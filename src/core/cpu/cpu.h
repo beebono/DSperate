@@ -73,7 +73,7 @@ struct CpuContext {
   u32 code_cycles;         // ARM9: cost of the most recent prefetch. ARM7: code-region table index.
   u32 data_cycles;         // accumulated data-access cost of the current instruction
   u32 code_region, data_region;   // high byte of the address (ARM7 main-RAM overlap rules)
-  u8  cycle_class;         // 0 = C, 1 = CI, 2 = CD, 3 = CDI
+  u8  _pad1;
   bool branch_fetch;       // ARM9: the next prefetch is the first after a branch
 
   // Debug single-stepping: when step_limit != 0 the interpreter stops after
@@ -83,6 +83,12 @@ struct CpuContext {
   mem::PageTable page_table;
 
   NDS* nds;
+
+  // Recompiler hooks (null when the CPU runs on the interpreter). The timing
+  // callback fires whenever the per-page cost table or the TCM windows change,
+  // since translated code bakes those costs in.
+  void (*jit_timing_changed)(CpuContext&) = nullptr;
+  void* jit = nullptr;
 
   void reset(Cpu which, NDS* nds);
 

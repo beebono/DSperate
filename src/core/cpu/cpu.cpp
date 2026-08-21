@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/cpu/cpu.h"
+#include "core/cpu/cpu_cycles.h"
 
 #include <cstring>
 
@@ -36,7 +37,7 @@ void CpuContext::reset(Cpu w, NDS* n) {
   pu_code_cacheable = pu_data_cacheable = pu_data_bufferable = 0;
   pu_code_perm = pu_data_perm = 0;
   itcm_size = 0; dtcm_base = 0xFFFFFFFF; dtcm_mask = 0;
-  code_cycles = data_cycles = 0; code_region = data_region = 0; cycle_class = 0; branch_fetch = true;
+  code_cycles = data_cycles = 0; code_region = data_region = 0; branch_fetch = true;
   step_limit = steps = 0;
   hot.cpsr = static_cast<u32>(Mode::SVC) | 0xC0;       // IRQ+FIQ masked, ARM state
   hot.regs[15] = exception_base() + 8;                 // reset vector, pipeline-adjusted
@@ -95,14 +96,6 @@ void CpuContext::update_tcm_windows() {
   } else { dtcm_base = 0xFFFFFFFF; dtcm_mask = 0; }
 }
 
-// Cost of one 32-bit instruction fetch, in the CPU's own cycles.
-static inline u32 fetch_cost9(const CpuContext& cpu, u32 addr, bool branch) {
-  if (addr < cpu.itcm_size) return 1;
-  const u8 c = cpu.timing9[addr >> 12][0];
-  if (c == 0xFF) return (branch || !(addr & 0x1F)) ? 3 : 1;   // cache line fill vs hit (approximation)
-  return c;
-}
-
 void CpuContext::jump(u32 addr, bool interwork) {
   jumped = true;
   if (interwork) {
@@ -111,26 +104,13 @@ void CpuContext::jump(u32 addr, bool interwork) {
   if (thumb()) hot.regs[15] = (addr & ~1u) + 4;
   else         hot.regs[15] = (addr & ~3u) + 8;
 
-  // Pipeline refill cost.
-  if (which == Cpu::ARM9) {
-    const u32 a = addr & ~1u;
-    u32 c;
-    if (thumb()) {
-      if (a & 2) { c = fetch_cost9(*this, a - 2, true); code_cycles = fetch_cost9(*this, a + 2, false); c += code_cycles; }
-      else       { c = fetch_cost9(*this, a, true); code_cycles = c; }
-    } else {
-      c = fetch_cost9(*this, a, true);
-      code_cycles = fetch_cost9(*this, a + 4, false);
-      c += code_cycles;
-    }
-    hot.cycle_budget -= static_cast<s32>(c);
-    branch_fetch = false;
-  } else {
-    code_cycles = (addr & ~1u) >> 15;
-    code_region = addr >> 24;
-    const u8* t = timing7[code_cycles];
-    hot.cycle_budget -= thumb() ? (t[0] + t[1]) : (t[2] + t[3]);
-  }
+  // Pipeline refill cost (the recompiler emits the same arithmetic). On the
+  // ARM9 the refill leaves the cost of its last fetch in code_cycles; on the
+  // ARM7 the code region follows the target.
+  u32 code_after = 0;
+  hot.cycle_budget -= static_cast<s32>(refill_cycles(*this, addr & ~1u, thumb(), &code_after));
+  if (which == Cpu::ARM9) { code_cycles = code_after; branch_fetch = false; }
+  else { code_cycles = (addr & ~1u) >> 15; code_region = addr >> 24; }
 }
 
 void CpuContext::raise_exception(Exception e) {
@@ -160,8 +140,7 @@ void CpuContext::raise_exception(Exception e) {
   // The architecture leaves F alone on IRQ entry; melonDS (our trace oracle)
   // sets it, and FIQ is unused on the DS, so follow melonDS for lockstep.
   if (e == Exception::Fiq || e == Exception::Reset || e == Exception::Irq) hot.cpsr |= 0x40;
-  hot.regs[15] = exception_base() + vector + 8;
-  jumped = true;
+  jump(exception_base() + vector, false);   // charges the pipeline refill like any branch
 }
 
 void CpuContext::check_irq() {

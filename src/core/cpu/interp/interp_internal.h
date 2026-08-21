@@ -4,13 +4,15 @@
 #include "core/cpu/cpu.h"
 #include "core/cpu/cpu_mem.h"
 #include "core/cpu/arm_decode.h"
+#include "core/cpu/cpu_cycles.h"
 
 namespace ds::interp {
 
-// Returns cycles consumed. r15 holds instruction address + 8 (ARM) / + 4 (Thumb)
-// on entry; handlers that branch call cpu.jump().
-u32 exec_arm(CpuContext& cpu, u32 instr);
-u32 exec_thumb(CpuContext& cpu, u16 instr);
+// r15 holds instruction address + 8 (ARM) / + 4 (Thumb) on entry; handlers
+// that branch call cpu.jump(). Every handler charges its cycles through
+// cpu_cycles.h exactly once.
+void exec_arm(CpuContext& cpu, u32 instr);
+void exec_thumb(CpuContext& cpu, u16 instr);
 
 // ---- flag helpers -------------------------------------------------------
 constexpr u32 FLAG_N = 0x80000000, FLAG_Z = 0x40000000, FLAG_C = 0x20000000, FLAG_V = 0x10000000;

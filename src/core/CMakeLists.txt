@@ -25,7 +25,7 @@ add_library(dsperate_core STATIC
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 if(DSPERATE_JIT)
-  target_sources(dsperate_core PRIVATE cpu/jit/jit.cpp)
+  target_sources(dsperate_core PRIVATE cpu/jit/runtime.cpp cpu/jit/translate.cpp)
   target_compile_definitions(dsperate_core PUBLIC DSPERATE_JIT=1)
 endif()
 if(DSPERATE_NEON)

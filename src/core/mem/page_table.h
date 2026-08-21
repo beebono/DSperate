@@ -23,6 +23,12 @@ namespace ds::mem {
 // Host pointers must therefore be 4-byte aligned and the biased value must fit
 // in 62 bits; both are asserted at map time.
 
+// Self-modifying-code notification: every store path that lands on a page
+// tagged CODE reports the host bytes it wrote. The recompiler installs the
+// hook; without one the call is a null check.
+extern void (*code_write_hook)(u8* host, u32 len);
+inline void code_written(u8* host, u32 len) { if (code_write_hook) code_write_hook(host, len); }
+
 constexpr u32 PAGE_SHIFT = 11;
 constexpr u32 PAGE_SIZE  = 1u << PAGE_SHIFT;      // 2 KB
 constexpr u32 PAGE_COUNT = 1u << (32 - PAGE_SHIFT); // 2 Mi entries = 16 MiB of table
@@ -54,6 +60,13 @@ public:
   void unmap(u32 guest, u32 size);
 
   void set_code(u32 guest, u32 size, bool is_code);
+
+  // Tag (or untag) every entry in the low 256 MB of guest space that maps the
+  // given 2 KB host page. Code pages are tracked by host address so that the
+  // other CPU's view and DMA see the same tag; `map` re-applies tags through
+  // `code_query` so remapping keeps them.
+  void set_code_host(const u8* host_page, bool is_code);
+  static bool (*code_query)(const u8* host_page);
 
   // Fast-path helpers. Return nullptr when the access must take the slow path.
   inline u8* read_ptr(u32 addr) const {

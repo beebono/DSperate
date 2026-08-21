@@ -45,4 +45,7 @@ Cross-building for ARM64 handhelds (needs `aarch64-linux-gnu-g++`; tests run und
     (cd build/aarch64 && ctest)
 
 The JIT and NEON kernels only build on AArch64 hosts; everywhere else you get the
-interpreter and the portable C++ renderer.
+interpreter and the portable C++ renderer. On AArch64 the recompiler is the
+default for both CPUs (`--interp`, `--jit9`, `--jit7` select otherwise); it is
+verified against the interpreter instruction by instruction
+(`tests/jit_test.cpp`) and slice by slice on whole games (docs/TRACING.md).

@@ -105,6 +105,35 @@ single base register can reach register spills (negative offsets) and page
 entries (positive offsets). Currently it is a member with its own mapping;
 `JitHot` is positioned so either choice stays cheap.
 
+### 3.1 The recompiler as built (2026-08-21)
+
+`cpu/jit/` (AArch64 only; `src/core/cpu/jit/README.md` has the file map).
+What matches the design above: pinned guest registers (r0-r7, r13, r14 in
+callee-saved host registers; r8-r12 in caller-saved ones the call stubs
+spill), guest NZCV in host NZCV with a per-block flag-liveness pass deciding
+when the `mrs/msr` merge is needed, inverted `b.cc` for conditionals, one
+batched budget `sub` per straight-line run, blocks addressed by 32-bit arena
+offsets in a direct-mapped LUT, lazy direct links patched into a bare `b`,
+and a prologue whose only check is the budget sign.
+
+What deliberately differs, for now:
+
+- **Every block is exact from day one.** Anything not inlined — MMIO
+  accesses, MSR, SWI, coprocessor, PC-destination ALU ops, user-bank LDM/STM,
+  SWP, LDRD/STRD, the v5 DSP extensions — runs through `jit_h_fallback`, which
+  executes that one instruction with the interpreter and its cycle accounting.
+  Inlining is an optimisation, and every inlined form is fuzzed against the
+  interpreter (§6 item 2).
+- **The cycle model is the interpreter's, exactly**, including dynamic data
+  costs read from the per-page table and the CD/CDI combine formulas emitted
+  without flags. `DS_JIT_STRICT=1` adds a budget test after every instruction
+  so the engines interleave identically (the oracle mode); normally the test
+  is per block, which is the only timing difference between the two engines.
+- r15 is still written to the context at every exit rather than reconstructed
+  from the native PC; there is no PC-metadata table yet.
+- The ARM9/ARM7 switch passes through C once per scheduler slice.
+- Interrupts are taken on the C side after a poll leaves translated code.
+
 ## 4. Scheduler and timing
 
 *Source: research note "JIT design forensics" §4–5 (private) for the budget
@@ -131,10 +160,19 @@ slot per EXMEMCNT. The ARM9 adds a 3-cycle non-sequential penalty outside main
 RAM and has a per-4 KB table derived from the PU region registers: cacheable
 pages cost 3 cycles on a fetch at a line start or after a branch and 1
 otherwise (a cache approximation, no tag state), and 3/1 for N/S data. TCM
-costs 1. Each instruction is charged a code fetch plus, by class, internal
-cycles (CI), a data access (CD) or a load (CDI), overlapped the way melonDS
-overlaps them; branches pay the pipeline refill. Measured against melonDS on
-Meteos: instructions per frame agree to ~0.1% on the ARM9 and ~3% on the ARM7.
+costs 1 (the TCM windows are baked into the per-4 KB table so both engines
+cost an access with one lookup). Each instruction is charged a code fetch
+plus, by class, internal cycles (CI), a data access (CD) or a load (CDI),
+overlapped the way melonDS overlaps them; branches pay the pipeline refill.
+Each interpreter handler charges at the point melonDS does (`cpu_cycles.h`):
+before the jump for ALU ops, LDR and the Thumb hi-register ops, after it for
+LDM and POP, which changes the numC of the charge (new pc, state and code
+region). Exceptions charge the refill of the vector jump. Measured against
+melonDS on Meteos over 300 frames: 84 of 300 frames have the exact ARM9
+instruction count (33 before the charge points were aligned), totals agree to
+0.7% on both CPUs, and the remaining difference is the cache approximation
+(melonDS takes the region cost from the jump target's page, not the fetch
+address).
 
 **DMA** (`dma/`): eight channels with immediate/VBlank/HBlank/display-start/cart
 triggers, main-RAM burst unit timings, repeat and IRQ. The display-FIFO mode is
@@ -257,8 +295,23 @@ take it as source A.
    Bangai-O Spirits and Sonic Rush are pixel-exact over 300-400 frames apart
    from single scene-transition frames; Kirby Canvas Curse differs only in
    animation phase. AArch64 (under qemu) produces byte-identical frames.
-2. JIT vs interpreter differential execution, block by block — the first
-   divergence names the broken instruction.
+2. JIT vs interpreter differential execution. `tests/jit_test.cpp`
+   (cross-built, runs under qemu) fuzzes random straight-line ARM and Thumb
+   sequences on both CPUs through both engines and compares registers,
+   flags, consumed cycles and memory, shrinking a failure to the shortest
+   failing prefix. On whole games, `DS_JIT_STRICT=1 DS_DEBUG_SLICES=1`
+   makes every scheduler slice comparable line by line (`--interp` vs
+   default) and frame dumps must be byte-identical. Status 2026-08-21: the
+   fuzzer found CLZ inlined on the ARM7 (undefined there), unaligned Thumb
+   LDM bases, the ARM7 multiply carry, register shifts by multiples of 32
+   above 32, and that an instruction routed to the interpreter observes
+   every flag (liveness must treat it as a read of all four); the slice
+   diff found that the interpreter charged no code-fetch cycles for ARM9
+   Thumb code (a double parity test), which is what led to aligning the
+   charge points with melonDS. After that: 300 random sequences per
+   CPU/state pass, and Meteos, Kirby Canvas Curse, Super Mario 64 DS (120
+   frames) and Golden Sun (150) run in exact lockstep — every scheduler
+   slice identical, frames byte-identical.
 3. NEON kernel vs C++ reference, vector by vector.
 4. Performance against the measured baseline: DraStic holds SM64DS at 100% on
    **37.2% of one Cortex-A55 @ ~1.58 GHz** (RK3566). That is the number.

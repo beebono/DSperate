@@ -4,6 +4,8 @@
 #include "core/nds.h"
 #include "core/profile.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 namespace ds {
@@ -63,7 +65,9 @@ u64 Scheduler::run_until(u64 until) {
     if (deadline > until) deadline = until;
     s64 slice = static_cast<s64>(deadline - now_);
     if (slice <= 0) slice = 1;
-    if (slice > INTERLEAVE_QUANTUM) slice = INTERLEAVE_QUANTUM;
+    // DS_QUANTUM=<cycles>: measurement knob only; anything but 128 breaks lockstep with melonDS.
+    static const s64 quantum = std::getenv("DS_QUANTUM") ? std::atoll(std::getenv("DS_QUANTUM")) : INTERLEAVE_QUANTUM;
+    if (slice > quantum) slice = quantum;
 
     // ARM9 gets the whole slice; ARM7 then catches up at half clock.
     CpuContext& a9 = nds_.cpu(Cpu::ARM9);
@@ -96,6 +100,9 @@ u64 Scheduler::run_until(u64 until) {
     running_ = nullptr;
 
     now_ += static_cast<u64>(ran9);
+    // DS_DEBUG_SLICES=1: one line per slice (engine lockstep debugging).
+    static const bool debug_slices = std::getenv("DS_DEBUG_SLICES") != nullptr;
+    if (debug_slices) std::fprintf(stderr, "[slice] now %llu ran9 %lld a9pc %08x b7 %d a7left %d a7pc %08x\n", (unsigned long long)now_, (long long)ran9, a9.hot.regs[15], budget7, a7.hot.cycle_budget, a7.hot.regs[15]);
     fire_due();
   }
   return now_ - start;

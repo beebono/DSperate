@@ -213,6 +213,7 @@ void Bus::update_tcm(CpuContext& cpu) {
   update_wram();
   update_vram();
   cpu.update_tcm_windows();
+  timing_.update_cpu9(cpu, 0, 0xFFFFFFFF);     // TCM windows are baked into the cost table
   if (watch_on) pt.map_mmio(watch_addr & ~0x7FFu, 0x800);
   const u32 ctl = cpu.cp15_control;
   if (ctl & (1u << 16)) {                                       // DTCM enabled
@@ -273,12 +274,12 @@ u32 Bus::dma_read32(Cpu cpu, u32 addr) {
 }
 void Bus::dma_write16(Cpu cpu, u32 addr, u16 v) {
   addr &= ~1u; bool code = false;
-  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 2); return; }
+  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 2); if (code) code_written(p, 2); return; }
   io_write(cpu, addr, 16, v);
 }
 void Bus::dma_write32(Cpu cpu, u32 addr, u32 v) {
   addr &= ~3u; bool code = false;
-  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 4); return; }
+  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 4); if (code) code_written(p, 4); return; }
   io_write(cpu, addr, 32, v);
 }
 

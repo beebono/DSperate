@@ -89,6 +89,12 @@ Debug hooks in the CLI, all environment-gated and free when unset:
 | `DS_PROFILE=1` | wall time per stage at exit (CPUs, DMA, geometry, each 2D line stage, output, 3D clear/spans/final pass); `perf` is not usable in every sandbox, this always is |
 | `DS_WATCH=<hex>` | log writes to a main-RAM or VRAM word with PC, frame and line |
 | `TRACE_PC_HIST=1` | uncollapsed PC histogram per CPU at exit (what a "quiet" frame is doing) |
+| `DS_DEBUG_SLICES=1` | one line per scheduler slice: time, ARM9 cycles run, both pcs and budgets — diff two engines' outputs to find the first slice they disagree on |
+| `DS_DEBUG_CYCLES=1` | the budget before every instruction (interpreter, and the JIT in strict mode): the instruction-level version of the slice diff |
+| `DS_JIT_STRICT=1` | recompiler tests the budget after every instruction, so it interleaves exactly like the interpreter (verification mode) |
+| `DS_JIT_DEBUG=1` | log every recompiler fallback to the interpreter with the resulting state; dump translated blocks |
+| `DS_JIT_HIST=1` | with `DS_PROFILE=1`: recompiler counters and hottest fallback sites at exit |
+| `DS_JIT_FASTCOST=1`, `DS_QUANTUM=<n>` | measurement knobs (inexact timing): constant data cost / scheduler quantum |
 | `TRACE_START_FRAME=N` | start tracing at frame N (both tracers) |
 
 The melonDS tracer adds `TRACE_VRAM_STATS` and `TRACE_VRAM_PER_FRAME` (bank
@@ -173,6 +179,25 @@ phase is not tied to the frame counter; Kingdom Hearts 358/2 Days, Okamiden
 and Metroid Prime Pinball differ only in fade steps and moving sprites
 (phase). The AArch64 build remains byte-identical to the host on these.
 
+## Recompiler vs interpreter (2026-08-21)
+
+The AArch64 build takes `--interp` (interpreter for both CPUs), `--jit9` and
+`--jit7` (one CPU recompiled); the default recompiles both. The recompiler
+calls the same trace hook per instruction when tracing is on, so every tool
+above applies to it unchanged. The sharpest check is the slice diff:
+
+    DS_DEBUG_SLICES=1 dsperate ... --interp  2> a.txt
+    DS_DEBUG_SLICES=1 DS_JIT_STRICT=1 dsperate ... 2> b.txt
+    cmp a.txt b.txt          # first differing line = first slice that differs
+
+followed by `DS_DEBUG_CYCLES=1` on both to see the instruction. This is how
+the interpreter's own Thumb fetch-cost bug was found: strict-mode frames were
+identical but the cycle totals were 182 apart over 30 frames, the slice diff
+pointed at the BIOS CpuSet loop, and the cycle log showed `lsrs` costing 0 on
+one side and 1 on the other. The per-instruction fuzzer (`test_jit`, cross-built,
+`ctest` runs it under qemu) covers the inlined instruction forms directly and
+prints the shortest failing sequence.
+
 ## Toolchain hazards
 
 - **GCC 13.3 AArch64, `-O2`: a side-effecting member function deleted.** With
@@ -199,9 +224,11 @@ and Metroid Prime Pinball differ only in fade steps and moving sprites
   already finished). The per-transfer cart timing has not been compared in
   isolation yet; this is the next timing item to pin down.
 
-- Timing follows melonDS's model (see ARCHITECTURE.md §4) and agrees to
-  ~0.1% (ARM9) / ~3% (ARM7) in instructions per frame on Meteos. The ARM7
-  residue shows up as timing resyncs, not divergences.
+- Timing follows melonDS's model (see ARCHITECTURE.md §4). On Meteos over
+  300 frames, 84 frames have the exact ARM9 instruction count and 50 the
+  exact ARM7 count; totals agree to 0.7% on both CPUs. The residue shows up
+  as timing resyncs, not divergences; the known modelling difference is the
+  instruction-cache approximation.
 - Resync windows are a heuristic. A value that differs but is dead (never read
   again) cannot resync until it is overwritten; the comparator reports it as a
   divergence and the reader has to judge.

@@ -6,6 +6,9 @@
 //   <pc> <instr> <cpsr> r0 .. r14     (hex, one line per instruction)
 // and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py.
 #include "core/nds.h"
+#if DSPERATE_JIT
+#include "core/cpu/jit/jit.h"
+#endif
 #include "core/profile.h"
 
 #include <cstdio>
@@ -56,6 +59,11 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
 int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr;
   int frames = 60; bool direct = false;
+#if DSPERATE_JIT
+  bool jit9 = true, jit7 = true;
+#else
+  bool jit9 = false, jit7 = false;
+#endif
   TraceState ts;
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
@@ -67,6 +75,9 @@ int main(int argc, char** argv) {
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
+    else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
+    else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
+    else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
     else rom = argv[i];
   }
   std::fprintf(stderr, "DSperate 0.0.1 (%s%s)\n",
@@ -89,6 +100,11 @@ int main(int argc, char** argv) {
   }
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   if (rom && direct) nds.setup_direct_boot();
+#if DSPERATE_JIT
+  if ((jit9 || jit7) && !ds::jit::attach(nds, jit9, jit7)) return 1;
+#else
+  (void)jit9; (void)jit7;
+#endif
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
   if (const char* w = std::getenv("DS_WATCH")) nds.bus.enable_watch(static_cast<ds::u32>(std::strtoul(w, nullptr, 16)));
   if (trace) {
@@ -103,7 +119,12 @@ int main(int argc, char** argv) {
   const char* trace_start = std::getenv("TRACE_START_FRAME");   // suppress trace output before this frame
   const int trace_from = trace_start ? std::atoi(trace_start) : 0;
   for (int i = 0; i < frames; ++i) {
-    if (trace && i == trace_from) { nds.trace = trace_cb; nds.trace_user = &ts; }
+    if (trace && i == trace_from) {
+      nds.trace = trace_cb; nds.trace_user = &ts;
+#if DSPERATE_JIT
+      ds::jit::set_trace(true);
+#endif
+    }
     nds.run_frame();
     if (dump_out) {   // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
@@ -125,6 +146,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "arm9: %llu lines (%llu instrs), arm7: %llu lines (%llu instrs), cap %llu lines each\n",
                  ts.count[0], ts.executed[0], ts.count[1], ts.executed[1], ts.max); }
   ds::prof::report();
+#if DSPERATE_JIT
+  if (ds::prof::enabled && (jit9 || jit7)) ds::jit::report(stderr);
+#endif
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));

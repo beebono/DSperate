@@ -68,16 +68,25 @@ void Timing::set_region7(u32 start, u32 end, Region r, int bus_width, int nonseq
   }
 }
 
-void Timing::update_cpu9(const CpuContext&, u32 start, u32 end) {
+// The TCM windows are baked into the table (4 KB pages; both windows are
+// multiples of 4 KB and aligned to their size): an ITCM page costs 1 for code
+// and data, a DTCM page 1 for data. Both engines then cost an access with one
+// table lookup and the recompiler inherits the interpreter's model exactly.
+void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end) {
   const u32 first = start >> 12, last = (end == 0xFFFFFFFF) ? 0x100000 : (end >> 12);
   for (u32 i = first; i < last; ++i) {
     const u8 pu = pu_map[i];
     const u8* b = &bus9_[(i >> 2) * 8];
     u8* c = &cpu9_[i * 4];
-    c[0] = (pu & 0x40) ? 0xFF : static_cast<u8>(b[2] << 1);
-    if (pu & 0x10) { c[1] = CACHE_DATA; c[2] = CACHE_DATA; c[3] = 1; }
+    const u32 addr = i << 12;
+    const bool itcm = addr < cpu.itcm_size;
+    const bool dtcm = (addr & cpu.dtcm_mask) == cpu.dtcm_base;
+    c[0] = itcm ? 1 : (pu & 0x40) ? 0xFF : static_cast<u8>(b[2] << 1);
+    if (itcm || dtcm) { c[1] = 1; c[2] = 1; c[3] = 1; }
+    else if (pu & 0x10) { c[1] = CACHE_DATA; c[2] = CACHE_DATA; c[3] = 1; }
     else { c[1] = static_cast<u8>(b[0] << 1); c[2] = static_cast<u8>(b[2] << 1); c[3] = static_cast<u8>(b[3] << 1); }
   }
+  if (cpu.jit_timing_changed) cpu.jit_timing_changed(const_cast<CpuContext&>(cpu));
 }
 
 } // namespace ds::mem
