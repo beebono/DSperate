@@ -26,7 +26,8 @@ struct Planes {
     fill(px, 256, 0x1F3F3F3F); fill(top, 256, 0xFF3F3F3F); fill(second, 256, 0xFF3F3F3F); fill(col, 256, 0x3F3F3F);
     fill(op, 256, 1); fill(win, 256, 0xFF); fill(top_id, 256, 0x3F); fill(top_kind, 256, 3); fill(top_alpha, 256, 0x1F); fill(second_id, 256, 0x3F);
     fill(attr, 256, 0xFF); fill(alpha, 256, 0x1F); fill(line3d, 256, 0x1F3F3F3F); fill(dst, 256, 0x3F3F3F);
-    for (u32 i = 0; i < 256; ++i) { if (rng() & 1) line3d[i] &= 0x00FFFFFF; if (top_alpha[i] > 16 && (rng() & 1)) top_alpha[i] &= 0xF; }
+    // OBJ alphas are EVA values (bitmap alpha + 1, at most 16); 3D alphas live in the top record.
+    for (u32 i = 0; i < 256; ++i) { if (rng() & 1) line3d[i] &= 0x00FFFFFF; top_alpha[i] %= 17; }
     for (u32 i = 0; i < 256; ++i) { if (!(rng() & 3)) top_kind[i] = K_NORMAL; }
     // ids are one-hot on real lines.
     for (u32 i = 0; i < 256; ++i) { top_id[i] = 1 << (rng() % 6); second_id[i] = 1 << (rng() % 6); }
@@ -82,6 +83,29 @@ static void test_palette_and_tiles() {
   }
 }
 
+// Whole-row text kernels: random packed/8-bit tile rows, palette numbers and
+// flips, including rows that are entirely transparent (the `any` result).
+static void test_text_tiles() {
+  alignas(16) u16 pal[4096]; alignas(16) Pixel p18[4096];
+  alignas(16) u8 packed[33 * 4], rows[33 * 8], ctl[33];
+  alignas(16) Pixel pxa[33 * 8 + 8], pxb[33 * 8 + 8]; alignas(16) u8 opa[33 * 8 + 16], opb[33 * 8 + 16];
+  fill(pal, 4096, 0xFFFF); kern::ref::palette_to_18(pal, p18, 4096);
+  const Pixel* pals[16]; for (u32 i = 0; i < 16; ++i) pals[i] = p18 + i * 256;
+  for (u32 it = 0; it < 300; ++it) {
+    const u32 n = 1 + rng() % 33, mask = (it & 7) == 0 ? 0 : 0xFF;
+    fill(packed, 33 * 4, mask); fill(rows, 33 * 8, mask); fill(ctl, 33, 0x1F);
+    const u32 shift = rng() & 7;   // unaligned destination, as the engine uses it
+    const bool a16 = kern::ref::text_tiles_16(packed, ctl, p18, n, pxa + shift, opa + shift);
+    const bool b16 = N::text_tiles_16(packed, ctl, p18, n, pxb + shift, opb + shift);
+    if (a16 != b16) { std::fprintf(stderr, "FAIL text_tiles_16 any (iteration %u)\n", it); ++failures; }
+    CHECK_SAME("text16 px", pxa + shift, pxb + shift, n * 32); CHECK_SAME("text16 op", opa + shift, opb + shift, n * 8);
+    const bool a256 = kern::ref::text_tiles_256(rows, ctl, pals, n, pxa + shift, opa + shift);
+    const bool b256 = N::text_tiles_256(rows, ctl, pals, n, pxb + shift, opb + shift);
+    if (a256 != b256) { std::fprintf(stderr, "FAIL text_tiles_256 any (iteration %u)\n", it); ++failures; }
+    CHECK_SAME("text256 px", pxa + shift, pxb + shift, n * 32); CHECK_SAME("text256 op", opa + shift, opb + shift, n * 8);
+  }
+}
+
 static void test_output() {
   for (u32 it = 0; it < 200; ++it) {
     Planes a; a.randomise(); Planes b = a;
@@ -92,6 +116,8 @@ static void test_output() {
     CHECK_SAME("brightness", a.dst, b.dst, sizeof a.dst);
     kern::ref::expand_colours(a.dst); N::expand_colours(b.dst);
     CHECK_SAME("expand", a.dst, b.dst, sizeof a.dst);
+    kern::ref::output_line(a.top, reg, a.dst); N::output_line(b.top, reg, b.dst);
+    CHECK_SAME("output_line", a.dst, b.dst, sizeof a.dst);
   }
 }
 
@@ -126,10 +152,30 @@ static void test_span() {
   }
 }
 
+// Sprite row plot: random plane state and rows, every priority pairing, odd lengths.
+static void test_obj_row() {
+  alignas(16) u8 idx[80]; alignas(16) u16 col[80];
+  alignas(16) u32 pxa[80], pxb[80]; alignas(16) u8 aa[80], ab[80], ala[80], alb[80];
+  for (u32 it = 0; it < 500; ++it) {
+    fill(idx, 80, (it & 3) == 0 ? 0x1 : 0xFF); fill(col, 80, 0xFFFF);
+    fill(pxa, 80, 0xFFFF); fill(aa, 80, 0xBF); fill(ala, 80, 0x1F);
+    for (u32 i = 0; i < 80; ++i) if (rng() & 1) aa[i] &= ~OA_OPAQUE;
+    std::memcpy(pxb, pxa, sizeof pxa); std::memcpy(ab, aa, 80); std::memcpy(alb, ala, 80);
+    const u32 n = 1 + rng() % 64, off = rng() % 16;
+    const u8 attr = static_cast<u8>(rng() & 0x3F), alpha = static_cast<u8>(1 + rng() % 16);
+    const u32 pal_base = (rng() & 1) ? (OP_STDPAL | ((rng() & 0xF) << 4)) : ((rng() & 0xF) << 8);
+    if (rng() & 1) { kern::ref::obj_row_idx(idx, n, pal_base, attr, pxa + off, aa + off, ala + off); N::obj_row_idx(idx, n, pal_base, attr, pxb + off, ab + off, alb + off); }
+    else { kern::ref::obj_row_bmp(col, n, attr, alpha, pxa + off, aa + off, ala + off); N::obj_row_bmp(col, n, attr, alpha, pxb + off, ab + off, alb + off); }
+    CHECK_SAME("obj px", pxa, pxb, sizeof pxa); CHECK_SAME("obj attr", aa, ab, 80); CHECK_SAME("obj alpha", ala, alb, 80);
+  }
+}
+
 int main() {
+  test_obj_row();
   test_select();
   test_composite();
   test_palette_and_tiles();
+  test_text_tiles();
   test_output();
   test_span();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }

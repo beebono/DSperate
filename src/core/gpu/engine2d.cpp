@@ -46,8 +46,10 @@ void Engine2D::reset() {
   bg_mosaic_y_ = bg_mosaic_ymax_ = obj_mosaic_y_ = 0;
   bg_mosaic_latch_ = obj_mosaic_latch_ = true;
   bg_mosaic_line_ = obj_mosaic_line_ = 0;
-  for (auto& p : bg_) { p.px.fill(0); p.op.fill(0); }
+  for (auto& p : bg_) { p.pxs.fill(0); p.ops.fill(0); p.any = false; }
+  pal18_checked_ = pal18_have_ = false; extpal_checked_ = extpal_have_ = 0; obj_prio_mask_ = 0;
   obj_px_.fill(0); obj_attr_.fill(0); obj_alpha_.fill(0); obj_win_.fill(0); num_sprites_ = 0;
+  oam_lists_valid_ = false;
   out_.fill(0);
   line3d_ = nullptr;
 }
@@ -216,6 +218,39 @@ u16 Engine2D::obj_extpal(u32 idx) const {
   return vram().read16(num_ ? vram().bobj_extpal : vram().aobj_extpal, idx * 2);
 }
 
+const Pixel* Engine2D::std_pal18() {
+  if (!pal18_checked_) {
+    pal18_checked_ = true;
+    const u16* src = palette();
+    if (!pal18_have_ || std::memcmp(src, pal_copy_.data(), 512) != 0) {
+      std::memcpy(pal_copy_.data(), src, 512);
+      kern::active::palette_to_18(pal_copy_.data(), pal18_.data(), 256);
+      pal18_have_ = true;
+    }
+  }
+  return pal18_.data();
+}
+
+const Pixel* Engine2D::ext_pal18(u32 slot, u32 pal) {
+  const u32 n = slot * 16 + pal;
+  Pixel* dst = extpal18_.data() + n * 256;
+  if (!(extpal_checked_ & (1ull << n))) {
+    extpal_checked_ |= 1ull << n;
+    u16* copy = extpal_copy_.data() + n * 256;
+    const VramView& v = num_ ? vram().bbg_extpal : vram().abg_extpal;
+    const u32 addr = slot * 0x2000 + pal * 0x200;
+    alignas(16) u16 tmp[256];
+    const u16* src = reinterpret_cast<const u16*>(v.direct(addr, 512));
+    if (!src) { for (u32 i = 0; i < 256; ++i) tmp[i] = vram().read16(v, addr + i * 2); src = tmp; }
+    if (!(extpal_have_ & (1ull << n)) || std::memcmp(src, copy, 512) != 0) {
+      std::memcpy(copy, src, 512);
+      kern::active::palette_to_18(copy, dst, 256);
+      extpal_have_ |= 1ull << n;
+    }
+  }
+  return dst;
+}
+
 void Engine2D::debug_dump(u32 line) {
   std::fprintf(stderr, "[eng%d] dispcnt %08x enabled %d layer_en %02x obj_en %d fb %d bgcnt %04x %04x %04x %04x hofs %u %u %u %u vofs %u %u %u %u wincnt %02x %02x %02x %02x bldcnt %04x eva %u evb %u evy %u mos %u %u\n",
                num_, dispcnt_, enabled_, layer_enable_, obj_enable_, forced_blank_, bgcnt_[0], bgcnt_[1], bgcnt_[2], bgcnt_[3],
@@ -236,7 +271,7 @@ void Engine2D::debug_dump(u32 line) {
   std::fprintf(stderr, "\n[eng%d] oam[0..3]:", num_);
   for (int n = 0; n < 4; ++n) std::fprintf(stderr, " %04x/%04x/%04x", oam[n * 4], oam[n * 4 + 1], oam[n * 4 + 2]);
   render_line(line);
-  u32 op = 0; for (int bg = 0; bg < 4; ++bg) for (u32 i = 0; i < 256; ++i) op += bg_[bg].op[i];
+  u32 op = 0; for (int bg = 0; bg < 4; ++bg) if (bg_[bg].any) for (u32 i = 0; i < 256; ++i) op += bg_[bg].op()[i];
   u32 nonbd = 0; for (u32 i = 0; i < 256; ++i) nonbd += top_id_[i] != L_BACKDROP;
   std::fprintf(stderr, "\n[eng%d] line %u: opaque bg pixels %u, non-backdrop top %u, out[128] %08x top %08x id %02x kind %u win %02x second %08x\n", num_, line, op, nonbd, out_[128], top_[128], top_id_[128], top_kind_[128], win_[128], second_[128]);
 }
@@ -251,7 +286,8 @@ void Engine2D::render_line(u32 line) {
   }
   if (forced_blank_) { out_.fill(0xFF3F3F3F); return; }
 
-  for (auto& p : bg_) p.op.fill(0);
+  for (auto& p : bg_) p.any = false;
+  pal18_checked_ = false; extpal_checked_ = 0;
   prof::Scope* sc = prof::enabled ? new prof::Scope(prof::BG_DRAW) : nullptr;
   const int mode = dispcnt_ & 7;
   auto bg_on = [&](int n) { return (layer_enable_ >> n) & 1; };
@@ -277,7 +313,10 @@ void Engine2D::render_line(u32 line) {
   { DS_PROF(EFFECTS); colour_effects(); }
 }
 
-// Text (tiled) background.
+// Text (tiled) background. The 33 tile rows covering the line are gathered
+// into index rows (direct VRAM pointers; the map row is one 64-byte run per
+// screen block), then one kernel call resolves them through the palettes and
+// writes the row at the scroll offset into the padded plane.
 void Engine2D::draw_bg_text(u32 line, int bg) {
   const u16 cnt = bgcnt_[bg];
   BgPlane& plane = bg_[bg];
@@ -298,13 +337,48 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
   const u32 extslot = (bg < 2 && (cnt & 0x2000)) ? (2 + bg) : bg;
   const bool mosaic = (cnt & (1 << 6)) && bg_mosaic_w_ > 0;
   const u32 mw = bg_mosaic_w_ + 1;
+  const u32 ty0 = yoff & 7;
 
-  u32 cur_tile = 0, cur_x = ~0u; u8 row[8] = {};   // decoded 8 pixels (palette indices) of the current tile row
+  if (!mosaic) {
+    const u8* map[2] = {vv.direct(tilemap, 64), nullptr};
+    map[1] = wide ? vv.direct(tilemap + 0x800, 64) : map[0];
+    alignas(16) u8 rows[33 * 8]; u8 ctl[33];
+    u32 palmask = 0;
+    for (u32 t = 0, x = xoff & ~7u; t < 33; ++t, x += 8) {
+      const u32 mx = (x & 0xF8) >> 2, blk = (x & widexmask) ? 1 : 0;
+      u16 tile;
+      if (map[blk]) std::memcpy(&tile, map[blk] + mx, 2); else tile = vm.read16(vv, tilemap + mx + (blk << 11));
+      const u32 ty = (tile & (1 << 11)) ? 7 - ty0 : ty0;
+      ctl[t] = static_cast<u8>((tile >> 12) | ((tile >> 6) & 0x10));
+      palmask |= 1u << (tile >> 12);
+      if (c256) {
+        const u32 a = tileset + ((tile & 0x3FF) << 6) + (ty << 3);
+        if (const u8* p = vv.direct(a, 8)) std::memcpy(rows + t * 8, p, 8); else for (u32 i = 0; i < 8; ++i) rows[t * 8 + i] = vm.read8(vv, a + i);
+      } else {
+        const u32 a = tileset + ((tile & 0x3FF) << 5) + (ty << 2);
+        if (const u8* p = vv.direct(a, 4)) std::memcpy(rows + t * 4, p, 4); else for (u32 i = 0; i < 4; ++i) rows[t * 4 + i] = vm.read8(vv, a + i);
+      }
+    }
+    const u32 shift = xoff & 7;
+    Pixel* px = plane.px() - shift; u8* op = plane.op() - shift;
+    if (!c256) plane.any = kern::active::text_tiles_16(rows, ctl, std_pal18(), 33, px, op);
+    else {
+      const Pixel* pals[16];
+      if (!extpal) { const Pixel* p = std_pal18(); for (auto& q : pals) q = p; }
+      else for (u32 i = 0; i < 16; ++i) pals[i] = (palmask & (1u << i)) ? ext_pal18(extslot, i) : nullptr;
+      plane.any = kern::active::text_tiles_256(rows, ctl, pals, 33, px, op);
+    }
+    return;
+  }
+
+  // Mosaic: pixel by pixel.
+  std::memset(plane.op(), 0, 256);
+  u32 cur_tile = 0, cur_x = ~0u; u8 row[8] = {};
   const u16* cur_palette = pal; u32 cur_pal_hi = 0;
   auto load_tile = [&](u32 x) {
     const u32 map_addr = tilemap + ((x & 0xF8) >> 2) + ((x & widexmask) << 3);
     cur_tile = vm.read16(vv, map_addr);
-    const u32 ty = (cur_tile & (1 << 11)) ? (7 - (yoff & 7)) : (yoff & 7);
+    const u32 ty = (cur_tile & (1 << 11)) ? (7 - ty0) : ty0;
     if (c256) {
       const u32 a = tileset + ((cur_tile & 0x3FF) << 6) + (ty << 3);
       if (const u8* p = vv.direct(a, 8)) std::memcpy(row, p, 8); else for (int i = 0; i < 8; ++i) row[i] = vm.read8(vv, a + i);
@@ -318,30 +392,15 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
     }
     if (cur_tile & (1 << 10)) { for (int i = 0; i < 4; ++i) { const u8 t = row[i]; row[i] = row[7 - i]; row[7 - i] = t; } }
   };
-
-  if (!mosaic && !c256) {
-    // 16-colour tiles: whole tile rows through the palette kernel into a
-    // padded line, then the visible window is copied out.
-    kern::active::palette_to_18(pal, pal18_.data(), 256);
-    alignas(16) Pixel tpx[264]; alignas(16) u8 top[264];
-    const u32 shift = xoff & 7;
-    for (u32 t = 0, x = xoff & ~7u; t < 33; ++t, x += 8) {
-      load_tile(x);
-      kern::active::tile_row_pal16(row, pal18_.data() + ((cur_tile & 0xF000) >> 8), tpx + t * 8, top + t * 8);
-    }
-    std::memcpy(plane.px.data(), tpx + shift, 256 * sizeof(Pixel));
-    std::memcpy(plane.op.data(), top + shift, 256);
-    return;
-  }
   for (u32 i = 0; i < 256; ++i) {
-    const u32 x = mosaic ? (xoff + i - (i % mw)) : (xoff + i);
+    const u32 x = xoff + i - (i % mw);
     if ((x >> 3) != cur_x) { cur_x = x >> 3; load_tile(x); }
     const u8 idx = row[x & 7];
     if (!idx) continue;
     u16 c;
     if (c256) c = extpal ? bg_extpal(extslot, cur_pal_hi, idx) : pal[idx];
     else c = cur_palette[idx];
-    plane.px[i] = rgb15_to_18(c); plane.op[i] = 1;
+    plane.px()[i] = rgb15_to_18(c); plane.op()[i] = 1; plane.any = true;
   }
 }
 
@@ -353,6 +412,7 @@ void Engine2D::draw_bg_affine(u32 line, int bg) {
   const VramView& vv = bg_vram();
   const VramMap& vm = vram();
   const u16* pal = palette();
+  std::memset(plane.op(), 0, 256); plane.any = false;
   static const u32 coord_masks[4] = {0x07800, 0x0F800, 0x1F800, 0x3F800};
   const u32 coordmask = coord_masks[(cnt >> 14) & 3], yshift = 7 + ((cnt >> 14) & 3) - 3;
   const u32 overflow = (cnt & (1 << 13)) ? 0 : ~(coordmask | 0x7FF);
@@ -370,7 +430,7 @@ void Engine2D::draw_bg_affine(u32 line, int bg) {
     const u32 tile = vm.read8(vv, tilemap + (((fy & coordmask) >> 11) << yshift) + ((fx & coordmask) >> 11));
     const u8 idx = vm.read8(vv, tileset + (tile << 6) + (((fy >> 8) & 7) << 3) + ((fx >> 8) & 7));
     if (!idx) continue;
-    plane.px[i] = rgb15_to_18(pal[idx]); plane.op[i] = 1;
+    plane.px()[i] = rgb15_to_18(pal[idx]); plane.op()[i] = 1; plane.any = true;
   }
 }
 
@@ -382,6 +442,7 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
   const VramView& vv = bg_vram();
   const VramMap& vm = vram();
   const u16* pal = palette();
+  std::memset(plane.op(), 0, 256); plane.any = false;
   const s32 dx = pa_[bg - 2], dy = pc_[bg - 2];
   s32 rx = ref_x_int_[bg - 2], ry = ref_y_int_[bg - 2];
   const bool mosaic = (cnt & (1 << 6)) && bg_mosaic_w_ > 0;
@@ -402,13 +463,13 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
       if (direct) {
         const u16 c = vm.read16(vv, base + (off << 1));
         if (!(c & 0x8000)) continue;
-        plane.px[i] = rgb15_to_18(c & 0x7FFF);
+        plane.px()[i] = rgb15_to_18(c & 0x7FFF);
       } else {
         const u8 idx = vm.read8(vv, base + off);
         if (!idx) continue;
-        plane.px[i] = rgb15_to_18(pal[idx]);
+        plane.px()[i] = rgb15_to_18(pal[idx]);
       }
-      plane.op[i] = 1;
+      plane.op()[i] = 1; plane.any = true;
     }
   } else {
     static const u32 coord_masks[4] = {0x07800, 0x0F800, 0x1F800, 0x3F800};
@@ -426,7 +487,7 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
       if (tile & (1 << 11)) ty = 7 - ty;
       const u8 idx = vm.read8(vv, tileset + ((tile & 0x3FF) << 6) + (ty << 3) + tx);
       if (!idx) continue;
-      plane.px[i] = rgb15_to_18(extpal ? bg_extpal(bg, tile >> 12, idx) : pal[idx]); plane.op[i] = 1;
+      plane.px()[i] = rgb15_to_18(extpal ? bg_extpal(bg, tile >> 12, idx) : pal[idx]); plane.op()[i] = 1; plane.any = true;
     }
   }
 }
@@ -439,6 +500,7 @@ void Engine2D::draw_bg_large(u32 line) {
   const VramView& vv = bg_vram();
   const VramMap& vm = vram();
   const u16* pal = palette();
+  std::memset(plane.op(), 0, 256); plane.any = false;
   static const u32 xm[4] = {0x1FFFF, 0x3FFFF, 0x1FFFF, 0x1FFFF}, ym[4] = {0x3FFFF, 0x1FFFF, 0x0FFFF, 0x1FFFF}, ys[4] = {9, 10, 9, 9};
   const u32 sz = (cnt >> 14) & 3, xmask = xm[sz], ymask = ym[sz], yshift = ys[sz];
   const u32 ofx = (cnt & (1 << 13)) ? 0 : ~xmask, ofy = (cnt & (1 << 13)) ? 0 : ~ymask;
@@ -452,23 +514,25 @@ void Engine2D::draw_bg_large(u32 line) {
     if ((fx & ofx) || (fy & ofy)) continue;
     const u8 idx = vm.read8(vv, (((fy & ymask) >> 8) << yshift) + ((fx & xmask) >> 8));
     if (!idx) continue;
-    plane.px[i] = rgb15_to_18(pal[idx]); plane.op[i] = 1;
+    plane.px()[i] = rgb15_to_18(pal[idx]); plane.op()[i] = 1; plane.any = true;
   }
 }
 
 void Engine2D::draw_bg_3d() {
   BgPlane& plane = bg_[0];
-  if (!line3d_) { plane.op.fill(0); return; }
-  kern::active::layer_3d(line3d_, plane.px.data(), plane.op.data());
+  if (!line3d_) { plane.any = false; return; }
+  kern::active::layer_3d(line3d_, plane.px(), plane.op());
+  plane.any = true;
 }
 
 // ---- sprites ----------------------------------------------------------------
 
-void Engine2D::put_sprite_pixel(s32 x, u32 colour, bool opaque, u8 attr, u8 alpha, bool window) {
+inline void Engine2D::put_sprite_pixel(s32 x, u32 colour, bool opaque, u8 attr, u8 alpha, bool window) {
   if (window) { if (opaque) obj_win_[x] = 1; return; }
   const u8 old = obj_attr_[x];
   if (opaque && (!(old & OA_OPAQUE) || (attr & OA_PRIO) < (old & OA_PRIO))) {
     obj_px_[x] = colour; obj_attr_[x] = attr | OA_OPAQUE; obj_alpha_[x] = alpha;
+    obj_prio_mask_ |= static_cast<u8>(1 << (attr & OA_PRIO));
   } else if (!opaque && !(old & OA_OPAQUE)) {
     // A transparent pixel still stamps its priority and mosaic flag.
     obj_attr_[x] = (old & ~(OA_MOSAIC | OA_PRIO)) | (attr & (OA_TOUCHED | OA_MOSAIC | OA_PRIO));
@@ -477,7 +541,7 @@ void Engine2D::put_sprite_pixel(s32 x, u32 colour, bool opaque, u8 attr, u8 alph
 
 void Engine2D::render_sprites(u32 line) {
   if (!enabled_) return;      // the OBJ planes are left as they are
-  num_sprites_ = 0;
+  num_sprites_ = 0; obj_prio_mask_ = 0;
   obj_px_.fill(0); obj_attr_.fill(0); obj_alpha_.fill(0); obj_win_.fill(0);
   if (!obj_enable_) return;
 
@@ -485,10 +549,14 @@ void Engine2D::render_sprites(u32 line) {
   static const s32 widths[16]  = {8, 16, 8, 8, 16, 32, 8, 8, 32, 32, 16, 8, 64, 64, 32, 8};
   static const s32 heights[16] = {8, 8, 16, 8, 16, 8, 32, 8, 32, 16, 32, 8, 64, 32, 64, 8};
 
-  for (int n = 0; n < 128; ++n) {
+  if (!oam_lists_valid_ || std::memcmp(oam, oam_copy_.data(), 1024) != 0) rebuild_sprite_lists(oam);
+  // (A mosaic sprite's candidacy is still its own box; the mosaic only
+  // changes which of its rows is drawn.)
+  const LineSprites& ls = line_sprites_[line & 0xFF];
+  for (u32 k = 0; k < ls.count; ++k) {
+    const int n = ls.idx[k];
     const u16* attr = &oam[n * 4];
     const u32 type = (attr[0] >> 8) & 3;      // bit 8 rotscale, bit 9 double-size / disable
-    if (type == 2) continue;
     const bool window = ((attr[0] >> 10) & 3) == 2;
     const u32 shape_size = (attr[0] >> 14) | ((attr[1] & 0xC000) >> 12);
     const s32 w = widths[shape_size], h = heights[shape_size];
@@ -507,6 +575,26 @@ void Engine2D::render_sprites(u32 line) {
     else draw_sprite_normal(attr, w, h, x, y, window);
     ++num_sprites_;
   }
+}
+
+// Candidate lists: every enabled sprite on every line of its (double-size)
+// box, in OAM order. The per-line test in render_sprites stays exact; the
+// list only prunes the 128-entry scan.
+void Engine2D::rebuild_sprite_lists(const u16* oam) {
+  static const s32 heights[16] = {8, 8, 16, 8, 16, 8, 32, 8, 32, 16, 32, 8, 64, 32, 64, 8};
+  std::memcpy(oam_copy_.data(), oam, 1024);
+  for (auto& l : line_sprites_) l.count = 0;
+  for (int n = 0; n < 128; ++n) {
+    const u16* attr = &oam[n * 4];
+    const u32 type = (attr[0] >> 8) & 3;
+    if (type == 2) continue;
+    const u32 shape_size = (attr[0] >> 14) | ((attr[1] & 0xC000) >> 12);
+    s32 bh = heights[shape_size];
+    if (type == 3) bh <<= 1;
+    const u32 y = attr[0] & 0xFF;
+    for (s32 i = 0; i < bh; ++i) { LineSprites& l = line_sprites_[(y + i) & 0xFF]; l.idx[l.count++] = static_cast<u8>(n); }
+  }
+  oam_lists_valid_ = true;
 }
 
 void Engine2D::draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, bool window) {
@@ -532,11 +620,15 @@ void Engine2D::draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, b
       addr = (tile << (7 + ((dispcnt_ >> 22) & 1))) + y * w * 2;
     } else if (dispcnt_ & 0x20) addr = ((tile & 0x1F) << 4) + ((tile & 0x3E0) << 7) + y * 256 * 2;
     else addr = ((tile & 0x0F) << 4) + ((tile & 0x3F0) << 7) + y * 128 * 2;
-    for (u32 i = xoff; i < xend; ++i, ++x) {
+    const u8* row = vv.direct(addr, w * 2);
+    alignas(16) u16 col[64 + 16];
+    for (u32 i = xoff; i < xend; ++i) {
       const u32 sx = hflip ? (w - 1 - i) : i;
-      const u16 c = vm.read16(vv, addr + sx * 2);
-      put_sprite_pixel(x, (c & 0x7FFF) | OP_DIRECT, c & 0x8000, a, static_cast<u8>(alpha + 1), window);
+      if (row) std::memcpy(col + (i - xoff), row + sx * 2, 2); else col[i - xoff] = vm.read16(vv, addr + sx * 2);
     }
+    if (window) { for (u32 i = 0; i < xend - xoff; ++i) if (col[i] & 0x8000) obj_win_[x + i] = 1; return; }
+    kern::active::obj_row_bmp(col, xend - xoff, a, static_cast<u8>(alpha + 1), obj_px_.data() + x, obj_attr_.data() + x, obj_alpha_.data() + x);
+    obj_prio_mask_ |= static_cast<u8>(1 << (a & OA_PRIO));
     return;
   }
 
@@ -547,25 +639,34 @@ void Engine2D::draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, b
   if (dispcnt_ & (1 << 4)) { base <<= (dispcnt_ >> 20) & 3; row_stride = (w >> 3) << (c256 ? 6 : 5); }
   else row_stride = 0x400;
   base = (base << 5) + (y >> 3) * row_stride;
+  // The sprite row is decoded tile by tile into indices first (direct VRAM
+  // pointers), then placed with the priority rule per pixel.
+  u8 idx[64];
   u32 pal_base = 0;
   if (c256) {
     base += (y & 7) << 3;
     pal_base = (dispcnt_ & (1u << 31)) ? ((attr[2] & 0xF000) >> 4) : OP_STDPAL;   // ext palette index or standard
-    for (u32 i = xoff; i < xend; ++i, ++x) {
-      const u32 sx = hflip ? (w - 1 - i) : i;
-      const u8 idx = vm.read8(vv, base + (sx >> 3) * 64 + (sx & 7));
-      put_sprite_pixel(x, pal_base | idx, idx != 0, a, 0, window);
+    for (u32 t = 0; t < static_cast<u32>(w >> 3); ++t) {
+      const u32 addr = base + t * 64;
+      if (const u8* p = vv.direct(addr, 8)) std::memcpy(idx + t * 8, p, 8);
+      else for (u32 i = 0; i < 8; ++i) idx[t * 8 + i] = vm.read8(vv, addr + i);
     }
   } else {
     base += (y & 7) << 2;
     pal_base = OP_STDPAL | ((attr[2] & 0xF000) >> 8);
-    for (u32 i = xoff; i < xend; ++i, ++x) {
-      const u32 sx = hflip ? (w - 1 - i) : i;
-      u8 idx = vm.read8(vv, base + (sx >> 3) * 32 + ((sx & 7) >> 1));
-      idx = (sx & 1) ? (idx >> 4) : (idx & 0xF);
-      put_sprite_pixel(x, pal_base | idx, idx != 0, a, 0, window);
+    for (u32 t = 0; t < static_cast<u32>(w >> 3); ++t) {
+      const u32 addr = base + t * 32;
+      u8 packed[4];
+      if (const u8* p = vv.direct(addr, 4)) std::memcpy(packed, p, 4);
+      else for (u32 i = 0; i < 4; ++i) packed[i] = vm.read8(vv, addr + i);
+      for (u32 i = 0; i < 4; ++i) { idx[t * 8 + i * 2] = packed[i] & 0xF; idx[t * 8 + i * 2 + 1] = packed[i] >> 4; }
     }
   }
+  alignas(16) u8 row[64 + 16];
+  for (u32 i = xoff; i < xend; ++i) row[i - xoff] = idx[hflip ? (w - 1 - i) : i];
+  if (window) { for (u32 i = 0; i < xend - xoff; ++i) if (row[i]) obj_win_[x + i] = 1; return; }
+  kern::active::obj_row_idx(row, xend - xoff, pal_base, a, obj_px_.data() + x, obj_attr_.data() + x, obj_alpha_.data() + x);
+  obj_prio_mask_ |= static_cast<u8>(1 << (a & OA_PRIO));
 }
 
 void Engine2D::draw_sprite_rotscale(const u16* attr, const u16* oam, int bw, int bh, int w, int h, s32 x, s32 y, bool window) {
@@ -669,8 +770,9 @@ void Engine2D::build_window_plane() {
 // Masked select of one BG plane into the top/second records.
 void Engine2D::select_bg(int bg) {
   const BgPlane& p = bg_[bg];
+  if (!p.any) return;
   const bool is3d = bg == 0 && !num_ && (dispcnt_ & 8);    // 3D pixels carry their alpha and blend differently
-  kern::active::select_plane(p.px.data(), p.op.data(), win_.data(), 1 << bg, 1 << bg, is3d,
+  kern::active::select_plane(p.px(), p.op(), win_.data(), 1 << bg, 1 << bg, is3d,
                              top_.data(), second_.data(), top_id_.data(), top_kind_.data(), top_alpha_.data(), second_id_.data());
 }
 
@@ -679,6 +781,10 @@ void Engine2D::select_bg(int bg) {
 void Engine2D::resolve_obj_colours() {
   const u16* pal = palette() + 0x100;
   for (u32 i = 0; i < 256; ++i) {
+    if (!(i & 15)) {   // skip 16-pixel runs without an opaque sprite pixel
+      u64 a, b; std::memcpy(&a, &obj_attr_[i], 8); std::memcpy(&b, &obj_attr_[i + 8], 8);
+      if (!((a | b) & 0x8080808080808080ull)) { i += 15; continue; }
+    }
     if (!(obj_attr_[i] & OA_OPAQUE)) continue;
     const u32 v = obj_px_[i];
     u16 c;
@@ -707,7 +813,7 @@ void Engine2D::select_layers() {
       if ((bgcnt_[bg] & 3) != prio) continue;
       select_bg(bg);
     }
-    if (objs) select_obj(prio);
+    if (objs && (obj_prio_mask_ & (1 << prio))) select_obj(prio);
   }
 }
 

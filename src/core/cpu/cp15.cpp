@@ -4,34 +4,50 @@
 #include "core/nds.h"
 
 #include <cstring>
+#include <memory>
 
 namespace ds {
 
 // Rebuild the per-4 KB cacheability map from the PU regions and refresh the
-// ARM9 timing table. Region 7 has the highest priority.
+// ARM9 timing table for the pages whose cacheability changed (a full rebuild
+// is 1 M entries; games flip the PU and the caches every few frames). Region
+// 7 has the highest priority.
 static void update_pu_map(CpuContext& cpu) {
   mem::Timing& t = cpu.nds->bus.timing();
   u8* map = t.pu_map.get();
+  static std::unique_ptr<u8[]> fresh(new u8[0x100000]);
+  u8* next = fresh.get();
   const u32 ctl = cpu.cp15_control;
   if (!(ctl & 1)) {                                   // PU disabled: caches apply everywhere if enabled
     u8 m = 0; if (ctl & (1u << 2)) m |= 0x10; if (ctl & (1u << 12)) m |= 0x40;
-    std::memset(map, m, 0x100000);
-    t.update_cpu9(cpu, 0, 0xFFFFFFFF);
-    return;
+    std::memset(next, m, 0x100000);
+  } else {
+    std::memset(next, 0, 0x100000);
+    for (int n = 0; n < 8; ++n) {
+      const u32 rgn = cpu.pu_region[n];
+      if (!(rgn & 1)) continue;
+      const int size_bits = static_cast<int>((rgn >> 1) & 0x1F) - 11;   // in 4 KB pages
+      const u32 size = size_bits <= 0 ? 1 : (size_bits >= 20 ? 0x100000 : (1u << size_bits));
+      const u32 start = ((rgn >> 12) / size) * size;
+      u8 m = 0;
+      if ((ctl & (1u << 2)) && ((cpu.pu_data_cacheable >> n) & 1)) m |= 0x10;
+      if ((ctl & (1u << 12)) && ((cpu.pu_code_cacheable >> n) & 1)) m |= 0x40;
+      for (u32 i = start; i < start + size && i < 0x100000; ++i) next[i] = m;
+    }
   }
-  std::memset(map, 0, 0x100000);
-  for (int n = 0; n < 8; ++n) {
-    const u32 rgn = cpu.pu_region[n];
-    if (!(rgn & 1)) continue;
-    const int size_bits = static_cast<int>((rgn >> 1) & 0x1F) - 11;   // in 4 KB pages
-    const u32 size = size_bits <= 0 ? 1 : (size_bits >= 20 ? 0x100000 : (1u << size_bits));
-    const u32 start = ((rgn >> 12) / size) * size;
-    u8 m = 0;
-    if ((ctl & (1u << 2)) && ((cpu.pu_data_cacheable >> n) & 1)) m |= 0x10;
-    if ((ctl & (1u << 12)) && ((cpu.pu_code_cacheable >> n) & 1)) m |= 0x40;
-    for (u32 i = start; i < start + size && i < 0x100000; ++i) map[i] = m;
+  // Diff in 256-page (1 MB of guest space) chunks; rebuild the runs that differ.
+  bool changed = false;
+  constexpr u32 CHUNK = 256;
+  u32 run_start = 0; bool in_run = false;
+  for (u32 i = 0; i <= 0x100000; i += CHUNK) {
+    const bool differs = i < 0x100000 && std::memcmp(map + i, next + i, CHUNK) != 0;
+    if (differs) { if (!in_run) { run_start = i; in_run = true; } std::memcpy(map + i, next + i, CHUNK); }
+    else if (in_run) {
+      t.update_cpu9(cpu, run_start << 12, i == 0x100000 ? 0xFFFFFFFF : (i << 12), false);
+      changed = true; in_run = false;
+    }
   }
-  t.update_cpu9(cpu, 0, 0xFFFFFFFF);
+  if (changed) t.notify_cpu9(cpu);
 }
 
 u32 cp15_read(CpuContext& cpu, u32 opc1, u32 crn, u32 crm, u32 opc2) {

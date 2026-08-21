@@ -74,7 +74,7 @@ void Timing::set_region7(u32 start, u32 end, Region r, int bus_width, int nonseq
 // multiples of 4 KB and aligned to their size): an ITCM page costs 1 for code
 // and data, a DTCM page 1 for data. Both engines then cost an access with one
 // table lookup and the recompiler inherits the interpreter's model exactly.
-void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end) {
+void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify) {
   // DS_DEBUG_TIMING=1: log every rebuild (each one also drops every translated block).
   static const bool debug = std::getenv("DS_DEBUG_TIMING") != nullptr;
   if (debug) std::fprintf(stderr, "[timing] update_cpu9 %08x-%08x ctl %08x dtcm %08x itcm %08x pu %08x/%08x\n", start, end, cpu.cp15_control, cpu.cp15_dtcm, cpu.cp15_itcm, cpu.pu_data_cacheable, cpu.pu_code_cacheable);
@@ -91,6 +91,10 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end) {
     else if (pu & 0x10) { c[1] = CACHE_DATA; c[2] = CACHE_DATA; c[3] = 1; }
     else { c[1] = static_cast<u8>(b[0] << 1); c[2] = static_cast<u8>(b[2] << 1); c[3] = static_cast<u8>(b[3] << 1); }
   }
+  if (notify) notify_cpu9(cpu);
+}
+
+void Timing::notify_cpu9(const CpuContext& cpu) {
   if (cpu.jit_timing_changed) cpu.jit_timing_changed(const_cast<CpuContext&>(cpu));
 }
 

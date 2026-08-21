@@ -32,11 +32,24 @@ namespace ds::gpu::kern {
   void NS##palette_to_18(const u16* pal, Pixel* out, u32 n);                                                 \
   /* One 16-colour tile row: 8 indices through a 16-entry 18-bit palette. */                                 \
   void NS##tile_row_pal16(const u8* idx, const Pixel* pal18, Pixel* px, u8* op);                             \
+  /* OBJ plane plot of one sprite row, n pixels at the plane pointers (which may be read and written up to  \
+     15 entries past n; callers pad): an opaque pixel wins over a transparent one or a lower priority, a      \
+     transparent pixel stamps priority and mosaic on a transparent one. Paletted: idx != 0 is opaque, colour  \
+     pal_base | idx, alpha 0. Bitmap: col bit 15 is opaque, colour (col & 0x7FFF) | OP_DIRECT. */             \
+  void NS##obj_row_idx(const u8* idx, u32 n, u32 pal_base, u8 attr, u32* px, u8* oattr, u8* oalpha);          \
+  void NS##obj_row_bmp(const u16* col, u32 n, u8 attr, u8 alpha, u32* px, u8* oattr, u8* oalpha);             \
   /* 3D layer into a BG plane: alpha 0 is transparent. */                                                    \
   void NS##layer_3d(const u32* line3d, Pixel* px, u8* op);                                                   \
+  /* Text BG row, 16-colour tiles: n tiles of 4 packed bytes (low nibble first); ctl[t] = palette number      \
+     (bits 0-3) | 0x10 for a horizontally flipped tile. Writes 8*n pixels; returns whether any is opaque. */  \
+  bool NS##text_tiles_16(const u8* packed, const u8* ctl, const Pixel* pal18, u32 n, Pixel* px, u8* op);     \
+  /* Text BG row, 256-colour tiles: n tiles of 8 indices through pal18[ctl[t] & 0xF] (256 records each). */  \
+  bool NS##text_tiles_256(const u8* rows, const u8* ctl, const Pixel* const* pal18, u32 n, Pixel* px, u8* op); \
   /* Output stage: master brightness on 18-bit records, then 6->8 bit expansion to 0xAARRGGBB. */            \
   void NS##master_brightness(u16 reg, u32* dst);                                                             \
   void NS##expand_colours(u32* dst);                                                                         \
+  /* Both in one pass from the engine's composite line. */                                                   \
+  void NS##output_line(const Pixel* src, u16 reg, u32* dst);                                                 \
   /* 3D span stages (render3d.cpp), `n` pixels from span offset `xv0`. Perspective factor with 8 fractional   \
      bits: num = (xv*w0n) << 8 (32-bit wrap), den = xv*w0d + (xdiff-xv)*w1d, 0 when den is 0. */             \
   void NS##span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac);                      \

@@ -225,7 +225,18 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
   (void)RO;
   update_wram();
   update_vram();
-  timing_.update_cpu9(cpu, 0, 0xFFFFFFFF);     // TCM windows are baked into the cost table
+  // The TCM windows are baked into the cost table: rebuild the old and the
+  // new windows (a forced rebuild covers everything).
+  if (force) timing_.update_cpu9(cpu, 0, 0xFFFFFFFF);
+  else {
+    auto window = [&](u32 base, u32 mask, u32 itcm) {
+      if (itcm) timing_.update_cpu9(cpu, 0, std::min(itcm, 0x10000000u), false);
+      if (mask) { const u32 end = base + (~mask + 1); timing_.update_cpu9(cpu, base, end < base ? 0xFFFFFFFF : end, false); }   // ~mask + 1 = window size
+    };
+    window(old_dbase, old_dmask, old_itcm);
+    window(cpu.dtcm_base, cpu.dtcm_mask, cpu.itcm_size);
+    timing_.notify_cpu9(cpu);
+  }
   if (watch_on) pt.map_mmio(watch_addr & ~0x7FFu, 0x800);
   const u32 ctl = cpu.cp15_control;
   if (ctl & (1u << 16)) {                                       // DTCM enabled

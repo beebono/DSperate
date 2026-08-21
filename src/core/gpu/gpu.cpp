@@ -209,11 +209,15 @@ void Gpu::draw_line(u32 line) {
   DS_PROF(OUTPUT);
   u32* dst_a = fb_[swap_ ? 0 : 1].data() + line * SCREEN_W;
   u32* dst_b = fb_[swap_ ? 1 : 0].data() + line * SCREEN_W;
-  output_a(line, dst_a);
-  output_b(line, dst_b);
+  if (screens_on_) {
+    // The common display modes go through one fused kernel (copy, master
+    // brightness, 6->8 bit expansion); the others build the line first.
+    if (((engine[0].dispcnt() >> 16) & 3) == 1) kern::active::output_line(engine[0].output(), master_bright_[0], dst_a);
+    else { output_a(line, dst_a); expand_colours(dst_a); }
+    if ((engine[1].dispcnt() >> 16) & 1) kern::active::output_line(engine[1].output(), master_bright_[1], dst_b);
+    else { output_b(line, dst_b); expand_colours(dst_b); }
+  } else { for (u32 i = 0; i < 256; ++i) dst_a[i] = dst_b[i] = 0xFF000000; }
   if (capture_on_) { DS_PROF(CAPTURE); capture(line); }
-  if (screens_on_) { expand_colours(dst_a); expand_colours(dst_b); }
-  else { for (u32 i = 0; i < 256; ++i) dst_a[i] = dst_b[i] = 0xFF000000; }
 }
 
 static inline u32 rgb15_to_18_plain(u16 c) {

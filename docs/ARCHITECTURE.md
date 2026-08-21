@@ -260,6 +260,32 @@ not straight passes (tile/map fetch, sprite rasterisation, windows, the 3D
 span loop) stay scalar for now; `DS_PROFILE=1` in the CLI reports where the
 time goes.
 
+**2D pass (2026-08-21 p.m.), from the device profile.** The first NEON
+kernels were straight translations and the profile on the A55 showed where
+that was wrong: `composite_line` computed all three blends for every pixel
+(43 cycles/pixel); `draw_bg_text` fetched map entries and tiles through the
+out-of-line VRAM accessors and resolved 256-colour pixels one at a time;
+palettes were reconverted per background per line; every enabled plane was
+selected even when empty; the output stage ran three passes over each line.
+Now: the effects kernel tests each 16-pixel block for "nothing blends" (one
+`umaxv`) and copies through, gating each blend kind by block otherwise;
+text backgrounds gather the 33 tile rows of the line through direct VRAM
+pointers (one 64-byte map run per screen block) and one kernel
+(`text_tiles_16` / `text_tiles_256`) resolves the whole row at the scroll
+offset into a padded plane — no per-tile call, no copy; palette conversions
+(standard and extended, by slot and number) persist across lines and are
+reused while a `memcmp` against the copy taken at conversion time still
+matches; planes report whether they have any opaque pixel and empty ones are
+skipped (select kernels also skip empty 16-pixel blocks); sprites decode a
+row of indices per tile and plot it through `obj_row_idx` / `obj_row_bmp`
+(the priority rule as a masked select, 16 pixels at a time), candidate
+sprites per line come from lists rebuilt only when the OAM bytes change;
+`output_line` fuses copy, master brightness and expansion. Device, 400
+frames from direct boot: Mario & Luigi 2D stages 2.6 s → 1.1 s (frame
+15.0 → 10.4 ms), Spectrobes 2.9 s → 1.4 s (14.4 → 9.2 ms). What remains is
+the tile gather (~5 %), `output_line` (memory-bound: the framebuffer is
+written through to DRAM) and the OAM-order sprite loop.
+
 ### 5.2 The 3D engine as built (`gpu/gpu3d.*`, `gpu/render3d.*`)
 
 Geometry (`Gpu3D`): a 256-entry command FIFO feeding a 4-entry pipe, with a

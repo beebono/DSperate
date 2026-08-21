@@ -110,6 +110,52 @@ void tile_row_pal16(const u8* idx, const Pixel* pal18, Pixel* px, u8* op) {
   for (u32 i = 0; i < 8; ++i) { px[i] = pal18[idx[i] & 0xF]; op[i] = idx[i] != 0; }
 }
 
+bool text_tiles_16(const u8* packed, const u8* ctl, const Pixel* pal18, u32 n, Pixel* px, u8* op) {
+  bool any = false;
+  for (u32 t = 0; t < n; ++t, packed += 4, px += 8, op += 8) {
+    const Pixel* pal = pal18 + (ctl[t] & 0xF) * 16;
+    const bool flip = ctl[t] & 0x10;
+    for (u32 i = 0; i < 8; ++i) {
+      const u32 j = flip ? 7 - i : i;
+      const u8 idx = (packed[j >> 1] >> ((j & 1) * 4)) & 0xF;
+      px[i] = pal[idx]; op[i] = idx != 0; any |= idx != 0;
+    }
+  }
+  return any;
+}
+
+bool text_tiles_256(const u8* rows, const u8* ctl, const Pixel* const* pal18, u32 n, Pixel* px, u8* op) {
+  bool any = false;
+  for (u32 t = 0; t < n; ++t, rows += 8, px += 8, op += 8) {
+    const Pixel* pal = pal18[ctl[t] & 0xF];
+    const bool flip = ctl[t] & 0x10;
+    for (u32 i = 0; i < 8; ++i) {
+      const u8 idx = rows[flip ? 7 - i : i];
+      px[i] = pal[idx]; op[i] = idx != 0; any |= idx != 0;
+    }
+  }
+  return any;
+}
+
+namespace {
+inline void obj_plot(u32 i, u32 colour, bool opaque, u8 attr, u8 alpha, u32* px, u8* oattr, u8* oalpha) {
+  const u8 old = oattr[i];
+  if (opaque && (!(old & OA_OPAQUE) || (attr & OA_PRIO) < (old & OA_PRIO))) {
+    px[i] = colour; oattr[i] = attr | OA_OPAQUE; oalpha[i] = alpha;
+  } else if (!opaque && !(old & OA_OPAQUE)) {
+    oattr[i] = (old & ~(OA_MOSAIC | OA_PRIO)) | (attr & (OA_TOUCHED | OA_MOSAIC | OA_PRIO));
+  }
+}
+}
+
+void obj_row_idx(const u8* idx, u32 n, u32 pal_base, u8 attr, u32* px, u8* oattr, u8* oalpha) {
+  for (u32 i = 0; i < n; ++i) obj_plot(i, pal_base | idx[i], idx[i] != 0, attr, 0, px, oattr, oalpha);
+}
+
+void obj_row_bmp(const u16* col, u32 n, u8 attr, u8 alpha, u32* px, u8* oattr, u8* oalpha) {
+  for (u32 i = 0; i < n; ++i) obj_plot(i, (col[i] & 0x7FFF) | OP_DIRECT, col[i] & 0x8000, attr, alpha, px, oattr, oalpha);
+}
+
 void layer_3d(const u32* line3d, Pixel* px, u8* op) {
   for (u32 i = 0; i < 256; ++i) { px[i] = line3d[i]; op[i] = (line3d[i] >> 24) != 0; }
 }
@@ -141,6 +187,12 @@ void expand_colours(u32* dst) {
     const u32 v = ((c & 0x3F) << 18) | ((c & 0x3F00) << 2) | ((c & 0x3F0000) >> 14);
     dst[i] = v | ((v & 0xC0C0C0) >> 6) | 0xFF000000;
   }
+}
+
+void output_line(const Pixel* src, u16 reg, u32* dst) {
+  for (u32 i = 0; i < 256; ++i) dst[i] = src[i];
+  master_brightness(reg, dst);
+  expand_colours(dst);
 }
 
 

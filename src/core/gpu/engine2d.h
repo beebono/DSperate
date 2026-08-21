@@ -96,17 +96,47 @@ private:
   bool bg_mosaic_latch_ = true, obj_mosaic_latch_ = true;
   u32 bg_mosaic_line_ = 0, obj_mosaic_line_ = 0;
 
-  // Planes.
-  struct BgPlane { alignas(16) std::array<Pixel, 256> px; alignas(16) std::array<u8, 256> op; };
+  // Planes. BG planes carry 8 pixels of padding on each side so the text
+  // renderer can write whole tile rows at the scroll offset; `any` records
+  // whether the line has an opaque pixel at all (empty planes are not selected).
+  struct BgPlane {
+    alignas(16) std::array<Pixel, 8 + 256 + 8> pxs;
+    alignas(16) std::array<u8, 16 + 256 + 16> ops;
+    bool any = false;
+    Pixel* px() { return pxs.data() + 8; }
+    u8* op() { return ops.data() + 16; }
+    const Pixel* px() const { return pxs.data() + 8; }
+    const u8* op() const { return ops.data() + 16; }
+  };
   std::array<BgPlane, 4> bg_;
   // OBJ plane: colour/index word plus attribute byte and window flag.
-  alignas(16) std::array<u32, 256> obj_px_{};        // bit 15 set: direct colour; else palette index (+ bit 12: standard palette)
-  alignas(16) std::array<u8, 256> obj_attr_{};       // bits 0-1 priority, bit 2 semi, bit 3 bitmap, bit 4 mosaic, bit 5 sprite-touched, bit 7 opaque
-  alignas(16) std::array<u8, 256> obj_alpha_{};      // bitmap sprites: EVA (alpha+1)
+  // (16 entries of slack after the line: the row kernels write whole vectors.)
+  alignas(16) std::array<u32, 256 + 16> obj_px_{};   // bit 15 set: direct colour; else palette index (+ bit 12: standard palette)
+  alignas(16) std::array<u8, 256 + 16> obj_attr_{};  // bits 0-1 priority, bit 2 semi, bit 3 bitmap, bit 4 mosaic, bit 5 sprite-touched, bit 7 opaque
+  alignas(16) std::array<u8, 256 + 16> obj_alpha_{}; // bitmap sprites: EVA (alpha+1)
   alignas(16) std::array<u8, 256> obj_win_{};
   alignas(16) std::array<Pixel, 256> obj_col_{};     // OBJ plane resolved through the palettes, per line
-  alignas(16) std::array<Pixel, 256> pal18_{};       // standard BG palette as 18-bit records, per line
+  // Palettes as 18-bit records: the standard BG palette and the extended
+  // palettes by slot and number. A conversion is reused across lines while
+  // the source bytes still equal the copy taken at conversion time (checked
+  // once per line on first use; palette RAM and VRAM can change mid-frame).
+  alignas(16) std::array<Pixel, 256> pal18_{};
+  alignas(16) std::array<u16, 256> pal_copy_{};
+  bool pal18_checked_ = false, pal18_have_ = false;
+  alignas(16) std::array<Pixel, 4 * 16 * 256> extpal18_{};
+  alignas(16) std::array<u16, 4 * 16 * 256> extpal_copy_{};
+  u64 extpal_checked_ = 0, extpal_have_ = 0;
+  u8 obj_prio_mask_ = 0;                             // priorities with an opaque sprite pixel on the line
+  const Pixel* std_pal18();
+  const Pixel* ext_pal18(u32 slot, u32 pal);
   u32 num_sprites_ = 0;
+  // Sprite candidates per line, rebuilt when the OAM bytes change (compared
+  // against a copy on every line, as OAM can be written mid-frame).
+  alignas(16) std::array<u16, 512> oam_copy_{};
+  bool oam_lists_valid_ = false;
+  struct LineSprites { u8 count; u8 idx[128]; };
+  std::array<LineSprites, 256> line_sprites_{};
+  void rebuild_sprite_lists(const u16* oam);
   alignas(16) std::array<u8, 256> win_{};            // bits 0-3 BG, 4 OBJ, 5 effects
   alignas(16) std::array<Pixel, 256> top_{}, second_{};
   alignas(16) std::array<u8, 256> top_id_{}, top_kind_{}, top_alpha_{}, second_id_{};
@@ -128,7 +158,7 @@ private:
   void draw_bg_3d();
   void draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, bool window);
   void draw_sprite_rotscale(const u16* attr, const u16* oam, int bw, int bh, int w, int h, s32 x, s32 y, bool window);
-  void put_sprite_pixel(s32 x, u32 colour, bool opaque, u8 attr, u8 alpha, bool window);
+  inline void put_sprite_pixel(s32 x, u32 colour, bool opaque, u8 attr, u8 alpha, bool window);
   void apply_sprite_mosaic_x();
   void build_window_plane();
   void select_layers();
