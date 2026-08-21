@@ -143,4 +143,46 @@ void expand_colours(u32* dst) {
   }
 }
 
+
+// ---- 3D span stages ------------------------------------------------------------
+// These are Renderer3D::Interp<0> (render3d.cpp) applied to every pixel of a
+// span; the scalar forms here are the specification.
+
+void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac) {
+  for (u32 i = 0; i < n; ++i) {
+    const s32 xv = xv0 + static_cast<s32>(i);
+    const u32 num = static_cast<u32>(xv * w0n) << 8;
+    const u32 den = static_cast<u32>(xv * w0d) + static_cast<u32>((xdiff - xv) * w1d);
+    fac[i] = den == 0 ? 0 : num / den;
+  }
+}
+
+void span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out) {
+  if (y0 == y1) { for (u32 i = 0; i < n; ++i) out[i] = y0; return; }
+  if (y0 < y1) { const s64 d = y1 - y0; for (u32 i = 0; i < n; ++i) out[i] = y0 + static_cast<s32>((d * fac[i]) >> 8); return; }
+  const s64 d = y0 - y1;
+  for (u32 i = 0; i < n; ++i) out[i] = y1 + static_cast<s32>((d * (256 - fac[i])) >> 8);
+}
+
+void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
+  if (y0 == y1) { for (u32 i = 0; i < n; ++i) out[i] = y0; return; }
+  for (u32 i = 0; i < n; ++i) {
+    const s32 xv = xv0 + static_cast<s32>(i);
+    if (y0 < y1) out[i] = y0 + static_cast<s32>(static_cast<s64>(y1 - y0) * xv / xdiff);
+    else out[i] = y1 + static_cast<s32>(static_cast<s64>(y0 - y1) * (xdiff - xv) / xdiff);
+  }
+}
+
+void span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* out) {
+  if (z0 == z1) { for (u32 i = 0; i < n; ++i) out[i] = z0; return; }
+  s32 base, disp;
+  if (z0 < z1) { base = z0; disp = z1 - z0; } else { base = z1; disp = z0 - z1; }
+  disp >>= 9;
+  for (u32 i = 0; i < n; ++i) {
+    const s32 xv = xv0 + static_cast<s32>(i);
+    const s32 factor = z0 < z1 ? xv : xdiff - xv;
+    out[i] = base + static_cast<s32>((static_cast<s64>(disp) * factor * xrecip) >> 13);
+  }
+}
+
 } // namespace ds::gpu::kern::ref

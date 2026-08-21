@@ -2,8 +2,6 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/mem/page_table.h"
 
-#include <unordered_map>
-#include <vector>
 
 #include <cassert>
 #include <cstring>
@@ -16,11 +14,26 @@ bool (*PageTable::code_query)(const u8* host_page) = nullptr;
 
 static constexpr size_t TABLE_BYTES = size_t{PAGE_COUNT} * sizeof(Entry);
 
+struct PageTable::HostIndex {
+  static constexpr u32 SLOT_BITS = 15, SLOTS = 1u << SLOT_BITS, NONE = 0xFFFFFFFFu;
+  static constexpr u32 TRACKED = 0x10000000u >> PAGE_SHIFT;   // guest pages below 256 MB
+  u64 key[SLOTS];      // host page number, 0 = empty (host pages are never at address 0)
+  u32 head[SLOTS];
+  u32 next[TRACKED], prev[TRACKED];   // doubly linked: removal is O(1) even for pages mirrored thousands of times
+  HostIndex() { std::memset(key, 0, sizeof key); std::memset(head, 0xFF, sizeof head); std::memset(next, 0xFF, sizeof next); std::memset(prev, 0xFF, sizeof prev); }
+  u32 slot(u64 hp) const {
+    u32 s = static_cast<u32>((hp * 0x9E3779B97F4A7C15ull) >> (64 - SLOT_BITS));
+    while (key[s] != 0 && key[s] != hp) s = (s + 1) & (SLOTS - 1);
+    return s;
+  }
+};
+
 PageTable::PageTable() {
   void* p = mmap(nullptr, TABLE_BYTES, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   assert(p != MAP_FAILED);
   table_ = static_cast<Entry*>(p);   // zero-filled: every page starts unmapped
+  index_ = new HostIndex;
 }
 
 
@@ -38,10 +51,14 @@ static Entry make_entry(u32 guest_page_addr, u8* host, u32 flags) {
 
 void PageTable::map(u32 guest, u32 size, u8* host, u32 flags) {
   assert((guest % PAGE_SIZE) == 0 && (size % PAGE_SIZE) == 0);
-  ++gen_;
   for (u32 off = 0; off < size; off += PAGE_SIZE) {
     u32 g = guest + off;
-    table_[g >> PAGE_SHIFT] = make_entry(g, host + off, flags);
+    const u32 p = g >> PAGE_SHIFT;
+    const Entry e = make_entry(g, host + off, flags);
+    if (table_[p] == e) continue;
+    index_remove(p, table_[p]);
+    table_[p] = e;
+    index_insert(p, e);
   }
 }
 
@@ -51,33 +68,47 @@ void PageTable::map_mmio(u32 guest, u32 size) {
 
 void PageTable::unmap(u32 guest, u32 size) {
   assert((guest % PAGE_SIZE) == 0 && (size % PAGE_SIZE) == 0);
-  ++gen_;
-  for (u32 off = 0; off < size; off += PAGE_SIZE)
-    table_[(guest + off) >> PAGE_SHIFT] = 0;
+  for (u32 off = 0; off < size; off += PAGE_SIZE) {
+    const u32 p = (guest + off) >> PAGE_SHIFT;
+    if (!table_[p]) continue;
+    index_remove(p, table_[p]);
+    table_[p] = 0;
+  }
 }
-
-struct PageTable::HostIndex { std::unordered_map<u64, std::vector<u32>> pages; };
 
 PageTable::~PageTable() { munmap(table_, TABLE_BYTES); delete index_; }
 
-void PageTable::build_index() {
-  if (!index_) index_ = new HostIndex;
-  index_->pages.clear();
-  for (u32 p = 0; p < (0x10000000u >> PAGE_SHIFT); ++p) {
-    Entry e = table_[p];
-    if (!(e << 2)) continue;
-    const u64 host = ((e << 2) + (static_cast<u64>(p) << PAGE_SHIFT)) >> PAGE_SHIFT;
-    index_->pages[host].push_back(p);
-  }
-  index_gen_ = gen_;
+static inline u64 host_page_of(Entry e, u32 p) { return ((e << 2) + (static_cast<u64>(p) << PAGE_SHIFT)) >> PAGE_SHIFT; }
+
+void PageTable::index_insert(u32 p, Entry e) {
+  if (p >= HostIndex::TRACKED || !(e << 2)) return;
+  HostIndex& ix = *index_;
+  const u64 hp = host_page_of(e, p);
+  const u32 s = ix.slot(hp);
+  ix.key[s] = hp;
+  ix.next[p] = ix.head[s];
+  ix.prev[p] = HostIndex::NONE;
+  if (ix.head[s] != HostIndex::NONE) ix.prev[ix.head[s]] = p;
+  ix.head[s] = p;
+}
+
+void PageTable::index_remove(u32 p, Entry e) {
+  if (p >= HostIndex::TRACKED || !(e << 2)) return;
+  HostIndex& ix = *index_;
+  const u32 s = ix.slot(host_page_of(e, p));
+  if (ix.key[s] == 0) return;
+  const u32 n = ix.next[p], q = ix.prev[p];
+  if (q != HostIndex::NONE) ix.next[q] = n; else if (ix.head[s] == p) ix.head[s] = n;
+  if (n != HostIndex::NONE) ix.prev[n] = q;
+  ix.next[p] = HostIndex::NONE; ix.prev[p] = HostIndex::NONE;
 }
 
 void PageTable::set_code_host(const u8* host_page, bool is_code) {
-  if (index_gen_ != gen_) build_index();
   const u64 want = reinterpret_cast<u64>(host_page) >> PAGE_SHIFT;
-  auto it = index_->pages.find(want);
-  if (it == index_->pages.end()) return;
-  for (u32 p : it->second) {
+  const HostIndex& ix = *index_;
+  const u32 s = ix.slot(want);
+  if (ix.key[s] != want) return;
+  for (u32 p = ix.head[s]; p != HostIndex::NONE; p = ix.next[p]) {
     Entry e = table_[p];
     table_[p] = is_code ? (e | TAG_CODE) : (e & ~TAG_CODE);
   }

@@ -96,9 +96,16 @@ private:
   u8  tex8(u32 addr) const;
   u16 tex16(u32 addr) const;
   u16 pal16(u32 addr) const;
-  void texture_lookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const;
-  u32  shade_pixel(const Polygon& p, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const;
+  // Per-polygon shading constants and the span stage buffers (render3d.cpp).
+  struct Shade;
+  struct SpanBuf;
+  u32  texture_sample(const Shade& sh, s32 s, s32 t, u32* alpha) const;
+  template <bool textured> u32 shade_pixel(const Shade& sh, u32 vr, u32 vg, u32 vb, s32 s, s32 t) const;
   void plot_translucent(u32 addr, u32 color, u32 z, u32 polyattr, bool shadow);
+  template <int mode> bool depth_pass(u32 addr, s32 z, u32 dstattr) const;
+  template <int mode, bool textured, bool aa, bool shadow> void resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
+  void span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
+                  const s32* al, const s32* ar, bool with_attrs) const;
   void setup_left_edge(Edge& e, s32 y) const;
   void setup_right_edge(Edge& e, s32 y) const;
   void setup_polygon(Edge& e, const Polygon& p) const;

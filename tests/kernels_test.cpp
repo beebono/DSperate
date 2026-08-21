@@ -95,11 +95,43 @@ static void test_output() {
   }
 }
 
+// 3D span stages: random spans and endpoints; every branch of the reference
+// (ascending / descending / equal attributes, all span widths, numerator wrap).
+static void test_span() {
+  alignas(16) u32 fa[256], fb[256]; alignas(16) s32 oa[256], ob[256];
+  for (u32 it = 0; it < 2000; ++it) {
+    const s32 xdiff = 1 + static_cast<s32>(rng() % 257);
+    const s32 xv0 = static_cast<s32>(rng() % static_cast<u32>(xdiff));
+    const u32 n = 1 + rng() % static_cast<u32>(xdiff - xv0);
+    s32 w0 = static_cast<s32>(rng() & 0xFFFF), w1 = static_cast<s32>(rng() & 0xFFFF);
+    if (!(rng() & 3)) w1 = w0;                       // equal W
+    if (!(rng() & 7)) w0 = 0;                        // degenerate
+    if (!(rng() & 15)) { w0 = static_cast<s32>(rng()); w1 = static_cast<s32>(rng()); }   // garbage W: wrap paths
+    kern::ref::span_factor(xv0, n, xdiff, w0, w0, w1, fa);
+    N::span_factor(xv0, n, xdiff, w0, w0, w1, fb);
+    CHECK_SAME("span_factor", fa, fb, n * 4);
+    const u32 kind = rng() % 3;
+    s32 y0, y1;
+    if (kind == 0) { y0 = static_cast<s32>(rng() & 0x1FF); y1 = static_cast<s32>(rng() & 0x1FF); }                  // colour
+    else if (kind == 1) { y0 = static_cast<s16>(rng()); y1 = static_cast<s16>(rng()); }                               // texture coordinate
+    else { y0 = static_cast<s32>(rng() & 0xFFFFFF); y1 = static_cast<s32>(rng() & 0xFFFFFF); }                       // depth
+    if (!(rng() & 7)) y1 = y0;
+    kern::ref::span_attr_persp(y0, y1, fa, n, oa); N::span_attr_persp(y0, y1, fa, n, ob);
+    CHECK_SAME("span_attr_persp", oa, ob, n * 4);
+    kern::ref::span_attr_linear(y0, y1, xv0, n, xdiff, oa); N::span_attr_linear(y0, y1, xv0, n, xdiff, ob);
+    CHECK_SAME("span_attr_linear", oa, ob, n * 4);
+    const s32 xrecip = (1 << 22) / xdiff;
+    kern::ref::span_z_linear(y0, y1, xv0, n, xdiff, xrecip, oa); N::span_z_linear(y0, y1, xv0, n, xdiff, xrecip, ob);
+    CHECK_SAME("span_z_linear", oa, ob, n * 4);
+  }
+}
+
 int main() {
   test_select();
   test_composite();
   test_palette_and_tiles();
   test_output();
+  test_span();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
 #if DSPERATE_NEON
   std::puts("kernels: ok (neon vs ref)");

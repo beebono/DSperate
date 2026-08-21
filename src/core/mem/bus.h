@@ -27,7 +27,8 @@ public:
   void reset();
 
   // Remaps after control-register changes.
-  void update_tcm(CpuContext& cpu, bool force = false);   // CP15 (ARM9)
+  void update_tcm(CpuContext& cpu, bool force = false);
+  u32 tcm_prev_itcm_ = 0, tcm_prev_dtcm_base_ = 0, tcm_prev_dtcm_size_ = 0;   // windows mapped by the last update_tcm   // CP15 (ARM9)
   void update_wram();                 // WRAMCNT
   void update_vram();                 // VRAMCNT A-I
 

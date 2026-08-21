@@ -88,12 +88,14 @@ public:
 
 private:
   Entry* table_;   // PAGE_COUNT entries, mmap'd: untouched pages cost no RSS
-  // Reverse index for set_code_host: host page number -> guest pages (low
-  // 256 MB) mapping it. Rebuilt lazily after any remap.
+  // Reverse index for set_code_host: host page number -> the guest pages (low
+  // 256 MB) mapping it, maintained by map/unmap. An open-addressing table of
+  // host pages whose values head intrusive lists threaded through `next`;
+  // no allocation on the remap path.
   struct HostIndex;
-  HostIndex* index_ = nullptr;
-  u32 gen_ = 1, index_gen_ = 0;
-  void build_index();
+  HostIndex* index_;
+  void index_insert(u32 guest_page, Entry e);
+  void index_remove(u32 guest_page, Entry e);
 };
 
 } // namespace ds::mem

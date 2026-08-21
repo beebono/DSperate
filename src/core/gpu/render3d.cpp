@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/render3d.h"
+#include "core/gpu/kernels.h"
 #include "core/gpu/gpu3d.h"
 #include "core/gpu/vram_map.h"
 #include "core/nds.h"
@@ -192,47 +193,66 @@ u16 Renderer3D::pal16(u32 addr) const {
   return vm_->read16(*palv_, addr);
 }
 
-void Renderer3D::texture_lookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* color, u8* alpha) const {
-  u32 addr = (texparam & 0xFFFF) << 3;
-  const s32 width = 8 << ((texparam >> 20) & 7), height = 8 << ((texparam >> 23) & 7);
-  s >>= 4; t >>= 4;
-  // Wrap / clamp / flip.
-  if (texparam & (1 << 16)) {
-    if (texparam & (1 << 18)) { if (s & width) s = static_cast<s16>((width - 1) - (s & (width - 1))); else s = static_cast<s16>(s & (width - 1)); }
-    else s = static_cast<s16>(s & (width - 1));
-  } else { if (s < 0) s = 0; else if (s >= width) s = static_cast<s16>(width - 1); }
-  if (texparam & (1 << 17)) {
-    if (texparam & (1 << 19)) { if (t & height) t = static_cast<s16>((height - 1) - (t & (height - 1))); else t = static_cast<s16>(t & (height - 1)); }
-    else t = static_cast<s16>(t & (height - 1));
-  } else { if (t < 0) t = 0; else if (t >= height) t = static_cast<s16>(height - 1); }
+// ---- pixel pipeline ------------------------------------------------------------
+//
+// Everything the per-pixel work needs from the polygon and the render state,
+// decoded once per polygon line rather than once per pixel.
+struct Renderer3D::Shade {
+  u32 blendmode, polyalpha, polyattr;
+  bool highlight, textured, wireframe, shadow, polyattr_z;   // polyattr_z: translucent pixels update depth
+  u32 dispcnt, alpha_ref;
+  const u16* toon;
+  // Texture: format, VRAM base, size, wrap/flip, transparent-colour-0 alpha, palette base.
+  u32 fmt, base, texpal, alpha0;
+  s32 width, height;
+  bool srep, sflip, trep, tflip;
+};
 
-  const u8 alpha0 = (texparam & (1 << 29)) ? 0 : 31;
-  switch ((texparam >> 26) & 7) {
+// Span stage buffers: one entry per pixel of the current span, index 0 at screen x `x0`.
+struct Renderer3D::SpanBuf {
+  s32 x0;
+  alignas(16) u32 fac[256];
+  alignas(16) s32 z[256];
+  alignas(16) s32 attr[5][256];   // r g b s t
+};
+
+namespace {
+inline u32 c15_to_18(u16 c, u32 shift) { u32 v = (shift == 0 ? (c << 1) : (c >> shift)) & 0x3E; if (v) ++v; return v; }
+inline void rgb15_to_666(u16 c, u32& r, u32& g, u32& b) { r = c15_to_18(c, 0); g = c15_to_18(c, 4); b = c15_to_18(c, 9); }
+}
+
+// Texel at 12.4 coordinates (s, t): RGB555 colour, 5-bit alpha.
+[[gnu::always_inline]] inline u32 Renderer3D::texture_sample(const Shade& sh, s32 s, s32 t, u32* alpha) const {
+  u32 addr = sh.base;
+  const s32 width = sh.width, height = sh.height;
+  s >>= 4; t >>= 4;
+  if (sh.srep) { if (sh.sflip && (s & width)) s = (width - 1) - (s & (width - 1)); else s &= width - 1; }
+  else { if (s < 0) s = 0; else if (s >= width) s = width - 1; }
+  if (sh.trep) { if (sh.tflip && (t & height)) t = (height - 1) - (t & (height - 1)); else t &= height - 1; }
+  else { if (t < 0) t = 0; else if (t >= height) t = height - 1; }
+  const u32 texpal = sh.texpal, alpha0 = sh.alpha0;
+  switch (sh.fmt) {
   case 1: {   // A3I5
     const u8 px = tex8(addr + (t * width + s));
-    *color = pal16((texpal << 4) + ((px & 0x1F) << 1));
-    *alpha = static_cast<u8>(((px >> 3) & 0x1C) + (px >> 6));
-    break;
+    *alpha = ((px >> 3) & 0x1C) + (px >> 6);
+    return pal16((texpal << 4) + ((px & 0x1F) << 1));
   }
   case 2: {   // 4 colours
     u8 px = tex8(addr + ((t * width + s) >> 2));
     px = (px >> ((s & 3) << 1)) & 3;
-    *color = pal16((texpal << 3) + (px << 1));
     *alpha = px == 0 ? alpha0 : 31;
-    break;
+    return pal16((texpal << 3) + (px << 1));
   }
   case 3: {   // 16 colours
     u8 px = tex8(addr + ((t * width + s) >> 1));
     px = (s & 1) ? (px >> 4) : (px & 0xF);
-    *color = pal16((texpal << 4) + (px << 1));
     *alpha = px == 0 ? alpha0 : 31;
-    break;
+    return pal16((texpal << 4) + (px << 1));
   }
   case 4: {   // 256 colours
     const u8 px = tex8(addr + (t * width + s));
-    *color = pal16((texpal << 4) + (px << 1));
     *alpha = px == 0 ? alpha0 : 31;
-    break;
+    return pal16((texpal << 4) + (px << 1));
   }
   case 5: {   // 4x4 compressed
     addr += ((t & 0x3FC) * (width >> 2)) + (s & 0x3FC) + (t & 3);
@@ -245,66 +265,62 @@ void Renderer3D::texture_lookup(u32 texparam, u32 texpal, s16 s, s16 t, u16* col
     const u16 palinfo = tex16(slot1);
     const u32 paloff = (palinfo & 0x3FFF) << 2;
     const u32 base = (texpal << 4) + paloff;
-    auto mix = [&](u32 ma, u32 mb, u32 sh) -> u16 {
+    auto mix = [&](u32 ma, u32 mb, u32 sh_) -> u16 {
       const u16 c0 = pal16(base), c1 = pal16(base + 2);
-      const u32 r = ((c0 & 0x1F) * ma + (c1 & 0x1F) * mb) >> sh;
-      const u32 g = (((c0 & 0x3E0) * ma + (c1 & 0x3E0) * mb) >> sh) & 0x3E0;
-      const u32 b = (((c0 & 0x7C00) * ma + (c1 & 0x7C00) * mb) >> sh) & 0x7C00;
+      const u32 r = ((c0 & 0x1F) * ma + (c1 & 0x1F) * mb) >> sh_;
+      const u32 g = (((c0 & 0x3E0) * ma + (c1 & 0x3E0) * mb) >> sh_) & 0x3E0;
+      const u32 b = (((c0 & 0x7C00) * ma + (c1 & 0x7C00) * mb) >> sh_) & 0x7C00;
       return static_cast<u16>(r | g | b);
     };
+    *alpha = 31;
     switch (val & 3) {
-    case 0: *color = pal16(base); *alpha = 31; break;
-    case 1: *color = pal16(base + 2); *alpha = 31; break;
+    case 0: return pal16(base);
+    case 1: return pal16(base + 2);
     case 2:
-      if ((palinfo >> 14) == 1) *color = mix(1, 1, 1);
-      else if ((palinfo >> 14) == 3) *color = mix(5, 3, 3);
-      else *color = pal16(base + 4);
-      *alpha = 31;
-      break;
+      if ((palinfo >> 14) == 1) return mix(1, 1, 1);
+      if ((palinfo >> 14) == 3) return mix(5, 3, 3);
+      return pal16(base + 4);
     default:
-      if ((palinfo >> 14) == 2) { *color = pal16(base + 6); *alpha = 31; }
-      else if ((palinfo >> 14) == 3) { *color = mix(3, 5, 3); *alpha = 31; }
-      else { *color = 0; *alpha = 0; }
-      break;
+      if ((palinfo >> 14) == 2) return pal16(base + 6);
+      if ((palinfo >> 14) == 3) return mix(3, 5, 3);
+      *alpha = 0; return 0;
     }
-    break;
   }
   case 6: {   // A5I3
     const u8 px = tex8(addr + (t * width + s));
-    *color = pal16((texpal << 4) + ((px & 7) << 1));
     *alpha = px >> 3;
-    break;
+    return pal16((texpal << 4) + ((px & 7) << 1));
   }
   case 7: {   // direct colour
-    *color = tex16(addr + ((t * width + s) << 1));
-    *alpha = (*color & 0x8000) ? 31 : 0;
-    break;
+    const u16 c = tex16(addr + ((t * width + s) << 1));
+    *alpha = (c & 0x8000) ? 31 : 0;
+    return c;
   }
-  default: *color = 0; *alpha = 0; break;
+  default: *alpha = 0; return 0;
   }
 }
 
+
+// Depth test: 'less than' normally (mode 0); 'less or equal' for a
+// front-facing pixel over an opaque back-facing one (mode 1); within a
+// tolerance when the polygon asks for equal-depth testing (mode 2 Z-buffered
+// ±0x200, mode 3 W-buffered ±0xFF).
+template <int mode>
+[[gnu::always_inline]] inline bool Renderer3D::depth_pass(u32 addr, s32 z, u32 dstattr) const {
+  const s32 dstz = static_cast<s32>(depth_[addr]);
+  if constexpr (mode == 0) return z < dstz;
+  else if constexpr (mode == 1) return (dstattr & 0x00400010) == 0x00000010 ? z <= dstz : z < dstz;
+  else if constexpr (mode == 2) return static_cast<u32>((dstz - z) + 0x200) <= 0x400;
+  else return static_cast<u32>((dstz - z) + 0xFF) <= 0x1FE;
+}
 namespace {
-inline u32 c15_to_18(u16 c, u32 shift) { u32 v = (shift == 0 ? (c << 1) : (c >> shift)) & 0x3E; if (v) ++v; return v; }
-inline void rgb15_to_666(u16 c, u32& r, u32& g, u32& b) { r = c15_to_18(c, 0); g = c15_to_18(c, 4); b = c15_to_18(c, 9); }
+inline int pick_depth_mode(const Polygon& p) {
+  if (p.attr & (1 << 14)) return p.wbuffer ? 3 : 2;
+  return p.facing ? 1 : 0;
+}
 }
 
-// Depth test: 'less than' normally; 'less or equal' for a front-facing pixel
-// over an opaque back-facing one, or within a tolerance when the polygon
-// asks for equal-depth testing (±0x200 Z-buffered, ±0xFF W-buffered).
-namespace {
-inline bool depth_equal_z(s32 dstz, s32 z, u32) { return static_cast<u32>((dstz - z) + 0x200) <= 0x400; }
-inline bool depth_equal_w(s32 dstz, s32 z, u32) { return static_cast<u32>((dstz - z) + 0xFF) <= 0x1FE; }
-inline bool depth_less(s32 dstz, s32 z, u32) { return z < dstz; }
-inline bool depth_less_front(s32 dstz, s32 z, u32 dstattr) { return (dstattr & 0x00400010) == 0x00000010 ? z <= dstz : z < dstz; }
-using DepthFn = bool (*)(s32, s32, u32);
-DepthFn pick_depth_test(const Polygon& p) {
-  if (p.attr & (1 << 14)) return p.wbuffer ? depth_equal_w : depth_equal_z;
-  return p.facing ? depth_less_front : depth_less;
-}
-}
-
-u32 Renderer3D::alpha_blend(u32 dispcnt, u32 src, u32 dst, u32 alpha) {
+[[gnu::always_inline]] inline u32 Renderer3D::alpha_blend(u32 dispcnt, u32 src, u32 dst, u32 alpha) {
   u32 dsta = dst >> 24;
   if (dsta == 0) return src;
   u32 r = src & 0x3F, g = (src >> 8) & 0x3F, b = (src >> 16) & 0x3F;
@@ -318,19 +334,17 @@ u32 Renderer3D::alpha_blend(u32 dispcnt, u32 src, u32 dst, u32 alpha) {
   return r | (g << 8) | (b << 16) | (dsta << 24);
 }
 
-u32 Renderer3D::shade_pixel(const Polygon& p, u8 vr, u8 vg, u8 vb, s16 s, s16 t) const {
+template <bool textured>
+[[gnu::always_inline]] inline u32 Renderer3D::shade_pixel(const Shade& sh, u32 vr, u32 vg, u32 vb, s32 s, s32 t) const {
   u32 r, g, b, a;
-  const u32 blendmode = (p.attr >> 4) & 3;
-  const u32 polyalpha = (p.attr >> 16) & 0x1F;
-  const bool wireframe = polyalpha == 0;
-  const bool highlight = rs_->dispcnt & (1 << 1);
+  const u32 blendmode = sh.blendmode;
   if (blendmode == 2) {
-    if (highlight) { vg = vr; vb = vr; }        // highlight: all components from red, toon colour added later
-    else { u32 tr, tg, tb; rgb15_to_666(rs_->toon[vr >> 1], tr, tg, tb); vr = tr; vg = tg; vb = tb; }
+    if (sh.highlight) { vg = vr; vb = vr; }        // highlight: all components from red, toon colour added later
+    else { u32 tr, tg, tb; rgb15_to_666(sh.toon[vr >> 1], tr, tg, tb); vr = tr; vg = tg; vb = tb; }
   }
-  if ((rs_->dispcnt & 1) && ((p.texparam >> 26) & 7) != 0) {
-    u16 tcolor; u8 talpha;
-    texture_lookup(p.texparam, p.texpal, s, t, &tcolor, &talpha);
+  if constexpr (textured) {
+    u32 talpha;
+    const u16 tcolor = static_cast<u16>(texture_sample(sh, s, t, &talpha));
     u32 tr, tg, tb; rgb15_to_666(tcolor, tr, tg, tb);
     if (blendmode & 1) {   // decal
       if (talpha == 0) { r = vr; g = vg; b = vb; }
@@ -340,26 +354,26 @@ u32 Renderer3D::shade_pixel(const Polygon& p, u8 vr, u8 vg, u8 vb, s16 s, s16 t)
         g = ((tg * talpha) + (vg * (31 - talpha))) >> 5;
         b = ((tb * talpha) + (vb * (31 - talpha))) >> 5;
       }
-      a = polyalpha;
+      a = sh.polyalpha;
     } else {               // modulate
       r = ((tr + 1) * (vr + 1) - 1) >> 6;
       g = ((tg + 1) * (vg + 1) - 1) >> 6;
       b = ((tb + 1) * (vb + 1) - 1) >> 6;
-      a = ((talpha + 1) * (polyalpha + 1) - 1) >> 5;
+      a = ((talpha + 1) * (sh.polyalpha + 1) - 1) >> 5;
     }
-  } else { r = vr; g = vg; b = vb; a = polyalpha; }
-  if (blendmode == 2 && highlight) {
-    u32 tr, tg, tb; rgb15_to_666(rs_->toon[vr >> 1], tr, tg, tb);
+  } else { r = vr; g = vg; b = vb; a = sh.polyalpha; }
+  if (blendmode == 2 && sh.highlight) {
+    u32 tr, tg, tb; rgb15_to_666(sh.toon[vr >> 1], tr, tg, tb);
     r += tr; g += tg; b += tb;
     if (r > 63) r = 63;
     if (g > 63) g = 63;
     if (b > 63) b = 63;
   }
-  if (wireframe) a = 31;
+  if (sh.wireframe) a = 31;
   return r | (g << 8) | (b << 16) | (a << 24);
 }
 
-void Renderer3D::plot_translucent(u32 addr, u32 color, u32 z, u32 polyattr, bool shadow) {
+[[gnu::always_inline]] inline void Renderer3D::plot_translucent(u32 addr, u32 color, u32 z, u32 polyattr, bool shadow) {
   const u32 dstattr = attr_[addr];
   u32 attr = (polyattr & 0xE0F0) | ((polyattr >> 8) & 0xFF0000) | (1u << 22) | (dstattr & 0xFF001F0F);
   if (shadow) {
@@ -428,22 +442,34 @@ void Renderer3D::setup_polygon(Edge& e, const Polygon& p) const {
 
 // ---- scanline rendering ------------------------------------------------------------
 
-namespace {
-// Per-scanline span description shared by the shadow-mask and colour passes.
-struct Span {
-  s32 xstart, xend;
-  bool l_fill, r_fill;
-  s32 l_len, r_len, l_cov, r_cov;
-  s32 wl, wr, zl, zr;
-  bool swapped;
-};
+// Span stage: the perspective factor, depth and (optionally) the five
+// attributes for screen pixels [xa, xb) of the span [xstart, xend], through
+// the kernels (kern::active). This is Interp<0> (setup, set_x, interpolate,
+// interpolate_z) evaluated for the whole span at once.
+void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
+                            const s32* al, const s32* ar, bool with_attrs) const {
+  sb.x0 = xa;
+  const u32 n = static_cast<u32>(xb - xa);
+  const s32 xdiff = (xend + 1) - xstart;
+  const s32 xv0 = xa - xstart;
+  const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
+  const bool use_factor = xdiff != 0 && (!linear || wbuffer);
+  if (use_factor) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac);
+  if (xdiff == 0) { for (u32 i = 0; i < n; ++i) sb.z[i] = zl; }
+  else if (wbuffer) kern::active::span_attr_persp(zl, zr, sb.fac, n, sb.z);
+  else kern::active::span_z_linear(zl, zr, xv0, n, xdiff, (1 << 22) / xdiff, sb.z);
+  if (!with_attrs) return;
+  for (int k = 0; k < 5; ++k) {
+    if (xdiff == 0) { for (u32 i = 0; i < n; ++i) sb.attr[k][i] = al[k]; }
+    else if (!linear) kern::active::span_attr_persp(al[k], ar[k], sb.fac, n, sb.attr[k]);
+    else kern::active::span_attr_linear(al[k], ar[k], xv0, n, xdiff, sb.attr[k]);
+  }
 }
 
 void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   const Polygon& p = *e.poly;
   u32 polyalpha = (p.attr >> 16) & 0x1F;
   const bool wireframe = polyalpha == 0;
-  const DepthFn depth_test = pick_depth_test(p);
 
   if (!prev_shadow_mask_) std::memset(&stencil_[256 * (y & 1)], 0, 256);
   prev_shadow_mask_ = true;
@@ -486,25 +512,35 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   }
 
   if (wireframe) polyalpha = 31;
-  if (polyalpha <= rs_->alpha_ref) return;
+  if (polyalpha <= rs_->alpha_ref) { e.xl = e.left.step(); e.xr = e.right.step(); return; }
 
   int yedge = 0;
   if (y == p.ytop) yedge = 0x4; else if (y == p.ybot - 1) yedge = 0x8;
   s32 x = xstart;
-  Interp<0> ix; ix.setup(xstart, xend + 1, wl, wr, p.wbuffer);
   if (x < 0) x = 0;
+  const s32 xa = x, xb = std::min(xend + 1, 256);
+  SpanBuf sb;
+  if (xb > xa) span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, nullptr, nullptr, false);
+  const int mode = pick_depth_mode(p);
 
   // Set stencil bits where the depth test fails; draw nothing.
   auto stencil_span = [&](s32 xlimit) {
     for (; x < xlimit; ++x) {
       u32 addr = FIRST + y * W + x;
-      ix.set_x(x);
-      const s32 z = ix.interpolate_z(zl, zr);
+      const s32 z = sb.z[x - sb.x0];
       const u32 dstattr = attr_[addr];
-      if (!depth_test(static_cast<s32>(depth_[addr]), z, dstattr)) stencil_[256 * (y & 1) + x] = 1;
+      auto fails = [&](u32 a, u32 da) {
+        switch (mode) {
+        case 0: return !depth_pass<0>(a, z, da);
+        case 1: return !depth_pass<1>(a, z, da);
+        case 2: return !depth_pass<2>(a, z, da);
+        default: return !depth_pass<3>(a, z, da);
+        }
+      };
+      if (fails(addr, dstattr)) stencil_[256 * (y & 1) + x] = 1;
       if (dstattr & 0xF) {
         addr += SIZE;
-        if (!depth_test(static_cast<s32>(depth_[addr]), z, attr_[addr])) stencil_[256 * (y & 1) + x] |= 2;
+        if (fails(addr, attr_[addr])) stencil_[256 * (y & 1) + x] |= 2;
       }
     }
   };
@@ -519,14 +555,92 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   e.xr = e.right.step();
 }
 
+// Per-pixel resolve of screen pixels [xa, xb) of the current span: stencil,
+// depth test (against the top pixel, then the one underneath), shading,
+// alpha test and the opaque / translucent writes.
+// part: 0 = left edge, 1 = inside, 2 = right edge.
+template <int mode, bool textured, bool aa, bool shadow>
+void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
+  const u32 polyattr = sh.polyattr;
+  const u8* stencil = &stencil_[256 * (y & 1)];
+  const s32* ra = sb.attr[0]; const s32* ga = sb.attr[1]; const s32* ba = sb.attr[2];
+  const s32* sa = sb.attr[3]; const s32* ta = sb.attr[4];
+  for (s32 x = xa; x < xb; ++x) {
+    const u32 i = static_cast<u32>(x - sb.x0);
+    u32 addr = FIRST + y * W + x;
+    u32 dstattr = attr_[addr];
+    if (shadow) {
+      const u8 st = stencil[x];
+      if (!st) continue;
+      if (!(st & 1)) addr += SIZE;
+      if (!(st & 2)) dstattr &= ~0xFu;      // no shadow under anti-aliased edges
+    }
+    const s32 z = sb.z[i];
+    // Failing against the top pixel, try the one underneath.
+    if (!depth_pass<mode>(addr, z, dstattr)) {
+      if (!(dstattr & 0xF) || addr >= static_cast<u32>(SIZE)) continue;
+      addr += SIZE;
+      dstattr = attr_[addr];
+      if (!depth_pass<mode>(addr, z, dstattr)) continue;
+    }
+    const u32 vr = (static_cast<u32>(ra[i]) >> 3) & 0xFF, vg = (static_cast<u32>(ga[i]) >> 3) & 0xFF, vb = (static_cast<u32>(ba[i]) >> 3) & 0xFF;
+    const s32 s = static_cast<s16>(sa[i]), t = static_cast<s16>(ta[i]);
+    const u32 color = shade_pixel<textured>(sh, vr, vg, vb, s, t);
+    const u32 alpha = color >> 24;
+    if (alpha <= sh.alpha_ref) continue;
+    if (alpha == 31) {
+      u32 attr = polyattr | edge;
+      bool push = false;
+      if (aa) {
+        if (part == 1) { if (attr & 0xF) { attr |= (0x1F << 8); push = true; } }
+        else {
+          s32 cov = part == 0 ? l_cov : r_cov;
+          if (cov & static_cast<s32>(0x80000000u)) {
+            if (part == 0) { cov = xcov >> 5; if (cov > 31) cov = 31; xcov += (l_cov & 0x3FF); }
+            else { cov = 0x1F - (xcov >> 5); if (cov < 0) cov = 0; xcov += (r_cov & 0x3FF); }
+          }
+          attr |= (cov << 8);
+          push = true;
+        }
+      }
+      if (push && addr < static_cast<u32>(SIZE)) {
+        color_[addr + SIZE] = color_[addr]; depth_[addr + SIZE] = depth_[addr]; attr_[addr + SIZE] = attr_[addr];
+      }
+      depth_[addr] = z; color_[addr] = color; attr_[addr] = attr;
+    } else {
+      const u32 zz = (sh.polyattr_z) ? static_cast<u32>(z) : 0xFFFFFFFFu;
+      plot_translucent(addr, color, zz, polyattr, shadow);
+      if ((dstattr & 0xF) && addr < static_cast<u32>(SIZE)) plot_translucent(addr + SIZE, color, zz, polyattr, shadow);
+    }
+  }
+}
+
 void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   const Polygon& p = *e.poly;
-  u32 polyattr = p.attr & 0x3F008000;
-  if (!p.facing) polyattr |= (1 << 4);
-  const u32 polyalpha = (p.attr >> 16) & 0x1F;
-  const bool wireframe = polyalpha == 0;
-  const DepthFn depth_test = pick_depth_test(p);
-  const u32 dispcnt = rs_->dispcnt;
+  Shade sh;
+  sh.polyattr = p.attr & 0x3F008000;
+  if (!p.facing) sh.polyattr |= (1 << 4);
+  sh.polyattr_z = (p.attr & (1 << 11)) != 0;
+  sh.polyalpha = (p.attr >> 16) & 0x1F;
+  sh.wireframe = sh.polyalpha == 0;
+  sh.shadow = p.shadow;
+  sh.dispcnt = rs_->dispcnt;
+  sh.alpha_ref = rs_->alpha_ref;
+  sh.blendmode = (p.attr >> 4) & 3;
+  sh.highlight = sh.dispcnt & (1 << 1);
+  sh.toon = rs_->toon.data();
+  sh.fmt = (p.texparam >> 26) & 7;
+  sh.textured = (sh.dispcnt & 1) && sh.fmt != 0;
+  sh.base = (p.texparam & 0xFFFF) << 3;
+  sh.width = 8 << ((p.texparam >> 20) & 7);
+  sh.height = 8 << ((p.texparam >> 23) & 7);
+  sh.srep = p.texparam & (1 << 16); sh.sflip = p.texparam & (1 << 18);
+  sh.trep = p.texparam & (1 << 17); sh.tflip = p.texparam & (1 << 19);
+  sh.alpha0 = (p.texparam & (1 << 29)) ? 0 : 31;
+  sh.texpal = p.texpal;
+  const u32 dispcnt = sh.dispcnt;
+  const bool wireframe = sh.wireframe;
+  const u32 polyalpha = sh.polyalpha;
   prev_shadow_mask_ = false;
 
   if (p.ytop != p.ybot) {
@@ -580,70 +694,38 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
     }
   }
 
-  // Attributes at both ends of the span.
-  const s32 rl = istart->interpolate(vlcur->fcol[0], vlnext->fcol[0]), gl = istart->interpolate(vlcur->fcol[1], vlnext->fcol[1]), bl = istart->interpolate(vlcur->fcol[2], vlnext->fcol[2]);
-  const s32 sl = istart->interpolate(vlcur->tex[0], vlnext->tex[0]), tl = istart->interpolate(vlcur->tex[1], vlnext->tex[1]);
-  const s32 rr = iend->interpolate(vrcur->fcol[0], vrnext->fcol[0]), gr = iend->interpolate(vrcur->fcol[1], vrnext->fcol[1]), br = iend->interpolate(vrcur->fcol[2], vrnext->fcol[2]);
-  const s32 sr = iend->interpolate(vrcur->tex[0], vrnext->tex[0]), tr = iend->interpolate(vrcur->tex[1], vrnext->tex[1]);
+  // Attributes at both ends of the span: r g b s t.
+  const s32 al[5] = {istart->interpolate(vlcur->fcol[0], vlnext->fcol[0]), istart->interpolate(vlcur->fcol[1], vlnext->fcol[1]), istart->interpolate(vlcur->fcol[2], vlnext->fcol[2]),
+                     istart->interpolate(vlcur->tex[0], vlnext->tex[0]), istart->interpolate(vlcur->tex[1], vlnext->tex[1])};
+  const s32 ar[5] = {iend->interpolate(vrcur->fcol[0], vrnext->fcol[0]), iend->interpolate(vrcur->fcol[1], vrnext->fcol[1]), iend->interpolate(vrcur->fcol[2], vrnext->fcol[2]),
+                     iend->interpolate(vrcur->tex[0], vrnext->tex[0]), iend->interpolate(vrcur->tex[1], vrnext->tex[1])};
 
   int yedge = 0;
   if (y == p.ytop) yedge = 0x4; else if (y == p.ybot - 1) yedge = 0x8;
   s32 x = xstart;
-  Interp<0> ix; ix.setup(xstart, xend + 1, wl, wr, p.wbuffer);
   if (x < 0) x = 0;
   s32 xcov = 0;
-  const bool aa = dispcnt & (1 << 4);
+  const s32 xa = x, xb = std::min(xend + 1, 256);
+  SpanBuf sb;
+  if (xb > xa) span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, al, ar, true);
+  const int mode = pick_depth_mode(p);
 
-  // part: 0 = left edge, 1 = inside, 2 = right edge
+  // One instantiation per (depth mode, textured, AA, shadow): the inner loop
+  // then branches only on per-pixel data.
+  using ResolveFn = void (Renderer3D::*)(const Shade&, const SpanBuf&, s32, s32, s32, int, int, s32, s32, s32&);
+  static constexpr ResolveFn kResolve[4][2][2][2] = {
+#define DS_R(m) {{{&Renderer3D::resolve_span<m, false, false, false>, &Renderer3D::resolve_span<m, false, false, true>},   \
+                  {&Renderer3D::resolve_span<m, false, true, false>,  &Renderer3D::resolve_span<m, false, true, true>}},  \
+                 {{&Renderer3D::resolve_span<m, true, false, false>,  &Renderer3D::resolve_span<m, true, false, true>},   \
+                  {&Renderer3D::resolve_span<m, true, true, false>,   &Renderer3D::resolve_span<m, true, true, true>}}}
+    DS_R(0), DS_R(1), DS_R(2), DS_R(3)
+#undef DS_R
+  };
+  const ResolveFn resolve = kResolve[mode][sh.textured][(dispcnt >> 4) & 1][sh.shadow];
   auto draw_span = [&](s32 xlimit, int part, int edge) {
-    for (; x < xlimit; ++x) {
-      u32 addr = FIRST + y * W + x;
-      u32 dstattr = attr_[addr];
-      if (p.shadow) {
-        const u8 st = stencil_[256 * (y & 1) + x];
-        if (!st) continue;
-        if (!(st & 1)) addr += SIZE;
-        if (!(st & 2)) dstattr &= ~0xFu;      // no shadow under anti-aliased edges
-      }
-      ix.set_x(x);
-      const s32 z = ix.interpolate_z(zl, zr);
-      // Failing against the top pixel, try the one underneath.
-      if (!depth_test(static_cast<s32>(depth_[addr]), z, dstattr)) {
-        if (!(dstattr & 0xF) || addr >= static_cast<u32>(SIZE)) continue;
-        addr += SIZE;
-        dstattr = attr_[addr];
-        if (!depth_test(static_cast<s32>(depth_[addr]), z, dstattr)) continue;
-      }
-      const u32 vr = ix.interpolate(rl, rr), vg = ix.interpolate(gl, gr), vb = ix.interpolate(bl, br);
-      const s16 s = static_cast<s16>(ix.interpolate(sl, sr)), t = static_cast<s16>(ix.interpolate(tl, tr));
-      const u32 color = shade_pixel(p, vr >> 3, vg >> 3, vb >> 3, s, t);
-      const u8 alpha = color >> 24;
-      if (alpha <= rs_->alpha_ref) continue;
-      if (alpha == 31) {
-        u32 attr = polyattr | edge;
-        bool push = false;
-        if (aa) {
-          if (part == 1) { if (attr & 0xF) { attr |= (0x1F << 8); push = true; } }
-          else {
-            s32 cov = part == 0 ? l_cov : r_cov;
-            if (cov & static_cast<s32>(0x80000000u)) {
-              if (part == 0) { cov = xcov >> 5; if (cov > 31) cov = 31; xcov += (l_cov & 0x3FF); }
-              else { cov = 0x1F - (xcov >> 5); if (cov < 0) cov = 0; xcov += (r_cov & 0x3FF); }
-            }
-            attr |= (cov << 8);
-            push = true;
-          }
-        }
-        if (push && addr < static_cast<u32>(SIZE)) {
-          color_[addr + SIZE] = color_[addr]; depth_[addr + SIZE] = depth_[addr]; attr_[addr + SIZE] = attr_[addr];
-        }
-        depth_[addr] = z; color_[addr] = color; attr_[addr] = attr;
-      } else {
-        const u32 zz = (p.attr & (1 << 11)) ? static_cast<u32>(z) : 0xFFFFFFFFu;
-        plot_translucent(addr, color, zz, polyattr, p.shadow);
-        if ((dstattr & 0xF) && addr < static_cast<u32>(SIZE)) plot_translucent(addr + SIZE, color, zz, polyattr, p.shadow);
-      }
-    }
+    if (x >= xlimit) return;
+    (this->*resolve)(sh, sb, y, x, xlimit, part, edge, l_cov, r_cov, xcov);
+    x = xlimit;
   };
 
   s32 xlimit = std::min({xstart + l_len, xend + 1, 256});

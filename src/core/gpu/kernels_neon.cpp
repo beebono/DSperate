@@ -223,6 +223,90 @@ void expand_colours(u32* dst) {
   }
 }
 
+
+// ---- 3D span stages ------------------------------------------------------------
+// Four pixels per step (the buffers are 256 wide, so rounding `n` up is safe).
+// Divisions: a correctly rounded f64 quotient of two u32 values, truncated, is
+// the exact integer quotient (the error is below num * 2^-53 < 1/den), so
+// vdivq_f64 reproduces the reference's integer division with no fix-up.
+
+namespace {
+inline uint32x4_t udiv_exact(uint32x4_t num, uint32x4_t den) {
+  const float64x2_t nlo = vcvtq_f64_u64(vmovl_u32(vget_low_u32(num))), nhi = vcvtq_f64_u64(vmovl_u32(vget_high_u32(num)));
+  const float64x2_t dlo = vcvtq_f64_u64(vmovl_u32(vget_low_u32(den))), dhi = vcvtq_f64_u64(vmovl_u32(vget_high_u32(den)));
+  const uint64x2_t qlo = vcvtq_u64_f64(vdivq_f64(nlo, dlo)), qhi = vcvtq_u64_f64(vdivq_f64(nhi, dhi));
+  return vcombine_u32(vmovn_u64(qlo), vmovn_u64(qhi));
+}
+// (u64 lanes) / d, exact, for products below 2^53.
+inline uint64x2_t udiv64_exact(uint64x2_t n, float64x2_t d) { return vcvtq_u64_f64(vdivq_f64(vcvtq_f64_u64(n), d)); }
+inline int32x4_t mul_hi8_add(int32x4_t base, uint32x4_t d, uint32x4_t f) {   // base + ((d * f) >> 8), 64-bit product, low 32 bits kept
+  const uint64x2_t lo = vshrq_n_u64(vmull_u32(vget_low_u32(d), vget_low_u32(f)), 8);
+  const uint64x2_t hi = vshrq_n_u64(vmull_high_u32(d, f), 8);
+  return vaddq_s32(base, vreinterpretq_s32_u32(vcombine_u32(vmovn_u64(lo), vmovn_u64(hi))));
+}
+const int32x4_t kLane = {0, 1, 2, 3};
+}
+
+void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac) {
+  const int32x4_t vw0n = vdupq_n_s32(w0n), vw0d = vdupq_n_s32(w0d), vw1d = vdupq_n_s32(w1d), vxdiff = vdupq_n_s32(xdiff);
+  for (u32 i = 0; i < n; i += 4) {
+    const int32x4_t xv = vaddq_s32(vdupq_n_s32(xv0 + static_cast<s32>(i)), kLane);
+    const uint32x4_t num = vshlq_n_u32(vreinterpretq_u32_s32(vmulq_s32(xv, vw0n)), 8);
+    const uint32x4_t den = vreinterpretq_u32_s32(vaddq_s32(vmulq_s32(xv, vw0d), vmulq_s32(vsubq_s32(vxdiff, xv), vw1d)));
+    const uint32x4_t zero = vceqzq_u32(den);
+    // Lanes with den == 0 divide by 1 and are masked to 0 afterwards.
+    const uint32x4_t q = udiv_exact(num, vorrq_u32(den, vandq_u32(zero, vdupq_n_u32(1))));
+    vst1q_u32(fac + i, vbicq_u32(q, zero));
+  }
+}
+
+void span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out) {
+  if (y0 == y1) { const int32x4_t v = vdupq_n_s32(y0); for (u32 i = 0; i < n; i += 4) vst1q_s32(out + i, v); return; }
+  const bool up = y0 < y1;
+  const int32x4_t base = vdupq_n_s32(up ? y0 : y1);
+  const uint32x4_t d = vdupq_n_u32(static_cast<u32>(up ? y1 - y0 : y0 - y1));
+  const uint32x4_t k256 = vdupq_n_u32(256);
+  for (u32 i = 0; i < n; i += 4) {
+    uint32x4_t f = vld1q_u32(fac + i);
+    if (!up) f = vsubq_u32(k256, f);
+    vst1q_s32(out + i, mul_hi8_add(base, d, f));
+  }
+}
+
+void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
+  if (y0 == y1) { const int32x4_t v = vdupq_n_s32(y0); for (u32 i = 0; i < n; i += 4) vst1q_s32(out + i, v); return; }
+  const bool up = y0 < y1;
+  const int32x4_t base = vdupq_n_s32(up ? y0 : y1);
+  const uint32x4_t d = vdupq_n_u32(static_cast<u32>(up ? y1 - y0 : y0 - y1));
+  const float64x2_t vd = vdupq_n_f64(static_cast<double>(xdiff));
+  const int32x4_t vxdiff = vdupq_n_s32(xdiff);
+  for (u32 i = 0; i < n; i += 4) {
+    int32x4_t xv = vaddq_s32(vdupq_n_s32(xv0 + static_cast<s32>(i)), kLane);
+    if (!up) xv = vsubq_s32(vxdiff, xv);
+    const uint32x4_t f = vreinterpretq_u32_s32(xv);
+    const uint64x2_t qlo = udiv64_exact(vmull_u32(vget_low_u32(d), vget_low_u32(f)), vd);
+    const uint64x2_t qhi = udiv64_exact(vmull_high_u32(d, f), vd);
+    vst1q_s32(out + i, vaddq_s32(base, vreinterpretq_s32_u32(vcombine_u32(vmovn_u64(qlo), vmovn_u64(qhi)))));
+  }
+}
+
+void span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* out) {
+  if (z0 == z1) { const int32x4_t v = vdupq_n_s32(z0); for (u32 i = 0; i < n; i += 4) vst1q_s32(out + i, v); return; }
+  const bool up = z0 < z1;
+  const int32x4_t base = vdupq_n_s32(up ? z0 : z1);
+  const uint32x4_t disp = vdupq_n_u32(static_cast<u32>((up ? z1 - z0 : z0 - z1) >> 9));
+  const uint32x4_t vrecip = vdupq_n_u32(static_cast<u32>(xrecip));
+  const int32x4_t vxdiff = vdupq_n_s32(xdiff);
+  for (u32 i = 0; i < n; i += 4) {
+    int32x4_t xv = vaddq_s32(vdupq_n_s32(xv0 + static_cast<s32>(i)), kLane);
+    if (!up) xv = vsubq_s32(vxdiff, xv);
+    const uint32x4_t df = vmulq_u32(disp, vreinterpretq_u32_s32(xv));          // disp * factor < 2^24
+    const uint64x2_t lo = vshrq_n_u64(vmull_u32(vget_low_u32(df), vget_low_u32(vrecip)), 13);
+    const uint64x2_t hi = vshrq_n_u64(vmull_high_u32(df, vrecip), 13);
+    vst1q_s32(out + i, vaddq_s32(base, vreinterpretq_s32_u32(vcombine_u32(vmovn_u64(lo), vmovn_u64(hi)))));
+  }
+}
+
 } // namespace ds::gpu::kern::neon
 
 #endif // DSPERATE_NEON

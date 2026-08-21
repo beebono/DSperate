@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 
 namespace ds::mem {
 
@@ -209,7 +210,13 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
   if (!force && cpu.itcm_size == old_itcm && cpu.dtcm_base == old_dbase && cpu.dtcm_mask == old_dmask) return;
   PageTable& pt = cpu.page_table;
   const u32 RW = PAGE_READABLE | PAGE_WRITABLE, RO = PAGE_READABLE;
-  pt.unmap(0x00000000, 0x10000000);
+  // Release the previous TCM windows, then reapply the fixed map: entries
+  // that do not change are skipped by PageTable::map, so this costs only
+  // the windows themselves rather than a 256 MB remap.
+  if (force) pt.unmap(0x00000000, 0x10000000);
+  if (tcm_prev_itcm_) pt.unmap(0, std::min(tcm_prev_itcm_, 0x02000000u));
+  if (tcm_prev_dtcm_size_) pt.unmap(tcm_prev_dtcm_base_, tcm_prev_dtcm_size_);
+  tcm_prev_itcm_ = 0; tcm_prev_dtcm_size_ = 0;
   map_page_aligned(pt, 0x02000000, MAIN_RAM_SIZE, main_ram.get(), RW, 0x03000000);
   pt.map_mmio(0x04000000, 0x01000000);
   map_page_aligned(pt, 0x05000000, PALETTE_SIZE, palette.get(), RW, 0x06000000);
@@ -228,6 +235,7 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
     for (u32 off = 0; off < size; off += DTCM_SIZE) {
       pt.map(base + off, DTCM_SIZE, dtcm.get(), RW);   // load mode (write-only) approximated as RW
     }
+    tcm_prev_dtcm_base_ = base; tcm_prev_dtcm_size_ = size;
   }
   if (ctl & (1u << 18)) {                                       // ITCM enabled (base fixed at 0)
     u32 size = 512u << ((cpu.cp15_itcm >> 1) & 0x1F);
@@ -236,6 +244,7 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
     for (u32 off = 0; off < size; off += ITCM_SIZE) {
       pt.map(off, ITCM_SIZE, itcm.get(), RW);
     }
+    tcm_prev_itcm_ = size;
   }
 }
 

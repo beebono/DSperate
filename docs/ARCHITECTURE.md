@@ -295,6 +295,19 @@ blending follow the hardware as melonDS models it. Engine A reads the result
 per line (X-scrolled by BG0HOFS) as its 3D layer, and display capture can
 take it as source A.
 
+Span pipeline (2026-08-21 p.m.): a polygon's scanline is rasterised in two
+stages. `span_stage` evaluates the perspective factor, depth and the five
+attributes for the whole span into per-pixel arrays through the kernel twins
+in `gpu/kernels.h` (`span_factor`, `span_attr_persp`, `span_attr_linear`,
+`span_z_linear`; reference and NEON, four pixels per step — the NEON
+divisions are correctly rounded f64 quotients, which are exact for u32/u32
+because the error is below `num * 2^-53 < 1/den`). `resolve_span` then walks
+the pixels with everything per-polygon hoisted into a `Shade` record, one
+instantiation per (depth mode, textured, AA, shadow), so the inner loop
+branches only on pixel data. Output is byte-identical to the previous
+per-pixel `Interp` code on every dumped game; on the RK3566 the span stage of
+SM64DS's first 300 frames went from 2.19 s to 0.96 s.
+
 ## 6. Verification
 
 1. Interpreter vs melonDS per-instruction trace diffs — see

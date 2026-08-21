@@ -11,9 +11,14 @@
 namespace ds {
 
 static std::vector<u8> slurp(const std::string& path) {
-  std::ifstream f(path, std::ios::binary);
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
   if (!f) return {};
-  return std::vector<u8>(std::istreambuf_iterator<char>(f), {});
+  const auto size = f.tellg();
+  if (size <= 0) return {};
+  std::vector<u8> v(static_cast<size_t>(size));
+  f.seekg(0);
+  f.read(reinterpret_cast<char*>(v.data()), size);
+  return v;
 }
 
 NDS::NDS()
