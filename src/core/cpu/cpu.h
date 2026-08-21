@@ -40,7 +40,8 @@ struct JitHot {
 struct CpuContext {
   Cpu  which;
   bool halted;
-  u8   _pad0[6];
+  bool jumped;       // set by jump(); cleared by the interpreter before each instruction
+  u8   _pad0[5];
 
   JitHot hot;
 
@@ -54,12 +55,51 @@ struct CpuContext {
   u32 cp15_control;
   u32 cp15_dtcm;           // DTCM base/size register value
   u32 cp15_itcm;           // ITCM size register value
+  u32 pu_region[8];        // c6,cN,0: base/size/enable
+  u32 pu_code_cacheable;   // c2,c0,1 (bit per region)
+  u32 pu_data_cacheable;   // c2,c0,0
+  u32 pu_data_bufferable;  // c3,c0,0
+  u32 pu_code_perm, pu_data_perm;   // c5,c0,{3,2}
+  u32 itcm_size;           // effective ITCM window (bytes), 0 when disabled
+  u32 dtcm_base, dtcm_mask;// DTCM window: (addr & dtcm_mask) == dtcm_base
+
+  // ---- cycle accounting (see docs/ARCHITECTURE.md §4 and interp.cpp) ----
+  // Per-4 KB timing for the ARM9: [0] code cost in ARM9 cycles or 0xFF when
+  // the page is instruction-cacheable; [1] data N16, [2] data N32, [3] data
+  // S32 (ARM9 cycles). Per-32 KB for the ARM7: N16, S16, N32, S32.
+  const u8 (*timing9)[4];
+  const u8 (*timing7)[4];
+  u32 code_cycles;         // ARM9: cost of the most recent prefetch. ARM7: code-region table index.
+  u32 data_cycles;         // accumulated data-access cost of the current instruction
+  u32 code_region, data_region;   // high byte of the address (ARM7 main-RAM overlap rules)
+  u8  cycle_class;         // 0 = C, 1 = CI, 2 = CD, 3 = CDI
+  bool branch_fetch;       // ARM9: the next prefetch is the first after a branch
+
+  // Debug single-stepping: when step_limit != 0 the interpreter stops after
+  // that many instructions regardless of the cycle budget.
+  u32 step_limit, steps;
 
   mem::PageTable page_table;
 
   NDS* nds;
 
   void reset(Cpu which, NDS* nds);
+
+  // Mode handling. `switch_mode` banks r8-r14 and SPSR as needed.
+  void switch_mode(u32 new_mode);
+  void set_cpsr(u32 value);          // full write incl. mode switch
+  void restore_cpsr();               // CPSR <- SPSR (exception return)
+
+  // Exceptions. `return_offset` is added to the current r15 to form LR.
+  enum class Exception : u8 { Reset, Undefined, Swi, PrefetchAbort, DataAbort, Irq, Fiq };
+  void raise_exception(Exception e);
+  void update_tcm_windows();         // recompute itcm_size/dtcm_base/dtcm_mask from CP15
+  void check_irq();                  // take a pending IRQ if unmasked
+
+  // Control flow. `addr` bit 0 selects Thumb when `interwork`.
+  void jump(u32 addr, bool interwork);
+  bool thumb() const { return hot.cpsr & 0x20; }
+  u32  exception_base() const;
 };
 
 static_assert(offsetof(JitHot, cycle_budget) == 72, "JitHot layout changed; update the JIT");

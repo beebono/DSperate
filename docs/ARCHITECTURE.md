@@ -20,6 +20,9 @@ src/core/          emulator core, no I/O dependencies, builds everywhere
   nds.*            the system: two CPUs, bus, scheduler, GPU, SPU, I/O
   mem/page_table.* the one memory abstraction (§2)
   mem/bus.*        physical memories; keeps both page tables in sync
+  mem/timing.*     region timing tables and the ARM9 PU cacheability map (§4)
+  dma/             eight DMA channels (§4)
+  cart/            Slot-1 retail cartridge: KEY1, secure area, save chip
   cpu/cpu.h        per-CPU context, layout is a contract with the JIT (§3)
   cpu/interp/      ARM7TDMI / ARM946E-S interpreter (always built)
   cpu/jit/         ARM -> AArch64 recompiler (AArch64 hosts only)
@@ -102,18 +105,40 @@ single base register can reach register spills (negative offsets) and page
 entries (positive offsets). Currently it is a member with its own mapping;
 `JitHot` is positioned so either choice stays cheap.
 
-## 4. Scheduler: a downward budget is the only check
+## 4. Scheduler and timing
 
-*Source: research note "JIT design forensics" §4–5 (private); still to be
-refined by a scheduler forensics pass.*
+*Source: research note "JIT design forensics" §4–5 (private) for the budget
+mechanism; melonDS for the cycle model, which our traces are compared against.*
 
-Time is ARM9 cycles in a `u64`. The scheduler hands each CPU a budget equal to
-the distance to the next event; the engine runs until the budget's sign bit
-sets. The ARM7 is issued half the cycles the ARM9 actually ran. Events are a
-fixed-size table indexed by `EventId` (no allocation in the hot path).
+**Clock units.** Scheduler time is a `u64` of ARM9 cycles (67 MHz). The
+system clock (ARM7, timers, DMA, SPI, cart, display) is half that: a scanline
+is 2130 system = 4260 ARM9 cycles, a frame 263 lines. Every event scheduled
+from a system-clock device converts with `<< 1`. Getting this wrong once cost a
+day: the whole machine ran at half speed relative to the CPUs.
 
-This is deliberately simple; the interleave granularity and the IPC/FIFO
-latency it implies need validating against real titles and melonDS.
+**Interleave.** Slices of 128 ARM9 cycles (melonDS's 64 system cycles): the ARM9
+runs its slice, then the ARM7 covers the same span at half clock. The ARM7's
+overshoot and the odd ARM9 cycle are carried as a debt across slices; a halted
+CPU consumes exactly its slice. `Scheduler::now()` includes the running CPU's
+consumed budget so events scheduled from inside an instruction are stamped at
+the right time. A CPU with a running DMA channel is stalled and the DMA runs in
+its place.
+
+**Cycle model** (`cpu_mem.h`, `interp.cpp`, `mem/timing.*`). Region timing
+tables per 16 KB (ARM9 bus) / 32 KB (ARM7) give N/S costs for 16- and 32-bit
+accesses; main RAM is a 16-bit bus with N=8/S=1, everything else 1/1, the GBA
+slot per EXMEMCNT. The ARM9 adds a 3-cycle non-sequential penalty outside main
+RAM and has a per-4 KB table derived from the PU region registers: cacheable
+pages cost 3 cycles on a fetch at a line start or after a branch and 1
+otherwise (a cache approximation, no tag state), and 3/1 for N/S data. TCM
+costs 1. Each instruction is charged a code fetch plus, by class, internal
+cycles (CI), a data access (CD) or a load (CDI), overlapped the way melonDS
+overlaps them; branches pay the pipeline refill. Measured against melonDS on
+Meteos: instructions per frame agree to ~0.1% on the ARM9 and ~3% on the ARM7.
+
+**DMA** (`dma/`): eight channels with immediate/VBlank/HBlank/display-start/cart
+triggers, main-RAM burst unit timings, repeat and IRQ. GX FIFO and display-FIFO
+modes wait for the 3D and 2D engines.
 
 ## 5. Renderer: decide nothing per pixel
 
@@ -136,8 +161,10 @@ latency it implies need validating against real titles and melonDS.
 
 ## 6. Verification
 
-1. Interpreter vs melonDS trace diffs (register file, CPSR, touched memory)
-   on real ROMs.
+1. Interpreter vs melonDS per-instruction trace diffs — see
+   [TRACING.md](TRACING.md). Status 2026-08-20: real firmware boot (120 frames)
+   and Meteos direct boot (300 frames) match with no semantic divergence on
+   either CPU, 4 M distinct states each.
 2. JIT vs interpreter differential execution, block by block — the first
    divergence names the broken instruction.
 3. NEON kernel vs C++ reference, vector by vector.

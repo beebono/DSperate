@@ -11,6 +11,7 @@ Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) { reset(); }
 
 void Scheduler::reset() {
   now_ = 0;
+  arm7_debt_ = 0;
   for (auto& e : events_) e = Event{0, nullptr, 0, false};
 }
 
@@ -43,15 +44,42 @@ u64 Scheduler::run_until(u64 until) {
     if (deadline > until) deadline = until;
     s64 slice = static_cast<s64>(deadline - now_);
     if (slice <= 0) slice = 1;
+    if (slice > INTERLEAVE_QUANTUM) slice = INTERLEAVE_QUANTUM;
 
     // ARM9 gets the whole slice; ARM7 then catches up at half clock.
     CpuContext& a9 = nds_.cpu(Cpu::ARM9);
     CpuContext& a7 = nds_.cpu(Cpu::ARM7);
     a9.hot.cycle_budget = static_cast<s32>(slice);
-    nds_.run_arm9(a9);
-    s64 ran9 = slice - a9.hot.cycle_budget;      // budget went negative => overshoot
-    a7.hot.cycle_budget = static_cast<s32>(ran9 / 2);
-    nds_.run_arm7(a7);
+    running_ = &a9; running_start_budget_ = static_cast<s32>(slice); running_shift_ = 0;
+    if (nds_.dma.any_running(Cpu::ARM9)) {
+      a9.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(Cpu::ARM9, static_cast<u32>(slice)));
+      if (a9.hot.cycle_budget > 0 && !nds_.dma.any_running(Cpu::ARM9)) nds_.run_arm9(a9);
+    } else {
+      nds_.run_arm9(a9);
+    }
+    // A halted CPU consumes exactly the slice; a running one may overshoot,
+    // and the overshoot is real time (it carries into the next slice).
+    s64 ran9 = a9.halted ? slice : (slice - a9.hot.cycle_budget);
+    if (ran9 <= 0) ran9 = 1;
+
+    // The ARM7 runs at half clock and must cover the same span of time. Its
+    // overshoot and the odd ARM9 cycle are carried in arm7_debt_, the way
+    // melonDS carries absolute timestamps, so it neither gains nor loses time.
+    arm7_debt_ += ran9;
+    const s32 budget7 = static_cast<s32>(arm7_debt_ / 2);
+    if (budget7 > 0) {
+      a7.hot.cycle_budget = budget7;
+      running_ = &a7; running_start_budget_ = budget7; running_shift_ = 1;
+      if (nds_.dma.any_running(Cpu::ARM7)) {
+        a7.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(Cpu::ARM7, static_cast<u32>(budget7)));
+        if (a7.hot.cycle_budget > 0 && !nds_.dma.any_running(Cpu::ARM7)) nds_.run_arm7(a7);
+      } else {
+        nds_.run_arm7(a7);
+      }
+      const s64 consumed7 = a7.halted ? budget7 : (budget7 - a7.hot.cycle_budget);
+      arm7_debt_ -= consumed7 * 2;
+    }
+    running_ = nullptr;
 
     now_ += static_cast<u64>(ran9);
     fire_due();

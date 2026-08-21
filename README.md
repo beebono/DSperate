@@ -9,9 +9,13 @@ and maybe overlaid shader support later on.
 
 ---
 
-**Status: scaffolding.** The tree builds and its tests pass on x86-64 and AArch64,
-but nothing is emulated yet — the interpreter is a stub. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design the code is growing into.
+**Status: core without video.** Both CPUs (ARM946E-S / ARM7TDMI) are
+interpreted with melonDS-grade cycle timing; DMA, timers, IPC, SPI devices,
+RTC, Wi-Fi probing and a retail cartridge (KEY1, save chip, direct boot) are
+in. The real firmware and Meteos both run in lockstep with melonDS for
+hundreds of frames, verified per instruction
+([docs/TRACING.md](docs/TRACING.md)). No 2D/3D rendering or sound yet.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the design.
 
 ## Licence
 
@@ -27,7 +31,8 @@ form, is in this tree.
 Requires CMake ≥ 3.16, Ninja, and a C++17 compiler.
 
     cmake --preset host && cmake --build --preset host && ctest --preset host
-    ./build/host/src/frontend/cli/dsperate --frames 60 [rom.nds]
+    ./build/host/src/frontend/cli/dsperate --bios9 bios9.bin --bios7 bios7.bin \
+        --firmware firmware.bin [--direct game.nds] --frames 60
 
 Cross-building for ARM64 handhelds (needs `aarch64-linux-gnu-g++`; tests run under
 `qemu-aarch64-static` if present):

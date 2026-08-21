@@ -10,7 +10,7 @@ static void on_event(NDS& nds, u32 param) { ++fired; fired_at = nds.sched.now();
 
 int main() {
   NDS nds;
-  nds.sched.schedule(EventId::HBlank, 1000, on_event, 7);
+  nds.sched.schedule(EventId::Dma, 1000, on_event, 7);
   nds.run_frame();
   CHECK(fired == 1);
   CHECK(fired_at >= 1000);

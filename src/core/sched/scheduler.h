@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
 #include "core/types.h"
+#include "core/cpu/cpu.h"
 
 #include <array>
 
@@ -23,8 +24,12 @@ struct NDS;
 enum class EventId : u8 {
   HBlank, VBlank_Scanline, Timer0, Timer1, Timer2, Timer3,
   Timer7_0, Timer7_1, Timer7_2, Timer7_3,
-  Dma, Spu, Rtc, Cart, Gx3D, Count
+  Dma, Spu, Spi, Rtc, Cart, Gx3D, Count
 };
+
+// CPU interleave quantum in ARM9 cycles. 128 matches melonDS's 64 system cycles,
+// which keeps IPC handshakes in the same order for trace comparison.
+constexpr u32 INTERLEAVE_QUANTUM = 128;
 
 using EventFn = void (*)(NDS& nds, u32 param);
 
@@ -37,7 +42,13 @@ public:
   void schedule(EventId id, u64 at, EventFn fn, u32 param = 0);
   void cancel(EventId id);
 
-  u64 now() const { return now_; }
+  // Current time. While a CPU is executing its slice this includes the cycles
+  // it has consumed so far, so events scheduled from inside an instruction
+  // (SPI, cart, timers) are stamped relative to that CPU's own position.
+  u64 now() const {
+    if (!running_) return now_;
+    return now_ + (static_cast<u64>(running_start_budget_ - running_->hot.cycle_budget) << running_shift_);
+  }
   u64 next_deadline() const;
 
   // Runs ARM9 then ARM7 up to the next event, fires due events, repeats until
@@ -53,6 +64,10 @@ private:
   };
   NDS& nds_;
   u64  now_;
+  const CpuContext* running_ = nullptr;
+  s32  running_start_budget_ = 0;
+  u32  running_shift_ = 0;           // 0 for ARM9 cycles, 1 for ARM7 (half clock)
+  s64  arm7_debt_ = 0;               // ARM9 cycles the ARM7 still has to cover (carries overshoot and odd cycles)
   std::array<Event, static_cast<size_t>(EventId::Count)> events_;
   void fire_due();
 };

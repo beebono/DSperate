@@ -3,9 +3,15 @@ add_library(dsperate_core STATIC
   nds.cpp
   mem/page_table.cpp
   mem/bus.cpp
+  mem/timing.cpp
+  dma/dma.cpp
+  cart/cart.cpp
   sched/scheduler.cpp
   cpu/cpu.cpp
+  cpu/cp15.cpp
   cpu/interp/interp.cpp
+  cpu/interp/interp_arm.cpp
+  cpu/interp/interp_thumb.cpp
   gpu/gpu.cpp
   spu/spu.cpp
   io/io.cpp
