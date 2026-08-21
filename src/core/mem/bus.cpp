@@ -10,6 +10,10 @@ namespace ds::mem {
 
 constexpr u32 Bus::VRAM_BANK_SIZES[9];
 
+// Debug watchpoint (DS_WATCH=<hex addr>): the 2 KB main-RAM page holding the
+// address is taken out of both page tables so accesses come through here.
+static u32 watch_addr = 0; static bool watch_on = false; static u32 watch_hits = 0;
+
 Bus::Bus(NDS& nds)
     : main_ram(new u8[MAIN_RAM_SIZE]), shared_wram(new u8[SHARED_WRAM_SIZE]),
       arm7_wram(new u8[ARM7_WRAM_SIZE]), itcm(new u8[ITCM_SIZE]),
@@ -131,45 +135,67 @@ void Bus::update_vram() {
   PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
   PageTable& pt7 = nds_.cpu(Cpu::ARM7).page_table;
   const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
+  u8* banks[9];
+  for (int i = 0; i < 9; ++i) banks[i] = vram_bank(i);
+  vram_map_.rebuild(nds_.io.vramcnt, banks);
   pt9.unmap(0x06000000, 0x01000000);
   pt7.unmap(0x06000000, 0x01000000);
-  // Later mappings override earlier ones at the same address; hardware ORs
-  // overlapping banks, which we do not model.
+  // Blocks backed by exactly one bank map straight into the page table;
+  // blocks where banks overlap stay unmapped so the slow path can OR the
+  // banks on read and write all of them.
+  auto map_view = [&](PageTable& pt, const gpu::VramView& v, u32 base, u32 end) {
+    for (u32 mirror = base; mirror < end; mirror += v.size)
+      for (u32 b = 0; b < v.blocks(); ++b)
+        if (v.ptr[b]) pt.map(mirror + b * gpu::VramView::BLOCK, gpu::VramView::BLOCK, v.ptr[b], RW);
+  };
+  map_view(pt9, vram_map_.abg,  0x06000000, 0x06200000);
+  map_view(pt9, vram_map_.bbg,  0x06200000, 0x06400000);
+  map_view(pt9, vram_map_.aobj, 0x06400000, 0x06600000);
+  map_view(pt9, vram_map_.bobj, 0x06600000, 0x06800000);
+  map_view(pt7, vram_map_.arm7, 0x06000000, 0x07000000);
+  static const u32 lcdc_base[9] = {0x00000, 0x20000, 0x40000, 0x60000, 0x80000, 0x90000, 0x94000, 0x98000, 0xA0000};
   for (int i = 0; i < 9; ++i) {
-    const u8 cnt = nds_.io.vramcnt[i];
-    if (!(cnt & 0x80)) continue;
-    const u32 mst = cnt & 7, ofs = (cnt >> 3) & 3, size = VRAM_BANK_SIZES[i];
-    u8* host = vram_bank(i);
-    // LCDC (MST 0): fixed addresses at 06800000.
-    static const u32 lcdc_base[9] = {0x06800000, 0x06820000, 0x06840000, 0x06860000, 0x06880000, 0x06890000, 0x06894000, 0x06898000, 0x068A0000};
-    if (mst == 0) { pt9.map(lcdc_base[i], size, host, RW); continue; }
-    switch (i) {
-    case 0: case 1: case 2: case 3:   // A-D
-      if (mst == 1) pt9.map(0x06000000 + ofs * 0x20000, size, host, RW);           // BG-A
-      else if (mst == 2 && (i == 2 || i == 3)) pt7.map(0x06000000 + (ofs & 1) * 0x20000, size, host, RW);  // ARM7
-      else if (mst == 2) pt9.map(0x06400000 + (ofs & 1) * 0x20000, size, host, RW); // OBJ-A (A,B)
-      else if (mst == 4 && i == 2) pt9.map(0x06200000, size, host, RW);            // BG-B
-      else if (mst == 4 && i == 3) pt9.map(0x06600000, size, host, RW);            // OBJ-B
-      break;
-    case 4:                            // E
-      if (mst == 1) pt9.map(0x06000000, size, host, RW);
-      else if (mst == 2) pt9.map(0x06400000, size, host, RW);
-      break;
-    case 5: case 6: {                  // F, G
-      const u32 o = (ofs & 1) * 0x4000 + (ofs & 2) * 0x8000;
-      if (mst == 1) pt9.map(0x06000000 + o, size, host, RW);
-      else if (mst == 2) pt9.map(0x06400000 + o, size, host, RW);
-      break;
-    }
-    case 7:                            // H
-      if (mst == 1) pt9.map(0x06200000, size, host, RW);
-      break;
-    case 8:                            // I
-      if (mst == 1) pt9.map(0x06208000, size, host, RW);
-      else if (mst == 2) pt9.map(0x06600000, size, host, RW);
-      break;
-    }
+    if (!(vram_map_.lcdc_mask & (1u << i))) continue;
+    for (u32 mirror = 0x06800000; mirror < 0x07000000; mirror += 0x100000) pt9.map(mirror + lcdc_base[i], VRAM_BANK_SIZES[i], banks[i], RW);
   }
+  if (watch_on && (watch_addr >> 24) == 0x06) { pt9.map_mmio(watch_addr & ~0x7FFu, 0x800); pt7.map_mmio(watch_addr & ~0x7FFu, 0x800); }
+}
+
+// Slow-path VRAM access for blocks with overlapping banks (and LCDC gaps).
+static const gpu::VramView* vram_view_for(const gpu::VramMap& m, Cpu cpu, u32 addr, int& lcdc_bank, u32& off) {
+  lcdc_bank = -1;
+  if (cpu == Cpu::ARM7) { off = addr; return &m.arm7; }
+  switch ((addr >> 21) & 7) {
+  case 0: off = addr; return &m.abg;
+  case 1: off = addr; return &m.bbg;
+  case 2: off = addr; return &m.aobj;
+  case 3: off = addr; return &m.bobj;
+  default: {
+    const u32 o = addr & 0xFFFFF;
+    static const u32 base[9] = {0x00000, 0x20000, 0x40000, 0x60000, 0x80000, 0x90000, 0x94000, 0x98000, 0xA0000};
+    for (int i = 0; i < 9; ++i)
+      if (o >= base[i] && o < base[i] + Bus::VRAM_BANK_SIZES[i]) { lcdc_bank = i; off = o - base[i]; return nullptr; }
+    return nullptr;
+  }
+  }
+}
+
+u32 Bus::vram_read(Cpu cpu, u32 addr, u32 width) {
+  int bank; u32 off;
+  const gpu::VramView* v = vram_view_for(vram_map_, cpu, addr, bank, off);
+  if (v) return width == 8 ? vram_map_.read8(*v, off) : width == 16 ? vram_map_.read16(*v, off) : vram_map_.read32(*v, off);
+  if (bank < 0 || !(vram_map_.lcdc_mask & (1u << bank))) return 0;
+  u32 r = 0; std::memcpy(&r, vram_bank(bank) + off, width / 8); return r;
+}
+
+void Bus::vram_write(Cpu cpu, u32 addr, u32 width, u32 val) {
+  if (watch_on && addr >= (watch_addr & ~0x7FFu) && addr < (watch_addr & ~0x7FFu) + 0x800 && watch_hits++ < 1000000)
+    std::fprintf(stderr, "[watch] cpu%d vram write%u %08x = %08x pc %08x frame %llu line %u vramcnt_h %02x\n", cpu == Cpu::ARM9 ? 9 : 7, width, addr, val, nds_.cpu(cpu).hot.regs[15], (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.io.vramcnt[7]);
+  int bank; u32 off;
+  const gpu::VramView* v = vram_view_for(vram_map_, cpu, addr, bank, off);
+  if (v) { if (width == 8) vram_map_.write8(*v, off, val); else if (width == 16) vram_map_.write16(*v, off, val); else vram_map_.write32(*v, off, val); return; }
+  if (bank < 0 || !(vram_map_.lcdc_mask & (1u << bank))) return;
+  std::memcpy(vram_bank(bank) + off, &val, width / 8);
 }
 
 void Bus::update_tcm(CpuContext& cpu) {
@@ -187,6 +213,7 @@ void Bus::update_tcm(CpuContext& cpu) {
   update_wram();
   update_vram();
   cpu.update_tcm_windows();
+  if (watch_on) pt.map_mmio(watch_addr & ~0x7FFu, 0x800);
   const u32 ctl = cpu.cp15_control;
   if (ctl & (1u << 16)) {                                       // DTCM enabled
     const u32 base = cpu.cp15_dtcm & 0xFFFFF000;
@@ -207,8 +234,16 @@ void Bus::update_tcm(CpuContext& cpu) {
 }
 
 // ---- slow paths -------------------------------------------------------------
+void Bus::enable_watch(u32 addr) {
+  watch_addr = addr; watch_on = true;
+  nds_.cpu(Cpu::ARM9).page_table.map_mmio(addr & ~0x7FFu, 0x800);
+  nds_.cpu(Cpu::ARM7).page_table.map_mmio(addr & ~0x7FFu, 0x800);
+}
+
 u32 Bus::io_read(Cpu cpu, u32 addr, u32 width) {
+  if (watch_on && (addr & 0xFF000000) == 0x02000000) { u32 v = 0; std::memcpy(&v, main_ram.get() + (addr & (MAIN_RAM_SIZE - 1)), width / 8); return v; }
   if ((addr & 0xFF000000) == 0x04000000) return nds_.io.read(cpu, addr, width);
+  if ((addr & 0xFF000000) == 0x06000000) return vram_read(cpu, addr, width);
   if ((addr & 0xFF000000) == 0x08000000 || (addr & 0xFF000000) == 0x09000000) {
     // GBA slot, nothing inserted: open bus pattern per GBATEK.
     u32 v = static_cast<u32>((addr >> 1) & 0xFFFF) | (static_cast<u32>(((addr + 2) >> 1) & 0xFFFF) << 16);
@@ -217,7 +252,13 @@ u32 Bus::io_read(Cpu cpu, u32 addr, u32 width) {
   return 0;
 }
 void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
+  if (watch_on && (addr & 0xFF000000) == 0x02000000) {
+    if (addr < watch_addr + 4 && addr + width / 8 > watch_addr)
+      std::fprintf(stderr, "[watch] cpu%d write%u %08x = %08x pc %08x frame %llu line %u\n", cpu == Cpu::ARM9 ? 9 : 7, width, addr, v, nds_.cpu(cpu).hot.regs[15], (unsigned long long)nds_.frame_count, nds_.gpu.line());
+    std::memcpy(main_ram.get() + (addr & (MAIN_RAM_SIZE - 1)), &v, width / 8); return;
+  }
   if ((addr & 0xFF000000) == 0x04000000) nds_.io.write(cpu, addr, width, v);
+  else if ((addr & 0xFF000000) == 0x06000000) vram_write(cpu, addr, width, v);
 }
 
 u16 Bus::dma_read16(Cpu cpu, u32 addr) {

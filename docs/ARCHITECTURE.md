@@ -159,12 +159,50 @@ modes wait for the 3D and 2D engines.
 - The 3D geometry engine is fixed-point integer math and stays in software;
   its rasteriser architecture is **not yet documented** on the research side.
 
+### 5.1 The 2D engines as built (`gpu/engine2d.*`, `gpu/gpu.*`, `gpu/vram_map.*`)
+
+The portable C++ pipeline is in; the NEON twins come next. Per line, per
+engine, in order:
+
+1. **Planes.** Each enabled background is rasterised into its own 256-entry
+   plane of 18-bit colour records plus an opacity mask (text, affine,
+   extended, large-bitmap and the 3D slot on BG0). Sprites are pre-rendered
+   one line ahead into an OBJ plane of palette indices/direct colours with a
+   per-pixel attribute byte (priority, semi-transparent, bitmap, mosaic), plus
+   the OBJ-window mask. Palette lookup is deferred to selection time, as on
+   hardware (the palette can change between pre-render and display).
+2. **Window plane.** One byte per pixel (BG0-3, OBJ, effects) from WIN0/WIN1/
+   OBJ-window/WINOUT, with the hardware's edge-triggered activation rule in
+   both axes.
+3. **Priority select.** Lowest priority first, BG3..BG0 then OBJ within a
+   level; each layer is a masked select that shifts the previous top record
+   to "second". Produces top/second colour, layer id (laid out like BLDCNT so
+   the id masks against the register) and kind (normal, semi OBJ, bitmap OBJ,
+   3D).
+4. **Colour effects.** Alpha blend, brightness up/down with the 3D and OBJ
+   override rules, on 6-bit channels with the hardware's rounding.
+5. **Output stage** (`Gpu`): display mode (graphics / VRAM / main-memory
+   FIFO), master brightness, display capture into an LCDC bank, 6→8-bit
+   expansion to `0xAARRGGBB` framebuffers.
+
+Register latching follows the hardware (enables take two lines, OBJ one;
+affine reference points advance per line and reload at VBlank; BG mosaic
+height is latched, OBJ mosaic is live). `VramMap` gives each consumer (BG-A/B,
+OBJ-A/B, extended palettes, textures, ARM7) a view of 16 KB blocks with a
+direct pointer where one bank backs a block and an OR-read fallback where
+banks overlap; the CPU page tables are built from the same views.
+
 ## 6. Verification
 
 1. Interpreter vs melonDS per-instruction trace diffs — see
    [TRACING.md](TRACING.md). Status 2026-08-20: real firmware boot (120 frames)
    and Meteos direct boot (300 frames) match with no semantic divergence on
    either CPU, 4 M distinct states each.
+1b. 2D renderer vs melonDS per-pixel frame diffs (`--dump-frames`,
+   `tools/compare_frames.py`). Status 2026-08-21: Meteos, Mega Man ZX,
+   Bangai-O Spirits and Sonic Rush are pixel-exact over 300-400 frames apart
+   from single scene-transition frames; Kirby Canvas Curse differs only in
+   animation phase. AArch64 (under qemu) produces byte-identical frames.
 2. JIT vs interpreter differential execution, block by block — the first
    divergence names the broken instruction.
 3. NEON kernel vs C++ reference, vector by vector.

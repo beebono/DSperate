@@ -67,6 +67,7 @@ void Dma::start(Channel& c) {
   c.running = 2;
   c.in_progress = true;
   c.burst_table = MRAM_DUMMY.data; c.burst_pos = 0;
+  nds_.sched.preempt(nds_.cpu(c.cpu));   // an immediate start stalls the CPU that issued it
 }
 
 void Dma::check(Cpu cpu, u32 mode) {

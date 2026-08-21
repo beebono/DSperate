@@ -37,6 +37,24 @@ void Scheduler::fire_due() {
   }
 }
 
+// One CPU's share of a slice: a running DMA goes first (the CPU is stalled),
+// then the CPU runs; a DMA it starts preempts it and the loop hands the
+// remaining budget to the DMA before the CPU continues.
+void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
+  const Cpu which = cpu.which;
+  for (;;) {
+    if (nds_.dma.any_running(which)) {
+      cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget)));
+      if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which)) return;
+    }
+    run(cpu);
+    if (!cpu.preempt_residual) return;
+    cpu.hot.cycle_budget += cpu.preempt_residual;   // overshoot of the preempted instruction comes off the residual
+    cpu.preempt_residual = 0;
+    if (cpu.hot.cycle_budget <= 0 || cpu.halted) return;
+  }
+}
+
 u64 Scheduler::run_until(u64 until) {
   const u64 start = now_;
   while (now_ < until) {
@@ -51,12 +69,7 @@ u64 Scheduler::run_until(u64 until) {
     CpuContext& a7 = nds_.cpu(Cpu::ARM7);
     a9.hot.cycle_budget = static_cast<s32>(slice);
     running_ = &a9; running_start_budget_ = static_cast<s32>(slice); running_shift_ = 0;
-    if (nds_.dma.any_running(Cpu::ARM9)) {
-      a9.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(Cpu::ARM9, static_cast<u32>(slice)));
-      if (a9.hot.cycle_budget > 0 && !nds_.dma.any_running(Cpu::ARM9)) nds_.run_arm9(a9);
-    } else {
-      nds_.run_arm9(a9);
-    }
+    run_cpu(a9, nds_.run_arm9);
     // A halted CPU consumes exactly the slice; a running one may overshoot,
     // and the overshoot is real time (it carries into the next slice).
     s64 ran9 = a9.halted ? slice : (slice - a9.hot.cycle_budget);
@@ -70,12 +83,7 @@ u64 Scheduler::run_until(u64 until) {
     if (budget7 > 0) {
       a7.hot.cycle_budget = budget7;
       running_ = &a7; running_start_budget_ = budget7; running_shift_ = 1;
-      if (nds_.dma.any_running(Cpu::ARM7)) {
-        a7.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(Cpu::ARM7, static_cast<u32>(budget7)));
-        if (a7.hot.cycle_budget > 0 && !nds_.dma.any_running(Cpu::ARM7)) nds_.run_arm7(a7);
-      } else {
-        nds_.run_arm7(a7);
-      }
+      run_cpu(a7, nds_.run_arm7);
       const s64 consumed7 = a7.halted ? budget7 : (budget7 - a7.hot.cycle_budget);
       arm7_debt_ -= consumed7 * 2;
     }

@@ -13,6 +13,8 @@ add_library(dsperate_core STATIC
   cpu/interp/interp_arm.cpp
   cpu/interp/interp_thumb.cpp
   gpu/gpu.cpp
+  gpu/engine2d.cpp
+  gpu/vram_map.cpp
   spu/spu.cpp
   io/io.cpp
 )

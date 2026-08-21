@@ -87,7 +87,7 @@ constexpr AOp classify_arm(u32 idx) {
           default: return AOp::Undefined;
           }
         }
-        if (((hi >> 1) & 3) == 0 && !bit20)      // bits 23:21 = 0x0, bit20=0 -> SWP
+        if ((hi & 0x0B) == 0)                    // bit24=1, bits 23,21,20 = 0 -> SWP; bit22 = byte
           return (hi & 4) ? AOp::Swpb : AOp::Swp;
         return AOp::Undefined;
       }

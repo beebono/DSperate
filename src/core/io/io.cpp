@@ -7,6 +7,7 @@
 #include "core/nds.h"
 #include "core/dma/dma.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -23,7 +24,7 @@ void Io::reset() {
   cpu_io[0] = CpuIo{}; cpu_io[1] = CpuIo{};
   dispstat[0] = dispstat[1] = 0; vcount = 0;
   wramcnt = 0; std::memset(vramcnt, 0, sizeof vramcnt);
-  powcnt1 = 0; powcnt2 = 0;
+  powcnt1 = 0; powcnt2 = 0; gxstat = 0; math = MathUnit{};
   keyinput = 0x03FF; extkeyin = 0x007F;
   exmemcnt = 0;
   spicnt = 0; spidata = 0;
@@ -500,8 +501,85 @@ void Io::wifi_write16(u32 addr, u16 value) {
   }
 }
 
+// ---- divider / square root --------------------------------------------------
+// Results appear after 18/34 (DIV, 32/64-bit) and 13 (SQRT) system cycles;
+// the busy bit is set meanwhile. Edge cases follow the hardware as documented
+// by GBATEK and melonDS: division by zero yields +/-1 with the numerator as
+// remainder, and the most-negative / -1 overflow wraps.
+static void ev_div(NDS& nds, u32)  { nds.io.div_done(); }
+static void ev_sqrt(NDS& nds, u32) { nds.io.sqrt_done(); }
+
+void Io::div_start() {
+  math.divcnt |= 0x8000;
+  nds_.sched.schedule(EventId::Div, nds_.sched.now() + (((math.divcnt & 3) == 0) ? 18 : 34) * 2, ev_div);
+}
+
+void Io::div_done() {
+  MathUnit& m = math;
+  m.divcnt &= ~0xC000;
+  switch (m.divcnt & 3) {
+  case 0: {
+    const s32 num = static_cast<s32>(m.div_num), den = static_cast<s32>(m.div_den);
+    if (den == 0) {
+      m.div_quot = (num < 0) ? 0xFFFFFFFF00000001ull : 0x00000000FFFFFFFFull;
+      m.div_rem = static_cast<u64>(static_cast<s64>(num));
+    } else if (num == INT32_MIN && den == -1) {
+      m.div_quot = 0x80000000ull;
+    } else {
+      m.div_quot = static_cast<u64>(static_cast<s64>(num / den));
+      m.div_rem = static_cast<u64>(static_cast<s64>(num % den));
+    }
+    break;
+  }
+  default: {
+    const s64 num = static_cast<s64>(m.div_num);
+    const s64 den = ((m.divcnt & 3) == 2) ? static_cast<s64>(m.div_den) : static_cast<s64>(static_cast<s32>(m.div_den));
+    if (den == 0) {
+      m.div_quot = (num < 0) ? 1ull : ~0ull;
+      m.div_rem = static_cast<u64>(num);
+    } else if (num == INT64_MIN && den == -1) {
+      m.div_quot = 0x8000000000000000ull; m.div_rem = 0;
+    } else {
+      m.div_quot = static_cast<u64>(num / den);
+      m.div_rem = static_cast<u64>(num % den);
+    }
+    break;
+  }
+  }
+  if (m.div_den == 0) m.divcnt |= 0x4000;
+}
+
+void Io::sqrt_start() {
+  math.sqrtcnt |= 0x8000;
+  nds_.sched.schedule(EventId::Sqrt, nds_.sched.now() + 13 * 2, ev_sqrt);
+}
+
+void Io::sqrt_done() {
+  MathUnit& m = math;
+  m.sqrtcnt &= ~0x8000;
+  u64 val = (m.sqrtcnt & 1) ? m.sqrt_val : (m.sqrt_val & 0xFFFFFFFFull);
+  // Digit-by-digit integer square root.
+  u64 res = 0, rem = 0;
+  const int nbits = (m.sqrtcnt & 1) ? 32 : 16;
+  const int topshift = (m.sqrtcnt & 1) ? 62 : 30;
+  for (int i = 0; i < nbits; ++i) {
+    rem = (rem << 2) + ((val >> topshift) & 3);
+    val <<= 2;
+    res <<= 1;
+    const u64 prod = (res << 1) + 1;
+    if (rem >= prod) { rem -= prod; ++res; }
+  }
+  m.sqrt_res = static_cast<u32>(res);
+}
+
+void Io::gx_check_irq() {
+  const u32 mode = gxstat >> 30;
+  if (mode == 1 || mode == 2) request_irq(Cpu::ARM9, IRQ_GX_FIFO);   // less-than-half / empty: always true without a 3D engine
+}
+
 // ---- register dispatch ----------------------------------------------------
 u32 Io::read(Cpu cpu, u32 addr, u32 width) {
+  if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) return nds_.gpu.reg_read(addr, width);
   bool handled = false;
   if (width == 32) { u32 v = read32_special(cpu, addr, handled); if (handled) return v; return read16(cpu, addr) | (static_cast<u32>(read16(cpu, addr + 2)) << 16); }
   if (width == 16) return read16(cpu, addr);
@@ -509,6 +587,10 @@ u32 Io::read(Cpu cpu, u32 addr, u32 width) {
 }
 
 void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
+  if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) {
+    if (std::getenv("DS_DEBUG_GPUREG") && (addr & 0xFF) >= 0x50) std::fprintf(stderr, "[gpureg] frame %llu line %u write%u %08x = %08x\n", (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
+    nds_.gpu.reg_write(addr, width, value); return;
+  }
   bool handled = false;
   if (width == 32) { write32_special(cpu, addr, value, handled); if (handled) return; write16(cpu, addr, static_cast<u16>(value)); write16(cpu, addr + 2, static_cast<u16>(value >> 16)); return; }
   if (width == 16) { write16(cpu, addr, static_cast<u16>(value)); return; }
@@ -525,6 +607,20 @@ u32 Io::read32_special(Cpu cpu, u32 addr, bool& handled) {
   case 0x04100000: return ipc_fifo_recv(cpu);
   case 0x04100010: return cart_read_data();
   case 0x040001A4: return cart.romctrl;
+  case 0x04000600: return gxstat | (1u << 26) | (1u << 25);     // FIFO empty, less than half full
+  case 0x04000280: return math.divcnt;
+  case 0x04000290: return static_cast<u32>(math.div_num);
+  case 0x04000294: return static_cast<u32>(math.div_num >> 32);
+  case 0x04000298: return static_cast<u32>(math.div_den);
+  case 0x0400029C: return static_cast<u32>(math.div_den >> 32);
+  case 0x040002A0: return static_cast<u32>(math.div_quot);
+  case 0x040002A4: return static_cast<u32>(math.div_quot >> 32);
+  case 0x040002A8: return static_cast<u32>(math.div_rem);
+  case 0x040002AC: return static_cast<u32>(math.div_rem >> 32);
+  case 0x040002B0: return math.sqrtcnt;
+  case 0x040002B4: return math.sqrt_res;
+  case 0x040002B8: return static_cast<u32>(math.sqrt_val);
+  case 0x040002BC: return static_cast<u32>(math.sqrt_val >> 32);
   case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: return nds_.dma.read_src(cpu, (addr - 0x040000B0) / 12);
   case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: return nds_.dma.read_dst(cpu, (addr - 0x040000B4) / 12);
   case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: return nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12);
@@ -543,6 +639,19 @@ void Io::write32_special(Cpu cpu, u32 addr, u32 value, bool& handled) {
   case 0x04000214: c.if_ &= ~value; update_irq(cpu); return;
   case 0x04000188: ipc_fifo_send(cpu, value); return;
   case 0x040001A4: cart_write_romctrl(value); return;
+  case 0x04000280: math.divcnt = value & 0x3; div_start(); return;
+  case 0x04000290: math.div_num = (math.div_num & 0xFFFFFFFF00000000ull) | value; div_start(); return;
+  case 0x04000294: math.div_num = (math.div_num & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return;
+  case 0x04000298: math.div_den = (math.div_den & 0xFFFFFFFF00000000ull) | value; div_start(); return;
+  case 0x0400029C: math.div_den = (math.div_den & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return;
+  case 0x040002B0: math.sqrtcnt = value & 0x1; sqrt_start(); return;
+  case 0x040002B8: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFF00000000ull) | value; sqrt_start(); return;
+  case 0x040002BC: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); sqrt_start(); return;
+  case 0x04000600:
+    gxstat = (gxstat & ~0xC0000000u) | (value & 0xC0000000u);
+    if (value & 0x8000) gxstat &= ~0x8000u;                       // acknowledge matrix stack error
+    gx_check_irq();
+    return;
   case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: nds_.dma.write_src(cpu, (addr - 0x040000B0) / 12, value); return;
   case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: nds_.dma.write_dst(cpu, (addr - 0x040000B4) / 12, value); return;
   case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: nds_.dma.write_cnt(cpu, (addr - 0x040000B8) / 12, value); return;
@@ -585,13 +694,18 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0x04000304: return a9 ? powcnt1 : powcnt2;
   case 0x04000500: return sound_cnt;
   case 0x04000504: return sound_bias;
+  case 0x04000280: return math.divcnt;
+  case 0x040002B0: return math.sqrtcnt;
+  case 0x04000600: return static_cast<u16>(gxstat);
+  case 0x04000602: return static_cast<u16>((gxstat | (1u << 26) | (1u << 25)) >> 16);
   default: break;
   }
+  if (a9 && addr >= 0x04000290 && addr < 0x040002C0) { bool h; const u32 v = read32_special(cpu, addr & ~3u, h); return static_cast<u16>((addr & 2) ? v >> 16 : v); }
   if (addr >= 0x04000240 && addr < 0x0400024A && a9) {
-    u32 i = addr - 0x04000240; u16 v = 0;
-    auto get = [&](u32 k) -> u8 { if (k == 7) return wramcnt; return k < 9 ? vramcnt[k] : 0; };
-    v = get(i) | (get(i + 1) << 8);
-    return v;
+    // 0x240-0x246 VRAMCNT A-G, 0x247 WRAMCNT, 0x248-0x249 VRAMCNT H-I.
+    const u32 i = addr - 0x04000240;
+    auto get = [&](u32 k) -> u8 { if (k == 7) return wramcnt; if (k > 9) return 0; return vramcnt[k < 7 ? k : k - 1]; };
+    return static_cast<u16>(get(i) | (get(i + 1) << 8));
   }
   if (!a9 && addr >= 0x04000400 && addr < 0x04000500) return sound_regs[addr - 0x04000400] | (sound_regs[addr - 0x04000400 + 1] << 8);
   return 0;
@@ -640,6 +754,8 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
     const u32 i = addr - 0x040001A8; cart.cmd[i] = static_cast<u8>(value); cart.cmd[i + 1] = static_cast<u8>(value >> 8); return;
   }
   case 0x04000206: return;                                   // WIFIWAITCNT
+  case 0x04000280: if (a9) { math.divcnt = value & 3; div_start(); } return;
+  case 0x040002B0: if (a9) { math.sqrtcnt = value & 1; sqrt_start(); } return;
   case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: {
     const int i = (addr - 0x040000B8) / 12; nds_.dma.write_cnt(cpu, i, (nds_.dma.read_cnt(cpu, i) & 0xFFFF0000) | value); return;
   }
@@ -663,21 +779,30 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
     c.postflg |= value & 1; if (a9) c.postflg = (c.postflg & 1) | (value & 2);
     if (!a9 && (value >> 8)) write8(cpu, 0x04000301, static_cast<u8>(value >> 8));
     return;
-  case 0x04000304: if (a9) powcnt1 = value; else powcnt2 = value; return;
+  case 0x04000304: if (a9) { powcnt1 = value & 0x820F; nds_.gpu.set_powcnt(powcnt1); } else powcnt2 = value & 0x0003; return;
   case 0x04000500: sound_cnt = value; return;
   case 0x04000504: sound_bias = value & 0x3FF; return;
   default: break;
   }
   if (addr >= 0x04000240 && addr < 0x0400024A && a9) { write8(cpu, addr, static_cast<u8>(value)); write8(cpu, addr + 1, static_cast<u8>(value >> 8)); return; }
+  if (a9 && ((addr >= 0x04000290 && addr < 0x040002A0) || addr == 0x040002B8 || addr == 0x040002BA || addr == 0x040002BC || addr == 0x040002BE)) {
+    bool h; const u32 cur = read32_special(cpu, addr & ~3u, h);
+    write32_special(cpu, addr & ~3u, (addr & 2) ? ((cur & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((cur & 0xFFFF0000) | value), h);
+    return;
+  }
   if (!a9 && addr >= 0x04000400 && addr < 0x04000500) { sound_regs[addr - 0x04000400] = static_cast<u8>(value); sound_regs[addr - 0x04000400 + 1] = static_cast<u8>(value >> 8); return; }
-  if (a9 && addr >= 0x04000000 && addr < 0x04000070) return;   // 2D engine A regs: GPU owns these later
-  if (a9 && addr >= 0x04001000 && addr < 0x04001070) return;   // engine B
-  if (a9 && addr >= 0x04000320 && addr < 0x040006A4) { if (addr - 0x04000320 < 0x100) gx_regs[addr - 0x04000320] = static_cast<u8>(value); return; }
+  if (a9 && addr >= 0x04000320 && addr < 0x040006A4) {
+    if (addr - 0x04000320 < 0x100) gx_regs[addr - 0x04000320] = static_cast<u8>(value);
+    if (addr == 0x04000602) { gxstat = (gxstat & 0x0000FFFFu) | ((static_cast<u32>(value) << 16) & 0xC0000000u); gx_check_irq(); }
+    else if (addr == 0x04000600 && (value & 0x8000)) gxstat &= ~0x8000u;
+    else if (addr >= 0x04000400 && addr < 0x04000600) gx_check_irq();      // a command was "executed"
+    return;
+  }
 }
 
 u8 Io::read8(Cpu cpu, u32 addr) {
   const bool a9 = cpu == Cpu::ARM9;
-  if (a9 && addr >= 0x04000240 && addr < 0x0400024A) { u32 k = addr - 0x04000240; return k == 7 ? wramcnt : vramcnt[k]; }
+  if (a9 && addr >= 0x04000240 && addr < 0x0400024A) { const u32 k = addr - 0x04000240; return k == 7 ? wramcnt : vramcnt[k < 7 ? k : k - 1]; }
   if (!a9 && addr == 0x04000241) return wramcnt;
   if (!a9 && addr == 0x04000240) return static_cast<u8>((((vramcnt[2] & 7) == 2) ? 1 : 0) | (((vramcnt[3] & 7) == 2) ? 2 : 0));
   if (addr == 0x04000300) return static_cast<u8>(cpu_io[ci(cpu)].postflg);
@@ -693,7 +818,9 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
   if (a9 && addr >= 0x04000240 && addr < 0x0400024A) {
     const u32 k = addr - 0x04000240;
     if (k == 7) { if (wramcnt != (value & 3)) { wramcnt = value & 3; nds_.bus.update_wram(); } return; }
-    if (vramcnt[k] != value) { vramcnt[k] = value; nds_.bus.update_vram(); }
+    const u32 bank = k < 7 ? k : k - 1;                 // 0x248/0x249 are banks H/I
+    if (std::getenv("DS_DEBUG_VRAMCNT")) std::fprintf(stderr, "[vramcnt] %c = %02x frame %llu line %u pc %08x\n", 'A' + bank, value, (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(Cpu::ARM9).hot.regs[15]);
+    if (vramcnt[bank] != value) { vramcnt[bank] = value; nds_.bus.update_vram(); }
     return;
   }
   if (addr == 0x04000300) { write16(cpu, addr, value); return; }

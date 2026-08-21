@@ -24,7 +24,7 @@ struct NDS;
 enum class EventId : u8 {
   HBlank, VBlank_Scanline, Timer0, Timer1, Timer2, Timer3,
   Timer7_0, Timer7_1, Timer7_2, Timer7_3,
-  Dma, Spu, Spi, Rtc, Cart, Gx3D, Count
+  Dma, Spu, Spi, Rtc, Cart, Gx3D, DisplayFifo, Div, Sqrt, Count
 };
 
 // CPU interleave quantum in ARM9 cycles. 128 matches melonDS's 64 system cycles,
@@ -47,7 +47,17 @@ public:
   // (SPI, cart, timers) are stamped relative to that CPU's own position.
   u64 now() const {
     if (!running_) return now_;
-    return now_ + (static_cast<u64>(running_start_budget_ - running_->hot.cycle_budget) << running_shift_);
+    return now_ + (static_cast<u64>(running_start_budget_ - running_->hot.cycle_budget - running_->preempt_residual) << running_shift_);
+  }
+  const CpuContext* running() const { return running_; }
+
+  // Called when an immediate DMA starts on `cpu`: if that CPU is the one
+  // executing, it leaves its run loop after the current instruction and the
+  // DMA takes over the rest of its slice, as the bus stall does on hardware.
+  void preempt(CpuContext& cpu) {
+    if (running_ != &cpu || cpu.hot.cycle_budget <= 0) return;
+    cpu.preempt_residual += cpu.hot.cycle_budget;
+    cpu.hot.cycle_budget = 0;
   }
   u64 next_deadline() const;
 
@@ -70,6 +80,7 @@ private:
   s64  arm7_debt_ = 0;               // ARM9 cycles the ARM7 still has to cover (carries overshoot and odd cycles)
   std::array<Event, static_cast<size_t>(EventId::Count)> events_;
   void fire_due();
+  void run_cpu(CpuContext& cpu, RunFn run);
 };
 
 } // namespace ds

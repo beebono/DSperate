@@ -211,12 +211,12 @@ u32 exec_thumb(CpuContext& cpu, u16 instr) {
     if (!is_arm9(cpu)) break;
     cpu.raise_exception(CpuContext::Exception::PrefetchAbort); return 0;
   case TOp::B: {
-    s32 off = (static_cast<s32>(instr << 21) >> 20);
+    s32 off = (static_cast<s32>(static_cast<u32>(instr) << 21) >> 20);
     cpu.jump(R(cpu, 15) + static_cast<u32>(off), false);
     return 0;
   }
   case TOp::BlPrefix: {
-    s32 off = (static_cast<s32>(instr << 21) >> 9);
+    s32 off = (static_cast<s32>(static_cast<u32>(instr) << 21) >> 9);
     R(cpu, 14) = R(cpu, 15) + static_cast<u32>(off);
     return 0;
   }

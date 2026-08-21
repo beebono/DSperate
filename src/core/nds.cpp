@@ -129,13 +129,14 @@ void NDS::setup_direct_boot() {
 
   io.exmemcnt = 0xE880; bus.update_gba_slot_timings();
   io.cpu_io[0].postflg = 1; io.cpu_io[1].postflg = 1;
-  io.powcnt1 = 0x820F;
+  io.powcnt1 = 0x820F; gpu.set_powcnt(0x820F);
   io.cart.romctrl |= 1u << 29;
   cart->setup_direct_boot();
   io.arm7_bios_prot = 0x1204;
 }
 
 void NDS::run_frame() {
+  if (!gpu.frame_begun()) gpu.begin_frame();   // first frame after reset/direct boot starts at line 0 without a line-0 event
   frame_ready = false;
   while (!frame_ready) sched.run_until(sched.next_deadline());
   ++frame_count;

@@ -85,6 +85,13 @@ struct Cart {
   bool late = false;                        // FIFO was full; receive paused
 };
 
+// ARM9 hardware divider and square root unit (0x04000280-0x040002BF).
+struct MathUnit {
+  u16 divcnt = 0, sqrtcnt = 0;              // bit 15 busy; DIVCNT bit 14 division by zero
+  u64 div_num = 0, div_den = 0, div_quot = 0, div_rem = 0;
+  u64 sqrt_val = 0; u32 sqrt_res = 0;
+};
+
 class Io {
 public:
   explicit Io(NDS& nds);
@@ -132,6 +139,13 @@ public:
   u16  wifi_read16(u32 addr);
   void wifi_write16(u32 addr, u16 value);
   std::array<u8, 0x100> gx_regs{};
+  // Geometry engine placeholder: no 3D yet, so the command FIFO is always
+  // empty and GXSTAT's FIFO IRQ conditions (bits 30-31) hold permanently.
+  u32 gxstat = 0;
+  void gx_check_irq();
+  MathUnit math;
+  void div_start(); void div_done();
+  void sqrt_start(); void sqrt_done();
 
   // Timers are sampled lazily from scheduler time.
   u16 timer_value(Cpu cpu, int idx);

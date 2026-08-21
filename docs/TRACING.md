@@ -2,7 +2,9 @@
 
 The interpreter is verified by running the same BIOS/firmware (and later ROM)
 on DSperate and on a headless melonDS build, emitting one line per executed
-instruction per CPU, and comparing.
+instruction per CPU, and comparing. The 2D renderer is verified the same way
+one level up: both emulators dump every frame and the frames are compared
+pixel for pixel (see "Frame comparison" below).
 
 ## Trace format
 
@@ -57,6 +59,39 @@ trace diff only shows indirectly (as poll loops exiting at different
 iterations). It found the half-speed clock bug in minutes after the diff had
 pointed at the wrong layer for hours.
 
+## Frame comparison
+
+Both tracers take `--dump-frames file`: after every frame they append the
+top and bottom screens as 256x192 little-endian `0xAARRGGBB` words (the
+same 6-to-8-bit expansion melonDS's software renderer produces, so a correct
+frame is byte-identical).
+
+    dsperate --bios9 .. --bios7 .. --firmware .. --direct --frames 300 \
+             --dump-frames out/ds.frames game.nds
+    tools/compare_frames.py out/ref.frames out/ds.frames [--offset K] [--png dir]
+
+The comparator prints per-frame mismatch counts and the first differing
+pixel, and with `--png` writes ref/cand/diff images for the first mismatching
+frames. Games drift by a few frames against melonDS (ARM7-driven waits differ
+slightly per scene), so `--offset K` compares candidate frame N with reference
+frame N+K; try a few offsets before suspecting the renderer. Differences that
+survive every offset and sit in fades, typewriter text or sprite animation are
+phase, not rendering.
+
+Debug hooks in the CLI, all environment-gated and free when unset:
+
+| variable | effect |
+|---|---|
+| `DS_DEBUG_GPU=1` | one line per frame: POWCNT, DISPCNT A/B, master brightness, DISPCAPCNT, VRAMCNT |
+| `DS_DEBUG_DUMP_FRAME=N` (`DS_DEBUG_DUMP_LINE=L`) | dump both engines' registers/latches and render line L at frame N |
+| `DS_DEBUG_VRAMNZ=1`, `DS_DEBUG_VRAMCNT=1`, `DS_DEBUG_GPUREG=1` | per-frame bank fill, VRAMCNT writes, blend/brightness register writes |
+| `DS_WATCH=<hex>` | log writes to a main-RAM or VRAM word with PC, frame and line |
+| `TRACE_PC_HIST=1` | uncollapsed PC histogram per CPU at exit (what a "quiet" frame is doing) |
+| `TRACE_START_FRAME=N` | start tracing at frame N (both tracers) |
+
+The melonDS tracer adds `TRACE_VRAM_STATS` and `TRACE_VRAM_PER_FRAME` (bank
+fill and VRAMCNT), which is how the Kirby DMA ordering bug below was pinned.
+
 ## Dead-value masking
 
 When pc/instr/cpsr match but a register differs (a poll-loop counter after the
@@ -87,7 +122,57 @@ states per CPU: no semantic divergence. Bugs it caught on the way, in order:
    (F bit too); RTC resets to 2000-01-01 with status1 = 0x82; an empty or
    unpowered cart slot reads as zero.
 
+Found by the frame comparison (2026-08-21). Every one of these was invisible
+to the instruction diff, because a game that is stuck or idling collapses to
+the same few lines on both sides:
+
+10. VRAMCNT_H/I live at 0x248/0x249 with WRAMCNT at 0x247 in between; indexing
+    them as banks 8 and 9 overflowed into POWCNT1 (screens went dark) and
+    mapped banks H/I from the wrong registers.
+11. `SWPB` decoded as undefined: the decoder required bits 22:21 clear, but
+    bit 22 *is* the byte flag. Mega Man ZX parked in the undefined-instruction
+    handler.
+12. The hardware divider and square-root unit (0x04000280-0x040002BF) were
+    missing; Meteos computes its fade step with a division and got zero.
+13. The geometry-FIFO interrupt: games arm GXSTAT bits 30-31 and run their
+    frame logic from IRQ 21. Until the 3D engine exists the FIFO is modelled
+    as always empty and the IRQ raised accordingly.
+14. An immediate DMA must stall the CPU that started it *now*, not at the next
+    scheduler slice. Kirby maps a bank to LCDC, starts the DMA and restores
+    the mapping ten instructions later; with the DMA deferred, the writes hit
+    a bank that was no longer LCDC-mapped and were dropped
+    (`Scheduler::preempt`).
+15. POWCNT's screen-enable bit is latched at frame start; the first frame
+    after reset/direct boot has no line-0 event, so it needs an explicit
+    latch.
+
+Status after these: Meteos (300 frames), Mega Man ZX, Bangai-O Spirits and
+Sonic Rush (400 frames each) are pixel-exact against melonDS apart from one or
+two scene-transition frames at a constant offset; Kirby Canvas Curse matches
+except for fade/typewriter phase; Rhythm Heaven differs only where it draws
+with the 3D engine. The AArch64 build under qemu produces byte-identical
+frames to the host build.
+
+## Toolchain hazards
+
+- **GCC 13.3 AArch64, `-O2`: a side-effecting member function deleted.** With
+  the colour-effects pass written as a member function looping over
+  `std::array` members of `*this`, `ipa-modref` summarised its stores as
+  parameter writes, `ivopts` rewrote the addressing, and `dce2` removed the
+  call from `render_line` altogether — the composite stage silently never ran
+  on AArch64 while the x86-64 build of the same source was fine.
+  `-fno-ipa-modref` or `-fno-ivopts` restores the call; so does writing the
+  pass as a free function over plane pointers, which is what the tree does now
+  (it is the shape the NEON kernels want anyway). Two things guard against a
+  recurrence: `test_gpu` fails under qemu when it happens, and the AArch64
+  build's frame dumps are compared byte-for-byte with the host's.
+
 ## Limits
+
+- Firmware boot: the instruction streams match but melonDS reaches the
+  POWCNT write that lights the screens ~80 frames later than DSperate (an
+  ARM7-side wait the firmware performs is faster here). Not yet investigated;
+  it does not affect direct-booted games.
 
 - Timing follows melonDS's model (see ARCHITECTURE.md §4) and agrees to
   ~0.1% (ARM9) / ~3% (ARM7) in instructions per frame on Meteos. The ARM7

@@ -234,7 +234,7 @@ u32 exec_arm(CpuContext& cpu, u32 instr) {
     // Unconditional space: BLX imm (v5), PLD.
     if (((instr >> 25) & 7) == 5) {
       if (!is_arm9(cpu)) { cpu.raise_exception(CpuContext::Exception::Undefined); return 0; }
-      s32 off = static_cast<s32>(instr << 8) >> 6;
+      s32 off = static_cast<s32>(static_cast<u32>(instr) << 8) >> 6;
       off |= (instr >> 23) & 2;
       R(cpu, 14) = R(cpu, 15) - 4;
       cpu.jump((R(cpu, 15) + static_cast<u32>(off)) | 1, true);
@@ -276,7 +276,7 @@ u32 exec_arm(CpuContext& cpu, u32 instr) {
   case AOp::MsrImm: return msr(cpu, instr, rotr32(instr & 0xFF, ((instr >> 8) & 0xF) * 2));
 
   case AOp::B: case AOp::Bl: {
-    s32 off = static_cast<s32>(instr << 8) >> 6;
+    s32 off = static_cast<s32>(static_cast<u32>(instr) << 8) >> 6;
     if (op == AOp::Bl) R(cpu, 14) = R(cpu, 15) - 4;
     cpu.jump(R(cpu, 15) + static_cast<u32>(off), false);
     return 0;

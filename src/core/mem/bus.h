@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/mem/page_table.h"
 #include "core/mem/timing.h"
+#include "core/gpu/vram_map.h"
 
 #include <memory>
 
@@ -39,6 +40,7 @@ public:
   Timing& timing() { return timing_; }
   const Timing& timing() const { return timing_; }
   void update_gba_slot_timings();    // EXMEMCNT
+  void enable_watch(u32 addr);       // debug: log writes to a main-RAM word (see DS_WATCH in the CLI)
 
   // Slow paths, reached when the page table returns nullptr.
   u8  read8 (Cpu cpu, u32 addr);
@@ -61,12 +63,17 @@ public:
   static constexpr u32 VRAM_BANK_SIZES[9] = {0x20000, 0x20000, 0x20000, 0x20000, 0x10000, 0x4000, 0x4000, 0x8000, 0x4000};
   static constexpr u32 VRAM_TOTAL = 0x20000 * 4 + 0x10000 + 0x4000 * 2 + 0x8000 + 0x4000;
 
+  const gpu::VramMap& vram_map() const { return vram_map_; }
+
   std::unique_ptr<u8[]> main_ram, shared_wram, arm7_wram, itcm, dtcm, vram, palette, oam, bios9, bios7;
   u8* vram_bank(int i);
 
 private:
   NDS& nds_;
   Timing timing_;
+  gpu::VramMap vram_map_;
+  u32 vram_read(Cpu cpu, u32 addr, u32 width);
+  void vram_write(Cpu cpu, u32 addr, u32 width, u32 v);
   void map_fixed_regions();
   void map_page_aligned(PageTable& pt, u32 guest, u32 size, u8* host, u32 flags, u32 mirror_end);
   u32 io_read(Cpu cpu, u32 addr, u32 width);

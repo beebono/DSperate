@@ -35,6 +35,7 @@ static void test_decode() {
   CHECK(decode_arm(0xE0010392) == AOp::Mul);          // mul r1, r2, r3
   CHECK(decode_arm(0xE0810392) == AOp::Umull);
   CHECK(decode_arm(0xE1021093) == AOp::Swp);
+  CHECK(decode_arm(0xE1439099) == AOp::Swpb);         // swpb r9, r9, [r3] (bit 22 = byte; was decoded as undefined)
   CHECK(decode_arm(0xE12FFF1E) == AOp::Bx);
   CHECK(decode_arm(0xE12FFF3E) == AOp::BlxReg);
   CHECK(decode_arm(0xE16F1F12) == AOp::Clz);
