@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
+#pragma once
+#include "core/types.h"
+#include "core/gpu/engine2d.h"
+
+// Line-stage kernels of the 2D pipeline and the output stage, as free
+// functions over plane pointers (docs/ARCHITECTURE.md §5): every stage is a
+// straight pass over the line with no data-dependent control flow, so each
+// has a portable C++ reference (kernels_ref.cpp) and, on AArch64, a NEON twin
+// (kernels_neon.cpp) with the same name and signature. `kern::active` is the
+// one the renderer calls; tests/kernels_test.cpp diffs the two vector by
+// vector, and the AArch64 frame dumps are compared with the host's.
+//
+// All pixel arrays are 256 entries and 16-byte aligned; `n` counts in the
+// palette kernel are multiples of 8.
+
+namespace ds::gpu::kern {
+
+#define DS_KERNEL_LIST(NS)                                                                                   \
+  /* Priority select of one BG plane into the top/second records. */                                         \
+  void NS##select_plane(const Pixel* px, const u8* op, const u8* win, u8 wbit, u8 id, bool is3d,             \
+                        Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id);  \
+  /* Priority select of the resolved OBJ plane at one priority level. */                                     \
+  void NS##select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win, u32 prio,             \
+                      Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id);    \
+  /* Colour effects: blend / brighten / darken with the OBJ and 3D override rules. */                         \
+  void NS##composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, const Pixel* second,      \
+                          const u8* top_id, const u8* top_kind, const u8* top_alpha, const u8* second_id,     \
+                          const u8* win, Pixel* out);                                                        \
+  /* BGR555 palette entries -> 18-bit records (bit 15 = low green bit). */                                   \
+  void NS##palette_to_18(const u16* pal, Pixel* out, u32 n);                                                 \
+  /* One 16-colour tile row: 8 indices through a 16-entry 18-bit palette. */                                 \
+  void NS##tile_row_pal16(const u8* idx, const Pixel* pal18, Pixel* px, u8* op);                             \
+  /* 3D layer into a BG plane: alpha 0 is transparent. */                                                    \
+  void NS##layer_3d(const u32* line3d, Pixel* px, u8* op);                                                   \
+  /* Output stage: master brightness on 18-bit records, then 6->8 bit expansion to 0xAARRGGBB. */            \
+  void NS##master_brightness(u16 reg, u32* dst);                                                             \
+  void NS##expand_colours(u32* dst);
+
+namespace ref { DS_KERNEL_LIST() }
+#if DSPERATE_NEON
+namespace neon { DS_KERNEL_LIST() }
+namespace active = neon;
+#else
+namespace active = ref;
+#endif
+
+#undef DS_KERNEL_LIST
+
+} // namespace ds::gpu::kern

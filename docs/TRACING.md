@@ -86,6 +86,7 @@ Debug hooks in the CLI, all environment-gated and free when unset:
 | `DS_DEBUG_DUMP_FRAME=N` (`DS_DEBUG_DUMP_LINE=L`) | dump both engines' registers/latches and render line L at frame N |
 | `DS_DEBUG_VRAMNZ=1`, `DS_DEBUG_VRAMCNT=1`, `DS_DEBUG_GPUREG=1` | per-frame bank fill, VRAMCNT writes, blend/brightness register writes |
 | `DS_DEBUG_GX=1` | one line per VBlank: 3D power/flush state, polygon and vertex counts, DISP3DCNT, clear attributes, FIFO level, GXSTAT, ARM9 IE/IF |
+| `DS_PROFILE=1` | wall time per stage at exit (CPUs, DMA, geometry, each 2D line stage, output, 3D clear/spans/final pass); `perf` is not usable in every sandbox, this always is |
 | `DS_WATCH=<hex>` | log writes to a main-RAM or VRAM word with PC, frame and line |
 | `TRACE_PC_HIST=1` | uncollapsed PC histogram per CPU at exit (what a "quiet" frame is doing) |
 | `TRACE_START_FRAME=N` | start tracing at frame N (both tracers) |

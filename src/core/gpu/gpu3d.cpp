@@ -265,9 +265,8 @@ void Gpu3D::finish_work(s32 cycles) {
   gxstat_ &= ~(1u << 27);
 }
 
-void Gpu3D::run_to(u64 arm9_time) {
+void Gpu3D::run_to_slow(u64 arm9_time) {
   const u64 now = arm9_time >> 1;
-  if (!geometry_on_ || flush_request_ || (pipe_.empty() && !(gxstat_ & (1u << 27)))) { timestamp_ = now; return; }
   cycle_count_ -= static_cast<s32>(now - timestamp_);
   timestamp_ = now;
   if (cycle_count_ <= 0) {

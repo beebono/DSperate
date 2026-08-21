@@ -24,6 +24,10 @@ enum LayerId : u8 { L_BG0 = 0x01, L_BG1 = 0x02, L_BG2 = 0x04, L_BG3 = 0x08, L_OB
 // Kind of the winning pixel, which decides how colour effects apply.
 enum PixelKind : u8 { K_NORMAL = 0, K_OBJ_SEMI = 1, K_OBJ_BITMAP = 2, K_3D = 3 };
 
+// OBJ plane attribute byte and colour-word flags (shared with the kernels).
+constexpr u8 OA_PRIO = 0x03, OA_SEMI = 0x04, OA_BITMAP = 0x08, OA_MOSAIC = 0x10, OA_TOUCHED = 0x20, OA_OPAQUE = 0x80;
+constexpr u32 OP_DIRECT = 1u << 15, OP_STDPAL = 1u << 12;
+
 // One 2D engine (A at 0x04000000, B at 0x04001000).
 //
 // Rendering is a mask-plane pipeline (docs/ARCHITECTURE.md §5): every enabled
@@ -100,6 +104,8 @@ private:
   alignas(16) std::array<u8, 256> obj_attr_{};       // bits 0-1 priority, bit 2 semi, bit 3 bitmap, bit 4 mosaic, bit 5 sprite-touched, bit 7 opaque
   alignas(16) std::array<u8, 256> obj_alpha_{};      // bitmap sprites: EVA (alpha+1)
   alignas(16) std::array<u8, 256> obj_win_{};
+  alignas(16) std::array<Pixel, 256> obj_col_{};     // OBJ plane resolved through the palettes, per line
+  alignas(16) std::array<Pixel, 256> pal18_{};       // standard BG palette as 18-bit records, per line
   u32 num_sprites_ = 0;
   alignas(16) std::array<u8, 256> win_{};            // bits 0-3 BG, 4 OBJ, 5 effects
   alignas(16) std::array<Pixel, 256> top_{}, second_{};
@@ -127,6 +133,7 @@ private:
   void build_window_plane();
   void select_layers();
   void select_bg(int bg);
+  void resolve_obj_colours();
   void select_obj(u32 prio);
   void colour_effects();
 };

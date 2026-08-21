@@ -6,7 +6,9 @@
 // blending corner cases that are verified against real hardware there.
 #include "core/gpu/engine2d.h"
 #include "core/gpu/vram_map.h"
+#include "core/gpu/kernels.h"
 #include "core/nds.h"
+#include "core/profile.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,44 +27,6 @@ inline Pixel rgb15_to_18(u16 c) {
   return r | (g << 8) | (b << 16);
 }
 
-inline Pixel blend(Pixel a, Pixel b, u32 eva, u32 evb) {
-  u32 r = (((a & 0x00003F) * eva) + ((b & 0x00003F) * evb) + 0x000008) >> 4;
-  u32 g = ((((a & 0x003F00) * eva) + ((b & 0x003F00) * evb) + 0x000800) >> 4) & 0x007F00;
-  u32 bl = ((((a & 0x3F0000) * eva) + ((b & 0x3F0000) * evb) + 0x080000) >> 4) & 0x7F0000;
-  if (r > 0x3F) r = 0x3F;
-  if (g > 0x3F00) g = 0x3F00;
-  if (bl > 0x3F0000) bl = 0x3F0000;
-  return r | g | bl | 0xFF000000;
-}
-
-// 3D/2D blend with the 3D layer's 5-bit alpha (alpha+1 of 32).
-inline Pixel blend_3d(Pixel a, Pixel b) {
-  const u32 eva = ((a >> 24) & 0x1F) + 1, evb = 32 - eva;
-  if (eva == 32) return a;
-  u32 r = (((a & 0x00003F) * eva) + ((b & 0x00003F) * evb) + 0x000010) >> 5;
-  u32 g = ((((a & 0x003F00) * eva) + ((b & 0x003F00) * evb) + 0x001000) >> 5) & 0x007F00;
-  u32 bl = ((((a & 0x3F0000) * eva) + ((b & 0x3F0000) * evb) + 0x100000) >> 5) & 0x7F0000;
-  if (r > 0x3F) r = 0x3F;
-  if (g > 0x3F00) g = 0x3F00;
-  if (bl > 0x3F0000) bl = 0x3F0000;
-  return r | g | bl | 0xFF000000;
-}
-
-inline Pixel brighten(Pixel v, u32 factor, u32 bias) {
-  u32 rb = v & 0x3F003F, g = v & 0x003F00;
-  rb += (((((0x3F003F - rb) * factor) + (bias * 0x010001)) >> 4) & 0x3F003F);
-  g  += (((((0x003F00 - g) * factor) + (bias * 0x000100)) >> 4) & 0x003F00);
-  return rb | g | 0xFF000000;
-}
-inline Pixel darken(Pixel v, u32 factor, u32 bias) {
-  u32 rb = v & 0x3F003F, g = v & 0x003F00;
-  rb -= ((((rb * factor) + (bias * 0x010001)) >> 4) & 0x3F003F);
-  g  -= ((((g * factor) + (bias * 0x000100)) >> 4) & 0x003F00);
-  return rb | g | 0xFF000000;
-}
-
-constexpr u8 OA_PRIO = 0x03, OA_SEMI = 0x04, OA_BITMAP = 0x08, OA_MOSAIC = 0x10, OA_TOUCHED = 0x20, OA_OPAQUE = 0x80;
-constexpr u32 OP_DIRECT = 1u << 15, OP_STDPAL = 1u << 12;
 
 } // namespace
 
@@ -288,6 +252,7 @@ void Engine2D::render_line(u32 line) {
   if (forced_blank_) { out_.fill(0xFF3F3F3F); return; }
 
   for (auto& p : bg_) p.op.fill(0);
+  prof::Scope* sc = prof::enabled ? new prof::Scope(prof::BG_DRAW) : nullptr;
   const int mode = dispcnt_ & 7;
   auto bg_on = [&](int n) { return (layer_enable_ >> n) & 1; };
 
@@ -306,10 +271,10 @@ void Engine2D::render_line(u32 line) {
   if (!num_ && (dispcnt_ & 8) && bg_on(0)) draw_bg_3d();
 
   // 2. Window plane, 3. sprite X mosaic, 4. priority select, 5. colour effects.
-  build_window_plane();
-  apply_sprite_mosaic_x();
-  select_layers();
-  colour_effects();
+  delete sc;
+  { DS_PROF(WINDOW); build_window_plane(); apply_sprite_mosaic_x(); }
+  { DS_PROF(SELECT); select_layers(); }
+  { DS_PROF(EFFECTS); colour_effects(); }
 }
 
 // Text (tiled) background.
@@ -354,6 +319,20 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
     if (cur_tile & (1 << 10)) { for (int i = 0; i < 4; ++i) { const u8 t = row[i]; row[i] = row[7 - i]; row[7 - i] = t; } }
   };
 
+  if (!mosaic && !c256) {
+    // 16-colour tiles: whole tile rows through the palette kernel into a
+    // padded line, then the visible window is copied out.
+    kern::active::palette_to_18(pal, pal18_.data(), 256);
+    alignas(16) Pixel tpx[264]; alignas(16) u8 top[264];
+    const u32 shift = xoff & 7;
+    for (u32 t = 0, x = xoff & ~7u; t < 33; ++t, x += 8) {
+      load_tile(x);
+      kern::active::tile_row_pal16(row, pal18_.data() + ((cur_tile & 0xF000) >> 8), tpx + t * 8, top + t * 8);
+    }
+    std::memcpy(plane.px.data(), tpx + shift, 256 * sizeof(Pixel));
+    std::memcpy(plane.op.data(), top + shift, 256);
+    return;
+  }
   for (u32 i = 0; i < 256; ++i) {
     const u32 x = mosaic ? (xoff + i - (i % mw)) : (xoff + i);
     if ((x >> 3) != cur_x) { cur_x = x >> 3; load_tile(x); }
@@ -479,13 +458,8 @@ void Engine2D::draw_bg_large(u32 line) {
 
 void Engine2D::draw_bg_3d() {
   BgPlane& plane = bg_[0];
-  plane.op.fill(0);
-  if (!line3d_) return;
-  for (u32 i = 0; i < 256; ++i) {
-    const Pixel c = line3d_[i];
-    if (!(c >> 24)) continue;                 // alpha 0: transparent
-    plane.px[i] = c; plane.op[i] = 1;
-  }
+  if (!line3d_) { plane.op.fill(0); return; }
+  kern::active::layer_3d(line3d_, plane.px.data(), plane.op.data());
 }
 
 // ---- sprites ----------------------------------------------------------------
@@ -695,33 +669,29 @@ void Engine2D::build_window_plane() {
 // Masked select of one BG plane into the top/second records.
 void Engine2D::select_bg(int bg) {
   const BgPlane& p = bg_[bg];
-  const u8 wbit = 1 << bg, id = 1 << bg;
-  for (u32 i = 0; i < 256; ++i) {
-    if (!p.op[i] || !(win_[i] & wbit)) continue;
-    second_[i] = top_[i]; second_id_[i] = top_id_[i];
-    top_[i] = p.px[i]; top_id_[i] = id; top_kind_[i] = K_NORMAL;
-  }
-  if (bg == 0 && !num_ && (dispcnt_ & 8)) {
-    // 3D pixels carry their alpha and blend differently.
-    for (u32 i = 0; i < 256; ++i) if (top_id_[i] == L_BG0 && p.op[i]) { top_kind_[i] = K_3D; top_alpha_[i] = (p.px[i] >> 24) & 0x1F; }
-  }
+  const bool is3d = bg == 0 && !num_ && (dispcnt_ & 8);    // 3D pixels carry their alpha and blend differently
+  kern::active::select_plane(p.px.data(), p.op.data(), win_.data(), 1 << bg, 1 << bg, is3d,
+                             top_.data(), second_.data(), top_id_.data(), top_kind_.data(), top_alpha_.data(), second_id_.data());
 }
 
-void Engine2D::select_obj(u32 prio) {
+// The OBJ plane holds palette indices; they are resolved once per line at
+// selection time (the palette can change between pre-render and display).
+void Engine2D::resolve_obj_colours() {
   const u16* pal = palette() + 0x100;
   for (u32 i = 0; i < 256; ++i) {
-    const u8 a = obj_attr_[i];
-    if (!(a & OA_OPAQUE) || (a & OA_PRIO) != prio || !(win_[i] & 0x10)) continue;
+    if (!(obj_attr_[i] & OA_OPAQUE)) continue;
     const u32 v = obj_px_[i];
     u16 c;
     if (v & OP_DIRECT) c = v & 0x7FFF;
     else if (v & OP_STDPAL) c = pal[v & 0xFF];
     else c = obj_extpal(v & 0xFFF);
-    second_[i] = top_[i]; second_id_[i] = top_id_[i];
-    top_[i] = rgb15_to_18(c); top_id_[i] = L_OBJ;
-    top_kind_[i] = (a & OA_BITMAP) ? K_OBJ_BITMAP : (a & OA_SEMI) ? K_OBJ_SEMI : K_NORMAL;
-    top_alpha_[i] = obj_alpha_[i];
+    obj_col_[i] = rgb15_to_18(c);
   }
+}
+
+void Engine2D::select_obj(u32 prio) {
+  kern::active::select_obj(obj_col_.data(), obj_attr_.data(), obj_alpha_.data(), win_.data(), prio,
+                           top_.data(), second_.data(), top_id_.data(), top_kind_.data(), top_alpha_.data(), second_id_.data());
 }
 
 void Engine2D::select_layers() {
@@ -729,6 +699,7 @@ void Engine2D::select_layers() {
   top_.fill(backdrop); top_id_.fill(L_BACKDROP); top_kind_.fill(K_NORMAL); top_alpha_.fill(0);
   second_.fill(0); second_id_.fill(0);
   const bool objs = (layer_enable_ & 0x10) && num_sprites_;
+  if (objs) resolve_obj_colours();
   // Lowest priority first; within a priority BG3..BG0 then OBJ, later wins.
   for (int prio = 3; prio >= 0; --prio) {
     for (int bg = 3; bg >= 0; --bg) {
@@ -740,48 +711,9 @@ void Engine2D::select_layers() {
   }
 }
 
-namespace {
-
-// Colour-effects pass over one line, as a free function over plane pointers.
-// This shape is deliberate: it is what the NEON twin will mirror, and GCC 13
-// (AArch64, -O2) mis-analysed the member-array version — ipa-modref plus
-// dead-code elimination deleted the call from render_line outright (see
-// docs/TRACING.md, "Toolchain hazards"). Plane pointers keep the stores
-// visible as parameter writes.
-void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy,
-                    const Pixel* top, const Pixel* second, const u8* top_id, const u8* top_kind,
-                    const u8* top_alpha, const u8* second_id, const u8* win, Pixel* out) {
-  const u32 effect = (bldcnt >> 6) & 3;
-  for (u32 i = 0; i < 256; ++i) {
-    const Pixel a = top[i], b = second[i];
-    const u32 t1 = top_id[i], t2 = static_cast<u32>(second_id[i]) << 8;
-    const u8 kind = top_kind[i];
-    Pixel o = a;
-    if ((kind == K_OBJ_SEMI || kind == K_OBJ_BITMAP) && (bldcnt & t2)) {
-      // Semi-transparent and bitmap sprites blend whenever the layer below is
-      // a second target, regardless of the selected effect.
-      const u32 ea = (kind == K_OBJ_BITMAP) ? top_alpha[i] : eva;
-      const u32 eb = (kind == K_OBJ_BITMAP) ? 16 - ea : evb;
-      o = blend(a, b, ea, eb);
-    } else if (kind == K_3D && (bldcnt & t2)) {
-      o = blend_3d(a, b);
-    } else if ((bldcnt & t1) && (win[i] & 0x20)) {
-      switch (effect) {
-      case 1: if (bldcnt & t2) o = blend(a, b, eva, evb); break;
-      case 2: o = brighten(a, evy, 0x8); break;
-      case 3: o = darken(a, evy, 0x7); break;
-      default: break;
-      }
-    }
-    out[i] = (o & 0x00FFFFFF) | 0xFF000000;
-  }
-}
-
-} // namespace
-
 void Engine2D::colour_effects() {
-  composite_line(bldcnt_, eva_, evb_, evy_, top_.data(), second_.data(), top_id_.data(), top_kind_.data(),
-                 top_alpha_.data(), second_id_.data(), win_.data(), out_.data());
+  kern::active::composite_line(bldcnt_, eva_, evb_, evy_, top_.data(), second_.data(), top_id_.data(), top_kind_.data(),
+                               top_alpha_.data(), second_id_.data(), win_.data(), out_.data());
 }
 
 } // namespace ds::gpu

@@ -4,6 +4,7 @@
 #include "core/gpu/gpu3d.h"
 #include "core/gpu/vram_map.h"
 #include "core/nds.h"
+#include "core/profile.h"
 
 #include <algorithm>
 #include <cstring>
@@ -801,16 +802,16 @@ void Renderer3D::render(const Gpu3D& gx) {
   vm_ = &nds_.bus.vram_map();
   texv_ = &vm_->texture;
   palv_ = &vm_->texpal;
-  clear_buffers();
+  { DS_PROF(R3D_CLEAR); clear_buffers(); }
   u32 n = 0;
   const Polygon* const* polys = gx.render_polygons();
   for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
     if (polys[i]->degenerate) continue;
     setup_polygon(edges_[n++], *polys[i]);
   }
-  render_line(0, n);
-  for (s32 y = 1; y < 192; ++y) { render_line(y, n); final_pass(y - 1); }
-  final_pass(191);
+  { DS_PROF(R3D_SPANS); render_line(0, n); }
+  for (s32 y = 1; y < 192; ++y) { { DS_PROF(R3D_SPANS); render_line(y, n); } { DS_PROF(R3D_FINAL); final_pass(y - 1); } }
+  { DS_PROF(R3D_FINAL); final_pass(191); }
 }
 
 } // namespace ds::gpu

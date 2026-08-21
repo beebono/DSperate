@@ -2,7 +2,9 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/gpu.h"
 #include "core/gpu/vram_map.h"
+#include "core/gpu/kernels.h"
 #include "core/nds.h"
+#include "core/profile.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -112,7 +114,7 @@ void Gpu::on_hblank() {
   if (line_ < 192) {
     draw_line(line_);
     // Sprites are rendered one line ahead of the backgrounds.
-    if (line_ < 191) { engine[0].render_sprites(line_ + 1); engine[1].render_sprites(line_ + 1); }
+    if (line_ < 191) { DS_PROF(OBJ_DRAW); engine[0].render_sprites(line_ + 1); engine[1].render_sprites(line_ + 1); }
     nds_.dma.check(Cpu::ARM9, dma::MODE9_HBLANK);
   } else if (line_ == 215) {
     // The 3D frame flushed at VBlank is rasterised now, ahead of the next
@@ -204,11 +206,12 @@ void Gpu::draw_line(u32 line) {
   engine[0].set_3d_line(line3d_);
   engine[0].render_line(line);
   engine[1].render_line(line);
+  DS_PROF(OUTPUT);
   u32* dst_a = fb_[swap_ ? 0 : 1].data() + line * SCREEN_W;
   u32* dst_b = fb_[swap_ ? 1 : 0].data() + line * SCREEN_W;
   output_a(line, dst_a);
   output_b(line, dst_b);
-  if (capture_on_) capture(line);
+  if (capture_on_) { DS_PROF(CAPTURE); capture(line); }
   if (screens_on_) { expand_colours(dst_a); expand_colours(dst_b); }
   else { for (u32 i = 0; i < 256; ++i) dst_a[i] = dst_b[i] = 0xFF000000; }
 }
@@ -303,35 +306,9 @@ void Gpu::capture(u32 line) {
   }
 }
 
-void Gpu::apply_master_brightness(u16 reg, u32* dst) {
-  const u32 mode = reg >> 14;
-  u32 factor = reg & 0x1F;
-  if (factor > 16) factor = 16;
-  if (mode == 1) {
-    for (u32 i = 0; i < 256; ++i) {
-      const u32 v = dst[i]; u32 rb = v & 0x3F003F, g = v & 0x003F00;
-      rb += ((((0x3F003F - rb) * factor) >> 4) & 0x3F003F);
-      g  += ((((0x003F00 - g) * factor) >> 4) & 0x003F00);
-      dst[i] = rb | g | 0xFF000000;
-    }
-  } else if (mode == 2) {
-    for (u32 i = 0; i < 256; ++i) {
-      const u32 v = dst[i]; u32 rb = v & 0x3F003F, g = v & 0x003F00;
-      rb -= ((((rb * factor) + (0xF * 0x010001)) >> 4) & 0x3F003F);
-      g  -= ((((g * factor) + (0xF * 0x000100)) >> 4) & 0x003F00);
-      dst[i] = rb | g | 0xFF000000;
-    }
-  }
-}
+void Gpu::apply_master_brightness(u16 reg, u32* dst) { kern::active::master_brightness(reg, dst); }
 
 // 6-bit RGB666 records -> 8-bit 0xAARRGGBB (top two bits replicated into the low two).
-void Gpu::expand_colours(u32* dst) {
-  for (u32 i = 0; i < 256; ++i) {
-    const u32 c = dst[i];
-    const u32 r = (c & 0x3F) << 18, g = (c & 0x3F00) << 2, b = (c & 0x3F0000) >> 14;
-    const u32 v = r | g | b;
-    dst[i] = v | ((v & 0xC0C0C0) >> 6) | 0xFF000000;
-  }
-}
+void Gpu::expand_colours(u32* dst) { kern::active::expand_colours(dst); }
 
 } // namespace ds::gpu

@@ -22,3 +22,7 @@ add_test(NAME io COMMAND test_io)
 add_executable(test_gpu3d gpu3d_test.cpp)
 target_link_libraries(test_gpu3d PRIVATE dsperate_core)
 add_test(NAME gpu3d COMMAND test_gpu3d)
+
+add_executable(test_kernels kernels_test.cpp)
+target_link_libraries(test_kernels PRIVATE dsperate_core)
+add_test(NAME kernels COMMAND test_kernels)

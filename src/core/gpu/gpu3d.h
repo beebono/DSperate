@@ -89,8 +89,12 @@ public:
   // POWCNT1 bit 3 (geometry) and bit 2 (rendering).
   void set_powcnt(u16 value);
 
-  // Advance the engine to `arm9_time` (scheduler time, ARM9 cycles).
-  void run_to(u64 arm9_time);
+  // Advance the engine to `arm9_time` (scheduler time, ARM9 cycles). The
+  // idle check is inline: the scheduler calls this after every ARM9 slice.
+  void run_to(u64 arm9_time) {
+    if (!geometry_on_ || flush_request_ || (pipe_.empty() && !(gxstat_ & (1u << 27)))) { timestamp_ = arm9_time >> 1; return; }
+    run_to_slow(arm9_time);
+  }
   bool stalled() const { return stalled_; }
 
   // Display timing hooks.
@@ -195,6 +199,7 @@ private:
   void fifo_write(const Entry& e);
   Entry fifo_read();
   void gxfifo_write(u32 value);
+  void run_to_slow(u64 arm9_time);
   void execute();
   void exec_single(u8 cmd, u32 param);
   void exec_multi(u8 cmd);

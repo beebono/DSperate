@@ -6,6 +6,7 @@
 //   <pc> <instr> <cpsr> r0 .. r14     (hex, one line per instruction)
 // and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py.
 #include "core/nds.h"
+#include "core/profile.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -88,6 +89,7 @@ int main(int argc, char** argv) {
   }
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   if (rom && direct) nds.setup_direct_boot();
+  ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
   if (const char* w = std::getenv("DS_WATCH")) nds.bus.enable_watch(static_cast<ds::u32>(std::strtoul(w, nullptr, 16)));
   if (trace) {
     ts.out[0] = std::fopen((std::string(trace) + ".arm9.trace").c_str(), "w");
@@ -122,6 +124,7 @@ int main(int argc, char** argv) {
   if (trace) { std::fclose(ts.out[0]); std::fclose(ts.out[1]);
     std::fprintf(stderr, "arm9: %llu lines (%llu instrs), arm7: %llu lines (%llu instrs), cap %llu lines each\n",
                  ts.count[0], ts.executed[0], ts.count[1], ts.executed[1], ts.max); }
+  ds::prof::report();
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));

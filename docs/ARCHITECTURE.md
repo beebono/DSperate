@@ -196,6 +196,21 @@ OBJ-A/B, extended palettes, textures, ARM7) a view of 16 KB blocks with a
 direct pointer where one bank backs a block and an OR-read fallback where
 banks overlap; the CPU page tables are built from the same views.
 
+**Kernel layer** (`gpu/kernels.h`, `kernels_ref.cpp`, `kernels_neon.cpp`).
+The line stages that are straight passes live as free functions over plane
+pointers in `kern::ref` (portable, the behavioural definition) and
+`kern::neon` (AArch64, same names and signatures); `kern::active` is a
+namespace alias chosen at configure time, so the renderer has no runtime
+dispatch. Current set: BG plane select, OBJ select (the OBJ plane is resolved
+through the palettes once per line first), colour effects, palette
+conversion, 16-colour tile rows (a 64-byte `tbl` lookup), the 3D layer copy,
+master brightness and the 6→8-bit expansion. `tests/kernels_test.cpp` diffs
+the twins on random planes covering every branch, and the AArch64 build's
+frame dumps are compared byte for byte with the host's. The stages that are
+not straight passes (tile/map fetch, sprite rasterisation, windows, the 3D
+span loop) stay scalar for now; `DS_PROFILE=1` in the CLI reports where the
+time goes.
+
 ### 5.2 The 3D engine as built (`gpu/gpu3d.*`, `gpu/render3d.*`)
 
 Geometry (`Gpu3D`): a 256-entry command FIFO feeding a 4-entry pipe, with a

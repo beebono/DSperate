@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/sched/scheduler.h"
 #include "core/nds.h"
+#include "core/profile.h"
 
 #include <limits>
 
@@ -44,10 +45,10 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
   const Cpu which = cpu.which;
   for (;;) {
     if (nds_.dma.any_running(which)) {
-      cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget)));
+      { DS_PROF(DMA); cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget))); }
       if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which)) return;
     }
-    run(cpu);
+    { prof::Scope sc(which == Cpu::ARM9 ? prof::CPU9 : prof::CPU7); run(cpu); }
     if (!cpu.preempt_residual) return;
     cpu.hot.cycle_budget += cpu.preempt_residual;   // overshoot of the preempted instruction comes off the residual
     cpu.preempt_residual = 0;
@@ -78,7 +79,7 @@ u64 Scheduler::run_until(u64 until) {
     s64 ran9 = (a9.halted || gx_stalled) ? slice : (slice - a9.hot.cycle_budget);
     if (ran9 <= 0) ran9 = 1;
     running_ = nullptr;
-    nds_.gpu3d.run_to(now_ + static_cast<u64>(ran9));
+    { DS_PROF(GX_RUN); nds_.gpu3d.run_to(now_ + static_cast<u64>(ran9)); }
 
     // The ARM7 runs at half clock and must cover the same span of time. Its
     // overshoot and the odd ARM9 cycle are carried in arm7_debt_, the way
