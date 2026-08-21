@@ -115,6 +115,9 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
       if (num_) dispcnt_ &= 0xC0B1FFF7;
       return;
     }
+    // BG0HOFS on engine A also scrolls the 3D layer, even with the engine powered down.
+    if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value & 0xFF), 0x00FF);
+    if (!num_ && r == 0x11) nds_.gpu3d.set_render_xpos(static_cast<u16>(value << 8), 0xFF00);
     if (!enabled_) return;
     switch (r) {
     case 0x40: win0_[1] = value; return; case 0x41: win0_[0] = value; return;
@@ -153,6 +156,7 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
   case 0x02: dispcnt_ = (dispcnt_ & 0x0000FFFF) | (value << 16); if (num_) dispcnt_ &= 0xC0B1FFF7; return;
   default: break;
   }
+  if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value), 0xFFFF);
   // Everything below is ignored while the engine is powered down (POWCNT1),
   // which is the behaviour the reference implementation models.
   if (!enabled_) return;

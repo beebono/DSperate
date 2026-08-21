@@ -9,15 +9,17 @@ and maybe overlaid shader support later on.
 
 ---
 
-**Status: 2D video, no 3D or sound.** Both CPUs (ARM946E-S / ARM7TDMI) are
+**Status: 2D and 3D video, no sound.** Both CPUs (ARM946E-S / ARM7TDMI) are
 interpreted with melonDS-grade cycle timing; DMA, timers, IPC, SPI devices,
 RTC, Wi-Fi probing, the divider/sqrt unit and a retail cartridge (KEY1, save
 chip, direct boot) are in. The two 2D engines are complete in portable C++
 (all BG modes, sprites, windows, mosaic, blending, extended palettes, display
-capture, master brightness) and render several commercial games pixel-for-pixel
-like melonDS ([docs/TRACING.md](docs/TRACING.md)); the NEON kernels, the 3D
-engine and the SPU are next. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-describes the design.
+capture, master brightness), and the 3D engine — command FIFO with cycle
+timing, matrix stacks, lighting, clipping, and a software rasteriser with
+textures, shadows, fog, edge marking and anti-aliasing — renders commercial
+games' 3D scenes pixel-for-pixel like melonDS
+([docs/TRACING.md](docs/TRACING.md)); the NEON kernels and the SPU are next.
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the design.
 
 ## Licence
 

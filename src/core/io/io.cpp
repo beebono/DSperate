@@ -24,7 +24,7 @@ void Io::reset() {
   cpu_io[0] = CpuIo{}; cpu_io[1] = CpuIo{};
   dispstat[0] = dispstat[1] = 0; vcount = 0;
   wramcnt = 0; std::memset(vramcnt, 0, sizeof vramcnt);
-  powcnt1 = 0; powcnt2 = 0; gxstat = 0; math = MathUnit{};
+  powcnt1 = 0; powcnt2 = 0; math = MathUnit{};
   keyinput = 0x03FF; extkeyin = 0x007F;
   exmemcnt = 0;
   spicnt = 0; spidata = 0;
@@ -32,7 +32,7 @@ void Io::reset() {
   rtc = Rtc{};
   cart = Cart{};
   sound_cnt = 0; sound_bias = 0x200;
-  sound_regs.fill(0); gx_regs.fill(0);
+  sound_regs.fill(0);
   wifi_reset();
 }
 
@@ -572,13 +572,14 @@ void Io::sqrt_done() {
   m.sqrt_res = static_cast<u32>(res);
 }
 
-void Io::gx_check_irq() {
-  const u32 mode = gxstat >> 30;
-  if (mode == 1 || mode == 2) request_irq(Cpu::ARM9, IRQ_GX_FIFO);   // less-than-half / empty: always true without a 3D engine
+void Io::set_irq_line(Cpu cpu, u32 bit, bool on) {
+  if (on) request_irq(cpu, bit);
+  else { cpu_io[ci(cpu)].if_ &= ~(1u << bit); update_irq(cpu); }
 }
 
 // ---- register dispatch ----------------------------------------------------
 u32 Io::read(Cpu cpu, u32 addr, u32 width) {
+  if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) return nds_.gpu3d.read(addr, width);
   if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) return nds_.gpu.reg_read(addr, width);
   bool handled = false;
   if (width == 32) { u32 v = read32_special(cpu, addr, handled); if (handled) return v; return read16(cpu, addr) | (static_cast<u32>(read16(cpu, addr + 2)) << 16); }
@@ -587,6 +588,7 @@ u32 Io::read(Cpu cpu, u32 addr, u32 width) {
 }
 
 void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
+  if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) { nds_.gpu3d.write(addr, width, value); return; }
   if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) {
     if (std::getenv("DS_DEBUG_GPUREG") && (addr & 0xFF) >= 0x50) std::fprintf(stderr, "[gpureg] frame %llu line %u write%u %08x = %08x\n", (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
     nds_.gpu.reg_write(addr, width, value); return;
@@ -607,7 +609,6 @@ u32 Io::read32_special(Cpu cpu, u32 addr, bool& handled) {
   case 0x04100000: return ipc_fifo_recv(cpu);
   case 0x04100010: return cart_read_data();
   case 0x040001A4: return cart.romctrl;
-  case 0x04000600: return gxstat | (1u << 26) | (1u << 25);     // FIFO empty, less than half full
   case 0x04000280: return math.divcnt;
   case 0x04000290: return static_cast<u32>(math.div_num);
   case 0x04000294: return static_cast<u32>(math.div_num >> 32);
@@ -636,7 +637,7 @@ void Io::write32_special(Cpu cpu, u32 addr, u32 value, bool& handled) {
   switch (addr) {
   case 0x04000208: c.ime = value & 1; update_irq(cpu); return;
   case 0x04000210: c.ie = value; update_irq(cpu); return;
-  case 0x04000214: c.if_ &= ~value; update_irq(cpu); return;
+  case 0x04000214: c.if_ &= ~value; update_irq(cpu); if (cpu == Cpu::ARM9) nds_.gpu3d.check_fifo_irq(); return;
   case 0x04000188: ipc_fifo_send(cpu, value); return;
   case 0x040001A4: cart_write_romctrl(value); return;
   case 0x04000280: math.divcnt = value & 0x3; div_start(); return;
@@ -647,11 +648,6 @@ void Io::write32_special(Cpu cpu, u32 addr, u32 value, bool& handled) {
   case 0x040002B0: math.sqrtcnt = value & 0x1; sqrt_start(); return;
   case 0x040002B8: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFF00000000ull) | value; sqrt_start(); return;
   case 0x040002BC: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); sqrt_start(); return;
-  case 0x04000600:
-    gxstat = (gxstat & ~0xC0000000u) | (value & 0xC0000000u);
-    if (value & 0x8000) gxstat &= ~0x8000u;                       // acknowledge matrix stack error
-    gx_check_irq();
-    return;
   case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: nds_.dma.write_src(cpu, (addr - 0x040000B0) / 12, value); return;
   case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: nds_.dma.write_dst(cpu, (addr - 0x040000B4) / 12, value); return;
   case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: nds_.dma.write_cnt(cpu, (addr - 0x040000B8) / 12, value); return;
@@ -696,8 +692,6 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0x04000504: return sound_bias;
   case 0x04000280: return math.divcnt;
   case 0x040002B0: return math.sqrtcnt;
-  case 0x04000600: return static_cast<u16>(gxstat);
-  case 0x04000602: return static_cast<u16>((gxstat | (1u << 26) | (1u << 25)) >> 16);
   default: break;
   }
   if (a9 && addr >= 0x04000290 && addr < 0x040002C0) { bool h; const u32 v = read32_special(cpu, addr & ~3u, h); return static_cast<u16>((addr & 2) ? v >> 16 : v); }
@@ -773,8 +767,8 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   case 0x04000208: c.ime = value & 1; update_irq(cpu); return;
   case 0x04000210: c.ie = (c.ie & 0xFFFF0000) | value; update_irq(cpu); return;
   case 0x04000212: c.ie = (c.ie & 0x0000FFFF) | (static_cast<u32>(value) << 16); update_irq(cpu); return;
-  case 0x04000214: c.if_ &= ~static_cast<u32>(value); update_irq(cpu); return;
-  case 0x04000216: c.if_ &= ~(static_cast<u32>(value) << 16); update_irq(cpu); return;
+  case 0x04000214: c.if_ &= ~static_cast<u32>(value); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq(); return;
+  case 0x04000216: c.if_ &= ~(static_cast<u32>(value) << 16); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq(); return;
   case 0x04000300:
     c.postflg |= value & 1; if (a9) c.postflg = (c.postflg & 1) | (value & 2);
     if (!a9 && (value >> 8)) write8(cpu, 0x04000301, static_cast<u8>(value >> 8));
@@ -791,13 +785,6 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
     return;
   }
   if (!a9 && addr >= 0x04000400 && addr < 0x04000500) { sound_regs[addr - 0x04000400] = static_cast<u8>(value); sound_regs[addr - 0x04000400 + 1] = static_cast<u8>(value >> 8); return; }
-  if (a9 && addr >= 0x04000320 && addr < 0x040006A4) {
-    if (addr - 0x04000320 < 0x100) gx_regs[addr - 0x04000320] = static_cast<u8>(value);
-    if (addr == 0x04000602) { gxstat = (gxstat & 0x0000FFFFu) | ((static_cast<u32>(value) << 16) & 0xC0000000u); gx_check_irq(); }
-    else if (addr == 0x04000600 && (value & 0x8000)) gxstat &= ~0x8000u;
-    else if (addr >= 0x04000400 && addr < 0x04000600) gx_check_irq();      // a command was "executed"
-    return;
-  }
 }
 
 u8 Io::read8(Cpu cpu, u32 addr) {

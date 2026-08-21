@@ -33,7 +33,7 @@ public:
   // DISPSTAT/VCOUNT, which stay with the interrupt logic in Io.
   static bool owns_reg(u32 addr) {
     const u32 r = addr - 0x04000000;
-    if (r < 0x70) return r >= 8 || r < 4;
+    if (r < 0x70) return (r >= 8 || r < 4) && (r < 0x60 || r >= 0x64);   // 0x60 is DISP3DCNT
     return r >= 0x1000 && r < 0x1070 && (r < 0x1004 || r >= 0x1008);
   }
   u32  reg_read(u32 addr, u32 width);
@@ -59,6 +59,7 @@ private:
   alignas(16) std::array<u16, 256> fifo_line_{};
   bool run_fifo_ = false;
   std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb_{};
+  const u32* line3d_ = nullptr;   // 3D output for the line being drawn
 
   void draw_line(u32 line);
   void output_a(u32 line, u32* dst);

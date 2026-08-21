@@ -49,7 +49,7 @@ void Dma::write_cnt(Cpu cpu, int n, u32 v) {
   c.start_mode = (cpu == Cpu::ARM9) ? ((v >> 27) & 7) : (((v >> 28) & 3) | 0x10);
   if ((c.start_mode & 7) == 0) start(c);
   else if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) { if (nds_.io.cart_drq()) start(c); }
-  else if (c.start_mode == MODE9_GXFIFO) { /* GX FIFO DMA: not until the 3D engine exists */ }
+  else if (c.start_mode == MODE9_GXFIFO) nds_.gpu3d.check_fifo_dma();
   if (c.start_mode == MODE9_GBA || c.start_mode == MODE7_WIFI_GBA)
     std::fprintf(stderr, "[dma] unimplemented start mode %02x on %s\n", c.start_mode, cpu == Cpu::ARM9 ? "arm9" : "arm7");
 }
@@ -128,6 +128,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
   u32 used = 0;
   mem::Bus& bus = nds_.bus;
   while (c.iter_count > 0 && used < budget) {
+    if (a9 && nds_.gpu3d.stalled()) break;      // a full GX FIFO stalls the ARM9's DMA too
     u32 cost = unit_cycles(c, burst_start, word);
     if (a9) cost <<= 1;
     used += cost;

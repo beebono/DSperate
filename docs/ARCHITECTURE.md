@@ -137,8 +137,10 @@ overlaps them; branches pay the pipeline refill. Measured against melonDS on
 Meteos: instructions per frame agree to ~0.1% on the ARM9 and ~3% on the ARM7.
 
 **DMA** (`dma/`): eight channels with immediate/VBlank/HBlank/display-start/cart
-triggers, main-RAM burst unit timings, repeat and IRQ. GX FIFO and display-FIFO
-modes wait for the 3D and 2D engines.
+triggers, main-RAM burst unit timings, repeat and IRQ. The display-FIFO mode is
+clocked by the output stage; the GX FIFO mode transfers 112 words whenever the
+geometry FIFO drops below half, and a full FIFO stalls the ARM9 and its DMA
+until it drains (the geometry engine keeps executing behind the stall).
 
 ## 5. Renderer: decide nothing per pixel
 
@@ -157,7 +159,9 @@ modes wait for the 3D and 2D engines.
 - Every NEON kernel ships next to a portable C++ reference with the same name
   and a test that diffs them. The C++ version is what non-AArch64 hosts run.
 - The 3D geometry engine is fixed-point integer math and stays in software;
-  its rasteriser architecture is **not yet documented** on the research side.
+  the rasteriser is a scanline renderer whose spans are again straight passes
+  (§5.2). The research notes do not cover DraStic's rasteriser; ours follows
+  the hardware behaviour as documented by melonDS.
 
 ### 5.1 The 2D engines as built (`gpu/engine2d.*`, `gpu/gpu.*`, `gpu/vram_map.*`)
 
@@ -191,6 +195,41 @@ height is latched, OBJ mosaic is live). `VramMap` gives each consumer (BG-A/B,
 OBJ-A/B, extended palettes, textures, ARM7) a view of 16 KB blocks with a
 direct pointer where one bank backs a block and an OR-read fallback where
 banks overlap; the CPU page tables are built from the same views.
+
+### 5.2 The 3D engine as built (`gpu/gpu3d.*`, `gpu/render3d.*`)
+
+Geometry (`Gpu3D`): a 256-entry command FIFO feeding a 4-entry pipe, with a
+stall queue for writes that arrive while the FIFO is full (the ARM9 and its
+DMA then sit out scheduler slices until it drains); packed GXFIFO writes and
+the per-command ports; 20.12 matrix stacks (projection/texture depth 1,
+position+vector depth 32); vertex colour and normal-based lighting with the
+hardware's truncation points; Sutherland-Hodgman clipping in Z, Y, X order
+with 64-bit interpolation and 5-bit colour quantisation between stages; the
+32-bit-divider viewport transform; strips sharing unclipped vertices;
+W normalisation to 16 bits and Z/W depth; the 2048-polygon / 6144-vertex
+double-buffered RAM. The engine has its own clock in system cycles with
+per-command costs and the vertex/polygon pipelines' overlap rules; the
+scheduler advances it after every ARM9 slice and GXSTAT reads catch up first.
+The GX FIFO IRQ is level-sensitive (re-raised on acknowledge while the
+condition holds).
+
+Rasteriser (`Renderer3D`): at VBlank the flushed polygon list is split into
+opaque and translucent, Y-sorted (stably, bottom then top) unless manual
+sorting is requested, and the render registers are latched; at line 215 the
+frame is rasterised into 258x194 colour/depth/attribute buffers with a
+one-pixel border and a second layer holding the pixel underneath (for
+anti-aliasing and translucent blending through edges). Edges step with an
+18-bit slope fraction computed as x * (1/y); attributes use the two-stage
+interpolation (9-bit perspective factor along Y, 8-bit along X, then linear
+by that factor, with a linear short-cut for equal W); Z interpolates linearly
+with a span reciprocal, W perspective-correctly. Fill rules per edge
+direction, wireframe, shadow masks/volumes via a two-line stencil, decal /
+modulate / toon / highlight shading, all seven texture formats through the
+texture and palette VRAM views, alpha test, equal-depth and front-over-back
+depth tests, fog (with the 32-bit wrap), edge marking and AA coverage
+blending follow the hardware as melonDS models it. Engine A reads the result
+per line (X-scrolled by BG0HOFS) as its 3D layer, and display capture can
+take it as source A.
 
 ## 6. Verification
 

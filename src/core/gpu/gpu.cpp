@@ -98,6 +98,7 @@ void Gpu::reg_write(u32 addr, u32 width, u32 value) {
 void Gpu::set_powcnt(u16 value) {
   engine[0].set_enabled(value & (1 << 1));
   engine[1].set_enabled(value & (1 << 9));
+  nds_.gpu3d.set_powcnt(value);
   swap_ = value & (1 << 15);
 }
 
@@ -113,6 +114,10 @@ void Gpu::on_hblank() {
     // Sprites are rendered one line ahead of the backgrounds.
     if (line_ < 191) { engine[0].render_sprites(line_ + 1); engine[1].render_sprites(line_ + 1); }
     nds_.dma.check(Cpu::ARM9, dma::MODE9_HBLANK);
+  } else if (line_ == 215) {
+    // The 3D frame flushed at VBlank is rasterised now, ahead of the next
+    // frame's display lines.
+    nds_.gpu3d.render_frame();
   } else if (line_ == 262) {
     engine[0].render_sprites(0); engine[1].render_sprites(0);
   }
@@ -135,6 +140,7 @@ void Gpu::on_scanline_start() {
     nds_.dma.stop(Cpu::ARM9, dma::MODE9_DISPLAY_FIFO);
     nds_.dma.check(Cpu::ARM9, dma::MODE9_VBLANK);
     nds_.dma.check(Cpu::ARM7, dma::MODE7_VBLANK);
+    nds_.gpu3d.vblank();
     if (capture_on_) { capcnt_ &= ~(1u << 31); capture_on_ = false; }
   } else if (line_ == 262) nds_.io.set_vblank(false);
   if (line_ >= 2 && line_ < 194) nds_.dma.check(Cpu::ARM9, dma::MODE9_DISPLAY_START);
@@ -194,6 +200,8 @@ void Gpu::on_display_fifo(u32 x) {
 // ---- output stage -----------------------------------------------------------
 
 void Gpu::draw_line(u32 line) {
+  line3d_ = nds_.gpu3d.line(line);
+  engine[0].set_3d_line(line3d_);
   engine[0].render_line(line);
   engine[1].render_line(line);
   u32* dst_a = fb_[swap_ ? 0 : 1].data() + line * SCREEN_W;
@@ -248,7 +256,7 @@ void Gpu::capture(u32 line) {
   if (!(vm.lcdc_mask & (1u << dst_bank))) return;
   u16* dst = reinterpret_cast<u16*>(vm.bank(dst_bank)) + (((((cnt >> 18) & 3) << 14) + line * width) & 0xFFFF);
 
-  const Pixel* src_a = engine[0].output();      // TODO: 3D-only source (bit 24) once the 3D layer exists
+  const Pixel* src_a = (cnt & (1 << 24)) ? line3d_ : engine[0].output();
   const u16* src_b = nullptr;
   if (cnt & (1 << 25)) src_b = fifo_line_.data();
   else {

@@ -138,11 +138,8 @@ public:
   void wifi_reset();
   u16  wifi_read16(u32 addr);
   void wifi_write16(u32 addr, u16 value);
-  std::array<u8, 0x100> gx_regs{};
-  // Geometry engine placeholder: no 3D yet, so the command FIFO is always
-  // empty and GXSTAT's FIFO IRQ conditions (bits 30-31) hold permanently.
-  u32 gxstat = 0;
-  void gx_check_irq();
+  // Level-sensitive IRQ sources (the GX FIFO) set and clear their IF bit.
+  void set_irq_line(Cpu cpu, u32 bit, bool on);
   MathUnit math;
   void div_start(); void div_done();
   void sqrt_start(); void sqrt_done();

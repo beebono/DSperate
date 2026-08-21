@@ -6,6 +6,7 @@
 #include "core/mem/bus.h"
 #include "core/sched/scheduler.h"
 #include "core/gpu/gpu.h"
+#include "core/gpu/gpu3d.h"
 #include "core/spu/spu.h"
 #include "core/io/io.h"
 #include "core/dma/dma.h"
@@ -48,6 +49,7 @@ struct NDS {
   mem::Bus   bus;
   Scheduler  sched;
   gpu::Gpu   gpu;
+  gpu::Gpu3D gpu3d;
   spu::Spu   spu;
   io::Io     io;
   dma::Dma   dma;

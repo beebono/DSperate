@@ -85,6 +85,7 @@ Debug hooks in the CLI, all environment-gated and free when unset:
 | `DS_DEBUG_GPU=1` | one line per frame: POWCNT, DISPCNT A/B, master brightness, DISPCAPCNT, VRAMCNT |
 | `DS_DEBUG_DUMP_FRAME=N` (`DS_DEBUG_DUMP_LINE=L`) | dump both engines' registers/latches and render line L at frame N |
 | `DS_DEBUG_VRAMNZ=1`, `DS_DEBUG_VRAMCNT=1`, `DS_DEBUG_GPUREG=1` | per-frame bank fill, VRAMCNT writes, blend/brightness register writes |
+| `DS_DEBUG_GX=1` | one line per VBlank: 3D power/flush state, polygon and vertex counts, DISP3DCNT, clear attributes, FIFO level, GXSTAT, ARM9 IE/IF |
 | `DS_WATCH=<hex>` | log writes to a main-RAM or VRAM word with PC, frame and line |
 | `TRACE_PC_HIST=1` | uncollapsed PC histogram per CPU at exit (what a "quiet" frame is doing) |
 | `TRACE_START_FRAME=N` | start tracing at frame N (both tracers) |
@@ -153,6 +154,24 @@ except for fade/typewriter phase; Rhythm Heaven differs only where it draws
 with the 3D engine. The AArch64 build under qemu produces byte-identical
 frames to the host build.
 
+With the 3D engine (2026-08-21): Rhythm Heaven's 3D title logo is
+pixel-exact at a constant 2-frame offset (3 transition frames of 400 differ);
+Super Mario 64 DS's rotating star (textured, lit, anti-aliased) is exact at
+offset 0 then offset 1 after a mid-run skew change; Geometry Wars differs on
+4 transition frames. Star Fox Command's Nintendo-logo quad (rendered through
+display capture with per-frame screen swapping) is exact in content but runs
+6 frames ahead of melonDS; the trace shows melonDS's ARM9 spending those
+frames in a file-name search loop that DSperate finished earlier, so the skew
+is cartridge-load timing, not rendering (see Limits). Over 1200 frames:
+Mario & Luigi: Bowser's Inside Story 0 frames differ at offset 1, Metroid
+Prime Hunters 0 at offset 0, Spectrobes 6 at offset 2; Golden Sun: Dark
+Dawn's 3D title scene (textured terrain, drifting translucent clouds, both
+screens through display capture) is exact on the top screen at offset -6 and
+on the bottom screen apart from its pulsing "tap the screen" text, whose
+phase is not tied to the frame counter; Kingdom Hearts 358/2 Days, Okamiden
+and Metroid Prime Pinball differ only in fade steps and moving sprites
+(phase). The AArch64 build remains byte-identical to the host on these.
+
 ## Toolchain hazards
 
 - **GCC 13.3 AArch64, `-O2`: a side-effecting member function deleted.** With
@@ -173,6 +192,11 @@ frames to the host build.
   POWCNT write that lights the screens ~80 frames later than DSperate (an
   ARM7-side wait the firmware performs is faster here). Not yet investigated;
   it does not affect direct-booted games.
+- Cartridge-heavy scenes run ahead of melonDS: Star Fox Command reaches its
+  Nintendo logo 6 frames early (melonDS's ARM9 spends ~43 k iterations of a
+  string-compare loop at 0x02086e40 during frames 146-152 that DSperate has
+  already finished). The per-transfer cart timing has not been compared in
+  isolation yet; this is the next timing item to pin down.
 
 - Timing follows melonDS's model (see ARCHITECTURE.md §4) and agrees to
   ~0.1% (ARM9) / ~3% (ARM7) in instructions per frame on Meteos. The ARM7

@@ -19,7 +19,7 @@ static std::vector<u8> slurp(const std::string& path) {
 NDS::NDS()
     : run_arm9(&interp::run), run_arm7(&interp::run),
       arm9(new CpuContext), arm7(new CpuContext),
-      bus(*this), sched(*this), gpu(*this), spu(*this), io(*this), dma(*this) {
+      bus(*this), sched(*this), gpu(*this), gpu3d(*this), spu(*this), io(*this), dma(*this) {
   arm9->reset(Cpu::ARM9, this);
   arm7->reset(Cpu::ARM7, this);
   arm9->hot.other_cpu = reinterpret_cast<u64>(arm7.get());
@@ -42,6 +42,7 @@ void NDS::reset() {
   arm9->cp15_itcm = 0x00000020;
   arm9->hot.regs[15] = arm9->exception_base() + 8;
   bus.reset();
+  gpu3d.reset();
   gpu.reset();
   spu.reset();
   frame_count = 0;

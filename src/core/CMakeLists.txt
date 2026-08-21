@@ -15,6 +15,8 @@ add_library(dsperate_core STATIC
   gpu/gpu.cpp
   gpu/engine2d.cpp
   gpu/vram_map.cpp
+  gpu/gpu3d.cpp
+  gpu/render3d.cpp
   spu/spu.cpp
   io/io.cpp
 )

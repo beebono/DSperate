@@ -84,9 +84,16 @@ static void test_vramcnt_layout() {
 static void test_gxstat_irq() {
   NDS nds;
   nds.io.cpu_io[0].ie = 1u << 21; nds.io.cpu_io[0].ime = 1;
-  w32(nds, 0x04000600, 0x40000000);                         // IRQ when the FIFO is less than half full: always, for now
+  w32(nds, 0x04000600, 0x40000000);                         // ignored: geometry engine powered down
+  CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 21), 0u);
+  w16(nds, 0x04000304, 0x820F);
+  w32(nds, 0x04000600, 0x40000000);                         // IRQ while the FIFO is less than half full
   CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 21), 1u << 21);
   CHECK_EQ(r32(nds, 0x04000600) & 0x06000000, 0x06000000u); // FIFO empty + less than half
+  w32(nds, 0x04000214, 1u << 21);                           // level-sensitive: acknowledging re-raises it
+  CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 21), 1u << 21);
+  w32(nds, 0x04000600, 0);
+  CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 21), 0u);
 }
 
 int main() {

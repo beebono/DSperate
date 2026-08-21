@@ -69,11 +69,16 @@ u64 Scheduler::run_until(u64 until) {
     CpuContext& a7 = nds_.cpu(Cpu::ARM7);
     a9.hot.cycle_budget = static_cast<s32>(slice);
     running_ = &a9; running_start_budget_ = static_cast<s32>(slice); running_shift_ = 0;
-    run_cpu(a9, nds_.run_arm9);
+    // While the GX FIFO is full the ARM9 (and its DMA) sit out the slice;
+    // the geometry engine keeps draining behind it.
+    const bool gx_stalled = nds_.gpu3d.stalled();
+    if (!gx_stalled) run_cpu(a9, nds_.run_arm9);
     // A halted CPU consumes exactly the slice; a running one may overshoot,
     // and the overshoot is real time (it carries into the next slice).
-    s64 ran9 = a9.halted ? slice : (slice - a9.hot.cycle_budget);
+    s64 ran9 = (a9.halted || gx_stalled) ? slice : (slice - a9.hot.cycle_budget);
     if (ran9 <= 0) ran9 = 1;
+    running_ = nullptr;
+    nds_.gpu3d.run_to(now_ + static_cast<u64>(ran9));
 
     // The ARM7 runs at half clock and must cover the same span of time. Its
     // overshoot and the odd ARM9 cycle are carried in arm7_debt_, the way
