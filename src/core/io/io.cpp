@@ -813,7 +813,7 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
   if (addr == 0x04000300) { write16(cpu, addr, value); return; }
   if (!a9 && addr == 0x04000301) {                       // HALTCNT
     const u8 v = value & 0xC0;
-    if (v == 0x80 || v == 0xC0) { CpuContext& ctx = nds_.cpu(Cpu::ARM7); ctx.halted = true; ctx.hot.cycle_budget = -1; }
+    if (v == 0x80 || v == 0xC0) nds_.cpu(Cpu::ARM7).halted = true;   // the run loop ends the slice
     else if (v == 0x40) std::fprintf(stderr, "[io] GBA mode requested; not supported\n");
     return;
   }

@@ -259,6 +259,25 @@ public:
   struct Fixup { size_t at; u32 kind; u32 rt_or_cond; u32 bit; };
   // Kinds: 0 = b, 1 = b.cond, 2 = cbz, 3 = cbnz, 4 = tbz, 5 = tbnz (cbz/cbnz 32-bit only)
   size_t b_fwd() { size_t at = pos_; emit(0x14000000u); return at; }
+  size_t bl_fwd() { size_t at = pos_; emit(0x94000000u); return at; }
+  // Literal data in the instruction stream (read by a stub through x30).
+  void word(u32 v) { emit(v); }
+  // Resolve the branch at `at` (any kind above, b/bl included) to an absolute target.
+  static void patch_rel(u8* at, const u8* target) {
+    u32 w; std::memcpy(&w, at, 4);
+    const s64 delta = target - at;
+    if ((w & 0x7C000000u) == 0x14000000u) {                 // b / bl
+      w = (w & 0xFC000000u) | (static_cast<u32>(delta >> 2) & 0x03FFFFFFu);
+    } else if ((w & 0xFF000010u) == 0x54000000u) {          // b.cond
+      w = (w & 0xFF00001Fu) | ((static_cast<u32>(delta >> 2) & 0x7FFFFu) << 5);
+    } else if (((w >> 24) & 0x7E) == 0x34) {                // cbz / cbnz
+      w = (w & 0xFF00001Fu) | ((static_cast<u32>(delta >> 2) & 0x7FFFFu) << 5);
+    } else {                                                // tbz / tbnz
+      assert(delta >= -(s64{1} << 15) && delta < (s64{1} << 15));
+      w = (w & 0xFFF8001Fu) | ((static_cast<u32>(delta >> 2) & 0x3FFFu) << 5);
+    }
+    std::memcpy(at, &w, 4);
+  }
   size_t b_cond_fwd(Cond c) { size_t at = pos_; emit(0x54000000u | c); return at; }
   size_t cbz_fwd(u32 rt, bool sf = false) { size_t at = pos_; emit((sf ? 0xB4000000u : 0x34000000u) | rt); return at; }
   size_t cbnz_fwd(u32 rt, bool sf = false) { size_t at = pos_; emit((sf ? 0xB5000000u : 0x35000000u) | rt); return at; }

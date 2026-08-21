@@ -203,6 +203,7 @@ void load_trial(Machine& m, const Trial& t, bool a9) {
   c.code_cycles = CODE_BASE >> 15;
   c.code_region = CODE_BASE >> 24;
   c.hot.cycle_budget = 1 << 24;
+  c.budget_at_halt = 0;
   c.jumped = false;
 }
 
@@ -221,8 +222,12 @@ bool compare(Machine& a, Machine& b, const Trial& t, u32 seed, bool report) {
   bool ok = true;
   for (int i = 0; i < 16; ++i) if (a.cpu.hot.regs[i] != b.cpu.hot.regs[i]) ok = false;
   if (a.cpu.hot.cpsr != b.cpu.hot.cpsr) ok = false;
-  if (a.cpu.hot.cycle_budget != b.cpu.hot.cycle_budget) ok = false;
   if (a.cpu.halted != b.cpu.halted) ok = false;
+  // Both engines end the slice with budget -1 on a halt; the budget at the
+  // moment of halting is the consumed-cycle comparison.
+  const s32 ba = a.cpu.halted ? a.cpu.budget_at_halt : a.cpu.hot.cycle_budget;
+  const s32 bb = b.cpu.halted ? b.cpu.budget_at_halt : b.cpu.hot.cycle_budget;
+  if (ba != bb) ok = false;
   if (std::memcmp(a.host(BUF_BASE), b.host(BUF_BASE), 0x2000) != 0) ok = false;
   if (std::memcmp(a.host(STACK - 0x200), b.host(STACK - 0x200), 0x400) != 0) ok = false;
   if (ok || !report) return ok;
@@ -233,13 +238,71 @@ bool compare(Machine& a, Machine& b, const Trial& t, u32 seed, bool report) {
   std::fprintf(stderr, "\n  %-6s %-10s %-10s\n", "", "interp", "jit");
   for (int i = 0; i < 16; ++i) if (a.cpu.hot.regs[i] != b.cpu.hot.regs[i]) std::fprintf(stderr, "  r%-5d %08x   %08x\n", i, a.cpu.hot.regs[i], b.cpu.hot.regs[i]);
   if (a.cpu.hot.cpsr != b.cpu.hot.cpsr) std::fprintf(stderr, "  cpsr   %08x   %08x\n", a.cpu.hot.cpsr, b.cpu.hot.cpsr);
-  if (a.cpu.hot.cycle_budget != b.cpu.hot.cycle_budget) std::fprintf(stderr, "  budget %08x   %08x (consumed %d vs %d)\n", a.cpu.hot.cycle_budget, b.cpu.hot.cycle_budget, (1 << 24) - a.cpu.hot.cycle_budget, (1 << 24) - b.cpu.hot.cycle_budget);
+  if (ba != bb) std::fprintf(stderr, "  budget %08x   %08x (consumed %d vs %d)\n", ba, bb, (1 << 24) - ba, (1 << 24) - bb);
   if (a.cpu.halted != b.cpu.halted) std::fprintf(stderr, "  halted %d %d\n", a.cpu.halted, b.cpu.halted);
   for (u32 i = 0; i < 0x2000; i += 4) {
     u32 x, y; std::memcpy(&x, a.host(BUF_BASE + i), 4); std::memcpy(&y, b.host(BUF_BASE + i), 4);
     if (x != y) { std::fprintf(stderr, "  buf[%04x] %08x %08x\n", i, x, y); }
   }
   return false;
+}
+
+bool run_both(Machine& mi, Machine& mj, const Trial& tr, bool a9, u32 seed, bool report) {
+  jit::flush(mj.cpu);
+  load_trial(mi, tr, a9);
+  load_trial(mj, tr, a9);
+  run_machine(mi, &interp::run);
+  run_machine(mj, &jit::run);
+  return compare(mi, mj, tr, seed, report);
+}
+
+// Hand-written sequences for cases the generator reaches rarely. Registers
+// follow the generator's conventions (r9/r6 = buffer, r13 = stack).
+struct Directed { Cpu which; bool thumb; std::vector<u32> code; u32 regs[15]; };
+
+void directed() {
+  const Directed cases[] = {
+    // Pending fetch cycles of the MOV must survive the LDR taking its slow path
+    // (unmapped address through a register offset).
+    {Cpu::ARM9, false, {0xE3A00001, 0xE7991102}, {0, 0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE3A00001, 0xE7991102}, {0, 0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // Same with a store, and with a conditional instruction in front.
+    {Cpu::ARM9, false, {0xE0811002, 0xE7891102}, {0, 1, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0x03A00001, 0xE7991102}, {0, 0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // CP15 cache maintenance (ignored by the core): drain write buffer,
+    // invalidate I-cache line, clean+invalidate D-cache line; then an ALU op.
+    {Cpu::ARM9, false, {0xEE070F9A, 0xEE073F35, 0xEE070F3E, 0xE2800001}, {5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // MSR CPSR_c keeping the mode (SYS): set F, then clear it; flags field from a register and an immediate.
+    {Cpu::ARM9, false, {0xE129F001, 0xE129F002, 0xE128F003, 0xE328F20F, 0xE2800001}, {0, 0x5F, 0x1F, 0xF0000000u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE129F001, 0xE129F002, 0xE128F003, 0xE328F20F, 0xE2800001}, {0, 0x5F, 0x1F, 0xF0000000u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // MSR CPSR_c changing the mode (SYS -> IRQ -> SYS): the interpreter path; r13/r14 are banked.
+    {Cpu::ARM9, false, {0xE129F001, 0xE1A0D004, 0xE129F002, 0xE2800001}, {0, 0x92, 0x1F, 0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // MSR CPSR_cxsf with the full mask, same mode, and an IRQ-enable (I cleared) with no IRQ pending.
+    {Cpu::ARM9, false, {0xE12FF001, 0xE2800001}, {0, 0x600000DFu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE129F001, 0xE2800001}, {0, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // Thumb: movs then ldr [r6 + r0] far away.
+    {Cpu::ARM9, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+  };
+  u32 n = 0;
+  for (const Directed& d : cases) {
+    const bool a9 = d.which == Cpu::ARM9;
+    Machine mi(d.which), mj(d.which);
+    CHECK(jit::attach(mj.nds, a9, !a9));
+    Trial t;
+    t.thumb = d.thumb;
+    t.code = d.code;
+    for (int i = 0; i < 15; ++i) t.regs[i] = d.regs[i];
+    t.regs[9] = BUF_BASE;
+    t.regs[6] = BUF_BASE;
+    t.regs[13] = STACK;
+    t.cpsr = 0;
+    const bool ok = run_both(mi, mj, t, a9, 100000 + n, true);
+    jit::detach(mj.nds);
+    CHECK(ok);
+    ++n;
+  }
+  std::printf("jit directed: %u cases ok\n", n);
 }
 
 void fuzz(Cpu which, bool thumb, u32 trials, u32 seed0) {
@@ -259,22 +322,14 @@ void fuzz(Cpu which, bool thumb, u32 trials, u32 seed0) {
     t.regs[6] = BUF_BASE + (r.below(4) << 10);
     t.regs[13] = STACK;
     t.cpsr = (r.next() & 0xF0000000u);
-    auto run_both = [&](const Trial& tr, bool report) {
-      jit::flush(mj.cpu);
-      load_trial(mi, tr, a9);
-      load_trial(mj, tr, a9);
-      run_machine(mi, &interp::run);
-      run_machine(mj, &jit::run);
-      return compare(mi, mj, tr, seed, report);
-    };
-    if (run_both(t, false)) continue;
+    if (run_both(mi, mj, t, a9, seed, false)) continue;
     // Shrink: the shortest failing prefix names the instruction.
     Trial p = t;
     for (u32 k = 1; k <= t.code.size(); ++k) {
       p.code.assign(t.code.begin(), t.code.begin() + k);
-      if (!run_both(p, false)) break;
+      if (!run_both(mi, mj, p, a9, seed, false)) break;
     }
-    run_both(p, true);
+    run_both(mi, mj, p, a9, seed, true);
     if (++fails >= 3) break;
   }
   CHECK(fails == 0);
@@ -292,6 +347,7 @@ int main(int argc, char** argv) {
     fuzz(seed >= 3000 ? Cpu::ARM7 : Cpu::ARM9, (seed / 1000) % 2 == 0, 1, seed);
     return 0;
   }
+  directed();
   fuzz(Cpu::ARM9, false, trials, 1000);
   fuzz(Cpu::ARM9, true, trials, 2000);
   fuzz(Cpu::ARM7, false, trials, 3000);

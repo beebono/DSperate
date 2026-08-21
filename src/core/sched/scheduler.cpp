@@ -16,15 +16,27 @@ void Scheduler::reset() {
   now_ = 0;
   arm7_debt_ = 0;
   for (auto& e : events_) e = Event{0, nullptr, 0, false};
+  next_ = std::numeric_limits<u64>::max();
 }
 
+// `next_` caches the earliest armed deadline so the per-slice loop scans the
+// table only when an event is actually due (or after a cancel).
 void Scheduler::schedule(EventId id, u64 at, EventFn fn, u32 param) {
-  events_[static_cast<size_t>(id)] = Event{at, fn, param, true};
+  Event& e = events_[static_cast<size_t>(id)];
+  const bool was_next = e.armed && e.at == next_;
+  e = Event{at, fn, param, true};
+  if (at < next_) next_ = at;
+  else if (was_next && at > next_) next_ = scan_deadline();
 }
 
-void Scheduler::cancel(EventId id) { events_[static_cast<size_t>(id)].armed = false; }
+void Scheduler::cancel(EventId id) {
+  Event& e = events_[static_cast<size_t>(id)];
+  if (!e.armed) return;
+  e.armed = false;
+  if (e.at == next_) next_ = scan_deadline();
+}
 
-u64 Scheduler::next_deadline() const {
+u64 Scheduler::scan_deadline() const {
   u64 best = std::numeric_limits<u64>::max();
   for (const auto& e : events_)
     if (e.armed && e.at < best) best = e.at;
@@ -32,12 +44,14 @@ u64 Scheduler::next_deadline() const {
 }
 
 void Scheduler::fire_due() {
+  if (now_ < next_) return;
   for (auto& e : events_) {
     if (e.armed && e.at <= now_) {
       e.armed = false;
-      e.fn(nds_, e.param);
+      e.fn(nds_, e.param);      // may schedule: next_ is kept current by schedule()
     }
   }
+  next_ = scan_deadline();
 }
 
 // One CPU's share of a slice: a running DMA goes first (the CPU is stalled),

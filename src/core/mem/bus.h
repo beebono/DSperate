@@ -27,7 +27,7 @@ public:
   void reset();
 
   // Remaps after control-register changes.
-  void update_tcm(CpuContext& cpu);   // CP15 (ARM9)
+  void update_tcm(CpuContext& cpu, bool force = false);   // CP15 (ARM9)
   void update_wram();                 // WRAMCNT
   void update_vram();                 // VRAMCNT A-I
 

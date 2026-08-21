@@ -79,6 +79,10 @@ struct CpuContext {
   // Debug single-stepping: when step_limit != 0 the interpreter stops after
   // that many instructions regardless of the cycle budget.
   u32 step_limit, steps;
+  // Budget at the moment the CPU halted (the run loops then set the budget
+  // to -1 to end the slice). Lets a harness compare consumed cycles across
+  // engines when a trial ends in a halt.
+  s32 budget_at_halt;
 
   mem::PageTable page_table;
 

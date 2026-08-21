@@ -66,18 +66,22 @@ void cp15_write(CpuContext& cpu, u32 opc1, u32 crn, u32 crm, u32 opc2, u32 value
     if ((old ^ cpu.cp15_control) & 0x00001005) update_pu_map(cpu);    // PU / caches toggled
     return;
   }
-  case 0x200: cpu.pu_data_cacheable = value; update_pu_map(cpu); return;
-  case 0x201: cpu.pu_code_cacheable = value; update_pu_map(cpu); return;
+  case 0x200: if (cpu.pu_data_cacheable != value) { cpu.pu_data_cacheable = value; update_pu_map(cpu); } return;
+  case 0x201: if (cpu.pu_code_cacheable != value) { cpu.pu_code_cacheable = value; update_pu_map(cpu); } return;
   case 0x300: cpu.pu_data_bufferable = value; return;
   case 0x502: cpu.pu_data_perm = value; return;
   case 0x503: cpu.pu_code_perm = value; return;
   case 0x600: case 0x610: case 0x620: case 0x630: case 0x640: case 0x650: case 0x660: case 0x670:
   case 0x601: case 0x611: case 0x621: case 0x631: case 0x641: case 0x651: case 0x661: case 0x671:
-    cpu.pu_region[crm] = value; update_pu_map(cpu); return;
-  case 0x910: cpu.cp15_dtcm = value & 0xFFFFF03E; cpu.nds->bus.update_tcm(cpu); return;
-  case 0x911: cpu.cp15_itcm = value & 0x0000003E; cpu.nds->bus.update_tcm(cpu); return;
+    if (cpu.pu_region[crm] != value) { cpu.pu_region[crm] = value; update_pu_map(cpu); }
+    return;
+  // Games rewrite the TCM registers with their current values (OS entry
+  // code, IRQ handlers); the remap and the timing-table rebuild are only
+  // for real changes.
+  case 0x910: { const u32 v = value & 0xFFFFF03E; if (cpu.cp15_dtcm != v) { cpu.cp15_dtcm = v; cpu.nds->bus.update_tcm(cpu); } return; }
+  case 0x911: { const u32 v = value & 0x0000003E; if (cpu.cp15_itcm != v) { cpu.cp15_itcm = v; cpu.nds->bus.update_tcm(cpu); } return; }
   case 0x704: case 0x782:                   // wait for interrupt
-    cpu.halted = true; cpu.hot.cycle_budget = -1; return;
+    cpu.halted = true; return;          // the run loop ends the slice
   default:
     return;                                 // PU regions, cache maintenance: accepted, ignored
   }

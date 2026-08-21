@@ -130,9 +130,20 @@ What deliberately differs, for now:
   so the engines interleave identically (the oracle mode); normally the test
   is per block, which is the only timing difference between the two engines.
 - r15 is still written to the context at every exit rather than reconstructed
-  from the native PC; there is no PC-metadata table yet.
+  from the native PC; there is no PC-metadata table yet. Exits are cold code
+  (`bl exit_key_lit; .word key`), so nothing is materialised on a hot path.
 - The ARM9/ARM7 switch passes through C once per scheduler slice.
 - Interrupts are taken on the C side after a poll leaves translated code.
+
+Layout and calling conventions as of the second pass (2026-08-21 p.m., see
+`cpu/jit/README.md`): each block is a hot section followed by a cold section
+spliced in at the end of translation; stubs read literal arguments from the
+words after their `bl` through x30; the budget register holds `budget - 1`
+so every test is one `tbnz`; memory slow paths are pure calls into the
+interpreter's `mem_read*/mem_write*` logic rather than re-executions of the
+instruction. Measured on the RK3566, the translated code is ~14 % of a
+SM64DS frame; the `perf` profile (the A55 PMU is usable on the device)
+drives the order of the remaining work.
 
 ## 4. Scheduler and timing
 

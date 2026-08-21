@@ -2,6 +2,9 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/mem/page_table.h"
 
+#include <unordered_map>
+#include <vector>
+
 #include <cassert>
 #include <cstring>
 #include <sys/mman.h>
@@ -20,7 +23,6 @@ PageTable::PageTable() {
   table_ = static_cast<Entry*>(p);   // zero-filled: every page starts unmapped
 }
 
-PageTable::~PageTable() { munmap(table_, TABLE_BYTES); }
 
 static Entry make_entry(u32 guest_page_addr, u8* host, u32 flags) {
   if (flags & PAGE_MMIO) return TAG_SPECIAL;
@@ -36,6 +38,7 @@ static Entry make_entry(u32 guest_page_addr, u8* host, u32 flags) {
 
 void PageTable::map(u32 guest, u32 size, u8* host, u32 flags) {
   assert((guest % PAGE_SIZE) == 0 && (size % PAGE_SIZE) == 0);
+  ++gen_;
   for (u32 off = 0; off < size; off += PAGE_SIZE) {
     u32 g = guest + off;
     table_[g >> PAGE_SHIFT] = make_entry(g, host + off, flags);
@@ -48,17 +51,34 @@ void PageTable::map_mmio(u32 guest, u32 size) {
 
 void PageTable::unmap(u32 guest, u32 size) {
   assert((guest % PAGE_SIZE) == 0 && (size % PAGE_SIZE) == 0);
+  ++gen_;
   for (u32 off = 0; off < size; off += PAGE_SIZE)
     table_[(guest + off) >> PAGE_SHIFT] = 0;
 }
 
-void PageTable::set_code_host(const u8* host_page, bool is_code) {
-  const u64 want = reinterpret_cast<u64>(host_page) >> PAGE_SHIFT;
+struct PageTable::HostIndex { std::unordered_map<u64, std::vector<u32>> pages; };
+
+PageTable::~PageTable() { munmap(table_, TABLE_BYTES); delete index_; }
+
+void PageTable::build_index() {
+  if (!index_) index_ = new HostIndex;
+  index_->pages.clear();
   for (u32 p = 0; p < (0x10000000u >> PAGE_SHIFT); ++p) {
     Entry e = table_[p];
     if (!(e << 2)) continue;
     const u64 host = ((e << 2) + (static_cast<u64>(p) << PAGE_SHIFT)) >> PAGE_SHIFT;
-    if (host != want) continue;
+    index_->pages[host].push_back(p);
+  }
+  index_gen_ = gen_;
+}
+
+void PageTable::set_code_host(const u8* host_page, bool is_code) {
+  if (index_gen_ != gen_) build_index();
+  const u64 want = reinterpret_cast<u64>(host_page) >> PAGE_SHIFT;
+  auto it = index_->pages.find(want);
+  if (it == index_->pages.end()) return;
+  for (u32 p : it->second) {
+    Entry e = table_[p];
     table_[p] = is_code ? (e | TAG_CODE) : (e & ~TAG_CODE);
   }
 }

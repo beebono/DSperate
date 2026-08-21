@@ -39,7 +39,7 @@ void run(CpuContext& cpu) {
       exec_arm(cpu, instr);
       if (!cpu.jumped) cpu.hot.regs[15] += 4;
     }
-    if (cpu.halted) { cpu.hot.cycle_budget = -1; return; }
+    if (cpu.halted) { cpu.budget_at_halt = cpu.hot.cycle_budget; cpu.hot.cycle_budget = -1; return; }
     if (cpu.hot.irq_pending) cpu.check_irq();
     if (cpu.step_limit && ++cpu.steps >= cpu.step_limit) return;
   }

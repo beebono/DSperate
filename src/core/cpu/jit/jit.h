@@ -20,6 +20,9 @@ struct Stats {
   u64 blocks_invalidated = 0;
   u64 flushes = 0;
   u64 entries = 0;             // native entries (one per scheduler slice at most)
+  u64 code_bytes = 0;          // native bytes emitted for blocks (cold sections included)
+  u64 hot_bytes = 0;           // of which the hot sections (what runs on the fast paths)
+  u64 slow_accesses = 0;       // loads/stores that left the inline page-table path
 };
 
 // Create the runtime (code arena, stubs) and route the selected CPUs through

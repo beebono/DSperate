@@ -48,7 +48,7 @@ void Bus::reset() {
   map_fixed_regions();
   update_wram();
   update_vram();
-  update_tcm(nds_.cpu(Cpu::ARM9));
+  update_tcm(nds_.cpu(Cpu::ARM9), true);
   update_gba_slot_timings();
 }
 
@@ -198,9 +198,15 @@ void Bus::vram_write(Cpu cpu, u32 addr, u32 width, u32 val) {
   std::memcpy(vram_bank(bank) + off, &val, width / 8);
 }
 
-void Bus::update_tcm(CpuContext& cpu) {
+void Bus::update_tcm(CpuContext& cpu, bool force) {
   // Rebuild the ARM9 map from scratch so a moved/shrunk TCM window releases
   // its old pages, then overlay TCM. TODO: track the previous window instead.
+  // Nothing happens when the effective windows are unchanged: the full remap
+  // and the timing-table rebuild (1 M entries) are expensive, and they
+  // invalidate every translated block.
+  const u32 old_itcm = cpu.itcm_size, old_dbase = cpu.dtcm_base, old_dmask = cpu.dtcm_mask;
+  cpu.update_tcm_windows();
+  if (!force && cpu.itcm_size == old_itcm && cpu.dtcm_base == old_dbase && cpu.dtcm_mask == old_dmask) return;
   PageTable& pt = cpu.page_table;
   const u32 RW = PAGE_READABLE | PAGE_WRITABLE, RO = PAGE_READABLE;
   pt.unmap(0x00000000, 0x10000000);
@@ -212,7 +218,6 @@ void Bus::update_tcm(CpuContext& cpu) {
   (void)RO;
   update_wram();
   update_vram();
-  cpu.update_tcm_windows();
   timing_.update_cpu9(cpu, 0, 0xFFFFFFFF);     // TCM windows are baked into the cost table
   if (watch_on) pt.map_mmio(watch_addr & ~0x7FFu, 0x800);
   const u32 ctl = cpu.cp15_control;

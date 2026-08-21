@@ -32,6 +32,7 @@ const Burst WRITE32      = make({{9,1},{7,34}});
 Dma::Dma(NDS& nds) : nds_(nds) { reset(); }
 
 void Dma::reset() {
+  running_mask_[0] = running_mask_[1] = 0;
   for (int i = 0; i < 8; ++i) { ch_[i] = Channel{}; ch_[i].cpu = i < 4 ? Cpu::ARM9 : Cpu::ARM7; ch_[i].num = i & 3; ch_[i].burst_table = MRAM_DUMMY.data; }
 }
 
@@ -64,7 +65,7 @@ void Dma::start(Channel& c) {
   c.iter_count = (c.start_mode == MODE9_GXFIFO && c.rem_count > 112) ? 112 : c.rem_count;
   if ((c.cnt & 0x01800000) == 0x01800000) c.cur_src = c.src;
   if ((c.cnt & 0x00600000) == 0x00600000) c.cur_dst = c.dst;
-  c.running = 2;
+  set_running(c, 2);
   c.in_progress = true;
   c.burst_table = MRAM_DUMMY.data; c.burst_pos = 0;
   nds_.sched.preempt(nds_.cpu(c.cpu));   // an immediate start stalls the CPU that issued it
@@ -75,10 +76,6 @@ void Dma::check(Cpu cpu, u32 mode) {
 }
 void Dma::stop(Cpu cpu, u32 mode) {
   for (int n = 0; n < 4; ++n) { Channel& c = channel(cpu, n); if (c.start_mode == mode) c.cnt &= ~0x80000000u; }
-}
-bool Dma::any_running(Cpu cpu) const {
-  for (int n = 0; n < 4; ++n) if (channel(cpu, n).running) return true;
-  return false;
 }
 bool Dma::in_mode(Cpu cpu, u32 mode) const {
   for (int n = 0; n < 4; ++n) { const Channel& c = channel(cpu, n); if (c.start_mode == mode && (c.cnt & 0x80000000)) return true; }
@@ -124,7 +121,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
   const bool a9 = c.cpu == Cpu::ARM9;
   const bool word = c.cnt & (1u << 26);
   bool burst_start = (c.running == 2);
-  c.running = 1;
+  set_running(c, 1);
   u32 used = 0;
   mem::Bus& bus = nds_.bus;
   while (c.iter_count > 0 && used < budget) {
@@ -141,12 +138,12 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
     c.iter_count--; c.rem_count--;
   }
   if (c.rem_count) {
-    if (c.iter_count == 0) c.running = 0;       // wait for the next trigger
+    if (c.iter_count == 0) set_running(c, 0);   // wait for the next trigger
     return used;
   }
   if (!(c.cnt & (1u << 25))) c.cnt &= ~0x80000000u;   // not repeating: disable
   if (c.cnt & (1u << 30)) nds_.io.request_irq(c.cpu, io::IRQ_DMA0 + c.num);
-  c.running = 0;
+  set_running(c, 0);
   c.in_progress = false;
   if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) { if (nds_.io.cart_drq()) start(c); }
   return used;

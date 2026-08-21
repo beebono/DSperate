@@ -5,6 +5,13 @@
 // stubs (emitted with the same encoder the translator uses, so there is no
 // assembler dependency), the block cache, block linking, and self-modifying
 // code tracking by host page.
+//
+// Stub calling convention: a block reaches a stub with `bl`, and the stub
+// reads its literal arguments (instruction word, key, ...) from the words
+// that follow the `bl` through x30, skipping them before it returns. A call
+// site is therefore the `bl` plus its literals; nothing is materialised in
+// registers at the site, and a linked `bl link; .word key` becomes a bare
+// `b` whose literal is never executed.
 #include "core/cpu/jit/jit_internal.h"
 #include "core/cpu/cpu_cycles.h"
 #include "core/cpu/interp/interp.h"
@@ -36,17 +43,20 @@ void emit_load_callee_saved_guest(Emitter& e) {
   for (u32 r = 0; r < 8; r += 2) e.ldp_w(host_reg(r), host_reg(r + 1), R_CTX, off_reg(r));
   e.ldp_w(host_reg(13), host_reg(14), R_CTX, off_reg(13));
 }
+// w8 holds budget - 1; the context holds the budget (x17 is free in stubs).
 void emit_store_caller_saved_guest(Emitter& e) {
   e.stp_w(host_reg(8), host_reg(9), R_CTX, off_reg(8));
   e.stp_w(host_reg(10), host_reg(11), R_CTX, off_reg(10));
   e.str_w(host_reg(12), R_CTX, off_reg(12));
-  e.str_w(R_BUDGET, R_CTX, OFF_BUDGET);
+  e.add_imm(17, R_BUDGET, 1);
+  e.str_w(17, R_CTX, OFF_BUDGET);
 }
 void emit_load_caller_saved_guest(Emitter& e) {
   e.ldp_w(host_reg(8), host_reg(9), R_CTX, off_reg(8));
   e.ldp_w(host_reg(10), host_reg(11), R_CTX, off_reg(10));
   e.ldr_w(host_reg(12), R_CTX, off_reg(12));
   e.ldr_w(R_BUDGET, R_CTX, OFF_BUDGET);
+  e.sub_imm(R_BUDGET, R_BUDGET, 1);
   e.ldr_x(17, R_CTX, OFF_JIT);
   e.ldr_x(R_PT, 17, OFF_JC_PT);
   e.ldr_x(R_TIM, 17, OFF_JC_TIM);
@@ -85,6 +95,21 @@ void emit_fetch_cost9(Emitter& e, u32 wa, u32 wc, u32 t, bool branch) {
   }
 }
 
+// Poll after a helper: `leave` receives the fixups to bind at the leave
+// code; execution falls through when the block continues. Clobbers w3.
+void emit_poll(Emitter& e, std::vector<size_t>& leave) {
+  leave.push_back(e.tbnz_fwd(R_BUDGET, 31));
+  e.ldr_w(3, R_CTX, OFF_ALERTS);
+  leave.push_back(e.cbnz_fwd(3));
+  e.ldr_w(3, R_CTX, OFF_IRQ);
+  size_t ok = e.cbz_fwd(3);
+  e.ldr_w(3, R_CTX, OFF_CPSR);
+  size_t ok2 = e.tbnz_fwd(3, 7);
+  leave.push_back(e.b_fwd());
+  e.bind(ok);
+  e.bind(ok2);
+}
+
 void emit_stubs(Runtime& rt) {
   Emitter e(rt.arena, rt.cap);
 
@@ -102,6 +127,10 @@ void emit_stubs(Runtime& rt) {
   emit_load_flags(e, 17);
   e.br(1);
 
+  // ---- exit_key_lit: `bl exit_key_lit; .word key` -------------------------------
+  rt.exit_key_lit = e.cur();
+  e.ldr_w(0, 30, 0);
+  // fall through
   // ---- exit_key: w0 = key of the next instruction -------------------------------
   rt.exit_key = e.cur();
   e.and_imm(1, 0, 1);                 // T
@@ -153,6 +182,67 @@ void emit_stubs(Runtime& rt) {
   e.ldr_x_post(30, SP, 16);
   e.ret();
 
+  // ---- call2: `bl call2; .word a; .word b; .xword fn` -> call_full fn(ctx, a, b) ----
+  rt.call2 = e.cur();
+  e.ldp_w(1, 2, 30, 0);
+  e.ldr_x(R_FN, 30, 8);
+  e.add_imm(30, 30, 16, true);
+  e.str_x_pre(30, SP, -16);
+  e.mov(0, R_CTX, true);
+  e.bl(rt.call_full);
+  e.ldr_x_post(30, SP, 16);
+  e.ret();
+
+  // ---- poll: `bl poll; .word next_key` ----------------------------------------------
+  rt.poll = e.cur();
+  {
+    std::vector<size_t> leave;
+    emit_poll(e, leave);
+    e.add_imm(30, 30, 4, true);
+    e.ret();
+    for (size_t f : leave) e.bind(f);
+    e.ldr_w(0, 30, 0);
+    e.b(rt.exit_key);
+  }
+
+  // ---- slow loads/stores: w1 = address (w2 = value); x1, x7 preserved -------------
+  {
+    const void* lds[3] = {reinterpret_cast<const void*>(&jit_h_ld8), reinterpret_cast<const void*>(&jit_h_ld16), reinterpret_cast<const void*>(&jit_h_ld32)};
+    const void* sts[3] = {reinterpret_cast<const void*>(&jit_h_st8), reinterpret_cast<const void*>(&jit_h_st16), reinterpret_cast<const void*>(&jit_h_st32)};
+    for (int k = 0; k < 6; ++k) {
+      (k < 3 ? rt.slow_load[k] : rt.slow_store[k - 3]) = e.cur();
+      e.stp_x_pre(30, 1, SP, -32);
+      e.str_x(7, SP, 16);
+      e.mov(0, R_CTX, true);
+      e.mov_imm64(R_FN, reinterpret_cast<u64>(k < 3 ? lds[k] : sts[k - 3]));
+      e.bl(rt.call_pure);
+      e.ldr_x(7, SP, 16);
+      e.ldp_x_post(30, 1, SP, 32);
+      e.ret();
+    }
+  }
+
+  // ---- flag merges ---------------------------------------------------------------------
+  // merge_keep_cv: w0 = result. N,Z from the result; C,V unchanged.
+  rt.merge_keep_cv = e.cur();
+  e.mrs_nzcv(1);
+  e.tst_reg(0, 0);
+  e.mrs_nzcv(2);
+  e.ubfx(3, 1, 28, 2, true);
+  e.bfi(2, 3, 28, 2, true);
+  e.msr_nzcv(2);
+  e.ret();
+  // merge_set_c: w0 = result, w1 = carry (0/1). N,Z from the result, C from w1, V unchanged.
+  rt.merge_set_c = e.cur();
+  e.mrs_nzcv(2);
+  e.tst_reg(0, 0);
+  e.mrs_nzcv(3);
+  e.ubfx(2, 2, 28, 1, true);
+  e.bfi(3, 2, 28, 1, true);
+  e.bfi(3, 1, 29, 1, true);
+  e.msr_nzcv(3);
+  e.ret();
+
   // ---- per-CPU stubs -----------------------------------------------------------------
   for (int c = 0; c < 2; ++c) {
     JitCpu& jc = rt.cpus[c];
@@ -175,14 +265,52 @@ void emit_stubs(Runtime& rt) {
     e.bl(rt.call_pure);
     e.br(0);
 
-    // link: w0 = key, x30 = patch site + 4
+    // link: `bl link; .word key`
     jc.link = e.cur();
-    e.sub_imm(2, 30, 4, true);
-    e.mov(1, 0);
+    e.ldr_w(1, 30, 0);
+    e.sub_imm(2, 30, 4, true);          // patch site
     e.mov(0, R_CTX, true);
     e.mov_imm64(R_FN, reinterpret_cast<u64>(&jit_h_link));
     e.bl(rt.call_pure);
     e.br(0);
+
+    // fallback: `bl fallback; .word instr; .word key`. Runs the instruction
+    // through the interpreter, polls, then returns to the block when the
+    // instruction did not jump, or dispatches on the new pc.
+    jc.fallback = e.cur();
+    {
+      e.ldp_w(1, 2, 30, 0);
+      e.add_imm(30, 30, 8, true);
+      e.stp_x_pre(30, 2, SP, -16);
+      e.mov(0, R_CTX, true);
+      e.mov_imm64(R_FN, reinterpret_cast<u64>(&jit_h_fallback));
+      e.bl(rt.call_full);
+      size_t jumped = e.cbnz_fwd(0);
+      std::vector<size_t> leave;
+      emit_poll(e, leave);
+      e.ldp_x_post(30, 2, SP, 16);
+      e.ret();
+      for (size_t f : leave) e.bind(f);
+      e.ldp_x_post(30, 2, SP, 16);
+      e.and_imm(3, 2, 1);               // next key = key + 4 - 2T
+      e.add_imm(0, 2, 4);
+      e.sub_reg(0, 0, 3, LSL, 1);
+      e.b(rt.exit_key);
+      e.bind(jumped);
+      e.ldp_x_post(30, 2, SP, 16);
+      std::vector<size_t> leave2;
+      emit_poll(e, leave2);
+      // dispatch from the context: key = (r15 - 8 + 4T) | T
+      e.ldr_w(0, R_CTX, off_reg(15));
+      e.ldr_w(1, R_CTX, OFF_CPSR);
+      e.ubfx(2, 1, 5, 1);
+      e.sub_imm(0, 0, 8);
+      e.add_reg(0, 0, 2, LSL, 2);
+      e.orr_reg(0, 0, 2);
+      e.b(jc.dispatch);
+      for (size_t f : leave2) e.bind(f);
+      e.b(rt.exit_r15);
+    }
 
     // branch_indirect_cdi: w0 = target (bit 0 = new T), w1 = numD, w2 = data
     // address. Charges the CDI cost of an LDM/POP that loaded pc the way the
@@ -423,6 +551,8 @@ Block* translate(JitCpu& jc, u32 key) {
   jc.all_blocks.push_back(b);
   lut_insert(jc, b);
   r.stats.blocks_translated++;
+  r.stats.code_bytes += b->size;
+  r.stats.hot_bytes += b->hot_size;
   return b;
 }
 
@@ -477,7 +607,7 @@ extern "C" u32 jit_h_fallback(CpuContext* cpu, u32 instr, u32 key) {
     interp::exec_arm(*cpu, instr);
     if (!cpu->jumped) cpu->hot.regs[15] += 4;
   }
-  if (cpu->halted) cpu->hot.cycle_budget = -1;
+  if (cpu->halted) cpu->hot.alerts |= ALERT_HALTED;   // the poll leaves; run() ends the slice
   g_rt.stats.instrs_fallback++;
   if (g_rt.hist) g_rt.fallback_hist[(static_cast<u64>(cpu->which) << 32) | key_pc(key)]++;
   if (g_rt.debug) std::fprintf(stderr, "[jit] fallback %08x %08x -> r15 %08x cpsr %08x budget %d halted %d jumped %d\n", key_pc(key), instr, cpu->hot.regs[15], cpu->hot.cpsr, cpu->hot.cycle_budget, cpu->halted, cpu->jumped);
@@ -514,6 +644,52 @@ extern "C" void jit_h_cyclog(CpuContext* cpu, u32 instr, u32 key) {
 extern "C" void jit_h_trace(CpuContext* cpu, u32 instr, u32 key) {
   cpu->hot.regs[15] = key_r15(key);
   if (cpu->nds->trace) cpu->nds->trace(*cpu, instr, cpu->nds->trace_user);
+}
+
+// Loads and stores that left the inline page-table path: MMIO, unmapped
+// space, read-only and code pages. The same paths the interpreter's
+// mem_read*/mem_write* take (cpu_mem.h), minus the cost, which the block
+// charges from the timing table like every other access.
+extern "C" u32 jit_h_ld8(CpuContext* cpu, u32 addr) {
+  g_rt.stats.slow_accesses++;
+  if (u8* p = cpu->page_table.read_ptr(addr)) return *p;
+  return cpu->nds->bus.read8(cpu->which, addr);
+}
+extern "C" u32 jit_h_ld16(CpuContext* cpu, u32 addr) {
+  g_rt.stats.slow_accesses++;
+  addr &= ~1u;
+  if (u8* p = cpu->page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
+  return cpu->nds->bus.read16(cpu->which, addr);
+}
+extern "C" u32 jit_h_ld32(CpuContext* cpu, u32 addr) {
+  g_rt.stats.slow_accesses++;
+  addr &= ~3u;
+  if (u8* p = cpu->page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
+  return cpu->nds->bus.read32(cpu->which, addr);
+}
+extern "C" void jit_h_st8(CpuContext* cpu, u32 addr, u32 v) {
+  g_rt.stats.slow_accesses++;
+  bool code = false;
+  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { *p = static_cast<u8>(v); if (code) mem::code_written(p, 1); }
+  else cpu->nds->bus.write8(cpu->which, addr, static_cast<u8>(v));
+  if (cpu->halted) cpu->hot.alerts |= ALERT_HALTED;
+}
+extern "C" void jit_h_st16(CpuContext* cpu, u32 addr, u32 v) {
+  g_rt.stats.slow_accesses++;
+  addr &= ~1u;
+  bool code = false;
+  const u16 h = static_cast<u16>(v);
+  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { std::memcpy(p, &h, 2); if (code) mem::code_written(p, 2); }
+  else cpu->nds->bus.write16(cpu->which, addr, h);
+  if (cpu->halted) cpu->hot.alerts |= ALERT_HALTED;
+}
+extern "C" void jit_h_st32(CpuContext* cpu, u32 addr, u32 v) {
+  g_rt.stats.slow_accesses++;
+  addr &= ~3u;
+  bool code = false;
+  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 4); if (code) mem::code_written(p, 4); }
+  else cpu->nds->bus.write32(cpu->which, addr, v);
+  if (cpu->halted) cpu->hot.alerts |= ALERT_HALTED;
 }
 
 // ---- public API ---------------------------------------------------------------------------------
@@ -575,9 +751,12 @@ const Stats& stats() { return g_rt.stats; }
 
 void report(std::FILE* out) {
   const Stats& s = g_rt.stats;
-  std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, entries %llu, invalidated %llu, flushes %llu\n",
+  std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, slow accesses %llu, entries %llu, invalidated %llu, flushes %llu\n",
                (unsigned long long)s.blocks_translated, (unsigned long long)s.instrs_translated, (unsigned long long)s.instrs_fallback,
-               (unsigned long long)s.entries, (unsigned long long)s.blocks_invalidated, (unsigned long long)s.flushes);
+               (unsigned long long)s.slow_accesses, (unsigned long long)s.entries, (unsigned long long)s.blocks_invalidated, (unsigned long long)s.flushes);
+  std::fprintf(out, "[jit] code %llu KB (hot %llu KB): %.1f bytes per guest instruction, %.1f hot\n", (unsigned long long)(s.code_bytes >> 10), (unsigned long long)(s.hot_bytes >> 10),
+               s.instrs_translated ? static_cast<double>(s.code_bytes) / static_cast<double>(s.instrs_translated) : 0.0,
+               s.instrs_translated ? static_cast<double>(s.hot_bytes) / static_cast<double>(s.instrs_translated) : 0.0);
   if (!g_rt.hist) return;
   std::vector<std::pair<u64, u64>> v(g_rt.fallback_hist.begin(), g_rt.fallback_hist.end());
   std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
@@ -598,17 +777,17 @@ void run(CpuContext& cpu) {
   cpu.check_irq();
   if (cpu.halted) { cpu.hot.cycle_budget = -1; return; }
   if (cpu.step_limit) { interp::run(cpu); return; }
-  // The timing table pointer can be rebuilt? No: Timing owns fixed buffers.
   while (cpu.hot.cycle_budget > 0) {
     if (r.need_reset) reset_arena();
     const bool thumb = cpu.thumb();
     const u32 key = make_key(cpu.hot.regs[15] - (thumb ? 4 : 8), thumb);
-    const u8* native = find_native(jc, key);
+    const u64 lut = jc.lut[(key >> 1) & (LUT_SIZE - 1)];
+    const u8* native = static_cast<u32>(lut) == key ? r.arena + (lut >> 32) : find_native(jc, key);
     if (!native) { reset_arena(); continue; }
     cpu.hot.alerts = 0;
     r.stats.entries++;
     r.enter(&cpu, native);
-    if (cpu.halted) { cpu.hot.cycle_budget = -1; return; }
+    if (cpu.halted) { cpu.budget_at_halt = cpu.hot.cycle_budget; cpu.hot.cycle_budget = -1; return; }
     if (cpu.hot.irq_pending) cpu.check_irq();
   }
 }

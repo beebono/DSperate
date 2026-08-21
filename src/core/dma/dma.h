@@ -47,7 +47,7 @@ public:
   // Trigger / cancel channels waiting on a start condition.
   void check(Cpu cpu, u32 mode);
   void stop(Cpu cpu, u32 mode);
-  bool any_running(Cpu cpu) const;
+  bool any_running(Cpu cpu) const { return running_mask_[cpu == Cpu::ARM9 ? 0 : 1] != 0; }
   bool in_mode(Cpu cpu, u32 mode) const;
 
   // Run the CPU's DMA channels for up to `budget` cycles (that CPU's clock).
@@ -56,6 +56,12 @@ public:
 
 private:
   NDS& nds_;
+  u8 running_mask_[2] = {};   // per CPU, bit n = channel n running (any_running is one load)
+  void set_running(Channel& c, u32 v) {
+    c.running = v;
+    u8& m = running_mask_[c.cpu == Cpu::ARM9 ? 0 : 1];
+    if (v) m |= static_cast<u8>(1u << c.num); else m &= static_cast<u8>(~(1u << c.num));
+  }
   std::array<Channel, 8> ch_;
   Channel& channel(Cpu cpu, int n) { return ch_[static_cast<int>(cpu) * 4 + n]; }
   const Channel& channel(Cpu cpu, int n) const { return ch_[static_cast<int>(cpu) * 4 + n]; }

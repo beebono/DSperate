@@ -3,6 +3,8 @@
 #include "core/mem/timing.h"
 #include "core/cpu/cpu.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace ds::mem {
@@ -73,6 +75,9 @@ void Timing::set_region7(u32 start, u32 end, Region r, int bus_width, int nonseq
 // and data, a DTCM page 1 for data. Both engines then cost an access with one
 // table lookup and the recompiler inherits the interpreter's model exactly.
 void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end) {
+  // DS_DEBUG_TIMING=1: log every rebuild (each one also drops every translated block).
+  static const bool debug = std::getenv("DS_DEBUG_TIMING") != nullptr;
+  if (debug) std::fprintf(stderr, "[timing] update_cpu9 %08x-%08x ctl %08x dtcm %08x itcm %08x pu %08x/%08x\n", start, end, cpu.cp15_control, cpu.cp15_dtcm, cpu.cp15_itcm, cpu.pu_data_cacheable, cpu.pu_code_cacheable);
   const u32 first = start >> 12, last = (end == 0xFFFFFFFF) ? 0x100000 : (end >> 12);
   for (u32 i = first; i < last; ++i) {
     const u8 pu = pu_map[i];

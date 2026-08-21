@@ -88,6 +88,12 @@ public:
 
 private:
   Entry* table_;   // PAGE_COUNT entries, mmap'd: untouched pages cost no RSS
+  // Reverse index for set_code_host: host page number -> guest pages (low
+  // 256 MB) mapping it. Rebuilt lazily after any remap.
+  struct HostIndex;
+  HostIndex* index_ = nullptr;
+  u32 gen_ = 1, index_gen_ = 0;
+  void build_index();
 };
 
 } // namespace ds::mem

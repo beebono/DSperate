@@ -59,13 +59,15 @@ public:
     cpu.preempt_residual += cpu.hot.cycle_budget;
     cpu.hot.cycle_budget = 0;
   }
-  u64 next_deadline() const;
+  u64 next_deadline() const { return next_; }
 
   // Runs ARM9 then ARM7 up to the next event, fires due events, repeats until
   // `until` is reached. Returns the number of cycles advanced.
   u64 run_until(u64 until);
 
 private:
+  u64 scan_deadline() const;
+  u64 next_ = ~u64{0};   // earliest armed deadline (cached)
   struct Event {
     u64     at;
     EventFn fn;
