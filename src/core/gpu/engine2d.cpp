@@ -427,8 +427,8 @@ void Engine2D::draw_bg_affine(u32 line, int bg) {
     s32 fx = rx, fy = ry;
     if (mosaic) { const s32 m = i % mw; fx -= m * dx; fy -= m * dy; }
     if ((fx | fy) & overflow) continue;
-    const u32 tile = vm.read8(vv, tilemap + (((fy & coordmask) >> 11) << yshift) + ((fx & coordmask) >> 11));
-    const u8 idx = vm.read8(vv, tileset + (tile << 6) + (((fy >> 8) & 7) << 3) + ((fx >> 8) & 7));
+    const u32 tile = vram_fetch8(vm, vv, tilemap + (((fy & coordmask) >> 11) << yshift) + ((fx & coordmask) >> 11));
+    const u8 idx = vram_fetch8(vm, vv, tileset + (tile << 6) + (((fy >> 8) & 7) << 3) + ((fx >> 8) & 7));
     if (!idx) continue;
     plane.px()[i] = rgb15_to_18(pal[idx]); plane.op()[i] = 1; plane.any = true;
   }
@@ -461,11 +461,11 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
       if ((fx & ofx) || (fy & ofy)) continue;
       const u32 off = (((fy & ymask) >> 8) << yshift) + ((fx & xmask) >> 8);
       if (direct) {
-        const u16 c = vm.read16(vv, base + (off << 1));
+        const u16 c = vram_fetch16(vm, vv, base + (off << 1));
         if (!(c & 0x8000)) continue;
         plane.px()[i] = rgb15_to_18(c & 0x7FFF);
       } else {
-        const u8 idx = vm.read8(vv, base + off);
+        const u8 idx = vram_fetch8(vm, vv, base + off);
         if (!idx) continue;
         plane.px()[i] = rgb15_to_18(pal[idx]);
       }
@@ -481,11 +481,11 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
       s32 fx = rx, fy = ry;
       if (mosaic) { const s32 m = i % mw; fx -= m * dx; fy -= m * dy; }
       if ((fx | fy) & overflow) continue;
-      const u16 tile = vm.read16(vv, tilemap + ((((fy & coordmask) >> 11) << yshift) + ((fx & coordmask) >> 11)) * 2);
+      const u16 tile = vram_fetch16(vm, vv, tilemap + ((((fy & coordmask) >> 11) << yshift) + ((fx & coordmask) >> 11)) * 2);
       u32 tx = (fx >> 8) & 7, ty = (fy >> 8) & 7;
       if (tile & (1 << 10)) tx = 7 - tx;
       if (tile & (1 << 11)) ty = 7 - ty;
-      const u8 idx = vm.read8(vv, tileset + ((tile & 0x3FF) << 6) + (ty << 3) + tx);
+      const u8 idx = vram_fetch8(vm, vv, tileset + ((tile & 0x3FF) << 6) + (ty << 3) + tx);
       if (!idx) continue;
       plane.px()[i] = rgb15_to_18(extpal ? bg_extpal(bg, tile >> 12, idx) : pal[idx]); plane.op()[i] = 1; plane.any = true;
     }
@@ -512,7 +512,7 @@ void Engine2D::draw_bg_large(u32 line) {
     s32 fx = rx, fy = ry;
     if (mosaic) { const s32 m = i % mw; fx -= m * dx; fy -= m * dy; }
     if ((fx & ofx) || (fy & ofy)) continue;
-    const u8 idx = vm.read8(vv, (((fy & ymask) >> 8) << yshift) + ((fx & xmask) >> 8));
+    const u8 idx = vram_fetch8(vm, vv, (((fy & ymask) >> 8) << yshift) + ((fx & xmask) >> 8));
     if (!idx) continue;
     plane.px()[i] = rgb15_to_18(pal[idx]); plane.op()[i] = 1; plane.any = true;
   }

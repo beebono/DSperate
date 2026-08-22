@@ -4,6 +4,7 @@
 #include "core/types.h"
 
 #include <array>
+#include <cstring>
 
 namespace ds::gpu {
 
@@ -62,5 +63,21 @@ private:
   void add(VramView& v, u32 base, u32 len, int bank);
   void finish(VramView& v);
 };
+
+// Per-pixel fetches for the renderers' scalar paths (rotscale backgrounds
+// sample the map and the tiles at arbitrary addresses, so there is no row
+// to gather): the unique-bank case is one array lookup, overlapping banks
+// fall back to the OR-read accessor.
+inline u8 vram_fetch8(const VramMap& vm, const VramView& v, u32 a) {
+  a &= v.addr_mask();
+  const u8* p = v.ptr[a / VramView::BLOCK];
+  return p ? p[a & (VramView::BLOCK - 1)] : vm.read8(v, a);
+}
+inline u16 vram_fetch16(const VramMap& vm, const VramView& v, u32 a) {
+  a &= v.addr_mask() & ~1u;
+  const u8* p = v.ptr[a / VramView::BLOCK];
+  if (!p) return vm.read16(v, a);
+  u16 r; std::memcpy(&r, p + (a & (VramView::BLOCK - 1)), 2); return r;
+}
 
 } // namespace ds::gpu

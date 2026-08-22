@@ -70,6 +70,9 @@ private:
 
   // Everything the per-pixel work needs from the polygon and the render
   // state, decoded once per polygon.
+public:
+  // Everything a span needs from its polygon, decoded once (the NEON gather
+  // helpers in render3d.cpp take it, hence public).
   struct Shade {
     u32 blendmode, polyalpha, polyattr;
     bool highlight, textured, wireframe, shadow, polyattr_z;   // polyattr_z: translucent pixels update depth
@@ -83,7 +86,11 @@ private:
     // mapped, host-contiguous VRAM (nullptr: go through the views).
     const u8* tex_ptr;
     const u16* pal_ptr;
+    // NEON builds: the four-texel gather specialised for (format, S wrap,
+    // T wrap), or nullptr for the per-lane sampler (render3d.cpp).
+    const void* gather4;
   };
+private:
 
   // One polygon edge walked down the scanlines.
   template <int side> struct Slope {
@@ -135,6 +142,7 @@ private:
   // for polygons without shadow / wireframe / toon shading.
   template <int mode, bool textured, bool aa> void resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
   void texture_gather4(const Shade& sh, const s32* sa, const s32* ta, u32* colour, u32* alpha) const;
+  static const void* select_gather4(const Shade& sh);
 #endif
   void span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
                   const s32* al, const s32* ar, bool with_attrs) const;

@@ -423,6 +423,29 @@ clear, the resolve's loads and the final pass then stay in L1 — ~5 % of
 SM64DS is memory stalls on those 1.2 MB), the translucent blend on 16-bit
 lanes, the geometry unit (6–9 %).
 
+**Texel gather (2026-08-21 p.m.), from the first gameplay profile.** Sixty
+seconds of hand-played SM64DS put `texture_gather4` at 11 % — one generic
+function switching on the format per four pixels and bouncing the lanes
+through the stack. It is now one instantiation per (format, S wrap, T wrap)
+chosen once per polygon (`Shade::gather4`): the wrap arithmetic and the
+decode are compile-time and the lanes travel through registers. The format
+mix measured on 900 direct-boot frames is 94 % A5I3 in SM64DS and 74 % /
+26 % 256-/16-colour in Mario & Luigi; the compressed format (3.7 % of
+SM64DS's gathers) still takes the per-lane sampler. Byte-exact against the
+reference on SM64DS, M&L and MPH. What is left in the function is the
+dependent texel-then-palette load pair and a stall on the coordinate
+arrays the span stage has just written — memory latency, not dispatch.
+On the headless 900-frame runs the whole-run gain is only 1–2 %, but those
+runs are logos, menus and attract loops where the gather is 1.7 % of the
+profile; the gameplay content that put it at 11 % cannot be replayed
+headlessly yet (see §8, input record/replay).
+
+The rotscale backgrounds (affine, extended, large bitmap) sampled their
+map and tiles through the out-of-line OR-read accessor twice per pixel —
+the pattern the 2D pass had replaced with direct pointers for text
+backgrounds, never applied here; `vram_fetch8/16` inline the unique-bank
+case (Meteos: `VramMap::read8` was 3.2 % of its gameplay profile).
+
 ## 6. Sound (`spu/`)
 
 The SPU is an ARM7-side device and runs entirely from one scheduler event:
@@ -553,6 +576,12 @@ saves, and nothing else — no savestates, no configuration, no menus.
   file; the frontend loads `<rom>.sav` at start and writes it back when the
   chip is dirty. Savestates are deliberately absent, battery saves are not
   optional.
+* **Not yet: input record/replay.** The gameplay profiles that direct the
+  renderer work (§5.2) came from hand-played sessions and cannot be
+  reproduced: a renderer change measured on headless direct-boot runs sees
+  logos and menus, not the scene that was hot. Recording the per-frame
+  button mask and pen position (six bytes a frame) and replaying it would
+  make a played scene a benchmark; it is the next frontend feature.
 
 **Measured on the RK3566** across SDL's KMSDRM backend (no session) and sway,
 and across both graphics stacks — Mesa 26.1.6 / panfrost (SDL's `opengl`
