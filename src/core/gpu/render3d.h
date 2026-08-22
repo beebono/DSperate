@@ -28,8 +28,11 @@ struct VramView;
 // renderer of the melonDS project (GPLv3); output is checked against it
 // pixel for pixel.
 //
-// Buffers are 258x194: a one-pixel border around the 256x192 frame so edge
-// marking never tests outside the buffer.
+// The working buffers are a ring of four 258-pixel lines (a one-pixel
+// border each side so edge marking never tests outside them): line y is
+// rendered, then the final pass of line y-1 reads lines y-2..y, and the
+// finished line is copied to the output buffer. The whole working set
+// (colour, depth, attributes, two pixels deep) stays in L1.
 class Renderer3D {
 public:
   explicit Renderer3D(NDS& nds);
@@ -39,21 +42,25 @@ public:
   void render(const Gpu3D& gx);
 
   // One output line: RGB666 in bits 0-21, 5-bit alpha in bits 24-28.
-  const u32* raw_line(u32 y) const { return &color_[FIRST + y * W]; }
+  const u32* raw_line(u32 y) const { return &out_[y * 256]; }
 
   // Portable pixel-pipeline pieces, exposed for the unit tests.
   static u32 alpha_blend(u32 dispcnt, u32 src, u32 dst, u32 alpha);
 
 private:
   NDS& nds_;
-  static constexpr int W = 258, H = 194, SIZE = W * H, FIRST = W + 1;
+  static constexpr int W = 258, RING = 4, RSIZE = W * RING;
+  // Ring row of frame line y (-1 and 192 are the border rows); the pixel
+  // address of (x, y) is row_of(y) + 1 + x, the pixel underneath RSIZE on.
+  static constexpr u32 row_of(s32 y) { return static_cast<u32>((y + 1) & (RING - 1)) * W; }
 
   // Colour: R 0-5, G 8-13, B 16-21, A 24-28.
   // Attr: bits 0-3 edge flags (L/R/T/B), bit 4 back-facing, bits 8-12 AA
   // coverage, bit 15 fog, bits 16-21 translucent polygon id, bit 22
   // translucent, bits 24-29 opaque polygon id.
   // The second half of each buffer holds the pixel underneath (for AA).
-  std::array<u32, SIZE * 2> color_{}, depth_{}, attr_{};
+  std::array<u32, RSIZE * 2> color_{}, depth_{}, attr_{};
+  std::array<u32, 256 * 192> out_{};   // finished lines
   std::array<u8, 512> stencil_{};
   bool prev_shadow_mask_ = false;
 
@@ -164,7 +171,7 @@ private:
   void render_line(s32 y);
   u32  fog_density(u32 addr) const;
   void final_pass(s32 y);
-  void clear_border();
+  void clear_border(s32 y);
   void clear_line(s32 y);
 };
 

@@ -356,9 +356,11 @@ condition holds).
 Rasteriser (`Renderer3D`): at VBlank the flushed polygon list is split into
 opaque and translucent, Y-sorted (stably, bottom then top) unless manual
 sorting is requested, and the render registers are latched; at line 215 the
-frame is rasterised into 258x194 colour/depth/attribute buffers with a
-one-pixel border and a second layer holding the pixel underneath (for
-anti-aliasing and translucent blending through edges). Edges step with an
+frame is rasterised line by line into a four-line ring of 258-pixel
+colour/depth/attribute rows (a one-pixel border each side, and a second
+layer holding the pixel underneath for anti-aliasing and translucent
+blending through edges); the final pass of line y-1 runs after line y, and
+the finished line is copied out to a 256x192 output buffer. Edges step with an
 18-bit slope fraction computed as x * (1/y); attributes use the two-stage
 interpolation (9-bit perspective factor along Y, 8-bit along X, then linear
 by that factor, with a linear short-cut for equal W); Z interpolates linearly
@@ -422,6 +424,16 @@ buffers as a four-line ring (only the colour buffer must persist; the
 clear, the resolve's loads and the final pass then stay in L1 — ~5 % of
 SM64DS is memory stalls on those 1.2 MB), the translucent blend on 16-bit
 lanes, the geometry unit (6–9 %).
+
+**Four-line ring (2026-08-22).** The working buffers are now a ring of
+four rows (20 KB for both layers of all three, against 1.2 MB): line y is
+rendered, the final pass of line y-1 reads rows y-2..y, and the finished
+row is copied to the output buffer. The border rows are written into the
+ring just before the pass that reads them. Byte-identical on the eight
+baselines and the three played scenes (host, and NEON under qemu). Device,
+replayed scenes: SM64DS 94.2 → 92.7 s (−1.6 %), Mario & Luigi 113.8 → 110.9
+(−2.6 %), Meteos 65.3 → 63.7 (−2.5 %) — the memory stalls those buffers
+were blamed for were mostly elsewhere.
 
 **Texel gather (2026-08-21 p.m.), from the first gameplay profile.** Sixty
 seconds of hand-played SM64DS put `texture_gather4` at 11 % — one generic

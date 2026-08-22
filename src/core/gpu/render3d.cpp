@@ -185,7 +185,7 @@ void Renderer3D::Slope<side>::edge_params(s32* length, s32* coverage) const {
 Renderer3D::Renderer3D(NDS& nds) : nds_(nds) { reset(); }
 
 void Renderer3D::reset() {
-  color_.fill(0); depth_.fill(0); attr_.fill(0);
+  color_.fill(0); depth_.fill(0); attr_.fill(0); out_.fill(0);
   stencil_.fill(0);
   prev_shadow_mask_ = false;
 }
@@ -555,7 +555,7 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   // Set stencil bits where the depth test fails; draw nothing.
   auto stencil_span = [&](s32 xlimit) {
     for (; x < xlimit; ++x) {
-      u32 addr = FIRST + y * W + x;
+      u32 addr = row_of(y) + 1 + x;
       const s32 z = sb.z[x - sb.x0];
       const u32 dstattr = attr_[addr];
       auto fails = [&](u32 a, u32 da) {
@@ -568,7 +568,7 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
       };
       if (fails(addr, dstattr)) stencil_[256 * (y & 1) + x] = 1;
       if (dstattr & 0xF) {
-        addr += SIZE;
+        addr += RSIZE;
         if (fails(addr, attr_[addr])) stencil_[256 * (y & 1) + x] |= 2;
       }
     }
@@ -597,19 +597,19 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
   for (s32 x = xa; x < xb; ++x) {
     const u32 i = static_cast<u32>(x - sb.x0);
     if (!sb.pass[i]) continue;    // neither the top pixel nor the one underneath can take it
-    u32 addr = FIRST + y * W + x;
+    u32 addr = row_of(y) + 1 + x;
     u32 dstattr = attr_[addr];
     if (shadow) {
       const u8 st = stencil[x];
       if (!st) continue;
-      if (!(st & 1)) addr += SIZE;
+      if (!(st & 1)) addr += RSIZE;
       if (!(st & 2)) dstattr &= ~0xFu;      // no shadow under anti-aliased edges
     }
     const s32 z = sb.z[i];
     // Failing against the top pixel, try the one underneath.
     if (!depth_pass<mode>(addr, z, dstattr)) {
-      if (!(dstattr & 0xF) || addr >= static_cast<u32>(SIZE)) continue;
-      addr += SIZE;
+      if (!(dstattr & 0xF) || addr >= static_cast<u32>(RSIZE)) continue;
+      addr += RSIZE;
       dstattr = attr_[addr];
       if (!depth_pass<mode>(addr, z, dstattr)) continue;
     }
@@ -634,14 +634,14 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
           push = true;
         }
       }
-      if (push && addr < static_cast<u32>(SIZE)) {
-        color_[addr + SIZE] = color_[addr]; depth_[addr + SIZE] = depth_[addr]; attr_[addr + SIZE] = attr_[addr];
+      if (push && addr < static_cast<u32>(RSIZE)) {
+        color_[addr + RSIZE] = color_[addr]; depth_[addr + RSIZE] = depth_[addr]; attr_[addr + RSIZE] = attr_[addr];
       }
       depth_[addr] = z; color_[addr] = color; attr_[addr] = attr;
     } else {
       const u32 zz = (sh.polyattr_z) ? static_cast<u32>(z) : 0xFFFFFFFFu;
       plot_translucent(addr, color, zz, polyattr, shadow);
-      if ((dstattr & 0xF) && addr < static_cast<u32>(SIZE)) plot_translucent(addr + SIZE, color, zz, polyattr, shadow);
+      if ((dstattr & 0xF) && addr < static_cast<u32>(RSIZE)) plot_translucent(addr + RSIZE, color, zz, polyattr, shadow);
     }
   }
 }
@@ -914,7 +914,7 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
   const uint32x4_t t_attr_fixed = vdupq_n_u32((polyattr & 0xE0F0) | ((polyattr >> 8) & 0xFF0000) | (1u << 22));
   const uint32x4_t t_keep = vdupq_n_u32(0xFF001F0F), t_id = vdupq_n_u32(0x007F0000), fogbit = vdupq_n_u32(1u << 15);
   const bool blend_on = sh.dispcnt & (1 << 3);
-  const u32 row0 = FIRST + y * W;
+  const u32 row0 = row_of(y) + 1;
 
   // Alpha-blend `src` over the destination at base+x for the lanes `m`;
   // plot_translucent on four lanes.
@@ -1013,7 +1013,7 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
       const uint32x4_t dstcol = vld1q_u32(&color_[addr]);
       const int32x4_t dstz = vld1q_s32(reinterpret_cast<const s32*>(&depth_[addr]));
       if (push) {
-        const u32 under = addr + SIZE;
+        const u32 under = addr + RSIZE;
         vst1q_u32(&color_[under], vbslq_u32(mo, dstcol, vld1q_u32(&color_[under])));
         vst1q_s32(reinterpret_cast<s32*>(&depth_[under]), vbslq_s32(mo, dstz, vld1q_s32(reinterpret_cast<const s32*>(&depth_[under]))));
         vst1q_u32(&attr_[under], vbslq_u32(mo, dstattr, vld1q_u32(&attr_[under])));
@@ -1024,7 +1024,7 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
     }
     if (kinds & 0x0002000200020002ull) {
       plot4(addr, mt, colour, a, z);
-      if (kinds & 0x0004000400040004ull) plot4(addr + SIZE, mb, colour, a, z);
+      if (kinds & 0x0004000400040004ull) plot4(addr + RSIZE, mb, colour, a, z);
     }
   }
 }
@@ -1108,7 +1108,7 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
       // Shadow polygons test against whichever pixel their stencil names; no pre-pass.
       std::memset(sb.pass, 1, static_cast<size_t>(xb - xa)); cb = xb;
     } else {
-      const u32 row = FIRST + y * W + xa;
+      const u32 row = row_of(y) + 1 + xa;
       const u32 r = kern::active::depth_candidates(mode, sb.z, &depth_[row], &attr_[row], static_cast<u32>(xb - xa), sb.pass);
       if (r) { ca = xa + static_cast<s32>(r >> 16); cb = xa + static_cast<s32>(r & 0xFFFF); }
     }
@@ -1215,20 +1215,23 @@ void Renderer3D::final_pass(s32 y) {
   // Edge marking and anti-aliasing act on polygon pixels (edge flags); fog
   // on the fog bit, which the clear can set too. A line nothing touched
   // needs none of it unless the clear carries fog.
-  if (!line_touched_[y]) {
+  bool work = line_touched_[y];
+  if (!work) {
     const bool clear_fog = (rs_->dispcnt & (1 << 14)) || (rs_->clear_attr1 & 0x8000);
-    if (!((dispcnt & (1 << 7)) && clear_fog)) return;
+    work = (dispcnt & (1 << 7)) && clear_fog;
   }
+  if (!work) { std::memcpy(&out_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32)); return; }
   if (dispcnt & (1 << 5)) {
     // Edge marking on the topmost pixels, against the four neighbours.
+    const u32 up = row_of(y - 1) + 1, dn = row_of(y + 1) + 1;
     for (int x = 0; x < 256; ++x) {
-      const u32 addr = FIRST + y * W + x;
+      const u32 addr = row_of(y) + 1 + x;
       const u32 attr = attr_[addr];
       if (!(attr & 0xF)) continue;
       const u32 id = attr >> 24;
       const u32 z = depth_[addr];
       if ((id != (attr_[addr - 1] >> 24) && z < depth_[addr - 1]) || (id != (attr_[addr + 1] >> 24) && z < depth_[addr + 1]) ||
-          (id != (attr_[addr - W] >> 24) && z < depth_[addr - W]) || (id != (attr_[addr + W] >> 24) && z < depth_[addr + W])) {
+          (id != (attr_[up + x] >> 24) && z < depth_[up + x]) || (id != (attr_[dn + x] >> 24) && z < depth_[dn + x])) {
         u32 r, g, b; rgb15_to_666(rs_->edge[id >> 3], r, g, b);
         color_[addr] = r | (g << 8) | (b << 16) | (color_[addr] & 0xFF000000);
         attr_[addr] = (attr & 0xFFFFE0FF) | 0x00001000;    // coverage broken for the AA pass
@@ -1253,24 +1256,24 @@ void Renderer3D::final_pass(s32 y) {
       color_[addr] = r | (g << 8) | (b << 16) | (a << 24);
     };
     for (int x = 0; x < 256; ++x) {
-      u32 addr = FIRST + y * W + x;
+      u32 addr = row_of(y) + 1 + x;
       const u32 attr = attr_[addr];
       if (attr & (1 << 15)) apply(addr);
       if (!(attr & 0xF)) continue;
-      addr += SIZE;
+      addr += RSIZE;
       if (attr_[addr] & (1 << 15)) apply(addr);
     }
   }
   if (dispcnt & (1 << 4)) {
     // Anti-aliasing: blend edge pixels with the pixel underneath by coverage.
     for (int x = 0; x < 256; ++x) {
-      const u32 addr = FIRST + y * W + x;
+      const u32 addr = row_of(y) + 1 + x;
       const u32 attr = attr_[addr];
       if (!(attr & 0xF)) continue;
       u32 cov = (attr >> 8) & 0x1F;
       if (cov == 0x1F) continue;
-      if (cov == 0) { color_[addr] = color_[addr + SIZE]; continue; }
-      const u32 top = color_[addr], bot = color_[addr + SIZE];
+      if (cov == 0) { color_[addr] = color_[addr + RSIZE]; continue; }
+      const u32 top = color_[addr], bot = color_[addr + RSIZE];
       u32 tr = top & 0x3F, tg = (top >> 8) & 0x3F, tb = (top >> 16) & 0x3F, ta = (top >> 24) & 0x1F;
       const u32 br = bot & 0x3F, bg = (bot >> 8) & 0x3F, bb = (bot >> 16) & 0x3F, ba = (bot >> 24) & 0x1F;
       ++cov;
@@ -1283,23 +1286,25 @@ void Renderer3D::final_pass(s32 y) {
       color_[addr] = tr | (tg << 8) | (tb << 16) | (ta << 24);
     }
   }
+  std::memcpy(&out_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32));
 }
 
 // The clear is done per line, just before the line is rendered (the final
 // pass of line y-1 runs after line y, so the neighbours it reads are ready);
-// only the one-pixel border rows are cleared up front. The lower pixel
+// the one-pixel border rows (y = -1 and 192) are written into the ring just
+// before the final pass of the line that reads them. The lower pixel
 // buffers (AA) are never cleared, as on the reference renderer.
-void Renderer3D::clear_border() {
+void Renderer3D::clear_border(s32 y) {
   const u32 clearz = ((rs_->clear_attr2 & 0x7FFF) * 0x200) + 0x1FF;
   const u32 polyid = rs_->clear_attr1 & 0x3F000000;
-  for (int x = 0; x < W; ++x) { color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid; }
-  for (int x = W * 193; x < W * 194; ++x) { color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid; }
+  const u32 row = row_of(y);
+  for (u32 x = row; x < row + W; ++x) { color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid; }
 }
 
 void Renderer3D::clear_line(s32 y) {
   const u32 clearz = ((rs_->clear_attr2 & 0x7FFF) * 0x200) + 0x1FF;
   u32 polyid = rs_->clear_attr1 & 0x3F000000;
-  const u32 row = W * (y + 1);
+  const u32 row = row_of(y);
   color_[row] = 0; depth_[row] = clearz; attr_[row] = polyid;
   color_[row + 257] = 0; depth_[row + 257] = clearz; attr_[row + 257] = polyid;
   u32* color = &color_[row + 1]; u32* depth = &depth_[row + 1]; u32* attr = &attr_[row + 1];
@@ -1352,7 +1357,7 @@ void Renderer3D::render(const Gpu3D& gx) {
     if (texcache_.decodes_this_frame() == 0) { prof::add(prof::C_R3D_FRAMES_KEPT, 1); return; }
   }
   rendered_once_ = true;
-  { DS_PROF(R3D_CLEAR); clear_border(); }
+  { DS_PROF(R3D_CLEAR); clear_border(-1); }
   u32 n = 0;
   for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
     if (polys[i]->degenerate) continue;
@@ -1369,7 +1374,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   active_count_ = 0; active_ = active_buf_[0].data(); active_next_ = active_buf_[1].data();
   { DS_PROF(R3D_SPANS); render_line(0); }
   for (s32 y = 1; y < 192; ++y) { { DS_PROF(R3D_SPANS); render_line(y); } { DS_PROF(R3D_FINAL); final_pass(y - 1); } }
-  { DS_PROF(R3D_FINAL); final_pass(191); }
+  { DS_PROF(R3D_FINAL); clear_border(192); final_pass(191); }
 }
 
 } // namespace ds::gpu
