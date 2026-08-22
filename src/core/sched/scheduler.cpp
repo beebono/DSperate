@@ -57,6 +57,7 @@ void Scheduler::fire_due() {
   for (auto& e : events_) {
     if (e.armed && e.at <= now_) {
       e.armed = false;
+      firing_at_ = e.at;
       e.fn(nds_, e.param);      // may schedule: next_ is kept current by schedule()
     }
   }

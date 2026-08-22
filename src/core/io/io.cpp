@@ -152,13 +152,13 @@ void Io::timer_schedule(Cpu cpu, int idx) {
   if (!t.running() || t.count_up()) { nds_.sched.cancel(id); return; }
   u64 ticks_left = 0x10000 - t.counter;
   u64 cycles = (ticks_left << t.prescaler_shift()) << 1;   // system -> ARM9 cycles
-  nds_.sched.schedule(id, nds_.sched.now() + cycles, timer_event, (static_cast<u32>(cpu) << 2) | idx);
+  nds_.sched.schedule(id, t.start_time + cycles, timer_event, (static_cast<u32>(cpu) << 2) | idx);   // from the sample point, exact
 }
 
 void Io::timer_overflow(Cpu cpu, int idx) {
   Timer& t = cpu_io[ci(cpu)].timers[idx];
   t.counter = t.reload;
-  t.start_time = nds_.sched.now();
+  t.start_time = nds_.sched.event_time();   // the overflow's nominal time, not the (late) slice end
   if (t.control & 0x40) request_irq(cpu, IRQ_TIMER0 + idx);
   if (idx < 3) {
     Timer& n = cpu_io[ci(cpu)].timers[idx + 1];

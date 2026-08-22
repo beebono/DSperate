@@ -125,7 +125,7 @@ void Gpu::on_hblank() {
   }
   engine[0].post_draw(frame_reset);
   engine[1].post_draw(frame_reset);
-  nds_.sched.schedule(EventId::VBlank_Scanline, nds_.sched.now() + (CYCLES_PER_SCANLINE - HBLANK_START), ev_scanline);
+  nds_.sched.schedule(EventId::VBlank_Scanline, nds_.sched.event_time() + (CYCLES_PER_SCANLINE - HBLANK_START), ev_scanline);
 }
 
 void Gpu::on_scanline_start() {
@@ -147,9 +147,9 @@ void Gpu::on_scanline_start() {
   } else if (line_ == 262) nds_.io.set_vblank(false);
   if (line_ >= 2 && line_ < 194) nds_.dma.check(Cpu::ARM9, dma::MODE9_DISPLAY_START);
   else if (line_ == 194) nds_.dma.stop(Cpu::ARM9, dma::MODE9_DISPLAY_START);
-  if (line_ < 192 && run_fifo_) nds_.sched.schedule(EventId::DisplayFifo, nds_.sched.now() + 32 * 2, ev_fifo, 0);
+  if (line_ < 192 && run_fifo_) nds_.sched.schedule(EventId::DisplayFifo, nds_.sched.event_time() + 32 * 2, ev_fifo, 0);
   nds_.io.set_vcount(line_);
-  nds_.sched.schedule(EventId::HBlank, nds_.sched.now() + HBLANK_START, ev_hblank);
+  nds_.sched.schedule(EventId::HBlank, nds_.sched.event_time() + HBLANK_START, ev_hblank);
 }
 
 void Gpu::begin_frame() {
@@ -195,7 +195,7 @@ void Gpu::on_display_fifo(u32 x) {
   if (x > 0) { if (x == 8) sample_fifo(0, 5); else sample_fifo(x - 11, 8); }
   if (x < 256) {
     nds_.dma.check(Cpu::ARM9, dma::MODE9_DISPLAY_FIFO);
-    nds_.sched.schedule(EventId::DisplayFifo, nds_.sched.now() + 6 * 8 * 2, ev_fifo, x + 8);
+    nds_.sched.schedule(EventId::DisplayFifo, nds_.sched.event_time() + 6 * 8 * 2, ev_fifo, x + 8);
   } else sample_fifo(253, 3);
 }
 

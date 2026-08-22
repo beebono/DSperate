@@ -66,6 +66,12 @@ public:
   }
   u64 next_deadline() const { return next_; }
 
+  // Nominal time of the event whose handler is running. Events fire at slice
+  // ends, up to a CPU overshoot after their deadline; a periodic handler must
+  // reschedule from this, not from now(), or the lateness accumulates into a
+  // slow clock (measured: 0.04 % on the scanline and SPU events).
+  u64 event_time() const { return firing_at_; }
+
   // Runs ARM9 then ARM7 up to the next event, fires due events, repeats until
   // `until` is reached. Returns the number of cycles advanced.
   u64 run_until(u64 until);
@@ -89,6 +95,7 @@ private:
   u64 run_until_native(u64 until);
   u64 scan_deadline() const;
   u64 next_ = ~u64{0};   // earliest armed deadline (cached)
+  u64 firing_at_ = 0;    // deadline of the event being fired
   s64  quantum_ = INTERLEAVE_QUANTUM;   // DS_QUANTUM override (measurement only)
   bool debug_slices_ = false;           // DS_DEBUG_SLICES
   struct Event {

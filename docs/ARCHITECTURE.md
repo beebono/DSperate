@@ -426,15 +426,21 @@ rescheduling from the late time accumulated into a sample clock 0.036 %
 slow — enough for Rhythm Heaven's just-in-time stream writer (it refills
 each 256-byte chunk ~0.5 ms before the FIFO prefetch reaches it) to
 overtake the prefetch and play next-lap samples as crackle in one channel.
-The GPU's scanline events still reschedule from `now()` and run 0.038 %
-long for the same reason (+432 ARM9 cycles per frame); the fix is the same
-and is pending because it moves every baseline dump.
+The scanline, display-FIFO and hardware-timer handlers had the same
+pattern (frames ran +432 ARM9 cycles, 0.038 %, long) and now reschedule
+from `Scheduler::event_time()`, the firing event's deadline; a frame is
+exactly 1 120 380 cycles and Rhythm Heaven matches melonDS frame for frame
+and sample for sample with no offset at all.
 
 Cost: sixteen channels × 32768 samples/s of integer work; measured under
 `DS_PROFILE=1` as the `spu` stage: 0.3–0.45 ms per frame on the RK3566.
 
 ## 7. Verification
 
+0. Every periodic event handler reschedules from `Scheduler::event_time()`
+   (its deadline), never `now()` (the slice end, up to a CPU overshoot
+   late): the accumulated lateness made frames 0.038 % long and the SPU
+   clock 0.036 % slow before 2026-08-21.
 1. Interpreter vs melonDS per-instruction trace diffs — see
    [TRACING.md](TRACING.md). Status 2026-08-20: real firmware boot (120 frames)
    and Meteos direct boot (300 frames) match with no semantic divergence on
