@@ -52,6 +52,25 @@ u64 Scheduler::scan_deadline() const {
   return best;
 }
 
+bool Scheduler::both_idle() const {
+  const CpuContext& a9 = nds_.cpu(Cpu::ARM9);
+  const CpuContext& a7 = nds_.cpu(Cpu::ARM7);
+  auto asleep = [](const CpuContext& c) { return c.halted && !(c.hot.irq_pending && !(c.hot.cpsr & 0x80)); };
+  return asleep(a9) && asleep(a7) && !nds_.dma.any_running(Cpu::ARM9) && !nds_.dma.any_running(Cpu::ARM7) && nds_.gpu3d.idle();
+}
+
+// DS_PROFILE=1: what the slices are made of.
+void Scheduler::count_slice(bool skipped) const {
+  const CpuContext& a9 = nds_.cpu(Cpu::ARM9);
+  const CpuContext& a7 = nds_.cpu(Cpu::ARM7);
+  prof::add(prof::C_SLICES, 1);
+  if (a9.halted) prof::add(prof::C_SLICES_A9_HALTED, 1);
+  if (a7.halted) prof::add(prof::C_SLICES_A7_HALTED, 1);
+  if (a9.halted && a7.halted) prof::add(prof::C_SLICES_BOTH_HALTED, 1);
+  if (nds_.dma.any_running(Cpu::ARM9) || nds_.dma.any_running(Cpu::ARM7)) prof::add(prof::C_SLICES_DMA, 1);
+  if (skipped) prof::add(prof::C_SLICES_SKIPPED, 1);
+}
+
 void Scheduler::fire_due() {
   if (now_ < next_) return;
   for (auto& e : events_) {
@@ -111,8 +130,11 @@ begin:
     if (deadline > sl_.until) deadline = sl_.until;
     s64 slice = static_cast<s64>(deadline - now_);
     if (slice <= 0) slice = 1;
-    if (slice > quantum_) slice = quantum_;
+    // With both CPUs asleep the quantum only paces the clock: run to the deadline.
+    const bool idle = slice > quantum_ && both_idle();
+    if (slice > quantum_ && !idle) slice = quantum_;
     sl_.slice = slice;
+    if (prof::enabled) count_slice(idle);
     a9.hot.cycle_budget = static_cast<s32>(slice);
     running_ = &a9; running_start_budget_ = static_cast<s32>(slice); running_shift_ = 0;
     sl_.gx_stalled = nds_.gpu3d.stalled();
@@ -204,7 +226,9 @@ u64 Scheduler::run_until(u64 until) {
     s64 slice = static_cast<s64>(deadline - now_);
     if (slice <= 0) slice = 1;
     // DS_QUANTUM=<cycles>: measurement knob only; anything but 128 breaks lockstep with melonDS.
-    if (slice > quantum_) slice = quantum_;
+    const bool idle = slice > quantum_ && both_idle();
+    if (slice > quantum_ && !idle) slice = quantum_;
+    if (prof::enabled) count_slice(idle);
 
     // ARM9 gets the whole slice; ARM7 then catches up at half clock.
     CpuContext& a9 = nds_.cpu(Cpu::ARM9);

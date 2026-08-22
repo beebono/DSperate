@@ -201,6 +201,31 @@ consumed budget so events scheduled from inside an instruction are stamped at
 the right time. A CPU with a running DMA channel is stalled and the DMA runs in
 its place.
 
+**Idle skip (2026-08-22).** When both CPUs are halted with no unmasked IRQ
+pending, no DMA running and the geometry engine idle, nothing can happen
+before the next event, so the slice runs to the deadline instead of the
+quantum (`Scheduler::both_idle`). Exact: the ARM7 debt's parity carries the
+same way, `run_to` only stamps the time. On SM64DS and Meteos 63 % of all
+slices were of that kind (31 % on Mario & Luigi); the count halves, wall
+time drops only 1.3–1.7 % — an idle slice was already cheap.
+`DS_PROFILE=1` prints the slice breakdown (halted per CPU, both, with DMA,
+run to the deadline).
+
+**In-place refill — tried and reverted (2026-08-22).** The next idea was
+to keep the ARM9 in translated code across slice boundaries: when its
+budget runs out at the block-prologue check or a poll, a helper replays
+the slice end and start (GX catch-up, ARM7 debt, next capped budget) if
+the ARM7 is asleep, no DMA runs, nothing is pending and no event is due,
+and the block simply continues. It is exact (byte-identical JIT frame
+dumps on the device and under qemu) and it fired for 1.5 M of SM64DS's 2.1
+M ARM9 slice ends — and wall time did not move (15.90 → 15.82 s per 900
+frames). Leaving and re-entering translated code was never the cost; the
+scheduler's ~6 % in profiles is the cache-cold scheduler and context state
+touched at every boundary, and whoever touches it first pays. What does
+move it is fewer boundaries: `DS_QUANTUM=512` ran the SM64DS scene 2.5 %
+faster (91.7 → 89.4 s), but 1024 wedged SM64DS outright, so the
+interleave stays at 128 until that dependence is understood.
+
 **Native slice loop (2026-08-22).** With the recompiler attached,
 `Scheduler::run_until` hands the slice sequence to a loop in the code arena
 (`jit::run_loop`): it saves the callee-saved registers once, then alternates

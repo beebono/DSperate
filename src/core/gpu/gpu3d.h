@@ -96,6 +96,8 @@ public:
     run_to_slow(arm9_time);
   }
   bool stalled() const { return stalled_; }
+  // Nothing to execute and nothing to raise: run_to would only stamp the time.
+  bool idle() const { return !geometry_on_ || flush_request_ || (pipe_.empty() && !(gxstat_ & (1u << 27))); }
 
   // Display timing hooks.
   void vblank();            // VCount 192: latch registers, sort, swap buffers

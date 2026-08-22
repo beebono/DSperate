@@ -82,6 +82,7 @@ public:
   // again when the code leaves. Interpreted CPUs and DMA run inside.
   SliceNext slice_next();
 
+
 private:
   struct SliceState {
     u64 until = 0;
@@ -112,6 +113,10 @@ private:
   s64  arm7_debt_ = 0;               // ARM9 cycles the ARM7 still has to cover (carries overshoot and odd cycles)
   std::array<Event, static_cast<size_t>(EventId::Count)> events_;
   void fire_due();
+  void count_slice(bool skipped) const;
+  // Both CPUs halted with nothing pending that could wake them before the
+  // next event: the slice can run to the deadline instead of the quantum.
+  bool both_idle() const;
   void run_cpu(CpuContext& cpu, RunFn run);
 };
 
