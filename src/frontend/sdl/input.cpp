@@ -67,7 +67,7 @@ void Input::close() {
 void Input::touch_at(int wx, int wy, Display& display) {
   int screen = 0, sx = 0, sy = 0;
   if (!display.map_point(wx, wy, screen, sx, sy) || screen != 1) return;   // bottom screen only
-  touching_ = true; touch_x_ = sx; touch_y_ = sy;
+  touching_ = true; touched_ = true; touch_x_ = sx; touch_y_ = sy;
 }
 
 void Input::handle(const SDL_Event& e, Display& display) {

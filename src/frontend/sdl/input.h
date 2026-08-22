@@ -20,7 +20,15 @@ public:
 
   // Feeds one SDL event; `display` maps window points onto the screens.
   void handle(const SDL_Event& e, Display& display);
-  input::Frame frame() const { return input::Frame{static_cast<u16>(buttons_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_}; }
+  // The state for the coming frame. A press and release that both arrived
+  // since the last frame (a quick tap between two polls, common when frames
+  // take 30 ms) still count as held for this frame: the release lands on
+  // the next one, so the game sees every tap.
+  input::Frame frame() {
+    const input::Frame f{static_cast<u16>(buttons_ | pressed_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_ || touched_};
+    pressed_ = 0; touched_ = false;
+    return f;
+  }
 
   bool quit() const { return quit_; }
   // Select+Start together quits when there is no keyboard (handhelds).
@@ -28,12 +36,12 @@ public:
 
 private:
   void set(io::Io::Button b, bool down) {
-    if (down) buttons_ |= 1u << b; else buttons_ &= ~(1u << b);
+    if (down) { buttons_ |= 1u << b; pressed_ |= 1u << b; } else buttons_ &= ~(1u << b);
   }
   void touch_at(int wx, int wy, Display& display);
 
-  u32  buttons_ = 0;
-  bool touching_ = false;
+  u32  buttons_ = 0, pressed_ = 0;        // held now; pressed since the last frame
+  bool touching_ = false, touched_ = false;
   int  touch_x_ = 0, touch_y_ = 0;
   bool quit_ = false;
   SDL_GameController* pad_ = nullptr;
