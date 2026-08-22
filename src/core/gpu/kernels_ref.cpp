@@ -70,6 +70,11 @@ void select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win
   }
 }
 
+bool line_has_translucent_3d(const Pixel* line3d) {
+  for (u32 i = 0; i < 256; ++i) { const u32 a = (line3d[i] >> 24) & 0x1F; if (a != 0 && a != 31) return true; }
+  return false;
+}
+
 void select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out) {
   for (u32 i = 0; i < 256; ++i)
     if (op[i] && (win[i] & wbit)) out[i] = (px[i] & 0x00FFFFFF) | 0xFF000000;

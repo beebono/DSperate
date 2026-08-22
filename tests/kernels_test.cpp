@@ -60,6 +60,15 @@ static void test_select() {
   }
 }
 
+static void test_translucent_3d() {
+  alignas(16) Pixel line[256];
+  for (u32 it = 0; it < 300; ++it) {
+    for (auto& v : line) { const u32 a = (it % 3 == 0) ? (rng() & 1 ? 31 : 0) : (rng() % 32); v = (rng() & 0xFFFFFF) | (a << 24); }
+    const bool r = kern::ref::line_has_translucent_3d(line), n = N::line_has_translucent_3d(line);
+    if (r != n) { std::fprintf(stderr, "FAIL line_has_translucent_3d %d vs %d (iteration %u)\n", r, n, it); ++failures; }
+  }
+}
+
 static void test_select_flat() {
   for (u32 it = 0; it < 200; ++it) {
     Planes a; a.randomise(); Planes b = a;
@@ -208,6 +217,7 @@ int main() {
   test_depth_candidates();
   test_obj_row();
   test_select();
+  test_translucent_3d();
   test_select_flat();
   test_composite();
   test_palette_and_tiles();

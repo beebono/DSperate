@@ -418,6 +418,34 @@ gather (the 33 map entries and tile pointers, reused across the eight
 lines of a tile row while the map bytes match) — exact, and no measurable
 change on any scene: the gather's cost is the tile-row fetches themselves.
 
+**Third pass (2026-08-22 p.m.), from the DraStic comparison.** Line
+anatomy from the counters: on SM64DS's attract 66 % of lines are one
+fully opaque layer, and 2.4 text backgrounds are drawn per line, so most
+drawn BG lines are empty (HUD layers). Two exact additions: (1) a text BG
+line whose 33 map entries are one repeated tile with a transparent row
+returns before the tile fetch and kernel — 25-49 % of BG lines; measured
+nothing on the device, an empty line through the kernel was already
+cheap; (2) `effect_possible` treats identity coefficients as no effect
+(mode 1 at EVA 16 / EVB 0, modes 2-3 at EVY 0 — the rounding biases
+vanish under the channel masks; games leave a fade enabled for whole
+scenes), and a 3D layer only forces the composite when a pixel on the
+line is actually translucent (`line_has_translucent_3d`). Flat lines on
+the attract 3 % → 50 %, SM64DS scene 19 % → 62 %; device: attract 32.0 →
+30.8 s (−3.6 %), scenes within noise to −1.5 %.
+
+What is left is structural, and the comparison says how much: per
+scanline we spend ~1.45 K cycles gathering a text BG (the dependent
+map → tile → pointer chain, ~44 cycles a tile in order), ~1.8 K in the
+tile kernel (a palette lookup and five bytes written per pixel, per
+background), ~3 K selecting, ~4.2 K compositing when it runs, 1.3 K in
+output — ~19 K a line against DraStic's ~4.4 K. Its pipeline keeps
+8-bit palette indices per layer, selects on those (16 pixels per vector
+op, opacity is "index ≠ 0"), and resolves the palette once on the
+winning index; ours resolves per background and carries 32-bit colour
+plus a separate opacity byte through every stage. The index-plane
+redesign is the remaining 2D item (estimate: ~5 K a line, ~5 M cycles a
+frame on this content).
+
 Measured and parked: a line cache. Counting lines whose register state
 matches the previous frame's same line while the engine's palette, OAM and
 mapped banks are byte-identical across the frame gives SM64DS A 6 % / B

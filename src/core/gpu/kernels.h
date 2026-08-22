@@ -24,6 +24,8 @@ namespace ds::gpu::kern {
   /* Priority select of the resolved OBJ plane at one priority level. */                                     \
   void NS##select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win, u32 prio,             \
                       Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id);    \
+  /* Any 3D pixel with alpha strictly between 0 and 31 on the line (alpha in bits 24-28). */                 \
+  bool NS##line_has_translucent_3d(const Pixel* line3d);                                                    \
   /* The same two selects straight into the output line, for lines no colour effect can touch. */            \
   void NS##select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out);             \
   void NS##select_obj_flat(const Pixel* col, const u8* attr, const u8* win, u32 prio, Pixel* out);           \

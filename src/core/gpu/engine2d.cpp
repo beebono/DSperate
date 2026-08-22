@@ -314,6 +314,18 @@ void Engine2D::render_line(u32 line) {
 
   // 2. Window plane, 3. sprite X mosaic, 4. priority select, 5. colour effects.
   delete sc;
+  if (prof::enabled) {
+    u32 layers = 0; int only = -1;
+    for (int n = 0; n < 4; ++n) if (bg_[n].any) { ++layers; only = n; }
+    bool objpx = false;
+    if ((layer_enable_ & 0x10) && num_sprites_) { u64 acc = 0; for (u32 i = 0; i < 256; i += 8) { u64 v; std::memcpy(&v, &obj_attr_[i], 8); acc |= v; } objpx = acc & 0x8080808080808080ull; }
+    if (objpx) ++layers;
+    prof::add(layers == 0 ? prof::C_2D_L0 : layers == 1 ? prof::C_2D_L1 : layers == 2 ? prof::C_2D_L2 : layers == 3 ? prof::C_2D_L3 : prof::C_2D_L4P, 1);
+    if (layers == 1 && only >= 0) { u64 acc = ~0ull; for (u32 i = 0; i < 256; i += 8) { u64 v; std::memcpy(&v, bg_[only].op() + i, 8); acc &= v; } if ((acc & 0x0101010101010101ull) == 0x0101010101010101ull) prof::add(prof::C_2D_L1_FULL, 1); }
+    if (objpx) prof::add(prof::C_2D_OBJ_PRESENT, 1);
+    if (!num_ && (dispcnt_ & 8) && bg_[0].any) prof::add(prof::C_2D_3D_PRESENT, 1);
+    if (dispcnt_ & 0xE000) prof::add(prof::C_2D_WIN_PRESENT, 1);
+  }
   { DS_PROF(WINDOW); build_window_plane(); apply_sprite_mosaic_x(); }
   if (!effect_possible()) {
     // No colour effect can touch this line: the planes go straight into
@@ -339,13 +351,24 @@ bool Engine2D::effect_possible() const {
   if (objs) present |= L_OBJ;
   const u32 mode = (bldcnt_ >> 6) & 3;
   const bool second = ((bldcnt_ >> 8) & present) != 0;
-  if (mode != 0 && (bldcnt_ & 0x3F & present) && (mode != 1 || second)) return true;
+  // Identity coefficients make the effect a no-op (the rounding biases
+  // vanish under the channel masks): a fade left enabled at EVY 0, or a
+  // blend at EVA 16 / EVB 0, which games do for whole scenes.
+  const bool blend_identity = eva_ == 16 && evb_ == 0;
+  const bool mode_noop = (mode == 1 && blend_identity) || (mode >= 2 && evy_ == 0);
+  if (mode != 0 && !mode_noop && (bldcnt_ & 0x3F & present) && (mode != 1 || second)) { prof::add(prof::C_2D_FULL_MODE, 1); return true; }
   if (!second) return false;
-  if (!num_ && (dispcnt_ & 8) && bg_[0].any) return true;
+  if (!num_ && (dispcnt_ & 8) && bg_[0].any) {
+    // The 3D layer blends with what is beneath only where a pixel's alpha
+    // is strictly between 0 and 31; a line of opaque and transparent
+    // pixels only is flat.
+    if (kern::active::line_has_translucent_3d(line3d_)) { prof::add(prof::C_2D_FULL_3D, 1); return true; }
+  }
   if (objs) {
     u64 acc = 0;
     for (u32 i = 0; i < 256; i += 8) { u64 v; std::memcpy(&v, &obj_attr_[i], 8); acc |= v; }
-    if (acc & 0x0C0C0C0C0C0C0C0Cull) return true;   // OA_SEMI | OA_BITMAP somewhere on the line
+    // Bitmap sprites blend on their own alpha; semi-transparent ones with EVA/EVB.
+    if ((acc & 0x0808080808080808ull) || (!blend_identity && (acc & 0x0404040404040404ull))) { prof::add(prof::C_2D_FULL_OBJ, 1); return true; }
   }
   return false;
 }
@@ -356,6 +379,7 @@ bool Engine2D::effect_possible() const {
 // writes the row at the scroll offset into the padded plane.
 void Engine2D::draw_bg_text(u32 line, int bg) {
   prof::add(prof::C_2D_BG_TEXT, 1);
+  prof::add((bgcnt_[bg] & (1 << 7)) ? prof::C_2D_BG_PAL256 : prof::C_2D_BG_PAL16, 1);
   const u16 cnt = bgcnt_[bg];
   BgPlane& plane = bg_[bg];
   const VramView& vv = bg_vram();
@@ -380,12 +404,28 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
   if (!mosaic) {
     const u8* map[2] = {vv.direct(tilemap, 64), nullptr};
     map[1] = wide ? vv.direct(tilemap + 0x800, 64) : map[0];
-    alignas(16) u8 rows[33 * 8]; u8 ctl[33];
+    alignas(16) u8 rows[33 * 8]; u8 ctl[33]; u16 tiles[33];
     u32 palmask = 0;
+    // Map entries first: a row of one repeated tile whose row is
+    // transparent (a text layer with nothing on this line, which most HUD
+    // layers are most of the time) is empty, and neither the tile rows
+    // nor the kernel are needed.
+    bool uniform = true;
     for (u32 t = 0, x = xoff & ~7u; t < 33; ++t, x += 8) {
       const u32 mx = (x & 0xF8) >> 2, blk = (x & widexmask) ? 1 : 0;
-      u16 tile;
-      if (map[blk]) std::memcpy(&tile, map[blk] + mx, 2); else tile = vm.read16(vv, tilemap + mx + (blk << 11));
+      if (map[blk]) std::memcpy(&tiles[t], map[blk] + mx, 2); else tiles[t] = vm.read16(vv, tilemap + mx + (blk << 11));
+      uniform &= tiles[t] == tiles[0];
+    }
+    if (uniform) {
+      const u32 ty = (tiles[0] & (1 << 11)) ? 7 - ty0 : ty0;
+      const u32 a = c256 ? tileset + ((tiles[0] & 0x3FF) << 6) + (ty << 3) : tileset + ((tiles[0] & 0x3FF) << 5) + (ty << 2);
+      const u32 len = c256 ? 8 : 4;
+      u64 row = 0;
+      if (const u8* p = vv.direct(a, len)) std::memcpy(&row, p, len); else for (u32 i = 0; i < len; ++i) row |= static_cast<u64>(vm.read8(vv, a + i)) << (8 * i);
+      if (row == 0) { plane.any = false; prof::add(prof::C_2D_BG_EMPTY, 1); return; }
+    }
+    for (u32 t = 0; t < 33; ++t) {
+      const u16 tile = tiles[t];
       const u32 ty = (tile & (1 << 11)) ? 7 - ty0 : ty0;
       ctl[t] = static_cast<u8>((tile >> 12) | ((tile >> 6) & 0x10));
       palmask |= 1u << (tile >> 12);

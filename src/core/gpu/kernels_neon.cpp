@@ -92,6 +92,16 @@ void select_plane(const Pixel* px, const u8* op, const u8* win, u8 wbit, u8 id, 
   }
 }
 
+bool line_has_translucent_3d(const Pixel* line3d) {
+  const uint32x4_t m = vdupq_n_u32(0x1F), v31 = vdupq_n_u32(31), zero = vdupq_n_u32(0);
+  uint32x4_t acc = zero;
+  for (u32 i = 0; i < 256; i += 4) {
+    const uint32x4_t a = vandq_u32(vshrq_n_u32(vld1q_u32(line3d + i), 24), m);
+    acc = vorrq_u32(acc, vbicq_u32(vmvnq_u32(vceqq_u32(a, zero)), vceqq_u32(a, v31)));
+  }
+  return vmaxvq_u32(acc) != 0;
+}
+
 void select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out) {
   const uint8x16_t vwbit = vdupq_n_u8(wbit), zero = vdupq_n_u8(0);
   const uint32x4_t keep = vdupq_n_u32(0x00FFFFFF), opaque = vdupq_n_u32(0xFF000000);
