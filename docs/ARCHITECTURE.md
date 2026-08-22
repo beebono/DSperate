@@ -535,11 +535,19 @@ frames. `--frames N` with `DS_FPS=1` prints a line per 60 frames;
 Comparing two runs line by line only holds if neither is touched — the
 emulator is deterministic, the player is not.
 
-Everything else is emulation, and playing past the intros is far less
-flattering than the 300-frame averages of §5, which are dominated by logos
-and menus: driven by hand into Meteos's menus and SM64DS's 3D attract,
-frames cost 21 ms and 22 ms, reaching 48 ms — 34 % speed — in SM64DS's
-heaviest scene. Closing that is §7.4's problem, not the frontend's.
+Everything else is emulation, and the frontend adds nothing measurable to
+it: over the same frame windows the headless CLI costs the same to a tenth
+of a millisecond (SM64DS 21.0 ms both; Mario & Luigi 9.7 vs 9.6 and 26.6 vs
+26.7). Comparing a CLI *average* over a window against the frontend's last
+blocks inside it does not work — cost ramps steeply when a game reaches a
+heavy scene, and that shape is the real finding: 900 untouched frames from
+direct boot reach 15.6 ms in Meteos (98 %), 21.0 ms in SM64DS once its 3D
+attract starts (75 %) and 33 ms in Mario & Luigi from frame ~720 (45 %).
+The 300-frame averages of §5 describe logos and menus. Closing that gap is
+§7.4's problem, not the frontend's.
+
+Battery saves change what a game boots into and therefore what it costs, so
+a measurement pair must have identical (or no) save files.
 
 ## 9. Targets
 
