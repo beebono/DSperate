@@ -6,8 +6,10 @@
 
 namespace ds::sdl {
 
-bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync) {
-  const int w = static_cast<int>(SCREEN_W) * scale, h = static_cast<int>(SCREEN_H) * 2 * scale;
+bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout_mode) {
+  layout_ = layout_mode;
+  const bool across = layout_ == Layout::Horizontal;
+  const int w = static_cast<int>(SCREEN_W) * (across ? 2 : 1) * scale, h = static_cast<int>(SCREEN_H) * (across ? 1 : 2) * scale;
   const u32 flags = static_cast<u32>(SDL_WINDOW_RESIZABLE) | (fullscreen ? static_cast<u32>(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u);
   win_ = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
@@ -50,17 +52,20 @@ void Display::close() {
   if (win_) { SDL_DestroyWindow(win_); win_ = nullptr; }
 }
 
-// Both screens stacked, aspect preserved, centred. Integer scaling is not the
-// default: a 1280x720 handheld panel fits the 256x384 stack 1.875 times, and
-// rounding that down to 1 would waste most of the screen.
+// Both screens stacked or side by side, aspect preserved, centred. Integer
+// scaling is not the default: a 1280x720 handheld panel fits the 256x384
+// stack 1.875 times, and rounding that down to 1 would waste most of the
+// screen.
 void Display::layout() {
   int w = 0, h = 0;
   SDL_GetRendererOutputSize(ren_, &w, &h);
   const int sw = static_cast<int>(SCREEN_W), sh = static_cast<int>(SCREEN_H);
-  const double s = std::min(static_cast<double>(w) / sw, static_cast<double>(h) / (sh * 2));
+  const bool across = layout_ == Layout::Horizontal;
+  const int cols = across ? 2 : 1, rows = across ? 1 : 2;
+  const double s = std::min(static_cast<double>(w) / (sw * cols), static_cast<double>(h) / (sh * rows));
   const int dw = static_cast<int>(sw * s), dh = static_cast<int>(sh * s);
-  const int x = (w - dw) / 2, y = (h - dh * 2) / 2;
-  for (int i = 0; i < SCREENS; ++i) views_[i] = View{i, SDL_Rect{x, y + dh * i, dw, dh}};
+  const int x = (w - dw * cols) / 2, y = (h - dh * rows) / 2;
+  for (int i = 0; i < SCREENS; ++i) views_[i] = View{i, across ? SDL_Rect{x + dw * i, y, dw, dh} : SDL_Rect{x, y + dh * i, dw, dh}};
 }
 
 void Display::draw(const u32* const fb[SCREENS]) {

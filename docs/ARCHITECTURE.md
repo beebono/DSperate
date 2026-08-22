@@ -644,8 +644,12 @@ saves, and nothing else — no savestates, no configuration, no menus.
   (`{screen, rect}`), so the eventual per-screen-window mode is a second
   `Display` rather than a rewrite — textures belong to a renderer and cannot
   be shared between windows, which is what forces that shape. The handhelds
-  run SDL's KMSDRM backend, where only one window can exist, so the stacked
-  layout is the only one built. Scaling preserves aspect and is not forced to
+  run SDL's KMSDRM backend, where only one window can exist, so one window
+  holds both screens: stacked (default) or side by side (`--layout
+  horizontal`) — the latter for dual-panel units such as the RG DS, whose
+  compositor lays the panels out horizontally and reports touch in that
+  combined canvas, so the window's bottom screen must sit where the touch
+  panel is. Scaling preserves aspect and is not forced to
   integers: a 1280x720 panel fits the 256x384 stack 1.875 times and rounding
   down to 1 would waste the screen. The core's framebuffers are ARGB8888
   already, so a frame is two `SDL_UpdateTexture` calls.

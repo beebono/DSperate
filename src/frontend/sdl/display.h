@@ -14,12 +14,16 @@ namespace ds::sdl {
 // creating two of these — textures belong to a renderer and cannot be shared
 // between windows, which is why the texture lives here and not in the app.
 // The handhelds run SDL's KMSDRM backend, where only one window exists, so
-// the stacked layout is the only one built for now.
+// one window holds both screens, stacked or side by side.
 class Display {
 public:
   static constexpr int SCREENS = 2;
 
-  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync);
+  // Screens stacked (top over bottom) or side by side (top left, bottom
+  // right): the latter matches handhelds whose two panels sit horizontally
+  // in the compositor's canvas, so touch coordinates line up.
+  enum class Layout { Vertical, Horizontal };
+  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout = Layout::Vertical);
   void close();
 
   void draw(const u32* const fb[SCREENS]);
@@ -45,6 +49,7 @@ private:
   SDL_Texture*  tex_[SCREENS] = {nullptr, nullptr};
   View          views_[SCREENS] = {};
   bool          fullscreen_ = false;
+  Layout        layout_ = Layout::Vertical;
 };
 
 } // namespace ds::sdl

@@ -30,6 +30,7 @@ const char* kUsage =
     "usage: dsperate-sdl <rom.nds> --bios9 F --bios7 F --firmware F [options]\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
+    "  --layout L      vertical (default) or horizontal: screens stacked or side by side\n"
     "  --linear        smooth scaling instead of nearest\n"
     "  --no-audio      run without sound (frames are paced by the clock)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
@@ -71,6 +72,7 @@ int main(int argc, char** argv) {
   long frame_limit = 0;
   const char *record = nullptr, *replay = nullptr;
   bool fullscreen = false, linear = false, audio_on = true, jit = true, vsync = true;
+  ds::sdl::Display::Layout layout = ds::sdl::Display::Layout::Vertical;
 
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
@@ -78,6 +80,12 @@ int main(int argc, char** argv) {
     else if (arg("--bios7")) bios7 = argv[++i];
     else if (arg("--firmware")) fw = argv[++i];
     else if (arg("--scale")) scale = std::atoi(argv[++i]);
+    else if (arg("--layout")) {
+      const char* l = argv[++i];
+      if (!std::strcmp(l, "horizontal")) layout = ds::sdl::Display::Layout::Horizontal;
+      else if (!std::strcmp(l, "vertical")) layout = ds::sdl::Display::Layout::Vertical;
+      else { std::fprintf(stderr, "unknown layout %s\n", l); return 2; }
+    }
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
@@ -119,7 +127,7 @@ int main(int argc, char** argv) {
   if (SDL_Init(init) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
 
   ds::sdl::Display display;
-  if (!display.open("DSperate", scale, fullscreen, linear, vsync)) { SDL_Quit(); return 1; }
+  if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout)) { SDL_Quit(); return 1; }
 
   ds::sdl::Audio audio;
   if (audio_on) audio.open();
