@@ -14,10 +14,15 @@ const char* const names[COUNT] = {
   "3d clear", "3d spans", "3d final pass",
 };
 
+u64 count[C_COUNT] = {};
+const char* const count_names[C_COUNT] = {"3d polygon lines", "3d span pixels", "3d resolved pixels"};
+
 void report() {
   u64 total = 0;
   for (u64 v : ns) total += v;
   if (!total) return;
+  for (u32 i = 0; i < C_COUNT; ++i)
+    if (count[i]) std::fprintf(stderr, "[profile] %-20s %12llu\n", count_names[i], static_cast<unsigned long long>(count[i]));
   std::fprintf(stderr, "[profile] %-14s %9s %6s\n", "stage", "ms", "%");
   for (u32 i = 0; i < COUNT; ++i)
     if (ns[i]) std::fprintf(stderr, "[profile] %-14s %9.1f %5.1f%%\n", names[i], ns[i] / 1e6, 100.0 * ns[i] / total);

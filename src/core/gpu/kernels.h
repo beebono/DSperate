@@ -55,10 +55,17 @@ namespace ds::gpu::kern {
   void NS##span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac);                      \
   /* Attribute by factor: y0 + ((y1-y0)*f >> 8) for y0 < y1, else y1 + ((y0-y1)*(256-f) >> 8); y0 == y1 -> y0. */ \
   void NS##span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out);                                \
-  /* Linear attribute: y0 + (y1-y0)*xv/xdiff for y0 < y1, else y1 + (y0-y1)*(xdiff-xv)/xdiff (truncating). */ \
+  /* Linear attribute: y0 + (y1-y0)*xv/xdiff for y0 < y1, else y1 + (y0-y1)*(xdiff-xv)/xdiff (truncating);    \
+     |y1-y0| * xdiff < 2^32 (colours and texture coordinates; depth goes through span_z_linear). */           \
   void NS##span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out);                            \
   /* Z-buffer depth: base + ((disp>>9) * factor * xrecip >> 13) with base/disp/factor chosen by z0 < z1. */    \
-  void NS##span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* out);
+  void NS##span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* out);                    \
+  /* Depth pre-pass over n pixels: pass[i] = 1 where z passes the test of `mode` against the top pixel        \
+     (0: z < dst; 1: z <= dst when the destination is an opaque back-facing pixel, else z < dst; 2: within    \
+     0x200 either way; 3: within 0xFF), 2 where it fails but the top pixel carries edge flags (the pixel      \
+     underneath is then a candidate), else 0. Returns (first << 16) | (last + 1) of the non-zero entries,     \
+     0 when there are none. `n` may be rounded up to a multiple of 4 (the arrays are padded). */              \
+  u32  NS##depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass);
 
 namespace ref { DS_KERNEL_LIST() }
 #if DSPERATE_NEON

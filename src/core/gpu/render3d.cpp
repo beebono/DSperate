@@ -9,6 +9,9 @@
 
 #include <algorithm>
 #include <cstring>
+#if DSPERATE_NEON
+#include <arm_neon.h>
+#endif
 
 namespace ds::gpu {
 
@@ -24,6 +27,7 @@ template <int dir>
 void Renderer3D::Interp<dir>::setup(s32 x0_, s32 x1_, s32 w0, s32 w1, bool wbuf) {
   x0 = x0_; x1 = x1_; xdiff = x1_ - x0_; wbuffer = wbuf;
   xrecip_z = xdiff != 0 ? (1 << 22) / xdiff : 0;
+  recip = xdiff >= 2 ? static_cast<u32>(((1ull << 32) + static_cast<u32>(xdiff) - 1) / static_cast<u32>(xdiff)) : 0;
   const u32 mask = dir ? 0x7E : 0x7F;
   linear = (w0 == w1) && !(w0 & mask) && !(w1 & mask);
   if (dir) { w0n = w0 >> 1; w0d = (w0 + ((w0 & ~w1) & 1)) >> 1; w1d = w1 >> 1; shift = 9; }
@@ -42,14 +46,24 @@ void Renderer3D::Interp<dir>::set_x(s32 xv) {
 }
 
 template <int dir>
-s32 Renderer3D::Interp<dir>::interpolate(s32 y0, s32 y1) const {
+[[gnu::always_inline]] inline s32 Renderer3D::Interp<dir>::interpolate(s32 y0, s32 y1) const {
   if (xdiff == 0 || y0 == y1) return y0;
   if (!linear) {
     if (y0 < y1) return y0 + static_cast<s32>((static_cast<s64>(y1 - y0) * yfactor) >> shift);
     return y1 + static_cast<s32>((static_cast<s64>(y0 - y1) * ((1 << shift) - yfactor)) >> shift);
   }
-  if (y0 < y1) return y0 + static_cast<s32>(static_cast<s64>(y1 - y0) * x / xdiff);
-  return y1 + static_cast<s32>(static_cast<s64>(y0 - y1) * (xdiff - x) / xdiff);
+  // Linear: d * f / xdiff with d < 2^17 (colours, texture coordinates) and
+  // f <= xdiff < 2^9, so the product fits 32 bits; q = (n * ceil(2^32/xdiff))
+  // >> 32 is the quotient or one too many, and one compare fixes it.
+  const u32 d = static_cast<u32>(y0 < y1 ? y1 - y0 : y0 - y1), f = static_cast<u32>(y0 < y1 ? x : xdiff - x);
+  u32 q;
+  if (recip) {
+    const u32 n = d * f;
+    q = static_cast<u32>((static_cast<u64>(n) * recip) >> 32);
+    if (q * static_cast<u32>(xdiff) > n) --q;
+  } else if (xdiff == 1) q = d * f;
+  else q = static_cast<u32>(static_cast<s64>(d) * f / xdiff);
+  return (y0 < y1 ? y0 : y1) + static_cast<s32>(q);
 }
 
 template <int dir>
@@ -195,25 +209,14 @@ u16 Renderer3D::pal16(u32 addr) const {
 
 // ---- pixel pipeline ------------------------------------------------------------
 //
-// Everything the per-pixel work needs from the polygon and the render state,
-// decoded once per polygon line rather than once per pixel.
-struct Renderer3D::Shade {
-  u32 blendmode, polyalpha, polyattr;
-  bool highlight, textured, wireframe, shadow, polyattr_z;   // polyattr_z: translucent pixels update depth
-  u32 dispcnt, alpha_ref;
-  const u16* toon;
-  // Texture: format, VRAM base, size, wrap/flip, transparent-colour-0 alpha, palette base.
-  u32 fmt, base, texpal, alpha0;
-  s32 width, height;
-  bool srep, sflip, trep, tflip;
-};
-
-// Span stage buffers: one entry per pixel of the current span, index 0 at screen x `x0`.
+// Span stage buffers: one entry per pixel of the current span, index 0 at
+// screen x `x0` (the kernels round their counts up to 4: padded).
 struct Renderer3D::SpanBuf {
   s32 x0;
-  alignas(16) u32 fac[256];
-  alignas(16) s32 z[256];
-  alignas(16) s32 attr[5][256];   // r g b s t
+  alignas(16) u32 fac[256 + 4];
+  alignas(16) s32 z[256 + 4];
+  alignas(16) s32 attr[5][256 + 4];   // r g b s t
+  alignas(16) u8 pass[256 + 8];       // depth pre-pass result (kern depth_candidates)
 };
 
 namespace {
@@ -231,6 +234,20 @@ inline void rgb15_to_666(u16 c, u32& r, u32& g, u32& b) { r = c15_to_18(c, 0); g
   if (sh.trep) { if (sh.tflip && (t & height)) t = (height - 1) - (t & (height - 1)); else t &= height - 1; }
   else { if (t < 0) t = 0; else if (t >= height) t = height - 1; }
   const u32 texpal = sh.texpal, alpha0 = sh.alpha0;
+  if (sh.tex_ptr) {
+    // Texel and palette reads straight from host memory.
+    const u8* tp = sh.tex_ptr; const u16* pp = sh.pal_ptr;
+    const u32 off = static_cast<u32>(t * width + s);
+    switch (sh.fmt) {
+    case 1: { const u8 px = tp[off]; *alpha = ((px >> 3) & 0x1C) + (px >> 6); return pp[px & 0x1F]; }
+    case 2: { const u8 px = (tp[off >> 2] >> ((s & 3) << 1)) & 3; *alpha = px == 0 ? alpha0 : 31; return pp[px]; }
+    case 3: { u8 px = tp[off >> 1]; px = (s & 1) ? (px >> 4) : (px & 0xF); *alpha = px == 0 ? alpha0 : 31; return pp[px]; }
+    case 4: { const u8 px = tp[off]; *alpha = px == 0 ? alpha0 : 31; return pp[px]; }
+    case 6: { const u8 px = tp[off]; *alpha = px >> 3; return pp[px & 7]; }
+    case 7: { u16 c; std::memcpy(&c, tp + off * 2, 2); *alpha = (c & 0x8000) ? 31 : 0; return c; }
+    default: break;
+    }
+  }
   switch (sh.fmt) {
   case 1: {   // A3I5
     const u8 px = tex8(addr + (t * width + s));
@@ -416,6 +433,7 @@ void Renderer3D::setup_polygon(Edge& e, const Polygon& p) const {
   const u32 n = p.nverts;
   u32 vtop = p.vtop, vbot = p.vbot;
   e.poly = &p;
+  setup_shade(e.sh, p);
   e.cur_vl = vtop; e.cur_vr = vtop;
   if (p.facing) {
     e.next_vl = e.cur_vl + 1; if (e.next_vl >= n) e.next_vl = 0;
@@ -458,11 +476,21 @@ void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s
   if (xdiff == 0) { for (u32 i = 0; i < n; ++i) sb.z[i] = zl; }
   else if (wbuffer) kern::active::span_attr_persp(zl, zr, sb.fac, n, sb.z);
   else kern::active::span_z_linear(zl, zr, xv0, n, xdiff, (1 << 22) / xdiff, sb.z);
-  if (!with_attrs) return;
+  if (with_attrs) span_attrs(sb, xstart, xend, xa, xb, wl, wr, al, ar);
+}
+
+// The five attributes for screen pixels [ca, cb) of the span (a sub-range of
+// the staged span, normally the depth pre-pass's candidate range).
+void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar) const {
+  const u32 off = static_cast<u32>(ca - sb.x0), n = static_cast<u32>(cb - ca);
+  const s32 xdiff = (xend + 1) - xstart;
+  const s32 xv0 = ca - xstart;
+  const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   for (int k = 0; k < 5; ++k) {
-    if (xdiff == 0) { for (u32 i = 0; i < n; ++i) sb.attr[k][i] = al[k]; }
-    else if (!linear) kern::active::span_attr_persp(al[k], ar[k], sb.fac, n, sb.attr[k]);
-    else kern::active::span_attr_linear(al[k], ar[k], xv0, n, xdiff, sb.attr[k]);
+    s32* out = sb.attr[k] + off;
+    if (xdiff == 0) { for (u32 i = 0; i < n; ++i) out[i] = al[k]; }
+    else if (!linear) kern::active::span_attr_persp(al[k], ar[k], sb.fac + off, n, out);
+    else kern::active::span_attr_linear(al[k], ar[k], xv0, n, xdiff, out);
   }
 }
 
@@ -567,6 +595,7 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
   const s32* sa = sb.attr[3]; const s32* ta = sb.attr[4];
   for (s32 x = xa; x < xb; ++x) {
     const u32 i = static_cast<u32>(x - sb.x0);
+    if (!sb.pass[i]) continue;    // neither the top pixel nor the one underneath can take it
     u32 addr = FIRST + y * W + x;
     u32 dstattr = attr_[addr];
     if (shadow) {
@@ -586,6 +615,7 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
     const u32 vr = (static_cast<u32>(ra[i]) >> 3) & 0xFF, vg = (static_cast<u32>(ga[i]) >> 3) & 0xFF, vb = (static_cast<u32>(ba[i]) >> 3) & 0xFF;
     const s32 s = static_cast<s16>(sa[i]), t = static_cast<s16>(ta[i]);
     const u32 color = shade_pixel<textured>(sh, vr, vg, vb, s, t);
+    prof::add(prof::C_RESOLVED_PIXELS, 1);
     const u32 alpha = color >> 24;
     if (alpha <= sh.alpha_ref) continue;
     if (alpha == 31) {
@@ -615,9 +645,7 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
   }
 }
 
-void Renderer3D::render_polygon_line(Edge& e, s32 y) {
-  const Polygon& p = *e.poly;
-  Shade sh;
+void Renderer3D::setup_shade(Shade& sh, const Polygon& p) const {
   sh.polyattr = p.attr & 0x3F008000;
   if (!p.facing) sh.polyattr |= (1 << 4);
   sh.polyattr_z = (p.attr & (1 << 11)) != 0;
@@ -638,6 +666,218 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   sh.trep = p.texparam & (1 << 17); sh.tflip = p.texparam & (1 << 19);
   sh.alpha0 = (p.texparam & (1 << 29)) ? 0 : 31;
   sh.texpal = p.texpal;
+  // Direct pointers: every 16 KB block of the texture's range must be mapped
+  // to one bank and follow the previous one in host memory.
+  auto direct_range = [](const VramView& v, u32 addr, u32 len) -> const u8* {
+    addr &= v.addr_mask();
+    if (addr + len > v.size) return nullptr;
+    const u8* p0 = v.ptr[addr / VramView::BLOCK];
+    if (!p0) return nullptr;
+    for (u32 b = addr / VramView::BLOCK + 1; b <= (addr + len - 1) / VramView::BLOCK; ++b)
+      if (v.ptr[b] != p0 + (b - addr / VramView::BLOCK) * VramView::BLOCK) return nullptr;
+    return p0 + (addr & (VramView::BLOCK - 1));
+  };
+  sh.tex_ptr = nullptr; sh.pal_ptr = nullptr;
+  if (sh.textured && sh.fmt != 5) {
+    static const u32 bpp_num[8] = {0, 8, 2, 4, 8, 0, 8, 16};   // bits per texel
+    const u32 bytes = (static_cast<u32>(sh.width * sh.height) * bpp_num[sh.fmt]) / 8;
+    sh.tex_ptr = direct_range(*texv_, sh.base, bytes);
+    const u32 pal_bytes = sh.fmt == 2 ? 8 : (sh.fmt == 3 ? 32 : (sh.fmt == 6 ? 16 : (sh.fmt == 1 ? 64 : 512)));
+    const u32 pal_addr = sh.fmt == 2 ? (sh.texpal << 3) : (sh.texpal << 4);
+    sh.pal_ptr = reinterpret_cast<const u16*>(direct_range(*palv_, pal_addr, pal_bytes));
+  }
+}
+
+
+#if DSPERATE_NEON
+namespace {
+// 15-bit colour channel -> 6-bit (c15_to_18 on lanes): bits 1-5 of the field, +1 when non-zero.
+inline uint32x4_t c15_to_18_4(uint32x4_t c, int shift) {
+  uint32x4_t v = shift == 0 ? vshlq_n_u32(c, 1) : (shift == 4 ? vshrq_n_u32(c, 4) : vshrq_n_u32(c, 9));
+  v = vandq_u32(v, vdupq_n_u32(0x3E));
+  return vaddq_u32(v, vandq_u32(vtstq_u32(v, v), vdupq_n_u32(1)));
+}
+// Exclusive prefix count of set lanes, and the total.
+inline uint32x4_t prefix_exclusive(uint32x4_t ones, u32* total) {
+  const uint32x4_t zero = vdupq_n_u32(0);
+  uint32x4_t s1 = vaddq_u32(ones, vextq_u32(zero, ones, 3));
+  s1 = vaddq_u32(s1, vextq_u32(zero, s1, 2));          // inclusive scan
+  *total = vgetq_lane_u32(s1, 3);
+  return vsubq_u32(s1, ones);
+}
+inline uint32x4_t pack_colour(uint32x4_t r, uint32x4_t g, uint32x4_t b, uint32x4_t a) {
+  return vorrq_u32(vorrq_u32(r, vshlq_n_u32(g, 8)), vorrq_u32(vshlq_n_u32(b, 16), vshlq_n_u32(a, 24)));
+}
+}
+
+// Four texels: wrap/clamp and addressing on lanes, one byte (or halfword)
+// load and one palette load per lane. Only for the direct-pointer case and
+// the uncompressed formats; otherwise texture_sample per lane.
+inline void Renderer3D::texture_gather4(const Shade& sh, const s32* sa, const s32* ta, u32* colour, u32* alpha) const {
+  if (!sh.tex_ptr) {
+    for (int k = 0; k < 4; ++k) colour[k] = texture_sample(sh, static_cast<s16>(sa[k]), static_cast<s16>(ta[k]), &alpha[k]);
+    return;
+  }
+  const int32x4_t w = vdupq_n_s32(sh.width), h = vdupq_n_s32(sh.height), w1 = vdupq_n_s32(sh.width - 1), h1 = vdupq_n_s32(sh.height - 1), zero = vdupq_n_s32(0);
+  int32x4_t sv = vshrq_n_s32(vmovl_s16(vmovn_s32(vld1q_s32(sa))), 4), tv = vshrq_n_s32(vmovl_s16(vmovn_s32(vld1q_s32(ta))), 4);
+  if (sh.srep) {
+    const int32x4_t sm = vandq_s32(sv, w1);
+    sv = sh.sflip ? vbslq_s32(vtstq_s32(sv, w), vsubq_s32(w1, sm), sm) : sm;
+  } else sv = vminq_s32(vmaxq_s32(sv, zero), w1);
+  if (sh.trep) {
+    const int32x4_t tm = vandq_s32(tv, h1);
+    tv = sh.tflip ? vbslq_s32(vtstq_s32(tv, h), vsubq_s32(h1, tm), tm) : tm;
+  } else tv = vminq_s32(vmaxq_s32(tv, zero), h1);
+  alignas(16) u32 off[4], sl[4];
+  vst1q_u32(off, vreinterpretq_u32_s32(vmlaq_s32(sv, tv, w)));
+  vst1q_u32(sl, vreinterpretq_u32_s32(sv));
+  const u8* tp = sh.tex_ptr; const u16* pp = sh.pal_ptr; const u32 alpha0 = sh.alpha0;
+  switch (sh.fmt) {
+  case 1: for (int k = 0; k < 4; ++k) { const u8 px = tp[off[k]]; alpha[k] = ((px >> 3) & 0x1C) + (px >> 6); colour[k] = pp[px & 0x1F]; } break;
+  case 2: for (int k = 0; k < 4; ++k) { const u8 px = (tp[off[k] >> 2] >> ((sl[k] & 3) << 1)) & 3; alpha[k] = px == 0 ? alpha0 : 31; colour[k] = pp[px]; } break;
+  case 3: for (int k = 0; k < 4; ++k) { u8 px = tp[off[k] >> 1]; px = (sl[k] & 1) ? (px >> 4) : (px & 0xF); alpha[k] = px == 0 ? alpha0 : 31; colour[k] = pp[px]; } break;
+  case 4: for (int k = 0; k < 4; ++k) { const u8 px = tp[off[k]]; alpha[k] = px == 0 ? alpha0 : 31; colour[k] = pp[px]; } break;
+  case 6: for (int k = 0; k < 4; ++k) { const u8 px = tp[off[k]]; alpha[k] = px >> 3; colour[k] = pp[px & 7]; } break;
+  default: for (int k = 0; k < 4; ++k) { u16 c; std::memcpy(&c, tp + off[k] * 2, 2); alpha[k] = (c & 0x8000) ? 31 : 0; colour[k] = c; } break;
+  }
+}
+
+template <int mode, bool textured, bool aa>
+void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
+  const u32 polyattr = sh.polyattr;
+  const s32* ra = sb.attr[0]; const s32* ga = sb.attr[1]; const s32* ba = sb.attr[2];
+  const s32* sa = sb.attr[3]; const s32* ta = sb.attr[4];
+  const uint32x4_t lane = {0, 1, 2, 3};
+  const uint32x4_t v_alpha_ref = vdupq_n_u32(sh.alpha_ref), v31 = vdupq_n_u32(31), v0 = vdupq_n_u32(0);
+  (void)v_alpha_ref;
+  const uint32x4_t v_polyalpha = vdupq_n_u32(sh.polyalpha);
+  // Opaque attribute word for this part (coverage added per lane on the edge parts).
+  u32 attr_base = polyattr | edge;
+  bool push = false;
+  s32 cov_sel = part == 0 ? l_cov : r_cov;
+  bool cov_accum = false;
+  if (aa) {
+    if (part == 1) { if (attr_base & 0xF) { attr_base |= (0x1F << 8); push = true; } }
+    else { push = true; cov_accum = cov_sel & static_cast<s32>(0x80000000u); if (!cov_accum) attr_base |= (cov_sel << 8); }
+  }
+  const s32 cov_step = cov_sel & 0x3FF;
+  // Translucent attribute pieces.
+  const uint32x4_t t_attr_fixed = vdupq_n_u32((polyattr & 0xE0F0) | ((polyattr >> 8) & 0xFF0000) | (1u << 22));
+  const uint32x4_t t_keep = vdupq_n_u32(0xFF001F0F), t_id = vdupq_n_u32(0x007F0000), fogbit = vdupq_n_u32(1u << 15);
+  const bool blend_on = sh.dispcnt & (1 << 3);
+  const u32 row0 = FIRST + y * W;
+
+  // Alpha-blend `src` over the destination at base+x for the lanes `m`;
+  // plot_translucent on four lanes.
+  auto plot4 = [&](u32 base, uint32x4_t m, uint32x4_t src, uint32x4_t alpha, int32x4_t z) {
+    const uint32x4_t da = vld1q_u32(&attr_[base]), dc = vld1q_u32(&color_[base]);
+    uint32x4_t attr = vorrq_u32(t_attr_fixed, vandq_u32(da, t_keep));
+    m = vbicq_u32(m, vceqq_u32(vandq_u32(da, t_id), vandq_u32(attr, t_id)));   // equal translucent ids don't blend
+    attr = vandq_u32(attr, vorrq_u32(da, vmvnq_u32(fogbit)));                   // fog bit only if the destination has it
+    uint32x4_t dsta = vshrq_n_u32(dc, 24);
+    uint32x4_t out = src;
+    if (blend_on) {
+      const uint32x4_t a1 = vaddq_u32(alpha, vdupq_n_u32(1)), a2 = vsubq_u32(vdupq_n_u32(32), a1), m3f = vdupq_n_u32(0x3F);
+      const uint32x4_t r = vshrq_n_u32(vmlaq_u32(vmulq_u32(vandq_u32(src, m3f), a1), vandq_u32(dc, m3f), a2), 5);
+      const uint32x4_t g = vshrq_n_u32(vmlaq_u32(vmulq_u32(vandq_u32(vshrq_n_u32(src, 8), m3f), a1), vandq_u32(vshrq_n_u32(dc, 8), m3f), a2), 5);
+      const uint32x4_t b = vshrq_n_u32(vmlaq_u32(vmulq_u32(vandq_u32(vshrq_n_u32(src, 16), m3f), a1), vandq_u32(vshrq_n_u32(dc, 16), m3f), a2), 5);
+      out = vorrq_u32(vorrq_u32(r, vshlq_n_u32(g, 8)), vshlq_n_u32(b, 16));
+    } else out = vandq_u32(src, vdupq_n_u32(0x00FFFFFF));
+    out = vorrq_u32(out, vshlq_n_u32(vmaxq_u32(alpha, dsta), 24));
+    out = vbslq_u32(vceqq_u32(dsta, v0), src, out);                            // nothing underneath: source as is
+    vst1q_u32(&color_[base], vbslq_u32(m, out, dc));
+    vst1q_u32(&attr_[base], vbslq_u32(m, attr, da));
+    if (sh.polyattr_z) vst1q_s32(reinterpret_cast<s32*>(&depth_[base]), vbslq_s32(m, z, vld1q_s32(reinterpret_cast<const s32*>(&depth_[base]))));
+  };
+
+  // Lane masks are tested through one 64-bit transfer of the narrowed lanes
+  // (a cross-lane reduction per test is what the in-order core stalls on).
+  auto lanes = [](uint32x4_t m) -> u64 { return vget_lane_u64(vreinterpret_u64_u16(vmovn_u32(m)), 0); };
+  const bool untextured_passes = !textured && sh.polyalpha > sh.alpha_ref;
+  if (!textured && !untextured_passes) return;   // alpha test fails for every pixel
+  for (s32 x = xa; x < xb; x += 4) {
+    const u32 i = static_cast<u32>(x - sb.x0);
+    u32 p4; std::memcpy(&p4, sb.pass + i, 4);
+    if (x + 4 > xb) p4 &= (1u << (8 * (xb - x))) - 1;    // lanes past the end
+    if (p4 & 0x02020202u) {
+      // A pixel that may land underneath: this block goes through the scalar path, in order.
+      resolve_span<mode, textured, aa, false>(sh, sb, y, x, std::min(x + 4, xb), part, edge, l_cov, r_cov, xcov);
+      continue;
+    }
+    if (!(p4 & 0x01010101u)) continue;
+    const uint32x4_t m1 = vtstq_u32(vshlq_u32(vdupq_n_u32(p4), vreinterpretq_s32_u32(vmulq_u32(lane, vdupq_n_u32(static_cast<u32>(-8))))), vdupq_n_u32(1));
+    const u32 addr = row0 + static_cast<u32>(x);
+    const int32x4_t z = vld1q_s32(sb.z + i);
+    const uint32x4_t m7 = vdupq_n_u32(0xFF);
+    uint32x4_t vr = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ra + i)), 3), m7);
+    uint32x4_t vg = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ga + i)), 3), m7);
+    uint32x4_t vb = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ba + i)), 3), m7);
+    uint32x4_t r, g, b, a;
+    if constexpr (textured) {
+      alignas(16) u32 tc[4], tal[4];
+      texture_gather4(sh, sa + i, ta + i, tc, tal);
+      const uint32x4_t c = vld1q_u32(tc), talpha = vld1q_u32(tal);
+      const uint32x4_t tr = c15_to_18_4(c, 0), tg = c15_to_18_4(c, 4), tb = c15_to_18_4(c, 9);
+      if (sh.blendmode & 1) {   // decal
+        const uint32x4_t inv = vsubq_u32(v31, talpha);
+        r = vshrq_n_u32(vmlaq_u32(vmulq_u32(tr, talpha), vr, inv), 5);
+        g = vshrq_n_u32(vmlaq_u32(vmulq_u32(tg, talpha), vg, inv), 5);
+        b = vshrq_n_u32(vmlaq_u32(vmulq_u32(tb, talpha), vb, inv), 5);
+        const uint32x4_t t0 = vceqq_u32(talpha, v0), t31 = vceqq_u32(talpha, v31);
+        r = vbslq_u32(t0, vr, vbslq_u32(t31, tr, r)); g = vbslq_u32(t0, vg, vbslq_u32(t31, tg, g)); b = vbslq_u32(t0, vb, vbslq_u32(t31, tb, b));
+        a = v_polyalpha;
+      } else {                  // modulate
+        const uint32x4_t one = vdupq_n_u32(1);
+        r = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tr, one), vaddq_u32(vr, one)), one), 6);
+        g = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tg, one), vaddq_u32(vg, one)), one), 6);
+        b = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tb, one), vaddq_u32(vb, one)), one), 6);
+        a = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(talpha, one), vaddq_u32(v_polyalpha, one)), one), 5);
+      }
+    } else { r = vr; g = vg; b = vb; a = v_polyalpha; }
+    prof::add(prof::C_RESOLVED_PIXELS, 4);
+    uint32x4_t m = m1;
+    if constexpr (textured) m = vandq_u32(m1, vcgtq_u32(a, v_alpha_ref));
+    const uint32x4_t colour = pack_colour(r, g, b, a);
+    const uint32x4_t mo = vandq_u32(m, vceqq_u32(a, v31)), mt = vbicq_u32(m, mo);
+    const uint32x4_t dstattr = vld1q_u32(&attr_[addr]);
+    // bit 0 per lane: opaque, bit 1: translucent, bit 2: translucent with a pixel underneath.
+    const uint32x4_t mb = vandq_u32(mt, vtstq_u32(dstattr, vdupq_n_u32(0xF)));
+    const u64 kinds = lanes(vorrq_u32(vorrq_u32(vandq_u32(mo, vdupq_n_u32(1)), vandq_u32(mt, vdupq_n_u32(2))), vandq_u32(mb, vdupq_n_u32(4))));
+    if (!kinds) continue;
+    if (kinds & 0x0001000100010001ull) {
+      uint32x4_t attr = vdupq_n_u32(attr_base);
+      if (aa && cov_accum) {
+        u32 total;
+        const uint32x4_t pre = prefix_exclusive(vandq_u32(mo, vdupq_n_u32(1)), &total);
+        const uint32x4_t xc = vshrq_n_u32(vmlaq_u32(vdupq_n_u32(static_cast<u32>(xcov)), pre, vdupq_n_u32(static_cast<u32>(cov_step))), 5);
+        uint32x4_t cov;
+        if (part == 0) cov = vminq_u32(xc, v31);
+        else cov = vreinterpretq_u32_s32(vmaxq_s32(vsubq_s32(vdupq_n_s32(0x1F), vreinterpretq_s32_u32(xc)), vdupq_n_s32(0)));
+        attr = vorrq_u32(attr, vshlq_n_u32(cov, 8));
+        xcov += cov_step * static_cast<s32>(total);
+      }
+      const uint32x4_t dstcol = vld1q_u32(&color_[addr]);
+      const int32x4_t dstz = vld1q_s32(reinterpret_cast<const s32*>(&depth_[addr]));
+      if (push) {
+        const u32 under = addr + SIZE;
+        vst1q_u32(&color_[under], vbslq_u32(mo, dstcol, vld1q_u32(&color_[under])));
+        vst1q_s32(reinterpret_cast<s32*>(&depth_[under]), vbslq_s32(mo, dstz, vld1q_s32(reinterpret_cast<const s32*>(&depth_[under]))));
+        vst1q_u32(&attr_[under], vbslq_u32(mo, dstattr, vld1q_u32(&attr_[under])));
+      }
+      vst1q_s32(reinterpret_cast<s32*>(&depth_[addr]), vbslq_s32(mo, z, dstz));
+      vst1q_u32(&color_[addr], vbslq_u32(mo, colour, dstcol));
+      vst1q_u32(&attr_[addr], vbslq_u32(mo, attr, dstattr));
+    }
+    if (kinds & 0x0002000200020002ull) {
+      plot4(addr, mt, colour, a, z);
+      if (kinds & 0x0004000400040004ull) plot4(addr + SIZE, mb, colour, a, z);
+    }
+  }
+}
+#endif
+void Renderer3D::render_polygon_line(Edge& e, s32 y) {
+  const Polygon& p = *e.poly;
+  const Shade& sh = e.sh;
   const u32 dispcnt = sh.dispcnt;
   const bool wireframe = sh.wireframe;
   const u32 polyalpha = sh.polyalpha;
@@ -694,21 +934,38 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
     }
   }
 
-  // Attributes at both ends of the span: r g b s t.
-  const s32 al[5] = {istart->interpolate(vlcur->fcol[0], vlnext->fcol[0]), istart->interpolate(vlcur->fcol[1], vlnext->fcol[1]), istart->interpolate(vlcur->fcol[2], vlnext->fcol[2]),
-                     istart->interpolate(vlcur->tex[0], vlnext->tex[0]), istart->interpolate(vlcur->tex[1], vlnext->tex[1])};
-  const s32 ar[5] = {iend->interpolate(vrcur->fcol[0], vrnext->fcol[0]), iend->interpolate(vrcur->fcol[1], vrnext->fcol[1]), iend->interpolate(vrcur->fcol[2], vrnext->fcol[2]),
-                     iend->interpolate(vrcur->tex[0], vrnext->tex[0]), iend->interpolate(vrcur->tex[1], vrnext->tex[1])};
-
   int yedge = 0;
   if (y == p.ytop) yedge = 0x4; else if (y == p.ybot - 1) yedge = 0x8;
   s32 x = xstart;
   if (x < 0) x = 0;
   s32 xcov = 0;
   const s32 xa = x, xb = std::min(xend + 1, 256);
-  SpanBuf sb;
-  if (xb > xa) span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, al, ar, true);
   const int mode = pick_depth_mode(p);
+  prof::add(prof::C_POLY_LINES, 1); prof::add(prof::C_SPAN_PIXELS, xb > xa ? static_cast<u64>(xb - xa) : 0);
+  // Depth first: the pre-pass finds the pixels the span can still write
+  // (against the top pixel, or the one underneath where the top carries
+  // edge flags); attributes are interpolated and the span resolved only
+  // within that range, and an occluded span costs its depth stage alone.
+  SpanBuf sb;
+  s32 ca = xa, cb = xa;
+  if (xb > xa) {
+    span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, nullptr, nullptr, false);
+    if (sh.shadow) {
+      // Shadow polygons test against whichever pixel their stencil names; no pre-pass.
+      std::memset(sb.pass, 1, static_cast<size_t>(xb - xa)); cb = xb;
+    } else {
+      const u32 row = FIRST + y * W + xa;
+      const u32 r = kern::active::depth_candidates(mode, sb.z, &depth_[row], &attr_[row], static_cast<u32>(xb - xa), sb.pass);
+      if (r) { ca = xa + static_cast<s32>(r >> 16); cb = xa + static_cast<s32>(r & 0xFFFF); }
+    }
+  }
+  if (cb <= ca) { e.xl = e.left.step(); e.xr = e.right.step(); return; }
+  // Attributes at both ends of the span: r g b s t.
+  const s32 al[5] = {istart->interpolate(vlcur->fcol[0], vlnext->fcol[0]), istart->interpolate(vlcur->fcol[1], vlnext->fcol[1]), istart->interpolate(vlcur->fcol[2], vlnext->fcol[2]),
+                     istart->interpolate(vlcur->tex[0], vlnext->tex[0]), istart->interpolate(vlcur->tex[1], vlnext->tex[1])};
+  const s32 ar[5] = {iend->interpolate(vrcur->fcol[0], vrnext->fcol[0]), iend->interpolate(vrcur->fcol[1], vrnext->fcol[1]), iend->interpolate(vrcur->fcol[2], vrnext->fcol[2]),
+                     iend->interpolate(vrcur->tex[0], vrnext->tex[0]), iend->interpolate(vrcur->tex[1], vrnext->tex[1])};
+  span_attrs(sb, xstart, xend, ca, cb, wl, wr, al, ar);
 
   // One instantiation per (depth mode, textured, AA, shadow): the inner loop
   // then branches only on per-pixel data.
@@ -721,10 +978,20 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
     DS_R(0), DS_R(1), DS_R(2), DS_R(3)
 #undef DS_R
   };
-  const ResolveFn resolve = kResolve[mode][sh.textured][(dispcnt >> 4) & 1][sh.shadow];
+  ResolveFn resolve = kResolve[mode][sh.textured][(dispcnt >> 4) & 1][sh.shadow];
+#if DSPERATE_NEON
+  static constexpr ResolveFn kResolveVec[4][2][2] = {
+#define DS_V(m) {{&Renderer3D::resolve_span_vec<m, false, false>, &Renderer3D::resolve_span_vec<m, false, true>},   \
+                 {&Renderer3D::resolve_span_vec<m, true, false>,  &Renderer3D::resolve_span_vec<m, true, true>}}
+    DS_V(0), DS_V(1), DS_V(2), DS_V(3)
+#undef DS_V
+  };
+  if (!sh.shadow && !sh.wireframe && sh.blendmode != 2) resolve = kResolveVec[mode][sh.textured][(dispcnt >> 4) & 1];
+#endif
   auto draw_span = [&](s32 xlimit, int part, int edge) {
     if (x >= xlimit) return;
-    (this->*resolve)(sh, sb, y, x, xlimit, part, edge, l_cov, r_cov, xcov);
+    const s32 lo = std::max(x, ca), hi = std::min(xlimit, cb);
+    if (lo < hi) (this->*resolve)(sh, sb, y, lo, hi, part, edge, l_cov, r_cov, xcov);
     x = xlimit;
   };
 
@@ -741,15 +1008,33 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   e.xr = e.right.step();
 }
 
-void Renderer3D::render_line(s32 y, u32 npolys) {
-  for (u32 i = 0; i < npolys; ++i) {
-    Edge& e = edges_[i];
+void Renderer3D::render_line(s32 y) {
+  clear_line(y);
+  // Merge the polygons starting on this line into the active list (both
+  // sorted by list index), render, then drop the ones that end here.
+  {
+    const u16* in = &order_[bucket_[y]];
+    const u32 nin = bucket_[y + 1] - bucket_[y];
+    u32 a = 0, b = 0, n = 0;
+    while (a < active_count_ || b < nin) {
+      if (b >= nin || (a < active_count_ && active_[a] < in[b])) active_next_[n++] = active_[a++];
+      else active_next_[n++] = in[b++];
+    }
+    std::swap(active_, active_next_);
+    active_count_ = n;
+  }
+  u32 keep = 0;
+  line_touched_[y] = active_count_ != 0;
+  for (u32 k = 0; k < active_count_; ++k) {
+    Edge& e = edges_[active_[k]];
     const Polygon& p = *e.poly;
-    if (y >= p.ytop && (y < p.ybot || (y == p.ytop && p.ybot == p.ytop))) {
+    if (y < p.ybot || (y == p.ytop && p.ybot == p.ytop)) {
       if (p.shadow_mask) render_shadow_mask_line(e, y);
       else render_polygon_line(e, y);
     }
+    if (y + 1 < p.ybot) active_[keep++] = active_[k];
   }
+  active_count_ = keep;
 }
 
 // ---- final pass -----------------------------------------------------------------------
@@ -773,6 +1058,13 @@ u32 Renderer3D::fog_density(u32 addr) const {
 
 void Renderer3D::final_pass(s32 y) {
   const u32 dispcnt = rs_->dispcnt;
+  // Edge marking and anti-aliasing act on polygon pixels (edge flags); fog
+  // on the fog bit, which the clear can set too. A line nothing touched
+  // needs none of it unless the clear carries fog.
+  if (!line_touched_[y]) {
+    const bool clear_fog = (rs_->dispcnt & (1 << 14)) || (rs_->clear_attr1 & 0x8000);
+    if (!((dispcnt & (1 << 7)) && clear_fog)) return;
+  }
   if (dispcnt & (1 << 5)) {
     // Edge marking on the topmost pixels, against the four neighbours.
     for (int x = 0; x < 256; ++x) {
@@ -839,42 +1131,43 @@ void Renderer3D::final_pass(s32 y) {
   }
 }
 
-void Renderer3D::clear_buffers() {
+// The clear is done per line, just before the line is rendered (the final
+// pass of line y-1 runs after line y, so the neighbours it reads are ready);
+// only the one-pixel border rows are cleared up front. The lower pixel
+// buffers (AA) are never cleared, as on the reference renderer.
+void Renderer3D::clear_border() {
+  const u32 clearz = ((rs_->clear_attr2 & 0x7FFF) * 0x200) + 0x1FF;
+  const u32 polyid = rs_->clear_attr1 & 0x3F000000;
+  for (int x = 0; x < W; ++x) { color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid; }
+  for (int x = W * 193; x < W * 194; ++x) { color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid; }
+}
+
+void Renderer3D::clear_line(s32 y) {
   const u32 clearz = ((rs_->clear_attr2 & 0x7FFF) * 0x200) + 0x1FF;
   u32 polyid = rs_->clear_attr1 & 0x3F000000;
-  // Border for edge marking.
-  for (int x = 0; x < W; ++x) { color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid; }
-  for (int x = W; x < W * 193; x += W) {
-    color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid;
-    color_[x + 257] = 0; depth_[x + 257] = clearz; attr_[x + 257] = polyid;
-  }
-  for (int x = W * 193; x < W * 194; ++x) { color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid; }
-
+  const u32 row = W * (y + 1);
+  color_[row] = 0; depth_[row] = clearz; attr_[row] = polyid;
+  color_[row + 257] = 0; depth_[row + 257] = clearz; attr_[row + 257] = polyid;
+  u32* color = &color_[row + 1]; u32* depth = &depth_[row + 1]; u32* attr = &attr_[row + 1];
   if (rs_->dispcnt & (1 << 14)) {
     // Clear image from texture slots 2 (colour) and 3 (depth), scrolled.
-    u8 yoff = (rs_->clear_attr2 >> 24) & 0xFF;
-    for (int y = 0; y < W * 192; y += W) {
-      u8 xoff = (rs_->clear_attr2 >> 16) & 0xFF;
-      for (int x = 0; x < 256; ++x) {
-        const u16 v2 = tex16(0x40000 + (yoff << 9) + (xoff << 1));
-        const u16 v3 = tex16(0x60000 + (yoff << 9) + (xoff << 1));
-        u32 r, g, b; rgb15_to_666(v2, r, g, b);
-        const u32 a = (v2 & 0x8000) ? 0x1F000000 : 0;
-        const u32 addr = FIRST + y + x;
-        color_[addr] = r | (g << 8) | (b << 16) | a;
-        depth_[addr] = ((v3 & 0x7FFF) * 0x200) + 0x1FF;
-        attr_[addr] = polyid | (v3 & 0x8000);
-        ++xoff;
-      }
-      ++yoff;
+    const u8 yoff = static_cast<u8>(((rs_->clear_attr2 >> 24) & 0xFF) + y);
+    u8 xoff = (rs_->clear_attr2 >> 16) & 0xFF;
+    for (int x = 0; x < 256; ++x, ++xoff) {
+      const u16 v2 = tex16(0x40000 + (yoff << 9) + (xoff << 1));
+      const u16 v3 = tex16(0x60000 + (yoff << 9) + (xoff << 1));
+      u32 r, g, b; rgb15_to_666(v2, r, g, b);
+      const u32 a = (v2 & 0x8000) ? 0x1F000000 : 0;
+      color[x] = r | (g << 8) | (b << 16) | a;
+      depth[x] = ((v3 & 0x7FFF) * 0x200) + 0x1FF;
+      attr[x] = polyid | (v3 & 0x8000);
     }
   } else {
     u32 r, g, b; rgb15_to_666(static_cast<u16>(rs_->clear_attr1), r, g, b);
     const u32 a = (rs_->clear_attr1 >> 16) & 0x1F;
-    const u32 color = r | (g << 8) | (b << 16) | (a << 24);
+    const u32 c = r | (g << 8) | (b << 16) | (a << 24);
     polyid |= (rs_->clear_attr1 & 0x8000);
-    for (int y = 0; y < W * 192; y += W)
-      for (int x = 0; x < 256; ++x) { const u32 addr = FIRST + y + x; color_[addr] = color; depth_[addr] = clearz; attr_[addr] = polyid; }
+    for (int x = 0; x < 256; ++x) { color[x] = c; depth[x] = clearz; attr[x] = polyid; }
   }
 }
 
@@ -884,15 +1177,24 @@ void Renderer3D::render(const Gpu3D& gx) {
   vm_ = &nds_.bus.vram_map();
   texv_ = &vm_->texture;
   palv_ = &vm_->texpal;
-  { DS_PROF(R3D_CLEAR); clear_buffers(); }
+  { DS_PROF(R3D_CLEAR); clear_border(); }
   u32 n = 0;
   const Polygon* const* polys = gx.render_polygons();
   for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
     if (polys[i]->degenerate) continue;
     setup_polygon(edges_[n++], *polys[i]);
   }
-  { DS_PROF(R3D_SPANS); render_line(0, n); }
-  for (s32 y = 1; y < 192; ++y) { { DS_PROF(R3D_SPANS); render_line(y, n); } { DS_PROF(R3D_FINAL); final_pass(y - 1); } }
+  // Bucket the polygons by their top line (counting sort, list order kept).
+  // A polygon above the screen starts at line 0; one below it is dropped.
+  auto top_line = [&](const Polygon& p) { return p.ytop < 0 ? 0 : p.ytop; };
+  bucket_.fill(0);
+  for (u32 i = 0; i < n; ++i) { const s32 t = top_line(*edges_[i].poly); if (t < 192) ++bucket_[t + 1]; }
+  for (int y = 0; y < 193; ++y) bucket_[y + 1] = static_cast<u16>(bucket_[y + 1] + bucket_[y]);
+  std::array<u16, 194> fill = bucket_;
+  for (u32 i = 0; i < n; ++i) { const s32 t = top_line(*edges_[i].poly); if (t < 192) order_[fill[t]++] = static_cast<u16>(i); }
+  active_count_ = 0; active_ = active_buf_[0].data(); active_next_ = active_buf_[1].data();
+  { DS_PROF(R3D_SPANS); render_line(0); }
+  for (s32 y = 1; y < 192; ++y) { { DS_PROF(R3D_SPANS); render_line(y); } { DS_PROF(R3D_FINAL); final_pass(y - 1); } }
   { DS_PROF(R3D_FINAL); final_pass(191); }
 }
 

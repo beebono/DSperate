@@ -395,7 +395,25 @@ void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac)
     const uint32x4_t den = vreinterpretq_u32_s32(vaddq_s32(vmulq_s32(xv, vw0d), vmulq_s32(vsubq_s32(vxdiff, xv), vw1d)));
     const uint32x4_t zero = vceqzq_u32(den);
     // Lanes with den == 0 divide by 1 and are masked to 0 afterwards.
-    const uint32x4_t q = udiv_exact(num, vorrq_u32(den, vandq_u32(zero, vdupq_n_u32(1))));
+    const uint32x4_t d = vorrq_u32(den, vandq_u32(zero, vdupq_n_u32(1)));
+    // f32 quotient, then the remainder decides: one step up or down covers
+    // the f32 error for quotients below 2^22; the f64 path takes the rest.
+    // Valid when num + d does not wrap (q*d <= num + d then cannot either)
+    // and the quotient is below 2^22 (the estimate is then within one).
+    const float32x4_t fd = vcvtq_f32_u32(d);
+    float32x4_t rcp = vrecpeq_f32(fd);
+    rcp = vmulq_f32(rcp, vrecpsq_f32(fd, rcp));
+    rcp = vmulq_f32(rcp, vrecpsq_f32(fd, rcp));                         // ~23 bits after two Newton steps
+    uint32x4_t q = vcvtq_u32_f32(vmulq_f32(vcvtq_f32_u32(num), rcp));
+    const uint32x4_t unsafe = vorrq_u32(vcgeq_u32(q, vdupq_n_u32(0x3FFFFF)), vcltq_u32(vaddq_u32(num, d), num));
+    uint32x4_t r = vsubq_u32(num, vmulq_u32(q, d));                    // wraps negative when q is one too many
+    const uint32x4_t over = vcgtq_u32(r, num);                           // r "negative"
+    q = vaddq_u32(q, over);                                              // -1 on those lanes
+    r = vaddq_u32(r, vandq_u32(over, d));
+    const uint32x4_t under = vcgeq_u32(r, d);
+    q = vsubq_u32(q, under);                                             // +1 on those lanes
+    r = vsubq_u32(r, vandq_u32(under, d));
+    if (vmaxvq_u32(vorrq_u32(unsafe, vorrq_u32(vcgeq_u32(r, d), vcgtq_u32(r, num)))) != 0) q = udiv_exact(num, d);
     vst1q_u32(fac + i, vbicq_u32(q, zero));
   }
 }
@@ -418,15 +436,22 @@ void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
   const bool up = y0 < y1;
   const int32x4_t base = vdupq_n_s32(up ? y0 : y1);
   const uint32x4_t d = vdupq_n_u32(static_cast<u32>(up ? y1 - y0 : y0 - y1));
-  const float64x2_t vd = vdupq_n_f64(static_cast<double>(xdiff));
   const int32x4_t vxdiff = vdupq_n_s32(xdiff);
+  // d * f / xdiff with the product below 2^32: q = (n * ceil(2^32 / xdiff)) >> 32
+  // is exact or one too many; the compare q * xdiff > n fixes it. xdiff == 1
+  // (reciprocal would not fit) divides by nothing.
+  const u32 m = xdiff >= 2 ? static_cast<u32>(((1ull << 32) + static_cast<u32>(xdiff) - 1) / static_cast<u32>(xdiff)) : 0;
+  const uint32x4_t vm = vdupq_n_u32(m), vxd = vreinterpretq_u32_s32(vxdiff);
   for (u32 i = 0; i < n; i += 4) {
     int32x4_t xv = vaddq_s32(vdupq_n_s32(xv0 + static_cast<s32>(i)), kLane);
     if (!up) xv = vsubq_s32(vxdiff, xv);
-    const uint32x4_t f = vreinterpretq_u32_s32(xv);
-    const uint64x2_t qlo = udiv64_exact(vmull_u32(vget_low_u32(d), vget_low_u32(f)), vd);
-    const uint64x2_t qhi = udiv64_exact(vmull_high_u32(d, f), vd);
-    vst1q_s32(out + i, vaddq_s32(base, vreinterpretq_s32_u32(vcombine_u32(vmovn_u64(qlo), vmovn_u64(qhi)))));
+    const uint32x4_t num = vmulq_u32(d, vreinterpretq_u32_s32(xv));
+    uint32x4_t q = num;
+    if (m) {
+      q = vcombine_u32(vshrn_n_u64(vmull_u32(vget_low_u32(num), vget_low_u32(vm)), 32), vshrn_n_u64(vmull_high_u32(num, vm), 32));
+      q = vaddq_u32(q, vcgtq_u32(vmulq_u32(q, vxd), num));   // all-ones lane = -1
+    }
+    vst1q_s32(out + i, vaddq_s32(base, vreinterpretq_s32_u32(q)));
   }
 }
 
@@ -445,6 +470,33 @@ void span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* o
     const uint64x2_t hi = vshrq_n_u64(vmull_high_u32(df, vrecip), 13);
     vst1q_s32(out + i, vaddq_s32(base, vreinterpretq_s32_u32(vcombine_u32(vmovn_u64(lo), vmovn_u64(hi)))));
   }
+}
+
+u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass) {
+  const uint32x4_t one = vdupq_n_u32(1), two = vdupq_n_u32(2);
+  uint32x4_t any = vdupq_n_u32(0);
+  for (u32 i = 0; i < n; i += 4) {
+    const int32x4_t zv = vld1q_s32(z + i), d = vreinterpretq_s32_u32(vld1q_u32(dstz + i));
+    const uint32x4_t a = vld1q_u32(dstattr + i);
+    uint32x4_t ok;
+    if (mode == 0) ok = vcltq_s32(zv, d);
+    else if (mode == 1) {
+      const uint32x4_t back = vceqq_u32(vandq_u32(a, vdupq_n_u32(0x00400010)), vdupq_n_u32(0x10));
+      ok = vbslq_u32(back, vcleq_s32(zv, d), vcltq_s32(zv, d));
+    } else if (mode == 2) ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(d, zv), vdupq_n_s32(0x200))), vdupq_n_u32(0x400));
+    else ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(d, zv), vdupq_n_s32(0xFF))), vdupq_n_u32(0x1FE));
+    const uint32x4_t edge = vtstq_u32(a, vdupq_n_u32(0xF));
+    const uint32x4_t v = vbslq_u32(ok, one, vandq_u32(edge, two));
+    const uint16x4_t v16 = vmovn_u32(v);
+    const uint8x8_t v8 = vmovn_u16(vcombine_u16(v16, v16));
+    vst1_lane_u32(reinterpret_cast<u32*>(pass + i), vreinterpret_u32_u8(v8), 0);
+    any = vorrq_u32(any, v);
+  }
+  if (vmaxvq_u32(any) == 0) return 0;
+  u32 first = 0; while (!pass[first]) ++first;
+  u32 last = n; while (last && !pass[last - 1]) --last;
+  if (!last) return 0;   // the only hits were in the rounded-up tail
+  return (first << 16) | last;
 }
 
 } // namespace ds::gpu::kern::neon

@@ -334,6 +334,45 @@ branches only on pixel data. Output is byte-identical to the previous
 per-pixel `Interp` code on every dumped game; on the RK3566 the span stage of
 SM64DS's first 300 frames went from 2.19 s to 0.96 s.
 
+**3D pass (2026-08-21 p.m.), from the device profile and the stage
+counters (`DS_PROFILE=1` now reports polygon-lines, span pixels and resolved
+pixels).** Two different shapes: Metroid Prime Hunters has ~4 000
+polygon-lines per frame averaging 28 pixels of which 39 % pass the depth
+test, so per-line fixed cost and wasted interpolation dominate; SM64DS has
+270 polygon-lines and 44 k pixels that all pass, at ~180 cycles per pixel
+in the scalar resolve — in-order stalls down a long dependent chain, not
+bandwidth (IPC 0.74, L1 misses negligible). Done: the clear is per line
+just before the line is rendered (the final pass of line y−1 runs after line
+y, so its neighbours are ready) instead of a 600 KB streaming clear; an
+active polygon list per line (buckets by `ytop`, merged in list order — the
+blending rules depend on list order); the `Shade` record is decoded once
+per polygon; the edge and span linear interpolations divide by one multiply
+with `ceil(2^32/xdiff)` and a compare fix-up (exact: the product is below
+2^32 and the estimate is the quotient or one too many); depth is staged
+first and `depth_candidates` marks the pixels the span can still write
+(against the top pixel, or the one underneath where the top has edge
+flags) so attributes are interpolated and the span resolved only in that
+range; `resolve_span_vec` does four pixels per step — all four depth
+modes, opaque writes with the AA push and per-lane coverage (an exclusive
+prefix count across lanes for the accumulating edge parts), translucent
+blending (`plot4`) for the top and the underneath pixel — with texels
+gathered through `texture_gather4` (wrap/clamp/addressing on lanes, one
+texel and one palette load per lane from direct pointers resolved once per
+polygon); shadow, wireframe, toon and the "may land underneath" lanes go
+through the scalar resolve, which remains the specification; the final
+pass skips lines no polygon touched. Lane masks are tested through one
+64-bit transfer of the narrowed lanes: a `umaxv` per test was a 10-cycle
+stall each. The perspective factor uses a reciprocal estimate with two
+Newton steps and the same integer fix-up, falling back to the f64 divide
+when the quotient or the sum could wrap (`vdivq_f32` is no faster than
+f64 on the A55's 64-bit FP pipe). Device: MPH 3D 7.0 → 5.1 ms/frame, SM64DS
+3.6 → 3.2, Mario & Luigi 1.45 → 1.2; whole frames MPH 21.2 → 19.2 ms, SM64DS
+15.6 → 15.1, M&L 10.4 → 9.9. What remains, in order: the depth/attribute
+buffers as a four-line ring (only the colour buffer must persist; the
+clear, the resolve's loads and the final pass then stay in L1 — ~5 % of
+SM64DS is memory stalls on those 1.2 MB), the translucent blend on 16-bit
+lanes, the geometry unit (6–9 %).
+
 ## 6. Verification
 
 1. Interpreter vs melonDS per-instruction trace diffs — see

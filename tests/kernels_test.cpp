@@ -144,8 +144,10 @@ static void test_span() {
     if (!(rng() & 7)) y1 = y0;
     kern::ref::span_attr_persp(y0, y1, fa, n, oa); N::span_attr_persp(y0, y1, fa, n, ob);
     CHECK_SAME("span_attr_persp", oa, ob, n * 4);
-    kern::ref::span_attr_linear(y0, y1, xv0, n, xdiff, oa); N::span_attr_linear(y0, y1, xv0, n, xdiff, ob);
-    CHECK_SAME("span_attr_linear", oa, ob, n * 4);
+    if (kind != 2) {   // linear attributes: |y1 - y0| * xdiff < 2^32
+      kern::ref::span_attr_linear(y0, y1, xv0, n, xdiff, oa); N::span_attr_linear(y0, y1, xv0, n, xdiff, ob);
+      CHECK_SAME("span_attr_linear", oa, ob, n * 4);
+    }
     const s32 xrecip = (1 << 22) / xdiff;
     kern::ref::span_z_linear(y0, y1, xv0, n, xdiff, xrecip, oa); N::span_z_linear(y0, y1, xv0, n, xdiff, xrecip, ob);
     CHECK_SAME("span_z_linear", oa, ob, n * 4);
@@ -170,7 +172,26 @@ static void test_obj_row() {
   }
 }
 
+// Depth pre-pass: every mode, z values around the destination, edge flags.
+static void test_depth_candidates() {
+  alignas(16) s32 z[260]; alignas(16) u32 dz[260], da[260]; alignas(16) u8 pa[264], pb[264];
+  for (u32 it = 0; it < 500; ++it) {
+    const u32 n = 1 + rng() % 256;
+    for (u32 i = 0; i < 260; ++i) {
+      dz[i] = rng() & 0xFFFFFF; z[i] = static_cast<s32>(dz[i]) + static_cast<s32>(rng() % 0x801) - 0x400;
+      if (!(rng() & 3)) z[i] = static_cast<s32>(rng() & 0xFFFFFF);
+      da[i] = (rng() & 1 ? 0x10 : 0) | (rng() & 1 ? 0x00400000 : 0) | (rng() & 3 ? 0 : (rng() & 0xF));
+    }
+    std::memset(pa, 0xAA, sizeof pa); std::memset(pb, 0xAA, sizeof pb);
+    const int mode = rng() & 3;
+    const u32 ra = kern::ref::depth_candidates(mode, z, dz, da, n, pa), rb = N::depth_candidates(mode, z, dz, da, n, pb);
+    if (ra != rb) { std::fprintf(stderr, "FAIL depth_candidates range %08x vs %08x (iteration %u)\n", ra, rb, it); ++failures; }
+    CHECK_SAME("depth pass", pa, pb, n);
+  }
+}
+
 int main() {
+  test_depth_candidates();
   test_obj_row();
   test_select();
   test_composite();

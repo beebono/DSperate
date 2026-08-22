@@ -18,6 +18,11 @@ enum Stage : u32 {
 extern bool enabled;
 extern u64 ns[COUNT];
 extern const char* const names[COUNT];
+// Event counters (reported with the stages): how much work the stages did.
+enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_COUNT };
+extern u64 count[C_COUNT];
+extern const char* const count_names[C_COUNT];
+inline void add(Counter c, u64 n) { if (enabled) count[c] += n; }
 void report();
 
 struct Scope {

@@ -237,4 +237,22 @@ void span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* o
   }
 }
 
+u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass) {
+  u32 first = n, last = 0;
+  for (u32 i = 0; i < n; ++i) {
+    const s32 d = static_cast<s32>(dstz[i]);
+    bool ok;
+    switch (mode) {
+    case 0: ok = z[i] < d; break;
+    case 1: ok = (dstattr[i] & 0x00400010) == 0x00000010 ? z[i] <= d : z[i] < d; break;
+    case 2: ok = static_cast<u32>((d - z[i]) + 0x200) <= 0x400; break;
+    default: ok = static_cast<u32>((d - z[i]) + 0xFF) <= 0x1FE; break;
+    }
+    const u8 v = ok ? 1 : ((dstattr[i] & 0xF) ? 2 : 0);
+    pass[i] = v;
+    if (v) { if (i < first) first = i; last = i; }
+  }
+  return first < n ? (first << 16) | (last + 1) : 0;
+}
+
 } // namespace ds::gpu::kern::ref
