@@ -7,6 +7,7 @@
 // games expect them.
 #include "core/nds.h"
 #include "core/profile.h"
+#include "core/input/input_log.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
@@ -33,7 +34,9 @@ const char* kUsage =
     "  --no-audio      run without sound (frames are paced by the clock)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
     "  --interp        interpreter instead of the recompiler\n"
-    "  --frames N      quit after N frames (for repeatable measurements)\n";
+    "  --frames N      quit after N frames (for repeatable measurements)\n"
+    "  --record F      write the played inputs to F (one record per frame)\n"
+    "  --replay F      play the inputs in F instead of the controls; quits at its end\n";
 
 // Battery save file next to the ROM.
 std::string save_path(const std::string& rom) {
@@ -66,6 +69,7 @@ int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr;
   int scale = 2;
   long frame_limit = 0;
+  const char *record = nullptr, *replay = nullptr;
   bool fullscreen = false, linear = false, audio_on = true, jit = true, vsync = true;
 
   for (int i = 1; i < argc; ++i) {
@@ -75,6 +79,8 @@ int main(int argc, char** argv) {
     else if (arg("--firmware")) fw = argv[++i];
     else if (arg("--scale")) scale = std::atoi(argv[++i]);
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
+    else if (arg("--record")) record = argv[++i];
+    else if (arg("--replay")) replay = argv[++i];
     else if (!std::strcmp(argv[i], "--fullscreen")) fullscreen = true;
     else if (!std::strcmp(argv[i], "--linear")) linear = true;
     else if (!std::strcmp(argv[i], "--no-audio")) audio_on = false;
@@ -98,6 +104,14 @@ int main(int argc, char** argv) {
 #endif
   const std::string sav = save_path(rom);
   load_save(nds, sav);
+
+  ds::input::Log log;
+  if (record && replay) { std::fprintf(stderr, "--record and --replay are exclusive\n"); return 2; }
+  if (record && !log.open_write(record)) { std::fprintf(stderr, "cannot write %s\n", record); return 1; }
+  if (replay) {
+    if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return 1; }
+    std::fprintf(stderr, "replay: %u frames from %s\n", log.frames(), replay);
+  }
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
 
   u32 init = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
@@ -125,7 +139,10 @@ int main(int argc, char** argv) {
   while (!input.quit() && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) input.handle(e, display);
-    input.apply(nds);
+    ds::input::Frame in = input.frame();
+    if (log.reading()) { if (!log.read(in)) break; }   // the controls still quit; the log ends the run
+    else if (log.writing()) log.write(in);
+    ds::input::apply(nds, in);
 
     const Uint64 t0 = SDL_GetPerformanceCounter();
     nds.run_frame();
@@ -166,6 +183,8 @@ int main(int argc, char** argv) {
   }
 
   if (nds.cart && nds.cart->sram_dirty()) write_save(nds, sav);
+  if (log.writing()) std::fprintf(stderr, "recorded %u frames to %s\n", log.frames(), record);
+  log.close();
   ds::prof::report();
   input.close();
   audio.close();

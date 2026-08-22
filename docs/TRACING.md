@@ -70,6 +70,15 @@ frame is byte-identical).
              --dump-frames out/ds.frames game.nds
     tools/compare_frames.py out/ref.frames out/ds.frames [--offset K] [--png dir]
 
+## Replaying a played scene
+
+`dsperate-sdl --record scene.dsin` logs the player's inputs per frame;
+`dsperate --replay scene.dsin ...` (the headless CLI) replays them, running
+for the log's length unless `--frames` is given, with `--dump-frames`,
+`--dump-audio` and `DS_PROFILE=1` available as usual. Keep the `<rom>.sav`
+that existed when the scene was recorded (or none, both times): the save
+decides what the game boots into.
+
 ## Audio comparison
 
 `--dump-audio file` appends the SPU output after every frame: raw interleaved

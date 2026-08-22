@@ -576,12 +576,17 @@ saves, and nothing else — no savestates, no configuration, no menus.
   file; the frontend loads `<rom>.sav` at start and writes it back when the
   chip is dirty. Savestates are deliberately absent, battery saves are not
   optional.
-* **Not yet: input record/replay.** The gameplay profiles that direct the
-  renderer work (§5.2) came from hand-played sessions and cannot be
-  reproduced: a renderer change measured on headless direct-boot runs sees
-  logos and menus, not the scene that was hot. Recording the per-frame
-  button mask and pen position (six bytes a frame) and replaying it would
-  make a played scene a benchmark; it is the next frontend feature.
+* **Input record/replay** (`core/input/input_log.*`). The gameplay profiles
+  that direct the renderer work (§5.2) come from hand-played sessions, and a
+  renderer change measured on headless direct-boot runs sees logos and
+  menus rather than the scene that was hot. `--record` writes one 8-byte
+  record per frame (button mask, pen x/y, pen down) and `--replay` feeds it
+  back before each `run_frame` — in the window, or in the headless CLI,
+  which then runs for the log's length and takes `--dump-frames` and
+  `perf` like any other run. The emulator is deterministic given its
+  inputs (two replays produce byte-identical frames), so the replay
+  reproduces the session provided the ROM, BIOS and battery save match;
+  the log records nothing else on purpose.
 
 **Measured on the RK3566** across SDL's KMSDRM backend (no session) and sway,
 and across both graphics stacks — Mesa 26.1.6 / panfrost (SDL's `opengl`

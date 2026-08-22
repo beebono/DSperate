@@ -70,6 +70,14 @@ bottom screen. Battery saves live next to the ROM as `<rom>.sav`; there are no
 savestates. `DS_FPS=1` prints speed, per-stage times and audio buffer depth;
 with `--frames N` the output is comparable between runs by frame index.
 
+`--record scene.dsin` writes what you play, one 8-byte record per frame, and
+`--replay scene.dsin` plays it back (in the window, or headlessly with
+`dsperate --replay scene.dsin`, which also takes `--dump-frames` and works
+under `perf`). The emulator is deterministic given its inputs, so a replay
+reproduces the session frame for frame as long as the ROM, BIOS and battery
+save (`<rom>.sav`) are the same as when it was recorded — a played scene
+becomes a benchmark.
+
 On a handheld with no desktop session, SDL uses its KMSDRM backend directly;
 point `XDG_RUNTIME_DIR` at the PipeWire runtime directory or SDL's PulseAudio
 backend spends about twenty seconds failing to connect before sound starts.

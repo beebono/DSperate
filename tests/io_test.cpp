@@ -5,6 +5,7 @@
 // layout, GXSTAT placeholder, and the frontend input path (buttons, KEYCNT
 // interrupts, touchscreen samples over SPI).
 #include "core/nds.h"
+#include "core/input/input_log.h"
 
 #include <cstdio>
 
@@ -157,12 +158,38 @@ static void test_input() {
   CHECK_EQ(tsc_read(nds, 1), 0xFFFu);
 }
 
+static void test_input_log() {
+  const char* path = "/tmp/dsperate_input_log_test.bin";
+  {
+    input::Log w;
+    CHECK_EQ(w.open_write(path), true);
+    for (u32 i = 0; i < 1000; ++i) w.write(input::Frame{static_cast<u16>(i * 7), static_cast<u8>(i), static_cast<u8>(255 - i), (i & 3) == 0});
+  }
+  input::Log r;
+  CHECK_EQ(r.open_read(path), true);
+  CHECK_EQ(r.frames(), 1000u);
+  input::Frame f; u32 n = 0;
+  while (r.read(f)) {
+    const input::Frame want{static_cast<u16>(n * 7), static_cast<u8>(n), static_cast<u8>(255 - n), (n & 3) == 0};
+    CHECK_EQ(f == want, true);
+    ++n;
+  }
+  CHECK_EQ(n, 1000u);
+  // Applying a frame drives the registers the games read.
+  NDS nds;
+  input::apply(nds, input::Frame{1u << io::Io::BTN_START, 10, 20, true});
+  CHECK_EQ(r16(nds, 0x04000130), 0x03FFu & ~(1u << 3));
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x40, 0u);
+  std::remove(path);
+}
+
 int main() {
   test_div();
   test_sqrt();
   test_vramcnt_layout();
   test_gxstat_irq();
   test_input();
+  test_input_log();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("io: ok");
   return 0;

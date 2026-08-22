@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
 #include "core/io/io.h"
+#include "core/input/input_log.h"
 
 #include <SDL2/SDL.h>
 
@@ -19,7 +20,7 @@ public:
 
   // Feeds one SDL event; `display` maps window points onto the screens.
   void handle(const SDL_Event& e, Display& display);
-  void apply(NDS& nds) const;
+  input::Frame frame() const { return input::Frame{static_cast<u16>(buttons_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_}; }
 
   bool quit() const { return quit_; }
   // Select+Start together quits when there is no keyboard (handhelds).

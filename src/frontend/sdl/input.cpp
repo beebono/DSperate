@@ -130,9 +130,4 @@ void Input::handle(const SDL_Event& e, Display& display) {
   }
 }
 
-void Input::apply(NDS& nds) const {
-  nds.io.set_buttons(buttons_);
-  nds.io.set_touch(touch_x_, touch_y_, touching_);
-}
-
 } // namespace ds::sdl

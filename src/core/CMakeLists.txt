@@ -20,6 +20,7 @@ add_library(dsperate_core STATIC
   gpu/render3d.cpp
   gpu/kernels_ref.cpp
   spu/spu.cpp
+  input/input_log.cpp
   io/io.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

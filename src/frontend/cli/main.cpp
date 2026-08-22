@@ -7,6 +7,7 @@
 // and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py
 // and the SPU output (--dump-audio, raw s16 stereo at 32768 Hz).
 #include "core/nds.h"
+#include "core/input/input_log.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
@@ -58,7 +59,7 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
 } // namespace
 
 int main(int argc, char** argv) {
-  const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr;
+  const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr;
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit9 = true, jit7 = true;
@@ -66,9 +67,10 @@ int main(int argc, char** argv) {
   bool jit9 = false, jit7 = false;
 #endif
   TraceState ts;
+  bool frames_given = false;
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
-    if (arg("--frames")) frames = std::atoi(argv[++i]);
+    if (arg("--frames")) { frames = std::atoi(argv[++i]); frames_given = true; }
     else if (arg("--bios9")) bios9 = argv[++i];
     else if (arg("--bios7")) bios7 = argv[++i];
     else if (arg("--firmware")) fw = argv[++i];
@@ -76,6 +78,7 @@ int main(int argc, char** argv) {
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
+    else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
@@ -117,6 +120,12 @@ int main(int argc, char** argv) {
   unsigned long long last9 = 0, last7 = 0;
   FILE* dump_out = dump ? std::fopen(dump, "wb") : nullptr;
   if (dump && !dump_out) { std::fprintf(stderr, "could not open %s\n", dump); return 1; }
+  ds::input::Log log;
+  if (replay) {
+    if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return 1; }
+    if (!frames_given) frames = static_cast<int>(log.frames());
+    std::fprintf(stderr, "replay: %u frames from %s\n", log.frames(), replay);
+  }
   FILE* audio_out = dump_audio ? std::fopen(dump_audio, "wb") : nullptr;
   if (dump_audio && !audio_out) { std::fprintf(stderr, "could not open %s\n", dump_audio); return 1; }
   ts.pc_hist = std::getenv("TRACE_PC_HIST") != nullptr;
@@ -129,6 +138,7 @@ int main(int argc, char** argv) {
       ds::jit::set_trace(true);
 #endif
     }
+    if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
     nds.run_frame();
     if (dump_out) {   // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
