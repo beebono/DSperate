@@ -165,6 +165,21 @@ The guest's own code is 7-9 %; everything else is emulator overhead around
 it, with the renderers at 55-60 % and the scheduler/JIT/memory plumbing at
 13-20 %.
 
+Against DraStic on the same device and content (SM64DS boot/attract,
+4,200 frames; private research notes, comparison/DRASTIC_PROFILE_SM64.md),
+per frame in millions of cycles, 2026-08-22 p.m.: total 18.0 vs our 28.5
+(1.6x); 3D raster 7.7 vs 13.2 (1.7x); **2D 1.7 vs 7.4 (4.4x)**; geometry
+1.8 vs 0.5; **translated code 0.65 vs 2.35 (3.6x)** — the same guest
+instructions, so host instructions per guest instruction; JIT runtime +
+stubs 1.07 vs 1.04; scheduler 0.12 vs 0.83; SPU/IO/memory/libc within
+1.3-2.7x of each other on small bases. The two ratios in bold are the
+next targets: per-line specialisation in the 2D engine (DraStic
+classifies each line by its layer set and runs a path for it; we
+materialise planes, masks, six select records and a composite for every
+line) and the per-instruction overhead of the recompiler (budget and
+data-cost accounting per access, flag materialisation) against DraStic's
+block-level budget and NZCV-resident flags.
+
 ## Dead-value masking
 
 When pc/instr/cpsr match but a register differs (a poll-loop counter after the
