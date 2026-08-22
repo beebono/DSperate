@@ -449,7 +449,36 @@ either. The cost of compressed textures is the texel, palette-info and
 palette loads missing cache, not the instructions around them — and the
 likeliest reason they miss is the 1.2 MB of depth/attribute buffers
 streaming through the same L2 every line, which is the four-line-ring item
-above. That is now the first thing to try for SM64DS.
+above.
+
+**Texture cache (2026-08-22, `gpu/texcache.*`), from the DraStic
+forensics.** DraStic never decodes a texel while rasterising: it samples
+from a cache of decoded texels (private research notes, NEON coverage §4),
+so its texel fetch is one load. Ours now does the same: the first polygon
+to use a (format, address, size, palette, transparent-0) in a frame
+decodes the whole texture into one 32-bit word per texel — the sampler's
+16-bit colour in the low half, the 5-bit alpha above it — and the span
+kernels gather with one independent load per lane through nine wrap-mode
+instantiations. Validity is by content, not write tracking: once per frame
+per texture, the source ranges (texels, the compressed format's slot-1
+palette info, the palette range the decode actually touched) are compared
+with the copy taken at decode time and the texture is re-decoded on any
+difference, which covers bank remaps, DMA, capture and palette animation
+with no hooks anywhere. DS textures are small: the SM64DS scene decodes
+91 textures in 3600 frames and compares 43 KB per frame. Entries unused
+for a frame are dropped past a 24 MB budget. `Renderer3D::texture_sample`
+remains the specification; `tests/texcache_test.cpp` checks every format
+against an independent decoder, and the NEON build (cache) against the
+reference build (sampler) is byte-exact on SM64DS, M&L, MPH and 1500
+frames of the played SM64DS scene. `DS_NO_TEXCACHE=1` disables it.
+
+The cache is used where sampling from VRAM is a chain of dependent loads:
+always for the compressed format, and for any texture the direct pointers
+cannot cover. For the other formats a byte texel plus an L1-resident
+palette beats a word from a four-times-larger decoded array — caching
+everything cost Mario & Luigi and Meteos 0.5-1 %. On the replayed scenes:
+SM64DS −10 % whole-run (3D span stage 66 → 54 s), the 2D-heavy games
+unchanged.
 
 The rotscale backgrounds (affine, extended, large bitmap) sampled their
 map and tiles through the out-of-line OR-read accessor twice per pixel —

@@ -18,6 +18,7 @@ add_library(dsperate_core STATIC
   gpu/vram_map.cpp
   gpu/gpu3d.cpp
   gpu/render3d.cpp
+  gpu/texcache.cpp
   gpu/kernels_ref.cpp
   spu/spu.cpp
   input/input_log.cpp

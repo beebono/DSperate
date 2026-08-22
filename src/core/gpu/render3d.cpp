@@ -678,7 +678,7 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) const {
       if (v.ptr[b] != p0 + (b - addr / VramView::BLOCK) * VramView::BLOCK) return nullptr;
     return p0 + (addr & (VramView::BLOCK - 1));
   };
-  sh.tex_ptr = nullptr; sh.pal_ptr = nullptr;
+  sh.tex_ptr = nullptr; sh.pal_ptr = nullptr; sh.texels = nullptr;
   sh.texv = texv_; sh.palv = palv_; sh.vm = vm_;
   if (sh.textured && sh.fmt != 5) {
     static const u32 bpp_num[8] = {0, 8, 2, 4, 8, 0, 8, 16};   // bits per texel
@@ -688,6 +688,14 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) const {
     const u32 pal_addr = sh.fmt == 2 ? (sh.texpal << 3) : (sh.texpal << 4);
     sh.pal_ptr = reinterpret_cast<const u16*>(direct_range(*palv_, pal_addr, pal_bytes));
   }
+  // The decoded cache wins where sampling from VRAM is a chain of dependent
+  // loads: always for the compressed format, and for any texture the direct
+  // pointers cannot cover. A byte texel plus an L1-resident palette is
+  // cheaper than a word from a four-times-larger decoded array, so the
+  // other formats keep the direct path (measured: Mario & Luigi and Meteos
+  // lost 0.5-1 % with every texture cached).
+  if (sh.textured && (sh.fmt == 5 || !sh.tex_ptr || !sh.pal_ptr))
+    sh.texels = texcache_.lookup(*vm_, sh.fmt, sh.base, static_cast<u32>(sh.width), static_cast<u32>(sh.height), sh.texpal, sh.alpha0);
 #if DSPERATE_NEON
   sh.gather4 = select_gather4(sh);
 #else
@@ -827,6 +835,30 @@ void gather4_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uin
   alpha  = vcombine_u32(vcreate_u32(a0 | (static_cast<u64>(a1) << 32)), vcreate_u32(a2 | (static_cast<u64>(a3) << 32)));
 }
 
+// Four texels from the decoded cache: wrap on lanes, one independent load
+// per lane, colour and alpha split from the word.
+template <int swrap, int twrap>
+void gather4_cached(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uint32x4_t& colour, uint32x4_t& alpha, Tex5Block*) {
+  const int32x4_t w = vdupq_n_s32(sh.width), h = vdupq_n_s32(sh.height);
+  const int32x4_t w1 = vdupq_n_s32(sh.width - 1), h1 = vdupq_n_s32(sh.height - 1);
+  const int32x4_t sv = wrap_lanes<swrap>(vshrq_n_s32(vshlq_n_s32(vld1q_s32(sa), 16), 20), w, w1);
+  const int32x4_t tv = wrap_lanes<twrap>(vshrq_n_s32(vshlq_n_s32(vld1q_s32(ta), 16), 20), h, h1);
+  const uint32x4_t offv = vreinterpretq_u32_s32(vmlaq_s32(sv, tv, w));
+  const u32* tp = sh.texels;
+  const u32 v0 = tp[vgetq_lane_u32(offv, 0)], v1 = tp[vgetq_lane_u32(offv, 1)], v2 = tp[vgetq_lane_u32(offv, 2)], v3 = tp[vgetq_lane_u32(offv, 3)];
+  const uint32x4_t v = vcombine_u32(vcreate_u32(v0 | (static_cast<u64>(v1) << 32)), vcreate_u32(v2 | (static_cast<u64>(v3) << 32)));
+  colour = vandq_u32(v, vdupq_n_u32(0xFFFF));
+  alpha = vshrq_n_u32(v, 16);
+}
+constexpr Gather4Fn gather4_cached_wraps(int swrap, int twrap) {
+  constexpr Gather4Fn t[3][3] = {
+    {gather4_cached<CLAMP, CLAMP>,  gather4_cached<CLAMP, REPEAT>,  gather4_cached<CLAMP, FLIP>},
+    {gather4_cached<REPEAT, CLAMP>, gather4_cached<REPEAT, REPEAT>, gather4_cached<REPEAT, FLIP>},
+    {gather4_cached<FLIP, CLAMP>,   gather4_cached<FLIP, REPEAT>,   gather4_cached<FLIP, FLIP>},
+  };
+  return t[swrap][twrap];
+}
+
 template <int fmt> constexpr Gather4Fn gather4_wraps(int swrap, int twrap) {
   constexpr Gather4Fn t[3][3] = {
     {gather4_impl<fmt, CLAMP, CLAMP>,  gather4_impl<fmt, CLAMP, REPEAT>,  gather4_impl<fmt, CLAMP, FLIP>},
@@ -839,6 +871,7 @@ template <int fmt> constexpr Gather4Fn gather4_wraps(int swrap, int twrap) {
 
 const void* Renderer3D::select_gather4(const Shade& sh) {
   const int sw = sh.srep ? (sh.sflip ? FLIP : REPEAT) : CLAMP, tw = sh.trep ? (sh.tflip ? FLIP : REPEAT) : CLAMP;
+  if (sh.texels) return reinterpret_cast<const void*>(gather4_cached_wraps(sw, tw));
   if (sh.fmt == 5) return reinterpret_cast<const void*>(gather4_wraps<5>(sw, tw));
   if (!sh.tex_ptr || !sh.pal_ptr) return nullptr;
   switch (sh.fmt) {
@@ -933,7 +966,7 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
     uint32x4_t r, g, b, a;
     if constexpr (textured) {
       uint32x4_t c, talpha;
-      if (gather) { gather(sh, sa + i, ta + i, c, talpha, &tex5); prof::add(sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST, 1); }
+      if (gather) { gather(sh, sa + i, ta + i, c, talpha, &tex5); prof::add(sh.texels ? prof::C_TEX_FAST : (sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST), 1); }
       else {
         prof::add(prof::C_TEX_SLOW_VIEWS, 1);
         alignas(16) u32 tc[4], tal[4]; texture_gather4(sh, sa + i, ta + i, tc, tal); c = vld1q_u32(tc); talpha = vld1q_u32(tal);
@@ -1298,6 +1331,9 @@ void Renderer3D::render(const Gpu3D& gx) {
   vm_ = &nds_.bus.vram_map();
   texv_ = &vm_->texture;
   palv_ = &vm_->texpal;
+  static const bool no_cache = std::getenv("DS_NO_TEXCACHE") != nullptr;   // A/B and debugging
+  if (no_cache) texcache_.set_enabled(false);
+  texcache_.begin_frame(nds_.frame_count);
   { DS_PROF(R3D_CLEAR); clear_border(); }
   u32 n = 0;
   const Polygon* const* polys = gx.render_polygons();

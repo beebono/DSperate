@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
 #include "core/types.h"
+#include "core/gpu/texcache.h"
 
 #include <array>
 
@@ -88,6 +89,9 @@ public:
     const u16* pal_ptr;
     // Views for the formats that address VRAM per texel (the compressed one).
     const VramView* texv; const VramView* palv; const VramMap* vm;
+    // Decoded texels from the texture cache (width*height words, colour16 |
+    // alpha << 16), or nullptr when the cache is off.
+    const u32* texels;
     // NEON builds: the four-texel gather specialised for (format, S wrap,
     // T wrap), or nullptr for the per-lane sampler (render3d.cpp).
     const void* gather4;
@@ -127,6 +131,7 @@ private:
   const Gpu3D* gx_ = nullptr;
   const RenderState* rs_ = nullptr;
   const VramMap* vm_ = nullptr;
+  mutable TextureCache texcache_;
   const VramView* texv_ = nullptr;
   const VramView* palv_ = nullptr;
 

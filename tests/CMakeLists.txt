@@ -36,3 +36,7 @@ endif()
 add_executable(test_spu spu_test.cpp)
 target_link_libraries(test_spu PRIVATE dsperate_core)
 add_test(NAME spu COMMAND test_spu)
+
+add_executable(test_texcache texcache_test.cpp)
+target_link_libraries(test_texcache PRIVATE dsperate_core)
+add_test(NAME texcache COMMAND test_texcache)
