@@ -92,6 +92,37 @@ void select_plane(const Pixel* px, const u8* op, const u8* win, u8 wbit, u8 id, 
   }
 }
 
+void select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out) {
+  const uint8x16_t vwbit = vdupq_n_u8(wbit), zero = vdupq_n_u8(0);
+  const uint32x4_t keep = vdupq_n_u32(0x00FFFFFF), opaque = vdupq_n_u32(0xFF000000);
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t m8 = vandq_u8(vmvnq_u8(vceqq_u8(vld1q_u8(op + i), zero)), vtstq_u8(vld1q_u8(win + i), vwbit));
+    if (vmaxvq_u8(m8) == 0) continue;
+    const Mask4 m = widen(m8);
+    for (u32 k = 0; k < 4; ++k) {
+      const uint32x4_t p = vorrq_u32(vandq_u32(vld1q_u32(px + i + k * 4), keep), opaque);
+      vst1q_u32(out + i + k * 4, vbslq_u32(m.m[k], p, vld1q_u32(out + i + k * 4)));
+    }
+  }
+}
+
+void select_obj_flat(const Pixel* col, const u8* attr, const u8* win, u32 prio, Pixel* out) {
+  const uint8x16_t vprio = vdupq_n_u8(static_cast<u8>(prio));
+  const uint32x4_t keep = vdupq_n_u32(0x00FFFFFF), opaque = vdupq_n_u32(0xFF000000);
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t a = vld1q_u8(attr + i);
+    uint8x16_t m8 = vtstq_u8(a, vdupq_n_u8(OA_OPAQUE));
+    m8 = vandq_u8(m8, vceqq_u8(vandq_u8(a, vdupq_n_u8(OA_PRIO)), vprio));
+    m8 = vandq_u8(m8, vtstq_u8(vld1q_u8(win + i), vdupq_n_u8(0x10)));
+    if (vmaxvq_u8(m8) == 0) continue;
+    const Mask4 m = widen(m8);
+    for (u32 k = 0; k < 4; ++k) {
+      const uint32x4_t c = vorrq_u32(vandq_u32(vld1q_u32(col + i + k * 4), keep), opaque);
+      vst1q_u32(out + i + k * 4, vbslq_u32(m.m[k], c, vld1q_u32(out + i + k * 4)));
+    }
+  }
+}
+
 void select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win, u32 prio,
                 Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {
   const uint8x16_t vprio = vdupq_n_u8(static_cast<u8>(prio)), vid = vdupq_n_u8(L_OBJ);

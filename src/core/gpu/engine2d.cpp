@@ -288,6 +288,12 @@ void Engine2D::render_line(u32 line) {
 
   for (auto& p : bg_) p.any = false;
   pal18_checked_ = false; extpal_checked_ = 0;
+  if (prof::enabled) {
+    prof::add(prof::C_2D_LINES, 1);
+    if ((layer_enable_ & 0x10) && num_sprites_) prof::add(prof::C_2D_OBJ_LINES, 1);
+    if (dispcnt_ & 0xE000) prof::add(prof::C_2D_WINDOW_LINES, 1);
+    if (bldcnt_ & 0xC0) prof::add(prof::C_2D_EFFECT_LINES, 1);
+  }
   prof::Scope* sc = prof::enabled ? new prof::Scope(prof::BG_DRAW) : nullptr;
   const int mode = dispcnt_ & 7;
   auto bg_on = [&](int n) { return (layer_enable_ >> n) & 1; };
@@ -309,8 +315,39 @@ void Engine2D::render_line(u32 line) {
   // 2. Window plane, 3. sprite X mosaic, 4. priority select, 5. colour effects.
   delete sc;
   { DS_PROF(WINDOW); build_window_plane(); apply_sprite_mosaic_x(); }
+  if (!effect_possible()) {
+    // No colour effect can touch this line: the planes go straight into
+    // the output, with none of the second-layer bookkeeping.
+    prof::add(prof::C_2D_FLAT_LINES, 1);
+    DS_PROF(SELECT); select_layers_flat();
+    return;
+  }
+  prof::add(prof::C_2D_EFFECT_LIVE, 1);
   { DS_PROF(SELECT); select_layers(); }
   { DS_PROF(EFFECTS); colour_effects(); }
+}
+
+// Whether any pixel of the line could be changed by the colour-effects pass:
+// the selected effect with a first target (and, for blending, a second
+// target) among the layers present, or a layer that blends on its own —
+// semi-transparent / bitmap sprites and the 3D layer — over a second
+// target. Conservative: presence is per line, not per pixel.
+bool Engine2D::effect_possible() const {
+  u32 present = L_BACKDROP;
+  for (int n = 0; n < 4; ++n) if (bg_[n].any) present |= 1u << n;
+  const bool objs = (layer_enable_ & 0x10) && num_sprites_;
+  if (objs) present |= L_OBJ;
+  const u32 mode = (bldcnt_ >> 6) & 3;
+  const bool second = ((bldcnt_ >> 8) & present) != 0;
+  if (mode != 0 && (bldcnt_ & 0x3F & present) && (mode != 1 || second)) return true;
+  if (!second) return false;
+  if (!num_ && (dispcnt_ & 8) && bg_[0].any) return true;
+  if (objs) {
+    u64 acc = 0;
+    for (u32 i = 0; i < 256; i += 8) { u64 v; std::memcpy(&v, &obj_attr_[i], 8); acc |= v; }
+    if (acc & 0x0C0C0C0C0C0C0C0Cull) return true;   // OA_SEMI | OA_BITMAP somewhere on the line
+  }
+  return false;
 }
 
 // Text (tiled) background. The 33 tile rows covering the line are gathered
@@ -318,6 +355,7 @@ void Engine2D::render_line(u32 line) {
 // screen block), then one kernel call resolves them through the palettes and
 // writes the row at the scroll offset into the padded plane.
 void Engine2D::draw_bg_text(u32 line, int bg) {
+  prof::add(prof::C_2D_BG_TEXT, 1);
   const u16 cnt = bgcnt_[bg];
   BgPlane& plane = bg_[bg];
   const VramView& vv = bg_vram();
@@ -406,6 +444,7 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
 
 // Affine (rotation/scaling) background: 8-bit map entries, 256-colour tiles.
 void Engine2D::draw_bg_affine(u32 line, int bg) {
+  prof::add(prof::C_2D_BG_AFFINE, 1);
   (void)line;
   const u16 cnt = bgcnt_[bg];
   BgPlane& plane = bg_[bg];
@@ -436,6 +475,7 @@ void Engine2D::draw_bg_affine(u32 line, int bg) {
 
 // Extended background: 16-bit-map affine, 8-bit bitmap or direct-colour bitmap.
 void Engine2D::draw_bg_extended(u32 line, int bg) {
+  prof::add(prof::C_2D_BG_EXT, 1);
   (void)line;
   const u16 cnt = bgcnt_[bg];
   BgPlane& plane = bg_[bg];
@@ -519,6 +559,7 @@ void Engine2D::draw_bg_large(u32 line) {
 }
 
 void Engine2D::draw_bg_3d() {
+  prof::add(prof::C_2D_BG_3D, 1);
   BgPlane& plane = bg_[0];
   if (!line3d_) { plane.any = false; return; }
   kern::active::layer_3d(line3d_, plane.px(), plane.op());
@@ -771,6 +812,7 @@ void Engine2D::build_window_plane() {
 void Engine2D::select_bg(int bg) {
   const BgPlane& p = bg_[bg];
   if (!p.any) return;
+  prof::add(prof::C_2D_SELECTS, 1);
   const bool is3d = bg == 0 && !num_ && (dispcnt_ & 8);    // 3D pixels carry their alpha and blend differently
   kern::active::select_plane(p.px(), p.op(), win_.data(), 1 << bg, 1 << bg, is3d,
                              top_.data(), second_.data(), top_id_.data(), top_kind_.data(), top_alpha_.data(), second_id_.data());
@@ -814,6 +856,23 @@ void Engine2D::select_layers() {
       select_bg(bg);
     }
     if (objs && (obj_prio_mask_ & (1 << prio))) select_obj(prio);
+  }
+}
+
+void Engine2D::select_layers_flat() {
+  out_.fill(rgb15_to_18(palette()[0]) | 0xFF000000);
+  const bool objs = (layer_enable_ & 0x10) && num_sprites_;
+  if (objs) resolve_obj_colours();
+  for (int prio = 3; prio >= 0; --prio) {
+    for (int bg = 3; bg >= 0; --bg) {
+      if (!(layer_enable_ & (1 << bg))) continue;
+      if ((bgcnt_[bg] & 3) != prio) continue;
+      const BgPlane& p = bg_[bg];
+      if (!p.any) continue;
+      prof::add(prof::C_2D_SELECTS, 1);
+      kern::active::select_plane_flat(p.px(), p.op(), win_.data(), 1 << bg, out_.data());
+    }
+    if (objs && (obj_prio_mask_ & (1 << prio))) kern::active::select_obj_flat(obj_col_.data(), obj_attr_.data(), win_.data(), prio, out_.data());
   }
 }
 

@@ -24,6 +24,9 @@ namespace ds::gpu::kern {
   /* Priority select of the resolved OBJ plane at one priority level. */                                     \
   void NS##select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win, u32 prio,             \
                       Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id);    \
+  /* The same two selects straight into the output line, for lines no colour effect can touch. */            \
+  void NS##select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out);             \
+  void NS##select_obj_flat(const Pixel* col, const u8* attr, const u8* win, u32 prio, Pixel* out);           \
   /* Colour effects: blend / brighten / darken with the OBJ and 3D override rules. */                         \
   void NS##composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, const Pixel* second,      \
                           const u8* top_id, const u8* top_kind, const u8* top_alpha, const u8* second_id,     \

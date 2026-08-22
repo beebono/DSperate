@@ -70,6 +70,19 @@ void select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win
   }
 }
 
+void select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out) {
+  for (u32 i = 0; i < 256; ++i)
+    if (op[i] && (win[i] & wbit)) out[i] = (px[i] & 0x00FFFFFF) | 0xFF000000;
+}
+
+void select_obj_flat(const Pixel* col, const u8* attr, const u8* win, u32 prio, Pixel* out) {
+  for (u32 i = 0; i < 256; ++i) {
+    const u8 a = attr[i];
+    if (!(a & OA_OPAQUE) || (a & OA_PRIO) != prio || !(win[i] & 0x10)) continue;
+    out[i] = (col[i] & 0x00FFFFFF) | 0xFF000000;
+  }
+}
+
 void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, const Pixel* second,
                     const u8* top_id, const u8* top_kind, const u8* top_alpha, const u8* second_id,
                     const u8* win, Pixel* out) {

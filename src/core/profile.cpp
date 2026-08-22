@@ -18,7 +18,8 @@ u64 count[C_COUNT] = {};
 const char* const count_names[C_COUNT] = {"3d polygon lines", "3d span pixels", "3d resolved pixels",
   "3d texel gathers (cached/direct)", "3d texel gathers (compressed)", "3d texel gathers (via views)",
   "3d texcache validated", "3d texcache decoded", "3d texcache bytes compared", "3d frames kept (no new swap)",
-  "slices", "slices arm9 halted", "slices arm7 halted", "slices both halted", "slices with dma", "slices run to the deadline (both halted)"};
+  "slices", "slices arm9 halted", "slices arm7 halted", "slices both halted", "slices with dma", "slices run to the deadline (both halted)",
+  "2d lines rendered", "2d text bg lines", "2d affine bg lines", "2d extended bg lines", "2d 3d-layer lines", "2d lines with sprites", "2d lines with windows", "2d lines with colour effect", "2d lines where an effect can apply", "2d flat lines (no effect possible)", "2d plane selects"};
 
 void report() {
   u64 total = 0;

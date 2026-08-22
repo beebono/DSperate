@@ -367,6 +367,31 @@ frames from direct boot: Mario & Luigi 2D stages 2.6 s → 1.1 s (frame
 the tile gather (~5 %), `output_line` (memory-bound: the framebuffer is
 written through to DRAM) and the OAM-order sprite loop.
 
+**2D, second pass (2026-08-22), from the subsystem sweep.** Counters first
+(`DS_PROFILE=1` prints them): per line ~2 text backgrounds and 1.6 plane
+selects; BLDCNT has an effect selected on 85 % of lines, but an effect can
+*reach* a pixel — a first target among the layers present (and a second one
+for blending), or a semi-transparent / bitmap sprite or the 3D layer over a
+second target — on only 75 % of SM64DS's lines (the 3D layer), 49 % of
+Mario & Luigi's and 45 % of Meteos's. The rest now take a *flat* path
+(`Engine2D::effect_possible`, conservative per line): the planes are
+selected straight into the output line (`select_plane_flat` /
+`select_obj_flat`), with no second-layer, kind or alpha records and no
+composite pass. Device, replayed scenes: Meteos −1.8 %, Mario & Luigi
+−2.2 %, SM64DS −1.0 %. Tried and dropped: caching the text-background
+gather (the 33 map entries and tile pointers, reused across the eight
+lines of a tile row while the map bytes match) — exact, and no measurable
+change on any scene: the gather's cost is the tile-row fetches themselves.
+
+Measured and parked: a line cache. Counting lines whose register state
+matches the previous frame's same line while the engine's palette, OAM and
+mapped banks are byte-identical across the frame gives SM64DS A 6 % / B
+18 %, Mario & Luigi A 8 % / B 55 %, Meteos A 16 % / B 26 % of lines — worth
+2–7 % of wall, but exactness needs VRAM write tracking within the frame
+(a frame-end compare cannot see a mid-frame write that a skipped line
+should have shown), which is a page-table write-notify mode plus DMA
+hooks. Not built yet.
+
 ### 5.2 The 3D engine as built (`gpu/gpu3d.*`, `gpu/render3d.*`)
 
 Geometry (`Gpu3D`): a 256-entry command FIFO feeding a 4-entry pipe, with a

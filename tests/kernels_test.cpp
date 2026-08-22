@@ -60,6 +60,20 @@ static void test_select() {
   }
 }
 
+static void test_select_flat() {
+  for (u32 it = 0; it < 200; ++it) {
+    Planes a; a.randomise(); Planes b = a;
+    const u8 wbit = 1 << (rng() % 5);
+    kern::ref::select_plane_flat(a.px, a.op, a.win, wbit, a.out);
+    N::select_plane_flat(b.px, b.op, b.win, wbit, b.out);
+    CHECK_SAME("flat out", a.out, b.out, sizeof a.out);
+    const u32 prio = rng() & 3;
+    kern::ref::select_obj_flat(a.col, a.attr, a.win, prio, a.out);
+    N::select_obj_flat(b.col, b.attr, b.win, prio, b.out);
+    CHECK_SAME("flat obj out", a.out, b.out, sizeof a.out);
+  }
+}
+
 static void test_composite() {
   for (u32 it = 0; it < 400; ++it) {
     Planes a; a.randomise(); Planes b = a;
@@ -194,6 +208,7 @@ int main() {
   test_depth_candidates();
   test_obj_row();
   test_select();
+  test_select_flat();
   test_composite();
   test_palette_and_tiles();
   test_text_tiles();

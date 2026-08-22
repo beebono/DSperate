@@ -143,6 +143,7 @@ private:
   alignas(16) std::array<Pixel, 256> out_{};
   const Pixel* line3d_ = nullptr;
 
+
   // Helpers.
   const VramMap& vram() const;
   const VramView& bg_vram() const;
@@ -162,6 +163,8 @@ private:
   void apply_sprite_mosaic_x();
   void build_window_plane();
   void select_layers();
+  void select_layers_flat();
+  bool effect_possible() const;
   void select_bg(int bg);
   void resolve_obj_colours();
   void select_obj(u32 prio);
