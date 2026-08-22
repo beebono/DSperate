@@ -70,6 +70,36 @@ Consequences:
 - Fastmem (melonDS-style signal-handler backed loads) is a possible later
   addition on top of this table, not a replacement for it.
 
+### 2.1 Why not host-MMU fastmem
+
+The traditional trick — reserve 4 GB of host address space, `mmap` the guest
+memories into it, let the MMU translate and a SIGSEGV handler catch I/O —
+would replace four instructions of our emitted fast path (page index, entry
+load, base recovery, unmapped test) with one `ldr`. It cannot touch the other
+half of that path: cycle accuracy needs the *region* of every access to
+charge the right N/S cost, so the timing-table load and the charge stay
+regardless. Emulators where fastmem transforms things do not pay per-access
+timing; we do, and the trace comparison against melonDS rests on it.
+
+The DS then charges extra for the privilege: VRAMCNT/WRAMCNT bank switching
+becomes `mmap`/`mremap` with TLB shootdowns where a table rewrite does now
+(and games rebank mid-frame); SMC detection becomes `mprotect` plus write
+faults instead of a tag bit that `lsl #2` discards for free; every I/O
+register poll becomes a signal, microseconds each, unless the recompiler can
+prove RAM-ness statically. Two CPUs with different maps and the TCM overlays
+sit on top of all that. Measured against a profile where translated code is
+6-11 % of the process and the 3D rasteriser is 31-46 %, the ceiling is ~1-3 %.
+
+The cheap version of the same idea, if the memory path ever does become hot:
+the two lookups hit two tables and therefore two cache lines, while the page
+entry has ~14 spare bits between the 48-bit biased base and the two tags.
+Either pack the four cost bytes into those, or interleave the tables at a
+16-byte stride and fetch both with one `ldp` (`add x2, x14, x2, lsl #4` +
+`ldp x2, x6, [x2]`): three instructions instead of five, one cache line
+instead of two. The cost is coupling the timing granularity (4 KB on the
+ARM9, 32 KB on the ARM7) to the 2 KB page entries, so every remap writes
+both fields.
+
 ## 3. CPU context is a JIT contract
 
 *Source: research notes "JIT design forensics" §1, §5, §6 and "DraStic vs melonDS" §1–2 (private).*
