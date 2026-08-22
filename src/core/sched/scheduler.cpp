@@ -3,6 +3,10 @@
 #include "core/sched/scheduler.h"
 #include "core/nds.h"
 #include "core/profile.h"
+#include "core/cpu/interp/interp.h"
+#if DSPERATE_JIT
+#include "core/cpu/jit/jit.h"
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -10,7 +14,12 @@
 
 namespace ds {
 
-Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) { reset(); }
+Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) {
+  // Read once: a function-local static costs an acquire load per use.
+  if (const char* q = std::getenv("DS_QUANTUM")) quantum_ = std::atoll(q);
+  debug_slices_ = std::getenv("DS_DEBUG_SLICES") != nullptr;
+  reset();
+}
 
 void Scheduler::reset() {
   now_ = 0;
@@ -72,7 +81,121 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
   }
 }
 
+#if DSPERATE_JIT
+// ---- native slice loop ----------------------------------------------------------
+//
+// run_until / run_cpu / jit::run cut at the points where translated code is
+// entered, written as one straight-line sequence per slice with two resume
+// points at the top (the in-order core mispredicts jump tables and indirect
+// calls; the common path here is a handful of well-predicted branches). The
+// order of operations is exactly the one of run_until below; the strict
+// slice diff and the JIT-vs-JIT frame diff check it.
+
+namespace {
+enum { SL_BEGIN, SL_A9, SL_A7 };
+}
+
+SliceNext Scheduler::slice_next() {
+  CpuContext& a9 = nds_.cpu(Cpu::ARM9);
+  CpuContext& a7 = nds_.cpu(Cpu::ARM7);
+  CpuContext* cpu;
+  RunFn run;
+  if (sl_.phase == SL_A9) { cpu = &a9; run = nds_.run_arm9; goto resume; }
+  if (sl_.phase == SL_A7) { cpu = &a7; run = nds_.run_arm7; goto resume; }
+
+begin:
+  {
+    if (now_ >= sl_.until) { sl_.phase = SL_BEGIN; return {nullptr, nullptr}; }
+    u64 deadline = next_;
+    if (deadline > sl_.until) deadline = sl_.until;
+    s64 slice = static_cast<s64>(deadline - now_);
+    if (slice <= 0) slice = 1;
+    if (slice > quantum_) slice = quantum_;
+    sl_.slice = slice;
+    a9.hot.cycle_budget = static_cast<s32>(slice);
+    running_ = &a9; running_start_budget_ = static_cast<s32>(slice); running_shift_ = 0;
+    sl_.gx_stalled = nds_.gpu3d.stalled();
+    sl_.phase = SL_A9; cpu = &a9; run = nds_.run_arm9;
+    if (sl_.gx_stalled) goto a9_done;
+  }
+cpu_begin:   // run_cpu loop head
+  {
+    if (nds_.dma.any_running(cpu->which)) {
+      { DS_PROF(DMA); cpu->hot.cycle_budget -= static_cast<s32>(nds_.dma.run(cpu->which, static_cast<u32>(cpu->hot.cycle_budget))); }
+      if (cpu->hot.cycle_budget <= 0 || nds_.dma.any_running(cpu->which)) goto cpu_done;
+    }
+    if (prof::enabled) sl_.t0 = std::chrono::steady_clock::now();
+    if (!cpu->jit) { run(*cpu); goto run_returned; }
+    // jit::run up to the first entry
+    if (cpu->hot.irq_pending) cpu->check_irq();
+    if (cpu->halted) { cpu->hot.cycle_budget = -1; goto run_returned; }
+    if (cpu->step_limit) { interp::run(*cpu); goto run_returned; }
+    if (cpu->hot.cycle_budget > 0) return {cpu, jit::lookup(*cpu)};
+    goto run_returned;
+  }
+resume:      // translated code left
+  {
+    if (cpu->halted) { cpu->budget_at_halt = cpu->hot.cycle_budget; cpu->hot.cycle_budget = -1; goto run_returned; }
+    if (cpu->hot.irq_pending) cpu->check_irq();
+    if (cpu->hot.cycle_budget > 0) return {cpu, jit::lookup(*cpu)};
+  }
+run_returned:
+  {
+    if (prof::enabled) prof::ns[cpu->which == Cpu::ARM9 ? prof::CPU9 : prof::CPU7] += static_cast<u64>((std::chrono::steady_clock::now() - sl_.t0).count());
+    if (cpu->preempt_residual) {
+      cpu->hot.cycle_budget += cpu->preempt_residual;
+      cpu->preempt_residual = 0;
+      if (cpu->hot.cycle_budget > 0 && !cpu->halted) goto cpu_begin;
+    }
+  }
+cpu_done:
+  if (cpu == &a7) goto a7_done;
+a9_done:
+  {
+    s64 ran9 = (a9.halted || sl_.gx_stalled) ? sl_.slice : (sl_.slice - a9.hot.cycle_budget);
+    if (ran9 <= 0) ran9 = 1;
+    sl_.ran9 = ran9;
+    running_ = nullptr;
+    { DS_PROF(GX_RUN); nds_.gpu3d.run_to(now_ + static_cast<u64>(ran9)); }
+    arm7_debt_ += ran9;
+    sl_.budget7 = static_cast<s32>(arm7_debt_ / 2);
+    if (sl_.budget7 <= 0) goto slice_end;
+    a7.hot.cycle_budget = sl_.budget7;
+    running_ = &a7; running_start_budget_ = sl_.budget7; running_shift_ = 1;
+    sl_.phase = SL_A7; cpu = &a7; run = nds_.run_arm7;
+    goto cpu_begin;
+  }
+a7_done:
+  {
+    const s64 consumed7 = a7.halted ? sl_.budget7 : (sl_.budget7 - a7.hot.cycle_budget);
+    arm7_debt_ -= consumed7 * 2;
+  }
+slice_end:
+  {
+    running_ = nullptr;
+    now_ += static_cast<u64>(sl_.ran9);
+    if (debug_slices_) std::fprintf(stderr, "[slice] now %llu ran9 %lld a9pc %08x b7 %d a7left %d a7pc %08x\n", (unsigned long long)now_, (long long)sl_.ran9, a9.hot.regs[15], sl_.budget7, a7.hot.cycle_budget, a7.hot.regs[15]);
+    fire_due();
+    goto begin;
+  }
+}
+
+extern "C" SliceNext ds_slice_next(void* scheduler) { return static_cast<Scheduler*>(scheduler)->slice_next(); }
+
+u64 Scheduler::run_until_native(u64 until) {
+  const u64 start = now_;
+  sl_.until = until;
+  sl_.phase = SL_BEGIN;
+  jit::run_loop(this);
+  return now_ - start;
+}
+
+#endif // DSPERATE_JIT
+
 u64 Scheduler::run_until(u64 until) {
+#if DSPERATE_JIT
+  if (jit::has_runtime()) return run_until_native(until);
+#endif
   const u64 start = now_;
   while (now_ < until) {
     u64 deadline = next_deadline();
@@ -80,8 +203,7 @@ u64 Scheduler::run_until(u64 until) {
     s64 slice = static_cast<s64>(deadline - now_);
     if (slice <= 0) slice = 1;
     // DS_QUANTUM=<cycles>: measurement knob only; anything but 128 breaks lockstep with melonDS.
-    static const s64 quantum = std::getenv("DS_QUANTUM") ? std::atoll(std::getenv("DS_QUANTUM")) : INTERLEAVE_QUANTUM;
-    if (slice > quantum) slice = quantum;
+    if (slice > quantum_) slice = quantum_;
 
     // ARM9 gets the whole slice; ARM7 then catches up at half clock.
     CpuContext& a9 = nds_.cpu(Cpu::ARM9);
@@ -115,8 +237,7 @@ u64 Scheduler::run_until(u64 until) {
 
     now_ += static_cast<u64>(ran9);
     // DS_DEBUG_SLICES=1: one line per slice (engine lockstep debugging).
-    static const bool debug_slices = std::getenv("DS_DEBUG_SLICES") != nullptr;
-    if (debug_slices) std::fprintf(stderr, "[slice] now %llu ran9 %lld a9pc %08x b7 %d a7left %d a7pc %08x\n", (unsigned long long)now_, (long long)ran9, a9.hot.regs[15], budget7, a7.hot.cycle_budget, a7.hot.regs[15]);
+    if (debug_slices_) std::fprintf(stderr, "[slice] now %llu ran9 %lld a9pc %08x b7 %d a7left %d a7pc %08x\n", (unsigned long long)now_, (long long)ran9, a9.hot.regs[15], budget7, a7.hot.cycle_budget, a7.hot.regs[15]);
     fire_due();
   }
   return now_ - start;

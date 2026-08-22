@@ -34,6 +34,16 @@ void detach(NDS& nds);
 // RunFn entry: runs `cpu` until its budget is exhausted or it halts.
 void run(CpuContext& cpu);
 
+// Native slice loop (docs/ARCHITECTURE.md §4): the scheduler's slice state
+// machine (Scheduler::slice_next) is driven from a loop in the code arena
+// that saves the callee-saved registers once and enters translated code
+// without the per-entry frame. `lookup` is the block lookup that
+// run() does before each entry (translating or resetting the arena as
+// needed); `run_loop` returns when slice_next reports the end.
+const void* lookup(CpuContext& cpu);
+bool has_runtime();
+void run_loop(void* scheduler);
+
 // Drop every translated block of `cpu` (timing tables changed, tracing
 // toggled, debugger). Cheap to call; translation is lazy.
 void flush(CpuContext& cpu);

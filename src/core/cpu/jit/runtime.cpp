@@ -13,6 +13,7 @@
 // registers at the site, and a linked `bl link; .word key` becomes a bare
 // `b` whose literal is never executed.
 #include "core/cpu/jit/jit_internal.h"
+#include "core/sched/scheduler.h"
 #include "core/cpu/cpu_cycles.h"
 #include "core/cpu/interp/interp.h"
 #include "core/cpu/interp/interp_internal.h"
@@ -110,10 +111,18 @@ void emit_poll(Emitter& e, std::vector<size_t>& leave) {
   e.bind(ok2);
 }
 
+} // namespace
+
+// Scheduler::slice_next, C-callable (scheduler.cpp): returns the context to
+// enter in x0 (nullptr at the end of the run) and the native entry in x1.
+extern "C" ds::SliceNext ds_slice_next(void* scheduler);
+
+namespace {
+
 void emit_stubs(Runtime& rt) {
   Emitter e(rt.arena, rt.cap);
 
-  // ---- enter(ctx, native) -------------------------------------------------------
+  // ---- enter(ctx, native): C-callable, saves the callee-saved registers ----------
   rt.enter = reinterpret_cast<void (*)(CpuContext*, const void*)>(e.cur());
   e.stp_x_pre(29, 30, SP, -96);
   e.stp_x(19, 20, SP, 16);
@@ -121,6 +130,18 @@ void emit_stubs(Runtime& rt) {
   e.stp_x(23, 24, SP, 48);
   e.stp_x(25, 26, SP, 64);
   e.stp_x(27, 28, SP, 80);
+  size_t to_light = e.bl_fwd();
+  e.ldp_x(19, 20, SP, 16);
+  e.ldp_x(21, 22, SP, 32);
+  e.ldp_x(23, 24, SP, 48);
+  e.ldp_x(25, 26, SP, 64);
+  e.ldp_x(27, 28, SP, 80);
+  e.ldp_x_post(29, 30, SP, 96);
+  e.ret();
+  // ---- enter_light(ctx, native): only x29/x30 are kept; exits return here ---------
+  e.bind(to_light);
+  rt.enter_light = e.cur();
+  e.stp_x_pre(29, 30, SP, -16);
   e.mov(R_CTX, 0, true);
   emit_load_callee_saved_guest(e);
   emit_load_caller_saved_guest(e);
@@ -143,12 +164,36 @@ void emit_stubs(Runtime& rt) {
   emit_store_callee_saved_guest(e);
   emit_store_caller_saved_guest(e);
   emit_save_flags(e, 17, 30);
+  e.ldp_x_post(29, 30, SP, 16);
+  e.ret();
+
+  // ---- run_loop(scheduler): the native slice loop -----------------------------------
+  // Saves the callee-saved registers once, then alternates the scheduler's
+  // state machine (slice_next: x0 = context or 0, x1 = native entry) with
+  // enter_light. Nothing lives in x19-x28 between calls: translated code
+  // owns them, and the C++ helpers preserve their own.
+  rt.run_loop = reinterpret_cast<void (*)(void*)>(e.cur());
+  e.stp_x_pre(29, 30, SP, -112);
+  e.stp_x(19, 20, SP, 16);
+  e.stp_x(21, 22, SP, 32);
+  e.stp_x(23, 24, SP, 48);
+  e.stp_x(25, 26, SP, 64);
+  e.stp_x(27, 28, SP, 80);
+  e.str_x(0, SP, 96);
+  const size_t loop_top = e.size();
+  e.ldr_x(0, SP, 96);
+  e.mov_imm64(16, reinterpret_cast<u64>(&ds_slice_next));
+  e.blr(16);
+  size_t loop_exit = e.cbz_fwd(0, true);
+  e.bl(rt.enter_light);
+  e.b(e.base() + loop_top);
+  e.bind(loop_exit);
   e.ldp_x(19, 20, SP, 16);
   e.ldp_x(21, 22, SP, 32);
   e.ldp_x(23, 24, SP, 48);
   e.ldp_x(25, 26, SP, 64);
   e.ldp_x(27, 28, SP, 80);
-  e.ldp_x_post(29, 30, SP, 96);
+  e.ldp_x_post(29, 30, SP, 112);
   e.ret();
 
   // ---- flush_exit: w0 = key; arena full ----------------------------------------
@@ -771,13 +816,10 @@ void report(std::FILE* out) {
   }
 }
 
-void run(CpuContext& cpu) {
+const void* lookup(CpuContext& cpu) {
   JitCpu& jc = *static_cast<JitCpu*>(cpu.jit);
   Runtime& r = g_rt;
-  cpu.check_irq();
-  if (cpu.halted) { cpu.hot.cycle_budget = -1; return; }
-  if (cpu.step_limit) { interp::run(cpu); return; }
-  while (cpu.hot.cycle_budget > 0) {
+  for (;;) {
     if (r.need_reset) reset_arena();
     const bool thumb = cpu.thumb();
     const u32 key = make_key(cpu.hot.regs[15] - (thumb ? 4 : 8), thumb);
@@ -786,7 +828,20 @@ void run(CpuContext& cpu) {
     if (!native) { reset_arena(); continue; }
     cpu.hot.alerts = 0;
     r.stats.entries++;
-    r.enter(&cpu, native);
+    return native;
+  }
+}
+
+bool has_runtime() { return g_rt.arena != nullptr; }
+void run_loop(void* scheduler) { g_rt.run_loop(scheduler); }
+
+void run(CpuContext& cpu) {
+  Runtime& r = g_rt;
+  cpu.check_irq();
+  if (cpu.halted) { cpu.hot.cycle_budget = -1; return; }
+  if (cpu.step_limit) { interp::run(cpu); return; }
+  while (cpu.hot.cycle_budget > 0) {
+    r.enter(&cpu, lookup(cpu));
     if (cpu.halted) { cpu.budget_at_halt = cpu.hot.cycle_budget; cpu.hot.cycle_budget = -1; return; }
     if (cpu.hot.irq_pending) cpu.check_irq();
   }

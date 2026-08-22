@@ -289,8 +289,8 @@ public:
     u32 w; std::memcpy(&w, base_ + at, 4);
     const s64 delta = static_cast<s64>(target) - static_cast<s64>(at);
     const u32 top = w >> 24;
-    if ((w & 0xFC000000u) == 0x14000000u) {                 // b
-      w = 0x14000000u | (static_cast<u32>(delta >> 2) & 0x03FFFFFFu);
+    if ((w & 0x7C000000u) == 0x14000000u) {                 // b / bl
+      w = (w & 0x80000000u) | 0x14000000u | (static_cast<u32>(delta >> 2) & 0x03FFFFFFu);
     } else if ((w & 0xFF000010u) == 0x54000000u) {          // b.cond
       w = (w & 0xFF00001Fu) | ((static_cast<u32>(delta >> 2) & 0x7FFFFu) << 5);
     } else if ((top & 0x7E) == 0x34) {                      // cbz / cbnz

@@ -153,6 +153,8 @@ PMU, JIT code shows as `[JIT]`):
 | + cold sections, literal-argument stubs, slow-path helpers, ARM9 charge collapse | 2.46 s | 0.99 s | 27.1 ms |
 | + MSR/MCR inline, no-op CP15 writes skipped, `set_code_host` index, LUT-first entry | 1.75 s | 0.71 s | 23.8 ms |
 | + cached next deadline, DMA running mask | 1.72 s | 0.70 s | 23.7 ms (25.4 wall) |
+| + 2D/3D renderer passes (not the JIT), range-limited timing rebuilds | 1.52 s | 0.69 s | 15.1 ms |
+| + native slice loop (2026-08-22) | 1.55 s | 0.65 s | 14.9 ms wall (MPH 19.1, M&L 10.4, Spectrobes 8.6) |
 
 The game executes ~292 k ARM9 instructions per frame; translated code is
 **13.7 % of the run** (≈3.3 ms/frame for both CPUs, ≈18 host cycles per
@@ -171,20 +173,29 @@ profile actually showed, and what was done:
 - Per-slice overhead (scheduler loop, `enter`/`exit`, `run()`): ~14 % of the
   run, ~450 ns per 128-cycle slice, 7.3 k slices per frame.
 
+**Native slice loop** (done 2026-08-22, `Runtime::run_loop`,
+`Scheduler::slice_next`): the scheduler's slice sequence runs from a loop
+in the arena that saves the callee-saved registers once and enters blocks
+through `enter_light` (x29/x30 only); `enter` for C callers wraps it. The
+C++ slice logic became a straight-line function with two resume points —
+the `switch` state machine tried first was slower than the old loop
+(jump-table and indirect-call mispredicts on the A55). Worth 2–6 % of wall
+time; `slice_next` is still ~6 % (≈300 cycles per slice) and the guest
+register save/restore per entry is the rest. Next on this axis: refilling
+the budget in place from the poll stub while the other CPU is halted and
+no event is due, so the ARM9 never leaves translated code between slices.
+
 Next, in order, each measured on the device with the strict slice diff kept
 green:
 
-1. **Native slice switch**: the ARM9→ARM7→events hand-off without returning
-   to C every 128 cycles (the remaining per-slice cost is mostly the C loop,
-   `enter`/`exit` and `gpu3d.run_to`).
-2. The translated code itself (≈18 cycles per guest instruction): the
+1. The translated code itself (≈18 cycles per guest instruction): the
    dispatcher for indirect branches (`bx lr`: LUT probe + refill-cost stub,
    ~45 instructions and an indirect-branch mispredict), conditional
    execution without the pending flush, link through a second entry point
    that skips the budget test, shift-by-register clamps.
-3. ARM7 data-cost path (still the full main-RAM rule inline, ~12
+2. ARM7 data-cost path (still the full main-RAM rule inline, ~12
    instructions); inline `MSR SPSR` and `LDR pc` for the ARM7 BIOS IRQ
-   handler.
+   handler (MPH's ARM7 spins in BIOS `swi 3` with five fallbacks per loop).
 
 Still open, not performance: W^X dual mapping for Android; inlining the v5
 DSP ops, SWP, LDRD/STRD; ARM7 straight-line code crossing a 32 KB region

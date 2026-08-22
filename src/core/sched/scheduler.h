@@ -5,6 +5,7 @@
 #include "core/cpu/cpu.h"
 
 #include <array>
+#include <chrono>
 
 namespace ds {
 
@@ -32,6 +33,10 @@ enum class EventId : u8 {
 constexpr u32 INTERLEAVE_QUANTUM = 128;
 
 using EventFn = void (*)(NDS& nds, u32 param);
+
+// What the native slice loop runs next: the context to enter and the native
+// entry (returned in x0/x1); ctx == nullptr ends the run.
+struct SliceNext { CpuContext* ctx; const void* native; };
 
 class Scheduler {
 public:
@@ -65,9 +70,27 @@ public:
   // `until` is reached. Returns the number of cycles advanced.
   u64 run_until(u64 until);
 
+  // The same, as a state machine for the recompiler's native slice loop
+  // (docs/ARCHITECTURE.md §4): every call runs the scheduler up to the next
+  // entry into translated code and returns it; the loop enters it and calls
+  // again when the code leaves. Interpreted CPUs and DMA run inside.
+  SliceNext slice_next();
+
 private:
+  struct SliceState {
+    u64 until = 0;
+    int phase = 0, sub = 0;
+    s64 slice = 0, ran9 = 0;
+    s32 budget7 = 0;
+    bool gx_stalled = false;
+    CpuContext* cpu = nullptr;
+    std::chrono::steady_clock::time_point t0;
+  } sl_;
+  u64 run_until_native(u64 until);
   u64 scan_deadline() const;
   u64 next_ = ~u64{0};   // earliest armed deadline (cached)
+  s64  quantum_ = INTERLEAVE_QUANTUM;   // DS_QUANTUM override (measurement only)
+  bool debug_slices_ = false;           // DS_DEBUG_SLICES
   struct Event {
     u64     at;
     EventFn fn;

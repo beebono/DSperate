@@ -114,6 +114,11 @@ struct Runtime {
 
   // C-callable: void enter(CpuContext*, const void* native)
   void (*enter)(CpuContext*, const void*) = nullptr;
+  // Same without the callee-saved frame: for callers that saved x19-x28
+  // themselves and keep nothing in them (the native slice loop).
+  u8* enter_light = nullptr;
+  // void run_loop(Scheduler*): the native slice loop (runtime.cpp, jit::run_loop)
+  void (*run_loop)(void*) = nullptr;
   u8* exit_key = nullptr;      // w0 = key of the next instruction; stores r15, leaves
   u8* exit_key_lit = nullptr;  // `bl exit_key_lit; .word key`
   u8* exit_r15 = nullptr;      // ctx.r15 already correct; leaves

@@ -164,6 +164,25 @@ consumed budget so events scheduled from inside an instruction are stamped at
 the right time. A CPU with a running DMA channel is stalled and the DMA runs in
 its place.
 
+**Native slice loop (2026-08-22).** With the recompiler attached,
+`Scheduler::run_until` hands the slice sequence to a loop in the code arena
+(`jit::run_loop`): it saves the callee-saved registers once, then alternates
+`Scheduler::slice_next` — run_until/run_cpu/jit::run written as one
+straight-line sequence per slice with two resume points, returning the
+context and native entry to run next — with `enter_light`, which loads the
+guest state and jumps; the exit stubs `ret` straight back into the loop.
+Interpreted CPUs and DMA run inside `slice_next`, so all engine mixes use
+it. The sequence of operations is identical to the C++ loop (kept for x86),
+and the check is byte-equal JIT frame dumps against the previous build on
+six games plus the strict slice diff. Measured: 2–6 % of wall time (Mario
+& Luigi 4.37 → 4.16 s per 400 frames); the first version as a `switch`
+state machine was *slower* than the C++ loop — the in-order core
+mispredicts jump tables and indirect calls — and a function-local static
+costs an acquire load per use. What remains per slice is the guest
+register save/restore on each side and ~100 instructions of slice logic;
+the next step would refill the running CPU's budget in place (a pure call
+from the budget poll) while the other CPU is halted and nothing is due.
+
 **Cycle model** (`cpu_mem.h`, `interp.cpp`, `mem/timing.*`). Region timing
 tables per 16 KB (ARM9 bus) / 32 KB (ARM7) give N/S costs for 16- and 32-bit
 accesses; main RAM is a 16-bit bus with N=8/S=1, everything else 1/1, the GBA
