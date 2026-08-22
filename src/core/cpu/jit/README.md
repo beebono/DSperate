@@ -209,6 +209,12 @@ the last jump target's).
 `perf` resolves JIT samples to `jit9_<pc>` / `jit7_<pc>` (a `t` suffix marks
 Thumb) instead of one anonymous mapping. The arena is reused after a flush,
 so an address can appear more than once; perf takes the last entry.
+The permanent stubs are named too (`jit_stub_<name>`, per-CPU ones
+`jit_stub9_`/`jit_stub7_`: dispatch, link, fallback, branch_indirect…), so
+dispatch and call overhead shows up under its own names rather than as bare
+arena addresses. `tools/profile_categories.py` sums a `perf report` listing
+into subsystem buckets (JIT code / JIT stubs / JIT runtime / 3D / 2D /
+scheduler / memory …); see docs/TRACING.md.
 
 Measured this way on the RK3566 over 60 s of real gameplay, translated code
 is 6-11 % of the process and extremely diffuse — the hottest single block is

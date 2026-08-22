@@ -128,6 +128,42 @@ Debug hooks in the CLI, all environment-gated and free when unset:
 The melonDS tracer adds `TRACE_VRAM_STATS` and `TRACE_VRAM_PER_FRAME` (bank
 fill and VRAMCNT), which is how the Kirby DMA ordering bug below was pinned.
 
+### Profiling by subsystem
+
+A per-symbol `perf` listing hides cost that is spread over many small
+functions (the 2D engine is a dozen kernels and line stages; the JIT's
+overhead is lookup + stubs + page-table bookkeeping). On the device:
+
+    DS_PERF_MAP=1 perf record -e cycles -F 999 -o perf.data ./dsperate ... --replay scenes/sm64.dsin game.nds
+
+then on the host, with the binary under a `--symfs` tree at its device path
+and `/tmp/perf-<pid>.map` copied over:
+
+    perf report -i perf.data --symfs=symfs --stdio -g none --sort dso,sym --percent-limit 0 > report.txt
+    tools/profile_categories.py build/aarch64 report.txt --detail
+
+which maps every symbol to the object that defines it (`nm` over the build
+tree) and sums the buckets: 3D raster, 3D geometry, 2D, JIT code, JIT
+stubs, JIT runtime, scheduler, memory, IO/DMA/cart, SPU, libc, kernel.
+Replayed 60 s scenes, 2026-08-22 (`DS_PROFILE` off):
+
+| bucket | SM64DS | Mario & Luigi | Meteos |
+|---|---:|---:|---:|
+| 3D raster | 37.7 % | 34.3 % | 19.9 % |
+| 2D (engine + kernels) | 19.9 % | 14.4 % | 36.0 % |
+| 3D geometry (GX FIFO, submit) | 8.5 % | 9.4 % | 3.7 % |
+| JIT code | 7.0 % | 6.6 % | 8.6 % |
+| JIT stubs + runtime (lookup, code_query) | 5.2 % | 9.0 % | 7.4 % |
+| scheduler (`slice_next`, `fire_due`) | 5.9 % | 4.9 % | 8.4 % |
+| IO / DMA / cart | 4.4 % | 3.9 % | 2.7 % |
+| libc (memcmp = texture-cache validation, memset, memcpy) | 2.3 % | 3.4 % | 3.9 % |
+| memory (bus I/O paths; page-table churn on M&L) | 1.9 % | 6.3 % | 1.4 % |
+| SPU | 2.9 % | 1.8 % | 2.7 % |
+
+The guest's own code is 7-9 %; everything else is emulator overhead around
+it, with the renderers at 55-60 % and the scheduler/JIT/memory plumbing at
+13-20 %.
+
 ## Dead-value masking
 
 When pc/instr/cpsr match but a register differs (a poll-loop counter after the

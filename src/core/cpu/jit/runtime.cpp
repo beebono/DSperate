@@ -20,6 +20,7 @@
 #include "core/nds.h"
 
 #include <cstdio>
+#include <string>
 #include <cstring>
 #include <unistd.h>
 #include <cstdlib>
@@ -568,7 +569,7 @@ void lut_insert(JitCpu& jc, Block* b) {
 // instead of one anonymous mapping. Blocks are named jit9_<pc>/jit7_<pc>
 // (with a `t` suffix for Thumb); the arena is reused after a flush, so the
 // same address can appear more than once and perf takes the last entry.
-static void perf_map_add(const Block* b, bool arm9) {
+static FILE* perf_map_file() {
   static FILE* map = [] () -> FILE* {
     if (!std::getenv("DS_PERF_MAP")) return nullptr;
     char path[64];
@@ -577,9 +578,43 @@ static void perf_map_add(const Block* b, bool arm9) {
     if (f) std::setvbuf(f, nullptr, _IOLBF, 0);
     return f;
   }();
+  return map;
+}
+
+static void perf_map_add(const Block* b, bool arm9) {
+  FILE* map = perf_map_file();
   if (!map) return;
   std::fprintf(map, "%llx %x jit%c_%08x%s\n", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(b->entry)),
                b->size, arm9 ? '9' : '7', key_pc(b->key), key_thumb(b->key) ? "t" : "");
+}
+
+// The permanent stubs, named jit_stub_<name> (per-CPU ones jit_stub9_/jit_stub7_);
+// each runs to the next stub's start.
+static void perf_map_stubs(const Runtime& r) {
+  FILE* map = perf_map_file();
+  if (!map) return;
+  std::vector<std::pair<const u8*, std::string>> v;
+  auto add = [&](const void* p, const char* name) { if (p) v.emplace_back(static_cast<const u8*>(p), name); };
+  add(reinterpret_cast<const void*>(r.enter), "jit_stub_enter"); add(r.enter_light, "jit_stub_enter_light");
+  add(reinterpret_cast<const void*>(r.run_loop), "jit_stub_run_loop");
+  add(r.exit_key, "jit_stub_exit_key"); add(r.exit_key_lit, "jit_stub_exit_key_lit"); add(r.exit_r15, "jit_stub_exit_r15");
+  add(r.call_pure, "jit_stub_call_pure"); add(r.call_full, "jit_stub_call_full"); add(r.call2, "jit_stub_call2");
+  add(r.poll, "jit_stub_poll"); add(r.flush_exit, "jit_stub_flush_exit");
+  static const char* const sz[3] = {"8", "16", "32"};
+  for (int i = 0; i < 3; ++i) { add(r.slow_load[i], (std::string("jit_stub_slow_load") + sz[i]).c_str()); add(r.slow_store[i], (std::string("jit_stub_slow_store") + sz[i]).c_str()); }
+  add(r.merge_keep_cv, "jit_stub_merge_keep_cv"); add(r.merge_set_c, "jit_stub_merge_set_c");
+  for (int c = 0; c < 2; ++c) {
+    const JitCpu& jc = r.cpus[c];
+    const std::string pre = c == 0 ? "jit_stub9_" : "jit_stub7_";
+    add(jc.dispatch, (pre + "dispatch").c_str()); add(jc.link, (pre + "link").c_str()); add(jc.fallback, (pre + "fallback").c_str());
+    add(jc.branch_indirect, (pre + "branch_indirect").c_str()); add(jc.branch_indirect_cdi, (pre + "branch_indirect_cdi").c_str());
+  }
+  std::sort(v.begin(), v.end());
+  for (size_t i = 0; i < v.size(); ++i) {
+    const u8* end = i + 1 < v.size() ? v[i + 1].first : r.arena + r.stubs_end;
+    std::fprintf(map, "%llx %llx %s\n", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(v[i].first)),
+                 static_cast<unsigned long long>(end - v[i].first), v[i].second.c_str());
+  }
 }
 
 Block* translate(JitCpu& jc, u32 key) {
@@ -772,6 +807,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
       for (u32 i = 0; i < LUT_SIZE; ++i) r.cpus[c].lut[i] = LUT_EMPTY_KEY;
     }
     emit_stubs(r);
+    perf_map_stubs(r);
     r.strict = std::getenv("DS_JIT_STRICT") != nullptr;
     r.debug = std::getenv("DS_JIT_DEBUG") != nullptr;
     r.cyclog = std::getenv("DS_DEBUG_CYCLES") != nullptr;
