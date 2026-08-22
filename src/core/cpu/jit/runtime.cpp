@@ -21,6 +21,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <unistd.h>
 #include <cstdlib>
 #include <sys/mman.h>
 #include <algorithm>
@@ -562,6 +563,25 @@ void lut_insert(JitCpu& jc, Block* b) {
   jc.lut[idx] = (static_cast<u64>(b->entry - g_rt.arena) << 32) | b->key;
 }
 
+// DS_PERF_MAP=1: name each translated block for `perf` in /tmp/perf-<pid>.map,
+// so profiles attribute samples to the guest address a block came from
+// instead of one anonymous mapping. Blocks are named jit9_<pc>/jit7_<pc>
+// (with a `t` suffix for Thumb); the arena is reused after a flush, so the
+// same address can appear more than once and perf takes the last entry.
+static void perf_map_add(const Block* b, bool arm9) {
+  static FILE* map = [] () -> FILE* {
+    if (!std::getenv("DS_PERF_MAP")) return nullptr;
+    char path[64];
+    std::snprintf(path, sizeof path, "/tmp/perf-%d.map", static_cast<int>(getpid()));
+    FILE* f = std::fopen(path, "w");
+    if (f) std::setvbuf(f, nullptr, _IOLBF, 0);
+    return f;
+  }();
+  if (!map) return;
+  std::fprintf(map, "%llx %x jit%c_%08x%s\n", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(b->entry)),
+               b->size, arm9 ? '9' : '7', key_pc(b->key), key_thumb(b->key) ? "t" : "");
+}
+
 Block* translate(JitCpu& jc, u32 key) {
   Runtime& r = g_rt;
   if (r.pos + BLOCK_MARGIN > r.cap) return nullptr;
@@ -579,6 +599,7 @@ Block* translate(JitCpu& jc, u32 key) {
   }
   r.pos += (b->size + 15) & ~size_t{15};
   sync_icache(b->entry, b->size);
+  perf_map_add(b, jc.arm9);
 
   // Register the host pages the guest code lives in.
   const u32 pc = key_pc(key);

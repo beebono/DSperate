@@ -201,3 +201,16 @@ Still open, not performance: W^X dual mapping for Android; inlining the v5
 DSP ops, SWP, LDRD/STRD; ARM7 straight-line code crossing a 32 KB region
 boundary uses the block's own region for fetch costs (the interpreter keeps
 the last jump target's).
+
+
+## Profiling translated code
+
+`DS_PERF_MAP=1` writes `/tmp/perf-<pid>.map` as blocks are translated, so
+`perf` resolves JIT samples to `jit9_<pc>` / `jit7_<pc>` (a `t` suffix marks
+Thumb) instead of one anonymous mapping. The arena is reused after a flush,
+so an address can appear more than once; perf takes the last entry.
+
+Measured this way on the RK3566 over 60 s of real gameplay, translated code
+is 6-11 % of the process and extremely diffuse — the hottest single block is
+0.65 % (Mario & Luigi) and 0.19 % elsewhere. The renderer, not the
+recompiler, is where the time goes.
