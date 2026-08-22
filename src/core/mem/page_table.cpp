@@ -62,6 +62,31 @@ void PageTable::map(u32 guest, u32 size, u8* host, u32 flags) {
   }
 }
 
+void PageTable::remap(u32 guest, u32 size, u8* const* hosts, u32 flags) {
+  assert((guest % PAGE_SIZE) == 0 && (size % PAGE_SIZE) == 0 && !(flags & PAGE_MMIO));
+  const bool writable = flags & PAGE_WRITABLE;
+  for (u32 off = 0, i = 0; off < size; off += PAGE_SIZE, ++i) {
+    const u32 g = guest + off;
+    const u32 p = g >> PAGE_SHIFT;
+    const Entry old = table_[p];
+    u8* host = hosts[i];
+    if (!host) {
+      if (old) { index_remove(p, old); table_[p] = 0; }
+      continue;
+    }
+    if (old && !(old & TAG_SPECIAL) == writable) {
+      // Same backing as before: keep the entry (and its code tag).
+      const u8* old_host = reinterpret_cast<const u8*>(((old & BASE_MASK) << 2) + g);
+      if (old_host == host) continue;
+    }
+    const Entry e = make_entry(g, host, flags);
+    if (old == e) continue;
+    index_remove(p, old);
+    table_[p] = e;
+    index_insert(p, e);
+  }
+}
+
 void PageTable::map_mmio(u32 guest, u32 size) {
   map(guest, size, nullptr, PAGE_MMIO);
 }

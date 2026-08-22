@@ -139,26 +139,37 @@ void Bus::update_vram() {
   u8* banks[9];
   for (int i = 0; i < 9; ++i) banks[i] = vram_bank(i);
   vram_map_.rebuild(nds_.io.vramcnt, banks);
-  pt9.unmap(0x06000000, 0x01000000);
-  pt7.unmap(0x06000000, 0x01000000);
+  // The whole 16 MB region is described as one host pointer per page and
+  // applied as a diff: games that rewrite VRAMCNT every few frames (bank
+  // swaps for capture) would otherwise unmap and remap 8 K pages per CPU.
   // Blocks backed by exactly one bank map straight into the page table;
   // blocks where banks overlap stay unmapped so the slow path can OR the
   // banks on read and write all of them.
-  auto map_view = [&](PageTable& pt, const gpu::VramView& v, u32 base, u32 end) {
+  u8** const h9 = vram_hosts_[0].get();
+  u8** const h7 = vram_hosts_[1].get();
+  std::memset(h9, 0, VRAM_PAGES * sizeof(u8*));
+  std::memset(h7, 0, VRAM_PAGES * sizeof(u8*));
+  auto set_pages = [](u8** hosts, u32 addr, u32 size, u8* host) {
+    u8** pg = hosts + ((addr - 0x06000000) >> PAGE_SHIFT);
+    for (u32 i = 0; i < size / PAGE_SIZE; ++i) pg[i] = host + i * PAGE_SIZE;
+  };
+  auto map_view = [&](u8** hosts, const gpu::VramView& v, u32 base, u32 end) {
     for (u32 mirror = base; mirror < end; mirror += v.size)
       for (u32 b = 0; b < v.blocks(); ++b)
-        if (v.ptr[b]) pt.map(mirror + b * gpu::VramView::BLOCK, gpu::VramView::BLOCK, v.ptr[b], RW);
+        if (v.ptr[b]) set_pages(hosts, mirror + b * gpu::VramView::BLOCK, gpu::VramView::BLOCK, v.ptr[b]);
   };
-  map_view(pt9, vram_map_.abg,  0x06000000, 0x06200000);
-  map_view(pt9, vram_map_.bbg,  0x06200000, 0x06400000);
-  map_view(pt9, vram_map_.aobj, 0x06400000, 0x06600000);
-  map_view(pt9, vram_map_.bobj, 0x06600000, 0x06800000);
-  map_view(pt7, vram_map_.arm7, 0x06000000, 0x07000000);
+  map_view(h9, vram_map_.abg,  0x06000000, 0x06200000);
+  map_view(h9, vram_map_.bbg,  0x06200000, 0x06400000);
+  map_view(h9, vram_map_.aobj, 0x06400000, 0x06600000);
+  map_view(h9, vram_map_.bobj, 0x06600000, 0x06800000);
+  map_view(h7, vram_map_.arm7, 0x06000000, 0x07000000);
   static const u32 lcdc_base[9] = {0x00000, 0x20000, 0x40000, 0x60000, 0x80000, 0x90000, 0x94000, 0x98000, 0xA0000};
   for (int i = 0; i < 9; ++i) {
     if (!(vram_map_.lcdc_mask & (1u << i))) continue;
-    for (u32 mirror = 0x06800000; mirror < 0x07000000; mirror += 0x100000) pt9.map(mirror + lcdc_base[i], VRAM_BANK_SIZES[i], banks[i], RW);
+    for (u32 mirror = 0x06800000; mirror < 0x07000000; mirror += 0x100000) set_pages(h9, mirror + lcdc_base[i], VRAM_BANK_SIZES[i], banks[i]);
   }
+  pt9.remap(0x06000000, 0x01000000, h9, RW);
+  pt7.remap(0x06000000, 0x01000000, h7, RW);
   if (watch_on && (watch_addr >> 24) == 0x06) { pt9.map_mmio(watch_addr & ~0x7FFu, 0x800); pt7.map_mmio(watch_addr & ~0x7FFu, 0x800); }
 }
 

@@ -58,6 +58,10 @@ public:
   void map(u32 guest, u32 size, u8* host, u32 flags);
   void map_mmio(u32 guest, u32 size);
   void unmap(u32 guest, u32 size);
+  // Set the region to `hosts` (one pointer per page, nullptr = unmapped,
+  // all with `flags`), touching only the entries that change: the index and
+  // code tags of unchanged pages stay as they are.
+  void remap(u32 guest, u32 size, u8* const* hosts, u32 flags);
 
   void set_code(u32 guest, u32 size, bool is_code);
 

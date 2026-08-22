@@ -64,6 +64,12 @@ Consequences:
   second memory map.
 - All mapping changes (VRAMCNT, WRAMCNT, CP15 TCM moves, cart) go through
   `mem::Bus`, which updates both CPUs' tables and preserves `CODE` tags.
+  VRAMCNT changes are applied as a diff (`PageTable::remap`: the desired
+  host pointer per 2 KB page for the whole 16 MB region, then only the
+  entries that change are touched). Mario & Luigi rewrites VRAMCNT ~4.6
+  times per frame (bank swaps for capture); unmapping and remapping 8 K
+  pages per CPU each time, with a code-page lookup per page, was 6 % of the
+  game (2026-08-22: −3.4 % on the device after the diff).
 - SMC detection is a **value comparison** on the store path: a write that does
   not change the byte is not a modification. Only genuine changes reach the
   block-invalidation check.
