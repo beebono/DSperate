@@ -73,6 +73,14 @@ public:
     cpu.hot.cycle_budget = 0;
   }
   u64 next_deadline() const { return next_; }
+  // The geometry FIFO just filled under the ARM9: in event-bound mode its
+  // slice ends here (as the bus stall would), and it sits out until the
+  // FIFO drains, re-checking every LOCKSTEP_QUANTUM cycles. In lockstep the
+  // stall queue absorbs the rest of the 128-cycle slice, as before.
+  void gx_fifo_full();
+  bool in_dma() const { return in_dma_; }
+  // Event-bound mode: a GX-stalled ARM9 sits out (lockstep keeps queueing, as melonDS's timing assumes).
+  bool a9_gx_stalled(const CpuContext& cpu) const;
 
   // Nominal time of the event whose handler is running. Events fire at slice
   // ends, up to a CPU overshoot after their deadline; a periodic handler must
@@ -107,6 +115,7 @@ private:
   u64 firing_at_ = 0;    // deadline of the event being fired
   s64  quantum_ = INTERLEAVE_QUANTUM;
   bool quantum_forced_ = false;         // DS_QUANTUM given
+  bool in_dma_ = false;                 // inside Dma::run (a preempt there would corrupt the DMA's budget)
   bool debug_slices_ = false;           // DS_DEBUG_SLICES
   struct Event {
     u64     at;

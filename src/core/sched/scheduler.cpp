@@ -21,6 +21,16 @@ Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) {
   reset();
 }
 
+void Scheduler::gx_fifo_full() {
+  if (quantum_ <= LOCKSTEP_QUANTUM || in_dma_) return;
+  CpuContext& a9 = nds_.cpu(Cpu::ARM9);
+  if (running_ == &a9) preempt(a9);
+}
+
+bool Scheduler::a9_gx_stalled(const CpuContext& cpu) const {
+  return quantum_ > LOCKSTEP_QUANTUM && cpu.which == Cpu::ARM9 && nds_.gpu3d.stalled();
+}
+
 void Scheduler::set_quantum(s64 q) {
   if (quantum_forced_) return;
   quantum_ = q <= 0 ? std::numeric_limits<s64>::max() : q;
@@ -101,14 +111,15 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
   const Cpu which = cpu.which;
   for (;;) {
     if (nds_.dma.any_running(which)) {
-      { DS_PROF(DMA); cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget))); }
-      if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which)) return;
+      { DS_PROF(DMA); in_dma_ = true; cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget))); in_dma_ = false; }
+      if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which) || a9_gx_stalled(cpu)) return;
     }
     { prof::Scope sc(which == Cpu::ARM9 ? prof::CPU9 : prof::CPU7); run(cpu); }
     if (!cpu.preempt_residual) return;
     cpu.hot.cycle_budget += cpu.preempt_residual;   // overshoot of the preempted instruction comes off the residual
     cpu.preempt_residual = 0;
     if (cpu.hot.cycle_budget <= 0 || cpu.halted) return;
+    if (a9_gx_stalled(cpu)) return;   // gx_fifo_full: sits out until the FIFO drains
   }
 }
 
@@ -144,6 +155,7 @@ begin:
     // With both CPUs asleep the quantum only paces the clock: run to the deadline.
     const bool idle = slice > quantum_ && both_idle();
     if (slice > quantum_ && !idle) slice = quantum_;
+    if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
     sl_.slice = slice;
     if (prof::enabled) count_slice(idle);
     a9.hot.cycle_budget = static_cast<s32>(slice);
@@ -155,8 +167,8 @@ begin:
 cpu_begin:   // run_cpu loop head
   {
     if (nds_.dma.any_running(cpu->which)) {
-      { DS_PROF(DMA); cpu->hot.cycle_budget -= static_cast<s32>(nds_.dma.run(cpu->which, static_cast<u32>(cpu->hot.cycle_budget))); }
-      if (cpu->hot.cycle_budget <= 0 || nds_.dma.any_running(cpu->which)) goto cpu_done;
+      { DS_PROF(DMA); in_dma_ = true; cpu->hot.cycle_budget -= static_cast<s32>(nds_.dma.run(cpu->which, static_cast<u32>(cpu->hot.cycle_budget))); in_dma_ = false; }
+      if (cpu->hot.cycle_budget <= 0 || nds_.dma.any_running(cpu->which) || a9_gx_stalled(*cpu)) goto cpu_done;
     }
     if (prof::enabled) sl_.t0 = std::chrono::steady_clock::now();
     if (!cpu->jit) { run(*cpu); goto run_returned; }
@@ -179,7 +191,7 @@ run_returned:
     if (cpu->preempt_residual) {
       cpu->hot.cycle_budget += cpu->preempt_residual;
       cpu->preempt_residual = 0;
-      if (cpu->hot.cycle_budget > 0 && !cpu->halted) goto cpu_begin;
+      if (cpu->hot.cycle_budget > 0 && !cpu->halted && !a9_gx_stalled(*cpu)) goto cpu_begin;
     }
   }
 cpu_done:
@@ -240,6 +252,7 @@ u64 Scheduler::run_until(u64 until) {
     if (slice <= 0) slice = 1;
     const bool idle = slice > quantum_ && both_idle();
     if (slice > quantum_ && !idle) slice = quantum_;
+    if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
     if (prof::enabled) count_slice(idle);
 
     // ARM9 gets the whole slice; ARM7 then catches up at half clock.

@@ -291,9 +291,9 @@ void Gpu3D::fifo_write(const Entry& e) {
     if (fifo_.full()) {
       // The CPU stalls until the FIFO drains; writes already in flight (an
       // STM's remaining registers) queue up behind it.
-      if (stall_queue_.full()) { static bool once = false; if (!once) { once = true; std::fprintf(stderr, "[gx] stall queue overflow\n"); } return; }
+      if (stall_queue_.full()) { static int n = 0; if (n++ < 8) std::fprintf(stderr, "[gx] stall queue overflow: fifo %u running %d dma %d stalled %d now %llu\n", fifo_.level(), nds_.sched.running() ? (nds_.sched.running()->which == Cpu::ARM9 ? 9 : 7) : 0, nds_.sched.in_dma(), stalled_, (unsigned long long)nds_.sched.now()); return; }
       stall_queue_.push(e);
-      stalled_ = true;
+      if (!stalled_) { stalled_ = true; nds_.sched.gx_fifo_full(); }
       return;
     }
     fifo_.push(e);

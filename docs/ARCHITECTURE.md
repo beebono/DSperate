@@ -251,6 +251,15 @@ across quanta, so scene times can't be compared beyond that) −2.4 % SM64DS,
 −4.1 % Mario & Luigi, −4.5 % Meteos. The SDL frontend runs event-bound by
 default (`--lockstep` for 128); the CLI stays in lockstep by default,
 because every frame baseline and trace comparison assumes it.
+Event-bound slices exposed a gap in the geometry FIFO model: the engine
+only catches up at slice ends, and within a slice the ARM9 (or the FIFO
+DMA) could push unboundedly into a full FIFO — a 64-entry stall queue
+absorbed that at 128 cycles but overflowed at event length, dropping
+commands (missing geometry in SM64DS's intro). In event-bound mode the
+ARM9 now stops the moment the FIFO fills (`Scheduler::gx_fifo_full`, the
+DMA-preempt mechanism), sits out after a DMA step left it stalled, and
+re-checks every 128 cycles while stalled; lockstep keeps the queue
+behaviour, which melonDS's timing assumes.
 
 **Native slice loop (2026-08-22).** With the recompiler attached,
 `Scheduler::run_until` hands the slice sequence to a loop in the code arena
