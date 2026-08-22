@@ -679,6 +679,7 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) const {
     return p0 + (addr & (VramView::BLOCK - 1));
   };
   sh.tex_ptr = nullptr; sh.pal_ptr = nullptr;
+  sh.texv = texv_; sh.palv = palv_; sh.vm = vm_;
   if (sh.textured && sh.fmt != 5) {
     static const u32 bpp_num[8] = {0, 8, 2, 4, 8, 0, 8, 16};   // bits per texel
     const u32 bytes = (static_cast<u32>(sh.width * sh.height) * bpp_num[sh.fmt]) / 8;
@@ -724,7 +725,11 @@ inline uint32x4_t pack_colour(uint32x4_t r, uint32x4_t g, uint32x4_t b, uint32x4
 // host-contiguous take the per-lane sampler below.
 namespace {
 enum Wrap { CLAMP = 0, REPEAT = 1, FLIP = 2 };
-using Gather4Fn = void (*)(const Renderer3D::Shade&, const s32*, const s32*, uint32x4_t&, uint32x4_t&);
+// The compressed format keeps the colour table of the last 4x4 block it
+// decoded in `scratch` (adjacent lanes nearly always share a block); the
+// other formats ignore it.
+struct Tex5Block { u32 key; u32 colour[4]; u32 alpha[4]; };
+using Gather4Fn = void (*)(const Renderer3D::Shade&, const s32*, const s32*, uint32x4_t&, uint32x4_t&, Tex5Block*);
 
 template <int wrap> inline int32x4_t wrap_lanes(int32x4_t v, int32x4_t size, int32x4_t size1) {
   if constexpr (wrap == REPEAT) return vandq_s32(v, size1);
@@ -732,8 +737,34 @@ template <int wrap> inline int32x4_t wrap_lanes(int32x4_t v, int32x4_t size, int
   else return vminq_s32(vmaxq_s32(v, vdupq_n_s32(0)), size1);
 }
 
+// One 4x4 block of the compressed format: its palette-info halfword lives
+// in texture slot 1 at half the block's offset, and picks the palette base
+// and one of four colour modes (GBATEK "Texture Format 5").
+inline void tex5_decode_block(const Renderer3D::Shade& sh, u32 block, Tex5Block& b) {
+  b.key = block;
+  u32 slot1 = 0x20000 + ((block & 0x1FFFC) >> 1);
+  if (block >= 0x40000) slot1 += 0x10000;
+  const u16 palinfo = vram_fetch16(*sh.vm, *sh.texv, slot1);
+  const u32 base = (sh.texpal << 4) + ((palinfo & 0x3FFF) << 2), mode = palinfo >> 14;
+  const u32 c0 = vram_fetch16(*sh.vm, *sh.palv, base), c1 = vram_fetch16(*sh.vm, *sh.palv, base + 2);
+  auto mix = [&](u32 ma, u32 mb, u32 shift) -> u32 {
+    const u32 r = ((c0 & 0x1F) * ma + (c1 & 0x1F) * mb) >> shift;
+    const u32 g = (((c0 & 0x3E0) * ma + (c1 & 0x3E0) * mb) >> shift) & 0x3E0;
+    const u32 bl = (((c0 & 0x7C00) * ma + (c1 & 0x7C00) * mb) >> shift) & 0x7C00;
+    return r | g | bl;
+  };
+  b.colour[0] = c0; b.colour[1] = c1;
+  b.alpha[0] = b.alpha[1] = b.alpha[2] = 31;
+  switch (mode) {
+  case 0:  b.colour[2] = vram_fetch16(*sh.vm, *sh.palv, base + 4); b.colour[3] = 0; b.alpha[3] = 0; break;
+  case 1:  b.colour[2] = mix(1, 1, 1);                              b.colour[3] = 0; b.alpha[3] = 0; break;
+  case 2:  b.colour[2] = vram_fetch16(*sh.vm, *sh.palv, base + 4); b.colour[3] = vram_fetch16(*sh.vm, *sh.palv, base + 6); b.alpha[3] = 31; break;
+  default: b.colour[2] = mix(5, 3, 3);                              b.colour[3] = mix(3, 5, 3); b.alpha[3] = 31; break;
+  }
+}
+
 template <int fmt, int swrap, int twrap>
-void gather4_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uint32x4_t& colour, uint32x4_t& alpha) {
+void gather4_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uint32x4_t& colour, uint32x4_t& alpha, Tex5Block* scratch) {
   const int32x4_t w = vdupq_n_s32(sh.width), h = vdupq_n_s32(sh.height);
   const int32x4_t w1 = vdupq_n_s32(sh.width - 1), h1 = vdupq_n_s32(sh.height - 1);
   // (s16)coord >> 4, as the hardware truncates the interpolated coordinate.
@@ -742,6 +773,7 @@ void gather4_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uin
   const uint32x4_t offv = vreinterpretq_u32_s32(vmlaq_s32(sv, tv, w));
   const u32 o0 = vgetq_lane_u32(offv, 0), o1 = vgetq_lane_u32(offv, 1), o2 = vgetq_lane_u32(offv, 2), o3 = vgetq_lane_u32(offv, 3);
   const u8* tp = sh.tex_ptr; const u16* pp = sh.pal_ptr;
+  (void)o0; (void)o1; (void)o2; (void)o3; (void)tp; (void)pp; (void)scratch;
   u32 c0, c1, c2, c3, a0, a1, a2, a3;
   if constexpr (fmt == 1) {          // A3I5
     const u32 p0 = tp[o0], p1 = tp[o1], p2 = tp[o2], p3 = tp[o3];
@@ -770,6 +802,21 @@ void gather4_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uin
     const u32 p0 = tp[o0], p1 = tp[o1], p2 = tp[o2], p3 = tp[o3];
     a0 = p0 >> 3; a1 = p1 >> 3; a2 = p2 >> 3; a3 = p3 >> 3;
     c0 = pp[p0 & 7]; c1 = pp[p1 & 7]; c2 = pp[p2 & 7]; c3 = pp[p3 & 7];
+  } else if constexpr (fmt == 5) {   // 4x4 compressed: per lane, block table cached
+    alignas(16) u32 sl[4], tl[4];
+    vst1q_u32(sl, vreinterpretq_u32_s32(sv)); vst1q_u32(tl, vreinterpretq_u32_s32(tv));
+    u32 cs[4], as[4];
+    for (int k = 0; k < 4; ++k) {
+      const u32 ss = sl[k], tt = tl[k];
+      const u32 addr = (sh.base + ((tt & 0x3FC) * (static_cast<u32>(sh.width) >> 2)) + (ss & 0x3FC) + (tt & 3)) & 0x7FFFF;
+      const u32 block = addr & ~3u;
+      if (scratch->key != block) tex5_decode_block(sh, block, *scratch);
+      // Texels cannot live in slot 1: the hardware reads zero there.
+      const u32 val = (addr >= 0x20000 && addr < 0x40000) ? 0 : ((vram_fetch8(*sh.vm, *sh.texv, addr) >> (2 * (ss & 3))) & 3);
+      cs[k] = scratch->colour[val]; as[k] = scratch->alpha[val];
+    }
+    c0 = cs[0]; c1 = cs[1]; c2 = cs[2]; c3 = cs[3];
+    a0 = as[0]; a1 = as[1]; a2 = as[2]; a3 = as[3];
   } else {                           // direct colour
     u16 t0, t1, t2, t3;
     std::memcpy(&t0, tp + o0 * 2, 2); std::memcpy(&t1, tp + o1 * 2, 2); std::memcpy(&t2, tp + o2 * 2, 2); std::memcpy(&t3, tp + o3 * 2, 2);
@@ -791,8 +838,9 @@ template <int fmt> constexpr Gather4Fn gather4_wraps(int swrap, int twrap) {
 } // namespace
 
 const void* Renderer3D::select_gather4(const Shade& sh) {
-  if (!sh.tex_ptr || !sh.pal_ptr) return nullptr;
   const int sw = sh.srep ? (sh.sflip ? FLIP : REPEAT) : CLAMP, tw = sh.trep ? (sh.tflip ? FLIP : REPEAT) : CLAMP;
+  if (sh.fmt == 5) return reinterpret_cast<const void*>(gather4_wraps<5>(sw, tw));
+  if (!sh.tex_ptr || !sh.pal_ptr) return nullptr;
   switch (sh.fmt) {
   case 1: return reinterpret_cast<const void*>(gather4_wraps<1>(sw, tw));
   case 2: return reinterpret_cast<const void*>(gather4_wraps<2>(sw, tw));
@@ -800,7 +848,7 @@ const void* Renderer3D::select_gather4(const Shade& sh) {
   case 4: return reinterpret_cast<const void*>(gather4_wraps<4>(sw, tw));
   case 6: return reinterpret_cast<const void*>(gather4_wraps<6>(sw, tw));
   case 7: return reinterpret_cast<const void*>(gather4_wraps<7>(sw, tw));
-  default: return nullptr;            // compressed: per-lane sampler
+  default: return nullptr;
   }
 }
 
@@ -862,6 +910,7 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
   // (a cross-lane reduction per test is what the in-order core stalls on).
   auto lanes = [](uint32x4_t m) -> u64 { return vget_lane_u64(vreinterpret_u64_u16(vmovn_u32(m)), 0); };
   const Gather4Fn gather = reinterpret_cast<Gather4Fn>(sh.gather4);
+  Tex5Block tex5{0xFFFFFFFFu, {}, {}};
   const bool untextured_passes = !textured && sh.polyalpha > sh.alpha_ref;
   if (!textured && !untextured_passes) return;   // alpha test fails for every pixel
   for (s32 x = xa; x < xb; x += 4) {
@@ -884,8 +933,11 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
     uint32x4_t r, g, b, a;
     if constexpr (textured) {
       uint32x4_t c, talpha;
-      if (gather) gather(sh, sa + i, ta + i, c, talpha);
-      else { alignas(16) u32 tc[4], tal[4]; texture_gather4(sh, sa + i, ta + i, tc, tal); c = vld1q_u32(tc); talpha = vld1q_u32(tal); }
+      if (gather) { gather(sh, sa + i, ta + i, c, talpha, &tex5); prof::add(sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST, 1); }
+      else {
+        prof::add(prof::C_TEX_SLOW_VIEWS, 1);
+        alignas(16) u32 tc[4], tal[4]; texture_gather4(sh, sa + i, ta + i, tc, tal); c = vld1q_u32(tc); talpha = vld1q_u32(tal);
+      }
       const uint32x4_t tr = c15_to_18_4(c, 0), tg = c15_to_18_4(c, 4), tb = c15_to_18_4(c, 9);
       if (sh.blendmode & 1) {   // decal
         const uint32x4_t inv = vsubq_u32(v31, talpha);

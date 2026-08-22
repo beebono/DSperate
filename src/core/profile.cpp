@@ -15,7 +15,8 @@ const char* const names[COUNT] = {
 };
 
 u64 count[C_COUNT] = {};
-const char* const count_names[C_COUNT] = {"3d polygon lines", "3d span pixels", "3d resolved pixels"};
+const char* const count_names[C_COUNT] = {"3d polygon lines", "3d span pixels", "3d resolved pixels",
+  "3d texel gathers (direct)", "3d texel gathers (compressed)", "3d texel gathers (via views)"};
 
 void report() {
   u64 total = 0;

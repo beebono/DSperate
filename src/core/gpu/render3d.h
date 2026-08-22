@@ -86,6 +86,8 @@ public:
     // mapped, host-contiguous VRAM (nullptr: go through the views).
     const u8* tex_ptr;
     const u16* pal_ptr;
+    // Views for the formats that address VRAM per texel (the compressed one).
+    const VramView* texv; const VramView* palv; const VramMap* vm;
     // NEON builds: the four-texel gather specialised for (format, S wrap,
     // T wrap), or nullptr for the per-lane sampler (render3d.cpp).
     const void* gather4;

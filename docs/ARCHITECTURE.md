@@ -437,8 +437,19 @@ dependent texel-then-palette load pair and a stall on the coordinate
 arrays the span stage has just written — memory latency, not dispatch.
 On the headless 900-frame runs the whole-run gain is only 1–2 %, but those
 runs are logos, menus and attract loops where the gather is 1.7 % of the
-profile; the gameplay content that put it at 11 % cannot be replayed
-headlessly yet (see §8, input record/replay).
+profile. With the played scenes replayed (§8) the picture is different
+again: in SM64DS gameplay 77 % of the gathers are the **compressed 4x4
+format**, which the attract loop never uses, and they were all going
+through the per-lane sampler — 13.4 % of the scene. That format now has
+its own gather (per-lane block addressing through the view tables, the
+block's four decoded colours cached across lanes). It is byte-exact and it
+made no difference: the same 13 % merely moved into the new symbols and
+total cycles fell 1.4 %. Prefetching the next block along S did nothing
+either. The cost of compressed textures is the texel, palette-info and
+palette loads missing cache, not the instructions around them — and the
+likeliest reason they miss is the 1.2 MB of depth/attribute buffers
+streaming through the same L2 every line, which is the four-line-ring item
+above. That is now the first thing to try for SM64DS.
 
 The rotscale backgrounds (affine, extended, large bitmap) sampled their
 map and tiles through the out-of-line OR-read accessor twice per pixel —
