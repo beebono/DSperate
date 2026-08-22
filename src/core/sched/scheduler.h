@@ -28,9 +28,13 @@ enum class EventId : u8 {
   Dma, Spu, Spi, Rtc, Cart, Gx3D, DisplayFifo, Div, Sqrt, Count
 };
 
-// CPU interleave quantum in ARM9 cycles. 128 matches melonDS's 64 system cycles,
-// which keeps IPC handshakes in the same order for trace comparison.
-constexpr u32 INTERLEAVE_QUANTUM = 128;
+// CPU interleave quantum in ARM9 cycles: the most one CPU runs before the
+// other catches up. LOCKSTEP_QUANTUM (melonDS's 64 system cycles) keeps IPC
+// handshakes in the same order as melonDS for trace and frame comparison;
+// 0 means event-bound — each CPU runs to the next scheduled event, as
+// DraStic does — which is 5-10 % faster and what the frontends run with.
+constexpr u32 LOCKSTEP_QUANTUM = 128;
+constexpr u32 INTERLEAVE_QUANTUM = LOCKSTEP_QUANTUM;   // the core's default (the verification harness)
 
 using EventFn = void (*)(NDS& nds, u32 param);
 
@@ -43,6 +47,10 @@ public:
   explicit Scheduler(NDS& nds);
 
   void reset();
+
+  // Interleave quantum in ARM9 cycles; 0 = event-bound. DS_QUANTUM in the
+  // environment overrides whatever the frontend sets.
+  void set_quantum(s64 q);
 
   void schedule(EventId id, u64 at, EventFn fn, u32 param = 0);
   void cancel(EventId id);
@@ -97,7 +105,8 @@ private:
   u64 scan_deadline() const;
   u64 next_ = ~u64{0};   // earliest armed deadline (cached)
   u64 firing_at_ = 0;    // deadline of the event being fired
-  s64  quantum_ = INTERLEAVE_QUANTUM;   // DS_QUANTUM override (measurement only)
+  s64  quantum_ = INTERLEAVE_QUANTUM;
+  bool quantum_forced_ = false;         // DS_QUANTUM given
   bool debug_slices_ = false;           // DS_DEBUG_SLICES
   struct Event {
     u64     at;

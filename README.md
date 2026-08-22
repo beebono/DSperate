@@ -50,6 +50,13 @@ default for both CPUs (`--interp`, `--jit9`, `--jit7` select otherwise); it is
 verified against the interpreter instruction by instruction
 (`tests/jit_test.cpp`) and slice by slice on whole games (docs/TRACING.md).
 
+The two CPUs are interleaved either in 128-cycle lockstep with melonDS
+(`--quantum 128`, the CLI's default — every frame dump and trace comparison
+assumes it) or event-bound, each CPU running to the next scheduled event as
+DraStic does (`--quantum 0`, the SDL frontend's default; `--lockstep` there
+selects the former). Event-bound is a few percent faster at the cost of the
+CPUs seeing each other's IPC writes and IRQs up to an event interval late.
+
 Sound is mixed by the core at 32768 Hz (`src/core/spu/`); the CLI has no audio
 output but `--dump-audio file` writes the raw s16 stereo stream.
 
@@ -60,7 +67,8 @@ and input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
 
     dsperate-sdl game.nds --bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin \
                  [--scale N] [--fullscreen] [--linear] [--no-vsync] [--no-audio]
-                 [--interp] [--frames N]
+                 [--interp] [--lockstep | --quantum N] [--layout vertical|horizontal]
+                 [--frames N] [--record F | --replay F]
 
 Keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R, Enter = Start,
 Right Shift = Select, `F` toggles fullscreen, Escape quits. A game controller

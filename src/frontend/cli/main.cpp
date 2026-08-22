@@ -63,8 +63,10 @@ int main(int argc, char** argv) {
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit9 = true, jit7 = true;
+  long quantum = ds::LOCKSTEP_QUANTUM;   // the harness compares against melonDS: lockstep unless asked otherwise
 #else
   bool jit9 = false, jit7 = false;
+  long quantum = ds::LOCKSTEP_QUANTUM;
 #endif
   TraceState ts;
   bool frames_given = false;
@@ -81,6 +83,7 @@ int main(int argc, char** argv) {
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
+    else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
     else rom = argv[i];
@@ -104,6 +107,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "note: no --bios9/--bios7/--firmware given; running with empty BIOS\n");
   }
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
+  nds.sched.set_quantum(quantum);
   if (rom && direct) nds.setup_direct_boot();
 #if DSPERATE_JIT
   if ((jit9 || jit7) && !ds::jit::attach(nds, jit9, jit7)) return 1;

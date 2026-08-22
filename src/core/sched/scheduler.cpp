@@ -16,9 +16,14 @@ namespace ds {
 
 Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) {
   // Read once: a function-local static costs an acquire load per use.
-  if (const char* q = std::getenv("DS_QUANTUM")) quantum_ = std::atoll(q);
+  if (const char* q = std::getenv("DS_QUANTUM")) { set_quantum(std::atoll(q)); quantum_forced_ = true; }
   debug_slices_ = std::getenv("DS_DEBUG_SLICES") != nullptr;
   reset();
+}
+
+void Scheduler::set_quantum(s64 q) {
+  if (quantum_forced_) return;
+  quantum_ = q <= 0 ? std::numeric_limits<s64>::max() : q;
 }
 
 void Scheduler::reset() {
@@ -233,7 +238,6 @@ u64 Scheduler::run_until(u64 until) {
     if (deadline > until) deadline = until;
     s64 slice = static_cast<s64>(deadline - now_);
     if (slice <= 0) slice = 1;
-    // DS_QUANTUM=<cycles>: measurement knob only; anything but 128 breaks lockstep with melonDS.
     const bool idle = slice > quantum_ && both_idle();
     if (slice > quantum_ && !idle) slice = quantum_;
     if (prof::enabled) count_slice(idle);

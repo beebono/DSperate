@@ -234,10 +234,23 @@ the loop body never runs and nothing ever fires again — the emulator spins
 with the frame counter stuck. `fire_due` now repeats its pass while
 anything is due, and `run_until` fires due events on entry. Byte-identical
 at 128 (the state could only arise by hanging); SM64DS runs at 1024 and
-4096. The quantum question is now purely a timing-fidelity trade: the
+4096. The quantum question is then purely a timing-fidelity trade: the
 interleave decides how far one CPU can get ahead of the other before it
 sees the other's IPC writes and IRQs, and 128 (melonDS's 64 system
 cycles) keeps the trace comparison in lockstep.
+
+**Event-bound interleave (2026-08-22).** DraStic has no quantum: its slice
+is the distance to the next pending event (private research notes,
+`slice_cycles = events.pending`), so one CPU may be a whole event interval
+ahead of the other — which is where its <1 % scheduler comes from. We now
+offer the same: `Scheduler::set_quantum(0)` bounds slices only by events
+(scanline, HBlank, timers, SPU: one to a few thousand cycles). Device,
+no-input 1800 frames: SM64DS 33.2 → 32.0 s (−3.6 %); the replayed scenes
+at 512 (the rows whose work stayed comparable — input replays diverge
+across quanta, so scene times can't be compared beyond that) −2.4 % SM64DS,
+−4.1 % Mario & Luigi, −4.5 % Meteos. The SDL frontend runs event-bound by
+default (`--lockstep` for 128); the CLI stays in lockstep by default,
+because every frame baseline and trace comparison assumes it.
 
 **Native slice loop (2026-08-22).** With the recompiler attached,
 `Scheduler::run_until` hands the slice sequence to a loop in the code arena

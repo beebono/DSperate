@@ -122,7 +122,8 @@ Debug hooks in the CLI, all environment-gated and free when unset:
 | `DS_JIT_STRICT=1` | recompiler tests the budget after every instruction, so it interleaves exactly like the interpreter (verification mode) |
 | `DS_JIT_DEBUG=1` | log every recompiler fallback to the interpreter with the resulting state; dump translated blocks |
 | `DS_JIT_HIST=1` | with `DS_PROFILE=1`: recompiler counters and hottest fallback sites at exit |
-| `DS_JIT_FASTCOST=1`, `DS_QUANTUM=<n>` | measurement knobs (inexact timing): constant data cost / scheduler quantum |
+| `DS_JIT_FASTCOST=1` | measurement knob (inexact timing): constant data cost |
+| `DS_QUANTUM=<n>` | CPU interleave quantum in ARM9 cycles, overriding the frontend's `--quantum`/`--lockstep` (128 = melonDS lockstep, the CLI default and what every comparison assumes; 0 = event-bound, the SDL default) |
 | `TRACE_START_FRAME=N` | start tracing at frame N (both tracers) |
 
 The melonDS tracer adds `TRACE_VRAM_STATS` and `TRACE_VRAM_PER_FRAME` (bank

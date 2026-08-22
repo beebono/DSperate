@@ -35,6 +35,7 @@ const char* kUsage =
     "  --no-audio      run without sound (frames are paced by the clock)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
     "  --interp        interpreter instead of the recompiler\n"
+    "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
     "  --replay F      play the inputs in F instead of the controls; quits at its end\n";
@@ -73,6 +74,7 @@ int main(int argc, char** argv) {
   const char *record = nullptr, *replay = nullptr;
   bool fullscreen = false, linear = false, audio_on = true, jit = true, vsync = true;
   ds::sdl::Display::Layout layout = ds::sdl::Display::Layout::Vertical;
+  long quantum = 0;   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
 
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
@@ -94,6 +96,8 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--no-audio")) audio_on = false;
     else if (!std::strcmp(argv[i], "--no-vsync")) vsync = false;
     else if (!std::strcmp(argv[i], "--interp")) jit = false;
+    else if (!std::strcmp(argv[i], "--lockstep")) quantum = ds::LOCKSTEP_QUANTUM;
+    else if (arg("--quantum")) quantum = std::atol(argv[++i]);
     else if (!std::strcmp(argv[i], "--help")) { std::fputs(kUsage, stderr); return 0; }
     else rom = argv[i];
   }
@@ -103,6 +107,7 @@ int main(int argc, char** argv) {
   NDS nds;
   if (!nds.load_bios(bios9, bios7, fw)) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
   nds.reset();
+  nds.sched.set_quantum(quantum);
   if (!nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.setup_direct_boot();
 #if DSPERATE_JIT
