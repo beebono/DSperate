@@ -71,16 +71,22 @@ void Scheduler::count_slice(bool skipped) const {
   if (skipped) prof::add(prof::C_SLICES_SKIPPED, 1);
 }
 
+// Every armed event at or before now_, in table order, repeated until none
+// is left: a handler may schedule an event (its own, or one earlier in the
+// table) at a time the CPUs have already overshot — a timer with a period
+// shorter than a slice does — and a single pass would leave it armed in the
+// past, where run_until(next_deadline()) can never reach it.
 void Scheduler::fire_due() {
-  if (now_ < next_) return;
-  for (auto& e : events_) {
-    if (e.armed && e.at <= now_) {
-      e.armed = false;
-      firing_at_ = e.at;
-      e.fn(nds_, e.param);      // may schedule: next_ is kept current by schedule()
+  while (now_ >= next_) {
+    for (auto& e : events_) {
+      if (e.armed && e.at <= now_) {
+        e.armed = false;
+        firing_at_ = e.at;
+        e.fn(nds_, e.param);      // may schedule: next_ is kept current by schedule()
+      }
     }
+    next_ = scan_deadline();
   }
-  next_ = scan_deadline();
 }
 
 // One CPU's share of a slice: a running DMA goes first (the CPU is stalled),
@@ -207,6 +213,7 @@ extern "C" SliceNext ds_slice_next(void* scheduler) { return static_cast<Schedul
 
 u64 Scheduler::run_until_native(u64 until) {
   const u64 start = now_;
+  fire_due();   // anything already due (see fire_due): the loop only fires at slice ends
   sl_.until = until;
   sl_.phase = SL_BEGIN;
   jit::run_loop(this);
@@ -220,6 +227,7 @@ u64 Scheduler::run_until(u64 until) {
   if (jit::has_runtime()) return run_until_native(until);
 #endif
   const u64 start = now_;
+  fire_due();   // anything already due (see fire_due): the loop only fires at slice ends
   while (now_ < until) {
     u64 deadline = next_deadline();
     if (deadline > until) deadline = until;

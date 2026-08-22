@@ -223,8 +223,21 @@ frames). Leaving and re-entering translated code was never the cost; the
 scheduler's ~6 % in profiles is the cache-cold scheduler and context state
 touched at every boundary, and whoever touches it first pays. What does
 move it is fewer boundaries: `DS_QUANTUM=512` ran the SM64DS scene 2.5 %
-faster (91.7 → 89.4 s), but 1024 wedged SM64DS outright, so the
-interleave stays at 128 until that dependence is understood.
+faster (91.7 → 89.4 s), but 1024 wedged SM64DS outright.
+
+**The 1024 wedge (2026-08-22) was ours, not the game's.** `fire_due` made
+one pass over the event table. An ARM7 timer whose period is shorter than
+a slice reschedules itself, from its own handler, at a time the CPUs have
+already overshot; the single pass never revisits it, `run_frame` then
+calls `run_until(next_deadline())` with `now_` already past that deadline,
+the loop body never runs and nothing ever fires again — the emulator spins
+with the frame counter stuck. `fire_due` now repeats its pass while
+anything is due, and `run_until` fires due events on entry. Byte-identical
+at 128 (the state could only arise by hanging); SM64DS runs at 1024 and
+4096. The quantum question is now purely a timing-fidelity trade: the
+interleave decides how far one CPU can get ahead of the other before it
+sees the other's IPC writes and IRQs, and 128 (melonDS's 64 system
+cycles) keeps the trace comparison in lockstep.
 
 **Native slice loop (2026-08-22).** With the recompiler attached,
 `Scheduler::run_until` hands the slice sequence to a loop in the code arena
