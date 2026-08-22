@@ -136,6 +136,8 @@ void NDS::setup_direct_boot() {
   io.exmemcnt = 0xE880; bus.update_gba_slot_timings();
   io.cpu_io[0].postflg = 1; io.cpu_io[1].postflg = 1;
   io.powcnt1 = 0x820F; gpu.set_powcnt(0x820F);
+  io.powcnt2 = 0x0001; spu.set_powcnt2(0x0001);      // sound on, SOUNDBIAS centred, as the firmware leaves them
+  spu.write(0x04000504, 16, 0x200);
   io.cart.romctrl |= 1u << 29;
   cart->setup_direct_boot();
   io.arm7_bios_prot = 0x1204;

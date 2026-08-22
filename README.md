@@ -49,3 +49,6 @@ interpreter and the portable C++ renderer. On AArch64 the recompiler is the
 default for both CPUs (`--interp`, `--jit9`, `--jit7` select otherwise); it is
 verified against the interpreter instruction by instruction
 (`tests/jit_test.cpp`) and slice by slice on whole games (docs/TRACING.md).
+
+Sound is mixed by the core at 32768 Hz (`src/core/spu/`); the CLI has no audio
+output yet but `--dump-audio file` writes the raw s16 stereo stream.

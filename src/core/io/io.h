@@ -124,8 +124,6 @@ public:
   Cart cart;
   u16 arm7_bios_prot = 0;    // ARM7 BIOS reads below this from outside the BIOS return garbage
   bool cart_drq() const { return (cart.romctrl & 0x00800000) != 0; }
-  u16 sound_cnt = 0, sound_bias = 0x200;
-  std::array<u8, 0x100> sound_regs{};
   // Wi-Fi (ARM7, 0x04800000-0x0480FFFF). Register file, 8 KB RAM, baseband
   // and RF register indirection — enough for games' hardware probing. No
   // frames, timers or interrupts yet. Power-gated by POWCNT2 bit 1.

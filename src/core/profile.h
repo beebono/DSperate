@@ -12,7 +12,7 @@ namespace ds::prof {
 enum Stage : u32 {
   CPU9, CPU7, DMA, GX_RUN,
   BG_DRAW, OBJ_DRAW, WINDOW, SELECT, EFFECTS, OUTPUT, CAPTURE,
-  R3D_CLEAR, R3D_SPANS, R3D_FINAL,
+  R3D_CLEAR, R3D_SPANS, R3D_FINAL, SPU,
   COUNT
 };
 extern bool enabled;

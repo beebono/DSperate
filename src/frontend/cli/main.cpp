@@ -4,7 +4,8 @@
 // Headless CLI: boots the BIOS/firmware (and optionally a ROM), runs N frames,
 // optionally writing per-CPU instruction traces in the shared trace format:
 //   <pc> <instr> <cpsr> r0 .. r14     (hex, one line per instruction)
-// and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py.
+// and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py
+// and the SPU output (--dump-audio, raw s16 stereo at 32768 Hz).
 #include "core/nds.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
@@ -57,7 +58,7 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
 } // namespace
 
 int main(int argc, char** argv) {
-  const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr;
+  const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr;
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit9 = true, jit7 = true;
@@ -74,6 +75,7 @@ int main(int argc, char** argv) {
     else if (arg("--trace")) trace = argv[++i];
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
+    else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
@@ -115,6 +117,8 @@ int main(int argc, char** argv) {
   unsigned long long last9 = 0, last7 = 0;
   FILE* dump_out = dump ? std::fopen(dump, "wb") : nullptr;
   if (dump && !dump_out) { std::fprintf(stderr, "could not open %s\n", dump); return 1; }
+  FILE* audio_out = dump_audio ? std::fopen(dump_audio, "wb") : nullptr;
+  if (dump_audio && !audio_out) { std::fprintf(stderr, "could not open %s\n", dump_audio); return 1; }
   ts.pc_hist = std::getenv("TRACE_PC_HIST") != nullptr;
   const char* trace_start = std::getenv("TRACE_START_FRAME");   // suppress trace output before this frame
   const int trace_from = trace_start ? std::atoi(trace_start) : 0;
@@ -130,9 +134,14 @@ int main(int argc, char** argv) {
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
       std::fwrite(nds.gpu.framebuffer(1), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
     }
+    if (audio_out) {
+      ds::s16 buf[2048 * 2]; size_t n;
+      while ((n = nds.spu.take(buf, 2048)) != 0) std::fwrite(buf, 4, n, audio_out);
+    } else nds.spu.drain();
     if (per_frame && trace) { std::fprintf(stderr, "frame %d arm9 %llu arm7 %llu\n", i, ts.executed[0] - last9, ts.executed[1] - last7); last9 = ts.executed[0]; last7 = ts.executed[1]; }
   }
   if (dump_out) std::fclose(dump_out);
+  if (audio_out) std::fclose(audio_out);
   if (ts.pc_hist) {
     for (int c = 0; c < 2; ++c) {
       std::vector<std::pair<ds::u32, unsigned long long>> v(ts.hist[c].begin(), ts.hist[c].end());

@@ -31,8 +31,6 @@ void Io::reset() {
   spi_fw = SpiFirmware{}; spi_tsc = SpiTouch{}; spi_pm = SpiPower{};
   rtc = Rtc{};
   cart = Cart{};
-  sound_cnt = 0; sound_bias = 0x200;
-  sound_regs.fill(0);
   wifi_reset();
 }
 
@@ -581,6 +579,7 @@ void Io::set_irq_line(Cpu cpu, u32 bit, bool on) {
 u32 Io::read(Cpu cpu, u32 addr, u32 width) {
   if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) return nds_.gpu3d.read(addr, width);
   if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) return nds_.gpu.reg_read(addr, width);
+  if (cpu == Cpu::ARM7 && spu::Spu::owns_reg(addr)) return nds_.spu.read(addr, width);
   bool handled = false;
   if (width == 32) { u32 v = read32_special(cpu, addr, handled); if (handled) return v; return read16(cpu, addr) | (static_cast<u32>(read16(cpu, addr + 2)) << 16); }
   if (width == 16) return read16(cpu, addr);
@@ -593,6 +592,7 @@ void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
     if (std::getenv("DS_DEBUG_GPUREG") && (addr & 0xFF) >= 0x50) std::fprintf(stderr, "[gpureg] frame %llu line %u write%u %08x = %08x\n", (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
     nds_.gpu.reg_write(addr, width, value); return;
   }
+  if (cpu == Cpu::ARM7 && spu::Spu::owns_reg(addr)) { nds_.spu.write(addr, width, value); return; }
   bool handled = false;
   if (width == 32) { write32_special(cpu, addr, value, handled); if (handled) return; write16(cpu, addr, static_cast<u16>(value)); write16(cpu, addr + 2, static_cast<u16>(value >> 16)); return; }
   if (width == 16) { write16(cpu, addr, static_cast<u16>(value)); return; }
@@ -688,8 +688,6 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0x04000240: return a9 ? static_cast<u16>(vramcnt[0] | (vramcnt[1] << 8)) : static_cast<u16>(((vramcnt[2] >> 0) & 7) == 2 ? 1 : 0) | ((((vramcnt[3] >> 0) & 7) == 2 ? 2 : 0)) | (wramcnt << 8);
   case 0x04000300: return c.postflg;
   case 0x04000304: return a9 ? powcnt1 : powcnt2;
-  case 0x04000500: return sound_cnt;
-  case 0x04000504: return sound_bias;
   case 0x04000280: return math.divcnt;
   case 0x040002B0: return math.sqrtcnt;
   default: break;
@@ -701,7 +699,6 @@ u32 Io::read16(Cpu cpu, u32 addr) {
     auto get = [&](u32 k) -> u8 { if (k == 7) return wramcnt; if (k > 9) return 0; return vramcnt[k < 7 ? k : k - 1]; };
     return static_cast<u16>(get(i) | (get(i + 1) << 8));
   }
-  if (!a9 && addr >= 0x04000400 && addr < 0x04000500) return sound_regs[addr - 0x04000400] | (sound_regs[addr - 0x04000400 + 1] << 8);
   return 0;
 }
 
@@ -773,9 +770,7 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
     c.postflg |= value & 1; if (a9) c.postflg = (c.postflg & 1) | (value & 2);
     if (!a9 && (value >> 8)) write8(cpu, 0x04000301, static_cast<u8>(value >> 8));
     return;
-  case 0x04000304: if (a9) { powcnt1 = value & 0x820F; nds_.gpu.set_powcnt(powcnt1); } else powcnt2 = value & 0x0003; return;
-  case 0x04000500: sound_cnt = value; return;
-  case 0x04000504: sound_bias = value & 0x3FF; return;
+  case 0x04000304: if (a9) { powcnt1 = value & 0x820F; nds_.gpu.set_powcnt(powcnt1); } else { powcnt2 = value & 0x0003; nds_.spu.set_powcnt2(powcnt2); } return;
   default: break;
   }
   if (addr >= 0x04000240 && addr < 0x0400024A && a9) { write8(cpu, addr, static_cast<u8>(value)); write8(cpu, addr + 1, static_cast<u8>(value >> 8)); return; }
@@ -784,7 +779,6 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
     write32_special(cpu, addr & ~3u, (addr & 2) ? ((cur & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((cur & 0xFFFF0000) | value), h);
     return;
   }
-  if (!a9 && addr >= 0x04000400 && addr < 0x04000500) { sound_regs[addr - 0x04000400] = static_cast<u8>(value); sound_regs[addr - 0x04000400 + 1] = static_cast<u8>(value >> 8); return; }
 }
 
 u8 Io::read8(Cpu cpu, u32 addr) {
@@ -820,7 +814,6 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
   if (!a9 && addr == 0x04000138) { rtc_write(value, true); return; }
   if (!a9 && addr == 0x04000139) { rtc_write(static_cast<u16>((rtc.io & 0xFF) | (value << 8)), false); return; }
   if (!a9 && addr == 0x040001C2) { spi_write_data(value); return; }
-  if (!a9 && addr >= 0x04000400 && addr < 0x04000500) { sound_regs[addr - 0x04000400] = value; return; }
   // Generic byte write: read-modify-write the halfword.
   const u32 base = addr & ~1u;
   u16 cur = read16(cpu, base);

@@ -11,7 +11,7 @@ u64 ns[COUNT] = {};
 const char* const names[COUNT] = {
   "cpu arm9", "cpu arm7", "dma", "gx geometry",
   "2d bg draw", "2d obj draw", "2d window", "2d select", "2d effects", "output", "capture",
-  "3d clear", "3d spans", "3d final pass",
+  "3d clear", "3d spans", "3d final pass", "spu",
 };
 
 u64 count[C_COUNT] = {};

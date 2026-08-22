@@ -392,7 +392,48 @@ clear, the resolve's loads and the final pass then stay in L1 — ~5 % of
 SM64DS is memory stalls on those 1.2 MB), the translucent blend on 16-bit
 lanes, the geometry unit (6–9 %).
 
-## 6. Verification
+## 6. Sound (`spu/`)
+
+The SPU is an ARM7-side device and runs entirely from one scheduler event:
+every 2048 ARM9 cycles (32.768 kHz) `Spu::mix` advances the sixteen channel
+timers by 512 SPU ticks, decodes whatever samples they cross, pans, sums,
+captures and emits one stereo frame into a ring the frontend drains. Channel
+data is fetched through a 32-byte per-channel FIFO in 16-byte bursts
+(`bus.dma_read32` on the ARM7 map, zero below 0x4000 — the SPU cannot read
+the ARM7 BIOS), so the per-sample hot path never touches the page table.
+
+Formats: PCM8, PCM16, IMA-ADPCM (4-byte header, loop-point predictor/index
+snapshot taken on the first pass through the loop start), PSG square with
+the eight duty cycles (channels 8–13), 15-bit LFSR noise (14–15). Volume is
+`sample << {4,3,2,0}[divider] * volume` with 127 → 128, pan the same, mixer
+`>> 10`, master `>> 7`, output `>> 8`, SOUNDBIAS applied relative to 0x200,
+clip to s16 — every truncation point follows melonDS so the streams can be
+compared sample for sample. SOUNDCNT bits 8–11 select mixer / channel 1 /
+channel 3 / both per side; bits 12–13 pull channels 1 and 3 out of the mix.
+Capture units 0/1 sample the left/right mixer output (16- or 8-bit, loop or
+one-shot) through a 16-byte FIFO and write it back to ARM7 memory; the
+"add" and channel-source capture modes melonDS also leaves out are
+reported once and ignored. POWCNT2 bit 0 mutes the output. Direct boot
+leaves POWCNT2 = 1 and SOUNDBIAS = 0x200 as the firmware does.
+
+The DS has no sound DMA: the ARM7's DMA controller has no FIFO mode, so
+there is nothing to wire there. Output resampling (32768 Hz → the device
+rate) and clock drift belong to the frontend, not the core.
+
+The sample event is rescheduled from its *nominal* time, never from
+`now()`: events fire at slice ends, up to one CPU overshoot late, and
+rescheduling from the late time accumulated into a sample clock 0.036 %
+slow — enough for Rhythm Heaven's just-in-time stream writer (it refills
+each 256-byte chunk ~0.5 ms before the FIFO prefetch reaches it) to
+overtake the prefetch and play next-lap samples as crackle in one channel.
+The GPU's scanline events still reschedule from `now()` and run 0.038 %
+long for the same reason (+432 ARM9 cycles per frame); the fix is the same
+and is pending because it moves every baseline dump.
+
+Cost: sixteen channels × 32768 samples/s of integer work; measured under
+`DS_PROFILE=1` as the `spu` stage: 0.3–0.45 ms per frame on the RK3566.
+
+## 7. Verification
 
 1. Interpreter vs melonDS per-instruction trace diffs — see
    [TRACING.md](TRACING.md). Status 2026-08-20: real firmware boot (120 frames)
@@ -403,6 +444,16 @@ lanes, the geometry unit (6–9 %).
    Bangai-O Spirits and Sonic Rush are pixel-exact over 300-400 frames apart
    from single scene-transition frames; Kirby Canvas Curse differs only in
    animation phase. AArch64 (under qemu) produces byte-identical frames.
+1c. Sound vs melonDS sample for sample: `--dump-audio file` writes the mixer
+   output as raw interleaved s16 stereo at 32768 Hz (≈547 samples per
+   frame); the oracle build dumps the same stream and
+   `tools/compare_audio.py` aligns the two (games start their streams a few
+   ms apart) and counts differing samples per frame. Status 2026-08-21:
+   Rhythm Heaven (streamed PCM16) and Mario & Luigi are exact over 600
+   frames; Super Mario 64 DS differs from frame 27 because its sequencer
+   keys notes ~21 ms apart from melonDS with a different envelope state —
+   CPU timing upstream of the SPU, inaudible. `tests/spu_test.cpp` checks
+   each format, the mixer arithmetic, capture and mute in isolation.
 2. JIT vs interpreter differential execution. `tests/jit_test.cpp`
    (cross-built, runs under qemu) fuzzes random straight-line ARM and Thumb
    sequences on both CPUs through both engines and compares registers,
@@ -424,7 +475,7 @@ lanes, the geometry unit (6–9 %).
 4. Performance against the measured baseline: DraStic holds SM64DS at 100% on
    **37.2% of one Cortex-A55 @ ~1.58 GHz** (RK3566). That is the number.
 
-## 7. Targets
+## 8. Targets
 
 | tier | device | role |
 |---|---|---|

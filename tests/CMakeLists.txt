@@ -32,3 +32,7 @@ if(DSPERATE_JIT)
   target_link_libraries(test_jit PRIVATE dsperate_core)
   add_test(NAME jit COMMAND test_jit)
 endif()
+
+add_executable(test_spu spu_test.cpp)
+target_link_libraries(test_spu PRIVATE dsperate_core)
+add_test(NAME spu COMMAND test_spu)

@@ -70,6 +70,25 @@ frame is byte-identical).
              --dump-frames out/ds.frames game.nds
     tools/compare_frames.py out/ref.frames out/ds.frames [--offset K] [--png dir]
 
+## Audio comparison
+
+`--dump-audio file` appends the SPU output after every frame: raw interleaved
+s16 stereo at 32768 Hz, ≈547 samples per frame (import into Audacity as
+"raw, signed 16-bit PCM, little-endian, 2 channels, 32768 Hz", or play with
+`aplay -f S16_LE -c 2 -r 32768`). The melonDS tracer build takes the same
+flag and writes the mixer output before its resampler, so the streams are
+comparable sample for sample:
+
+    tools/compare_audio.py out/melon.pcm out/ds.pcm [--offset K] [--search N]
+
+Without `--offset` the candidate is aligned by searching for the shift with
+the fewest mismatches over the first non-silent seconds (streams start a few
+ms apart between emulators); it then prints mismatching samples per frame,
+the first differing samples, and the RMS of the difference against the
+signal. `DS_DEBUG_SPU=1` logs SOUNDCNT/capture writes and every channel
+key-on (with the sample index it lands on) to stderr, which is how a
+mismatch is traced back to a register write.
+
 The comparator prints per-frame mismatch counts and the first differing
 pixel, and with `--png` writes ref/cand/diff images for the first mismatching
 frames. Games drift by a few frames against melonDS (ARM7-driven waits differ
