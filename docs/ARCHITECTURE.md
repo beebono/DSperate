@@ -530,15 +530,16 @@ under sway with Mesa 26.1.6 / panfrost: presentation costs a flat
 and without vsync — about 7 % of the 16.7 ms budget. With vsync on, the
 present call also absorbs the slack when the emulator is ahead (up to 5 ms),
 which is waiting rather than work; audio pacing holds the queue at 2-3
-frames. `--frames N` with `DS_FPS=1` makes the per-60-frame lines comparable
-by frame index between runs, which is how the two paths were compared
-(`--no-vsync --no-audio` removes every sleep and leaves the real cost).
+frames. `--frames N` with `DS_FPS=1` prints a line per 60 frames;
+`--no-vsync --no-audio` removes every sleep and leaves the real cost.
+Comparing two runs line by line only holds if neither is touched — the
+emulator is deterministic, the player is not.
 
-Everything else is emulation, and the frame-indexed numbers are less
-flattering than the 300-frame averages of §5: Meteos runs at 4 ms/frame
-early and 21 ms in its late attract demo; SM64DS is 11 ms in menus, 22 ms in
-ordinary 3D and 48 ms in the heaviest scene reached within 900 frames — 34 %
-speed. Closing that is §7.4's problem, not the frontend's.
+Everything else is emulation, and playing past the intros is far less
+flattering than the 300-frame averages of §5, which are dominated by logos
+and menus: driven by hand into Meteos's menus and SM64DS's 3D attract,
+frames cost 21 ms and 22 ms, reaching 48 ms — 34 % speed — in SM64DS's
+heaviest scene. Closing that is §7.4's problem, not the frontend's.
 
 ## 9. Targets
 
