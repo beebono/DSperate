@@ -524,10 +524,12 @@ saves, and nothing else — no savestates, no configuration, no menus.
   chip is dirty. Savestates are deliberately absent, battery saves are not
   optional.
 
-**Measured on the RK3566**, both with SDL's KMSDRM backend (no session) and
-under sway with Mesa 26.1.6 / panfrost: presentation costs a flat
-**1.1-1.5 ms per frame** whatever the emulation load, on both paths, with
-and without vsync — about 7 % of the 16.7 ms budget. With vsync on, the
+**Measured on the RK3566** across SDL's KMSDRM backend (no session) and sway,
+and across both graphics stacks — Mesa 26.1.6 / panfrost (SDL's `opengl`
+renderer) and the Mali blob (GLES-only, so SDL's `opengles2`) — presentation
+costs a flat **1.0-1.5 ms per frame** whatever the emulation load, with and
+without vsync: about 7 % of the 16.7 ms budget, panfrost marginally ahead of
+the blob. The graphics stack is not where the time goes. With vsync on, the
 present call also absorbs the slack when the emulator is ahead (up to 5 ms),
 which is waiting rather than work; audio pacing holds the queue at 2-3
 frames. `--frames N` with `DS_FPS=1` prints a line per 60 frames;
