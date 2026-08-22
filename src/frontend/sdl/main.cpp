@@ -32,7 +32,8 @@ const char* kUsage =
     "  --linear        smooth scaling instead of nearest\n"
     "  --no-audio      run without sound (frames are paced by the clock)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
-    "  --interp        interpreter instead of the recompiler\n";
+    "  --interp        interpreter instead of the recompiler\n"
+    "  --frames N      quit after N frames (for repeatable measurements)\n";
 
 // Battery save file next to the ROM.
 std::string save_path(const std::string& rom) {
@@ -64,6 +65,7 @@ void write_save(NDS& nds, const std::string& path) {
 int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr;
   int scale = 2;
+  long frame_limit = 0;
   bool fullscreen = false, linear = false, audio_on = true, jit = true, vsync = true;
 
   for (int i = 1; i < argc; ++i) {
@@ -72,6 +74,7 @@ int main(int argc, char** argv) {
     else if (arg("--bios7")) bios7 = argv[++i];
     else if (arg("--firmware")) fw = argv[++i];
     else if (arg("--scale")) scale = std::atoi(argv[++i]);
+    else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (!std::strcmp(argv[i], "--fullscreen")) fullscreen = true;
     else if (!std::strcmp(argv[i], "--linear")) linear = true;
     else if (!std::strcmp(argv[i], "--no-audio")) audio_on = false;
@@ -119,7 +122,7 @@ int main(int argc, char** argv) {
   Uint64 fps_mark = SDL_GetPerformanceCounter();
   Uint64 emu_ticks = 0, draw_ticks = 0;
   u64 frames = 0;
-  while (!input.quit()) {
+  while (!input.quit() && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) input.handle(e, display);
     input.apply(nds);

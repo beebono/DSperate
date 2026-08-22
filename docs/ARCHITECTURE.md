@@ -524,11 +524,21 @@ saves, and nothing else — no savestates, no configuration, no menus.
   chip is dirty. Savestates are deliberately absent, battery saves are not
   optional.
 
-Measured on the RK3566 (KMSDRM, OpenGL renderer, PipeWire): presentation
-costs 1-2 ms per frame plus the vsync wait, and audio pacing holds the queue
-at 2-3 frames. Games inside the frame budget run at a steady 100 %; the
-heavier ones (Meteos's late attract demo at 20 ms/frame, SM64DS's 3D scenes)
-drop to 75-90 %, which is the emulation-speed gap §7 measures, not frontend cost.
+**Measured on the RK3566**, both with SDL's KMSDRM backend (no session) and
+under sway with Mesa 26.1.6 / panfrost: presentation costs a flat
+**1.1-1.5 ms per frame** whatever the emulation load, on both paths, with
+and without vsync — about 7 % of the 16.7 ms budget. With vsync on, the
+present call also absorbs the slack when the emulator is ahead (up to 5 ms),
+which is waiting rather than work; audio pacing holds the queue at 2-3
+frames. `--frames N` with `DS_FPS=1` makes the per-60-frame lines comparable
+by frame index between runs, which is how the two paths were compared
+(`--no-vsync --no-audio` removes every sleep and leaves the real cost).
+
+Everything else is emulation, and the frame-indexed numbers are less
+flattering than the 300-frame averages of §5: Meteos runs at 4 ms/frame
+early and 21 ms in its late attract demo; SM64DS is 11 ms in menus, 22 ms in
+ordinary 3D and 48 ms in the heaviest scene reached within 900 frames — 34 %
+speed. Closing that is §7.4's problem, not the frontend's.
 
 ## 9. Targets
 

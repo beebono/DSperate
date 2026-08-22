@@ -32,6 +32,15 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   SDL_RendererInfo info;
   if (SDL_GetRendererInfo(ren_, &info) == 0)
     std::fprintf(stderr, "video: %s renderer, %s driver, vsync %s\n", info.name, SDL_GetCurrentVideoDriver(), (info.flags & SDL_RENDERER_PRESENTVSYNC) ? "on" : "off");
+
+  // Which GL stack actually ended up driving the window (Mesa/panfrost or a
+  // vendor blob) is the thing that changes underneath us, so name it.
+  using GetString = const unsigned char* (*)(unsigned);
+  if (auto gl_get_string = reinterpret_cast<GetString>(SDL_GL_GetProcAddress("glGetString"))) {
+    const unsigned char* rend = gl_get_string(0x1F01);      // GL_RENDERER
+    const unsigned char* ver  = gl_get_string(0x1F02);      // GL_VERSION
+    if (rend) std::fprintf(stderr, "gl: %s | %s\n", rend, ver ? reinterpret_cast<const char*>(ver) : "?");
+  }
   return true;
 }
 
