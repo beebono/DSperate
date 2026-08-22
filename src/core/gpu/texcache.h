@@ -38,6 +38,7 @@ public:
   const u32* lookup(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0);
   void clear();
   bool enabled() const { return enabled_; }
+  u32  decodes_this_frame() const { return decodes_; }
   void set_enabled(bool on) { enabled_ = on; if (!on) clear(); }
 
 private:
@@ -57,6 +58,7 @@ private:
   std::unordered_map<u64, Entry> entries_;
   size_t bytes_ = 0;
   u64 frame_ = 0;
+  u32 decodes_ = 0;
   bool enabled_ = true;
 };
 

@@ -20,7 +20,7 @@ extern u64 ns[COUNT];
 extern const char* const names[COUNT];
 // Event counters (reported with the stages): how much work the stages did.
 enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST, C_TEX_SLOW_FMT5, C_TEX_SLOW_VIEWS,
-  C_TEXCACHE_HIT, C_TEXCACHE_DECODE, C_TEXCACHE_BYTES, C_COUNT };
+  C_TEXCACHE_HIT, C_TEXCACHE_DECODE, C_TEXCACHE_BYTES, C_R3D_FRAMES_KEPT, C_COUNT };
 extern u64 count[C_COUNT];
 extern const char* const count_names[C_COUNT];
 inline void add(Counter c, u64 n) { if (enabled) count[c] += n; }

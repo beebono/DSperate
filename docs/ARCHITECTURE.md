@@ -480,6 +480,20 @@ everything cost Mario & Luigi and Meteos 0.5-1 %. On the replayed scenes:
 SM64DS −10 % whole-run (3D span stage 66 → 54 s), the 2D-heavy games
 unchanged.
 
+**Frames without a new swap (2026-08-22).** The display runs at 60 Hz but
+the 3D engine only has a new polygon list when the game issues
+SWAP_BUFFERS; SM64DS swaps every other frame. We rasterised every display
+frame regardless. Now `Gpu3D::vblank` notes when there was no flush and
+the render registers (DISP3DCNT, alpha test, clear, fog, edge and toon
+tables) match what the last render used — melonDS's `RenderFrameIdentical`
+— and `Renderer3D::render` then validates every texture the polygon list
+reads through the cache; if none had to be re-decoded the previous colour
+buffer is kept. That is exact (unused VRAM cannot affect the picture and
+everything else that could is compared), byte-identical on the eight
+baselines and the three played scenes, and keeps 1 269 of the SM64DS
+scene's 3 600 frames (its menus run at 60): 113.4 → 94.5 s, −17 %, on top
+of the cache's −10 %; M&L and Meteos within noise (they swap every frame).
+
 The rotscale backgrounds (affine, extended, large bitmap) sampled their
 map and tiles through the out-of-line OR-read accessor twice per pixel —
 the pattern the 2D pass had replaced with direct pointers for text

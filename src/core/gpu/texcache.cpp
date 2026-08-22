@@ -49,6 +49,7 @@ u64 TextureCache::key(u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 
 
 void TextureCache::begin_frame(u64 frame) {
   frame_ = frame;
+  decodes_ = 0;
   if (bytes_ <= BUDGET_BYTES) return;
   // Over budget: drop what the previous frame did not use; if that is not
   // enough, everything older than this frame goes.
@@ -74,7 +75,7 @@ const u32* TextureCache::lookup(const VramMap& vm, u32 fmt, u32 base, u32 width,
     snapshot(vm, it->second);
     bytes_ += it->second.texels.size() * 4 + it->second.copy.size();
     it->second.validated = frame_;
-    prof::add(prof::C_TEXCACHE_DECODE, 1);
+    ++decodes_; prof::add(prof::C_TEXCACHE_DECODE, 1);
   } else if (it->second.validated != frame_) {
     if (unchanged(vm, it->second)) prof::add(prof::C_TEXCACHE_HIT, 1);
     else {
@@ -82,7 +83,7 @@ const u32* TextureCache::lookup(const VramMap& vm, u32 fmt, u32 base, u32 width,
       decode(vm, it->second);
       snapshot(vm, it->second);
       bytes_ += it->second.texels.size() * 4 + it->second.copy.size();
-      prof::add(prof::C_TEXCACHE_DECODE, 1);
+      ++decodes_; prof::add(prof::C_TEXCACHE_DECODE, 1);
     }
     it->second.validated = frame_;
   }

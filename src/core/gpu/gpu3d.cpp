@@ -183,7 +183,7 @@ void Gpu3D::reset() {
   vertex_num_ = vertex_in_poly_ = consecutive_polys_ = 0;
   last_strip_poly_ = nullptr; num_opaque_ = 0;
   bank_ = 0; num_vertices_ = num_polygons_ = 0;
-  flush_request_ = flush_attr_ = 0;
+  flush_request_ = flush_attr_ = 0; render_identical_ = false;
   renderer_.reset();
 }
 
@@ -875,6 +875,15 @@ void Gpu3D::vblank() {
                          [](const Polygon* a, const Polygon* b) { return a->sort_key < b->sort_key; });
       }
       render_count_ = num_polygons_;
+      render_identical_ = false;
+    } else {
+      // Same polygon list as last time; identical output if the render
+      // registers match what that render used (melonDS's RenderFrameIdentical).
+      render_identical_ = rstate_.dispcnt == dispcnt_ && rstate_.alpha_ref == alpha_ref_
+        && rstate_.clear_attr1 == clear_attr1_ && rstate_.clear_attr2 == clear_attr2_
+        && rstate_.fog_color == fog_color_ && rstate_.fog_offset == fog_offset_ * 0x200u
+        && rstate_.edge == edge_ && rstate_.toon == toon_
+        && std::equal(fog_density_.begin(), fog_density_.end(), rstate_.fog_density.begin() + 1);
     }
     rstate_.dispcnt = dispcnt_;
     rstate_.alpha_ref = alpha_ref_;

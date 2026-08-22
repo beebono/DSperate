@@ -1334,9 +1334,26 @@ void Renderer3D::render(const Gpu3D& gx) {
   static const bool no_cache = std::getenv("DS_NO_TEXCACHE") != nullptr;   // A/B and debugging
   if (no_cache) texcache_.set_enabled(false);
   texcache_.begin_frame(nds_.frame_count);
+  const Polygon* const* polys = gx.render_polygons();
+  // A frame with no new polygon list and the same render registers draws
+  // the same picture as the last one — unless a texture or palette it reads
+  // changed underneath. Validating every texture it uses through the cache
+  // (a memcmp per texture, once) settles that, and when nothing had to be
+  // re-decoded the previous colour buffer is kept; games that run their 3D
+  // at 30 fps then cost half.
+  if (gx.render_identical() && texcache_.enabled() && rendered_once_) {
+    for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
+      const Polygon& p = *polys[i];
+      const u32 fmt = (p.texparam >> 26) & 7;
+      if (p.degenerate || !(rs_->dispcnt & 1) || fmt == 0) continue;
+      texcache_.lookup(*vm_, fmt, (p.texparam & 0xFFFF) << 3, 8u << ((p.texparam >> 20) & 7), 8u << ((p.texparam >> 23) & 7),
+                       p.texpal, (p.texparam & (1 << 29)) ? 0 : 31);
+    }
+    if (texcache_.decodes_this_frame() == 0) { prof::add(prof::C_R3D_FRAMES_KEPT, 1); return; }
+  }
+  rendered_once_ = true;
   { DS_PROF(R3D_CLEAR); clear_border(); }
   u32 n = 0;
-  const Polygon* const* polys = gx.render_polygons();
   for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
     if (polys[i]->degenerate) continue;
     setup_polygon(edges_[n++], *polys[i]);

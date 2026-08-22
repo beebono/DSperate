@@ -111,6 +111,10 @@ public:
   const Vertex& vertex(u32 idx) const { return vram_[idx]; }
   const Polygon* const* render_polygons() const { return render_polys_.data(); }
   u32 render_polygon_count() const { return render_count_; }
+  // No SWAP_BUFFERS since the last render and the render registers are
+  // unchanged: the rasteriser may keep its previous output if the textures
+  // it used are unchanged too (it checks those itself).
+  bool render_identical() const { return render_identical_; }
 
 private:
   NDS& nds_;
@@ -189,6 +193,7 @@ private:
   u32 num_vertices_ = 0, num_polygons_ = 0;
   std::array<const Polygon*, PRAM_BANK> render_polys_{};
   u32 render_count_ = 0;
+  bool render_identical_ = false;
   u32 flush_request_ = 0, flush_attr_ = 0;
 
   Vertex* cur_vram() { return &vram_[bank_ * VRAM_BANK]; }

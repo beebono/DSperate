@@ -132,6 +132,7 @@ private:
   const RenderState* rs_ = nullptr;
   const VramMap* vm_ = nullptr;
   mutable TextureCache texcache_;
+  bool rendered_once_ = false;   // the colour buffer holds a rendered frame
   const VramView* texv_ = nullptr;
   const VramView* palv_ = nullptr;
 
