@@ -2,7 +2,8 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // ARM9 I/O block tests: hardware divider / square root, VRAMCNT register
-// layout, GXSTAT placeholder.
+// layout, GXSTAT placeholder, and the frontend input path (buttons, KEYCNT
+// interrupts, touchscreen samples over SPI).
 #include "core/nds.h"
 
 #include <cstdio>
@@ -96,11 +97,72 @@ static void test_gxstat_irq() {
   CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 21), 0u);
 }
 
+// Reads one 12-bit sample from the touchscreen controller the way a game
+// does: control byte with the channel, then two data bytes.
+static u16 tsc_read(NDS& nds, u32 channel) {
+  auto spi = [&](u8 v) {
+    nds.io.write(Cpu::ARM7, 0x040001C0, 16, 0x8000 | 0x0800 | 0x0200);   // enable, hold, device 2
+    nds.io.write(Cpu::ARM7, 0x040001C2, 8, v);
+    nds.sched.run_until(nds.sched.now() + 4000);                         // transfer latency
+    return static_cast<u8>(nds.io.read(Cpu::ARM7, 0x040001C2, 8));
+  };
+  spi(static_cast<u8>(0x80 | (channel << 4)));
+  const u8 hi = spi(0), lo = spi(0);
+  nds.io.write(Cpu::ARM7, 0x040001C0, 16, 0);                            // deselect
+  return static_cast<u16>((hi << 5) | (lo >> 3));
+}
+
+static void test_input() {
+  NDS nds;
+  using B = io::Io::Button;
+  CHECK_EQ(r16(nds, 0x04000130), 0x03FFu);                 // nothing held
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16), 0x007Fu);
+
+  nds.io.set_buttons((1u << B::BTN_A) | (1u << B::BTN_DOWN) | (1u << B::BTN_X));
+  CHECK_EQ(r16(nds, 0x04000130), 0x03FFu & ~((1u << 0) | (1u << 7)));
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16), 0x007Eu);   // X held, pen up
+  nds.io.set_buttons(0);
+  CHECK_EQ(r16(nds, 0x04000130), 0x03FFu);
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16), 0x007Fu);
+
+  // KEYCNT: IRQ when any selected key is held (bit 14 on, bit 15 off).
+  nds.cpu(Cpu::ARM9).hot.regs[15] = 0;
+  w16(nds, 0x04000132, 0x4000 | (1u << 1));                // B
+  nds.io.cpu_io[0].if_ = 0;
+  nds.io.set_buttons(1u << B::BTN_A);
+  CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 12), 0u);         // A is not selected
+  nds.io.set_buttons(1u << B::BTN_B);
+  CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 12), 1u << 12);
+  // AND condition: both selected keys must be held.
+  nds.io.cpu_io[0].if_ = 0;
+  w16(nds, 0x04000132, 0xC000 | (1u << 0) | (1u << 1));
+  nds.io.set_buttons(1u << B::BTN_A);
+  CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 12), 0u);
+  nds.io.set_buttons((1u << B::BTN_A) | (1u << B::BTN_B));
+  CHECK_EQ(nds.io.cpu_io[0].if_ & (1u << 12), 1u << 12);
+  w16(nds, 0x04000132, 0);
+  nds.io.set_buttons(0);
+
+  // Touchscreen: calibration is normalised at load, so ADC = pixel << 4.
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x40, 0x40u);   // pen up
+  nds.io.set_touch(100, 50, true);
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x40, 0u);      // pen down
+  CHECK_EQ(tsc_read(nds, 5), 100u << 4);                            // X
+  CHECK_EQ(tsc_read(nds, 1), 50u << 4);                             // Y
+  nds.io.set_touch(400, -8, true);                                  // clamped to the screen
+  CHECK_EQ(tsc_read(nds, 5), 255u << 4);
+  CHECK_EQ(tsc_read(nds, 1), 0u);
+  nds.io.set_touch(0, 0, false);
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x40, 0x40u);
+  CHECK_EQ(tsc_read(nds, 1), 0xFFFu);
+}
+
 int main() {
   test_div();
   test_sqrt();
   test_vramcnt_layout();
   test_gxstat_irq();
+  test_input();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("io: ok");
   return 0;

@@ -4,6 +4,8 @@
 #include "core/cpu/interp/interp.h"
 #include "core/cpu/cp15.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -54,12 +56,52 @@ void NDS::reset() {
   frame_ready = false;
 }
 
+// DS firmware CRC16 (GBATEK "Firmware Header"; the polynomial table and the
+// bit order follow melonDS's SPI.cpp).
+static u16 fw_crc16(const u8* data, u32 len, u16 start) {
+  static const u16 poly[8] = {0xC0C1, 0xC181, 0xC301, 0xC601, 0xCC01, 0xD801, 0xF001, 0xA001};
+  u32 crc = start;
+  for (u32 i = 0; i < len; ++i) {
+    crc ^= data[i];
+    for (int j = 0; j < 8; ++j) {
+      const bool carry = crc & 1;
+      crc >>= 1;
+      if (carry) crc ^= static_cast<u32>(poly[j]) << (7 - j);
+    }
+  }
+  return static_cast<u16>(crc);
+}
+
+// Normalise the touchscreen calibration in both user-settings blocks so that
+// an ADC reading is exactly the screen pixel << 4, and fix their checksums.
+// The frontend then reports plain pixel coordinates instead of inverting
+// whatever calibration the dumped firmware's owner happened to save; melonDS
+// does the same at reset, which keeps traces against it comparable.
+void NDS::normalise_touch_calibration() {
+  if (firmware.size() < 0x40000) return;
+  const u32 base = static_cast<u32>(firmware[0x20] | (firmware[0x21] << 8)) << 3;
+  for (u32 blk = 0; blk < 2; ++blk) {
+    const u32 off = base + blk * 0x100;
+    if (off + 0x74 > firmware.size()) continue;
+    u8* u = firmware.data() + off;
+    auto w16 = [](u8* p, u16 v) { p[0] = static_cast<u8>(v); p[1] = static_cast<u8>(v >> 8); };
+    w16(u + 0x58, 0);        // ADC x1
+    w16(u + 0x5A, 0);        // ADC y1
+    u[0x5C] = 0; u[0x5D] = 0;                    // pixel x1, y1
+    w16(u + 0x5E, 255 << 4); // ADC x2
+    w16(u + 0x60, 191 << 4); // ADC y2
+    u[0x62] = 255; u[0x63] = 191;                // pixel x2, y2
+    w16(u + 0x72, fw_crc16(u, 0x70, 0xFFFF));    // user settings CRC16
+  }
+}
+
 bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::string& pfw) {
   auto b9 = slurp(p9), b7 = slurp(p7), fw = slurp(pfw);
   if (b9.size() != mem::Bus::BIOS9_SIZE || b7.size() != mem::Bus::BIOS7_SIZE || fw.empty()) return false;
   std::memcpy(bus.bios9.get(), b9.data(), b9.size());
   std::memcpy(bus.bios7.get(), b7.data(), b7.size());
   firmware = std::move(fw);
+  normalise_touch_calibration();
   return true;
 }
 

@@ -57,7 +57,10 @@ struct CpuIo {
 struct SpiFirmware {
   bool hold = false; u8 cmd = 0; u32 pos = 0; u32 addr = 0; u8 status = 0; u8 data = 0;
 };
-struct SpiTouch { bool hold = false; u32 pos = 0; u8 cmd = 0; u16 sample = 0; u8 data = 0; };
+struct SpiTouch { bool hold = false; u32 pos = 0; u8 cmd = 0; u16 sample = 0; u8 data = 0;
+  // Last position from the frontend in the TSC's 12-bit ADC units; the
+  // firmware's calibration is normalised at load so ADC = pixel << 4 (nds.cpp).
+  u16 x = 0, y = 0xFFF; };
 struct SpiPower { bool hold = false; u32 pos = 0; u8 cmd = 0; std::array<u8, 8> regs{}; u8 data = 0; };
 
 struct Rtc {
@@ -116,7 +119,18 @@ public:
   u8  vramcnt[9] = {};     // 0x04000240-0x04000249 (skipping 0x247)
   u16 powcnt1 = 0;         // 0x04000304 (ARM9)
   u16 powcnt2 = 0;         // 0x04000304 (ARM7)
-  u16 keyinput = 0x03FF, extkeyin = 0x007F;
+  u16 keyinput = 0x03FF, extkeyin = 0x007F;   // 0 = held
+  u16 keycnt[2] = {0, 0};                     // 0x04000132, one per CPU
+
+  // Frontend input. `pressed` is a mask of Button bits; the touch position is
+  // in screen pixels (0-255, 0-191), and `down` false lifts the pen.
+  enum Button : u32 {
+    BTN_A = 0, BTN_B, BTN_SELECT, BTN_START, BTN_RIGHT, BTN_LEFT, BTN_UP, BTN_DOWN,
+    BTN_R, BTN_L, BTN_X, BTN_Y, BTN_COUNT
+  };
+  void set_buttons(u32 pressed);
+  void set_touch(int x, int y, bool down);
+  void update_key_irq();
   u16 exmemcnt = 0;
   u16 spicnt = 0; u8 spidata = 0;
   SpiFirmware spi_fw; SpiTouch spi_tsc; SpiPower spi_pm;

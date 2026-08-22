@@ -51,4 +51,23 @@ verified against the interpreter instruction by instruction
 (`tests/jit_test.cpp`) and slice by slice on whole games (docs/TRACING.md).
 
 Sound is mixed by the core at 32768 Hz (`src/core/spu/`); the CLI has no audio
-output yet but `--dump-audio file` writes the raw s16 stereo stream.
+output but `--dump-audio file` writes the raw s16 stereo stream.
+
+## Playing
+
+`dsperate-sdl` is the SDL2 frontend: direct boot, both screens stacked, sound
+and input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
+
+    dsperate-sdl game.nds --bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin \
+                 [--scale N] [--fullscreen] [--linear] [--no-vsync] [--no-audio] [--interp]
+
+Keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R, Enter = Start,
+Right Shift = Select, `F` toggles fullscreen, Escape quits. A game controller
+is picked up automatically (Select+Start quits, for handhelds without a
+keyboard), and the touchscreen is driven by a finger or the mouse on the
+bottom screen. Battery saves live next to the ROM as `<rom>.sav`; there are no
+savestates. `DS_FPS=1` prints speed, per-stage times and audio buffer depth.
+
+On a handheld with no desktop session, SDL uses its KMSDRM backend directly;
+point `XDG_RUNTIME_DIR` at the PipeWire runtime directory or SDL's PulseAudio
+backend spends about twenty seconds failing to connect before sound starts.

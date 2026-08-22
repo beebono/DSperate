@@ -28,8 +28,9 @@ src/core/          emulator core, no I/O dependencies, builds everywhere
   cpu/jit/         ARM -> AArch64 recompiler (AArch64 hosts only)
   sched/           event scheduler and the CPU interleave (§4)
   gpu/             2D engines + 3D geometry/rasteriser (§5)
-  spu/, io/        sound; IRQ/timers/DMA/IPC/SPI/cart
-src/frontend/cli/  headless runner (SDL frontend later)
+  spu/, io/        sound (§6); IRQ/timers/DMA/IPC/SPI/cart
+src/frontend/cli/  headless runner: traces, frame and audio dumps (§7)
+src/frontend/sdl/  the playable frontend: screens, sound, input (§8)
 tests/             ctest unit tests; differential harness later
 cmake/             AArch64 cross toolchain
 ```
@@ -481,7 +482,55 @@ Cost: sixteen channels × 32768 samples/s of integer work; measured under
 4. Performance against the measured baseline: DraStic holds SM64DS at 100% on
    **37.2% of one Cortex-A55 @ ~1.58 GHz** (RK3566). That is the number.
 
-## 8. Targets
+## 8. Frontends (`src/frontend/`)
+
+`cli/` is the headless harness the verification chain runs on (traces, frame
+and audio dumps); it has no windowing dependency and never gains one.
+
+`sdl/` is the playable one: direct boot, both screens, sound, input, battery
+saves, and nothing else — no savestates, no configuration, no menus.
+
+* **Presentation** (`display.*`). One window holds a list of *views*
+  (`{screen, rect}`), so the eventual per-screen-window mode is a second
+  `Display` rather than a rewrite — textures belong to a renderer and cannot
+  be shared between windows, which is what forces that shape. The handhelds
+  run SDL's KMSDRM backend, where only one window can exist, so the stacked
+  layout is the only one built. Scaling preserves aspect and is not forced to
+  integers: a 1280x720 panel fits the 256x384 stack 1.875 times and rounding
+  down to 1 would waste the screen. The core's framebuffers are ARGB8888
+  already, so a frame is two `SDL_UpdateTexture` calls.
+* **Sound and pacing** (`audio.*`). The device is opened at the SPU's own
+  32768 Hz and SDL converts for the hardware; samples are queued rather than
+  pulled from a callback, which keeps the frontend single-threaded (the SPU
+  ring is the buffer). The queue depth is also the clock: a frame is a fixed
+  number of samples, so holding the queue near three frames paces the
+  emulator at the DS's exact rate with no timer. The wait is bounded so a
+  device that stops consuming slows the emulator instead of hanging it;
+  without audio, a wall-clock pacer runs at 59.8261 Hz.
+* **Input** (`input.*`). Keyboard, `SDL_GameController` and touch (a real
+  finger on the handhelds, the mouse elsewhere) fold into one button mask and
+  pen position, applied to the core once per frame through `Io::set_buttons`
+  and `Io::set_touch`. Touch maps through the bottom screen's view rect.
+  KEYCNT interrupts are implemented because games wake from `halt` on them.
+* **Touchscreen calibration.** Direct boot copies the firmware's user
+  settings verbatim, calibration included, and a real dump carries whatever
+  that console's owner calibrated (ours: ADC 632-3408 across pixels 32-224).
+  `NDS::normalise_touch_calibration` rewrites both user-settings blocks to
+  the identity (ADC = pixel << 4) and fixes their CRC16s, so the frontend
+  reports plain pixel coordinates; melonDS does the same at reset, which
+  keeps traces against it comparable.
+* **Battery saves.** The core emulates the save chip but never touched a
+  file; the frontend loads `<rom>.sav` at start and writes it back when the
+  chip is dirty. Savestates are deliberately absent, battery saves are not
+  optional.
+
+Measured on the RK3566 (KMSDRM, OpenGL renderer, PipeWire): presentation
+costs 1-2 ms per frame plus the vsync wait, and audio pacing holds the queue
+at 2-3 frames. Games inside the frame budget run at a steady 100 %; the
+heavier ones (Meteos's late attract demo at 20 ms/frame, SM64DS's 3D scenes)
+drop to 75-90 %, which is the emulation-speed gap §7 measures, not frontend cost.
+
+## 9. Targets
 
 | tier | device | role |
 |---|---|---|

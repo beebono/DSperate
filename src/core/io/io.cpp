@@ -25,7 +25,7 @@ void Io::reset() {
   dispstat[0] = dispstat[1] = 0; vcount = 0;
   wramcnt = 0; std::memset(vramcnt, 0, sizeof vramcnt);
   powcnt1 = 0; powcnt2 = 0; math = MathUnit{};
-  keyinput = 0x03FF; extkeyin = 0x007F;
+  keyinput = 0x03FF; extkeyin = 0x007F; keycnt[0] = keycnt[1] = 0;
   exmemcnt = 0;
   spicnt = 0; spidata = 0;
   spi_fw = SpiFirmware{}; spi_tsc = SpiTouch{}; spi_pm = SpiPower{};
@@ -238,8 +238,8 @@ u8 Io::spi_transfer(u8 value) {
       const u32 channel = (value >> 4) & 7;
       u16 sample = 0;
       switch (channel) {
-      case 1: sample = 0; break;          // Y (pen up -> 0)
-      case 5: sample = 0; break;          // X
+      case 1: sample = t.y; break;        // Y
+      case 5: sample = t.x; break;        // X
       case 6: sample = 0x800; break;      // AUX / mic: mid
       default: sample = 0; break;
       }
@@ -254,6 +254,41 @@ u8 Io::spi_transfer(u8 value) {
   }
   default:
     return 0;
+  }
+}
+
+// ---- frontend input ---------------------------------------------------------
+
+void Io::set_buttons(u32 pressed) {
+  keyinput = static_cast<u16>(0x03FF & ~(pressed & 0x03FF));
+  const u16 xy = static_cast<u16>(((pressed >> BTN_X) & 1) | (((pressed >> BTN_Y) & 1) << 1));
+  extkeyin = static_cast<u16>((extkeyin & ~0x0003u) | (~xy & 0x0003u));
+  update_key_irq();
+}
+
+void Io::set_touch(int x, int y, bool down) {
+  if (!down) {                       // melonDS's release values; games test bit 6
+    spi_tsc.x = 0; spi_tsc.y = 0xFFF;
+    extkeyin |= 1u << 6;
+    return;
+  }
+  x = x < 0 ? 0 : (x > 255 ? 255 : x);
+  y = y < 0 ? 0 : (y > 191 ? 191 : y);
+  spi_tsc.x = static_cast<u16>(x << 4);
+  spi_tsc.y = static_cast<u16>(y << 4);
+  extkeyin &= ~(1u << 6);
+}
+
+// KEYCNT: bits 0-9 select keys, bit 14 enables the IRQ, bit 15 picks the
+// condition (0 = any selected key held, 1 = all of them).
+void Io::update_key_irq() {
+  const u16 held = static_cast<u16>(~keyinput & 0x03FF);
+  for (int c = 0; c < 2; ++c) {
+    const u16 cnt = keycnt[c];
+    if (!(cnt & 0x4000)) continue;
+    const u16 sel = cnt & 0x03FF;
+    const bool fire = (cnt & 0x8000) ? (sel != 0 && (held & sel) == sel) : ((held & sel) != 0);
+    if (fire) request_irq(static_cast<Cpu>(c), IRQ_KEYPAD);
   }
 }
 
@@ -666,6 +701,7 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0x04000100: case 0x04000104: case 0x04000108: case 0x0400010C: return timer_value(cpu, (addr - 0x04000100) / 4);
   case 0x04000102: case 0x04000106: case 0x0400010A: case 0x0400010E: return c.timers[(addr - 0x04000102) / 4].control;
   case 0x04000130: return keyinput;
+  case 0x04000132: return keycnt[ci(cpu)];
   case 0x04000136: return a9 ? 0 : extkeyin;
   case 0x04000138: return a9 ? 0 : rtc_read();
   case 0x04000180: return c.ipc_sync;
@@ -710,7 +746,7 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   case 0x04000004: dispstat[ci(cpu)] = (dispstat[ci(cpu)] & 0x0007) | (value & 0xFFB8); return;
   case 0x04000100: case 0x04000104: case 0x04000108: case 0x0400010C: c.timers[(addr - 0x04000100) / 4].reload = value; return;
   case 0x04000102: case 0x04000106: case 0x0400010A: case 0x0400010E: timer_write_control(cpu, (addr - 0x04000102) / 4, value); return;
-  case 0x04000132: return;                                   // KEYCNT
+  case 0x04000132: keycnt[ci(cpu)] = value; update_key_irq(); return;
   case 0x04000134: return;                                   // RCNT
   case 0x04000138: if (!a9) rtc_write(value, false); return;
   case 0x04000180: ipc_sync_write(cpu, value); return;
