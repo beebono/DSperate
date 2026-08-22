@@ -42,21 +42,98 @@ namespace N = kern::neon;
 namespace N = kern::ref;
 #endif
 
-static void test_select() {
+
+static void test_select16() {
+  alignas(16) u16 v[256], ov[256], ta[256], tb[256], sa[256], sb[256];
+  alignas(16) u8 win[256], attr[256], tta[256], ttb[256], sta[256], stb[256];
+  for (u32 it = 0; it < 300; ++it) {
+    for (u32 i = 0; i < 256; ++i) {
+      v[i] = static_cast<u16>(rng()); ov[i] = static_cast<u16>(rng()); win[i] = static_cast<u8>(rng());
+      attr[i] = static_cast<u8>(rng()); ta[i] = tb[i] = static_cast<u16>(rng()); sa[i] = sb[i] = static_cast<u16>(rng());
+      tta[i] = ttb[i] = rng() & 7; sta[i] = stb[i] = rng() & 7;
+    }
+    const u8 wbit = 1 << (rng() % 5), tid = rng() & 3; const u32 prio = rng() & 3;
+    kern::ref::select16(v, win, wbit, tid, ta, tta, sa, sta); N::select16(v, win, wbit, tid, tb, ttb, sb, stb);
+    CHECK_SAME("s16 top", ta, tb, sizeof ta); CHECK_SAME("s16 tid", tta, ttb, 256); CHECK_SAME("s16 second", sa, sb, sizeof sa); CHECK_SAME("s16 stid", sta, stb, 256);
+    kern::ref::select16_obj(ov, attr, win, prio, ta, tta, sa, sta); N::select16_obj(ov, attr, win, prio, tb, ttb, sb, stb);
+    CHECK_SAME("o16 top", ta, tb, sizeof ta); CHECK_SAME("o16 tid", tta, ttb, 256); CHECK_SAME("o16 second", sa, sb, sizeof sa); CHECK_SAME("o16 stid", sta, stb, 256);
+    kern::ref::select16_flat(v, win, wbit, tid, ta, tta); N::select16_flat(v, win, wbit, tid, tb, ttb);
+    CHECK_SAME("f16 top", ta, tb, sizeof ta); CHECK_SAME("f16 tid", tta, ttb, 256);
+    kern::ref::select16_obj_flat(ov, attr, win, prio, ta, tta); N::select16_obj_flat(ov, attr, win, prio, tb, ttb);
+    CHECK_SAME("of16 top", ta, tb, sizeof ta); CHECK_SAME("of16 tid", tta, ttb, 256);
+  }
+}
+
+static void test_resolve16() {
+  static Pixel tabs[8][32768];
+  const Pixel* tables[8];
+  for (u32 t = 0; t < 8; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = tabs[t]; }
+  alignas(16) u16 top[256]; alignas(16) u8 tid[256]; alignas(16) Pixel oa[256], ob[256];
   for (u32 it = 0; it < 200; ++it) {
-    Planes a; a.randomise(); Planes b = a;
-    const u8 wbit = 1 << (rng() % 5), id = 1 << (rng() % 5); const bool is3d = rng() & 1;
-    kern::ref::select_plane(a.px, a.op, a.win, wbit, id, is3d, a.top, a.second, a.top_id, a.top_kind, a.top_alpha, a.second_id);
-    N::select_plane(b.px, b.op, b.win, wbit, id, is3d, b.top, b.second, b.top_id, b.top_kind, b.top_alpha, b.second_id);
-    CHECK_SAME("top", a.top, b.top, sizeof a.top); CHECK_SAME("second", a.second, b.second, sizeof a.second);
-    CHECK_SAME("top_id", a.top_id, b.top_id, 256); CHECK_SAME("top_kind", a.top_kind, b.top_kind, 256);
-    CHECK_SAME("top_alpha", a.top_alpha, b.top_alpha, 256); CHECK_SAME("second_id", a.second_id, b.second_id, 256);
-    const u32 prio = rng() & 3;
-    kern::ref::select_obj(a.col, a.attr, a.alpha, a.win, prio, a.top, a.second, a.top_id, a.top_kind, a.top_alpha, a.second_id);
-    N::select_obj(b.col, b.attr, b.alpha, b.win, prio, b.top, b.second, b.top_id, b.top_kind, b.top_alpha, b.second_id);
-    CHECK_SAME("obj top", a.top, b.top, sizeof a.top); CHECK_SAME("obj second", a.second, b.second, sizeof a.second);
-    CHECK_SAME("obj top_id", a.top_id, b.top_id, 256); CHECK_SAME("obj top_kind", a.top_kind, b.top_kind, 256);
-    CHECK_SAME("obj top_alpha", a.top_alpha, b.top_alpha, 256); CHECK_SAME("obj second_id", a.second_id, b.second_id, 256);
+    const bool uniform = it & 1;
+    for (u32 i = 0; i < 256; ++i) { top[i] = static_cast<u16>(rng()); tid[i] = uniform ? (it >> 1) & 7 : rng() & 7; }
+    kern::ref::resolve16(top, tid, tables, oa); N::resolve16(top, tid, tables, ob);
+    CHECK_SAME("resolve16", oa, ob, sizeof oa);
+  }
+}
+
+static void test_resolve16_full() {
+  static Pixel tabs[9][32768];
+  const Pixel* tables[9];
+  for (u32 t = 0; t < 9; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = tabs[t]; }
+  alignas(16) u16 top[256], second[256]; alignas(16) u8 tt[256], st[256], attr[256], alpha[256]; alignas(16) Pixel line3d[256];
+  alignas(16) Pixel tpa[256], tpb[256], spa[256], spb[256]; alignas(16) u8 ia[256], ib[256], ka[256], kb[256], aa[256], ab[256], sa[256], sb[256];
+  for (u32 it = 0; it < 200; ++it) {
+    for (u32 i = 0; i < 256; ++i) { top[i] = static_cast<u16>(rng()); second[i] = static_cast<u16>(rng()); tt[i] = rng() % 9; st[i] = rng() % 9; attr[i] = static_cast<u8>(rng()); alpha[i] = rng() % 17; line3d[i] = rng() & 0x1FFFFFFF; }
+    const Pixel* l3 = (it & 1) ? line3d : nullptr;
+    kern::ref::resolve16_full(top, tt, second, st, tables, attr, alpha, l3, tpa, spa, ia, ka, aa, sa);
+    N::resolve16_full(top, tt, second, st, tables, attr, alpha, l3, tpb, spb, ib, kb, ab, sb);
+    CHECK_SAME("rf top", tpa, tpb, sizeof tpa); CHECK_SAME("rf second", spa, spb, sizeof spa); CHECK_SAME("rf id", ia, ib, 256);
+    CHECK_SAME("rf kind", ka, kb, 256); CHECK_SAME("rf alpha", aa, ab, 256); CHECK_SAME("rf sid", sa, sb, 256);
+  }
+}
+
+static void test_rows16() {
+  alignas(16) u8 packed[33 * 4], rows[33 * 8], ctl[33]; alignas(16) u16 va[33 * 8], vb[33 * 8];
+  for (u32 it = 0; it < 200; ++it) {
+    fill(packed, sizeof packed, 0xFF); fill(rows, sizeof rows, 0xFF); fill(ctl, 33, 0x1F);
+    if (it % 5 == 0) { std::memset(packed, 0, sizeof packed); std::memset(rows, 0, sizeof rows); }
+    const u32 n = 1 + rng() % 33;
+    const bool ra = kern::ref::text_row_16(packed, ctl, n, va), rb = N::text_row_16(packed, ctl, n, vb);
+    if (ra != rb) { std::fprintf(stderr, "FAIL text_row_16 any %d vs %d\n", ra, rb); ++failures; }
+    CHECK_SAME("text_row_16", va, vb, n * 16);
+    const bool ext = rng() & 1;
+    const bool ra2 = kern::ref::text_row_256(rows, ctl, n, ext, va), rb2 = N::text_row_256(rows, ctl, n, ext, vb);
+    if (ra2 != rb2) { std::fprintf(stderr, "FAIL text_row_256 any %d vs %d\n", ra2, rb2); ++failures; }
+    CHECK_SAME("text_row_256", va, vb, n * 16);
+  }
+  alignas(16) u32 line[256]; alignas(16) u16 la[256], lb[256];
+  for (u32 it = 0; it < 100; ++it) {
+    for (auto& x : line) x = rng() & (rng() & 1 ? 0x1FFFFFFF : 0x00FFFFFF);
+    kern::ref::layer16_3d(line, la); N::layer16_3d(line, lb);
+    CHECK_SAME("layer16_3d", la, lb, sizeof la);
+  }
+}
+
+static void test_obj_row16() {
+  alignas(16) u8 idx[80]; alignas(16) u16 col[80];
+  alignas(16) u16 pa[80], pb[80]; alignas(16) u8 aa[80], ab[80], la[80], lb[80];
+  for (u32 it = 0; it < 300; ++it) {
+    fill(idx, 80, 0xFF); for (auto& c : col) c = static_cast<u16>(rng());
+    for (u32 i = 0; i < 80; ++i) { pa[i] = pb[i] = static_cast<u16>(rng()); aa[i] = ab[i] = static_cast<u8>(rng()); la[i] = lb[i] = static_cast<u8>(rng()); }
+    const u32 n = 1 + rng() % 64; const u8 attr = static_cast<u8>(rng() & 0x7F), alpha = rng() % 17; const u16 pal_base = static_cast<u16>((rng() & 0xF) << (rng() & 1 ? 4 : 8));
+    if (rng() & 1) { kern::ref::obj_row_idx16(idx, n, pal_base, attr, pa, aa, la); N::obj_row_idx16(idx, n, pal_base, attr, pb, ab, lb); }
+    else { kern::ref::obj_row_bmp16(col, n, attr, alpha, pa, aa, la); N::obj_row_bmp16(col, n, attr, alpha, pb, ab, lb); }
+    CHECK_SAME("obj16 v", pa, pb, sizeof pa); CHECK_SAME("obj16 attr", aa, ab, 80); CHECK_SAME("obj16 alpha", la, lb, 80);
+  }
+}
+
+static void test_palette() {
+  alignas(16) u16 pal[512]; alignas(16) Pixel p18a[512], p18b[512];
+  for (u32 it = 0; it < 100; ++it) {
+    fill(pal, 512, 0xFFFF);
+    kern::ref::palette_to_18(pal, p18a, 512); N::palette_to_18(pal, p18b, 512);
+    CHECK_SAME("pal18", p18a, p18b, sizeof p18a);
   }
 }
 
@@ -69,19 +146,6 @@ static void test_translucent_3d() {
   }
 }
 
-static void test_select_flat() {
-  for (u32 it = 0; it < 200; ++it) {
-    Planes a; a.randomise(); Planes b = a;
-    const u8 wbit = 1 << (rng() % 5);
-    kern::ref::select_plane_flat(a.px, a.op, a.win, wbit, a.out);
-    N::select_plane_flat(b.px, b.op, b.win, wbit, b.out);
-    CHECK_SAME("flat out", a.out, b.out, sizeof a.out);
-    const u32 prio = rng() & 3;
-    kern::ref::select_obj_flat(a.col, a.attr, a.win, prio, a.out);
-    N::select_obj_flat(b.col, b.attr, b.win, prio, b.out);
-    CHECK_SAME("flat obj out", a.out, b.out, sizeof a.out);
-  }
-}
 
 static void test_composite() {
   for (u32 it = 0; it < 400; ++it) {
@@ -93,47 +157,10 @@ static void test_composite() {
   }
 }
 
-static void test_palette_and_tiles() {
-  alignas(16) u16 pal[512]; alignas(16) Pixel p18a[512], p18b[512];
-  alignas(16) u8 idx[8]; alignas(16) Pixel pxa[8], pxb[8]; alignas(16) u8 opa[8], opb[8];
-  for (u32 it = 0; it < 100; ++it) {
-    fill(pal, 512, 0xFFFF);
-    kern::ref::palette_to_18(pal, p18a, 512); N::palette_to_18(pal, p18b, 512);
-    CHECK_SAME("pal18", p18a, p18b, sizeof p18a);
-    fill(idx, 8, 0xF);
-    kern::ref::tile_row_pal16(idx, p18a + (it & 15) * 16, pxa, opa); N::tile_row_pal16(idx, p18a + (it & 15) * 16, pxb, opb);
-    CHECK_SAME("tile px", pxa, pxb, sizeof pxa); CHECK_SAME("tile op", opa, opb, sizeof opa);
-  }
-}
-
-// Whole-row text kernels: random packed/8-bit tile rows, palette numbers and
-// flips, including rows that are entirely transparent (the `any` result).
-static void test_text_tiles() {
-  alignas(16) u16 pal[4096]; alignas(16) Pixel p18[4096];
-  alignas(16) u8 packed[33 * 4], rows[33 * 8], ctl[33];
-  alignas(16) Pixel pxa[33 * 8 + 8], pxb[33 * 8 + 8]; alignas(16) u8 opa[33 * 8 + 16], opb[33 * 8 + 16];
-  fill(pal, 4096, 0xFFFF); kern::ref::palette_to_18(pal, p18, 4096);
-  const Pixel* pals[16]; for (u32 i = 0; i < 16; ++i) pals[i] = p18 + i * 256;
-  for (u32 it = 0; it < 300; ++it) {
-    const u32 n = 1 + rng() % 33, mask = (it & 7) == 0 ? 0 : 0xFF;
-    fill(packed, 33 * 4, mask); fill(rows, 33 * 8, mask); fill(ctl, 33, 0x1F);
-    const u32 shift = rng() & 7;   // unaligned destination, as the engine uses it
-    const bool a16 = kern::ref::text_tiles_16(packed, ctl, p18, n, pxa + shift, opa + shift);
-    const bool b16 = N::text_tiles_16(packed, ctl, p18, n, pxb + shift, opb + shift);
-    if (a16 != b16) { std::fprintf(stderr, "FAIL text_tiles_16 any (iteration %u)\n", it); ++failures; }
-    CHECK_SAME("text16 px", pxa + shift, pxb + shift, n * 32); CHECK_SAME("text16 op", opa + shift, opb + shift, n * 8);
-    const bool a256 = kern::ref::text_tiles_256(rows, ctl, pals, n, pxa + shift, opa + shift);
-    const bool b256 = N::text_tiles_256(rows, ctl, pals, n, pxb + shift, opb + shift);
-    if (a256 != b256) { std::fprintf(stderr, "FAIL text_tiles_256 any (iteration %u)\n", it); ++failures; }
-    CHECK_SAME("text256 px", pxa + shift, pxb + shift, n * 32); CHECK_SAME("text256 op", opa + shift, opb + shift, n * 8);
-  }
-}
 
 static void test_output() {
   for (u32 it = 0; it < 200; ++it) {
     Planes a; a.randomise(); Planes b = a;
-    kern::ref::layer_3d(a.line3d, a.px, a.op); N::layer_3d(b.line3d, b.px, b.op);
-    CHECK_SAME("3d px", a.px, b.px, sizeof a.px); CHECK_SAME("3d op", a.op, b.op, 256);
     const u16 reg = static_cast<u16>(((rng() % 3) << 14) | (rng() & 0x1F));
     kern::ref::master_brightness(reg, a.dst); N::master_brightness(reg, b.dst);
     CHECK_SAME("brightness", a.dst, b.dst, sizeof a.dst);
@@ -178,22 +205,6 @@ static void test_span() {
 }
 
 // Sprite row plot: random plane state and rows, every priority pairing, odd lengths.
-static void test_obj_row() {
-  alignas(16) u8 idx[80]; alignas(16) u16 col[80];
-  alignas(16) u32 pxa[80], pxb[80]; alignas(16) u8 aa[80], ab[80], ala[80], alb[80];
-  for (u32 it = 0; it < 500; ++it) {
-    fill(idx, 80, (it & 3) == 0 ? 0x1 : 0xFF); fill(col, 80, 0xFFFF);
-    fill(pxa, 80, 0xFFFF); fill(aa, 80, 0xBF); fill(ala, 80, 0x1F);
-    for (u32 i = 0; i < 80; ++i) if (rng() & 1) aa[i] &= ~OA_OPAQUE;
-    std::memcpy(pxb, pxa, sizeof pxa); std::memcpy(ab, aa, 80); std::memcpy(alb, ala, 80);
-    const u32 n = 1 + rng() % 64, off = rng() % 16;
-    const u8 attr = static_cast<u8>(rng() & 0x3F), alpha = static_cast<u8>(1 + rng() % 16);
-    const u32 pal_base = (rng() & 1) ? (OP_STDPAL | ((rng() & 0xF) << 4)) : ((rng() & 0xF) << 8);
-    if (rng() & 1) { kern::ref::obj_row_idx(idx, n, pal_base, attr, pxa + off, aa + off, ala + off); N::obj_row_idx(idx, n, pal_base, attr, pxb + off, ab + off, alb + off); }
-    else { kern::ref::obj_row_bmp(col, n, attr, alpha, pxa + off, aa + off, ala + off); N::obj_row_bmp(col, n, attr, alpha, pxb + off, ab + off, alb + off); }
-    CHECK_SAME("obj px", pxa, pxb, sizeof pxa); CHECK_SAME("obj attr", aa, ab, 80); CHECK_SAME("obj alpha", ala, alb, 80);
-  }
-}
 
 // Depth pre-pass: every mode, z values around the destination, edge flags.
 static void test_depth_candidates() {
@@ -215,13 +226,14 @@ static void test_depth_candidates() {
 
 int main() {
   test_depth_candidates();
-  test_obj_row();
-  test_select();
+  test_select16();
+  test_resolve16();
+  test_resolve16_full();
+  test_rows16();
+  test_obj_row16();
+  test_palette();
   test_translucent_3d();
-  test_select_flat();
   test_composite();
-  test_palette_and_tiles();
-  test_text_tiles();
   test_output();
   test_span();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }

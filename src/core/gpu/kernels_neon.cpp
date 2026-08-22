@@ -70,27 +70,6 @@ inline uint32x4_t darken4(uint32x4_t v, u32 factor, u32 bias) {
 
 } // namespace
 
-void select_plane(const Pixel* px, const u8* op, const u8* win, u8 wbit, u8 id, bool is3d,
-                  Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {
-  const uint8x16_t vwbit = vdupq_n_u8(wbit), vid = vdupq_n_u8(id), vkind = vdupq_n_u8(is3d ? K_3D : K_NORMAL), zero = vdupq_n_u8(0);
-  for (u32 i = 0; i < 256; i += 16) {
-    const uint8x16_t m8 = vandq_u8(vmvnq_u8(vceqq_u8(vld1q_u8(op + i), zero)), vtstq_u8(vld1q_u8(win + i), vwbit));
-    if (vmaxvq_u8(m8) == 0) continue;
-    const Mask4 m = widen(m8);
-    uint32x4_t a24[4];
-    for (u32 k = 0; k < 4; ++k) {
-      const uint32x4_t t = vld1q_u32(top + i + k * 4), p = vld1q_u32(px + i + k * 4), s = vld1q_u32(second + i + k * 4);
-      vst1q_u32(second + i + k * 4, vbslq_u32(m.m[k], t, s));
-      vst1q_u32(top + i + k * 4, vbslq_u32(m.m[k], p, t));
-      a24[k] = vandq_u32(vshrq_n_u32(p, 24), vdupq_n_u32(0x1F));
-    }
-    const uint8x16_t tid = vld1q_u8(top_id + i);
-    vst1q_u8(second_id + i, vbslq_u8(m8, tid, vld1q_u8(second_id + i)));
-    vst1q_u8(top_id + i, vbslq_u8(m8, vid, tid));
-    vst1q_u8(top_kind + i, vbslq_u8(m8, vkind, vld1q_u8(top_kind + i)));
-    if (is3d) vst1q_u8(top_alpha + i, vbslq_u8(m8, narrow(a24[0], a24[1], a24[2], a24[3]), vld1q_u8(top_alpha + i)));
-  }
-}
 
 bool line_has_translucent_3d(const Pixel* line3d) {
   const uint32x4_t m = vdupq_n_u32(0x1F), v31 = vdupq_n_u32(31), zero = vdupq_n_u32(0);
@@ -102,62 +81,8 @@ bool line_has_translucent_3d(const Pixel* line3d) {
   return vmaxvq_u32(acc) != 0;
 }
 
-void select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out) {
-  const uint8x16_t vwbit = vdupq_n_u8(wbit), zero = vdupq_n_u8(0);
-  const uint32x4_t keep = vdupq_n_u32(0x00FFFFFF), opaque = vdupq_n_u32(0xFF000000);
-  for (u32 i = 0; i < 256; i += 16) {
-    const uint8x16_t m8 = vandq_u8(vmvnq_u8(vceqq_u8(vld1q_u8(op + i), zero)), vtstq_u8(vld1q_u8(win + i), vwbit));
-    if (vmaxvq_u8(m8) == 0) continue;
-    const Mask4 m = widen(m8);
-    for (u32 k = 0; k < 4; ++k) {
-      const uint32x4_t p = vorrq_u32(vandq_u32(vld1q_u32(px + i + k * 4), keep), opaque);
-      vst1q_u32(out + i + k * 4, vbslq_u32(m.m[k], p, vld1q_u32(out + i + k * 4)));
-    }
-  }
-}
 
-void select_obj_flat(const Pixel* col, const u8* attr, const u8* win, u32 prio, Pixel* out) {
-  const uint8x16_t vprio = vdupq_n_u8(static_cast<u8>(prio));
-  const uint32x4_t keep = vdupq_n_u32(0x00FFFFFF), opaque = vdupq_n_u32(0xFF000000);
-  for (u32 i = 0; i < 256; i += 16) {
-    const uint8x16_t a = vld1q_u8(attr + i);
-    uint8x16_t m8 = vtstq_u8(a, vdupq_n_u8(OA_OPAQUE));
-    m8 = vandq_u8(m8, vceqq_u8(vandq_u8(a, vdupq_n_u8(OA_PRIO)), vprio));
-    m8 = vandq_u8(m8, vtstq_u8(vld1q_u8(win + i), vdupq_n_u8(0x10)));
-    if (vmaxvq_u8(m8) == 0) continue;
-    const Mask4 m = widen(m8);
-    for (u32 k = 0; k < 4; ++k) {
-      const uint32x4_t c = vorrq_u32(vandq_u32(vld1q_u32(col + i + k * 4), keep), opaque);
-      vst1q_u32(out + i + k * 4, vbslq_u32(m.m[k], c, vld1q_u32(out + i + k * 4)));
-    }
-  }
-}
 
-void select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win, u32 prio,
-                Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {
-  const uint8x16_t vprio = vdupq_n_u8(static_cast<u8>(prio)), vid = vdupq_n_u8(L_OBJ);
-  for (u32 i = 0; i < 256; i += 16) {
-    const uint8x16_t a = vld1q_u8(attr + i);
-    uint8x16_t m8 = vtstq_u8(a, vdupq_n_u8(OA_OPAQUE));
-    m8 = vandq_u8(m8, vceqq_u8(vandq_u8(a, vdupq_n_u8(OA_PRIO)), vprio));
-    m8 = vandq_u8(m8, vtstq_u8(vld1q_u8(win + i), vdupq_n_u8(0x10)));
-    if (vmaxvq_u8(m8) == 0) continue;
-    const Mask4 m = widen(m8);
-    for (u32 k = 0; k < 4; ++k) {
-      const uint32x4_t t = vld1q_u32(top + i + k * 4), c = vld1q_u32(col + i + k * 4), s = vld1q_u32(second + i + k * 4);
-      vst1q_u32(second + i + k * 4, vbslq_u32(m.m[k], t, s));
-      vst1q_u32(top + i + k * 4, vbslq_u32(m.m[k], c, t));
-    }
-    const uint8x16_t tid = vld1q_u8(top_id + i);
-    vst1q_u8(second_id + i, vbslq_u8(m8, tid, vld1q_u8(second_id + i)));
-    vst1q_u8(top_id + i, vbslq_u8(m8, vid, tid));
-    // kind: bitmap -> 2, else semi -> 1, else 0.
-    uint8x16_t kind = vandq_u8(vtstq_u8(a, vdupq_n_u8(OA_SEMI)), vdupq_n_u8(K_OBJ_SEMI));
-    kind = vbslq_u8(vtstq_u8(a, vdupq_n_u8(OA_BITMAP)), vdupq_n_u8(K_OBJ_BITMAP), kind);
-    vst1q_u8(top_kind + i, vbslq_u8(m8, kind, vld1q_u8(top_kind + i)));
-    vst1q_u8(top_alpha + i, vbslq_u8(m8, vld1q_u8(alpha + i), vld1q_u8(top_alpha + i)));
-  }
-}
 
 void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, const Pixel* second,
                     const u8* top_id, const u8* top_kind, const u8* top_alpha, const u8* second_id,
@@ -226,19 +151,6 @@ void palette_to_18(const u16* pal, Pixel* out, u32 n) {
 
 // 16-entry palette lookup as a 64-byte table lookup: each index is expanded
 // to the four byte offsets of its 32-bit record.
-void tile_row_pal16(const u8* idx, const Pixel* pal18, Pixel* px, u8* op) {
-  const uint8x8_t raw = vld1_u8(idx);
-  const uint8x8_t i4 = vshl_n_u8(vand_u8(raw, vdup_n_u8(0xF)), 2);
-  const uint8x8x2_t z1 = vzip_u8(i4, i4);                       // each index twice
-  const uint8x16_t twice = vcombine_u8(z1.val[0], z1.val[1]);
-  const uint8x16x2_t z2 = vzipq_u8(twice, twice);               // four times
-  const uint8x16_t step = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
-  const uint8x16x4_t table = {{vld1q_u8(reinterpret_cast<const u8*>(pal18)), vld1q_u8(reinterpret_cast<const u8*>(pal18) + 16),
-                               vld1q_u8(reinterpret_cast<const u8*>(pal18) + 32), vld1q_u8(reinterpret_cast<const u8*>(pal18) + 48)}};
-  vst1q_u8(reinterpret_cast<u8*>(px), vqtbl4q_u8(table, vaddq_u8(z2.val[0], step)));
-  vst1q_u8(reinterpret_cast<u8*>(px) + 16, vqtbl4q_u8(table, vaddq_u8(z2.val[1], step)));
-  vst1_u8(op, vand_u8(vmvn_u8(vceq_u8(raw, vdup_n_u8(0))), vdup_n_u8(1)));
-}
 
 namespace {
 inline uint8x16x4_t pal16_table(const Pixel* pal) {
@@ -257,42 +169,12 @@ inline void pal16_row(uint8x8_t idx, const uint8x16x4_t& table, Pixel* px) {
 }
 }
 
-bool text_tiles_16(const u8* packed, const u8* ctl, const Pixel* pal18, u32 n, Pixel* px, u8* op) {
-  uint8x8_t any = vdup_n_u8(0);
-  u32 cur_pal = 0; uint8x16x4_t table = pal16_table(pal18);   // neighbouring tiles mostly share a palette
-  for (u32 t = 0; t < n; ++t, packed += 4, px += 8, op += 8) {
-    u32 w; std::memcpy(&w, packed, 4);
-    const uint8x8_t raw = vreinterpret_u8_u32(vdup_n_u32(w));
-    const uint8x8x2_t nib = vzip_u8(vand_u8(raw, vdup_n_u8(0xF)), vshr_n_u8(raw, 4));
-    uint8x8_t idx = nib.val[0];
-    if (ctl[t] & 0x10) idx = vrev64_u8(idx);
-    const u32 pal = ctl[t] & 0xF;
-    if (pal != cur_pal) { cur_pal = pal; table = pal16_table(pal18 + pal * 16); }
-    pal16_row(idx, table, px);
-    vst1_u8(op, vand_u8(vmvn_u8(vceq_u8(idx, vdup_n_u8(0))), vdup_n_u8(1)));
-    any = vorr_u8(any, idx);
-  }
-  return vmaxv_u8(any) != 0;
-}
 
-bool text_tiles_256(const u8* rows, const u8* ctl, const Pixel* const* pal18, u32 n, Pixel* px, u8* op) {
-  uint8x8_t any = vdup_n_u8(0);
-  for (u32 t = 0; t < n; ++t, rows += 8, px += 8, op += 8) {
-    uint8x8_t idx = vld1_u8(rows);
-    if (ctl[t] & 0x10) idx = vrev64_u8(idx);
-    vst1_u8(op, vand_u8(vmvn_u8(vceq_u8(idx, vdup_n_u8(0))), vdup_n_u8(1)));
-    any = vorr_u8(any, idx);
-    const Pixel* pal = pal18[ctl[t] & 0xF];
-    alignas(8) u8 r[8]; vst1_u8(r, idx);
-    for (u32 i = 0; i < 8; ++i) px[i] = pal[r[i]];
-  }
-  return vmaxv_u8(any) != 0;
-}
 
 namespace {
 // The priority rule on 16 plane entries: `opq` marks the sprite's opaque
 // pixels, `valid` the lanes inside the row; colour lanes come from `col`.
-inline void obj_plot16(uint8x16_t opq, uint8x16_t valid, const uint32x4_t col[4], u8 attr, u8 alpha, u32* px, u8* oattr, u8* oalpha) {
+inline void obj_plot16(uint8x16_t opq, uint8x16_t valid, uint16x8_t v0, uint16x8_t v1, u8 attr, u8 alpha, u16* px, u8* oattr, u8* oalpha) {
   const uint8x16_t old = vld1q_u8(oattr);
   const uint8x16_t old_opaque = vtstq_u8(old, vdupq_n_u8(OA_OPAQUE));
   const uint8x16_t higher = vcgtq_u8(vandq_u8(old, vdupq_n_u8(OA_PRIO)), vdupq_n_u8(attr & OA_PRIO));
@@ -302,45 +184,186 @@ inline void obj_plot16(uint8x16_t opq, uint8x16_t valid, const uint32x4_t col[4]
   a = vbslq_u8(win, vdupq_n_u8(attr | OA_OPAQUE), a);
   vst1q_u8(oattr, a);
   vst1q_u8(oalpha, vbslq_u8(win, vdupq_n_u8(alpha), vld1q_u8(oalpha)));
-  const Mask4 m = widen(win);
-  for (u32 k = 0; k < 4; ++k) vst1q_u32(px + k * 4, vbslq_u32(m.m[k], col[k], vld1q_u32(px + k * 4)));
+  const int8x16_t ws = vreinterpretq_s8_u8(win);
+  const uint16x8_t m0 = vreinterpretq_u16_s16(vmovl_s8(vget_low_s8(ws))), m1 = vreinterpretq_u16_s16(vmovl_s8(vget_high_s8(ws)));
+  vst1q_u16(px, vbslq_u16(m0, v0, vld1q_u16(px)));
+  vst1q_u16(px + 8, vbslq_u16(m1, v1, vld1q_u16(px + 8)));
 }
 const uint8x16_t kLane16 = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 }
 
-void obj_row_idx(const u8* idx, u32 n, u32 pal_base, u8 attr, u32* px, u8* oattr, u8* oalpha) {
-  const uint32x4_t base = vdupq_n_u32(pal_base);
-  for (u32 i = 0; i < n; i += 16) {
-    const uint8x16_t v = vld1q_u8(idx + i);
-    const uint8x16_t valid = vcltq_u8(kLane16, vdupq_n_u8(static_cast<u8>(n - i > 16 ? 16 : n - i)));
-    const uint16x8_t lo = vmovl_u8(vget_low_u8(v)), hi = vmovl_u8(vget_high_u8(v));
-    const uint32x4_t col[4] = {vorrq_u32(base, vmovl_u16(vget_low_u16(lo))), vorrq_u32(base, vmovl_u16(vget_high_u16(lo))),
-                               vorrq_u32(base, vmovl_u16(vget_low_u16(hi))), vorrq_u32(base, vmovl_u16(vget_high_u16(hi)))};
-    obj_plot16(vmvnq_u8(vceqq_u8(v, vdupq_n_u8(0))), valid, col, attr, 0, px + i, oattr + i, oalpha + i);
-  }
-}
 
-void obj_row_bmp(const u16* col16, u32 n, u8 attr, u8 alpha, u32* px, u8* oattr, u8* oalpha) {
-  const uint32x4_t direct = vdupq_n_u32(OP_DIRECT);
-  const uint16x8_t cmask = vdupq_n_u16(0x7FFF);
-  for (u32 i = 0; i < n; i += 16) {
-    const uint16x8_t a = vld1q_u16(col16 + i), b = vld1q_u16(col16 + i + 8);
-    const uint8x16_t opq = vcombine_u8(vshrn_n_u16(a, 8), vshrn_n_u16(b, 8));   // high bytes
-    const uint8x16_t opaque = vtstq_u8(opq, vdupq_n_u8(0x80));
-    const uint8x16_t valid = vcltq_u8(kLane16, vdupq_n_u8(static_cast<u8>(n - i > 16 ? 16 : n - i)));
-    const uint16x8_t ca = vandq_u16(a, cmask), cb = vandq_u16(b, cmask);
-    const uint32x4_t col[4] = {vorrq_u32(direct, vmovl_u16(vget_low_u16(ca))), vorrq_u32(direct, vmovl_u16(vget_high_u16(ca))),
-                               vorrq_u32(direct, vmovl_u16(vget_low_u16(cb))), vorrq_u32(direct, vmovl_u16(vget_high_u16(cb)))};
-    obj_plot16(opaque, valid, col, attr, alpha, px + i, oattr + i, oalpha + i);
-  }
-}
 
-void layer_3d(const u32* line3d, Pixel* px, u8* op) {
+
+void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,
+                    const Pixel* const* tables, const u8* attr, const u8* alpha, const Pixel* line3d,
+                    Pixel* top_px, Pixel* second_px, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {
+  static const u8 id_tab[16] = {L_BG0, L_BG1, L_BG2, L_BG3, L_OBJ, L_OBJ, L_OBJ, L_BACKDROP, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint8x16_t ids = vld1q_u8(id_tab), zero = vdupq_n_u8(0);
   for (u32 i = 0; i < 256; i += 16) {
-    uint32x4_t a[4];
-    for (u32 k = 0; k < 4; ++k) { a[k] = vld1q_u32(line3d + i + k * 4); vst1q_u32(px + i + k * 4, a[k]); }
-    const uint8x16_t alpha = narrow(vshrq_n_u32(a[0], 24), vshrq_n_u32(a[1], 24), vshrq_n_u32(a[2], 24), vshrq_n_u32(a[3], 24));
-    vst1q_u8(op + i, vandq_u8(vmvnq_u8(vceqq_u8(alpha, vdupq_n_u8(0))), vdupq_n_u8(1)));
+    const uint8x16_t tt = vld1q_u8(top_tid + i), st = vld1q_u8(second_tid + i);
+    vst1q_u8(top_id + i, vqtbl1q_u8(ids, tt));
+    vst1q_u8(second_id + i, vqtbl1q_u8(ids, st));
+    const uint8x16_t at = vld1q_u8(attr + i);
+    const uint8x16_t isobj = vandq_u8(vcgeq_u8(tt, vdupq_n_u8(T_OBJ_STD)), vcleq_u8(tt, vdupq_n_u8(T_OBJ_DIRECT)));
+    uint8x16_t kind = vbslq_u8(vtstq_u8(at, vdupq_n_u8(OA_BITMAP)), vdupq_n_u8(K_OBJ_BITMAP), vbslq_u8(vtstq_u8(at, vdupq_n_u8(OA_SEMI)), vdupq_n_u8(K_OBJ_SEMI), zero));
+    kind = vandq_u8(kind, isobj);
+    uint8x16_t al = vandq_u8(vld1q_u8(alpha + i), isobj);
+    if (line3d) {
+      const uint8x16_t is3d = vceqq_u8(tt, zero);
+      kind = vbslq_u8(is3d, vdupq_n_u8(K_3D), kind);
+      const uint8x16_t a3 = narrow(vshrq_n_u32(vld1q_u32(line3d + i), 24), vshrq_n_u32(vld1q_u32(line3d + i + 4), 24),
+                                  vshrq_n_u32(vld1q_u32(line3d + i + 8), 24), vshrq_n_u32(vld1q_u32(line3d + i + 12), 24));
+      al = vbslq_u8(is3d, vandq_u8(a3, vdupq_n_u8(0x1F)), al);
+    }
+    vst1q_u8(top_kind + i, kind);
+    vst1q_u8(top_alpha + i, al);
+    for (u32 k = 0; k < 16; ++k) {
+      const u8 t = top_tid[i + k];
+      top_px[i + k] = (line3d && t == 0) ? line3d[i + k] : (tables[t][top[i + k] & 0x7FFF] | 0xFF000000);
+      second_px[i + k] = tables[second_tid[i + k]][second[i + k] & 0x7FFF] | 0xFF000000;
+    }
+  }
+}
+
+void obj_row_idx16(const u8* idx, u32 n, u16 pal_base, u8 attr, u16* v, u8* oattr, u8* oalpha) {
+  const uint16x8_t base = vdupq_n_u16(static_cast<u16>(LV_OPAQUE | pal_base));
+  for (u32 i = 0; i < n; i += 16) {
+    const uint8x16_t x = vld1q_u8(idx + i);
+    const uint8x16_t valid = vcltq_u8(kLane16, vdupq_n_u8(static_cast<u8>(n - i > 16 ? 16 : n - i)));
+    obj_plot16(vmvnq_u8(vceqq_u8(x, vdupq_n_u8(0))), valid, vorrq_u16(base, vmovl_u8(vget_low_u8(x))), vorrq_u16(base, vmovl_u8(vget_high_u8(x))),
+               attr, 0, v + i, oattr + i, oalpha + i);
+  }
+}
+
+void obj_row_bmp16(const u16* col, u32 n, u8 attr, u8 alpha, u16* v, u8* oattr, u8* oalpha) {
+  for (u32 i = 0; i < n; i += 16) {
+    const uint16x8_t a = vld1q_u16(col + i), b = vld1q_u16(col + i + 8);
+    const uint8x16_t opaque = vtstq_u8(vcombine_u8(vshrn_n_u16(a, 8), vshrn_n_u16(b, 8)), vdupq_n_u8(0x80));
+    const uint8x16_t valid = vcltq_u8(kLane16, vdupq_n_u8(static_cast<u8>(n - i > 16 ? 16 : n - i)));
+    obj_plot16(opaque, valid, a, b, attr, alpha, v + i, oattr + i, oalpha + i);
+  }
+}
+
+void layer16_3d(const u32* line3d, u16* v) {
+  const uint16x8_t lane = {0, 1, 2, 3, 4, 5, 6, 7}, opq = vdupq_n_u16(LV_OPAQUE);
+  for (u32 i = 0; i < 256; i += 8) {
+    const uint16x8_t alpha = vcombine_u16(vmovn_u32(vshrq_n_u32(vld1q_u32(line3d + i), 24)), vmovn_u32(vshrq_n_u32(vld1q_u32(line3d + i + 4), 24)));
+    const uint16x8_t m = vmvnq_u16(vceqq_u16(alpha, vdupq_n_u16(0)));
+    vst1q_u16(v + i, vandq_u16(m, vorrq_u16(opq, vaddq_u16(lane, vdupq_n_u16(static_cast<u16>(i))))));
+  }
+}
+
+bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {
+  uint8x8_t any = vdup_n_u8(0);
+  for (u32 t = 0; t < n; ++t, packed += 4, v += 8) {
+    u32 w; std::memcpy(&w, packed, 4);
+    const uint8x8_t raw = vreinterpret_u8_u32(vdup_n_u32(w));
+    const uint8x8x2_t nib = vzip_u8(vand_u8(raw, vdup_n_u8(0xF)), vshr_n_u8(raw, 4));
+    uint8x8_t idx = nib.val[0];
+    if (ctl[t] & 0x10) idx = vrev64_u8(idx);
+    const uint16x8_t i16 = vmovl_u8(idx);
+    const uint16x8_t m = vmvnq_u16(vceqq_u16(i16, vdupq_n_u16(0)));
+    vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | ((ctl[t] & 0xF) << 4))))));
+    any = vorr_u8(any, idx);
+  }
+  return vmaxv_u8(any) != 0;
+}
+
+bool text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v) {
+  uint8x8_t any = vdup_n_u8(0);
+  for (u32 t = 0; t < n; ++t, rows += 8, v += 8) {
+    uint8x8_t idx = vld1_u8(rows);
+    if (ctl[t] & 0x10) idx = vrev64_u8(idx);
+    const uint16x8_t i16 = vmovl_u8(idx);
+    const uint16x8_t m = vmvnq_u16(vceqq_u16(i16, vdupq_n_u16(0)));
+    vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | (ext ? (ctl[t] & 0xF) << 8 : 0))))));
+    any = vorr_u8(any, idx);
+  }
+  return vmaxv_u8(any) != 0;
+}
+
+namespace {
+// 16 lanes of the window test for a BG (bit wbit) or OBJ (bit 4).
+inline uint8x16_t win_mask(const u8* win, u8 wbit) { return vtstq_u8(vld1q_u8(win), vdupq_n_u8(wbit)); }
+// u16 opaque bits of 16 values as a byte mask.
+inline uint8x16_t opaque_mask(uint16x8_t a, uint16x8_t b) { return vtstq_u8(vcombine_u8(vshrn_n_u16(a, 8), vshrn_n_u16(b, 8)), vdupq_n_u8(0x80)); }
+inline void split16(uint8x16_t m8, uint16x8_t& m0, uint16x8_t& m1) {
+  const int8x16_t ws = vreinterpretq_s8_u8(m8);
+  m0 = vreinterpretq_u16_s16(vmovl_s8(vget_low_s8(ws))); m1 = vreinterpretq_u16_s16(vmovl_s8(vget_high_s8(ws)));
+}
+// The OBJ table id per lane from the attribute byte.
+inline uint8x16_t obj_tid16(uint8x16_t a) {
+  const uint8x16_t bitmap = vtstq_u8(a, vdupq_n_u8(OA_BITMAP)), std = vtstq_u8(a, vdupq_n_u8(OA_STDPAL));
+  return vbslq_u8(bitmap, vdupq_n_u8(T_OBJ_DIRECT), vbslq_u8(std, vdupq_n_u8(T_OBJ_STD), vdupq_n_u8(T_OBJ_EXT)));
+}
+inline void merge16(uint8x16_t m8, uint16x8_t v0, uint16x8_t v1, uint8x16_t tid, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  uint16x8_t m0, m1; split16(m8, m0, m1);
+  const uint16x8_t t0 = vld1q_u16(top), t1 = vld1q_u16(top + 8);
+  if (second) {
+    vst1q_u16(second, vbslq_u16(m0, t0, vld1q_u16(second)));
+    vst1q_u16(second + 8, vbslq_u16(m1, t1, vld1q_u16(second + 8)));
+    vst1q_u8(second_tid, vbslq_u8(m8, vld1q_u8(top_tid), vld1q_u8(second_tid)));
+  }
+  vst1q_u16(top, vbslq_u16(m0, v0, t0));
+  vst1q_u16(top + 8, vbslq_u16(m1, v1, t1));
+  vst1q_u8(top_tid, vbslq_u8(m8, tid, vld1q_u8(top_tid)));
+}
+}
+
+void select16(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  const uint8x16_t vtid = vdupq_n_u8(tid);
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint16x8_t a = vld1q_u16(v + i), b = vld1q_u16(v + i + 8);
+    const uint8x16_t m8 = vandq_u8(opaque_mask(a, b), win_mask(win + i, wbit));
+    if (vmaxvq_u8(m8) == 0) continue;
+    merge16(m8, a, b, vtid, top + i, top_tid + i, second + i, second_tid + i);
+  }
+}
+
+void select16_obj(const u16* v, const u8* attr, const u8* win, u32 prio, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  const uint8x16_t vprio = vdupq_n_u8(static_cast<u8>(prio));
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t a = vld1q_u8(attr + i);
+    uint8x16_t m8 = vandq_u8(vtstq_u8(a, vdupq_n_u8(OA_OPAQUE)), vceqq_u8(vandq_u8(a, vdupq_n_u8(OA_PRIO)), vprio));
+    m8 = vandq_u8(m8, win_mask(win + i, 0x10));
+    if (vmaxvq_u8(m8) == 0) continue;
+    merge16(m8, vld1q_u16(v + i), vld1q_u16(v + i + 8), obj_tid16(a), top + i, top_tid + i, second + i, second_tid + i);
+  }
+}
+
+void select16_flat(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid) {
+  const uint8x16_t vtid = vdupq_n_u8(tid);
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint16x8_t a = vld1q_u16(v + i), b = vld1q_u16(v + i + 8);
+    const uint8x16_t m8 = vandq_u8(opaque_mask(a, b), win_mask(win + i, wbit));
+    if (vmaxvq_u8(m8) == 0) continue;
+    merge16(m8, a, b, vtid, top + i, top_tid + i, nullptr, nullptr);
+  }
+}
+
+void select16_obj_flat(const u16* v, const u8* attr, const u8* win, u32 prio, u16* top, u8* top_tid) {
+  const uint8x16_t vprio = vdupq_n_u8(static_cast<u8>(prio));
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t a = vld1q_u8(attr + i);
+    uint8x16_t m8 = vandq_u8(vtstq_u8(a, vdupq_n_u8(OA_OPAQUE)), vceqq_u8(vandq_u8(a, vdupq_n_u8(OA_PRIO)), vprio));
+    m8 = vandq_u8(m8, win_mask(win + i, 0x10));
+    if (vmaxvq_u8(m8) == 0) continue;
+    merge16(m8, vld1q_u16(v + i), vld1q_u16(v + i + 8), obj_tid16(a), top + i, top_tid + i, nullptr, nullptr);
+  }
+}
+
+void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pixel* out) {
+  // A gather; runs of one table are the common case, so the table pointer
+  // is hoisted per 16 pixels when the ids agree.
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t t = vld1q_u8(top_tid + i);
+    if (vmaxvq_u8(t) == vminvq_u8(t)) {
+      const Pixel* tab = tables[top_tid[i]];
+      for (u32 k = 0; k < 16; ++k) out[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
+    } else {
+      for (u32 k = 0; k < 16; ++k) out[i + k] = tables[top_tid[i + k]][top[i + k] & 0x7FFF] | 0xFF000000;
+    }
   }
 }
 

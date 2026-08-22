@@ -18,38 +18,42 @@
 namespace ds::gpu::kern {
 
 #define DS_KERNEL_LIST(NS)                                                                                   \
-  /* Priority select of one BG plane into the top/second records. */                                         \
-  void NS##select_plane(const Pixel* px, const u8* op, const u8* win, u8 wbit, u8 id, bool is3d,             \
-                        Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id);  \
-  /* Priority select of the resolved OBJ plane at one priority level. */                                     \
-  void NS##select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win, u32 prio,             \
-                      Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id);    \
+  /* Priority select of one layer line (u16, bit 15 opaque) into the top/second values and table ids. */    \
+  void NS##select16(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid); \
+  /* The OBJ line at one priority level; the table id comes from the attribute byte (bitmap / standard / extended). */ \
+  void NS##select16_obj(const u16* v, const u8* attr, const u8* win, u32 prio, u16* top, u8* top_tid, u16* second, u8* second_tid); \
+  /* The same without the second record, for lines no colour effect can touch. */                           \
+  void NS##select16_flat(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid);              \
+  void NS##select16_obj_flat(const u16* v, const u8* attr, const u8* win, u32 prio, u16* top, u8* top_tid);  \
+  /* Winning values through their tables (index = value & 0x7FFF) to 18-bit records with alpha 0xFF. */     \
+  void NS##resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pixel* out);             \
+  /* Top and second values to the composite's records: colours through the tables (a 3D pixel keeps its own \
+     word when line3d is given), layer ids as BLDCNT masks, kind (3D, semi / bitmap OBJ from attr) and alpha. */ \
+  void NS##resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,        \
+                          const Pixel* const* tables, const u8* attr, const u8* alpha, const Pixel* line3d,  \
+                          Pixel* top_px, Pixel* second_px, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id); \
   /* Any 3D pixel with alpha strictly between 0 and 31 on the line (alpha in bits 24-28). */                 \
   bool NS##line_has_translucent_3d(const Pixel* line3d);                                                    \
-  /* The same two selects straight into the output line, for lines no colour effect can touch. */            \
-  void NS##select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out);             \
-  void NS##select_obj_flat(const Pixel* col, const u8* attr, const u8* win, u32 prio, Pixel* out);           \
   /* Colour effects: blend / brighten / darken with the OBJ and 3D override rules. */                         \
   void NS##composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, const Pixel* second,      \
                           const u8* top_id, const u8* top_kind, const u8* top_alpha, const u8* second_id,     \
                           const u8* win, Pixel* out);                                                        \
   /* BGR555 palette entries -> 18-bit records (bit 15 = low green bit). */                                   \
   void NS##palette_to_18(const u16* pal, Pixel* out, u32 n);                                                 \
-  /* One 16-colour tile row: 8 indices through a 16-entry 18-bit palette. */                                 \
-  void NS##tile_row_pal16(const u8* idx, const Pixel* pal18, Pixel* px, u8* op);                             \
-  /* OBJ plane plot of one sprite row, n pixels at the plane pointers (which may be read and written up to  \
+  /* OBJ line plot of one sprite row, n pixels at the line pointers (which may be read and written up to   \
      15 entries past n; callers pad): an opaque pixel wins over a transparent one or a lower priority, a      \
-     transparent pixel stamps priority and mosaic on a transparent one. Paletted: idx != 0 is opaque, colour  \
-     pal_base | idx, alpha 0. Bitmap: col bit 15 is opaque, colour (col & 0x7FFF) | OP_DIRECT. */             \
-  void NS##obj_row_idx(const u8* idx, u32 n, u32 pal_base, u8 attr, u32* px, u8* oattr, u8* oalpha);          \
-  void NS##obj_row_bmp(const u16* col, u32 n, u8 attr, u8 alpha, u32* px, u8* oattr, u8* oalpha);             \
-  /* 3D layer into a BG plane: alpha 0 is transparent. */                                                    \
-  void NS##layer_3d(const u32* line3d, Pixel* px, u8* op);                                                   \
+     transparent pixel stamps priority and mosaic on a transparent one. Paletted: idx != 0 is opaque, value   \
+     0x8000 | pal_base | idx, alpha 0. Bitmap: col bit 15 is opaque, value col. */                            \
+  void NS##obj_row_idx16(const u8* idx, u32 n, u16 pal_base, u8 attr, u16* v, u8* oattr, u8* oalpha);        \
+  void NS##obj_row_bmp16(const u16* col, u32 n, u8 attr, u8 alpha, u16* v, u8* oattr, u8* oalpha);           \
+  /* 3D layer as a layer line: 0x8000 | x where the alpha is non-zero, 0 elsewhere. */                       \
+  void NS##layer16_3d(const u32* line3d, u16* v);                                                           \
   /* Text BG row, 16-colour tiles: n tiles of 4 packed bytes (low nibble first); ctl[t] = palette number      \
-     (bits 0-3) | 0x10 for a horizontally flipped tile. Writes 8*n pixels; returns whether any is opaque. */  \
-  bool NS##text_tiles_16(const u8* packed, const u8* ctl, const Pixel* pal18, u32 n, Pixel* px, u8* op);     \
-  /* Text BG row, 256-colour tiles: n tiles of 8 indices through pal18[ctl[t] & 0xF] (256 records each). */  \
-  bool NS##text_tiles_256(const u8* rows, const u8* ctl, const Pixel* const* pal18, u32 n, Pixel* px, u8* op); \
+     (bits 0-3) | 0x10 for a horizontally flipped tile. Writes 8*n values 0x8000 | pal << 4 | idx (0 for       \
+     index 0); returns whether any is opaque. */                                                             \
+  bool NS##text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v);                                      \
+  /* Text BG row, 256-colour tiles: n tiles of 8 indices; values 0x8000 | (ext ? pal << 8 : 0) | idx. */     \
+  bool NS##text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v);                             \
   /* Output stage: master brightness on 18-bit records, then 6->8 bit expansion to 0xAARRGGBB. */            \
   void NS##master_brightness(u16 reg, u32* dst);                                                             \
   void NS##expand_colours(u32* dst);                                                                         \

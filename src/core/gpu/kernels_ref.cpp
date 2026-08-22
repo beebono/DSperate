@@ -47,45 +47,9 @@ inline Pixel darken(Pixel v, u32 factor, u32 bias) {
 
 } // namespace
 
-void select_plane(const Pixel* px, const u8* op, const u8* win, u8 wbit, u8 id, bool is3d,
-                  Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {
-  for (u32 i = 0; i < 256; ++i) {
-    if (!op[i] || !(win[i] & wbit)) continue;
-    second[i] = top[i]; second_id[i] = top_id[i];
-    top[i] = px[i]; top_id[i] = id;
-    top_kind[i] = is3d ? K_3D : K_NORMAL;
-    if (is3d) top_alpha[i] = (px[i] >> 24) & 0x1F;
-  }
-}
-
-void select_obj(const Pixel* col, const u8* attr, const u8* alpha, const u8* win, u32 prio,
-                Pixel* top, Pixel* second, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {
-  for (u32 i = 0; i < 256; ++i) {
-    const u8 a = attr[i];
-    if (!(a & OA_OPAQUE) || (a & OA_PRIO) != prio || !(win[i] & 0x10)) continue;
-    second[i] = top[i]; second_id[i] = top_id[i];
-    top[i] = col[i]; top_id[i] = L_OBJ;
-    top_kind[i] = (a & OA_BITMAP) ? K_OBJ_BITMAP : (a & OA_SEMI) ? K_OBJ_SEMI : K_NORMAL;
-    top_alpha[i] = alpha[i];
-  }
-}
-
 bool line_has_translucent_3d(const Pixel* line3d) {
   for (u32 i = 0; i < 256; ++i) { const u32 a = (line3d[i] >> 24) & 0x1F; if (a != 0 && a != 31) return true; }
   return false;
-}
-
-void select_plane_flat(const Pixel* px, const u8* op, const u8* win, u8 wbit, Pixel* out) {
-  for (u32 i = 0; i < 256; ++i)
-    if (op[i] && (win[i] & wbit)) out[i] = (px[i] & 0x00FFFFFF) | 0xFF000000;
-}
-
-void select_obj_flat(const Pixel* col, const u8* attr, const u8* win, u32 prio, Pixel* out) {
-  for (u32 i = 0; i < 256; ++i) {
-    const u8 a = attr[i];
-    if (!(a & OA_OPAQUE) || (a & OA_PRIO) != prio || !(win[i] & 0x10)) continue;
-    out[i] = (col[i] & 0x00FFFFFF) | 0xFF000000;
-  }
 }
 
 void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, const Pixel* second,
@@ -124,58 +88,120 @@ void palette_to_18(const u16* pal, Pixel* out, u32 n) {
   }
 }
 
-void tile_row_pal16(const u8* idx, const Pixel* pal18, Pixel* px, u8* op) {
-  for (u32 i = 0; i < 8; ++i) { px[i] = pal18[idx[i] & 0xF]; op[i] = idx[i] != 0; }
-}
 
-bool text_tiles_16(const u8* packed, const u8* ctl, const Pixel* pal18, u32 n, Pixel* px, u8* op) {
-  bool any = false;
-  for (u32 t = 0; t < n; ++t, packed += 4, px += 8, op += 8) {
-    const Pixel* pal = pal18 + (ctl[t] & 0xF) * 16;
-    const bool flip = ctl[t] & 0x10;
-    for (u32 i = 0; i < 8; ++i) {
-      const u32 j = flip ? 7 - i : i;
-      const u8 idx = (packed[j >> 1] >> ((j & 1) * 4)) & 0xF;
-      px[i] = pal[idx]; op[i] = idx != 0; any |= idx != 0;
-    }
-  }
-  return any;
-}
 
-bool text_tiles_256(const u8* rows, const u8* ctl, const Pixel* const* pal18, u32 n, Pixel* px, u8* op) {
-  bool any = false;
-  for (u32 t = 0; t < n; ++t, rows += 8, px += 8, op += 8) {
-    const Pixel* pal = pal18[ctl[t] & 0xF];
-    const bool flip = ctl[t] & 0x10;
-    for (u32 i = 0; i < 8; ++i) {
-      const u8 idx = rows[flip ? 7 - i : i];
-      px[i] = pal[idx]; op[i] = idx != 0; any |= idx != 0;
-    }
-  }
-  return any;
-}
 
 namespace {
-inline void obj_plot(u32 i, u32 colour, bool opaque, u8 attr, u8 alpha, u32* px, u8* oattr, u8* oalpha) {
+inline void obj_plot(u32 i, u16 value, bool opaque, u8 attr, u8 alpha, u16* px, u8* oattr, u8* oalpha) {
   const u8 old = oattr[i];
   if (opaque && (!(old & OA_OPAQUE) || (attr & OA_PRIO) < (old & OA_PRIO))) {
-    px[i] = colour; oattr[i] = attr | OA_OPAQUE; oalpha[i] = alpha;
+    px[i] = value; oattr[i] = attr | OA_OPAQUE; oalpha[i] = alpha;
   } else if (!opaque && !(old & OA_OPAQUE)) {
     oattr[i] = (old & ~(OA_MOSAIC | OA_PRIO)) | (attr & (OA_TOUCHED | OA_MOSAIC | OA_PRIO));
   }
 }
 }
 
-void obj_row_idx(const u8* idx, u32 n, u32 pal_base, u8 attr, u32* px, u8* oattr, u8* oalpha) {
-  for (u32 i = 0; i < n; ++i) obj_plot(i, pal_base | idx[i], idx[i] != 0, attr, 0, px, oattr, oalpha);
+
+
+
+namespace {
+inline u8 obj_tid(u8 attr) { return (attr & OA_BITMAP) ? T_OBJ_DIRECT : (attr & OA_STDPAL) ? T_OBJ_STD : T_OBJ_EXT; }
 }
 
-void obj_row_bmp(const u16* col, u32 n, u8 attr, u8 alpha, u32* px, u8* oattr, u8* oalpha) {
-  for (u32 i = 0; i < n; ++i) obj_plot(i, (col[i] & 0x7FFF) | OP_DIRECT, col[i] & 0x8000, attr, alpha, px, oattr, oalpha);
+void select16(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  for (u32 i = 0; i < 256; ++i) {
+    if (!(v[i] & LV_OPAQUE) || !(win[i] & wbit)) continue;
+    second[i] = top[i]; second_tid[i] = top_tid[i];
+    top[i] = v[i]; top_tid[i] = tid;
+  }
 }
 
-void layer_3d(const u32* line3d, Pixel* px, u8* op) {
-  for (u32 i = 0; i < 256; ++i) { px[i] = line3d[i]; op[i] = (line3d[i] >> 24) != 0; }
+void select16_obj(const u16* v, const u8* attr, const u8* win, u32 prio, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  for (u32 i = 0; i < 256; ++i) {
+    const u8 a = attr[i];
+    if (!(a & OA_OPAQUE) || (a & OA_PRIO) != prio || !(win[i] & 0x10)) continue;
+    second[i] = top[i]; second_tid[i] = top_tid[i];
+    top[i] = v[i]; top_tid[i] = obj_tid(a);
+  }
+}
+
+void select16_flat(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid) {
+  for (u32 i = 0; i < 256; ++i) {
+    if (!(v[i] & LV_OPAQUE) || !(win[i] & wbit)) continue;
+    top[i] = v[i]; top_tid[i] = tid;
+  }
+}
+
+void select16_obj_flat(const u16* v, const u8* attr, const u8* win, u32 prio, u16* top, u8* top_tid) {
+  for (u32 i = 0; i < 256; ++i) {
+    const u8 a = attr[i];
+    if (!(a & OA_OPAQUE) || (a & OA_PRIO) != prio || !(win[i] & 0x10)) continue;
+    top[i] = v[i]; top_tid[i] = obj_tid(a);
+  }
+}
+
+void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pixel* out) {
+  for (u32 i = 0; i < 256; ++i) out[i] = tables[top_tid[i]][top[i] & 0x7FFF] | 0xFF000000;
+}
+
+void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,
+                    const Pixel* const* tables, const u8* attr, const u8* alpha, const Pixel* line3d,
+                    Pixel* top_px, Pixel* second_px, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {
+  static const u8 id_of[T_COUNT] = {L_BG0, L_BG1, L_BG2, L_BG3, L_OBJ, L_OBJ, L_OBJ, L_BACKDROP, 0};
+  for (u32 i = 0; i < 256; ++i) {
+    const u8 tt = top_tid[i], st = second_tid[i];
+    top_px[i] = tables[tt][top[i] & 0x7FFF] | 0xFF000000;
+    second_px[i] = tables[st][second[i] & 0x7FFF] | 0xFF000000;
+    top_id[i] = id_of[tt]; second_id[i] = id_of[st];
+    u8 kind = K_NORMAL, a = 0;
+    if (tt == T_BG0 && line3d) { kind = K_3D; a = (line3d[i] >> 24) & 0x1F; top_px[i] = line3d[i]; }
+    else if (tt >= T_OBJ_STD && tt <= T_OBJ_DIRECT) {
+      const u8 at = attr[i];
+      kind = (at & OA_BITMAP) ? K_OBJ_BITMAP : (at & OA_SEMI) ? K_OBJ_SEMI : K_NORMAL;
+      a = alpha[i];
+    }
+    top_kind[i] = kind; top_alpha[i] = a;
+  }
+}
+
+void obj_row_idx16(const u8* idx, u32 n, u16 pal_base, u8 attr, u16* v, u8* oattr, u8* oalpha) {
+  for (u32 i = 0; i < n; ++i) obj_plot(i, static_cast<u16>(LV_OPAQUE | pal_base | idx[i]), idx[i] != 0, attr, 0, v, oattr, oalpha);
+}
+
+void obj_row_bmp16(const u16* col, u32 n, u8 attr, u8 alpha, u16* v, u8* oattr, u8* oalpha) {
+  for (u32 i = 0; i < n; ++i) obj_plot(i, col[i], col[i] & 0x8000, attr, alpha, v, oattr, oalpha);
+}
+
+void layer16_3d(const u32* line3d, u16* v) {
+  for (u32 i = 0; i < 256; ++i) v[i] = (line3d[i] >> 24) ? static_cast<u16>(LV_OPAQUE | i) : 0;
+}
+
+bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {
+  bool any = false;
+  for (u32 t = 0; t < n; ++t, packed += 4, v += 8) {
+    const u16 base = static_cast<u16>((ctl[t] & 0xF) << 4);
+    const bool flip = ctl[t] & 0x10;
+    for (u32 i = 0; i < 8; ++i) {
+      const u32 j = flip ? 7 - i : i;
+      const u8 idx = (packed[j >> 1] >> ((j & 1) * 4)) & 0xF;
+      v[i] = idx ? static_cast<u16>(LV_OPAQUE | base | idx) : 0; any |= idx != 0;
+    }
+  }
+  return any;
+}
+
+bool text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v) {
+  bool any = false;
+  for (u32 t = 0; t < n; ++t, rows += 8, v += 8) {
+    const u16 base = ext ? static_cast<u16>((ctl[t] & 0xF) << 8) : 0;
+    const bool flip = ctl[t] & 0x10;
+    for (u32 i = 0; i < 8; ++i) {
+      const u8 idx = rows[flip ? 7 - i : i];
+      v[i] = idx ? static_cast<u16>(LV_OPAQUE | base | idx) : 0; any |= idx != 0;
+    }
+  }
+  return any;
 }
 
 void master_brightness(u16 reg, u32* dst) {

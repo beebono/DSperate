@@ -19,7 +19,10 @@ void VramMap::add(VramView& v, u32 base, u32 len, int bank) {
 }
 
 void VramMap::finish(VramView& v) {
-  for (u32 b = 0; b < v.blocks(); ++b) {
+  // A view smaller than a block (the OBJ extended palettes, 8 KB) is one
+  // partial block: it still gets its direct pointer.
+  const u32 nblocks = v.blocks() ? v.blocks() : 1;
+  for (u32 b = 0; b < nblocks; ++b) {
     const u32 m = v.mask[b];
     v.ptr[b] = nullptr;
     if (m && !(m & (m - 1))) {

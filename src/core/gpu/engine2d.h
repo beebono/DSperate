@@ -25,17 +25,28 @@ enum LayerId : u8 { L_BG0 = 0x01, L_BG1 = 0x02, L_BG2 = 0x04, L_BG3 = 0x08, L_OB
 enum PixelKind : u8 { K_NORMAL = 0, K_OBJ_SEMI = 1, K_OBJ_BITMAP = 2, K_3D = 3 };
 
 // OBJ plane attribute byte and colour-word flags (shared with the kernels).
-constexpr u8 OA_PRIO = 0x03, OA_SEMI = 0x04, OA_BITMAP = 0x08, OA_MOSAIC = 0x10, OA_TOUCHED = 0x20, OA_OPAQUE = 0x80;
-constexpr u32 OP_DIRECT = 1u << 15, OP_STDPAL = 1u << 12;
+constexpr u8 OA_PRIO = 0x03, OA_SEMI = 0x04, OA_BITMAP = 0x08, OA_MOSAIC = 0x10, OA_TOUCHED = 0x20, OA_STDPAL = 0x40, OA_OPAQUE = 0x80;
+
+// Layer lines are u16 per pixel with bit 15 = opaque: a palette index in
+// bits 0-11 (extended palettes: palette number << 8 | index), or an RGB555
+// colour as VRAM holds it (bit 15 is the hardware's own opaque bit there),
+// or for the 3D layer the pixel's position. Each layer resolves through a
+// table (the standard palette, an extended-palette slot, the RGB555 table
+// or the 3D line), once, on the pixel that wins the priority select.
+constexpr u16 LV_OPAQUE = 0x8000;
+// Resolve table ids carried per pixel by the select.
+enum TableId : u8 { T_BG0 = 0, T_BG1, T_BG2, T_BG3, T_OBJ_STD, T_OBJ_EXT, T_OBJ_DIRECT, T_BACKDROP, T_NONE, T_COUNT };   // T_NONE: nothing beneath (colour 0, no layer id)
 
 // One 2D engine (A at 0x04000000, B at 0x04001000).
 //
-// Rendering is a mask-plane pipeline (docs/ARCHITECTURE.md §5): every enabled
-// background is rasterised into its own 256-pixel plane with an opacity mask,
-// sprites are pre-rendered one line ahead into their own plane, then a window
-// plane, a priority select and a colour-effects pass run as straight passes
-// over the line. Nothing in the later stages branches on per-pixel layer
-// identity in a way that can't be expressed as a masked select.
+// Rendering is a deferred-palette line pipeline (docs/ARCHITECTURE.md §5.1):
+// every enabled background is rasterised into a u16 line of palette indices
+// or RGB555 (bit 15 = opaque), sprites are pre-rendered one line ahead into
+// their own u16 line with an attribute byte, then a window plane and a
+// priority select on those 16-bit values run as straight passes over the
+// line, and the winning value of each pixel is resolved through its layer's
+// palette table once. Lines a colour effect can reach also keep the second
+// value and go through the composite pass on 18-bit records.
 class Engine2D {
 public:
   Engine2D(NDS& nds, int num);
@@ -66,6 +77,7 @@ public:
 
   u32 dispcnt() const { return dispcnt_; }
   void debug_dump(u32 line);   // stderr dump of register/latch state and a rendered line (debug builds of the CLI)
+  void debug_outhash(u32 line);   // DS_DEBUG_OUTHASH: per-frame / per-line output hashes
   bool forced_blank() const { return forced_blank_; }
 
 private:
@@ -96,26 +108,37 @@ private:
   bool bg_mosaic_latch_ = true, obj_mosaic_latch_ = true;
   u32 bg_mosaic_line_ = 0, obj_mosaic_line_ = 0;
 
-  // Planes. BG planes carry 8 pixels of padding on each side so the text
-  // renderer can write whole tile rows at the scroll offset; `any` records
-  // whether the line has an opaque pixel at all (empty planes are not selected).
-  struct BgPlane {
-    alignas(16) std::array<Pixel, 8 + 256 + 8> pxs;
-    alignas(16) std::array<u8, 16 + 256 + 16> ops;
+  // Layer lines (u16, see LV_OPAQUE). BG lines carry 8 pixels of padding on
+  // each side so the text renderer can write whole tile rows at the scroll
+  // offset; `any` records whether the line has an opaque pixel at all;
+  // `table` is what the layer resolves through this line.
+  struct Layer {
+    alignas(16) std::array<u16, 8 + 256 + 8> vs;
     bool any = false;
-    Pixel* px() { return pxs.data() + 8; }
-    u8* op() { return ops.data() + 16; }
-    const Pixel* px() const { return pxs.data() + 8; }
-    const u8* op() const { return ops.data() + 16; }
+    const Pixel* table = nullptr;
+    u16* v() { return vs.data() + 8; }
+    const u16* v() const { return vs.data() + 8; }
   };
-  std::array<BgPlane, 4> bg_;
-  // OBJ plane: colour/index word plus attribute byte and window flag.
-  // (16 entries of slack after the line: the row kernels write whole vectors.)
-  alignas(16) std::array<u32, 256 + 16> obj_px_{};   // bit 15 set: direct colour; else palette index (+ bit 12: standard palette)
-  alignas(16) std::array<u8, 256 + 16> obj_attr_{};  // bits 0-1 priority, bit 2 semi, bit 3 bitmap, bit 4 mosaic, bit 5 sprite-touched, bit 7 opaque
+  std::array<Layer, 4> bg_;
+  // OBJ line: value (index with OA_STDPAL/OA_BITMAP in the attribute byte choosing the table, or RGB555),
+  // attribute byte and window flag. (16 entries of slack: the row kernels write whole vectors.)
+  alignas(16) std::array<u16, 256 + 16> obj_v_{};
+  alignas(16) std::array<u8, 256 + 16> obj_attr_{};  // bits 0-1 priority, bit 2 semi, bit 3 bitmap, bit 4 mosaic, bit 5 sprite-touched, bit 6 standard palette, bit 7 opaque
   alignas(16) std::array<u8, 256 + 16> obj_alpha_{}; // bitmap sprites: EVA (alpha+1)
   alignas(16) std::array<u8, 256> obj_win_{};
-  alignas(16) std::array<Pixel, 256> obj_col_{};     // OBJ plane resolved through the palettes, per line
+  // OBJ palettes as 18-bit records, validated per line on first use.
+  alignas(16) std::array<Pixel, 256> objpal18_{};
+  alignas(16) std::array<u16, 256> objpal_copy_{};
+  bool objpal_checked_ = false, objpal_have_ = false;
+  alignas(16) std::array<Pixel, 4096> objext18_{};
+  alignas(16) std::array<u16, 4096> objext_copy_{};
+  u16 objext_checked_ = 0, objext_have_ = 0;   // per 256-entry palette
+  const Pixel* obj_std_pal18();
+  static const Pixel* rgb555_table();
+  void obj_ext_pal18(u32 pal);                 // validate / convert one OBJ extended palette
+  // Per-line resolve tables by TableId.
+  const Pixel* tables_[T_COUNT] = {};
+  static const Pixel zero_table_[256];
   // Palettes as 18-bit records: the standard BG palette and the extended
   // palettes by slot and number. A conversion is reused across lines while
   // the source bytes still equal the copy taken at conversion time (checked
@@ -138,6 +161,8 @@ private:
   std::array<LineSprites, 256> line_sprites_{};
   void rebuild_sprite_lists(const u16* oam);
   alignas(16) std::array<u8, 256> win_{};            // bits 0-3 BG, 4 OBJ, 5 effects
+  alignas(16) std::array<u16, 256> top16_{}, second16_{};
+  alignas(16) std::array<u8, 256> top_tid_{}, second_tid_{};
   alignas(16) std::array<Pixel, 256> top_{}, second_{};
   alignas(16) std::array<u8, 256> top_id_{}, top_kind_{}, top_alpha_{}, second_id_{};
   alignas(16) std::array<Pixel, 256> out_{};
@@ -159,15 +184,14 @@ private:
   void draw_bg_3d();
   void draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, bool window);
   void draw_sprite_rotscale(const u16* attr, const u16* oam, int bw, int bh, int w, int h, s32 x, s32 y, bool window);
-  inline void put_sprite_pixel(s32 x, u32 colour, bool opaque, u8 attr, u8 alpha, bool window);
+  inline void put_sprite_pixel(s32 x, u16 value, bool opaque, u8 attr, u8 alpha, bool window);
   void apply_sprite_mosaic_x();
   void build_window_plane();
   void select_layers();
   void select_layers_flat();
   bool effect_possible() const;
-  void select_bg(int bg);
-  void resolve_obj_colours();
-  void select_obj(u32 prio);
+  void setup_tables();
+  void resolve_full();
   void colour_effects();
 };
 

@@ -311,10 +311,13 @@ until it drains (the geometry engine keeps executing behind the stall).
 
 *Source: research note "Renderer design forensics" (private).*
 
-- 2D is a **mask-plane deferred scanline compositor**: rasterise each layer into
-  its own line buffer, build window/visibility masks, priority-encode, masked
-  select, masked blend. Every stage is a straight pass over 256 pixels with no
-  data-dependent branching — which is what makes NEON applicable at all.
+- 2D is a **deferred-palette scanline compositor**: rasterise each layer into
+  its own 16-bit line of palette indices or RGB555 (opacity is bit 15),
+  build window masks, priority-select on those values, resolve the winner
+  through its palette once, blend where an effect can reach. Every stage is
+  a straight pass over 256 pixels with no data-dependent branching — which
+  is what makes NEON applicable at all — and the bytes per pixel between
+  stages are what the hardware carries.
 - **Static specialisation** over runtime branching: texture wrap modes, blend
   modes, tile widths, output formats and 1x/2x scale are separate kernels chosen
   once per scanline/polygon through an indirect call.
@@ -330,24 +333,34 @@ until it drains (the geometry engine keeps executing behind the stall).
 
 ### 5.1 The 2D engines as built (`gpu/engine2d.*`, `gpu/gpu.*`, `gpu/vram_map.*`)
 
-The portable C++ pipeline is in; the NEON twins come next. Per line, per
-engine, in order:
+Per line, per engine, in order (the u16 form since 2026-08-22 p.m.; the
+first version carried 18-bit colour plus an opacity byte per layer, see the
+passes below):
 
-1. **Planes.** Each enabled background is rasterised into its own 256-entry
-   plane of 18-bit colour records plus an opacity mask (text, affine,
-   extended, large-bitmap and the 3D slot on BG0). Sprites are pre-rendered
-   one line ahead into an OBJ plane of palette indices/direct colours with a
-   per-pixel attribute byte (priority, semi-transparent, bitmap, mosaic), plus
-   the OBJ-window mask. Palette lookup is deferred to selection time, as on
-   hardware (the palette can change between pre-render and display).
+1. **Layer lines.** Each enabled background is rasterised into its own
+   256-entry `u16` line with bit 15 = opaque: a palette index in bits 0-11
+   (extended palettes: palette number << 8 | index) for text, affine,
+   extended-paletted and large-bitmap backgrounds, RGB555 as VRAM holds it
+   for direct-colour bitmaps (the hardware's own opaque bit), and the pixel's
+   position for the 3D slot on BG0. Each layer names the table it resolves
+   through this line: the standard palette, an extended-palette slot (4096
+   records, contiguous), the RGB555→18-bit table, or the 3D line. Sprites are
+   pre-rendered one line ahead into an OBJ `u16` line with an attribute byte
+   (priority, semi-transparent, bitmap, mosaic, standard-palette) that
+   selects their table per pixel. Palette lookup is deferred past the select,
+   as on hardware (the palette can change between pre-render and display).
 2. **Window plane.** One byte per pixel (BG0-3, OBJ, effects) from WIN0/WIN1/
    OBJ-window/WINOUT, with the hardware's edge-triggered activation rule in
    both axes.
 3. **Priority select.** Lowest priority first, BG3..BG0 then OBJ within a
-   level; each layer is a masked select that shifts the previous top record
-   to "second". Produces top/second colour, layer id (laid out like BLDCNT so
-   the id masks against the register) and kind (normal, semi OBJ, bitmap OBJ,
-   3D).
+   level; each layer is a masked select on the 16-bit values (16 pixels per
+   vector op) carrying a table id per pixel. Lines no colour effect can reach
+   (`effect_possible`: most of them) select the top value only and resolve it
+   straight into the output line — one palette gather per pixel for the whole
+   line. Other lines also keep the second value and resolve both into 18-bit
+   records with layer id (laid out like BLDCNT so the id masks against the
+   register), kind (normal, semi OBJ, bitmap OBJ, 3D — a 3D pixel keeps its
+   own word, the composite reads its alpha from it) and alpha.
 4. **Colour effects.** Alpha blend, brightness up/down with the 3D and OBJ
    override rules, on 6-bit channels with the hardware's rounding.
 5. **Output stage** (`Gpu`): display mode (graphics / VRAM / main-memory
@@ -443,8 +456,30 @@ output — ~19 K a line against DraStic's ~4.4 K. Its pipeline keeps
 op, opacity is "index ≠ 0"), and resolves the palette once on the
 winning index; ours resolves per background and carries 32-bit colour
 plus a separate opacity byte through every stage. The index-plane
-redesign is the remaining 2D item (estimate: ~5 K a line, ~5 M cycles a
-frame on this content).
+redesign was the remaining 2D item.
+
+**u16 layer lines (2026-08-22 p.m., the pipeline described at the top of
+this section).** Built, exact on the eight baselines, the three played
+scenes and NEON under qemu — and neutral on the device: Meteos 58.2 →
+58.0 s, Mario & Luigi 97.7 → 98.1, SM64DS 86.5 → 85.9, attract 30.7 →
+30.7. The data the stages carry dropped from 5 bytes a pixel per layer to 2
+and the select and tile kernels shrank to a third (select_plane 4.4 % →
+select16 ~1 %, text_tiles 7 % → text_row 1.4 % on the Meteos scene), but
+the palette lookup that used to happen inside the tile kernels — for
+16-colour tiles as a *vector* table lookup, `vqtbl4q` over the 64-byte
+palette bank, 8 pixels an instruction — became a scalar gather of 256
+dependent loads per line after the select (`resolve16` 2.5 % +
+`resolve16_full` 5.3 %), which on the in-order A55 costs what it saved.
+Two things found on the way: the OBJ extended-palette view is 8 KB,
+smaller than a 16 KB block, so `VramMap::finish` never gave it a direct
+pointer and every read of it went through the slow path (the old engine
+paid that per sprite pixel, the first version of this one per palette per
+line — 60 % slower on Meteos until it validated per 256-entry palette);
+and the composite reads a 3D pixel's alpha from bits 24-28 of the top
+colour word, so the resolved record must keep the raw 3D word. The lever
+left in this design is the gather: the winning values of a 16-colour text
+line come in runs of one palette bank per tile, so the resolve can use the
+vector table lookup for those runs and the scalar gather only elsewhere.
 
 Measured and parked: a line cache. Counting lines whose register state
 matches the previous frame's same line while the engine's palette, OAM and
