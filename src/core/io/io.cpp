@@ -400,30 +400,88 @@ void Io::cart_write_romctrl(u32 value) {
   const u32 xfer = (cart.romctrl & (1u << 27)) ? 8 : 5;
   u32 cmddelay = 8 + (cart.romctrl & 0x1FFF);
   if (bytes) cmddelay += (cart.romctrl >> 16) & 0x3F;
+  cart.event_armed = false;
   if (cart.romctrl & (1u << 30)) {            // write direction: not supported; end after the command
     nds_.sched.schedule(EventId::Cart, nds_.sched.now() + 2 * xfer * cmddelay, cart_ev, 0);
+    cart.event_armed = true;
     return;
   }
-  if (bytes == 0) nds_.sched.schedule(EventId::Cart, nds_.sched.now() + 2 * xfer * cmddelay, cart_ev, 0);
-  else nds_.sched.schedule(EventId::Cart, nds_.sched.now() + 2 * xfer * (cmddelay + 4), cart_ev, 1);
+  if (bytes == 0) {
+    nds_.sched.schedule(EventId::Cart, nds_.sched.now() + 2 * xfer * cmddelay, cart_ev, 0);
+    cart.event_armed = true;
+    return;
+  }
+  // The first word: an event only if a DMA is waiting for it (see above).
+  cart.next_word_at = nds_.sched.now() + 2 * xfer * (cmddelay + 4);
+  if (cart_dma_armed()) {
+    nds_.sched.schedule(EventId::Cart, cart.next_word_at, cart_ev, 1);
+    cart.event_armed = true;
+  }
 }
 
-void Io::cart_schedule_receive() {
-  if (cart.transfer_pos >= cart.transfer_len) return;
+// Cart words arrive on a fixed clock, and nothing observes one arriving: the
+// CPU learns of them by reading ROMCTRL's DRQ bit or ROMDATA. So the words are
+// produced at the read (`cart_catch_up`) instead of costing a scheduler event
+// each. On SM64DS the cart was 634-1,033 events a frame -- half of everything
+// we fire -- against DraStic's zero; it reads the card synchronously, and its
+// whole scheduler runs ~1,390 events a frame. melonDS, which this model came
+// from, schedules per word as we did.
+//
+// The exception is a cart-mode DMA channel: it is level-triggered on DRQ and
+// has nothing to poll it, so while one is armed the per-word event stays and
+// the behaviour is exactly what it was.
+bool Io::cart_dma_armed() const {
+  return nds_.dma.in_mode(Cpu::ARM9, dma::MODE9_CART) || nds_.dma.in_mode(Cpu::ARM7, dma::MODE7_CART);
+}
+
+u32 Io::cart_word_delay() const {
   const u32 xfer = (cart.romctrl & (1u << 27)) ? 8 : 5;
   u32 delay = 4;
   if (!(cart.transfer_pos & 0x1FF)) delay += (cart.romctrl >> 16) & 0x3F;
-  nds_.sched.schedule(EventId::Cart, nds_.sched.now() + 2 * xfer * delay, cart_ev, 1);
+  return 2 * xfer * delay;
 }
 
-void Io::cart_receive_word() {
+// `from` is the base the next word's delay counts from. On the lazy path that
+// is the word's nominal arrival time, so a transfer keeps the card's cadence
+// however late the reader looks. The event path passes now() instead, and must:
+// a nominal deadline there can land in the past, fire again inside the same
+// fire_due pass, and turn a clock-paced transfer into a burst -- measured at
+// 95-104 differing frames against melonDS on SM64DS, against 16 for now().
+void Io::cart_schedule_receive(u64 from) {
+  if (cart.transfer_pos >= cart.transfer_len) return;
+  cart.next_word_at = from + cart_word_delay();
+  if (cart_dma_armed()) {
+    nds_.sched.schedule(EventId::Cart, cart.next_word_at, cart_ev, 1);
+    cart.event_armed = true;
+  }
+}
+
+// Materialise every word whose time has passed. The FIFO holds two, and while
+// it is full the transfer stalls (`late`) and resumes from the read that makes
+// room -- as on hardware, and as melonDS's ROMDataLate does.
+void Io::cart_catch_up_slow() {
+  if (cart.event_armed || cart.late) return;
+  while (cart.transfer_pos < cart.transfer_len && cart.fifo_count < 2 && nds_.sched.now() >= cart.next_word_at)
+    cart_receive_word(cart.next_word_at);
+  // A DMA armed part-way through a transfer takes the words from here on.
+  if (!cart.event_armed && !cart.late && cart.transfer_pos < cart.transfer_len && cart_dma_armed()) {
+    nds_.sched.schedule(EventId::Cart, cart.next_word_at, cart_ev, 1);
+    cart.event_armed = true;
+  }
+}
+
+void Io::cart_receive_word(u64 at) {
   cart.fifo[(cart.fifo_head + cart.fifo_count) & 1] = nds_.cart ? nds_.cart->command_receive() : 0;
   cart.fifo_count++;
   cart.transfer_pos += 4;
   cart.romctrl |= 0x00800000u;                 // DRQ
-  nds_.dma.check(Cpu::ARM9, dma::MODE9_CART);
-  nds_.dma.check(Cpu::ARM7, dma::MODE7_CART);
-  if (cart.fifo_count < 2) cart_schedule_receive(); else cart.late = true;
+  // Only a cart-mode channel can be started by DRQ, and cart_drq() would
+  // re-enter the catch-up; skip the scan when none is armed.
+  if (cart_dma_armed()) {
+    nds_.dma.check(Cpu::ARM9, dma::MODE9_CART);
+    nds_.dma.check(Cpu::ARM7, dma::MODE7_CART);
+  }
+  if (cart.fifo_count < 2) cart_schedule_receive(at); else cart.late = true;
 }
 
 void Io::cart_end_transfer() {
@@ -433,16 +491,18 @@ void Io::cart_end_transfer() {
 }
 
 void Io::cart_event(u32 param) {
-  if (param == 0) cart_end_transfer(); else cart_receive_word();
+  cart.event_armed = false;
+  if (param == 0) cart_end_transfer(); else cart_receive_word(nds_.sched.now());
 }
 
 u32 Io::cart_read_data() {
+  cart_catch_up();
   const u32 v = cart.fifo[cart.fifo_head];
   if (cart.romctrl & (1u << 30)) return v;
   if (cart.fifo_count > 0) { cart.fifo_count--; cart.fifo_head ^= 1; }
   cart.romctrl &= ~0x00800000u;
   if (cart.transfer_pos < cart.transfer_len) {
-    if (cart.late) { cart.late = false; cart_schedule_receive(); }
+    if (cart.late) { cart.late = false; cart_schedule_receive(nds_.sched.now()); }
   } else {
     if (cart.fifo_count == 0) cart_end_transfer();
     else cart.romctrl |= 0x00800000u;
@@ -643,7 +703,7 @@ u32 Io::read32_special(Cpu cpu, u32 addr, bool& handled) {
   case 0x04000214: return c.if_;
   case 0x04100000: return ipc_fifo_recv(cpu);
   case 0x04100010: return cart_read_data();
-  case 0x040001A4: return cart.romctrl;
+  case 0x040001A4: cart_catch_up(); return cart.romctrl;
   case 0x04000280: return math.divcnt;
   case 0x04000290: return static_cast<u32>(math.div_num);
   case 0x04000294: return static_cast<u32>(math.div_num >> 32);

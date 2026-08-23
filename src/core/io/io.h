@@ -86,6 +86,8 @@ struct Cart {
   u32 fifo_count = 0;                       // 0..2 words waiting for the CPU
   u32 fifo[2] = {0, 0}; u32 fifo_head = 0;
   bool late = false;                        // FIFO was full; receive paused
+  u64 next_word_at = 0;                     // when the next word lands (nominal, not a slice end)
+  bool event_armed = false;                 // a per-word Cart event is pending (DMA path only)
 };
 
 // ARM9 hardware divider and square root unit (0x04000280-0x040002BF).
@@ -137,7 +139,12 @@ public:
   Rtc rtc;
   Cart cart;
   u16 arm7_bios_prot = 0;    // ARM7 BIOS reads below this from outside the BIOS return garbage
-  bool cart_drq() const { return (cart.romctrl & 0x00800000) != 0; }
+  // DRQ as the DMA trigger sees it. Not const: on the lazy path the words a
+  // transfer has produced so far are materialised when someone looks.
+  bool cart_drq() { cart_catch_up(); return (cart.romctrl & 0x00800000) != 0; }
+  // Called from every ROMCTRL and ROMDATA read, so the no-transfer case is a
+  // compare and a branch at the call site.
+  void cart_catch_up() { if (cart.transfer_pos < cart.transfer_len) cart_catch_up_slow(); }
   // Wi-Fi (ARM7, 0x04800000-0x0480FFFF). Register file, 8 KB RAM, baseband
   // and RF register indirection — enough for games' hardware probing. No
   // frames, timers or interrupts yet. Power-gated by POWCNT2 bit 1.
@@ -194,8 +201,11 @@ private:
   void cart_write_romctrl(u32 value);
   u32  cart_read_data();
   void cart_end_transfer();
-  void cart_receive_word();
-  void cart_schedule_receive();
+  void cart_receive_word(u64 at);
+  void cart_schedule_receive(u64 from);
+  void cart_catch_up_slow();
+  bool cart_dma_armed() const;
+  u32  cart_word_delay() const;
 public:
   void cart_event(u32 param);
 };
