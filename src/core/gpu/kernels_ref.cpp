@@ -264,6 +264,10 @@ void span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out) {
   for (u32 i = 0; i < n; ++i) out[i] = y1 + static_cast<s32>((d * (256 - fac[i])) >> 8);
 }
 
+void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const* out) {
+  for (int k = 0; k < 5; ++k) span_attr_persp(y0[k], y1[k], fac, n, out[k]);
+}
+
 void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
   if (y0 == y1) { for (u32 i = 0; i < n; ++i) out[i] = y0; return; }
   for (u32 i = 0; i < n; ++i) {

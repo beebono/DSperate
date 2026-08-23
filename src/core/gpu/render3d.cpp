@@ -490,10 +490,15 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   const s32 xdiff = (xend + 1) - xstart;
   const s32 xv0 = ca - xstart;
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
+  if (xdiff != 0 && !linear) {
+    // The common case: one pass over the span for all five attributes.
+    s32* outs[5] = {sb.attr[0] + off, sb.attr[1] + off, sb.attr[2] + off, sb.attr[3] + off, sb.attr[4] + off};
+    kern::active::span_attrs5(al, ar, sb.fac + off, n, outs);
+    return;
+  }
   for (int k = 0; k < 5; ++k) {
     s32* out = sb.attr[k] + off;
     if (xdiff == 0) { for (u32 i = 0; i < n; ++i) out[i] = al[k]; }
-    else if (!linear) kern::active::span_attr_persp(al[k], ar[k], sb.fac + off, n, out);
     else kern::active::span_attr_linear(al[k], ar[k], xv0, n, xdiff, out);
   }
 }

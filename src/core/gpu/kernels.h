@@ -66,6 +66,9 @@ namespace ds::gpu::kern {
   void NS##span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac);                      \
   /* Attribute by factor: y0 + ((y1-y0)*f >> 8) for y0 < y1, else y1 + ((y0-y1)*(256-f) >> 8); y0 == y1 -> y0. */ \
   void NS##span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out);                                \
+  /* The five span attributes (r g b s t) in one pass: the perspective factor is loaded once instead of     \
+     once per attribute. y0/y1 are the five endpoint pairs, out the five destination pointers. */            \
+  void NS##span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const* out);                \
   /* Linear attribute: y0 + (y1-y0)*xv/xdiff for y0 < y1, else y1 + (y0-y1)*(xdiff-xv)/xdiff (truncating);    \
      |y1-y0| * xdiff < 2^32 (colours and texture coordinates; depth goes through span_z_linear). */           \
   void NS##span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out);                            \

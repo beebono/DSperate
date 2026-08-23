@@ -205,6 +205,19 @@ static void test_span() {
     if (!(rng() & 7)) y1 = y0;
     kern::ref::span_attr_persp(y0, y1, fa, n, oa); N::span_attr_persp(y0, y1, fa, n, ob);
     CHECK_SAME("span_attr_persp", oa, ob, n * 4);
+    {
+      // The five-attribute pass: mixed flat / rising / falling endpoints.
+      alignas(16) static s32 a5[5][264], b5[5][264];
+      s32 ys0[5], ys1[5]; s32* pa[5]; s32* pb[5];
+      for (int k = 0; k < 5; ++k) {
+        ys0[k] = static_cast<s32>(rng() & 0xFFFFFF); ys1[k] = static_cast<s32>(rng() & 0xFFFFFF);
+        if (!(rng() & 5)) ys1[k] = ys0[k];
+        if (!(rng() & 3)) { const s32 t = ys0[k]; ys0[k] = ys1[k]; ys1[k] = t; }
+        pa[k] = a5[k]; pb[k] = b5[k];
+      }
+      kern::ref::span_attrs5(ys0, ys1, fa, n, pa); N::span_attrs5(ys0, ys1, fa, n, pb);
+      for (int k = 0; k < 5; ++k) CHECK_SAME("span_attrs5", a5[k], b5[k], n * 4);
+    }
     if (kind != 2) {   // linear attributes: |y1 - y0| * xdiff < 2^32
       kern::ref::span_attr_linear(y0, y1, xv0, n, xdiff, oa); N::span_attr_linear(y0, y1, xv0, n, xdiff, ob);
       CHECK_SAME("span_attr_linear", oa, ob, n * 4);
