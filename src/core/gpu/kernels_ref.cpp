@@ -269,7 +269,7 @@ void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const
 }
 
 void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
-  s32 tmp[5][264];
+  s32 tmp[5][272];
   s32* out[5] = {tmp[0], tmp[1], tmp[2], tmp[3], tmp[4]};
   span_attrs5(y0, y1, fac, n, out);
   for (u32 i = 0; i < n; ++i) {

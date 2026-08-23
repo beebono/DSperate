@@ -214,17 +214,23 @@ u16 Renderer3D::pal16(u32 addr) const {
 // screen x `x0` (the kernels round their counts up to 4: padded).
 struct Renderer3D::SpanBuf {
   s32 x0;
-  alignas(16) u32 fac[256 + 4];
-  alignas(16) s32 z[256 + 4];
+  // Every array carries sixteen entries of slack: the stages round the span
+  // length up to their vector width (four, eight or sixteen pixels) and write
+  // whole vectors, so the tail of a short span runs past `n`.
+  alignas(16) u32 fac[256 + 16];
+  alignas(16) s32 z[256 + 16];
   // The pixel stages read colour as a 6-bit channel and texture coordinates
   // as s16, so the span keeps them in those widths (a third of the bytes and
   // eight pixels a vector instead of four).
-  alignas(16) u8  vr[256 + 8], vg[256 + 8], vb[256 + 8];
-  alignas(16) s16 sc[256 + 8], tc[256 + 8];
-  alignas(16) u8 pass[256 + 8];       // depth pre-pass result (kern depth_candidates)
-  alignas(16) u32 tcol[256 + 4];      // texels for the span (textured polygons), colour15 and
-  alignas(16) u32 talp[256 + 4];      // 5-bit alpha, gathered once per span
-  alignas(16) u32 col[256 + 4];       // shaded pixel records (18-bit colour, alpha 24-28)
+  alignas(16) u8  vr[256 + 16], vg[256 + 16], vb[256 + 16];
+  alignas(16) s16 sc[256 + 16], tc[256 + 16];
+  alignas(16) u8 pass[256 + 16];      // depth pre-pass result (kern depth_candidates)
+  alignas(16) u32 tcol[256 + 16];     // texels for the span (textured polygons), colour15 and
+  alignas(16) u32 talp[256 + 16];     // 5-bit alpha, gathered once per span
+  // The same texels as 6-bit channels and 5-bit alpha, one plane each, so the
+  // shader runs in byte lanes (sixteen pixels a vector).
+  alignas(16) u8 tr[256 + 16], tg[256 + 16], tb[256 + 16], ta[256 + 16];
+  alignas(16) u32 col[256 + 16];      // shaded pixel records (18-bit colour, alpha 24-28)
 };
 
 namespace {
@@ -499,7 +505,7 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
     kern::active::span_attrs5n(al, ar, sb.fac + off, n, sb.vr + off, sb.vg + off, sb.vb + off, sb.sc + off, sb.tc + off);
     return;
   }
-  alignas(16) s32 tmp[5][264];
+  alignas(16) s32 tmp[5][272];
   for (int k = 0; k < 5; ++k) {
     if (xdiff == 0) { for (u32 i = 0; i < n; ++i) tmp[k][i] = al[k]; }
     else kern::active::span_attr_linear(al[k], ar[k], xv0, n, xdiff, tmp[k]);
@@ -951,16 +957,33 @@ inline void Renderer3D::texture_gather4(const Shade& sh, const s16* sa, const s1
 // loads texels from the span buffer and keeps no texture state live.
 void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const {
   const u32 off = static_cast<u32>(ca - sb.x0);
-  const u32 n = (static_cast<u32>(cb - ca) + 3) & ~3u;   // the buffers carry four words of slack
+  const u32 n = (static_cast<u32>(cb - ca) + 15) & ~15u;   // the buffers carry sixteen entries of slack
   const s16* sa = sb.sc + off; const s16* ta = sb.tc + off;
   u32* col = sb.tcol + off; u32* alp = sb.talp + off;
   if (const GatherNFn g = reinterpret_cast<GatherNFn>(sh.gather4)) {
     g(sh, sa, ta, n, col, alp);
     prof::add(sh.texels ? prof::C_TEX_FAST : (sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST), n);
-    return;
+  } else {
+    prof::add(prof::C_TEX_SLOW_VIEWS, n);
+    for (u32 i = 0; i < n; i += 4) texture_gather4(sh, sa + i, ta + i, col + i, alp + i);
   }
-  prof::add(prof::C_TEX_SLOW_VIEWS, n);
-  for (u32 i = 0; i < n; i += 4) texture_gather4(sh, sa + i, ta + i, col + i, alp + i);
+  // RGB555 -> three 6-bit channels, in 16-bit lanes, stored as byte planes.
+  const uint16x8_t m3e = vdupq_n_u16(0x3E), one16 = vdupq_n_u16(1);
+  auto chan = [&](uint16x8_t c, int shift) {
+    uint16x8_t v = shift == 0 ? vshlq_n_u16(c, 1) : (shift == 4 ? vshrq_n_u16(c, 4) : vshrq_n_u16(c, 9));
+    v = vandq_u16(v, m3e);
+    return vaddq_u16(v, vandq_u16(vtstq_u16(v, v), one16));
+  };
+  for (u32 i = 0; i < n; i += 16) {
+    const uint16x8_t c0 = vcombine_u16(vmovn_u32(vld1q_u32(col + i)),     vmovn_u32(vld1q_u32(col + i + 4)));
+    const uint16x8_t c1 = vcombine_u16(vmovn_u32(vld1q_u32(col + i + 8)), vmovn_u32(vld1q_u32(col + i + 12)));
+    const uint16x8_t a0 = vcombine_u16(vmovn_u32(vld1q_u32(alp + i)),     vmovn_u32(vld1q_u32(alp + i + 4)));
+    const uint16x8_t a1 = vcombine_u16(vmovn_u32(vld1q_u32(alp + i + 8)), vmovn_u32(vld1q_u32(alp + i + 12)));
+    vst1q_u8(sb.tr + off + i, vcombine_u8(vmovn_u16(chan(c0, 0)), vmovn_u16(chan(c1, 0))));
+    vst1q_u8(sb.tg + off + i, vcombine_u8(vmovn_u16(chan(c0, 4)), vmovn_u16(chan(c1, 4))));
+    vst1q_u8(sb.tb + off + i, vcombine_u8(vmovn_u16(chan(c0, 9)), vmovn_u16(chan(c1, 9))));
+    vst1q_u8(sb.ta + off + i, vcombine_u8(vmovn_u16(a0), vmovn_u16(a1)));
+  }
 }
 
 // The span's shaded colours. Decal vs modulate is a property of the polygon,
@@ -969,37 +992,61 @@ void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const
 template <bool textured>
 void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const {
   const u32 off = static_cast<u32>(ca - sb.x0);
-  const u32 n = (static_cast<u32>(cb - ca) + 3) & ~3u;
+  const u32 n = (static_cast<u32>(cb - ca) + 15) & ~15u;
   const u8* ra = sb.vr + off; const u8* ga = sb.vg + off; const u8* ba = sb.vb + off;
-  const u32* tc = sb.tcol + off; const u32* ta = sb.talp + off;
   u32* out = sb.col + off;
-  const uint32x4_t v_polyalpha = vdupq_n_u32(sh.polyalpha), v31 = vdupq_n_u32(31), v0 = vdupq_n_u32(0);
-  const uint32x4_t m7 = vdupq_n_u32(0xFF), one = vdupq_n_u32(1);
+  const uint8x16_t vpa = vdupq_n_u8(static_cast<u8>(sh.polyalpha));
+  // A pixel record is r | g << 8 | b << 16 | a << 24, so four byte planes
+  // stored interleaved (st4) are the records themselves.
+  if constexpr (!textured) {
+    for (u32 i = 0; i < n; i += 16) {
+      const uint8x16x4_t rec = {vld1q_u8(ra + i), vld1q_u8(ga + i), vld1q_u8(ba + i), vpa};
+      vst4q_u8(reinterpret_cast<u8*>(out + i), rec);
+    }
+    return;
+  }
+  const u8* tra = sb.tr + off; const u8* tga = sb.tg + off; const u8* tba = sb.tb + off; const u8* taa = sb.ta + off;
   const bool decal = sh.blendmode & 1;
-  for (u32 i = 0; i < n; i += 4) {
-    const uint32x4_t vr = vmovl_u16(vget_low_u16(vmovl_u8(vld1_u8(ra + i))));
-    const uint32x4_t vg = vmovl_u16(vget_low_u16(vmovl_u8(vld1_u8(ga + i))));
-    const uint32x4_t vb = vmovl_u16(vget_low_u16(vmovl_u8(vld1_u8(ba + i))));
-    uint32x4_t r, g, b, a;
-    if constexpr (textured) {
-      const uint32x4_t c = vld1q_u32(tc + i), talpha = vld1q_u32(ta + i);
-      const uint32x4_t tr = c15_to_18_4(c, 0), tg = c15_to_18_4(c, 4), tb = c15_to_18_4(c, 9);
-      if (decal) {
-        const uint32x4_t inv = vsubq_u32(v31, talpha);
-        r = vshrq_n_u32(vmlaq_u32(vmulq_u32(tr, talpha), vr, inv), 5);
-        g = vshrq_n_u32(vmlaq_u32(vmulq_u32(tg, talpha), vg, inv), 5);
-        b = vshrq_n_u32(vmlaq_u32(vmulq_u32(tb, talpha), vb, inv), 5);
-        const uint32x4_t t0 = vceqq_u32(talpha, v0), t31 = vceqq_u32(talpha, v31);
-        r = vbslq_u32(t0, vr, vbslq_u32(t31, tr, r)); g = vbslq_u32(t0, vg, vbslq_u32(t31, tg, g)); b = vbslq_u32(t0, vb, vbslq_u32(t31, tb, b));
-        a = v_polyalpha;
-      } else {
-        r = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tr, one), vaddq_u32(vr, one)), one), 6);
-        g = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tg, one), vaddq_u32(vg, one)), one), 6);
-        b = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tb, one), vaddq_u32(vb, one)), one), 6);
-        a = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(talpha, one), vaddq_u32(v_polyalpha, one)), one), 5);
+  if (!decal) {
+    // Modulate: ((t + 1) * (v + 1) - 1) >> 6 is t + v + t*v >> 6, which is an
+    // add-long plus a multiply-accumulate-long in byte lanes (both channels
+    // are 6-bit, so the product cannot leave 16 bits).
+    for (u32 i = 0; i < n; i += 16) {
+      uint8x16_t ch[4];
+      const uint8x16_t tv[4] = {vld1q_u8(tra + i), vld1q_u8(tga + i), vld1q_u8(tba + i), vld1q_u8(taa + i)};
+      const uint8x16_t vv[4] = {vld1q_u8(ra + i), vld1q_u8(ga + i), vld1q_u8(ba + i), vpa};
+      for (int k = 0; k < 4; ++k) {
+        uint16x8_t lo = vaddl_u8(vget_low_u8(tv[k]), vget_low_u8(vv[k]));
+        uint16x8_t hi = vaddl_high_u8(tv[k], vv[k]);
+        lo = vmlal_u8(lo, vget_low_u8(tv[k]), vget_low_u8(vv[k]));
+        hi = vmlal_high_u8(hi, tv[k], vv[k]);
+        ch[k] = k == 3 ? vcombine_u8(vshrn_n_u16(lo, 5), vshrn_n_u16(hi, 5))
+                       : vcombine_u8(vshrn_n_u16(lo, 6), vshrn_n_u16(hi, 6));
       }
-    } else { r = vr; g = vg; b = vb; a = v_polyalpha; }
-    vst1q_u32(out + i, pack_colour(r, g, b, a));
+      const uint8x16x4_t rec = {ch[0], ch[1], ch[2], ch[3]};
+      vst4q_u8(reinterpret_cast<u8*>(out + i), rec);
+    }
+    return;
+  }
+  // Decal: (t * ta + v * (31 - ta)) >> 5, with the two ends taken whole.
+  const uint8x16_t v31 = vdupq_n_u8(31), v0 = vdupq_n_u8(0);
+  for (u32 i = 0; i < n; i += 16) {
+    const uint8x16_t tal = vld1q_u8(taa + i);
+    const uint8x16_t inv = vsubq_u8(v31, tal);
+    const uint8x16_t at0 = vceqq_u8(tal, v0), at31 = vceqq_u8(tal, v31);
+    uint8x16_t ch[4];
+    const uint8x16_t tv[3] = {vld1q_u8(tra + i), vld1q_u8(tga + i), vld1q_u8(tba + i)};
+    const uint8x16_t vv[3] = {vld1q_u8(ra + i), vld1q_u8(ga + i), vld1q_u8(ba + i)};
+    for (int k = 0; k < 3; ++k) {
+      uint16x8_t lo = vmull_u8(vget_low_u8(tv[k]), vget_low_u8(tal));
+      uint16x8_t hi = vmull_high_u8(tv[k], tal);
+      lo = vmlal_u8(lo, vget_low_u8(vv[k]), vget_low_u8(inv));
+      hi = vmlal_high_u8(hi, vv[k], inv);
+      const uint8x16_t m = vcombine_u8(vshrn_n_u16(lo, 5), vshrn_n_u16(hi, 5));
+      ch[k] = vbslq_u8(at0, vv[k], vbslq_u8(at31, tv[k], m));
+    }
+    const uint8x16x4_t rec = {ch[0], ch[1], ch[2], vpa};
+    vst4q_u8(reinterpret_cast<u8*>(out + i), rec);
   }
 }
 
