@@ -1026,16 +1026,29 @@ inline void Renderer3D::texture_gather4(const Shade& sh, const s16* sa, const s1
 // loads texels from the span buffer and keeps no texture state live.
 void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const {
   const u32 off = static_cast<u32>(ca - sb.x0);
-  const u32 n = (static_cast<u32>(cb - ca) + 15) & ~15u;   // the buffers carry sixteen entries of slack
+  // Two roundings, deliberately different. The gather is real work -- an
+  // address computation, a wrap and a palette lookup per texel -- and steps
+  // by four, so it runs over the span rounded up to *four*: rounding it to
+  // sixteen fetched up to twelve texels nobody reads, and with a mean span
+  // around ten pixels that was a third of the whole texture stage. The
+  // repack below is byte-lane ALU over a buffer that is already there, so it
+  // keeps its sixteen-wide step and the gap is filled in rather than fetched.
+  const u32 n = static_cast<u32>(cb - ca);
+  const u32 n4 = (n + 3) & ~3u;
+  const u32 n16 = (n + 15) & ~15u;                         // the buffers carry sixteen entries of slack
   const s16* sa = sb.sc + off; const s16* ta = sb.tc + off;
   u32* col = sb.tcol + off; u32* alp = sb.talp + off;
   if (const GatherNFn g = reinterpret_cast<GatherNFn>(sh.gather4)) {
-    g(sh, sa, ta, n, col, alp);
-    prof::add(sh.texels ? prof::C_TEX_FAST : (sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST), n);
+    g(sh, sa, ta, n4, col, alp);
+    prof::add(sh.texels ? prof::C_TEX_FAST : (sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST), n4);
   } else {
-    prof::add(prof::C_TEX_SLOW_VIEWS, n);
-    for (u32 i = 0; i < n; i += 4) texture_gather4(sh, sa + i, ta + i, col + i, alp + i);
+    prof::add(prof::C_TEX_SLOW_VIEWS, n4);
+    for (u32 i = 0; i < n4; i += 4) texture_gather4(sh, sa + i, ta + i, col + i, alp + i);
   }
+  // The repack reads whole sixteens; the tail past the gather is padding the
+  // resolve loop never looks at, but it has to be a defined value.
+  const uint32x4_t zero = vdupq_n_u32(0);
+  for (u32 i = n4; i < n16; i += 4) { vst1q_u32(col + i, zero); vst1q_u32(alp + i, zero); }
   // RGB555 -> three 6-bit channels, in 16-bit lanes, stored as byte planes.
   const uint16x8_t m3e = vdupq_n_u16(0x3E), one16 = vdupq_n_u16(1);
   auto chan = [&](uint16x8_t c, int shift) {
@@ -1043,7 +1056,7 @@ void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const
     v = vandq_u16(v, m3e);
     return vaddq_u16(v, vandq_u16(vtstq_u16(v, v), one16));
   };
-  for (u32 i = 0; i < n; i += 16) {
+  for (u32 i = 0; i < n16; i += 16) {
     const uint16x8_t c0 = vcombine_u16(vmovn_u32(vld1q_u32(col + i)),     vmovn_u32(vld1q_u32(col + i + 4)));
     const uint16x8_t c1 = vcombine_u16(vmovn_u32(vld1q_u32(col + i + 8)), vmovn_u32(vld1q_u32(col + i + 12)));
     const uint16x8_t a0 = vcombine_u16(vmovn_u32(vld1q_u32(alp + i)),     vmovn_u32(vld1q_u32(alp + i + 4)));
