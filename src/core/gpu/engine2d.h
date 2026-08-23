@@ -189,6 +189,7 @@ private:
   void build_window_plane();
   void select_layers();
   void select_layers_flat();
+  static bool line_all_opaque(const Layer& p);
   bool effect_possible() const;
   void setup_tables();
   void resolve_full();

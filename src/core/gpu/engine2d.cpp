@@ -365,9 +365,27 @@ void Engine2D::render_line(u32 line) {
   { DS_PROF(WINDOW); build_window_plane(); apply_sprite_mosaic_x(); }
   if (!effect_possible()) {
     // No colour effect can touch this line: the planes go straight into
-    // the output, with none of the second-layer bookkeeping.
+    // the output, with none of the second-layer bookkeeping. Most lines
+    // are simpler still, so the pass is chosen from what actually
+    // contributes rather than run in full for every line (§5.1).
     prof::add(prof::C_2D_FLAT_LINES, 1);
-    DS_PROF(SELECT); select_layers_flat();
+    DS_PROF(SELECT);
+    u32 nlayers = 0; int only = -1;
+    for (int n = 0; n < 4; ++n) if (bg_[n].any) { ++nlayers; only = n; }
+    const bool objs = (layer_enable_ & 0x10) && num_sprites_ && obj_prio_mask_;
+    if (!objs) {
+      // Nothing on the line: the backdrop shows everywhere (windows
+      // inhibit layers, never the backdrop).
+      if (nlayers == 0) { prof::add(prof::C_2D_FAST_BACKDROP, 1); out_.fill(std_pal18()[0] | 0xFF000000); return; }
+      // One layer covering every pixel, no window to punch through it:
+      // the select can only ever pick that layer, so resolve it directly.
+      if (nlayers == 1 && !(dispcnt_ & 0xE000) && line_all_opaque(bg_[only])) {
+        prof::add(prof::C_2D_FAST_ONE, 1);
+        kern::active::resolve16_one(bg_[only].v(), bg_[only].table, out_.data());
+        return;
+      }
+    }
+    select_layers_flat();
     return;
   }
   prof::add(prof::C_2D_EFFECT_LIVE, 1);
@@ -458,8 +476,13 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
       const u32 len = c256 ? 8 : 4;
       u64 row = 0;
       if (const u8* p = vv.direct(a, len)) std::memcpy(&row, p, len); else for (u32 i = 0; i < len; ++i) row |= static_cast<u64>(vm.read8(vv, a + i)) << (8 * i);
-      if (row == 0) { plane.any = false; prof::add(prof::C_2D_BG_EMPTY, 1); return; }
+      if (row == 0) { plane.any = false; prof::add(prof::C_2D_BG_EMPTY, 1); return; }   // repeated blank tile: not even the rows are needed
     }
+    // The rows are accumulated as they are gathered: a line whose tiles are
+    // all blank (different tiles, all index 0 on this row -- most of what a
+    // HUD or a text layer holds) needs neither the kernel nor the extended
+    // palettes, and drops out of the priority select entirely.
+    u64 rowacc = 0;
     for (u32 t = 0; t < 33; ++t) {
       const u16 tile = tiles[t];
       const u32 ty = (tile & (1 << 11)) ? 7 - ty0 : ty0;
@@ -467,12 +490,21 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
       palmask |= 1u << (tile >> 12);
       if (c256) {
         const u32 a = tileset + ((tile & 0x3FF) << 6) + (ty << 3);
-        if (const u8* p = vv.direct(a, 8)) std::memcpy(rows + t * 8, p, 8); else for (u32 i = 0; i < 8; ++i) rows[t * 8 + i] = vm.read8(vv, a + i);
+        u64 row;
+        if (const u8* p = vv.direct(a, 8)) std::memcpy(&row, p, 8);
+        else { row = 0; for (u32 i = 0; i < 8; ++i) row |= static_cast<u64>(vm.read8(vv, a + i)) << (8 * i); }
+        std::memcpy(rows + t * 8, &row, 8);
+        rowacc |= row;
       } else {
         const u32 a = tileset + ((tile & 0x3FF) << 5) + (ty << 2);
-        if (const u8* p = vv.direct(a, 4)) std::memcpy(rows + t * 4, p, 4); else for (u32 i = 0; i < 4; ++i) rows[t * 4 + i] = vm.read8(vv, a + i);
+        u32 row;
+        if (const u8* p = vv.direct(a, 4)) std::memcpy(&row, p, 4);
+        else { row = 0; for (u32 i = 0; i < 4; ++i) row |= static_cast<u32>(vm.read8(vv, a + i)) << (8 * i); }
+        std::memcpy(rows + t * 4, &row, 4);
+        rowacc |= row;
       }
     }
+    if (!rowacc) { plane.any = false; prof::add(prof::C_2D_BG_EMPTY, 1); return; }
     const u32 shift = xoff & 7;
     u16* v = plane.v() - shift;
     if (!c256) plane.any = kern::active::text_row_16(rows, ctl, 33, v);
@@ -977,6 +1009,14 @@ void Engine2D::resolve_full() {
   const bool is3d = !num_ && (dispcnt_ & 8);
   kern::active::resolve16_full(top16_.data(), top_tid_.data(), second16_.data(), second_tid_.data(), tables_, obj_attr_.data(), obj_alpha_.data(),
                                is3d ? line3d_ : nullptr, top_.data(), second_.data(), top_id_.data(), top_kind_.data(), top_alpha_.data(), second_id_.data());
+}
+
+// Every pixel of the line opaque (bit 15 set): four vectors' worth of AND.
+bool Engine2D::line_all_opaque(const Layer& p) {
+  const u16* v = p.v();
+  u64 acc = ~0ull;
+  for (u32 i = 0; i < 256; i += 4) { u64 w; std::memcpy(&w, v + i, 8); acc &= w; }
+  return (acc & 0x8000800080008000ull) == 0x8000800080008000ull;
 }
 
 void Engine2D::select_layers_flat() {

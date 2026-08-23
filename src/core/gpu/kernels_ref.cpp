@@ -145,6 +145,10 @@ void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pi
   for (u32 i = 0; i < 256; ++i) out[i] = tables[top_tid[i]][top[i] & 0x7FFF] | 0xFF000000;
 }
 
+void resolve16_one(const u16* v, const Pixel* table, Pixel* out) {
+  for (u32 i = 0; i < 256; ++i) out[i] = table[v[i] & 0x7FFF] | 0xFF000000;
+}
+
 void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,
                     const Pixel* const* tables, const u8* attr, const u8* alpha, const Pixel* line3d,
                     Pixel* top_px, Pixel* second_px, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {

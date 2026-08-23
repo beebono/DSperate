@@ -490,6 +490,27 @@ mapped banks are byte-identical across the frame gives SM64DS A 6 % / B
 should have shown), which is a page-table write-notify mode plus DMA
 hooks. Not built yet.
 
+**Per-line dispatch.** Most scanlines are far simpler than the general
+pipeline: on the boot/attract content 69-89 % of them are either pure
+backdrop or a single background layer covering every pixel. The flat path
+therefore counts what actually contributes and picks the pass from that --
+no contributing layer is a fill with the backdrop colour, and one fully
+opaque layer with no window is `resolve16_one` straight from that layer's
+line, skipping the priority select entirely. In played scenes the rate is
+lower (17-44 %), so the end-to-end gain is around 1 %.
+
+Text rows accumulate their tile rows as they are gathered and drop out
+before the kernel when every one is blank, which is about half of the rows
+M&L rasterises.
+
+**Kernel shape.** The select kernels step 32 pixels and never test the mask.
+A `vmaxvq` + branch to skip a fully transparent group is a vector-to-scalar
+readback, and on the A55 it costs more than the merge it avoids at every
+density (measured: -17 % from removing it, -22 % with the wider step). A
+hand-written assembly version of the same kernel was 10 % *slower* than the
+intrinsics -- GCC schedules the loop better -- so the kernels stay in
+intrinsics and the tuning is in the shape, not the encoding.
+
 ### 5.2 The 3D engine as built (`gpu/gpu3d.*`, `gpu/render3d.*`)
 
 Geometry (`Gpu3D`): a 256-entry command FIFO feeding a 4-entry pipe, with a

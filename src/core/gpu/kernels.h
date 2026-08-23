@@ -27,6 +27,8 @@ namespace ds::gpu::kern {
   void NS##select16_obj_flat(const u16* v, const u8* attr, const u8* win, u32 prio, u16* top, u8* top_tid);  \
   /* Winning values through their tables (index = value & 0x7FFF) to 18-bit records with alpha 0xFF. */     \
   void NS##resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pixel* out);             \
+  /* The same for a line that is one layer through one table (the single-opaque-layer fast path). */         \
+  void NS##resolve16_one(const u16* v, const Pixel* table, Pixel* out);                                      \
   /* Top and second values to the composite's records: colours through the tables (a 3D pixel keeps its own \
      word when line3d is given), layer ids as BLDCNT masks, kind (3D, semi / bitmap OBJ from attr) and alpha. */ \
   void NS##resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,        \

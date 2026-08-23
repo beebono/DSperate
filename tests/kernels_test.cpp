@@ -77,6 +77,17 @@ static void test_resolve16() {
   }
 }
 
+static void test_resolve16_one() {
+  static Pixel tab[32768];
+  for (u32 i = 0; i < 32768; ++i) tab[i] = rng() & 0x3F3F3F;
+  alignas(16) u16 v[256]; alignas(16) Pixel oa[256], ob[256];
+  for (u32 it = 0; it < 200; ++it) {
+    for (u32 i = 0; i < 256; ++i) v[i] = static_cast<u16>(rng());
+    kern::ref::resolve16_one(v, tab, oa); N::resolve16_one(v, tab, ob);
+    CHECK_SAME("resolve16_one", oa, ob, sizeof oa);
+  }
+}
+
 static void test_resolve16_full() {
   static Pixel tabs[9][32768];
   const Pixel* tables[9];
@@ -228,6 +239,7 @@ int main() {
   test_depth_candidates();
   test_select16();
   test_resolve16();
+  test_resolve16_one();
   test_resolve16_full();
   test_rows16();
   test_obj_row16();
