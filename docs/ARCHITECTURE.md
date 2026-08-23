@@ -303,6 +303,14 @@ re-read after every handler so an event armed at a higher id still fires
 in the same pass. SM64DS, Meteos and Mario & Luigi are byte-identical over
 300 frames at both quanta.
 
+Measured with the qemu dispatch harness (SM64DS scene, 600 frames,
+event-bound), instructions per frame: scheduler **1,035,373 -> 656,570**
+(-36.6 %), of a total 15,926,875 -> 15,570,192 (-2.2 %); the bucket falls
+from 6.4 % to 4.2 % of everything we execute, and from 6.2x DraStic's
+scheduler to 3.9x. `fire_due` 460,436 -> 213,956 (its call count halves:
+the per-event entry call is gone), `slice_next` 422,955 -> 366,232 on 1,277
+calls instead of 2,984, `run_until` 59,751 -> 41.
+
 The event count itself is now the thing to look at: SM64DS fires ~2,100
 events a frame, of which **1,033 are cart transfers** -- `cart_schedule_receive`
 arms one event per word -- against DraStic's ~1,390 events of all kinds.
