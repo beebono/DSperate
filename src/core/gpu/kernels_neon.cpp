@@ -559,6 +559,40 @@ void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const
   }
 }
 
+// The same interpolation, narrowed as it is stored: colour to the 6-bit
+// channel the shader reads and texture coordinates to the s16 the sampler
+// truncates to. Eight pixels a step, so the stores are whole vectors and the
+// span buffers are a third of the size.
+void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
+  const uint32x4_t k256 = vdupq_n_u32(256);
+  int32x4_t base[5]; uint32x4_t d[5]; bool up[5], flat[5];
+  for (int k = 0; k < 5; ++k) {
+    flat[k] = y0[k] == y1[k];
+    up[k] = y0[k] < y1[k];
+    base[k] = vdupq_n_s32(flat[k] ? y0[k] : (up[k] ? y0[k] : y1[k]));
+    d[k] = vdupq_n_u32(static_cast<u32>(up[k] ? y1[k] - y0[k] : y0[k] - y1[k]));
+  }
+  u8* const cout[3] = {vr, vg, vb};
+  s16* const tout[2] = {sc, tc};
+  for (u32 i = 0; i < n; i += 8) {
+    const uint32x4_t f0 = vld1q_u32(fac + i), f1 = vld1q_u32(fac + i + 4);
+    const uint32x4_t i0 = vsubq_u32(k256, f0), i1 = vsubq_u32(k256, f1);
+    for (int k = 0; k < 5; ++k) {
+      int32x4_t v0, v1;
+      if (flat[k]) { v0 = base[k]; v1 = base[k]; }
+      else { v0 = mul_hi8_add(base[k], d[k], up[k] ? f0 : i0); v1 = mul_hi8_add(base[k], d[k], up[k] ? f1 : i1); }
+      if (k < 3) {   // (v >> 3) & 0xFF: the two narrowing moves mask it
+        const uint16x8_t w = vcombine_u16(vmovn_u32(vshrq_n_u32(vreinterpretq_u32_s32(v0), 3)),
+                                          vmovn_u32(vshrq_n_u32(vreinterpretq_u32_s32(v1), 3)));
+        vst1_u8(cout[k] + i, vmovn_u16(w));
+      } else {       // (s16)v
+        vst1q_s16(tout[k - 3] + i, vreinterpretq_s16_u16(vcombine_u16(vmovn_u32(vreinterpretq_u32_s32(v0)),
+                                                                     vmovn_u32(vreinterpretq_u32_s32(v1)))));
+      }
+    }
+  }
+}
+
 void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
   if (y0 == y1) { const int32x4_t v = vdupq_n_s32(y0); for (u32 i = 0; i < n; i += 4) vst1q_s32(out + i, v); return; }
   const bool up = y0 < y1;

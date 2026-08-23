@@ -217,6 +217,16 @@ static void test_span() {
       }
       kern::ref::span_attrs5(ys0, ys1, fa, n, pa); N::span_attrs5(ys0, ys1, fa, n, pb);
       for (int k = 0; k < 5; ++k) CHECK_SAME("span_attrs5", a5[k], b5[k], n * 4);
+      // The narrowing twin: colour to 6 bits, texture coordinates to s16.
+      alignas(16) static u8 ra8[264], ga8[264], ba8[264], rb8[264], gb8[264], bb8[264];
+      alignas(16) static s16 sa16[264], ta16[264], sb16[264], tb16[264];
+      kern::ref::span_attrs5n(ys0, ys1, fa, n, ra8, ga8, ba8, sa16, ta16);
+      N::span_attrs5n(ys0, ys1, fa, n, rb8, gb8, bb8, sb16, tb16);
+      CHECK_SAME("span_attrs5n r", ra8, rb8, n);
+      CHECK_SAME("span_attrs5n g", ga8, gb8, n);
+      CHECK_SAME("span_attrs5n b", ba8, bb8, n);
+      CHECK_SAME("span_attrs5n s", sa16, sb16, n * 2);
+      CHECK_SAME("span_attrs5n t", ta16, tb16, n * 2);
     }
     if (kind != 2) {   // linear attributes: |y1 - y0| * xdiff < 2^32
       kern::ref::span_attr_linear(y0, y1, xv0, n, xdiff, oa); N::span_attr_linear(y0, y1, xv0, n, xdiff, ob);

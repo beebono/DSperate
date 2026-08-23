@@ -69,6 +69,10 @@ namespace ds::gpu::kern {
   /* The five span attributes (r g b s t) in one pass: the perspective factor is loaded once instead of     \
      once per attribute. y0/y1 are the five endpoint pairs, out the five destination pointers. */            \
   void NS##span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const* out);                \
+  /* The same, narrowed on store to what the pixel stages read: colour as the 6-bit channel the shader      \
+     uses ((v >> 3) & 0xFF) and texture coordinates as the s16 the sampler truncates to. Eight pixels a     \
+     step; the span buffers carry eight entries of slack. */                                                \
+  void NS##span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc); \
   /* Linear attribute: y0 + (y1-y0)*xv/xdiff for y0 < y1, else y1 + (y0-y1)*(xdiff-xv)/xdiff (truncating);    \
      |y1-y0| * xdiff < 2^32 (colours and texture coordinates; depth goes through span_z_linear). */           \
   void NS##span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out);                            \

@@ -268,6 +268,19 @@ void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const
   for (int k = 0; k < 5; ++k) span_attr_persp(y0[k], y1[k], fac, n, out[k]);
 }
 
+void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
+  s32 tmp[5][264];
+  s32* out[5] = {tmp[0], tmp[1], tmp[2], tmp[3], tmp[4]};
+  span_attrs5(y0, y1, fac, n, out);
+  for (u32 i = 0; i < n; ++i) {
+    vr[i] = static_cast<u8>((static_cast<u32>(tmp[0][i]) >> 3) & 0xFF);
+    vg[i] = static_cast<u8>((static_cast<u32>(tmp[1][i]) >> 3) & 0xFF);
+    vb[i] = static_cast<u8>((static_cast<u32>(tmp[2][i]) >> 3) & 0xFF);
+    sc[i] = static_cast<s16>(tmp[3][i]);
+    tc[i] = static_cast<s16>(tmp[4][i]);
+  }
+}
+
 void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
   if (y0 == y1) { for (u32 i = 0; i < n; ++i) out[i] = y0; return; }
   for (u32 i = 0; i < n; ++i) {

@@ -216,7 +216,11 @@ struct Renderer3D::SpanBuf {
   s32 x0;
   alignas(16) u32 fac[256 + 4];
   alignas(16) s32 z[256 + 4];
-  alignas(16) s32 attr[5][256 + 4];   // r g b s t
+  // The pixel stages read colour as a 6-bit channel and texture coordinates
+  // as s16, so the span keeps them in those widths (a third of the bytes and
+  // eight pixels a vector instead of four).
+  alignas(16) u8  vr[256 + 8], vg[256 + 8], vb[256 + 8];
+  alignas(16) s16 sc[256 + 8], tc[256 + 8];
   alignas(16) u8 pass[256 + 8];       // depth pre-pass result (kern depth_candidates)
   alignas(16) u32 tcol[256 + 4];      // texels for the span (textured polygons), colour15 and
   alignas(16) u32 talp[256 + 4];      // 5-bit alpha, gathered once per span
@@ -491,15 +495,21 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   const s32 xv0 = ca - xstart;
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   if (xdiff != 0 && !linear) {
-    // The common case: one pass over the span for all five attributes.
-    s32* outs[5] = {sb.attr[0] + off, sb.attr[1] + off, sb.attr[2] + off, sb.attr[3] + off, sb.attr[4] + off};
-    kern::active::span_attrs5(al, ar, sb.fac + off, n, outs);
+    // The common case: one pass for all five, narrowed as it is stored.
+    kern::active::span_attrs5n(al, ar, sb.fac + off, n, sb.vr + off, sb.vg + off, sb.vb + off, sb.sc + off, sb.tc + off);
     return;
   }
+  alignas(16) s32 tmp[5][264];
   for (int k = 0; k < 5; ++k) {
-    s32* out = sb.attr[k] + off;
-    if (xdiff == 0) { for (u32 i = 0; i < n; ++i) out[i] = al[k]; }
-    else kern::active::span_attr_linear(al[k], ar[k], xv0, n, xdiff, out);
+    if (xdiff == 0) { for (u32 i = 0; i < n; ++i) tmp[k][i] = al[k]; }
+    else kern::active::span_attr_linear(al[k], ar[k], xv0, n, xdiff, tmp[k]);
+  }
+  for (u32 i = 0; i < n; ++i) {
+    sb.vr[off + i] = static_cast<u8>((static_cast<u32>(tmp[0][i]) >> 3) & 0xFF);
+    sb.vg[off + i] = static_cast<u8>((static_cast<u32>(tmp[1][i]) >> 3) & 0xFF);
+    sb.vb[off + i] = static_cast<u8>((static_cast<u32>(tmp[2][i]) >> 3) & 0xFF);
+    sb.sc[off + i] = static_cast<s16>(tmp[3][i]);
+    sb.tc[off + i] = static_cast<s16>(tmp[4][i]);
   }
 }
 
@@ -600,8 +610,8 @@ template <int mode, bool textured, bool aa, bool shadow>
 void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
   const u32 polyattr = sh.polyattr;
   const u8* stencil = &stencil_[256 * (y & 1)];
-  const s32* ra = sb.attr[0]; const s32* ga = sb.attr[1]; const s32* ba = sb.attr[2];
-  const s32* sa = sb.attr[3]; const s32* ta = sb.attr[4];
+  const u8* ra = sb.vr; const u8* ga = sb.vg; const u8* ba = sb.vb;
+  const s16* sa = sb.sc; const s16* ta = sb.tc;
   for (s32 x = xa; x < xb; ++x) {
     const u32 i = static_cast<u32>(x - sb.x0);
     if (!sb.pass[i]) continue;    // neither the top pixel nor the one underneath can take it
@@ -621,8 +631,8 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
       dstattr = attr_[addr];
       if (!depth_pass<mode>(addr, z, dstattr)) continue;
     }
-    const u32 vr = (static_cast<u32>(ra[i]) >> 3) & 0xFF, vg = (static_cast<u32>(ga[i]) >> 3) & 0xFF, vb = (static_cast<u32>(ba[i]) >> 3) & 0xFF;
-    const s32 s = static_cast<s16>(sa[i]), t = static_cast<s16>(ta[i]);
+    const u32 vr = ra[i], vg = ga[i], vb = ba[i];
+    const s32 s = sa[i], t = ta[i];
     const u32 color = shade_pixel<textured>(sh, vr, vg, vb, s, t);
     prof::add(prof::C_RESOLVED_PIXELS, 1);
     const u32 alpha = color >> 24;
@@ -745,7 +755,7 @@ enum Wrap { CLAMP = 0, REPEAT = 1, FLIP = 2 };
 // decoded in `scratch` (adjacent lanes nearly always share a block); the
 // other formats ignore it.
 struct Tex5Block { u32 key; u32 colour[4]; u32 alpha[4]; };
-using Gather4Fn = void (*)(const Renderer3D::Shade&, const s32*, const s32*, uint32x4_t&, uint32x4_t&, Tex5Block*);
+using Gather4Fn = void (*)(const Renderer3D::Shade&, const s16*, const s16*, uint32x4_t&, uint32x4_t&, Tex5Block*);
 
 template <int wrap> inline int32x4_t wrap_lanes(int32x4_t v, int32x4_t size, int32x4_t size1) {
   if constexpr (wrap == REPEAT) return vandq_s32(v, size1);
@@ -780,12 +790,12 @@ inline void tex5_decode_block(const Renderer3D::Shade& sh, u32 block, Tex5Block&
 }
 
 template <int fmt, int swrap, int twrap>
-void gather4_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uint32x4_t& colour, uint32x4_t& alpha, Tex5Block* scratch) {
+void gather4_impl(const Renderer3D::Shade& sh, const s16* sa, const s16* ta, uint32x4_t& colour, uint32x4_t& alpha, Tex5Block* scratch) {
   const int32x4_t w = vdupq_n_s32(sh.width), h = vdupq_n_s32(sh.height);
   const int32x4_t w1 = vdupq_n_s32(sh.width - 1), h1 = vdupq_n_s32(sh.height - 1);
   // (s16)coord >> 4, as the hardware truncates the interpolated coordinate.
-  const int32x4_t sv = wrap_lanes<swrap>(vshrq_n_s32(vshlq_n_s32(vld1q_s32(sa), 16), 20), w, w1);
-  const int32x4_t tv = wrap_lanes<twrap>(vshrq_n_s32(vshlq_n_s32(vld1q_s32(ta), 16), 20), h, h1);
+  const int32x4_t sv = wrap_lanes<swrap>(vshrq_n_s32(vmovl_s16(vld1_s16(sa)), 4), w, w1);
+  const int32x4_t tv = wrap_lanes<twrap>(vshrq_n_s32(vmovl_s16(vld1_s16(ta)), 4), h, h1);
   const uint32x4_t offv = vreinterpretq_u32_s32(vmlaq_s32(sv, tv, w));
   const u32 o0 = vgetq_lane_u32(offv, 0), o1 = vgetq_lane_u32(offv, 1), o2 = vgetq_lane_u32(offv, 2), o3 = vgetq_lane_u32(offv, 3);
   const u8* tp = sh.tex_ptr; const u16* pp = sh.pal_ptr;
@@ -846,11 +856,11 @@ void gather4_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uin
 // Four texels from the decoded cache: wrap on lanes, one independent load
 // per lane, colour and alpha split from the word.
 template <int swrap, int twrap>
-void gather4_cached(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, uint32x4_t& colour, uint32x4_t& alpha, Tex5Block*) {
+void gather4_cached(const Renderer3D::Shade& sh, const s16* sa, const s16* ta, uint32x4_t& colour, uint32x4_t& alpha, Tex5Block*) {
   const int32x4_t w = vdupq_n_s32(sh.width), h = vdupq_n_s32(sh.height);
   const int32x4_t w1 = vdupq_n_s32(sh.width - 1), h1 = vdupq_n_s32(sh.height - 1);
-  const int32x4_t sv = wrap_lanes<swrap>(vshrq_n_s32(vshlq_n_s32(vld1q_s32(sa), 16), 20), w, w1);
-  const int32x4_t tv = wrap_lanes<twrap>(vshrq_n_s32(vshlq_n_s32(vld1q_s32(ta), 16), 20), h, h1);
+  const int32x4_t sv = wrap_lanes<swrap>(vshrq_n_s32(vmovl_s16(vld1_s16(sa)), 4), w, w1);
+  const int32x4_t tv = wrap_lanes<twrap>(vshrq_n_s32(vmovl_s16(vld1_s16(ta)), 4), h, h1);
   const uint32x4_t offv = vreinterpretq_u32_s32(vmlaq_s32(sv, tv, w));
   const u32* tp = sh.texels;
   const u32 v0 = tp[vgetq_lane_u32(offv, 0)], v1 = tp[vgetq_lane_u32(offv, 1)], v2 = tp[vgetq_lane_u32(offv, 2)], v3 = tp[vgetq_lane_u32(offv, 3)];
@@ -862,9 +872,9 @@ void gather4_cached(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, u
 // so the resolve loop neither makes an indirect call nor keeps the texture
 // state live per four pixels. `n` is rounded up to four by the caller (the
 // span buffers carry the slack).
-using GatherNFn = void (*)(const Renderer3D::Shade&, const s32*, const s32*, u32, u32*, u32*);
+using GatherNFn = void (*)(const Renderer3D::Shade&, const s16*, const s16*, u32, u32*, u32*);
 template <int fmt, int swrap, int twrap>
-void gatherN_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, u32 n, u32* col, u32* alp) {
+void gatherN_impl(const Renderer3D::Shade& sh, const s16* sa, const s16* ta, u32 n, u32* col, u32* alp) {
   Tex5Block scratch{0xFFFFFFFFu, {}, {}};
   for (u32 i = 0; i < n; i += 4) {
     uint32x4_t c, a;
@@ -873,7 +883,7 @@ void gatherN_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, u32
   }
 }
 template <int swrap, int twrap>
-void gatherN_cached(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, u32 n, u32* col, u32* alp) {
+void gatherN_cached(const Renderer3D::Shade& sh, const s16* sa, const s16* ta, u32 n, u32* col, u32* alp) {
   for (u32 i = 0; i < n; i += 4) {
     uint32x4_t c, a;
     gather4_cached<swrap, twrap>(sh, sa + i, ta + i, c, a, nullptr);
@@ -933,8 +943,8 @@ const void* Renderer3D::select_gather4(const Shade& sh) {
 
 // Four texels through the per-lane sampler: the compressed format, or a
 // texture / palette that is not host-contiguous.
-inline void Renderer3D::texture_gather4(const Shade& sh, const s32* sa, const s32* ta, u32* colour, u32* alpha) const {
-  for (int k = 0; k < 4; ++k) colour[k] = texture_sample(sh, static_cast<s16>(sa[k]), static_cast<s16>(ta[k]), &alpha[k]);
+inline void Renderer3D::texture_gather4(const Shade& sh, const s16* sa, const s16* ta, u32* colour, u32* alpha) const {
+  for (int k = 0; k < 4; ++k) colour[k] = texture_sample(sh, sa[k], ta[k], &alpha[k]);
 }
 
 // One call per span instead of one per four pixels: the resolve loop then
@@ -942,7 +952,7 @@ inline void Renderer3D::texture_gather4(const Shade& sh, const s32* sa, const s3
 void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const {
   const u32 off = static_cast<u32>(ca - sb.x0);
   const u32 n = (static_cast<u32>(cb - ca) + 3) & ~3u;   // the buffers carry four words of slack
-  const s32* sa = sb.attr[3] + off; const s32* ta = sb.attr[4] + off;
+  const s16* sa = sb.sc + off; const s16* ta = sb.tc + off;
   u32* col = sb.tcol + off; u32* alp = sb.talp + off;
   if (const GatherNFn g = reinterpret_cast<GatherNFn>(sh.gather4)) {
     g(sh, sa, ta, n, col, alp);
@@ -960,16 +970,16 @@ template <bool textured>
 void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const {
   const u32 off = static_cast<u32>(ca - sb.x0);
   const u32 n = (static_cast<u32>(cb - ca) + 3) & ~3u;
-  const s32* ra = sb.attr[0] + off; const s32* ga = sb.attr[1] + off; const s32* ba = sb.attr[2] + off;
+  const u8* ra = sb.vr + off; const u8* ga = sb.vg + off; const u8* ba = sb.vb + off;
   const u32* tc = sb.tcol + off; const u32* ta = sb.talp + off;
   u32* out = sb.col + off;
   const uint32x4_t v_polyalpha = vdupq_n_u32(sh.polyalpha), v31 = vdupq_n_u32(31), v0 = vdupq_n_u32(0);
   const uint32x4_t m7 = vdupq_n_u32(0xFF), one = vdupq_n_u32(1);
   const bool decal = sh.blendmode & 1;
   for (u32 i = 0; i < n; i += 4) {
-    const uint32x4_t vr = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ra + i)), 3), m7);
-    const uint32x4_t vg = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ga + i)), 3), m7);
-    const uint32x4_t vb = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ba + i)), 3), m7);
+    const uint32x4_t vr = vmovl_u16(vget_low_u16(vmovl_u8(vld1_u8(ra + i))));
+    const uint32x4_t vg = vmovl_u16(vget_low_u16(vmovl_u8(vld1_u8(ga + i))));
+    const uint32x4_t vb = vmovl_u16(vget_low_u16(vmovl_u8(vld1_u8(ba + i))));
     uint32x4_t r, g, b, a;
     if constexpr (textured) {
       const uint32x4_t c = vld1q_u32(tc + i), talpha = vld1q_u32(ta + i);
