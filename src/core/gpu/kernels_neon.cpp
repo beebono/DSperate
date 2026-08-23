@@ -475,33 +475,52 @@ const int32x4_t kLane = {0, 1, 2, 3};
 }
 
 void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac) {
-  const int32x4_t vw0n = vdupq_n_s32(w0n), vw0d = vdupq_n_s32(w0d), vw1d = vdupq_n_s32(w1d), vxdiff = vdupq_n_s32(xdiff);
+  // num and den are both linear in xv, so they step by a constant instead of
+  // being multiplied out per pixel. The quotient is a blend factor that stays
+  // inside 8 bits for real content, so one Newton step leaves the estimate
+  // within a small fraction of 1 and the two correction rounds land it
+  // exactly; lanes where that cannot be shown are collected in a vector and
+  // the whole span redone exactly -- once per span, not a scalar readback
+  // once per four pixels.
+  const int32x4_t x0 = vaddq_s32(vdupq_n_s32(xv0), kLane);
+  uint32x4_t num = vshlq_n_u32(vreinterpretq_u32_s32(vmulq_s32(x0, vdupq_n_s32(w0n))), 8);
+  uint32x4_t den = vreinterpretq_u32_s32(vaddq_s32(vmulq_s32(x0, vdupq_n_s32(w0d)),
+                                                   vmulq_s32(vsubq_s32(vdupq_n_s32(xdiff), x0), vdupq_n_s32(w1d))));
+  const uint32x4_t dnum = vdupq_n_u32(static_cast<u32>(w0n * 4) << 8);
+  const uint32x4_t dden = vdupq_n_u32(static_cast<u32>(w0d * 4) - static_cast<u32>(w1d * 4));
+  const uint32x4_t one = vdupq_n_u32(1), big = vdupq_n_u32(0x3FFFFF);
+  uint32x4_t bad = vdupq_n_u32(0);
   for (u32 i = 0; i < n; i += 4) {
-    const int32x4_t xv = vaddq_s32(vdupq_n_s32(xv0 + static_cast<s32>(i)), kLane);
-    const uint32x4_t num = vshlq_n_u32(vreinterpretq_u32_s32(vmulq_s32(xv, vw0n)), 8);
-    const uint32x4_t den = vreinterpretq_u32_s32(vaddq_s32(vmulq_s32(xv, vw0d), vmulq_s32(vsubq_s32(vxdiff, xv), vw1d)));
     const uint32x4_t zero = vceqzq_u32(den);
-    // Lanes with den == 0 divide by 1 and are masked to 0 afterwards.
-    const uint32x4_t d = vorrq_u32(den, vandq_u32(zero, vdupq_n_u32(1)));
-    // f32 quotient, then the remainder decides: one step up or down covers
-    // the f32 error for quotients below 2^22; the f64 path takes the rest.
-    // Valid when num + d does not wrap (q*d <= num + d then cannot either)
-    // and the quotient is below 2^22 (the estimate is then within one).
+    const uint32x4_t d = vorrq_u32(den, vandq_u32(zero, one));
     const float32x4_t fd = vcvtq_f32_u32(d);
     float32x4_t rcp = vrecpeq_f32(fd);
-    rcp = vmulq_f32(rcp, vrecpsq_f32(fd, rcp));
-    rcp = vmulq_f32(rcp, vrecpsq_f32(fd, rcp));                         // ~23 bits after two Newton steps
+    rcp = vmulq_f32(rcp, vrecpsq_f32(fd, rcp));                         // ~16 bits, enough for an 8-bit quotient
     uint32x4_t q = vcvtq_u32_f32(vmulq_f32(vcvtq_f32_u32(num), rcp));
-    const uint32x4_t unsafe = vorrq_u32(vcgeq_u32(q, vdupq_n_u32(0x3FFFFF)), vcltq_u32(vaddq_u32(num, d), num));
-    uint32x4_t r = vsubq_u32(num, vmulq_u32(q, d));                    // wraps negative when q is one too many
-    const uint32x4_t over = vcgtq_u32(r, num);                           // r "negative"
-    q = vaddq_u32(q, over);                                              // -1 on those lanes
+    const uint32x4_t unsafe = vorrq_u32(vcgeq_u32(q, big), vcltq_u32(vaddq_u32(num, d), num));
+    uint32x4_t r = vsubq_u32(num, vmulq_u32(q, d));                     // wraps negative when q is one too many
+    const uint32x4_t over = vcgtq_u32(r, num);
+    q = vaddq_u32(q, over);                                             // -1 on those lanes
     r = vaddq_u32(r, vandq_u32(over, d));
     const uint32x4_t under = vcgeq_u32(r, d);
-    q = vsubq_u32(q, under);                                             // +1 on those lanes
+    q = vsubq_u32(q, under);                                            // +1 on those lanes
     r = vsubq_u32(r, vandq_u32(under, d));
-    if (vmaxvq_u32(vorrq_u32(unsafe, vorrq_u32(vcgeq_u32(r, d), vcgtq_u32(r, num)))) != 0) q = udiv_exact(num, d);
+    bad = vorrq_u32(bad, vorrq_u32(unsafe, vorrq_u32(vcgeq_u32(r, d), vcgtq_u32(r, num))));
     vst1q_u32(fac + i, vbicq_u32(q, zero));
+    num = vaddq_u32(num, dnum);
+    den = vaddq_u32(den, dden);
+  }
+  if (vmaxvq_u32(bad) == 0) return;
+  // Anything the fast path could not prove exact: redo the span by division.
+  num = vshlq_n_u32(vreinterpretq_u32_s32(vmulq_s32(x0, vdupq_n_s32(w0n))), 8);
+  den = vreinterpretq_u32_s32(vaddq_s32(vmulq_s32(x0, vdupq_n_s32(w0d)),
+                                        vmulq_s32(vsubq_s32(vdupq_n_s32(xdiff), x0), vdupq_n_s32(w1d))));
+  for (u32 i = 0; i < n; i += 4) {
+    const uint32x4_t zero = vceqzq_u32(den);
+    const uint32x4_t d = vorrq_u32(den, vandq_u32(zero, one));
+    vst1q_u32(fac + i, vbicq_u32(udiv_exact(num, d), zero));
+    num = vaddq_u32(num, dnum);
+    den = vaddq_u32(den, dden);
   }
 }
 

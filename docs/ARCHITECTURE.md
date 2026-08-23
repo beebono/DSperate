@@ -503,6 +503,20 @@ Text rows accumulate their tile rows as they are gathered and drop out
 before the kernel when every one is blank, which is about half of the rows
 M&L rasterises.
 
+**Instructions, not stalls.** Measured against DraStic on the same device
+and the same game (gameplay on both sides): its IPC is *lower* than ours
+(0.49 vs 0.76), its branch density the same and its misprediction rate
+higher -- it wins by retiring 4.1x fewer instructions per frame. So the
+renderer is tuned for instructions retired per pixel. `span_factor` is the
+worked example: num and den are linear in x and now step by an add instead
+of being multiplied out, the reciprocal takes one Newton step rather than
+two (the quotient is a blend factor inside 8 bits, so the correction rounds
+still land it exactly), and the exactness guard accumulates in a vector and
+is read once per span instead of once per four pixels. 60 -> 37
+instructions per four pixels; -2.1 % on the SM64DS scene. Spans that the
+fast path cannot prove exact are redone by division, so the result is
+unchanged.
+
 **Kernel shape.** The select kernels step 32 pixels and never test the mask.
 A `vmaxvq` + branch to skip a fully transparent group is a vector-to-scalar
 readback, and on the A55 it costs more than the merge it avoids at every
