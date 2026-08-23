@@ -220,6 +220,7 @@ struct Renderer3D::SpanBuf {
   alignas(16) u8 pass[256 + 8];       // depth pre-pass result (kern depth_candidates)
   alignas(16) u32 tcol[256 + 4];      // texels for the span (textured polygons), colour15 and
   alignas(16) u32 talp[256 + 4];      // 5-bit alpha, gathered once per span
+  alignas(16) u32 col[256 + 4];       // shaded pixel records (18-bit colour, alpha 24-28)
 };
 
 namespace {
@@ -947,14 +948,52 @@ void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const
   for (u32 i = 0; i < n; i += 4) texture_gather4(sh, sa + i, ta + i, col + i, alp + i);
 }
 
+// The span's shaded colours. Decal vs modulate is a property of the polygon,
+// so it is decided here once rather than re-tested for every four pixels, and
+// the resolve loop reads finished records.
+template <bool textured>
+void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const {
+  const u32 off = static_cast<u32>(ca - sb.x0);
+  const u32 n = (static_cast<u32>(cb - ca) + 3) & ~3u;
+  const s32* ra = sb.attr[0] + off; const s32* ga = sb.attr[1] + off; const s32* ba = sb.attr[2] + off;
+  const u32* tc = sb.tcol + off; const u32* ta = sb.talp + off;
+  u32* out = sb.col + off;
+  const uint32x4_t v_polyalpha = vdupq_n_u32(sh.polyalpha), v31 = vdupq_n_u32(31), v0 = vdupq_n_u32(0);
+  const uint32x4_t m7 = vdupq_n_u32(0xFF), one = vdupq_n_u32(1);
+  const bool decal = sh.blendmode & 1;
+  for (u32 i = 0; i < n; i += 4) {
+    const uint32x4_t vr = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ra + i)), 3), m7);
+    const uint32x4_t vg = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ga + i)), 3), m7);
+    const uint32x4_t vb = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ba + i)), 3), m7);
+    uint32x4_t r, g, b, a;
+    if constexpr (textured) {
+      const uint32x4_t c = vld1q_u32(tc + i), talpha = vld1q_u32(ta + i);
+      const uint32x4_t tr = c15_to_18_4(c, 0), tg = c15_to_18_4(c, 4), tb = c15_to_18_4(c, 9);
+      if (decal) {
+        const uint32x4_t inv = vsubq_u32(v31, talpha);
+        r = vshrq_n_u32(vmlaq_u32(vmulq_u32(tr, talpha), vr, inv), 5);
+        g = vshrq_n_u32(vmlaq_u32(vmulq_u32(tg, talpha), vg, inv), 5);
+        b = vshrq_n_u32(vmlaq_u32(vmulq_u32(tb, talpha), vb, inv), 5);
+        const uint32x4_t t0 = vceqq_u32(talpha, v0), t31 = vceqq_u32(talpha, v31);
+        r = vbslq_u32(t0, vr, vbslq_u32(t31, tr, r)); g = vbslq_u32(t0, vg, vbslq_u32(t31, tg, g)); b = vbslq_u32(t0, vb, vbslq_u32(t31, tb, b));
+        a = v_polyalpha;
+      } else {
+        r = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tr, one), vaddq_u32(vr, one)), one), 6);
+        g = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tg, one), vaddq_u32(vg, one)), one), 6);
+        b = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tb, one), vaddq_u32(vb, one)), one), 6);
+        a = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(talpha, one), vaddq_u32(v_polyalpha, one)), one), 5);
+      }
+    } else { r = vr; g = vg; b = vb; a = v_polyalpha; }
+    vst1q_u32(out + i, pack_colour(r, g, b, a));
+  }
+}
+
 template <int mode, bool textured, bool aa>
 void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
   const u32 polyattr = sh.polyattr;
-  const s32* ra = sb.attr[0]; const s32* ga = sb.attr[1]; const s32* ba = sb.attr[2];
   const uint32x4_t lane = {0, 1, 2, 3};
   const uint32x4_t v_alpha_ref = vdupq_n_u32(sh.alpha_ref), v31 = vdupq_n_u32(31), v0 = vdupq_n_u32(0);
   (void)v_alpha_ref;
-  const uint32x4_t v_polyalpha = vdupq_n_u32(sh.polyalpha);
   // Opaque attribute word for this part (coverage added per lane on the edge parts).
   u32 attr_base = polyattr | edge;
   bool push = false;
@@ -1012,35 +1051,11 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
     const uint32x4_t m1 = vtstq_u32(vshlq_u32(vdupq_n_u32(p4), vreinterpretq_s32_u32(vmulq_u32(lane, vdupq_n_u32(static_cast<u32>(-8))))), vdupq_n_u32(1));
     const u32 addr = row0 + static_cast<u32>(x);
     const int32x4_t z = vld1q_s32(sb.z + i);
-    const uint32x4_t m7 = vdupq_n_u32(0xFF);
-    uint32x4_t vr = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ra + i)), 3), m7);
-    uint32x4_t vg = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ga + i)), 3), m7);
-    uint32x4_t vb = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ba + i)), 3), m7);
-    uint32x4_t r, g, b, a;
-    if constexpr (textured) {
-      // Gathered for the whole span before the loop (span_texels).
-      const uint32x4_t c = vld1q_u32(sb.tcol + i), talpha = vld1q_u32(sb.talp + i);
-      const uint32x4_t tr = c15_to_18_4(c, 0), tg = c15_to_18_4(c, 4), tb = c15_to_18_4(c, 9);
-      if (sh.blendmode & 1) {   // decal
-        const uint32x4_t inv = vsubq_u32(v31, talpha);
-        r = vshrq_n_u32(vmlaq_u32(vmulq_u32(tr, talpha), vr, inv), 5);
-        g = vshrq_n_u32(vmlaq_u32(vmulq_u32(tg, talpha), vg, inv), 5);
-        b = vshrq_n_u32(vmlaq_u32(vmulq_u32(tb, talpha), vb, inv), 5);
-        const uint32x4_t t0 = vceqq_u32(talpha, v0), t31 = vceqq_u32(talpha, v31);
-        r = vbslq_u32(t0, vr, vbslq_u32(t31, tr, r)); g = vbslq_u32(t0, vg, vbslq_u32(t31, tg, g)); b = vbslq_u32(t0, vb, vbslq_u32(t31, tb, b));
-        a = v_polyalpha;
-      } else {                  // modulate
-        const uint32x4_t one = vdupq_n_u32(1);
-        r = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tr, one), vaddq_u32(vr, one)), one), 6);
-        g = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tg, one), vaddq_u32(vg, one)), one), 6);
-        b = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(tb, one), vaddq_u32(vb, one)), one), 6);
-        a = vshrq_n_u32(vsubq_u32(vmulq_u32(vaddq_u32(talpha, one), vaddq_u32(v_polyalpha, one)), one), 5);
-      }
-    } else { r = vr; g = vg; b = vb; a = v_polyalpha; }
+    const uint32x4_t colour = vld1q_u32(sb.col + i);
+    const uint32x4_t a = vshrq_n_u32(colour, 24);
     prof::add(prof::C_RESOLVED_PIXELS, 4);
     uint32x4_t m = m1;
     if constexpr (textured) m = vandq_u32(m1, vcgtq_u32(a, v_alpha_ref));
-    const uint32x4_t colour = pack_colour(r, g, b, a);
     const uint32x4_t mo = vandq_u32(m, vceqq_u32(a, v31)), mt = vbicq_u32(m, mo);
     const uint32x4_t dstattr = vld1q_u32(&attr_[addr]);
     // bit 0 per lane: opaque, bit 1: translucent, bit 2: translucent with a pixel underneath.
@@ -1191,7 +1206,8 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   };
   if (!sh.shadow && !sh.wireframe && sh.blendmode != 2) {
     resolve = kResolveVec[mode][sh.textured][(dispcnt >> 4) & 1];
-    if (sh.textured) span_texels(sh, sb, ca, cb);
+    if (sh.textured) { span_texels(sh, sb, ca, cb); span_shade<true>(sh, sb, ca, cb); }
+    else span_shade<false>(sh, sb, ca, cb);
   }
 #endif
   auto draw_span = [&](s32 xlimit, int part, int edge) {

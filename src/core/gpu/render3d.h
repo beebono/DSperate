@@ -160,6 +160,9 @@ private:
   // A textured span's texels, gathered once into the span buffer before the
   // resolve loop reads them (removes an indirect call per four pixels).
   void span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const;
+  // The span's shaded colours (texture blend and the packed 18-bit record),
+  // computed before the resolve loop so the blend mode is decided once.
+  template <bool textured> void span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const;
   static const void* select_gather4(const Shade& sh);
 #endif
   void span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
