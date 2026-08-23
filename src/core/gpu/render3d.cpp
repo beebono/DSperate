@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/render3d.h"
+
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include "core/gpu/kernels.h"
 #include "core/gpu/gpu3d.h"
 #include "core/gpu/vram_map.h"
@@ -182,12 +187,68 @@ void Renderer3D::Slope<side>::edge_params(s32* length, s32* coverage) const {
 
 // ---- pixel pipeline ---------------------------------------------------------------
 
-Renderer3D::Renderer3D(NDS& nds) : nds_(nds) { reset(); }
+// Fixed set of band workers. The caller renders band 0 itself and waits for
+// the rest, so a frame costs one broadcast and one barrier -- the threads are
+// created once and parked on a condition variable in between, never per frame.
+struct Renderer3D::Pool {
+  explicit Pool(u32 n) {
+    threads_.reserve(n);
+    for (u32 i = 0; i < n; ++i) threads_.emplace_back([this, i] { loop(i + 1); });
+  }
+  ~Pool() {
+    { std::lock_guard<std::mutex> lk(m_); stop_ = true; ++generation_; }
+    start_.notify_all();
+    for (auto& t : threads_) t.join();
+  }
+  u32 workers() const { return static_cast<u32>(threads_.size()); }
+
+  void run(const std::function<void(u32)>& fn, u32 jobs) {
+    {
+      std::lock_guard<std::mutex> lk(m_);
+      job_ = &fn; jobs_ = jobs; remaining_ = static_cast<u32>(threads_.size());
+      ++generation_;
+    }
+    start_.notify_all();
+    fn(0);                                  // band 0 on the calling thread
+    std::unique_lock<std::mutex> lk(m_);
+    done_.wait(lk, [this] { return remaining_ == 0; });
+    job_ = nullptr;
+  }
+
+private:
+  void loop(u32 index) {
+    u64 seen = 0;
+    for (;;) {
+      std::unique_lock<std::mutex> lk(m_);
+      start_.wait(lk, [this, &seen] { return stop_ || generation_ != seen; });
+      if (stop_) return;
+      seen = generation_;
+      const std::function<void(u32)>* fn = job_;
+      const u32 jobs = jobs_;
+      lk.unlock();
+      if (fn && index < jobs) (*fn)(index);
+      lk.lock();
+      if (--remaining_ == 0) done_.notify_one();
+    }
+  }
+  std::vector<std::thread> threads_;
+  std::mutex m_;
+  std::condition_variable start_, done_;
+  const std::function<void(u32)>* job_ = nullptr;
+  u64 generation_ = 0;
+  u32 jobs_ = 0, remaining_ = 0;
+  bool stop_ = false;
+};
+
+Renderer3D::Renderer3D(NDS& nds) : nds_(nds) { out_dst_ = out_.data(); reset(); }
+Renderer3D::~Renderer3D() = default;
 
 void Renderer3D::reset() {
   color_.fill(0); depth_.fill(0); attr_.fill(0); out_.fill(0);
   stencil_.fill(0);
   prev_shadow_mask_ = false;
+  out_dst_ = out_.data();
+  for (auto& b : bands_) b->reset();
 }
 
 u8 Renderer3D::tex8(u32 addr) const {
@@ -443,7 +504,7 @@ void Renderer3D::setup_right_edge(Edge& e, s32 y) const {
   e.xr = e.right.setup(a.sx, b.sx, a.sy, b.sy, p.w[e.cur_vr], p.w[e.next_vr], y, p.wbuffer);
 }
 
-void Renderer3D::setup_polygon(Edge& e, const Polygon& p) const {
+void Renderer3D::setup_polygon(Edge& e, const Polygon& p) {
   const u32 n = p.nverts;
   u32 vtop = p.vtop, vbot = p.vbot;
   e.poly = &p;
@@ -670,7 +731,7 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
   }
 }
 
-void Renderer3D::setup_shade(Shade& sh, const Polygon& p) const {
+void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
   sh.polyattr = p.attr & 0x3F008000;
   if (!p.facing) sh.polyattr |= (1 << 4);
   sh.polyattr_z = (p.attr & (1 << 11)) != 0;
@@ -718,8 +779,16 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) const {
   // cheaper than a word from a four-times-larger decoded array, so the
   // other formats keep the direct path (measured: Mario & Luigi and Meteos
   // lost 0.5-1 % with every texture cached).
-  if (sh.textured && (sh.fmt == 5 || !sh.tex_ptr || !sh.pal_ptr))
-    sh.texels = texcache_.lookup(*vm_, sh.fmt, sh.base, static_cast<u32>(sh.width), static_cast<u32>(sh.height), sh.texpal, sh.alpha0);
+  if (sh.textured && (sh.fmt == 5 || !sh.tex_ptr || !sh.pal_ptr)) {
+    // The cache is resolved once on the calling thread; a band worker only
+    // reads the pointer that pass recorded, because TextureCache::lookup
+    // mutates its map and its per-entry frame stamps.
+    if (texels_in_) sh.texels = setup_poly_ < texels_in_->size() ? (*texels_in_)[setup_poly_] : nullptr;
+    else {
+      sh.texels = texcache_.lookup(*vm_, sh.fmt, sh.base, static_cast<u32>(sh.width), static_cast<u32>(sh.height), sh.texpal, sh.alpha0);
+      if (texels_out_ && setup_poly_ < texels_out_->size()) (*texels_out_)[setup_poly_] = sh.texels;
+    }
+  }
 #if DSPERATE_NEON
   sh.gather4 = select_gather4(sh);
 #else
@@ -1350,7 +1419,7 @@ void Renderer3D::final_pass(s32 y) {
     const bool clear_fog = (rs_->dispcnt & (1 << 14)) || (rs_->clear_attr1 & 0x8000);
     work = (dispcnt & (1 << 7)) && clear_fog;
   }
-  if (!work) { std::memcpy(&out_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32)); return; }
+  if (!work) { std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32)); return; }
   if (dispcnt & (1 << 5)) {
     // Edge marking on the topmost pixels, against the four neighbours.
     const u32 up = row_of(y - 1) + 1, dn = row_of(y + 1) + 1;
@@ -1416,7 +1485,7 @@ void Renderer3D::final_pass(s32 y) {
       color_[addr] = tr | (tg << 8) | (tb << 16) | (ta << 24);
     }
   }
-  std::memcpy(&out_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32));
+  std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32));
 }
 
 // The clear is done per line, just before the line is rendered (the final
@@ -1487,12 +1556,75 @@ void Renderer3D::render(const Gpu3D& gx) {
     if (texcache_.decodes_this_frame() == 0) { prof::add(prof::C_R3D_FRAMES_KEPT, 1); return; }
   }
   rendered_once_ = true;
-  { DS_PROF(R3D_CLEAR); clear_border(-1); }
+  poly_texels_.assign(gx.render_polygon_count(), nullptr);
+  texels_out_ = &poly_texels_;
+  texels_in_ = nullptr;
+  build_edges(gx);
+  texels_out_ = nullptr;
+
+  const u32 nb = band_count(edge_count_);
+  if (nb <= 1) { render_band(0, 192, out_.data()); return; }
+
+  if (bands_.size() < nb - 1) {
+    while (bands_.size() < nb - 1) bands_.push_back(std::make_unique<Renderer3D>(nds_));
+  }
+  if (!pool_ || pool_->workers() != nb - 1) pool_ = std::make_unique<Pool>(nb - 1);
+
+  const Gpu3D& gxr = gx;
+  u32* const dst = out_.data();
+  std::function<void(u32)> job = [this, &gxr, dst, nb](u32 i) {
+    const s32 y0 = static_cast<s32>(i * 192 / nb), y1 = static_cast<s32>((i + 1) * 192 / nb);
+    Renderer3D* r = this;
+    if (i != 0) { r = bands_[i - 1].get(); r->prepare_worker(gxr, &poly_texels_); }
+    r->render_band(y0, y1, dst);
+  };
+  pool_->run(job, nb);
+}
+
+// How many bands to split the frame into. DS_R3D_THREADS overrides the count
+// (0 or 1 disables banding entirely).
+//
+// The cutoff is deliberately tiny. An earlier version skipped banding below 24
+// polygons, on the theory that a short list is cheaper to draw on one thread;
+// that cost 12% of the whole win on SM64DS, because polygon *count* says
+// nothing about raster cost -- a handful of large polygons (a skybox, a
+// full-screen quad) is a full frame of spans. Area would be the right measure
+// and is not worth computing, so the only frames kept on one thread are the
+// ones with almost nothing in them, where the thread wake-up (a broadcast and
+// a barrier, tens of microseconds) could plausibly exceed the work.
+u32 Renderer3D::band_count(u32 polygons) {
+  static const int forced = [] {
+    const char* e = std::getenv("DS_R3D_THREADS");
+    return e ? std::atoi(e) : -1;
+  }();
+  if (forced >= 0) return forced < 1 ? 1u : static_cast<u32>(forced);
+  if (polygons < 2) return 1;
+  return 3;
+}
+
+// Set up a worker to render a band of the frame the coordinator has latched.
+void Renderer3D::prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels) {
+  gx_ = &gx;
+  rs_ = &gx.render_state();
+  vm_ = &nds_.bus.vram_map();
+  texv_ = &vm_->texture;
+  palv_ = &vm_->texpal;
+  texels_in_ = texels;
+  texels_out_ = nullptr;
+  build_edges(gx);
+}
+
+// Decode the polygon list into edges and bucket them by top line. Every band
+// repeats this: the edge cursors are walked per line and so cannot be shared.
+void Renderer3D::build_edges(const Gpu3D& gx) {
+  const Polygon* const* polys = gx.render_polygons();
   u32 n = 0;
   for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
     if (polys[i]->degenerate) continue;
+    setup_poly_ = i;
     setup_polygon(edges_[n++], *polys[i]);
   }
+  edge_count_ = n;
   // Bucket the polygons by their top line (counting sort, list order kept).
   // A polygon above the screen starts at line 0; one below it is dropped.
   auto top_line = [&](const Polygon& p) { return p.ytop < 0 ? 0 : p.ytop; };
@@ -1501,10 +1633,42 @@ void Renderer3D::render(const Gpu3D& gx) {
   for (int y = 0; y < 193; ++y) bucket_[y + 1] = static_cast<u16>(bucket_[y + 1] + bucket_[y]);
   std::array<u16, 194> fill = bucket_;
   for (u32 i = 0; i < n; ++i) { const s32 t = top_line(*edges_[i].poly); if (t < 192) order_[fill[t]++] = static_cast<u16>(i); }
-  active_count_ = 0; active_ = active_buf_[0].data(); active_next_ = active_buf_[1].data();
-  { DS_PROF(R3D_SPANS); render_line(0); }
-  for (s32 y = 1; y < 192; ++y) { { DS_PROF(R3D_SPANS); render_line(y); } { DS_PROF(R3D_FINAL); final_pass(y - 1); } }
-  { DS_PROF(R3D_FINAL); clear_border(192); final_pass(191); }
+}
+
+// The active set as it stands at the *start* of line y: every polygon that
+// began strictly above y and is still alive there, in list order (which the
+// blending rules depend on). Polygons whose top line is y itself are merged
+// in by render_line, exactly as in the sequential walk. Their edges are
+// positioned directly at y, which Slope::setup supports.
+void Renderer3D::seed_active(s32 y) {
+  active_ = active_buf_[0].data();
+  active_next_ = active_buf_[1].data();
+  active_count_ = 0;
+  if (y <= 0) return;
+  for (u32 i = 0; i < edge_count_; ++i) {
+    Edge& e = edges_[i];
+    const Polygon& p = *e.poly;
+    const s32 t = p.ytop < 0 ? 0 : p.ytop;
+    if (t >= y || y >= p.ybot) continue;
+    active_[active_count_++] = static_cast<u16>(i);
+    if (p.ytop != p.ybot) { setup_left_edge(e, y); setup_right_edge(e, y); }
+  }
+}
+
+// Rasterise output lines [y0, y1) into dst. The final pass of a line reads
+// the lines either side of it, so one extra line above is rasterised (and
+// the border row stands in at the top and bottom of the screen).
+void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
+  out_dst_ = dst;
+  const s32 first = y0 > 0 ? y0 - 1 : 0;
+  seed_active(first);
+  if (y0 == 0) { DS_PROF(R3D_CLEAR); clear_border(-1); }
+  { DS_PROF(R3D_SPANS); render_line(first); if (first < y0) render_line(y0); }
+  for (s32 y = y0; y < y1; ++y) {
+    if (y + 1 < 192) { DS_PROF(R3D_SPANS); render_line(y + 1); }
+    else { DS_PROF(R3D_FINAL); clear_border(192); }
+    { DS_PROF(R3D_FINAL); final_pass(y); }
+  }
 }
 
 } // namespace ds::gpu

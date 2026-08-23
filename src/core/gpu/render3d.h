@@ -5,6 +5,8 @@
 #include "core/gpu/texcache.h"
 
 #include <array>
+#include <memory>
+#include <vector>
 
 namespace ds { struct NDS; }
 
@@ -36,6 +38,7 @@ struct VramView;
 class Renderer3D {
 public:
   explicit Renderer3D(NDS& nds);
+  ~Renderer3D();
   void reset();
 
   // Rasterise the frame latched by the geometry engine.
@@ -170,11 +173,45 @@ private:
   void span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar) const;
   void setup_left_edge(Edge& e, s32 y) const;
   void setup_right_edge(Edge& e, s32 y) const;
-  void setup_polygon(Edge& e, const Polygon& p) const;
-  void setup_shade(Shade& sh, const Polygon& p) const;
+  void setup_polygon(Edge& e, const Polygon& p);
+  void setup_shade(Shade& sh, const Polygon& p);
   void render_shadow_mask_line(Edge& e, s32 y);
   void render_polygon_line(Edge& e, s32 y);
   void render_line(s32 y);
+
+  // ---- banded parallel rasterising ---------------------------------------
+  //
+  // The screen is split into horizontal bands, one worker per band. A band
+  // owns its line ring, its active polygon set and its edge cursors, and
+  // writes only its own output lines, so the workers share nothing mutable:
+  // the only shared state is the decoded-texture cache, which is resolved to
+  // plain pointers on the calling thread before any worker starts (the cache
+  // itself is not thread-safe).
+  //
+  // Slope::setup takes the line to position at and computes the edge state
+  // directly from it, so a band can enter a polygon that began above its
+  // first line without walking the lines in between. The final pass of a
+  // line reads its two neighbours, so a band rasterises one line above the
+  // range it emits; the line below comes from its own loop.
+  //
+  // Band boundaries are fixed for a given band count, so the split is
+  // deterministic and the output does not depend on thread scheduling.
+  void build_edges(const Gpu3D& gx);
+  void seed_active(s32 y);
+  void render_band(s32 y0, s32 y1, u32* dst);
+  void prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels);
+  static u32 band_count(u32 polygons);
+
+  u32  edge_count_ = 0;
+  u32* out_dst_ = nullptr;                              // where final_pass writes
+  std::vector<const u32*>* texels_out_ = nullptr;       // coordinator records decoded textures
+  const std::vector<const u32*>* texels_in_ = nullptr;  // worker reads them back
+  u32  setup_poly_ = 0;                                 // polygon index during build_edges
+  std::vector<const u32*> poly_texels_;
+  std::vector<std::unique_ptr<Renderer3D>> bands_;      // workers 1..n-1 (band 0 is this)
+  struct Pool;
+  std::unique_ptr<Pool> pool_;
+
   u32  fog_density(u32 addr) const;
   void final_pass(s32 y);
   void clear_border(s32 y);
