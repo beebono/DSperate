@@ -188,7 +188,7 @@ void NDS::setup_direct_boot() {
 void NDS::run_frame() {
   if (!gpu.frame_begun()) gpu.begin_frame();   // first frame after reset/direct boot starts at line 0 without a line-0 event
   frame_ready = false;
-  while (!frame_ready) sched.run_until(sched.next_deadline());
+  sched.run_until_frame();   // one entry into the slice loop per frame, not per event
   ++frame_count;
 }
 

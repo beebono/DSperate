@@ -46,32 +46,46 @@ void Scheduler::set_quantum(s64 q) {
 void Scheduler::reset() {
   now_ = 0;
   arm7_debt_ = 0;
-  for (auto& e : events_) e = Event{0, nullptr, 0, false};
+  armed_ = 0;
+  at_.fill(0); fn_.fill(nullptr); param_.fill(0);
   next_ = std::numeric_limits<u64>::max();
+  next_id_ = EVENT_COUNT;
 }
 
 // `next_` caches the earliest armed deadline so the per-slice loop scans the
 // table only when an event is actually due (or after a cancel).
 void Scheduler::schedule(EventId id, u64 at, EventFn fn, u32 param) {
-  Event& e = events_[static_cast<size_t>(id)];
-  const bool was_next = e.armed && e.at == next_;
-  e = Event{at, fn, param, true};
-  if (at < next_) next_ = at;
-  else if (was_next && at > next_) next_ = scan_deadline();
+  const u32 i = static_cast<u32>(id);
+  // Only a *live* next event can be pushed later and leave next_ stale. An
+  // event rescheduling itself from its own handler is already disarmed, and
+  // fire_due rescans when the pass ends -- rescanning here would double it.
+  const bool was_next = (armed_ & (1u << i)) && next_id_ == i;
+  at_[i] = at; fn_[i] = fn; param_[i] = param;
+  armed_ |= 1u << i;
+  if (at < next_) { next_ = at; next_id_ = i; }
+  else if (was_next && at > next_) rescan();
 }
 
 void Scheduler::cancel(EventId id) {
-  Event& e = events_[static_cast<size_t>(id)];
-  if (!e.armed) return;
-  e.armed = false;
-  if (e.at == next_) next_ = scan_deadline();
+  const u32 i = static_cast<u32>(id);
+  if (!(armed_ & (1u << i))) return;
+  armed_ &= ~(1u << i);
+  if (next_id_ == i) rescan();
 }
 
-u64 Scheduler::scan_deadline() const {
+// Earliest armed deadline and which event owns it. Only the armed events are
+// visited; `next_id_` lets schedule() and cancel() tell "the one that defines
+// next_" from "one that merely ties with it", which the old time comparison
+// could not.
+void Scheduler::rescan() {
   u64 best = std::numeric_limits<u64>::max();
-  for (const auto& e : events_)
-    if (e.armed && e.at < best) best = e.at;
-  return best;
+  u32 best_id = EVENT_COUNT;
+  for (u32 m = armed_; m; m &= m - 1) {
+    const u32 i = static_cast<u32>(__builtin_ctz(m));
+    if (at_[i] < best) { best = at_[i]; best_id = i; }
+  }
+  next_ = best;
+  next_id_ = best_id;
 }
 
 // A CPU counts as idle when it is halted, or awake but provably going nowhere.
@@ -229,14 +243,29 @@ void Scheduler::count_slice(bool skipped, s64 slice) const {
 // past, where run_until(next_deadline()) can never reach it.
 void Scheduler::fire_due() {
   while (now_ >= next_) {
-    for (auto& e : events_) {
-      if (e.armed && e.at <= now_) {
-        e.armed = false;
-        firing_at_ = e.at;
-        e.fn(nds_, e.param);      // may schedule: next_ is kept current by schedule()
+    // One walk of the armed set, not one to fire and one to rescan: the pass
+    // starts with next_ empty and folds in every event it steps over, while
+    // schedule() folds in every event a handler arms (it keeps next_ current
+    // against whatever minimum stands). Both leave next_ the true minimum.
+    next_ = std::numeric_limits<u64>::max();
+    next_id_ = EVENT_COUNT;
+    // Ascending id order, i.e. table order, as when this walked the array.
+    // `armed_` is re-read after every handler so an event the handler arms at
+    // a higher id still fires in this pass, and one it arms at a lower id
+    // waits for the next -- exactly what the array walk did.
+    for (u32 m = armed_; m; ) {
+      const u32 i = static_cast<u32>(__builtin_ctz(m));
+      const u32 bit = 1u << i;
+      if (at_[i] <= now_) {
+        armed_ &= ~bit;
+        firing_at_ = at_[i];
+        fn_[i](nds_, param_[i]);   // may schedule: next_ is kept current by schedule()
+        m = armed_ & ~((bit << 1) - 1);
+      } else {
+        if (at_[i] < next_) { next_ = at_[i]; next_id_ = i; }
+        m &= ~bit;
       }
     }
-    next_ = scan_deadline();
   }
 }
 
@@ -293,7 +322,7 @@ SliceNext Scheduler::slice_next() {
 
 begin:
   {
-    if (now_ >= sl_.until) { sl_.phase = SL_BEGIN; return {nullptr, nullptr}; }
+    if (sl_.until_frame ? nds_.frame_ready : now_ >= sl_.until) { sl_.phase = SL_BEGIN; return {nullptr, nullptr}; }
     u64 deadline = next_;
     if (deadline > sl_.until) deadline = sl_.until;
     s64 slice = static_cast<s64>(deadline - now_);
@@ -383,10 +412,11 @@ slice_end:
 
 extern "C" SliceNext ds_slice_next(void* scheduler) { return static_cast<Scheduler*>(scheduler)->slice_next(); }
 
-u64 Scheduler::run_until_native(u64 until) {
+u64 Scheduler::run_until_native(u64 until, bool until_frame) {
   const u64 start = now_;
   fire_due();   // anything already due (see fire_due): the loop only fires at slice ends
   sl_.until = until;
+  sl_.until_frame = until_frame;
   sl_.phase = SL_BEGIN;
   jit::run_loop(this);
   return now_ - start;
@@ -394,13 +424,24 @@ u64 Scheduler::run_until_native(u64 until) {
 
 #endif // DSPERATE_JIT
 
-u64 Scheduler::run_until(u64 until) {
+// The frame flag is set by the line-0 scanline handler, i.e. from the fire_due
+// at a slice end, so testing it at the next slice start stops at exactly the
+// point `while (!frame_ready) run_until(next_deadline())` stopped at.
+bool Scheduler::done(u64 until, bool until_frame) const {
+  return until_frame ? nds_.frame_ready : now_ >= until;
+}
+
+u64 Scheduler::run_until(u64 until) { return run_until_impl(until, false); }
+
+u64 Scheduler::run_until_frame() { return run_until_impl(~u64{0}, true); }
+
+u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
 #if DSPERATE_JIT
-  if (jit::has_runtime()) return run_until_native(until);
+  if (jit::has_runtime()) return run_until_native(until, until_frame);
 #endif
   const u64 start = now_;
   fire_due();   // anything already due (see fire_due): the loop only fires at slice ends
-  while (now_ < until) {
+  while (!done(until, until_frame)) {
     u64 deadline = next_deadline();
     if (deadline > until) deadline = until;
     s64 slice = static_cast<s64>(deadline - now_);

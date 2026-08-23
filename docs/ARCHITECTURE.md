@@ -280,6 +280,33 @@ register save/restore on each side and ~100 instructions of slice logic;
 the next step would refill the running CPU's budget in place (a pure call
 from the budget poll) while the other CPU is halted and nothing is due.
 
+**Event table and frame loop (2026-08-23).** Measured against DraStic with
+the qemu dispatch harness, our scheduler read 11x its instruction count --
+but that comparison ran our CLI in lockstep (128) against DraStic's
+event-bound engine: 9,321 slices per frame against its 1,087. Event-bound
+(what the frontends ship) the slice counts match within 20 %, and the real
+gap was per-event cost: `fire_due` walked all twenty table entries and then
+`scan_deadline` walked them again, 131 instructions to fire one event
+against DraStic's 25.6, and `NDS::run_frame`'s
+`while (!frame_ready) run_until(next_deadline())` re-entered the whole
+stack -- `run_until`, the native slice loop's register save/restore, a
+`fire_due` with nothing to fire -- about 2,100 times a frame.
+
+Now: the table is split by field (`at_`, `fn_`, `param_`) behind an
+`armed_` bitmask, so firing steps only through the armed events (six to
+eight of twenty) and touches three cache lines of deadlines instead of
+eight of interleaved records; the pass computes the next deadline as it
+goes rather than rescanning after it; and `Scheduler::run_until_frame`
+runs to the GPU's frame flag, so the slice loop is entered once per frame.
+Ordering is unchanged -- ascending id is table order, and `armed_` is
+re-read after every handler so an event armed at a higher id still fires
+in the same pass. SM64DS, Meteos and Mario & Luigi are byte-identical over
+300 frames at both quanta.
+
+The event count itself is now the thing to look at: SM64DS fires ~2,100
+events a frame, of which **1,033 are cart transfers** -- `cart_schedule_receive`
+arms one event per word -- against DraStic's ~1,390 events of all kinds.
+
 **Cycle model** (`cpu_mem.h`, `interp.cpp`, `mem/timing.*`). Region timing
 tables per 16 KB (ARM9 bus) / 32 KB (ARM7) give N/S costs for 16- and 32-bit
 accesses; main RAM is a 16-bit bus with N=8/S=1, everything else 1/1, the GBA

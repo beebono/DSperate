@@ -93,6 +93,13 @@ public:
   // `until` is reached. Returns the number of cycles advanced.
   u64 run_until(u64 until);
 
+  // The same, but bounded by the GPU's frame flag instead of a deadline: the
+  // slice loop is entered once per frame rather than once per event, which is
+  // what `while (!frame_ready) run_until(next_deadline())` used to cost
+  // (~2,100 entries per frame on SM64DS, each with the native loop's register
+  // save/restore and a fire_due that had nothing to fire).
+  u64 run_until_frame();
+
   // The same, as a state machine for the recompiler's native slice loop
   // (docs/ARCHITECTURE.md §4): every call runs the scheduler up to the next
   // entry into translated code and returns it; the loop enters it and calls
@@ -103,6 +110,7 @@ public:
 private:
   struct SliceState {
     u64 until = 0;
+    bool until_frame = false;   // stop on NDS::frame_ready, not on `until`
     int phase = 0, sub = 0;
     s64 slice = 0, ran9 = 0;
     s32 budget7 = 0;
@@ -111,8 +119,10 @@ private:
     CpuContext* cpu = nullptr;
     std::chrono::steady_clock::time_point t0;
   } sl_;
-  u64 run_until_native(u64 until);
-  u64 scan_deadline() const;
+  u64 run_until_native(u64 until, bool until_frame);
+  u64 run_until_impl(u64 until, bool until_frame);
+  void rescan();
+  bool done(u64 until, bool until_frame) const;
   u64 next_ = ~u64{0};   // earliest armed deadline (cached)
   u64 firing_at_ = 0;    // deadline of the event being fired
   s64  quantum_ = INTERLEAVE_QUANTUM;
@@ -120,19 +130,21 @@ private:
   bool in_dma_ = false;                 // inside Dma::run (a preempt there would corrupt the DMA's budget)
   bool debug_slices_ = false;           // DS_DEBUG_SLICES
   bool idle_skip_ = false;              // DS_IDLE_SKIP enables idle-loop skipping (off: it does not pay)
-  struct Event {
-    u64     at;
-    EventFn fn;
-    u32     param;
-    bool    armed;
-  };
+  // The event table is split by field and gated by a bitmask: firing scans
+  // only the armed events (typically six to eight of the twenty) and touches
+  // three cache lines of deadlines instead of eight of interleaved records.
+  static constexpr u32 EVENT_COUNT = static_cast<u32>(EventId::Count);
+  std::array<u64, EVENT_COUNT>     at_{};
+  std::array<EventFn, EVENT_COUNT> fn_{};
+  std::array<u32, EVENT_COUNT>     param_{};
+  u32 armed_ = 0;                 // bit i = events_[i] is armed
+  u32 next_id_ = EVENT_COUNT;     // which event `next_` belongs to (EVENT_COUNT: none)
   NDS& nds_;
   u64  now_;
   const CpuContext* running_ = nullptr;
   s32  running_start_budget_ = 0;
   u32  running_shift_ = 0;           // 0 for ARM9 cycles, 1 for ARM7 (half clock)
   s64  arm7_debt_ = 0;               // ARM9 cycles the ARM7 still has to cover (carries overshoot and odd cycles)
-  std::array<Event, static_cast<size_t>(EventId::Count)> events_;
   void fire_due();
   void count_slice(bool skipped, s64 slice) const;
   // Idle-loop skip: an awake CPU sitting in a proven side-effect-free poll
