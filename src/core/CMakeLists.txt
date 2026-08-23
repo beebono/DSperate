@@ -10,6 +10,7 @@ add_library(dsperate_core STATIC
   sched/scheduler.cpp
   cpu/cpu.cpp
   cpu/cp15.cpp
+  cpu/idle_loop.cpp
   cpu/interp/interp.cpp
   cpu/interp/interp_arm.cpp
   cpu/interp/interp_thumb.cpp

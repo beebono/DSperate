@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include <map>
 #include "core/types.h"
 #include "core/cpu/cpu.h"
 
@@ -106,6 +107,7 @@ private:
     s64 slice = 0, ran9 = 0;
     s32 budget7 = 0;
     bool gx_stalled = false;
+    bool skip9 = false, skip7 = false;   // proven idle loop: do not execute this slice
     CpuContext* cpu = nullptr;
     std::chrono::steady_clock::time_point t0;
   } sl_;
@@ -117,6 +119,7 @@ private:
   bool quantum_forced_ = false;         // DS_QUANTUM given
   bool in_dma_ = false;                 // inside Dma::run (a preempt there would corrupt the DMA's budget)
   bool debug_slices_ = false;           // DS_DEBUG_SLICES
+  bool idle_skip_ = false;              // DS_IDLE_SKIP enables idle-loop skipping (off: it does not pay)
   struct Event {
     u64     at;
     EventFn fn;
@@ -131,7 +134,24 @@ private:
   s64  arm7_debt_ = 0;               // ARM9 cycles the ARM7 still has to cover (carries overshoot and odd cycles)
   std::array<Event, static_cast<size_t>(EventId::Count)> events_;
   void fire_due();
-  void count_slice(bool skipped) const;
+  void count_slice(bool skipped, s64 slice) const;
+  // Idle-loop skip: an awake CPU sitting in a proven side-effect-free poll
+  // loop is treated as halted for the slice. Sets which CPUs to skip and
+  // returns whether the whole machine is idle. See cpu/idle_loop.h.
+  bool machine_idle(bool& skip9, bool& skip7) const;
+  // Pre-filter: a ring of each CPU's recent slice-start PCs. A slice ends at
+  // an arbitrary point inside a loop, so the test is membership in the last
+  // few, not equality with the last one.
+  mutable u32 idle_pc_ring_[2][8] = {};
+  mutable u32 idle_pc_pos_[2] = {};
+  // Measurement-only spin proxy (DS_PROFILE): a ring of each CPU's recent
+  // slice-start PCs. A CPU that keeps re-entering the same few addresses while
+  // awake is polling, not working -- the idle case both_idle() cannot see.
+  mutable u32 spin_ring_[2][8] = {};
+  mutable u32 spin_pos_[2] = {};
+  mutable bool spin_now_[2] = {};
+  static inline std::map<u32, u32>* spin_opcodes_ = nullptr;
+  static inline std::map<u32, const char*>* spin_reject_ = nullptr;   // this slice's classification, for host-time attribution
   // Both CPUs halted with nothing pending that could wake them before the
   // next event: the slice can run to the deadline instead of the quantum.
   bool both_idle() const;

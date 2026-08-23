@@ -4,13 +4,19 @@
 #include "core/nds.h"
 #include "core/profile.h"
 #include "core/cpu/interp/interp.h"
+#include "core/cpu/idle_loop.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
 
 #include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <map>
+#include <vector>
 #include <cstdlib>
 #include <limits>
+#include <algorithm>
 
 namespace ds {
 
@@ -18,6 +24,7 @@ Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) {
   // Read once: a function-local static costs an acquire load per use.
   if (const char* q = std::getenv("DS_QUANTUM")) { set_quantum(std::atoll(q)); quantum_forced_ = true; }
   debug_slices_ = std::getenv("DS_DEBUG_SLICES") != nullptr;
+  idle_skip_ = std::getenv("DS_IDLE_SKIP") != nullptr;   // opt-in: see docs/IDLE-LOOP.md
   reset();
 }
 
@@ -67,6 +74,47 @@ u64 Scheduler::scan_deadline() const {
   return best;
 }
 
+// A CPU counts as idle when it is halted, or awake but provably going nowhere.
+// Skipping is only safe while nothing else can change what the loop reads:
+// the sibling CPU must be idle too, no DMA may be running, and the geometry
+// engine must be quiet. The slice still ends at the next scheduled event, so
+// whatever the loop waits for is delivered on time.
+bool Scheduler::machine_idle(bool& skip9, bool& skip7) const {
+  skip9 = skip7 = false;
+  if (!idle_skip_) return both_idle();
+  CpuContext& a9 = const_cast<CpuContext&>(nds_.cpu(Cpu::ARM9));
+  CpuContext& a7 = const_cast<CpuContext&>(nds_.cpu(Cpu::ARM7));
+  if (nds_.dma.any_running(Cpu::ARM9) || nds_.dma.any_running(Cpu::ARM7)) { prof::add(prof::C_IDLE_NO_DMA, 1); return false; }
+  if (!nds_.gpu3d.idle()) { prof::add(prof::C_IDLE_NO_GX, 1); return false; }
+
+  CpuContext* cpus[2] = {&a9, &a7};
+  // Pre-filter: analysing costs a body walk, so only look at a CPU that came
+  // back to the same instruction it left on -- what a spinning CPU does.
+  // Both slots are refreshed before any early return, so a rejection on one
+  // CPU cannot leave the other's filter stale.
+  bool repeated[2];
+  for (int i = 0; i < 2; ++i) {
+    const u32 pc = cpus[i]->hot.regs[15];
+    repeated[i] = false;
+    for (u32 k = 0; k < 8; ++k) if (idle_pc_ring_[i][k] == pc) { repeated[i] = true; break; }
+    idle_pc_ring_[i][idle_pc_pos_[i]++ & 7] = pc;
+  }
+  bool skip[2] = {false, false};
+  for (int i = 0; i < 2; ++i) {
+    CpuContext& c = *cpus[i];
+    // An unmasked pending IRQ means the CPU is about to leave, halted or not.
+    if (c.hot.irq_pending && !(c.hot.cpsr & 0x80)) { prof::add(prof::C_IDLE_NO_IRQ, 1); return false; }
+    if (c.halted) continue;
+    if (!repeated[i]) { prof::add(prof::C_IDLE_NO_FILTER, 1); return false; }
+    if (!cpu::in_idle_loop(c)) { prof::add(i ? prof::C_IDLE_NO_LOOP7 : prof::C_IDLE_NO_LOOP9, 1); return false; }
+    skip[i] = true;
+  }
+  prof::add(prof::C_IDLE_OK, 1);
+  skip9 = skip[0];
+  skip7 = skip[1];
+  return true;
+}
+
 bool Scheduler::both_idle() const {
   const CpuContext& a9 = nds_.cpu(Cpu::ARM9);
   const CpuContext& a7 = nds_.cpu(Cpu::ARM7);
@@ -75,7 +123,7 @@ bool Scheduler::both_idle() const {
 }
 
 // DS_PROFILE=1: what the slices are made of.
-void Scheduler::count_slice(bool skipped) const {
+void Scheduler::count_slice(bool skipped, s64 slice) const {
   const CpuContext& a9 = nds_.cpu(Cpu::ARM9);
   const CpuContext& a7 = nds_.cpu(Cpu::ARM7);
   prof::add(prof::C_SLICES, 1);
@@ -84,6 +132,94 @@ void Scheduler::count_slice(bool skipped) const {
   if (a9.halted && a7.halted) prof::add(prof::C_SLICES_BOTH_HALTED, 1);
   if (nds_.dma.any_running(Cpu::ARM9) || nds_.dma.any_running(Cpu::ARM7)) prof::add(prof::C_SLICES_DMA, 1);
   if (skipped) prof::add(prof::C_SLICES_SKIPPED, 1);
+
+  // Cycle-weighted halt state: slice counts hide it, because the slices where
+  // a CPU is awake are the ones the quantum keeps short.
+  const u64 cyc = static_cast<u64>(slice);
+  prof::add(prof::C_CYC_TOTAL, cyc);
+  if (a9.halted && a7.halted) prof::add(prof::C_CYC_BOTH_HALTED, cyc);
+  else if (a9.halted) prof::add(prof::C_CYC_A9_ONLY_HALTED, cyc);
+  else if (a7.halted) prof::add(prof::C_CYC_A7_ONLY_HALTED, cyc);
+  else prof::add(prof::C_CYC_NEITHER_HALTED, cyc);
+
+  // Spin proxy for the awake CPUs.
+  bool spin[2] = {false, false};
+  const CpuContext* cpus[2] = {&a9, &a7};
+  for (int i = 0; i < 2; ++i) {
+    if (cpus[i]->halted) continue;
+    const u32 pc = cpus[i]->hot.regs[15];
+    for (u32 k = 0; k < 8; ++k) if (spin_ring_[i][k] == pc) { spin[i] = true; break; }
+    spin_ring_[i][spin_pos_[i]++ & 7] = pc;
+  }
+  spin_now_[0] = spin[0]; spin_now_[1] = spin[1];
+  // DS_DUMP_CODE=<hex addr>: one-shot dump of 16 guest words, for inspecting
+  // a loop body the analyser rejected.
+  static const char* dump_env = std::getenv("DS_DUMP_CODE");
+  if (dump_env) {
+    static bool done = false;
+    if (!done) {
+      const u32 base = static_cast<u32>(std::strtoul(dump_env, nullptr, 16));
+      CpuContext& c = const_cast<CpuContext&>(nds_.cpu(Cpu::ARM9));
+      const u32 at = c.hot.regs[15] - 8;   // wait until the CPU is actually in there
+      if (at >= base && at < base + 64 && c.page_table.read_ptr(base)) {
+        done = true;
+        for (u32 k = 0; k < 16; ++k) {
+          u32 w = 0;
+          if (const u8* hp = c.page_table.read_ptr(base + k * 4)) std::memcpy(&w, hp, 4);
+          std::fprintf(stderr, "[code] %08x  %08x\n", base + k * 4, w);
+        }
+      }
+    }
+  }
+  // DS_SPIN_PCS=1: where the spin slices actually sit, to tell an idle poll
+  // loop (a few addresses) from a merely hot inner loop (many).
+  static const bool spin_pcs = std::getenv("DS_SPIN_PCS") != nullptr;
+  if (spin_pcs) {
+    static std::map<u32, u64> hist[2];
+    static std::map<u32, u32> opc[2];
+    static std::map<u32, const char*> why[2];
+    spin_opcodes_ = &opc[0];
+    spin_reject_ = &why[0];
+    static bool reg = false;
+    if (!reg) {
+      reg = true;
+      std::atexit([] {
+        for (int i = 0; i < 2; ++i) {
+          std::vector<std::pair<u64, u32>> v;
+          u64 tot = 0;
+          for (auto& kv : hist[i]) { v.push_back({kv.second, kv.first}); tot += kv.second; }
+          if (!tot) continue;
+          std::sort(v.rbegin(), v.rend());
+          std::fprintf(stderr, "[spin] %s: %zu distinct pcs, %llu cycles\n", i ? "arm7" : "arm9",
+                       v.size(), (unsigned long long)tot);
+          for (size_t k = 0; k < v.size() && k < 12; ++k)
+            std::fprintf(stderr, "[spin]   %08x  op %08x  %-12s %12llu %5.1f%%\n", v[k].second,
+                         spin_opcodes_ ? spin_opcodes_[i][v[k].second] : 0u,
+                         spin_reject_ ? spin_reject_[i][v[k].second] : "?",
+                         (unsigned long long)v[k].first, 100.0 * static_cast<double>(v[k].first) / static_cast<double>(tot));
+        }
+      });
+    }
+    for (int i = 0; i < 2; ++i) if (spin[i]) {
+      const u32 pc = cpus[i]->hot.regs[15];
+      hist[i][pc] += cyc;
+      const bool th = cpus[i]->thumb();
+      const u32 at = pc - (th ? 4 : 8);   // regs[15] runs ahead of the executing instruction
+      u32 w = 0;
+      if (const u8* hp = cpus[i]->page_table.read_ptr(at)) std::memcpy(&w, hp, th ? 2 : 4);
+      opc[i][pc] = w;
+      CpuContext& dc = const_cast<CpuContext&>(*cpus[i]);
+      why[i][pc] = cpu::in_idle_loop(dc) ? "ok" : cpu::idle_reject_name(cpu::idle_loop_last_reject());
+    }
+  }
+  if (spin[0]) prof::add(prof::C_CYC_A9_SPIN, cyc);
+  if (spin[1]) prof::add(prof::C_CYC_A7_SPIN, cyc);
+  const bool idle9 = a9.halted || spin[0];
+  const bool idle7 = a7.halted || spin[1];
+  if (idle9 && idle7) {
+    prof::add(prof::C_CYC_BOTH_SPIN_OR_HALTED, cyc);
+    if (!(a9.halted && a7.halted)) prof::add(prof::C_CYC_ONE_SPIN_ONE_HALTED, cyc);
+  }
 }
 
 // Every armed event at or before now_, in table order, repeated until none
@@ -114,7 +250,17 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
       { DS_PROF(DMA); in_dma_ = true; cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget))); in_dma_ = false; }
       if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which) || a9_gx_stalled(cpu)) return;
     }
-    { prof::Scope sc(which == Cpu::ARM9 ? prof::CPU9 : prof::CPU7); run(cpu); }
+    {
+      const auto t0 = std::chrono::steady_clock::now();
+      run(cpu);
+      if (prof::enabled) {
+        const int ci = which == Cpu::ARM9 ? 0 : 1;
+        const u64 el = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
+        prof::ns[ci == 0 ? prof::CPU9 : prof::CPU7] += el;
+        prof::add(spin_now_[ci] ? (ci == 0 ? prof::C_NS_A9_SPIN : prof::C_NS_A7_SPIN)
+                                : (ci == 0 ? prof::C_NS_A9_WORK : prof::C_NS_A7_WORK), el);
+      }
+    }
     if (!cpu.preempt_residual) return;
     cpu.hot.cycle_budget += cpu.preempt_residual;   // overshoot of the preempted instruction comes off the residual
     cpu.preempt_residual = 0;
@@ -153,16 +299,18 @@ begin:
     s64 slice = static_cast<s64>(deadline - now_);
     if (slice <= 0) slice = 1;
     // With both CPUs asleep the quantum only paces the clock: run to the deadline.
-    const bool idle = slice > quantum_ && both_idle();
+    const bool all_idle = machine_idle(sl_.skip9, sl_.skip7);
+    const bool idle = slice > quantum_ && all_idle;
     if (slice > quantum_ && !idle) slice = quantum_;
     if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
     sl_.slice = slice;
-    if (prof::enabled) count_slice(idle);
+    if (prof::enabled) count_slice(idle, slice);
+    if (prof::enabled && (sl_.skip9 || sl_.skip7)) prof::add(prof::C_CYC_IDLE_SKIPPED, static_cast<u64>(slice));
     a9.hot.cycle_budget = static_cast<s32>(slice);
     running_ = &a9; running_start_budget_ = static_cast<s32>(slice); running_shift_ = 0;
     sl_.gx_stalled = nds_.gpu3d.stalled();
     sl_.phase = SL_A9; cpu = &a9; run = nds_.run_arm9;
-    if (sl_.gx_stalled) goto a9_done;
+    if (sl_.gx_stalled || sl_.skip9) goto a9_done;
   }
 cpu_begin:   // run_cpu loop head
   {
@@ -187,7 +335,13 @@ resume:      // translated code left
   }
 run_returned:
   {
-    if (prof::enabled) prof::ns[cpu->which == Cpu::ARM9 ? prof::CPU9 : prof::CPU7] += static_cast<u64>((std::chrono::steady_clock::now() - sl_.t0).count());
+    if (prof::enabled) {
+      const int ci = cpu->which == Cpu::ARM9 ? 0 : 1;
+      const u64 el = static_cast<u64>((std::chrono::steady_clock::now() - sl_.t0).count());
+      prof::ns[ci == 0 ? prof::CPU9 : prof::CPU7] += el;
+      prof::add(spin_now_[ci] ? (ci == 0 ? prof::C_NS_A9_SPIN : prof::C_NS_A7_SPIN)
+                              : (ci == 0 ? prof::C_NS_A9_WORK : prof::C_NS_A7_WORK), el);
+    }
     if (cpu->preempt_residual) {
       cpu->hot.cycle_budget += cpu->preempt_residual;
       cpu->preempt_residual = 0;
@@ -198,7 +352,7 @@ cpu_done:
   if (cpu == &a7) goto a7_done;
 a9_done:
   {
-    s64 ran9 = (a9.halted || sl_.gx_stalled) ? sl_.slice : (sl_.slice - a9.hot.cycle_budget);
+    s64 ran9 = (a9.halted || sl_.gx_stalled || sl_.skip9) ? sl_.slice : (sl_.slice - a9.hot.cycle_budget);
     if (ran9 <= 0) ran9 = 1;
     sl_.ran9 = ran9;
     running_ = nullptr;
@@ -209,11 +363,12 @@ a9_done:
     a7.hot.cycle_budget = sl_.budget7;
     running_ = &a7; running_start_budget_ = sl_.budget7; running_shift_ = 1;
     sl_.phase = SL_A7; cpu = &a7; run = nds_.run_arm7;
+    if (sl_.skip7) goto a7_done;
     goto cpu_begin;
   }
 a7_done:
   {
-    const s64 consumed7 = a7.halted ? sl_.budget7 : (sl_.budget7 - a7.hot.cycle_budget);
+    const s64 consumed7 = (a7.halted || sl_.skip7) ? sl_.budget7 : (sl_.budget7 - a7.hot.cycle_budget);
     arm7_debt_ -= consumed7 * 2;
   }
 slice_end:
@@ -250,10 +405,13 @@ u64 Scheduler::run_until(u64 until) {
     if (deadline > until) deadline = until;
     s64 slice = static_cast<s64>(deadline - now_);
     if (slice <= 0) slice = 1;
-    const bool idle = slice > quantum_ && both_idle();
+    bool skip9 = false, skip7 = false;
+    const bool all_idle = machine_idle(skip9, skip7);
+    const bool idle = slice > quantum_ && all_idle;
     if (slice > quantum_ && !idle) slice = quantum_;
     if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
-    if (prof::enabled) count_slice(idle);
+    if (prof::enabled) count_slice(idle, slice);
+    if (prof::enabled && (skip9 || skip7)) prof::add(prof::C_CYC_IDLE_SKIPPED, static_cast<u64>(slice));
 
     // ARM9 gets the whole slice; ARM7 then catches up at half clock.
     CpuContext& a9 = nds_.cpu(Cpu::ARM9);
@@ -263,10 +421,10 @@ u64 Scheduler::run_until(u64 until) {
     // While the GX FIFO is full the ARM9 (and its DMA) sit out the slice;
     // the geometry engine keeps draining behind it.
     const bool gx_stalled = nds_.gpu3d.stalled();
-    if (!gx_stalled) run_cpu(a9, nds_.run_arm9);
+    if (!gx_stalled && !skip9) run_cpu(a9, nds_.run_arm9);
     // A halted CPU consumes exactly the slice; a running one may overshoot,
     // and the overshoot is real time (it carries into the next slice).
-    s64 ran9 = (a9.halted || gx_stalled) ? slice : (slice - a9.hot.cycle_budget);
+    s64 ran9 = (a9.halted || gx_stalled || skip9) ? slice : (slice - a9.hot.cycle_budget);
     if (ran9 <= 0) ran9 = 1;
     running_ = nullptr;
     { DS_PROF(GX_RUN); nds_.gpu3d.run_to(now_ + static_cast<u64>(ran9)); }
@@ -279,8 +437,8 @@ u64 Scheduler::run_until(u64 until) {
     if (budget7 > 0) {
       a7.hot.cycle_budget = budget7;
       running_ = &a7; running_start_budget_ = budget7; running_shift_ = 1;
-      run_cpu(a7, nds_.run_arm7);
-      const s64 consumed7 = a7.halted ? budget7 : (budget7 - a7.hot.cycle_budget);
+      if (!skip7) run_cpu(a7, nds_.run_arm7);
+      const s64 consumed7 = (a7.halted || skip7) ? budget7 : (budget7 - a7.hot.cycle_budget);
       arm7_debt_ -= consumed7 * 2;
     }
     running_ = nullptr;
