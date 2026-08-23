@@ -218,6 +218,8 @@ struct Renderer3D::SpanBuf {
   alignas(16) s32 z[256 + 4];
   alignas(16) s32 attr[5][256 + 4];   // r g b s t
   alignas(16) u8 pass[256 + 8];       // depth pre-pass result (kern depth_candidates)
+  alignas(16) u32 tcol[256 + 4];      // texels for the span (textured polygons), colour15 and
+  alignas(16) u32 talp[256 + 4];      // 5-bit alpha, gathered once per span
 };
 
 namespace {
@@ -850,6 +852,44 @@ void gather4_cached(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, u
   colour = vandq_u32(v, vdupq_n_u32(0xFFFF));
   alpha = vshrq_n_u32(v, 16);
 }
+// A whole span's texels in one call: the four-lane bodies above in a loop,
+// so the resolve loop neither makes an indirect call nor keeps the texture
+// state live per four pixels. `n` is rounded up to four by the caller (the
+// span buffers carry the slack).
+using GatherNFn = void (*)(const Renderer3D::Shade&, const s32*, const s32*, u32, u32*, u32*);
+template <int fmt, int swrap, int twrap>
+void gatherN_impl(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, u32 n, u32* col, u32* alp) {
+  Tex5Block scratch{0xFFFFFFFFu, {}, {}};
+  for (u32 i = 0; i < n; i += 4) {
+    uint32x4_t c, a;
+    gather4_impl<fmt, swrap, twrap>(sh, sa + i, ta + i, c, a, &scratch);
+    vst1q_u32(col + i, c); vst1q_u32(alp + i, a);
+  }
+}
+template <int swrap, int twrap>
+void gatherN_cached(const Renderer3D::Shade& sh, const s32* sa, const s32* ta, u32 n, u32* col, u32* alp) {
+  for (u32 i = 0; i < n; i += 4) {
+    uint32x4_t c, a;
+    gather4_cached<swrap, twrap>(sh, sa + i, ta + i, c, a, nullptr);
+    vst1q_u32(col + i, c); vst1q_u32(alp + i, a);
+  }
+}
+constexpr GatherNFn gatherN_cached_wraps(int swrap, int twrap) {
+  constexpr GatherNFn t[3][3] = {
+    {gatherN_cached<CLAMP, CLAMP>,  gatherN_cached<CLAMP, REPEAT>,  gatherN_cached<CLAMP, FLIP>},
+    {gatherN_cached<REPEAT, CLAMP>, gatherN_cached<REPEAT, REPEAT>, gatherN_cached<REPEAT, FLIP>},
+    {gatherN_cached<FLIP, CLAMP>,   gatherN_cached<FLIP, REPEAT>,   gatherN_cached<FLIP, FLIP>},
+  };
+  return t[swrap][twrap];
+}
+template <int fmt> constexpr GatherNFn gatherN_wraps(int swrap, int twrap) {
+  constexpr GatherNFn t[3][3] = {
+    {gatherN_impl<fmt, CLAMP, CLAMP>,  gatherN_impl<fmt, CLAMP, REPEAT>,  gatherN_impl<fmt, CLAMP, FLIP>},
+    {gatherN_impl<fmt, REPEAT, CLAMP>, gatherN_impl<fmt, REPEAT, REPEAT>, gatherN_impl<fmt, REPEAT, FLIP>},
+    {gatherN_impl<fmt, FLIP, CLAMP>,   gatherN_impl<fmt, FLIP, REPEAT>,   gatherN_impl<fmt, FLIP, FLIP>},
+  };
+  return t[swrap][twrap];
+}
 constexpr Gather4Fn gather4_cached_wraps(int swrap, int twrap) {
   constexpr Gather4Fn t[3][3] = {
     {gather4_cached<CLAMP, CLAMP>,  gather4_cached<CLAMP, REPEAT>,  gather4_cached<CLAMP, FLIP>},
@@ -871,16 +911,16 @@ template <int fmt> constexpr Gather4Fn gather4_wraps(int swrap, int twrap) {
 
 const void* Renderer3D::select_gather4(const Shade& sh) {
   const int sw = sh.srep ? (sh.sflip ? FLIP : REPEAT) : CLAMP, tw = sh.trep ? (sh.tflip ? FLIP : REPEAT) : CLAMP;
-  if (sh.texels) return reinterpret_cast<const void*>(gather4_cached_wraps(sw, tw));
-  if (sh.fmt == 5) return reinterpret_cast<const void*>(gather4_wraps<5>(sw, tw));
+  if (sh.texels) return reinterpret_cast<const void*>(gatherN_cached_wraps(sw, tw));
+  if (sh.fmt == 5) return reinterpret_cast<const void*>(gatherN_wraps<5>(sw, tw));
   if (!sh.tex_ptr || !sh.pal_ptr) return nullptr;
   switch (sh.fmt) {
-  case 1: return reinterpret_cast<const void*>(gather4_wraps<1>(sw, tw));
-  case 2: return reinterpret_cast<const void*>(gather4_wraps<2>(sw, tw));
-  case 3: return reinterpret_cast<const void*>(gather4_wraps<3>(sw, tw));
-  case 4: return reinterpret_cast<const void*>(gather4_wraps<4>(sw, tw));
-  case 6: return reinterpret_cast<const void*>(gather4_wraps<6>(sw, tw));
-  case 7: return reinterpret_cast<const void*>(gather4_wraps<7>(sw, tw));
+  case 1: return reinterpret_cast<const void*>(gatherN_wraps<1>(sw, tw));
+  case 2: return reinterpret_cast<const void*>(gatherN_wraps<2>(sw, tw));
+  case 3: return reinterpret_cast<const void*>(gatherN_wraps<3>(sw, tw));
+  case 4: return reinterpret_cast<const void*>(gatherN_wraps<4>(sw, tw));
+  case 6: return reinterpret_cast<const void*>(gatherN_wraps<6>(sw, tw));
+  case 7: return reinterpret_cast<const void*>(gatherN_wraps<7>(sw, tw));
   default: return nullptr;
   }
 }
@@ -891,11 +931,26 @@ inline void Renderer3D::texture_gather4(const Shade& sh, const s32* sa, const s3
   for (int k = 0; k < 4; ++k) colour[k] = texture_sample(sh, static_cast<s16>(sa[k]), static_cast<s16>(ta[k]), &alpha[k]);
 }
 
+// One call per span instead of one per four pixels: the resolve loop then
+// loads texels from the span buffer and keeps no texture state live.
+void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const {
+  const u32 off = static_cast<u32>(ca - sb.x0);
+  const u32 n = (static_cast<u32>(cb - ca) + 3) & ~3u;   // the buffers carry four words of slack
+  const s32* sa = sb.attr[3] + off; const s32* ta = sb.attr[4] + off;
+  u32* col = sb.tcol + off; u32* alp = sb.talp + off;
+  if (const GatherNFn g = reinterpret_cast<GatherNFn>(sh.gather4)) {
+    g(sh, sa, ta, n, col, alp);
+    prof::add(sh.texels ? prof::C_TEX_FAST : (sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST), n);
+    return;
+  }
+  prof::add(prof::C_TEX_SLOW_VIEWS, n);
+  for (u32 i = 0; i < n; i += 4) texture_gather4(sh, sa + i, ta + i, col + i, alp + i);
+}
+
 template <int mode, bool textured, bool aa>
 void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
   const u32 polyattr = sh.polyattr;
   const s32* ra = sb.attr[0]; const s32* ga = sb.attr[1]; const s32* ba = sb.attr[2];
-  const s32* sa = sb.attr[3]; const s32* ta = sb.attr[4];
   const uint32x4_t lane = {0, 1, 2, 3};
   const uint32x4_t v_alpha_ref = vdupq_n_u32(sh.alpha_ref), v31 = vdupq_n_u32(31), v0 = vdupq_n_u32(0);
   (void)v_alpha_ref;
@@ -942,8 +997,6 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
   // Lane masks are tested through one 64-bit transfer of the narrowed lanes
   // (a cross-lane reduction per test is what the in-order core stalls on).
   auto lanes = [](uint32x4_t m) -> u64 { return vget_lane_u64(vreinterpret_u64_u16(vmovn_u32(m)), 0); };
-  const Gather4Fn gather = reinterpret_cast<Gather4Fn>(sh.gather4);
-  Tex5Block tex5{0xFFFFFFFFu, {}, {}};
   const bool untextured_passes = !textured && sh.polyalpha > sh.alpha_ref;
   if (!textured && !untextured_passes) return;   // alpha test fails for every pixel
   for (s32 x = xa; x < xb; x += 4) {
@@ -965,12 +1018,8 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
     uint32x4_t vb = vandq_u32(vshrq_n_u32(vld1q_u32(reinterpret_cast<const u32*>(ba + i)), 3), m7);
     uint32x4_t r, g, b, a;
     if constexpr (textured) {
-      uint32x4_t c, talpha;
-      if (gather) { gather(sh, sa + i, ta + i, c, talpha, &tex5); prof::add(sh.texels ? prof::C_TEX_FAST : (sh.fmt == 5 ? prof::C_TEX_SLOW_FMT5 : prof::C_TEX_FAST), 1); }
-      else {
-        prof::add(prof::C_TEX_SLOW_VIEWS, 1);
-        alignas(16) u32 tc[4], tal[4]; texture_gather4(sh, sa + i, ta + i, tc, tal); c = vld1q_u32(tc); talpha = vld1q_u32(tal);
-      }
+      // Gathered for the whole span before the loop (span_texels).
+      const uint32x4_t c = vld1q_u32(sb.tcol + i), talpha = vld1q_u32(sb.talp + i);
       const uint32x4_t tr = c15_to_18_4(c, 0), tg = c15_to_18_4(c, 4), tb = c15_to_18_4(c, 9);
       if (sh.blendmode & 1) {   // decal
         const uint32x4_t inv = vsubq_u32(v31, talpha);
@@ -1140,7 +1189,10 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
     DS_V(0), DS_V(1), DS_V(2), DS_V(3)
 #undef DS_V
   };
-  if (!sh.shadow && !sh.wireframe && sh.blendmode != 2) resolve = kResolveVec[mode][sh.textured][(dispcnt >> 4) & 1];
+  if (!sh.shadow && !sh.wireframe && sh.blendmode != 2) {
+    resolve = kResolveVec[mode][sh.textured][(dispcnt >> 4) & 1];
+    if (sh.textured) span_texels(sh, sb, ca, cb);
+  }
 #endif
   auto draw_span = [&](s32 xlimit, int part, int edge) {
     if (x >= xlimit) return;

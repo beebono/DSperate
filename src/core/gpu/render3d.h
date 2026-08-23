@@ -157,6 +157,9 @@ private:
   // for polygons without shadow / wireframe / toon shading.
   template <int mode, bool textured, bool aa> void resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
   void texture_gather4(const Shade& sh, const s32* sa, const s32* ta, u32* colour, u32* alpha) const;
+  // A textured span's texels, gathered once into the span buffer before the
+  // resolve loop reads them (removes an indirect call per four pixels).
+  void span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const;
   static const void* select_gather4(const Shade& sh);
 #endif
   void span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
