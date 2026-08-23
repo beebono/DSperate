@@ -16,7 +16,6 @@ enum Stage : u32 {
   COUNT
 };
 extern bool enabled;
-extern u64 ns[COUNT];
 extern const char* const names[COUNT];
 // Event counters (reported with the stages): how much work the stages did.
 enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST, C_TEX_SLOW_FMT5, C_TEX_SLOW_VIEWS,
@@ -28,14 +27,29 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   C_2D_LINES, C_2D_BG_TEXT, C_2D_BG_AFFINE, C_2D_BG_EXT, C_2D_BG_3D, C_2D_OBJ_LINES, C_2D_WINDOW_LINES, C_2D_EFFECT_LINES, C_2D_EFFECT_LIVE, C_2D_FLAT_LINES, C_2D_SELECTS,
   C_2D_L0, C_2D_L1, C_2D_L2, C_2D_L3, C_2D_L4P, C_2D_L1_FULL, C_2D_OBJ_PRESENT, C_2D_3D_PRESENT, C_2D_WIN_PRESENT, C_2D_BG_PAL16, C_2D_BG_PAL256, C_2D_BG_DIRECT, C_2D_BG_EMPTY, C_2D_FAST_BACKDROP, C_2D_FAST_ONE, C_2D_FULL_MODE, C_2D_FULL_3D, C_2D_FULL_OBJ, C_COUNT };
 extern const char* const count_names[C_COUNT];
-extern u64 count[C_COUNT];
-inline void add(Counter c, u64 n) { if (enabled) count[c] += n; }
+
+// The 3D raster runs on several band threads (docs/THREADED-RASTER.md), so the
+// accumulators are per thread: a single set of globals put every worker's
+// `+=` on one cache line, and the ping-pong showed up as time charged to the
+// stage being measured. Each thread owns an Accum; `report` sums them.
+struct Accum {
+  u64 ns[COUNT] = {};
+  u64 count[C_COUNT] = {};
+};
+namespace detail {
+extern thread_local Accum* acc;
+Accum* make_acc();                                  // registers a new one (once per thread)
+inline Accum* get() { Accum* a = acc; return a ? a : make_acc(); }
+}
+
+inline void add(Counter c, u64 n) { if (enabled) detail::get()->count[c] += n; }
+inline void add_ns(Stage s, u64 n) { if (enabled) detail::get()->ns[s] += n; }
 void report();
 
 struct Scope {
   Stage s; std::chrono::steady_clock::time_point t0;
   explicit Scope(Stage st) : s(st) { if (enabled) t0 = std::chrono::steady_clock::now(); }
-  ~Scope() { if (enabled) ns[s] += static_cast<u64>((std::chrono::steady_clock::now() - t0).count()); }
+  ~Scope() { if (enabled) add_ns(s, static_cast<u64>((std::chrono::steady_clock::now() - t0).count())); }
 };
 
 } // namespace ds::prof

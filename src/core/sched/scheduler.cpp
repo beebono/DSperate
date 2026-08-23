@@ -256,7 +256,7 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
       if (prof::enabled) {
         const int ci = which == Cpu::ARM9 ? 0 : 1;
         const u64 el = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
-        prof::ns[ci == 0 ? prof::CPU9 : prof::CPU7] += el;
+        prof::add_ns(ci == 0 ? prof::CPU9 : prof::CPU7, el);
         prof::add(spin_now_[ci] ? (ci == 0 ? prof::C_NS_A9_SPIN : prof::C_NS_A7_SPIN)
                                 : (ci == 0 ? prof::C_NS_A9_WORK : prof::C_NS_A7_WORK), el);
       }
@@ -338,7 +338,7 @@ run_returned:
     if (prof::enabled) {
       const int ci = cpu->which == Cpu::ARM9 ? 0 : 1;
       const u64 el = static_cast<u64>((std::chrono::steady_clock::now() - sl_.t0).count());
-      prof::ns[ci == 0 ? prof::CPU9 : prof::CPU7] += el;
+      prof::add_ns(ci == 0 ? prof::CPU9 : prof::CPU7, el);
       prof::add(spin_now_[ci] ? (ci == 0 ? prof::C_NS_A9_SPIN : prof::C_NS_A7_SPIN)
                               : (ci == 0 ? prof::C_NS_A9_WORK : prof::C_NS_A7_WORK), el);
     }

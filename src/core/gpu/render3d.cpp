@@ -1663,12 +1663,25 @@ void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
   const s32 first = y0 > 0 ? y0 - 1 : 0;
   seed_active(first);
   if (y0 == 0) { DS_PROF(R3D_CLEAR); clear_border(-1); }
-  { DS_PROF(R3D_SPANS); render_line(first); if (first < y0) render_line(y0); }
+  // The stage timers are accumulated in locals and flushed once per band
+  // rather than scoped per line: a scope per line is two clock reads per
+  // stage per line per band, which is a measurable share of what it measures.
+  const bool timing = prof::enabled;
+  u64 spans_ns = 0, final_ns = 0;
+  auto now = [] { return std::chrono::steady_clock::now(); };
+  auto t = timing ? now() : std::chrono::steady_clock::time_point{};
+  auto lap = [&](u64& into) { if (!timing) return; const auto n = now(); into += static_cast<u64>((n - t).count()); t = n; };
+
+  render_line(first); if (first < y0) render_line(y0);
+  lap(spans_ns);
   for (s32 y = y0; y < y1; ++y) {
-    if (y + 1 < 192) { DS_PROF(R3D_SPANS); render_line(y + 1); }
-    else { DS_PROF(R3D_FINAL); clear_border(192); }
-    { DS_PROF(R3D_FINAL); final_pass(y); }
+    if (y + 1 < 192) { render_line(y + 1); lap(spans_ns); }
+    else { clear_border(192); lap(final_ns); }
+    final_pass(y);
+    lap(final_ns);
   }
+  prof::add_ns(prof::R3D_SPANS, spans_ns);
+  prof::add_ns(prof::R3D_FINAL, final_ns);
 }
 
 } // namespace ds::gpu
