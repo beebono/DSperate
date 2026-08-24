@@ -4,3 +4,7 @@ build-*/
 compile_commands.json
 *.sav
 *.nds
+
+# the recorded scenes need their battery saves: without them the replay diverges
+# (M&L and Meteos most of all -- see docs)
+!scenes/*.sav
