@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/mem/bus.h"
+#include "core/profile.h"
 #include "core/nds.h"
 
 #include <cstdio>
@@ -133,6 +134,12 @@ void Bus::update_wram() {
 }
 
 void Bus::update_vram() {
+  // The probe counts only remaps that actually change the views a band worker
+  // indexes: most VRAMCNT traffic moves capture or BG banks and would not
+  // disturb an async raster at all.
+  const bool probing = prof::enabled && prof::async_window;
+  gpu::VramView tex_before, pal_before;
+  if (probing) { tex_before = vram_map_.texture; pal_before = vram_map_.texpal; }
   PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
   PageTable& pt7 = nds_.cpu(Cpu::ARM7).page_table;
   const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
@@ -171,6 +178,13 @@ void Bus::update_vram() {
   pt9.remap(0x06000000, 0x01000000, h9, RW);
   pt7.remap(0x06000000, 0x01000000, h7, RW);
   if (watch_on && (watch_addr >> 24) == 0x06) { pt9.map_mmio(watch_addr & ~0x7FFu, 0x800); pt7.map_mmio(watch_addr & ~0x7FFu, 0x800); }
+  if (probing) {
+    const auto differs = [](const gpu::VramView& a, const gpu::VramView& b) {
+      return a.size != b.size || a.ptr != b.ptr || a.mask != b.mask;
+    };
+    if (differs(tex_before, vram_map_.texture) || differs(pal_before, vram_map_.texpal))
+      prof::add(prof::C_ASYNC_VRAMCNT_SWAP, 1);
+  }
 }
 
 // Slow-path VRAM access for blocks with overlapping banks (and LCDC gaps).

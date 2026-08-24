@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include <cstdlib>
 #include "core/types.h"
 #include "core/gpu/engine2d.h"
 
@@ -26,7 +27,12 @@ public:
   void on_scanline_start();   // VCOUNT advance, VBlank/VCount flags
   void on_hblank();           // render the line, HBlank flag
   void on_display_fifo(u32 x);
-  void begin_frame();         // latches POWCNT/FIFO/capture state; runs at line 0 (and once before the first frame)
+  void begin_frame();
+  void async_probe_start();
+  void async_probe_check(bool at_line0);
+  bool probe_enabled_ = std::getenv("DS_ASYNC_PROBE") != nullptr;
+  bool probe_open_ = false;
+  u64  probe_hash_ = 0, probe_vramcnt_at_l0_ = 0, probe_vramcnt_base_ = 0;         // latches POWCNT/FIFO/capture state; runs at line 0 (and once before the first frame)
   bool frame_begun() const { return frame_begun_; }
 
   // 2D register file (0x04000000-0x0400006F, 0x04001000-0x0400106F) minus

@@ -120,6 +120,7 @@ void Gpu::on_hblank() {
     // The 3D frame flushed at VBlank is rasterised now, ahead of the next
     // frame's display lines.
     nds_.gpu3d.render_frame();
+    if (probe_enabled_) async_probe_start();
   } else if (line_ == 262) {
     engine[0].render_sprites(0); engine[1].render_sprites(0);
   }
@@ -128,15 +129,68 @@ void Gpu::on_hblank() {
   nds_.sched.schedule(EventId::VBlank_Scanline, nds_.sched.event_time() + (CYCLES_PER_SCANLINE - HBLANK_START), ev_scanline);
 }
 
+// ---- async-raster probe (DS_ASYNC_PROBE=1, measurement only) ----------------
+//
+// An asynchronous 3D raster would start at line 215 and have to be joined
+// before its output is read. Two candidate deadlines: line 0 of the next
+// frame (join everything before the first display line) and the next swap at
+// line 192 (the loosest possible, with a per-band lazy join). The probe
+// hashes the texture and texture-palette VRAM at the start and at each
+// deadline: a change means a worker would have been reading bytes the CPU was
+// writing. VRAMCNT rewrites are counted separately in Bus::update_vram --
+// those rebuild the view arrays themselves, which is worse than torn texels.
+namespace {
+u64 hash_view(const VramView& v) {
+  u64 h = 0xcbf29ce484222325ull;
+  for (u32 b = 0; b < v.blocks(); ++b) {
+    const u8* p = v.ptr[b];
+    if (!p) { h = (h ^ 0x9e37) * 0x100000001b3ull; continue; }
+    for (u32 o = 0; o < VramView::BLOCK; o += 8) {
+      u64 w; std::memcpy(&w, p + o, 8);
+      h = (h ^ w) * 0x100000001b3ull;
+    }
+  }
+  return h;
+}
+u64 hash_tex_vram(const VramMap& vm) { return hash_view(vm.texture) * 31 + hash_view(vm.texpal); }
+} // namespace
+
+void Gpu::async_probe_start() {
+  const VramMap& vm = nds_.bus.vram_map();
+  probe_hash_ = hash_tex_vram(vm);
+  probe_open_ = true;
+  probe_vramcnt_at_l0_ = 0;
+  prof::async_window = true;
+  prof::add(prof::C_ASYNC_FRAMES, 1);
+}
+
+void Gpu::async_probe_check(bool at_line0) {
+  if (!probe_open_) return;
+  const bool dirty = hash_tex_vram(nds_.bus.vram_map()) != probe_hash_;
+  if (at_line0) {
+    if (dirty) prof::add(prof::C_ASYNC_DIRTY_L0, 1);
+    // Snapshot the remap count so far; the rest belongs to the wider window.
+    probe_vramcnt_at_l0_ = prof::count(prof::C_ASYNC_VRAMCNT_SWAP);
+    if (probe_vramcnt_at_l0_ != probe_vramcnt_base_) prof::add(prof::C_ASYNC_VRAMCNT_L0, 1);
+    return;
+  }
+  if (dirty) prof::add(prof::C_ASYNC_DIRTY_SWAP, 1);
+  probe_open_ = false;
+  prof::async_window = false;
+  probe_vramcnt_base_ = prof::count(prof::C_ASYNC_VRAMCNT_SWAP);
+}
+
 void Gpu::on_scanline_start() {
   nds_.io.set_hblank(false);
   line_ = static_cast<u16>((line_ + 1) % SCANLINES_PER_FRAME);
   engine[0].update_windows(line_);
   engine[1].update_windows(line_);
   if (line_ == 0) {
+    if (probe_enabled_) async_probe_check(true);
     begin_frame();
     nds_.frame_ready = true;
   } else if (line_ == 192) {
+    if (probe_enabled_) async_probe_check(false);
     nds_.io.set_vblank(true);
     fifo_rd_ = fifo_wr_ = 0;
     nds_.dma.stop(Cpu::ARM9, dma::MODE9_DISPLAY_FIFO);
