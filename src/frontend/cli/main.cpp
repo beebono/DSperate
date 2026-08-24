@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 
 namespace {
 // Spin-loop collapse: a poll loop repeats its exact state every iteration until
@@ -150,7 +151,14 @@ int main(int argc, char** argv) {
   ts.pc_hist = std::getenv("TRACE_PC_HIST") != nullptr;
   const char* trace_start = std::getenv("TRACE_START_FRAME");   // suppress trace output before this frame
   const int trace_from = trace_start ? std::atoi(trace_start) : 0;
+  // Per-frame host times. Whole-process wall clock on the device turned out to
+  // spread 13 % run to run at a flat temperature, which buries any change
+  // worth measuring; the median frame rejects the transient stalls that cause
+  // it, and p90 still shows them if they matter.
+  std::vector<double> frame_ms;
+  frame_ms.reserve(static_cast<size_t>(frames));
   for (int i = 0; i < frames; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
     if (trace && i == trace_from) {
       nds.trace = trace_cb; nds.trace_user = &ts;
 #if DSPERATE_JIT
@@ -167,6 +175,7 @@ int main(int argc, char** argv) {
       ds::s16 buf[2048 * 2]; size_t n;
       while ((n = nds.spu.take(buf, 2048)) != 0) std::fwrite(buf, 4, n, audio_out);
     } else nds.spu.drain();
+    frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     if (per_frame && trace) { std::fprintf(stderr, "frame %d arm9 %llu arm7 %llu\n", i, ts.executed[0] - last9, ts.executed[1] - last7); last9 = ts.executed[0]; last7 = ts.executed[1]; }
   }
   if (dump_out) std::fclose(dump_out);
@@ -187,6 +196,13 @@ int main(int argc, char** argv) {
 #if DSPERATE_JIT
   if (ds::prof::enabled && (jit9 || jit7)) ds::jit::report(stderr);
 #endif
+  if (!frame_ms.empty()) {
+    std::vector<double> v = frame_ms;
+    std::sort(v.begin(), v.end());
+    double sum = 0; for (double x : v) sum += x;
+    std::fprintf(stderr, "frame ms: median %.3f mean %.3f p90 %.3f min %.3f total %.1f\n",
+                 v[v.size() / 2], sum / v.size(), v[(v.size() * 9) / 10], v.front(), sum);
+  }
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));
