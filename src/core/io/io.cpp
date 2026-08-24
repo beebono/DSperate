@@ -669,85 +669,92 @@ void Io::set_irq_line(Cpu cpu, u32 bit, bool on) {
 }
 
 // ---- register dispatch ----------------------------------------------------
+// Gpu3D owns r in [0x60,0x64), [0x320,0x3C0) and [0x400,0x6A4); Gpu owns
+// r < 0x70 and [0x1000,0x1070); Spu owns [0x400,0x520). So [0x70,0x320) and
+// everything from 0x1070 up belong to no subsystem -- which is where every
+// register the recompiler's slow path actually hits lives (ROMCTRL, DIVCNT,
+// SQRTCNT, IME/IE/IF, IPCSYNC, SPICNT, the timers and DMA, and ROMDATA at
+// 0x04100010). One range test then replaces three probes for all of them.
+static inline bool io_unowned(u32 r) { return (r - 0x70 < 0x2B0) || r >= 0x1070; }
+
 u32 Io::read(Cpu cpu, u32 addr, u32 width) {
-  if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) return nds_.gpu3d.read(addr, width);
-  if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) return nds_.gpu.reg_read(addr, width);
-  if (cpu == Cpu::ARM7 && spu::Spu::owns_reg(addr)) return nds_.spu.read(addr, width);
-  bool handled = false;
-  if (width == 32) { u32 v = read32_special(cpu, addr, handled); if (handled) return v; return read16(cpu, addr) | (static_cast<u32>(read16(cpu, addr + 2)) << 16); }
+  if (!io_unowned(addr - 0x04000000)) {
+    if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) return nds_.gpu3d.read(addr, width);
+    if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) return nds_.gpu.reg_read(addr, width);
+    if (cpu == Cpu::ARM7 && spu::Spu::owns_reg(addr)) return nds_.spu.read(addr, width);
+  }
+  if (width == 32) { const Special s = read32_special(cpu, addr); if (s.handled) return s.value; return read16(cpu, addr) | (static_cast<u32>(read16(cpu, addr + 2)) << 16); }
   if (width == 16) return read16(cpu, addr);
   return read8(cpu, addr);
 }
 
 void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
-  if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) { nds_.gpu3d.write(addr, width, value); return; }
-  if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) {
-    static const bool dbg_gpureg = std::getenv("DS_DEBUG_GPUREG") != nullptr;
-    if (dbg_gpureg && (addr & 0xFF) >= 0x50) std::fprintf(stderr, "[gpureg] frame %llu line %u write%u %08x = %08x\n", (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
-    nds_.gpu.reg_write(addr, width, value); return;
+  if (!io_unowned(addr - 0x04000000)) {
+    if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) { nds_.gpu3d.write(addr, width, value); return; }
+    if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) {
+      static const bool dbg_gpureg = std::getenv("DS_DEBUG_GPUREG") != nullptr;
+      if (dbg_gpureg && (addr & 0xFF) >= 0x50) std::fprintf(stderr, "[gpureg] frame %llu line %u write%u %08x = %08x\n", (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
+      nds_.gpu.reg_write(addr, width, value); return;
+    }
+    if (cpu == Cpu::ARM7 && spu::Spu::owns_reg(addr)) { nds_.spu.write(addr, width, value); return; }
   }
-  if (cpu == Cpu::ARM7 && spu::Spu::owns_reg(addr)) { nds_.spu.write(addr, width, value); return; }
-  bool handled = false;
-  if (width == 32) { write32_special(cpu, addr, value, handled); if (handled) return; write16(cpu, addr, static_cast<u16>(value)); write16(cpu, addr + 2, static_cast<u16>(value >> 16)); return; }
+  if (width == 32) { if (write32_special(cpu, addr, value).handled) return; write16(cpu, addr, static_cast<u16>(value)); write16(cpu, addr + 2, static_cast<u16>(value >> 16)); return; }
   if (width == 16) { write16(cpu, addr, static_cast<u16>(value)); return; }
   write8(cpu, addr, static_cast<u8>(value));
 }
 
-u32 Io::read32_special(Cpu cpu, u32 addr, bool& handled) {
-  handled = true;
+Io::Special Io::read32_special(Cpu cpu, u32 addr) {
   CpuIo& c = cpu_io[ci(cpu)];
   switch (addr) {
-  case 0x04000208: return c.ime;
-  case 0x04000210: return c.ie;
-  case 0x04000214: return c.if_;
-  case 0x04100000: return ipc_fifo_recv(cpu);
-  case 0x04100010: return cart_read_data();
-  case 0x040001A4: cart_catch_up(); return cart.romctrl;
-  case 0x04000280: return math.divcnt;
-  case 0x04000290: return static_cast<u32>(math.div_num);
-  case 0x04000294: return static_cast<u32>(math.div_num >> 32);
-  case 0x04000298: return static_cast<u32>(math.div_den);
-  case 0x0400029C: return static_cast<u32>(math.div_den >> 32);
-  case 0x040002A0: return static_cast<u32>(math.div_quot);
-  case 0x040002A4: return static_cast<u32>(math.div_quot >> 32);
-  case 0x040002A8: return static_cast<u32>(math.div_rem);
-  case 0x040002AC: return static_cast<u32>(math.div_rem >> 32);
-  case 0x040002B0: return math.sqrtcnt;
-  case 0x040002B4: return math.sqrt_res;
-  case 0x040002B8: return static_cast<u32>(math.sqrt_val);
-  case 0x040002BC: return static_cast<u32>(math.sqrt_val >> 32);
-  case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: return nds_.dma.read_src(cpu, (addr - 0x040000B0) / 12);
-  case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: return nds_.dma.read_dst(cpu, (addr - 0x040000B4) / 12);
-  case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: return nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12);
-  case 0x040000E0: case 0x040000E4: case 0x040000E8: case 0x040000EC: return c.dma_fill[(addr - 0x040000E0) / 4];
+  case 0x04000208: return {c.ime, true};
+  case 0x04000210: return {c.ie, true};
+  case 0x04000214: return {c.if_, true};
+  case 0x04100000: return {ipc_fifo_recv(cpu), true};
+  case 0x04100010: return {cart_read_data(), true};
+  case 0x040001A4: cart_catch_up(); return {cart.romctrl, true};
+  case 0x04000280: return {math.divcnt, true};
+  case 0x04000290: return {static_cast<u32>(math.div_num), true};
+  case 0x04000294: return {static_cast<u32>(math.div_num >> 32), true};
+  case 0x04000298: return {static_cast<u32>(math.div_den), true};
+  case 0x0400029C: return {static_cast<u32>(math.div_den >> 32), true};
+  case 0x040002A0: return {static_cast<u32>(math.div_quot), true};
+  case 0x040002A4: return {static_cast<u32>(math.div_quot >> 32), true};
+  case 0x040002A8: return {static_cast<u32>(math.div_rem), true};
+  case 0x040002AC: return {static_cast<u32>(math.div_rem >> 32), true};
+  case 0x040002B0: return {math.sqrtcnt, true};
+  case 0x040002B4: return {math.sqrt_res, true};
+  case 0x040002B8: return {static_cast<u32>(math.sqrt_val), true};
+  case 0x040002BC: return {static_cast<u32>(math.sqrt_val >> 32), true};
+  case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: return {nds_.dma.read_src(cpu, (addr - 0x040000B0) / 12), true};
+  case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: return {nds_.dma.read_dst(cpu, (addr - 0x040000B4) / 12), true};
+  case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: return {nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12), true};
+  case 0x040000E0: case 0x040000E4: case 0x040000E8: case 0x040000EC: return {c.dma_fill[(addr - 0x040000E0) / 4], true};
   }
-  handled = false;
-  return 0;
+  return {0, false};
 }
 
-void Io::write32_special(Cpu cpu, u32 addr, u32 value, bool& handled) {
-  handled = true;
+Io::Special Io::write32_special(Cpu cpu, u32 addr, u32 value) {
   CpuIo& c = cpu_io[ci(cpu)];
   switch (addr) {
-  case 0x04000208: c.ime = value & 1; update_irq(cpu); return;
-  case 0x04000210: c.ie = value; update_irq(cpu); return;
-  case 0x04000214: c.if_ &= ~value; update_irq(cpu); if (cpu == Cpu::ARM9) nds_.gpu3d.check_fifo_irq(); return;
-  case 0x04000188: ipc_fifo_send(cpu, value); return;
-  case 0x040001A4: cart_write_romctrl(value); return;
-  case 0x04000280: math.divcnt = value & 0x3; div_start(); return;
-  case 0x04000290: math.div_num = (math.div_num & 0xFFFFFFFF00000000ull) | value; div_start(); return;
-  case 0x04000294: math.div_num = (math.div_num & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return;
-  case 0x04000298: math.div_den = (math.div_den & 0xFFFFFFFF00000000ull) | value; div_start(); return;
-  case 0x0400029C: math.div_den = (math.div_den & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return;
-  case 0x040002B0: math.sqrtcnt = value & 0x1; sqrt_start(); return;
-  case 0x040002B8: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFF00000000ull) | value; sqrt_start(); return;
-  case 0x040002BC: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); sqrt_start(); return;
-  case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: nds_.dma.write_src(cpu, (addr - 0x040000B0) / 12, value); return;
-  case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: nds_.dma.write_dst(cpu, (addr - 0x040000B4) / 12, value); return;
-  case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: nds_.dma.write_cnt(cpu, (addr - 0x040000B8) / 12, value); return;
-  case 0x040000E0: case 0x040000E4: case 0x040000E8: case 0x040000EC: c.dma_fill[(addr - 0x040000E0) / 4] = value; return;
+  case 0x04000208: c.ime = value & 1; update_irq(cpu); return {0, true};
+  case 0x04000210: c.ie = value; update_irq(cpu); return {0, true};
+  case 0x04000214: c.if_ &= ~value; update_irq(cpu); if (cpu == Cpu::ARM9) nds_.gpu3d.check_fifo_irq(); return {0, true};
+  case 0x04000188: ipc_fifo_send(cpu, value); return {0, true};
+  case 0x040001A4: cart_write_romctrl(value); return {0, true};
+  case 0x04000280: math.divcnt = value & 0x3; div_start(); return {0, true};
+  case 0x04000290: math.div_num = (math.div_num & 0xFFFFFFFF00000000ull) | value; div_start(); return {0, true};
+  case 0x04000294: math.div_num = (math.div_num & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return {0, true};
+  case 0x04000298: math.div_den = (math.div_den & 0xFFFFFFFF00000000ull) | value; div_start(); return {0, true};
+  case 0x0400029C: math.div_den = (math.div_den & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return {0, true};
+  case 0x040002B0: math.sqrtcnt = value & 0x1; sqrt_start(); return {0, true};
+  case 0x040002B8: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFF00000000ull) | value; sqrt_start(); return {0, true};
+  case 0x040002BC: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); sqrt_start(); return {0, true};
+  case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: nds_.dma.write_src(cpu, (addr - 0x040000B0) / 12, value); return {0, true};
+  case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: nds_.dma.write_dst(cpu, (addr - 0x040000B4) / 12, value); return {0, true};
+  case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: nds_.dma.write_cnt(cpu, (addr - 0x040000B8) / 12, value); return {0, true};
+  case 0x040000E0: case 0x040000E4: case 0x040000E8: case 0x040000EC: c.dma_fill[(addr - 0x040000E0) / 4] = value; return {0, true};
   }
-  handled = false;
+  return {0, false};
 }
 
 u32 Io::read16(Cpu cpu, u32 addr) {
@@ -787,7 +794,7 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0x040002B0: return math.sqrtcnt;
   default: break;
   }
-  if (a9 && addr >= 0x04000290 && addr < 0x040002C0) { bool h; const u32 v = read32_special(cpu, addr & ~3u, h); return static_cast<u16>((addr & 2) ? v >> 16 : v); }
+  if (a9 && addr >= 0x04000290 && addr < 0x040002C0) { const u32 v = read32_special(cpu, addr & ~3u).value; return static_cast<u16>((addr & 2) ? v >> 16 : v); }
   if (addr >= 0x04000240 && addr < 0x0400024A && a9) {
     // 0x240-0x246 VRAMCNT A-G, 0x247 WRAMCNT, 0x248-0x249 VRAMCNT H-I.
     const u32 i = addr - 0x04000240;
@@ -870,8 +877,8 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   }
   if (addr >= 0x04000240 && addr < 0x0400024A && a9) { write8(cpu, addr, static_cast<u8>(value)); write8(cpu, addr + 1, static_cast<u8>(value >> 8)); return; }
   if (a9 && ((addr >= 0x04000290 && addr < 0x040002A0) || addr == 0x040002B8 || addr == 0x040002BA || addr == 0x040002BC || addr == 0x040002BE)) {
-    bool h; const u32 cur = read32_special(cpu, addr & ~3u, h);
-    write32_special(cpu, addr & ~3u, (addr & 2) ? ((cur & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((cur & 0xFFFF0000) | value), h);
+    const u32 cur = read32_special(cpu, addr & ~3u).value;
+    write32_special(cpu, addr & ~3u, (addr & 2) ? ((cur & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((cur & 0xFFFF0000) | value));
     return;
   }
 }
