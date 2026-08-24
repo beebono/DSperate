@@ -49,12 +49,18 @@ public:
   void stop(Cpu cpu, u32 mode);
   bool any_running(Cpu cpu) const { return running_mask_[cpu == Cpu::ARM9 ? 0 : 1] != 0; }
   bool in_mode(Cpu cpu, u32 mode) const;
+  // Cached `in_mode(cart)` for either CPU. The cart transfer path asks once
+  // per word and once per catch-up, and the eight-channel scan cost more than
+  // the events it was there to avoid (178k instructions a frame, measured).
+  bool cart_armed() const { return cart_armed_; }
 
   // Run the CPU's DMA channels for up to `budget` cycles (that CPU's clock).
   // Returns cycles consumed.
   u32 run(Cpu cpu, u32 budget);
 
 private:
+  void update_cart_armed();
+  bool cart_armed_ = false;
   NDS& nds_;
   u8 running_mask_[2] = {};   // per CPU, bit n = channel n running (any_running is one load)
   void set_running(Channel& c, u32 v) {

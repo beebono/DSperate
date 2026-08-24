@@ -34,6 +34,7 @@ Dma::Dma(NDS& nds) : nds_(nds) { reset(); }
 void Dma::reset() {
   running_mask_[0] = running_mask_[1] = 0;
   for (int i = 0; i < 8; ++i) { ch_[i] = Channel{}; ch_[i].cpu = i < 4 ? Cpu::ARM9 : Cpu::ARM7; ch_[i].num = i & 3; ch_[i].burst_table = MRAM_DUMMY.data; }
+  cart_armed_ = false;
 }
 
 void Dma::write_src(Cpu cpu, int n, u32 v) { channel(cpu, n).src = v & (cpu == Cpu::ARM9 ? 0x0FFFFFFF : 0x07FFFFFF); }
@@ -43,11 +44,16 @@ void Dma::write_cnt(Cpu cpu, int n, u32 v) {
   Channel& c = channel(cpu, n);
   const u32 old = c.cnt;
   c.cnt = v;
-  if ((old & 0x80000000) || !(v & 0x80000000)) return;
+  if ((old & 0x80000000) || !(v & 0x80000000)) {
+    // This path can clear the enable bit without the channel ever starting.
+    if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) update_cart_armed();
+    return;
+  }
   c.cur_src = c.src; c.cur_dst = c.dst;
   switch (v & 0x00600000) { case 0x00000000: c.dst_inc = 1; break; case 0x00200000: c.dst_inc = -1; break; case 0x00400000: c.dst_inc = 0; break; default: c.dst_inc = 1; break; }
   switch (v & 0x01800000) { case 0x00000000: c.src_inc = 1; break; case 0x00800000: c.src_inc = -1; break; case 0x01000000: c.src_inc = 0; break; default: c.src_inc = 1; break; }
   c.start_mode = (cpu == Cpu::ARM9) ? ((v >> 27) & 7) : (((v >> 28) & 3) | 0x10);
+  update_cart_armed();
   if ((c.start_mode & 7) == 0) start(c);
   else if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) { if (nds_.io.cart_drq()) start(c); }
   else if (c.start_mode == MODE9_GXFIFO) nds_.gpu3d.check_fifo_dma();
@@ -76,7 +82,12 @@ void Dma::check(Cpu cpu, u32 mode) {
 }
 void Dma::stop(Cpu cpu, u32 mode) {
   for (int n = 0; n < 4; ++n) { Channel& c = channel(cpu, n); if (c.start_mode == mode) c.cnt &= ~0x80000000u; }
+  if (mode == MODE9_CART || mode == MODE7_CART) update_cart_armed();
 }
+void Dma::update_cart_armed() {
+  cart_armed_ = in_mode(Cpu::ARM9, MODE9_CART) || in_mode(Cpu::ARM7, MODE7_CART);
+}
+
 bool Dma::in_mode(Cpu cpu, u32 mode) const {
   for (int n = 0; n < 4; ++n) { const Channel& c = channel(cpu, n); if (c.start_mode == mode && (c.cnt & 0x80000000)) return true; }
   return false;
@@ -141,7 +152,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
     if (c.iter_count == 0) set_running(c, 0);   // wait for the next trigger
     return used;
   }
-  if (!(c.cnt & (1u << 25))) c.cnt &= ~0x80000000u;   // not repeating: disable
+  if (!(c.cnt & (1u << 25))) { c.cnt &= ~0x80000000u; update_cart_armed(); }   // not repeating: disable
   if (c.cnt & (1u << 30)) nds_.io.request_irq(c.cpu, io::IRQ_DMA0 + c.num);
   set_running(c, 0);
   c.in_progress = false;

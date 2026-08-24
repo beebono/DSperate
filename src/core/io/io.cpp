@@ -430,9 +430,7 @@ void Io::cart_write_romctrl(u32 value) {
 // The exception is a cart-mode DMA channel: it is level-triggered on DRQ and
 // has nothing to poll it, so while one is armed the per-word event stays and
 // the behaviour is exactly what it was.
-bool Io::cart_dma_armed() const {
-  return nds_.dma.in_mode(Cpu::ARM9, dma::MODE9_CART) || nds_.dma.in_mode(Cpu::ARM7, dma::MODE7_CART);
-}
+bool Io::cart_dma_armed() const { return nds_.dma.cart_armed(); }
 
 u32 Io::cart_word_delay() const {
   const u32 xfer = (cart.romctrl & (1u << 27)) ? 8 : 5;
