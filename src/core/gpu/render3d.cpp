@@ -296,9 +296,6 @@ struct Renderer3D::SpanBuf {
   alignas(16) u8 pass[256 + 16];      // depth pre-pass result (kern depth_candidates)
   alignas(16) u32 tcol[256 + 16];     // texels for the span (textured polygons), colour15 and
   alignas(16) u32 talp[256 + 16];     // 5-bit alpha, gathered once per span
-  // The same texels as 6-bit channels and 5-bit alpha, one plane each, so the
-  // shader runs in byte lanes (sixteen pixels a vector).
-  alignas(16) u8 tr[256 + 16], tg[256 + 16], tb[256 + 16], ta[256 + 16];
   alignas(16) u32 col[256 + 16];      // shaded pixel records (18-bit colour, alpha 24-28)
 };
 
@@ -1085,27 +1082,35 @@ void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const
     prof::add(prof::C_TEX_SLOW_VIEWS, n4);
     for (u32 i = 0; i < n4; i += 4) texture_gather4(sh, sa + i, ta + i, col + i, alp + i);
   }
-  // The repack reads whole sixteens; the tail past the gather is padding the
-  // resolve loop never looks at, but it has to be a defined value.
+  // The shader reads whole sixteens; the tail past the gather is padding it
+  // never looks at, but it has to be a defined value.
   const uint32x4_t zero = vdupq_n_u32(0);
   for (u32 i = n4; i < n16; i += 4) { vst1q_u32(col + i, zero); vst1q_u32(alp + i, zero); }
-  // RGB555 -> three 6-bit channels, in 16-bit lanes, stored as byte planes.
+  // The RGB555 -> byte-plane repack used to happen here, into four more span
+  // planes. It is now done inside span_shade, a vector at a time, so the
+  // texels go gather -> registers -> shaded record without a round trip
+  // through memory: it was 8 bytes a pixel written and 8 read back, on a
+  // pipeline that measures memory-bound (refs/docs/render/RENDER_PLAN_V3 §5).
+}
+
+// A texel vector unpacked to the four 6-bit byte planes the shader wants:
+// RGB555 in `col`, 5-bit alpha in `alp`, sixteen pixels at a time. Lives here
+// rather than in a span plane because span_shade is its only consumer.
+[[gnu::always_inline]] inline void texels16(const u32* col, const u32* alp, uint8x16_t out[4]) {
   const uint16x8_t m3e = vdupq_n_u16(0x3E), one16 = vdupq_n_u16(1);
   auto chan = [&](uint16x8_t c, int shift) {
     uint16x8_t v = shift == 0 ? vshlq_n_u16(c, 1) : (shift == 4 ? vshrq_n_u16(c, 4) : vshrq_n_u16(c, 9));
     v = vandq_u16(v, m3e);
     return vaddq_u16(v, vandq_u16(vtstq_u16(v, v), one16));
   };
-  for (u32 i = 0; i < n16; i += 16) {
-    const uint16x8_t c0 = vcombine_u16(vmovn_u32(vld1q_u32(col + i)),     vmovn_u32(vld1q_u32(col + i + 4)));
-    const uint16x8_t c1 = vcombine_u16(vmovn_u32(vld1q_u32(col + i + 8)), vmovn_u32(vld1q_u32(col + i + 12)));
-    const uint16x8_t a0 = vcombine_u16(vmovn_u32(vld1q_u32(alp + i)),     vmovn_u32(vld1q_u32(alp + i + 4)));
-    const uint16x8_t a1 = vcombine_u16(vmovn_u32(vld1q_u32(alp + i + 8)), vmovn_u32(vld1q_u32(alp + i + 12)));
-    vst1q_u8(sb.tr + off + i, vcombine_u8(vmovn_u16(chan(c0, 0)), vmovn_u16(chan(c1, 0))));
-    vst1q_u8(sb.tg + off + i, vcombine_u8(vmovn_u16(chan(c0, 4)), vmovn_u16(chan(c1, 4))));
-    vst1q_u8(sb.tb + off + i, vcombine_u8(vmovn_u16(chan(c0, 9)), vmovn_u16(chan(c1, 9))));
-    vst1q_u8(sb.ta + off + i, vcombine_u8(vmovn_u16(a0), vmovn_u16(a1)));
-  }
+  const uint16x8_t c0 = vcombine_u16(vmovn_u32(vld1q_u32(col)),     vmovn_u32(vld1q_u32(col + 4)));
+  const uint16x8_t c1 = vcombine_u16(vmovn_u32(vld1q_u32(col + 8)), vmovn_u32(vld1q_u32(col + 12)));
+  const uint16x8_t a0 = vcombine_u16(vmovn_u32(vld1q_u32(alp)),     vmovn_u32(vld1q_u32(alp + 4)));
+  const uint16x8_t a1 = vcombine_u16(vmovn_u32(vld1q_u32(alp + 8)), vmovn_u32(vld1q_u32(alp + 12)));
+  out[0] = vcombine_u8(vmovn_u16(chan(c0, 0)), vmovn_u16(chan(c1, 0)));
+  out[1] = vcombine_u8(vmovn_u16(chan(c0, 4)), vmovn_u16(chan(c1, 4)));
+  out[2] = vcombine_u8(vmovn_u16(chan(c0, 9)), vmovn_u16(chan(c1, 9)));
+  out[3] = vcombine_u8(vmovn_u16(a0), vmovn_u16(a1));
 }
 
 // The span's shaded colours. Decal vs modulate is a property of the polygon,
@@ -1127,15 +1132,15 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
     }
     return;
   }
-  const u8* tra = sb.tr + off; const u8* tga = sb.tg + off; const u8* tba = sb.tb + off; const u8* taa = sb.ta + off;
+  const u32* tca = sb.tcol + off; const u32* taca = sb.talp + off;
   const bool decal = sh.blendmode & 1;
   if (!decal) {
     // Modulate: ((t + 1) * (v + 1) - 1) >> 6 is t + v + t*v >> 6, which is an
     // add-long plus a multiply-accumulate-long in byte lanes (both channels
     // are 6-bit, so the product cannot leave 16 bits).
     for (u32 i = 0; i < n; i += 16) {
-      uint8x16_t ch[4];
-      const uint8x16_t tv[4] = {vld1q_u8(tra + i), vld1q_u8(tga + i), vld1q_u8(tba + i), vld1q_u8(taa + i)};
+      uint8x16_t ch[4], tv[4];
+      texels16(tca + i, taca + i, tv);
       const uint8x16_t vv[4] = {vld1q_u8(ra + i), vld1q_u8(ga + i), vld1q_u8(ba + i), vpa};
       for (int k = 0; k < 4; ++k) {
         uint16x8_t lo = vaddl_u8(vget_low_u8(tv[k]), vget_low_u8(vv[k]));
@@ -1153,11 +1158,13 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
   // Decal: (t * ta + v * (31 - ta)) >> 5, with the two ends taken whole.
   const uint8x16_t v31 = vdupq_n_u8(31), v0 = vdupq_n_u8(0);
   for (u32 i = 0; i < n; i += 16) {
-    const uint8x16_t tal = vld1q_u8(taa + i);
+    uint8x16_t tx[4];
+    texels16(tca + i, taca + i, tx);
+    const uint8x16_t tal = tx[3];
     const uint8x16_t inv = vsubq_u8(v31, tal);
     const uint8x16_t at0 = vceqq_u8(tal, v0), at31 = vceqq_u8(tal, v31);
     uint8x16_t ch[4];
-    const uint8x16_t tv[3] = {vld1q_u8(tra + i), vld1q_u8(tga + i), vld1q_u8(tba + i)};
+    const uint8x16_t tv[3] = {tx[0], tx[1], tx[2]};
     const uint8x16_t vv[3] = {vld1q_u8(ra + i), vld1q_u8(ga + i), vld1q_u8(ba + i)};
     for (int k = 0; k < 3; ++k) {
       uint16x8_t lo = vmull_u8(vget_low_u8(tv[k]), vget_low_u8(tal));
