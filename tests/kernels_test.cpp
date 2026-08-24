@@ -270,6 +270,47 @@ static void test_span() {
     if (kind != 2) {   // linear attributes: |y1 - y0| * xdiff < 2^32
       kern::ref::span_attr_linear(y0, y1, xv0, n, xdiff, oa); N::span_attr_linear(y0, y1, xv0, n, xdiff, ob);
       CHECK_SAME("span_attr_linear", oa, ob, n * 4);
+      // The fused linear pass, against both its own reference and the
+      // per-attribute kernel it replaces: five span_attr_linear calls plus
+      // the narrowing store the caller used to do by hand. That equivalence
+      // is the thing the renderer depends on, so check it directly.
+      alignas(16) static s32 lin[5][264];
+      alignas(16) static u8 lra[264], lga[264], lba[264], lrb[264], lgb[264], lbb[264], lrc[264], lgc[264], lbc[264];
+      alignas(16) static s16 lsa[264], lta[264], lsb[264], ltb[264], lsc[264], ltc[264];
+      s32 ls0[5], ls1[5];
+      for (int k = 0; k < 5; ++k) {
+        // Colour magnitudes for r/g/b, texture-coordinate ones for s/t.
+        ls0[k] = k < 3 ? static_cast<s32>(rng() & 0x1FF) : static_cast<s16>(rng());
+        ls1[k] = k < 3 ? static_cast<s32>(rng() & 0x1FF) : static_cast<s16>(rng());
+        if (!(rng() & 5)) ls1[k] = ls0[k];
+      }
+      if (!(rng() & 3)) { ls1[0] = ls0[0]; ls1[1] = ls0[1]; ls1[2] = ls0[2]; }   // the flat-colour case
+      kern::ref::span_attrs5n_lin(ls0, ls1, xv0, n, xdiff, lra, lga, lba, lsa, lta);
+      N::span_attrs5n_lin(ls0, ls1, xv0, n, xdiff, lrb, lgb, lbb, lsb, ltb);
+      CHECK_SAME("span_attrs5n_lin r", lra, lrb, n);
+      CHECK_SAME("span_attrs5n_lin g", lga, lgb, n);
+      CHECK_SAME("span_attrs5n_lin b", lba, lbb, n);
+      CHECK_SAME("span_attrs5n_lin s", lsa, lsb, n * 2);
+      CHECK_SAME("span_attrs5n_lin t", lta, ltb, n * 2);
+      for (int k = 0; k < 5; ++k) kern::ref::span_attr_linear(ls0[k], ls1[k], xv0, n, xdiff, lin[k]);
+      for (u32 i = 0; i < n; ++i) {
+        lrc[i] = static_cast<u8>((static_cast<u32>(lin[0][i]) >> 3) & 0xFF);
+        lgc[i] = static_cast<u8>((static_cast<u32>(lin[1][i]) >> 3) & 0xFF);
+        lbc[i] = static_cast<u8>((static_cast<u32>(lin[2][i]) >> 3) & 0xFF);
+        lsc[i] = static_cast<s16>(lin[3][i]);
+        ltc[i] = static_cast<s16>(lin[4][i]);
+      }
+      CHECK_SAME("span_attrs5n_lin vs per-attribute r", lrc, lrb, n);
+      CHECK_SAME("span_attrs5n_lin vs per-attribute g", lgc, lgb, n);
+      CHECK_SAME("span_attrs5n_lin vs per-attribute b", lbc, lbb, n);
+      CHECK_SAME("span_attrs5n_lin vs per-attribute s", lsc, lsb, n * 2);
+      CHECK_SAME("span_attrs5n_lin vs per-attribute t", ltc, ltb, n * 2);
+      kern::ref::span_attrs2n_lin(ls0, ls1, xv0, n, xdiff, lsa, lta);
+      N::span_attrs2n_lin(ls0, ls1, xv0, n, xdiff, lsb, ltb);
+      CHECK_SAME("span_attrs2n_lin s", lsa, lsb, n * 2);
+      CHECK_SAME("span_attrs2n_lin t", lta, ltb, n * 2);
+      CHECK_SAME("span_attrs2n_lin vs 5n_lin s", lsc, lsb, n * 2);
+      CHECK_SAME("span_attrs2n_lin vs 5n_lin t", ltc, ltb, n * 2);
     }
     const s32 xrecip = (1 << 22) / xdiff;
     kern::ref::span_z_linear(y0, y1, xv0, n, xdiff, xrecip, oa); N::span_z_linear(y0, y1, xv0, n, xdiff, xrecip, ob);

@@ -591,18 +591,33 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
     kern::active::span_attrs5n(al, ar, sb.fac + off, n, sb.vr + off, sb.vg + off, sb.vb + off, sb.sc + off, sb.tc + off);
     return;
   }
-  alignas(16) s32 tmp[5][272];
-  for (int k = 0; k < 5; ++k) {
-    if (xdiff == 0) { for (u32 i = 0; i < n; ++i) tmp[k][i] = al[k]; }
-    else kern::active::span_attr_linear(al[k], ar[k], xv0, n, xdiff, tmp[k]);
+  if (xdiff == 0) {
+    // Degenerate span: every pixel is the left endpoint.
+    const u32 fill = (n + 7) & ~7u;
+    std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
+    std::memset(sb.vg + off, static_cast<u8>((static_cast<u32>(al[1]) >> 3) & 0xFF), fill);
+    std::memset(sb.vb + off, static_cast<u8>((static_cast<u32>(al[2]) >> 3) & 0xFF), fill);
+    for (u32 i = 0; i < n; ++i) { sb.sc[off + i] = static_cast<s16>(al[3]); sb.tc[off + i] = static_cast<s16>(al[4]); }
+    return;
   }
-  for (u32 i = 0; i < n; ++i) {
-    sb.vr[off + i] = static_cast<u8>((static_cast<u32>(tmp[0][i]) >> 3) & 0xFF);
-    sb.vg[off + i] = static_cast<u8>((static_cast<u32>(tmp[1][i]) >> 3) & 0xFF);
-    sb.vb[off + i] = static_cast<u8>((static_cast<u32>(tmp[2][i]) >> 3) & 0xFF);
-    sb.sc[off + i] = static_cast<s16>(tmp[3][i]);
-    sb.tc[off + i] = static_cast<s16>(tmp[4][i]);
+  // The linear span gets the same two-way split the perspective one above
+  // does. It used to stage all five attributes as s32 into a 5 KB scratch
+  // buffer and narrow them in a scalar loop, with a 64-bit reciprocal divide
+  // per attribute -- and it never took the constant-colour shortcut at all,
+  // although constant-W content (which is what makes a span linear) is
+  // exactly where flat colour is most common. Meteos takes this branch for
+  // every span it draws.
+  if (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2]) {
+    prof::add(prof::C_SPAN_FLAT_RGB, 1);
+    const u32 fill = (n + 7) & ~7u;
+    std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
+    std::memset(sb.vg + off, static_cast<u8>((static_cast<u32>(al[1]) >> 3) & 0xFF), fill);
+    std::memset(sb.vb + off, static_cast<u8>((static_cast<u32>(al[2]) >> 3) & 0xFF), fill);
+    kern::active::span_attrs2n_lin(al, ar, xv0, n, xdiff, sb.sc + off, sb.tc + off);
+    return;
   }
+  prof::add(prof::C_SPAN_LERP_RGB, 1);
+  kern::active::span_attrs5n_lin(al, ar, xv0, n, xdiff, sb.vr + off, sb.vg + off, sb.vb + off, sb.sc + off, sb.tc + off);
 }
 
 void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {

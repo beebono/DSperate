@@ -308,6 +308,31 @@ void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u
   }
 }
 
+// One linear attribute at one pixel, exactly as span_attr_linear computes it.
+static inline s32 lin_at(s32 y0, s32 y1, s32 xv, s32 xdiff) {
+  if (y0 == y1) return y0;
+  if (y0 < y1) return y0 + static_cast<s32>(static_cast<s64>(y1 - y0) * xv / xdiff);
+  return y1 + static_cast<s32>(static_cast<s64>(y0 - y1) * (xdiff - xv) / xdiff);
+}
+
+void span_attrs5n_lin(const s32* y0, const s32* y1, s32 xv0, u32 n, s32 xdiff, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
+  u8* const cout[3] = {vr, vg, vb};
+  s16* const tout[2] = {sc, tc};
+  for (u32 i = 0; i < n; ++i) {
+    const s32 xv = xv0 + static_cast<s32>(i);
+    for (int k = 0; k < 3; ++k) cout[k][i] = static_cast<u8>((static_cast<u32>(lin_at(y0[k], y1[k], xv, xdiff)) >> 3) & 0xFF);
+    for (int k = 3; k < 5; ++k) tout[k - 3][i] = static_cast<s16>(lin_at(y0[k], y1[k], xv, xdiff));
+  }
+}
+
+void span_attrs2n_lin(const s32* y0, const s32* y1, s32 xv0, u32 n, s32 xdiff, s16* sc, s16* tc) {
+  s16* const tout[2] = {sc, tc};
+  for (u32 i = 0; i < n; ++i) {
+    const s32 xv = xv0 + static_cast<s32>(i);
+    for (int k = 3; k < 5; ++k) tout[k - 3][i] = static_cast<s16>(lin_at(y0[k], y1[k], xv, xdiff));
+  }
+}
+
 void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
   if (y0 == y1) { for (u32 i = 0; i < n; ++i) out[i] = y0; return; }
   for (u32 i = 0; i < n; ++i) {

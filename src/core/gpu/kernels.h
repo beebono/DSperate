@@ -87,6 +87,12 @@ namespace ds::gpu::kern {
   /* Linear attribute: y0 + (y1-y0)*xv/xdiff for y0 < y1, else y1 + (y0-y1)*(xdiff-xv)/xdiff (truncating);    \
      |y1-y0| * xdiff < 2^32 (colours and texture coordinates; depth goes through span_z_linear). */           \
   void NS##span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out);                            \
+  /* The linear twins of span_attrs5n / span_attrs2n: same narrowing, same results as five (or two) calls  \
+     to span_attr_linear followed by the narrowing store, in one pass. Worth its own kernel because the      \
+     per-call reciprocal is a 64-bit division -- five of them per span on the path that staged the five      \
+     attributes as s32 first -- and because the s32 staging buffer disappears with them. */                  \
+  void NS##span_attrs5n_lin(const s32* y0, const s32* y1, s32 xv0, u32 n, s32 xdiff, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc); \
+  void NS##span_attrs2n_lin(const s32* y0, const s32* y1, s32 xv0, u32 n, s32 xdiff, s16* sc, s16* tc);      \
   /* Z-buffer depth: base + ((disp>>9) * factor * xrecip >> 13) with base/disp/factor chosen by z0 < z1. */    \
   void NS##span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* out);                    \
   /* Depth pre-pass over n pixels: pass[i] = 1 where z passes the test of `mode` against the top pixel        \

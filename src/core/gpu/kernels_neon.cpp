@@ -657,6 +657,87 @@ void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u
   }
 }
 
+// Linear interpolation of one attribute over four pixels, the vector form of
+// span_attr_linear's body: q = d * xv / xdiff by the reciprocal, with the
+// same one-compare fix-up, and xv mirrored when the endpoints descend.
+struct LinAttr {
+  int32x4_t base;
+  uint32x4_t d;
+  bool flat, up;
+  void set(s32 y0, s32 y1) {
+    flat = y0 == y1;
+    up = y0 < y1;
+    base = vdupq_n_s32(flat ? y0 : (up ? y0 : y1));
+    d = vdupq_n_u32(static_cast<u32>(up ? y1 - y0 : y0 - y1));
+  }
+  [[gnu::always_inline]] int32x4_t at(int32x4_t xv, int32x4_t vxdiff, uint32x4_t vm, uint32x4_t vxd, bool has_m) const {
+    if (flat) return base;
+    const int32x4_t x = up ? xv : vsubq_s32(vxdiff, xv);
+    const uint32x4_t num = vmulq_u32(d, vreinterpretq_u32_s32(x));
+    uint32x4_t q = num;
+    if (has_m) {
+      q = vcombine_u32(vshrn_n_u64(vmull_u32(vget_low_u32(num), vget_low_u32(vm)), 32), vshrn_n_u64(vmull_high_u32(num, vm), 32));
+      q = vaddq_u32(q, vcgtq_u32(vmulq_u32(q, vxd), num));   // all-ones lane = -1
+    }
+    return vaddq_s32(base, vreinterpretq_s32_u32(q));
+  }
+};
+
+// The reciprocal span_attr_linear derives per call. Hoisted here because the
+// fused kernels need it once for all five attributes, not once each: it is a
+// 64-bit division, and five of them per span was the cost this kernel exists
+// to remove.
+static inline u32 lin_recip(s32 xdiff) {
+  return xdiff >= 2 ? static_cast<u32>(((1ull << 32) + static_cast<u32>(xdiff) - 1) / static_cast<u32>(xdiff)) : 0;
+}
+
+void span_attrs5n_lin(const s32* y0, const s32* y1, s32 xv0, u32 n, s32 xdiff, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
+  LinAttr a[5];
+  for (int k = 0; k < 5; ++k) a[k].set(y0[k], y1[k]);
+  const int32x4_t vxdiff = vdupq_n_s32(xdiff);
+  const u32 m = lin_recip(xdiff);
+  const uint32x4_t vm = vdupq_n_u32(m), vxd = vreinterpretq_u32_s32(vxdiff);
+  u8* const cout[3] = {vr, vg, vb};
+  s16* const tout[2] = {sc, tc};
+  for (u32 i = 0; i < n; i += 8) {
+    const int32x4_t xv0v = vaddq_s32(vdupq_n_s32(xv0 + static_cast<s32>(i)), kLane);
+    const int32x4_t xv1v = vaddq_s32(xv0v, vdupq_n_s32(4));
+    for (int k = 0; k < 5; ++k) {
+      int32x4_t v0, v1;
+      if (m) { v0 = a[k].at(xv0v, vxdiff, vm, vxd, true);  v1 = a[k].at(xv1v, vxdiff, vm, vxd, true); }
+      else   { v0 = a[k].at(xv0v, vxdiff, vm, vxd, false); v1 = a[k].at(xv1v, vxdiff, vm, vxd, false); }
+      if (k < 3) {   // (v >> 3) & 0xFF: the two narrowing moves mask it
+        const uint16x8_t w = vcombine_u16(vmovn_u32(vshrq_n_u32(vreinterpretq_u32_s32(v0), 3)),
+                                          vmovn_u32(vshrq_n_u32(vreinterpretq_u32_s32(v1), 3)));
+        vst1_u8(cout[k] + i, vmovn_u16(w));
+      } else {       // (s16)v
+        vst1q_s16(tout[k - 3] + i, vreinterpretq_s16_u16(vcombine_u16(vmovn_u32(vreinterpretq_u32_s32(v0)),
+                                                                     vmovn_u32(vreinterpretq_u32_s32(v1)))));
+      }
+    }
+  }
+}
+
+void span_attrs2n_lin(const s32* y0, const s32* y1, s32 xv0, u32 n, s32 xdiff, s16* sc, s16* tc) {
+  LinAttr a[2];
+  for (int k = 0; k < 2; ++k) a[k].set(y0[k + 3], y1[k + 3]);
+  const int32x4_t vxdiff = vdupq_n_s32(xdiff);
+  const u32 m = lin_recip(xdiff);
+  const uint32x4_t vm = vdupq_n_u32(m), vxd = vreinterpretq_u32_s32(vxdiff);
+  s16* const tout[2] = {sc, tc};
+  for (u32 i = 0; i < n; i += 8) {
+    const int32x4_t xv0v = vaddq_s32(vdupq_n_s32(xv0 + static_cast<s32>(i)), kLane);
+    const int32x4_t xv1v = vaddq_s32(xv0v, vdupq_n_s32(4));
+    for (int k = 0; k < 2; ++k) {
+      int32x4_t v0, v1;
+      if (m) { v0 = a[k].at(xv0v, vxdiff, vm, vxd, true);  v1 = a[k].at(xv1v, vxdiff, vm, vxd, true); }
+      else   { v0 = a[k].at(xv0v, vxdiff, vm, vxd, false); v1 = a[k].at(xv1v, vxdiff, vm, vxd, false); }
+      vst1q_s16(tout[k] + i, vreinterpretq_s16_u16(vcombine_u16(vmovn_u32(vreinterpretq_u32_s32(v0)),
+                                                                vmovn_u32(vreinterpretq_u32_s32(v1)))));
+    }
+  }
+}
+
 void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
   if (y0 == y1) { const int32x4_t v = vdupq_n_s32(y0); for (u32 i = 0; i < n; i += 4) vst1q_s32(out + i, v); return; }
   const bool up = y0 < y1;
