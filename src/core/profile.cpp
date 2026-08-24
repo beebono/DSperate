@@ -3,6 +3,7 @@
 #include "core/profile.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -25,7 +26,7 @@ const char* const count_names[C_COUNT] = {"3d polygon lines", "3d span pixels", 
   "cycles arm9 awake+spinning", "cycles arm7 awake+spinning", "cycles one spinning, other halted", "cycles all idle (halt or spin)",
   "host ns arm9 in spin slices", "host ns arm7 in spin slices", "host ns arm9 working", "host ns arm7 working", "cycles skipped by idle-loop detect", "idle veto: dma", "idle veto: gx busy", "idle veto: irq pending", "idle veto: pc filter", "idle veto: arm9 not a loop", "idle veto: arm7 not a loop", "idle skip allowed",
   "2d lines rendered", "2d text bg lines", "2d affine bg lines", "2d extended bg lines", "2d 3d-layer lines", "2d lines with sprites", "2d lines with windows", "2d lines with colour effect", "2d lines where an effect can apply", "2d flat lines (no effect possible)", "2d plane selects",
-  "2d lines: 0 layers", "2d lines: 1 layer", "2d lines: 2 layers", "2d lines: 3 layers", "2d lines: 4+ layers", "2d lines: 1 layer, fully opaque", "2d lines with obj pixels", "2d lines with 3d pixels", "2d lines with a window", "2d bg lines 16-colour text", "2d bg lines 256-colour text", "2d bg lines direct colour", "2d bg lines empty (transparent row)", "2d fast lines: backdrop only", "2d fast lines: one opaque layer", "2d full lines: effect mode live", "2d full lines: translucent 3d", "2d full lines: semi/bitmap sprites", "2d full lines: second target needed", "2d full lines: fade only", "3d spans: constant colour", "3d spans: interpolated colour"};
+  "2d lines: 0 layers", "2d lines: 1 layer", "2d lines: 2 layers", "2d lines: 3 layers", "2d lines: 4+ layers", "2d lines: 1 layer, fully opaque", "2d lines with obj pixels", "2d lines with 3d pixels", "2d lines with a window", "2d bg lines 16-colour text", "2d bg lines 256-colour text", "2d bg lines direct colour", "2d bg lines empty (transparent row)", "2d fast lines: backdrop only", "2d fast lines: one opaque layer", "2d full lines: effect mode live", "2d full lines: translucent 3d", "2d full lines: semi/bitmap sprites", "2d full lines: second target needed", "2d full lines: fade only", "3d spans: constant colour", "3d spans: interpolated colour", "3d band 0 ns", "3d band 1 ns", "3d band 2 ns", "3d band 3 ns", "3d band phase ns (slowest band)", "3d band ns summed (all bands)"};
 
 namespace detail {
 thread_local Accum* acc = nullptr;
@@ -38,7 +39,7 @@ std::vector<Accum*>& accs() { static std::vector<Accum*> v; return v; }
 // either way (there are only ever a handful of threads).
 Accum* make_acc() {
   Accum* a = new Accum();
-  { std::lock_guard<std::mutex> lk(accs_mutex()); accs().push_back(a); }
+  { std::lock_guard<std::mutex> lk(accs_mutex()); a->tid = static_cast<u32>(accs().size()); accs().push_back(a); }
   acc = a;
   return a;
 }
@@ -71,6 +72,24 @@ void report() {
         std::fprintf(stderr, "[profile]   reject %-14s %10llu\n",
                      ds::cpu::idle_reject_name(static_cast<ds::cpu::IdleReject>(r)),
                      (unsigned long long)il.by_reason[r]);
+  }
+  // DS_PROFILE_THREADS=1: the same stages per thread. The emulation thread
+  // waits for the slowest band, so its own column is the frame's critical
+  // path and the workers' columns are only what they contribute to it.
+  if (std::getenv("DS_PROFILE_THREADS")) {
+    std::lock_guard<std::mutex> lk(detail::accs_mutex());
+    for (const Accum* a : detail::accs()) {
+      u64 t = 0;
+      for (u32 i = 0; i < COUNT; ++i) t += a->ns[i];
+      if (!t) continue;
+      std::fprintf(stderr, "[profile] --- thread %u (%s), %.1f ms of stage time\n", a->tid,
+                   a->tid == 0 ? "emulation" : "band worker", t / 1e6);
+      for (u32 i = 0; i < COUNT; ++i)
+        if (a->ns[i]) std::fprintf(stderr, "[profile]     %-14s %9.1f %5.1f%%\n", names[i], a->ns[i] / 1e6, 100.0 * a->ns[i] / t);
+      for (u32 i = 0; i < C_COUNT; ++i)
+        if (a->count[i] && (i == C_POLY_LINES || i == C_SPAN_PIXELS || i == C_RESOLVED_PIXELS || i == C_2D_LINES))
+          std::fprintf(stderr, "[profile]     %-24s %12llu\n", count_names[i], (unsigned long long)a->count[i]);
+    }
   }
   std::fprintf(stderr, "[profile] %-14s %9s %6s\n", "stage", "ms", "%");
   for (u32 i = 0; i < COUNT; ++i)

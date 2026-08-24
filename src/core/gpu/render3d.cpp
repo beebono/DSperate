@@ -1603,12 +1603,28 @@ void Renderer3D::render(const Gpu3D& gx) {
   const Gpu3D& gxr = gx;
   u32* const dst = out_.data();
   std::function<void(u32)> job = [this, &gxr, dst, nb](u32 i) {
+    const auto t0 = std::chrono::steady_clock::now();
     const s32 y0 = static_cast<s32>(i * 192 / nb), y1 = static_cast<s32>((i + 1) * 192 / nb);
     Renderer3D* r = this;
     if (i != 0) { r = bands_[i - 1].get(); r->prepare_worker(gxr, &poly_texels_); }
     r->render_band(y0, y1, dst);
+    // Each band writes its own slot, so no synchronisation; measurement only.
+    if (prof::enabled && i < 8) band_ns_[i] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   };
   pool_->run(job, nb);
+  // The emulation thread waits for the slowest band, so that -- not the sum --
+  // is what the 3D raster costs the frame. Both are recorded: the gap between
+  // them is what balancing the bands could recover.
+  if (prof::enabled) {
+    u64 mx = 0, sum = 0;
+    for (u32 i = 0; i < nb && i < 8; ++i) {
+      if (i < 4) prof::add(static_cast<prof::Counter>(prof::C_BAND0_NS + i), band_ns_[i]);
+      if (band_ns_[i] > mx) mx = band_ns_[i];
+      sum += band_ns_[i];
+    }
+    prof::add(prof::C_BAND_MAX_NS, mx);
+    prof::add(prof::C_BAND_SUM_NS, sum);
+  }
 }
 
 // How many bands to split the frame into. DS_R3D_THREADS overrides the count

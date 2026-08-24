@@ -209,6 +209,7 @@ private:
   u32  setup_poly_ = 0;                                 // polygon index during build_edges
   std::vector<const u32*> poly_texels_;
   std::vector<std::unique_ptr<Renderer3D>> bands_;      // workers 1..n-1 (band 0 is this)
+  u64 band_ns_[8] = {};                                 // DS_PROFILE: last frame's per-band wall time
   struct Pool;
   std::unique_ptr<Pool> pool_;
 
