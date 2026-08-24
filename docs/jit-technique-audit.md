@@ -409,7 +409,15 @@ no semantics at all.
 | fallback machinery | — | 2.07 % | `jit_h_fallback` + `call_full` + `exec_arm`, dominated by the ARM7 BIOS halt/IRQ path |
 | `Scheduler::slice_next` | 1.33 % | 1.69 % | |
 | `jit_stub_call_pure` | 0.90 % | 1.17 % | |
-| `Timing::reset` + `update_cpu9` | — | 1.20 % | the JIT README claims what remains of `update_cpu9` is boot; 1.2 % over 900 frames says otherwise |
+| `Timing::reset` + `update_cpu9` | — | 1.20 % | **boot only — not a candidate.** `DS_DEBUG_TIMING=1` reports 23 rebuilds at 60 frames and 23 at 900: zero per-frame work. The 1.2 % is a fixed ~60 ms spread over a profile that started at boot |
+
+A profile recorded from direct boot amortises startup across the run, so a
+fixed cost reads as an ongoing share. Check by running at two frame counts:
+if the absolute work does not scale, it is boot. Startup here is ~456 ms —
+two `NDS::reset()` calls (the constructor's, then the frontend's after the
+BIOS loads), each doing a full `Timing::reset` pass and a forced full
+`update_cpu9`. The ~30 ms of duplication is 6.5 % of startup and nothing of
+frame time; reordering reset to save it is not worth the risk.
 
 Note how flat that list is. Nothing left in the recompiler is worth more than
 about 2 %, and the 3D rasteriser is ~35 % of the frame — see
