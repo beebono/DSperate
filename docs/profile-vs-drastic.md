@@ -82,10 +82,20 @@ ratios are all the same defect in different clothes:
 - `render_polygon_line` is 4.3× `render_polygon_flush_1x` because theirs is a
   dispatcher and ours re-derives per-polygon facts on every scanline. §2 packs
   those into a descriptor word at bin time.
-- `span_factor` is 3.4× their perspective setup because we compute a
-  per-pixel factor array where they compute per-span *steps* and increment.
-  Their hot variant is `_w_constant` — the specialised one — which is the same
-  hoist again.
+- `span_factor` is 3.4× their perspective setup, and the reason is narrower
+  than "they step and we do not" — **we already forward-difference**
+  (`num += dnum; den += dden` per iteration). What costs us is the *division*:
+  a `vrecpe` estimate, a Newton step and two correction rounds per four
+  pixels. Their hot variant is `setup_perspective_steps_w_constant_asm`, and
+  the `_w_constant` is the point: when W does not vary, the denominator
+  `xv*w0d + (xdiff-xv)*w1d` collapses to the constant `xdiff*w0d`, so the
+  whole span needs **one** reciprocal rather than a corrected division per
+  four pixels. Censused, that case covers **76 % of span_factor's pixels on
+  SM64DS** (28 % of calls — the constant-denominator spans are the long ones,
+  87 px against a 32 px mean) but only 2.7 % on Dragon Ball and 0.2 % on
+  Etrian Odyssey, and Mario & Luigi never calls the kernel at all because its
+  W is constant *and* a multiple of 128, which takes the linear path. So it is
+  a real specialisation with a large payoff on exactly one of our scenes.
 - Geometry submission is 2.9× theirs, and this one is not covered by any
   technique document. `techniques/00` puts DraStic's whole Video Geometry phase
   at 0.09 ms/frame and we have never examined ours.
