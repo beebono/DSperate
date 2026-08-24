@@ -59,7 +59,7 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
 } // namespace
 
 int main(int argc, char** argv) {
-  const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr;
+  const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit9 = true, jit7 = true;
@@ -81,6 +81,7 @@ int main(int argc, char** argv) {
     else if (arg("--dump-frames")) dump = argv[++i];
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
+    else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
     else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
@@ -109,6 +110,20 @@ int main(int argc, char** argv) {
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.sched.set_quantum(quantum);
   if (rom && direct) nds.setup_direct_boot();
+  // A recording made with a save present only replays if the save is there:
+  // the game otherwise stops to create one. Loaded in the same place the SDL
+  // frontend loads it, and never written back -- this is a harness.
+  if (save && nds.cart && !nds.cart->sram().empty()) {
+    if (FILE* f = std::fopen(save, "rb")) {
+      std::vector<ds::u8>& sram = nds.cart->sram();
+      const size_t n = std::fread(sram.data(), 1, sram.size(), f);
+      std::fclose(f);
+      std::fprintf(stderr, "save: loaded %zu bytes from %s\n", n, save);
+    } else {
+      std::fprintf(stderr, "save: cannot read %s\n", save);
+      return 1;
+    }
+  }
 #if DSPERATE_JIT
   if ((jit9 || jit7) && !ds::jit::attach(nds, jit9, jit7)) return 1;
 #else
