@@ -64,7 +64,15 @@ slots, 16384 Thumb slots, **six instructions, no tag compare, no possible false
 hit**. Every ITCM branch in our build goes through the generic 64 K LUT probe
 with a tag compare and a miss path.
 
-### 2. Silent-store elimination (technique §5, stage 2)
+### 2. Silent-store elimination (technique §5, stage 2) — measured, not worth it
+
+**Do not do this.** Stores that leave the fast path because they land on a
+code page are **0.1 % of slow accesses in SM64DS (4,434 of 4.0 M), 1.4 % in
+Mario & Luigi, 0.09 % in Meteos** — measured 2026-08-24 with a temporary
+per-cause split in the slow-path helpers. The filter the technique calls "the
+filter that makes the whole scheme viable" would be filtering something that
+barely happens here. The rest of this section stands as a description of the
+gap; it just costs nothing to leave open.
 
 The technique calls this "the filter that makes the whole scheme viable", and
 we do not have it. Our store to a tagged code page goes: cold branch →
@@ -92,7 +100,42 @@ slot, so nothing propagates between instructions in a block. ARM code
 manufactures constants constantly through literal pools and `MOV`/`ORR` pairs,
 and every one of them reads a host register here.
 
-### 4. The GXFIFO store fast path (technique §8)
+### 4. The I/O fast path (technique §8) — done, but not as the technique writes it
+
+**Fixed 2026-08-24: −3.5 % / −2.8 % / −1.6 % on sm64 / mlbis / meteos.**
+
+Measured first, over 600 frames of each replayed scene: **99 % of everything
+that leaves the inline page-table path is MMIO**, and four in five are
+**loads, not stores** (sm64 6,729 slow accesses/frame, mlbis 5,297, meteos
+3,881). They concentrate hard on polled status bits — Mario & Luigi reads
+ROMCTRL 3,559 times a frame (67 % of its slow accesses), SM64DS reads DIVCNT
+2,432 times a frame (36 %) — and the geometry ports the technique singles out
+are only 10.7 % of SM64DS's traffic and ~2 % elsewhere.
+
+Skipping the polls is not available: `cpu/idle_loop.cpp` already implements
+idle-loop detection and **deliberately excludes** ROMCTRL and the cartridge
+ports, because skipping them changed output in Bowser's Inside Story and
+Meteos; `DS_IDLE_SKIP=1` also measures ~2 % *slower* overall. The poll had to
+be made cheap.
+
+The cost turned out to have nothing to do with the guest, the recompiler, or
+the technique. Disassembling `Io::read` showed **61 compare-and-branch
+instructions and no jump table** — a switch over ~25 scattered 32-bit
+addresses does not become one — plus a `-fstack-protector-strong` guard and a
+full frame on every call, courtesy of a `bool&` out-parameter whose
+address-taken local triggered it. Returning that flag by value dropped the
+guard and let GCC emit a real table (61 branches → 19); one range test
+replaced three `owns_reg` probes; and the JIT's slow helpers now call `Io`
+directly rather than through `Bus`'s two re-testing frames.
+
+A hand-written short-circuit for the eight hottest addresses, built first as
+an upper bound on what any dispatch flattening could recover, was **beaten**
+by the general fix — it also helps the registers the histogram does not name.
+
+Two lessons worth keeping. The technique's specific advice (recognise the
+geometry ports inline in the store helper) was the *less* valuable half of
+its own idea for us. And the win was found by disassembling the function, not
+by reasoning about instruction counts.
 
 3D games push their entire display list through `0x4000400`–`0x40005FC`, one
 32-bit store per command word — 82,662 per frame in SM64DS, 1.27 % of all guest
@@ -340,16 +383,31 @@ no semantics at all.
    (A), the biggest item. If exact data-cost accounting is costing more than a
    few percent, invest in resolving the cost statically where the page is known
    at translate time.
-4. **Silent-store elimination**, then per-block (not per-page) invalidation.
-   Cheap to add, and the technique is emphatic that it is what makes SMC
-   handling viable at all.
-5. **The GXFIFO fast path.** 82 k stores/frame in SM64DS through six nested C
-   calls. Self-contained: recognise the range in `emit_single`'s store path and
-   call `gxfifo_write` directly.
-6. **ITCM dispatch tables.** Largest new mechanism here, and the one that needs
-   the invalidation story (4) working first.
+4. ~~**Silent-store elimination**~~ **Dropped — 0.1–1.4 % of slow accesses.**
+   See §2.
+5. ~~**The GXFIFO fast path.**~~ **Done 2026-08-24, generalised.** See §4.
+6. **ITCM dispatch tables.** Largest new mechanism here. No longer gated on an
+   invalidation story, since (4) turned out not to matter.
 7. **Refill the budget in the poll stub** so a CPU switch does not leave the
-   arena.
+   arena. Worth less than it looks: `entries` is ~620/frame under
+   `--quantum 0`, against ~10,400 under the 128-cycle lockstep default.
+
+### What is left, with measured shares
+
+`perf` on the device, self time, JIT-relevant symbols only:
+
+| candidate | sm64 | meteos | note |
+|---|---|---|---|
+| indirect-branch stubs | 1.39 % | 2.78 % | the cost is the `br` mispredict on a *shared* stub, not instruction count — proven by the LUT change, which removed 8 instructions for nothing. Reducing it means fewer dispatches or a per-site probe, not a shorter one |
+| `memcmp` (2D palette/OAM compares) | 1.31 % | 2.70 % | not the recompiler, and never examined — bigger than most items here |
+| fallback machinery | — | 2.07 % | `jit_h_fallback` + `call_full` + `exec_arm`, dominated by the ARM7 BIOS halt/IRQ path |
+| `Scheduler::slice_next` | 1.33 % | 1.69 % | |
+| `jit_stub_call_pure` | 0.90 % | 1.17 % | |
+| `Timing::reset` + `update_cpu9` | — | 1.20 % | the JIT README claims what remains of `update_cpu9` is boot; 1.2 % over 900 frames says otherwise |
+
+Note how flat that list is. Nothing left in the recompiler is worth more than
+about 2 %, and the 3D rasteriser is ~35 % of the frame — see
+[techniques/02](techniques/02-3d-software-rasteriser.md).
 
 Everything in (1)–(3) can be measured against the existing SM64DS 300-frame
 baseline in `src/core/cpu/jit/README.md` with the strict slice diff kept green.
