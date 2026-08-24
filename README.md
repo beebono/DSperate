@@ -9,17 +9,25 @@ and maybe overlaid shader support later on.
 
 ---
 
-**Status: 2D and 3D video, no sound.** Both CPUs (ARM946E-S / ARM7TDMI) are
-interpreted with melonDS-grade cycle timing; DMA, timers, IPC, SPI devices,
-RTC, Wi-Fi probing, the divider/sqrt unit and a retail cartridge (KEY1, save
-chip, direct boot) are in. The two 2D engines are complete in portable C++
-(all BG modes, sprites, windows, mosaic, blending, extended palettes, display
-capture, master brightness), and the 3D engine — command FIFO with cycle
-timing, matrix stacks, lighting, clipping, and a software rasteriser with
-textures, shadows, fog, edge marking and anti-aliasing — renders commercial
-games' 3D scenes pixel-for-pixel like melonDS
-([docs/TRACING.md](docs/TRACING.md)); the NEON kernels and the SPU are next.
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the design.
+**Status: 2D and 3D video, sound, and an AArch64 recompiler.** Both CPUs
+(ARM946E-S / ARM7TDMI) run under the recompiler on AArch64 hosts and under the
+interpreter everywhere else, with melonDS-grade cycle timing; DMA, timers, IPC,
+SPI devices, RTC, Wi-Fi probing, the divider/sqrt unit and a retail cartridge
+(KEY1, save chip, direct boot) are in. The two 2D engines are complete (all BG
+modes, sprites, windows, mosaic, blending, extended palettes, display capture,
+master brightness), and the 3D engine — command FIFO with cycle timing, matrix
+stacks, lighting, clipping, and a software rasteriser with textures, shadows,
+fog, edge marking and anti-aliasing — renders commercial games' 3D scenes
+pixel-for-pixel like melonDS. The SPU mixes at 32768 Hz and the SDL frontend
+plays it.
+
+The 2D line stages exist as portable C++ with a NEON twin of the same name and
+signature (`src/core/gpu/kernels_ref.cpp`, `kernels_neon.cpp`, diffed against
+each other by `tests/kernels_test.cpp`); the 3D rasteriser is threaded by band.
+[docs/techniques](docs/techniques) documents the DraStic techniques being
+reimplemented and the measurements behind them;
+[src/core/cpu/jit/README.md](src/core/cpu/jit/README.md) describes the
+recompiler as built.
 
 ## Licence
 
@@ -27,8 +35,11 @@ GPLv3 — see [LICENSE](LICENSE). melonDS (GPLv3) is used as reference and, with
 attribution, as a code source.
 
 DSperate is a **clean-room** reimplementation of DraStic's *techniques*, documented
-by studying the binary, in private research notes that are not published. No DraStic code, in any
-form, is in this tree.
+by studying its freely-distributable debug-symbol build — which its original
+developer, Exophase, approved for distribution — and by measuring it on real
+hardware. Those notes are in [docs/techniques](docs/techniques); everything in
+them is reconstructible from that binary plus a test device. No DraStic code, in
+any form, is in this tree.
 
 ## Building
 
@@ -48,7 +59,7 @@ The JIT and NEON kernels only build on AArch64 hosts; everywhere else you get th
 interpreter and the portable C++ renderer. On AArch64 the recompiler is the
 default for both CPUs (`--interp`, `--jit9`, `--jit7` select otherwise); it is
 verified against the interpreter instruction by instruction
-(`tests/jit_test.cpp`) and slice by slice on whole games (docs/TRACING.md).
+(`tests/jit_test.cpp`) and slice by slice on whole games.
 
 The two CPUs are interleaved either in 128-cycle lockstep with melonDS
 (`--quantum 128`, the CLI's default — every frame dump and trace comparison
@@ -83,8 +94,14 @@ with `--frames N` the output is comparable between runs by frame index.
 `dsperate --replay scene.dsin`, which also takes `--dump-frames` and works
 under `perf`). The emulator is deterministic given its inputs, so a replay
 reproduces the session frame for frame as long as the ROM, BIOS and battery
-save (`<rom>.sav`) are the same as when it was recorded — a played scene
-becomes a benchmark.
+save are the same as when it was recorded — a played scene becomes a benchmark.
+
+The SDL frontend picks up `<rom>.sav` automatically; the CLI does not, so that
+a stray `.sav` next to a ROM cannot silently move a frame baseline. Give it
+`--save file` instead, which loads read-only and is never written back — a
+replay must not mutate its own input. A recording made against a game that
+writes a save (Mario & Luigi creates one on boot if it is missing) will diverge
+immediately without it.
 
 On a handheld with no desktop session, SDL uses its KMSDRM backend directly;
 point `XDG_RUNTIME_DIR` at the PipeWire runtime directory or SDL's PulseAudio

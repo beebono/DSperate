@@ -1,10 +1,10 @@
 # ARM → AArch64 recompiler
 
 Builds on AArch64 hosts only (`DSPERATE_JIT`); the x86 build runs the
-interpreter. The design is summarised in `docs/ARCHITECTURE.md` §3; the full
-derivation is in private research notes that are not published.
+interpreter. The techniques being reimplemented, and the measurements behind
+them, are described in `docs/techniques/01-arm-to-aarch64-jit.md`.
 
-**Every line here is authored from that design description.** Nothing is
+**Every line here is authored from that description of behaviour.** Nothing is
 transcribed from `objdump`/Ghidra output of any proprietary binary. melonDS's
 `ARMJIT_A64` (GPLv3) may be consulted and, with attribution, reused; so far
 nothing has been.
@@ -129,7 +129,7 @@ ends the slice, exactly as the interpreter's loop does.
 2. `dsperate --interp` vs default on the same ROM with `--dump-frames`
    (`DS_JIT_STRICT=1` for byte equality) and `--trace` (the JIT calls the same
    trace hook per instruction when tracing is on).
-3. Against melonDS exactly as the interpreter is (docs/TRACING.md).
+3. Against melonDS exactly as the interpreter is.
 
 ## Debugging
 
@@ -214,7 +214,7 @@ The permanent stubs are named too (`jit_stub_<name>`, per-CPU ones
 dispatch and call overhead shows up under its own names rather than as bare
 arena addresses. `tools/profile_categories.py` sums a `perf report` listing
 into subsystem buckets (JIT code / JIT stubs / JIT runtime / 3D / 2D /
-scheduler / memory …); see docs/TRACING.md.
+scheduler / memory …).
 
 Measured this way on the RK3566 over 60 s of real gameplay, translated code
 is 6-11 % of the process and extremely diffuse — the hottest single block is
