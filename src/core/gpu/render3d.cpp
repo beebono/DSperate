@@ -1600,11 +1600,13 @@ void Renderer3D::render(const Gpu3D& gx) {
   }
   if (!pool_ || pool_->workers() != nb - 1) pool_ = std::make_unique<Pool>(nb - 1);
 
+  compute_bands(nb);
   const Gpu3D& gxr = gx;
   u32* const dst = out_.data();
-  std::function<void(u32)> job = [this, &gxr, dst, nb](u32 i) {
+  std::function<void(u32)> job = [this, &gxr, dst](u32 i) {
     const auto t0 = std::chrono::steady_clock::now();
-    const s32 y0 = static_cast<s32>(i * 192 / nb), y1 = static_cast<s32>((i + 1) * 192 / nb);
+    const s32 y0 = band_y_[i], y1 = band_y_[i + 1];
+    if (y0 >= y1) { if (prof::enabled && i < 8) band_ns_[i] = 0; return; }
     Renderer3D* r = this;
     if (i != 0) { r = bands_[i - 1].get(); r->prepare_worker(gxr, &poly_texels_); }
     r->render_band(y0, y1, dst);
@@ -1624,6 +1626,42 @@ void Renderer3D::render(const Gpu3D& gx) {
     }
     prof::add(prof::C_BAND_MAX_NS, mx);
     prof::add(prof::C_BAND_SUM_NS, sum);
+  }
+}
+
+// Cut points for `nb` bands, equalising the work rather than the height.
+//
+// The cost model is the number of polygons covering each line: measured per
+// band on the device, time tracked polygon-lines (1.38M / 1.55M / 2.55M for
+// 5.35 / 8.11 / 6.42 s) and not span pixels, which were nearly equal across
+// the bands. Every line also costs a clear and a final pass whatever covers
+// it, hence the +1: a band of empty lines is not free.
+//
+// The polygons' line ranges are already known -- build_edges has just walked
+// them -- so this is a difference array and a prefix sum over 192 entries.
+void Renderer3D::compute_bands(u32 nb) {
+  std::array<s32, 194> delta{};
+  for (u32 i = 0; i < edge_count_; ++i) {
+    const Polygon& p = *edges_[i].poly;
+    const s32 y0 = p.ytop < 0 ? 0 : p.ytop;
+    const s32 y1 = p.ybot > 191 ? 191 : p.ybot;
+    if (y0 > 191 || y1 < y0) continue;
+    ++delta[y0]; --delta[y1 + 1];
+  }
+  std::array<u32, 193> cum{};   // cum[y] = cost of lines [0, y)
+  s32 active = 0;
+  for (s32 y = 0; y < 192; ++y) {
+    active += delta[y];
+    cum[y + 1] = cum[y] + static_cast<u32>(active) + 1;
+  }
+  const u32 total = cum[192];
+  band_y_[0] = 0;
+  band_y_[nb] = 192;
+  for (u32 b = 1; b < nb; ++b) {
+    const u32 target = static_cast<u32>((static_cast<u64>(total) * b) / nb);
+    s32 y = band_y_[b - 1];
+    while (y < 192 && cum[static_cast<u32>(y)] < target) ++y;
+    band_y_[b] = y;
   }
 }
 
