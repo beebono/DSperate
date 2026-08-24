@@ -682,7 +682,8 @@ u32 Io::read(Cpu cpu, u32 addr, u32 width) {
 void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
   if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) { nds_.gpu3d.write(addr, width, value); return; }
   if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) {
-    if (std::getenv("DS_DEBUG_GPUREG") && (addr & 0xFF) >= 0x50) std::fprintf(stderr, "[gpureg] frame %llu line %u write%u %08x = %08x\n", (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
+    static const bool dbg_gpureg = std::getenv("DS_DEBUG_GPUREG") != nullptr;
+    if (dbg_gpureg && (addr & 0xFF) >= 0x50) std::fprintf(stderr, "[gpureg] frame %llu line %u write%u %08x = %08x\n", (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
     nds_.gpu.reg_write(addr, width, value); return;
   }
   if (cpu == Cpu::ARM7 && spu::Spu::owns_reg(addr)) { nds_.spu.write(addr, width, value); return; }
@@ -894,7 +895,8 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
     const u32 k = addr - 0x04000240;
     if (k == 7) { if (wramcnt != (value & 3)) { wramcnt = value & 3; nds_.bus.update_wram(); } return; }
     const u32 bank = k < 7 ? k : k - 1;                 // 0x248/0x249 are banks H/I
-    if (std::getenv("DS_DEBUG_VRAMCNT")) std::fprintf(stderr, "[vramcnt] %c = %02x frame %llu line %u pc %08x\n", 'A' + bank, value, (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(Cpu::ARM9).hot.regs[15]);
+    static const bool dbg_vramcnt = std::getenv("DS_DEBUG_VRAMCNT") != nullptr;
+    if (dbg_vramcnt) std::fprintf(stderr, "[vramcnt] %c = %02x frame %llu line %u pc %08x\n", 'A' + bank, value, (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(Cpu::ARM9).hot.regs[15]);
     if (vramcnt[bank] != value) { vramcnt[bank] = value; nds_.bus.update_vram(); }
     return;
   }
