@@ -222,12 +222,18 @@ We chose exact melonDS timing instead — a legitimate choice, and it is what
 `DS_JIT_STRICT` and the frame-diff harness rest on — but the price is being
 paid on the hottest path in the emulator, per access, forever.
 
-Worth measuring before deciding: `DS_JIT_FASTCOST=1` already exists as an
-inexact knob. Run it on the device and see what exactness is actually costing
-us. If the answer is large, the shape to aim for is a *statically resolvable*
-data cost wherever the page can be determined at translate time (stack, TCM,
-main RAM through a known base) with the runtime path kept only for genuinely
-unknown addresses.
+**Still unpriced, and not easy to price.** `DS_JIT_FASTCOST=1` looked like the
+instrument for this and is not: on the device it runs at **442 ms/frame**, 50×
+slower than the exact path. It is the fuzzer's mutation check, not a timing
+knob. Pricing this properly needs a purpose-built variant, and any such
+variant changes the emulated cycle counts and therefore the workload — so the
+comparison would not be like-for-like. Treat the size of this item as unknown
+rather than large.
+
+If it is ever worth attacking, the shape to aim for is a *statically
+resolvable* data cost wherever the page can be determined at translate time
+(stack, TCM, main RAM through a known base), with the runtime path kept only
+for genuinely unknown addresses.
 
 ### B. The indirect-branch dispatcher
 
@@ -379,10 +385,10 @@ no semantics at all.
 2. **`csel` for simple conditional instructions.** Removes a mispredictable
    branch from a very common shape. Cycle accounting is already pre-charged for
    exactly these cases. Same dilution caveat applies — measure before investing.
-3. **Measure `DS_JIT_FASTCOST=1` on the device.** This is the decision point for
-   (A), the biggest item. If exact data-cost accounting is costing more than a
-   few percent, invest in resolving the cost statically where the page is known
-   at translate time.
+3. ~~**Measure `DS_JIT_FASTCOST=1` on the device.**~~ **Does not work** — 442
+   ms/frame, 50× slower; it is the fuzzer's mutation check, not a timing knob.
+   Item (A) stays unpriced, and pricing it needs a variant that changes the
+   workload it is being measured against.
 4. ~~**Silent-store elimination**~~ **Dropped — 0.1–1.4 % of slow accesses.**
    See §2.
 5. ~~**The GXFIFO fast path.**~~ **Done 2026-08-24, generalised.** See §4.
