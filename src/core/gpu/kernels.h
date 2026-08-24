@@ -34,8 +34,15 @@ namespace ds::gpu::kern {
   void NS##resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,        \
                           const Pixel* const* tables, const u8* attr, const u8* alpha, const Pixel* line3d,  \
                           Pixel* top_px, Pixel* second_px, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id); \
+  /* Top records only, for a line whose composite can never read the second target (a fade over plain      \
+     layers): colours through the tables, layer ids as BLDCNT masks. No second gather, no kind, no alpha. */ \
+  void NS##resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables, const Pixel* line3d, \
+                         Pixel* top_px, u8* top_id);                                                        \
   /* Any 3D pixel with alpha strictly between 0 and 31 on the line (alpha in bits 24-28). */                 \
   bool NS##line_has_translucent_3d(const Pixel* line3d);                                                    \
+  /* Colour effects for a fade-only line: brighten / darken the first target inside the effect window.      \
+     Reachable only where no blend path is live, so there is no second target, kind or alpha to consult. */  \
+  void NS##composite_line_fade(u32 bldcnt, u32 evy, const Pixel* top, const u8* top_id, const u8* win, Pixel* out); \
   /* Colour effects: blend / brighten / darken with the OBJ and 3D override rules. */                         \
   void NS##composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, const Pixel* second,      \
                           const u8* top_id, const u8* top_kind, const u8* top_alpha, const u8* second_id,     \

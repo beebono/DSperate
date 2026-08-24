@@ -149,6 +149,26 @@ void resolve16_one(const u16* v, const Pixel* table, Pixel* out) {
   for (u32 i = 0; i < 256; ++i) out[i] = table[v[i] & 0x7FFF] | 0xFF000000;
 }
 
+void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables, const Pixel* line3d,
+                   Pixel* top_px, u8* top_id) {
+  static const u8 id_of[T_COUNT] = {L_BG0, L_BG1, L_BG2, L_BG3, L_OBJ, L_OBJ, L_OBJ, L_BACKDROP, 0};
+  for (u32 i = 0; i < 256; ++i) {
+    const u8 tt = top_tid[i];
+    top_id[i] = id_of[tt];
+    top_px[i] = (line3d && tt == T_BG0) ? line3d[i] : (tables[tt][top[i] & 0x7FFF] | 0xFF000000);
+  }
+}
+
+void composite_line_fade(u32 bldcnt, u32 evy, const Pixel* top, const u8* top_id, const u8* win, Pixel* out) {
+  const u32 effect = (bldcnt >> 6) & 3;
+  for (u32 i = 0; i < 256; ++i) {
+    Pixel o = top[i];
+    if ((bldcnt & top_id[i]) && (win[i] & 0x20))
+      o = effect == 2 ? brighten(o, evy, 0x8) : darken(o, evy, 0x7);
+    out[i] = (o & 0x00FFFFFF) | 0xFF000000;
+  }
+}
+
 void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,
                     const Pixel* const* tables, const u8* attr, const u8* alpha, const Pixel* line3d,
                     Pixel* top_px, Pixel* second_px, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {

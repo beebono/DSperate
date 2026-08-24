@@ -195,6 +195,44 @@ const uint8x16_t kLane16 = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
 
 
 
+// One gather per pixel instead of two, and the id table lookup vectorised.
+// The table pointer is hoisted per 16 pixels when the ids agree, as resolve16
+// does: a line is usually long runs of one layer.
+void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables, const Pixel* line3d,
+                   Pixel* top_px, u8* top_id) {
+  static const u8 id_tab[16] = {L_BG0, L_BG1, L_BG2, L_BG3, L_OBJ, L_OBJ, L_OBJ, L_BACKDROP, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint8x16_t ids = vld1q_u8(id_tab);
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t tt = vld1q_u8(top_tid + i);
+    vst1q_u8(top_id + i, vqtbl1q_u8(ids, tt));
+    const u8 t0 = top_tid[i];
+    if (vmaxvq_u8(tt) == vminvq_u8(tt) && !(line3d && t0 == T_BG0)) {
+      const Pixel* tab = tables[t0];
+      for (u32 k = 0; k < 16; ++k) top_px[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
+    } else {
+      for (u32 k = 0; k < 16; ++k) {
+        const u8 t = top_tid[i + k];
+        top_px[i + k] = (line3d && t == T_BG0) ? line3d[i + k] : (tables[t][top[i + k] & 0x7FFF] | 0xFF000000);
+      }
+    }
+  }
+}
+
+void composite_line_fade(u32 bldcnt, u32 evy, const Pixel* top, const u8* top_id, const u8* win, Pixel* out) {
+  const u32 effect = (bldcnt >> 6) & 3;
+  const uint8x16_t v_t1 = vdupq_n_u8(static_cast<u8>(bldcnt));
+  const uint32x4_t colour_mask = vdupq_n_u32(0x00FFFFFF), opaque = vdupq_n_u32(0xFF000000);
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t hit = vandq_u8(vtstq_u8(vld1q_u8(top_id + i), v_t1), vtstq_u8(vld1q_u8(win + i), vdupq_n_u8(0x20)));
+    const Mask4 m = widen(hit);
+    for (u32 k = 0; k < 4; ++k) {
+      const uint32x4_t a = vld1q_u32(top + i + k * 4);
+      const uint32x4_t fx = effect == 2 ? brighten4(a, evy, 0x8) : darken4(a, evy, 0x7);
+      vst1q_u32(out + i + k * 4, vorrq_u32(vandq_u32(vbslq_u32(m.m[k], fx, a), colour_mask), opaque));
+    }
+  }
+}
+
 void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,
                     const Pixel* const* tables, const u8* attr, const u8* alpha, const Pixel* line3d,
                     Pixel* top_px, Pixel* second_px, u8* top_id, u8* top_kind, u8* top_alpha, u8* second_id) {

@@ -191,6 +191,9 @@ private:
   void select_layers_flat();
   static bool line_all_opaque(const Layer& p);
   bool effect_possible() const;
+  bool needs_second() const;
+  void select_top_only();
+  void select_layers_top();
   void setup_tables();
   void resolve_full();
   void colour_effects();

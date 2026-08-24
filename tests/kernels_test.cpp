@@ -104,6 +104,36 @@ static void test_resolve16_full() {
   }
 }
 
+static void test_resolve16_top() {
+  static Pixel tabs[9][32768];
+  const Pixel* tables[9];
+  for (u32 t = 0; t < 9; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = tabs[t]; }
+  alignas(16) u16 top[256]; alignas(16) u8 tt[256]; alignas(16) Pixel line3d[256];
+  alignas(16) Pixel tpa[256], tpb[256]; alignas(16) u8 ia[256], ib[256];
+  for (u32 it = 0; it < 200; ++it) {
+    // Every third iteration is one layer for the whole block, the run the
+    // NEON path hoists the table pointer for.
+    const bool run = it % 3 == 0;
+    const u8 one = static_cast<u8>(rng() % 9);
+    for (u32 i = 0; i < 256; ++i) { top[i] = static_cast<u16>(rng()); tt[i] = run ? one : static_cast<u8>(rng() % 9); line3d[i] = rng() & 0x1FFFFFFF; }
+    const Pixel* l3 = (it & 1) ? line3d : nullptr;
+    kern::ref::resolve16_top(top, tt, tables, l3, tpa, ia);
+    N::resolve16_top(top, tt, tables, l3, tpb, ib);
+    CHECK_SAME("rt top", tpa, tpb, sizeof tpa); CHECK_SAME("rt id", ia, ib, 256);
+  }
+}
+
+static void test_composite_fade() {
+  for (u32 it = 0; it < 400; ++it) {
+    Planes a; a.randomise(); Planes b = a;
+    // Only the fade effects reach this kernel (see Engine2D::needs_second).
+    const u32 bldcnt = (rng() & 0x3FFF & ~0x00C0u) | ((2 + (rng() & 1)) << 6), evy = rng() % 17;
+    kern::ref::composite_line_fade(bldcnt, evy, a.top, a.top_id, a.win, a.out);
+    N::composite_line_fade(bldcnt, evy, b.top, b.top_id, b.win, b.out);
+    CHECK_SAME("fade out", a.out, b.out, sizeof a.out);
+  }
+}
+
 static void test_rows16() {
   alignas(16) u8 packed[33 * 4], rows[33 * 8], ctl[33]; alignas(16) u16 va[33 * 8], vb[33 * 8];
   for (u32 it = 0; it < 200; ++it) {
@@ -264,6 +294,8 @@ int main() {
   test_resolve16();
   test_resolve16_one();
   test_resolve16_full();
+  test_resolve16_top();
+  test_composite_fade();
   test_rows16();
   test_obj_row16();
   test_palette();

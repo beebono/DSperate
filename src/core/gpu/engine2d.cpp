@@ -389,6 +389,16 @@ void Engine2D::render_line(u32 line) {
     return;
   }
   prof::add(prof::C_2D_EFFECT_LIVE, 1);
+  // A fade over plain layers never reads what is beneath the top pixel, so
+  // neither the second select nor the second gather nor the kind/alpha
+  // records are needed: run the stages that cannot look down instead.
+  if (!needs_second()) {
+    prof::add(prof::C_2D_FULL_FADE, 1);
+    { DS_PROF(SELECT); select_layers_top(); }
+    { DS_PROF(EFFECTS); kern::active::composite_line_fade(bldcnt_, evy_, top_.data(), top_id_.data(), win_.data(), out_.data()); }
+    return;
+  }
+  prof::add(prof::C_2D_FULL_SECOND, 1);
   { DS_PROF(SELECT); select_layers(); }
   { DS_PROF(EFFECTS); colour_effects(); }
 }
@@ -1005,6 +1015,23 @@ void Engine2D::select_layers() {
 // Top and second records for the composite: colours through the tables,
 // layer ids as BLDCNT masks, the kind and alpha of the winning pixel. The
 // per-pixel derivations are kernels; the two palette gathers stay scalar.
+// Whether the composite can read the second target at all on this line. Only
+// the three blending paths do: a blend effect, the 3D layer over something,
+// and semi-transparent or bitmap sprites. A fade (brighten/darken) over plain
+// layers never looks below the top pixel, so nothing under it need be
+// resolved -- DraStic's trick of hoisting the decision out of the pixel loop
+// and into which stage runs over the line.
+bool Engine2D::needs_second() const {
+  if (((bldcnt_ >> 6) & 3) == 1) return true;
+  if (!num_ && (dispcnt_ & 8) && bg_[0].any && kern::active::line_has_translucent_3d(line3d_)) return true;
+  if ((layer_enable_ & 0x10) && num_sprites_) {
+    u64 acc = 0;
+    for (u32 i = 0; i < 256; i += 8) { u64 v; std::memcpy(&v, &obj_attr_[i], 8); acc |= v; }
+    if (acc & 0x0C0C0C0C0C0C0C0Cull) return true;   // OA_SEMI | OA_BITMAP
+  }
+  return false;
+}
+
 void Engine2D::resolve_full() {
   const bool is3d = !num_ && (dispcnt_ & 8);
   kern::active::resolve16_full(top16_.data(), top_tid_.data(), second16_.data(), second_tid_.data(), tables_, obj_attr_.data(), obj_alpha_.data(),
@@ -1019,7 +1046,10 @@ bool Engine2D::line_all_opaque(const Layer& p) {
   return (acc & 0x8000800080008000ull) == 0x8000800080008000ull;
 }
 
-void Engine2D::select_layers_flat() {
+// The select without the second layer: priority order as select_layers, but
+// only the winner is kept. Shared by the flat path (which resolves straight
+// to the output) and the fade path (which still needs the layer ids).
+void Engine2D::select_top_only() {
   setup_tables();
   top16_.fill(LV_OPAQUE); top_tid_.fill(T_BACKDROP);
   const bool objs = (layer_enable_ & 0x10) && num_sprites_;
@@ -1034,7 +1064,17 @@ void Engine2D::select_layers_flat() {
     }
     if (objs && (obj_prio_mask_ & (1 << prio))) kern::active::select16_obj_flat(obj_v_.data(), obj_attr_.data(), win_.data(), prio, top16_.data(), top_tid_.data());
   }
+}
+
+void Engine2D::select_layers_flat() {
+  select_top_only();
   kern::active::resolve16(top16_.data(), top_tid_.data(), tables_, out_.data());
+}
+
+void Engine2D::select_layers_top() {
+  select_top_only();
+  const bool is3d = !num_ && (dispcnt_ & 8);
+  kern::active::resolve16_top(top16_.data(), top_tid_.data(), tables_, is3d ? line3d_ : nullptr, top_.data(), top_id_.data());
 }
 
 void Engine2D::colour_effects() {
