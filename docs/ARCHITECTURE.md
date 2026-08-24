@@ -311,9 +311,29 @@ scheduler to 3.9x. `fire_due` 460,436 -> 213,956 (its call count halves:
 the per-event entry call is gone), `slice_next` 422,955 -> 366,232 on 1,277
 calls instead of 2,984, `run_until` 59,751 -> 41.
 
-The event count itself is now the thing to look at: SM64DS fires ~2,100
-events a frame, of which **1,033 are cart transfers** -- `cart_schedule_receive`
-arms one event per word -- against DraStic's ~1,390 events of all kinds.
+**Cart words are produced at the read (2026-08-23).** Half those events were
+cart transfers -- `cart_schedule_receive` armed one per word, the model this
+came from melonDS with, where DraStic fires none and reads the card
+synchronously. Nothing observes a word arriving, so `Io::cart_catch_up`
+materialises the words a transfer has produced when the CPU reads ROMCTRL's
+DRQ bit or ROMDATA, off a nominal `next_word_at` clock, keeping the two-word
+FIFO depth and the stall-and-resume-from-the-read rule. A cart-mode DMA
+channel keeps the per-word event: it is level-triggered on DRQ with nothing
+to poll it. The event path must keep scheduling from `now()` -- a nominal
+deadline there can land in the past, fire again in the same `fire_due` pass
+and burst the transfer; the FIFO depth is what bounds the same clock on the
+lazy path.
+
+Per frame, event-bound, SM64DS: **scheduler 1,035,373 -> 436,316** and
+**2.6x DraStic's scheduler**, down from 6.2x (and from the 11.1x the lockstep
+comparison had booked); slices 1,707 -> 1,092, against DraStic's 1,087. The
+whole plumbing group -- scheduler, cart, DMA, IO/bus -- falls 2,368,928 ->
+1,735,925 per frame, and the scheduler is 2.8 % of what we execute.
+
+Against the melonDS oracle (200 frames, direct boot, no input, compared at
+the best frame offset -- the change advances the boot by a frame or two, so a
+fixed offset misreads it as a regression) the result is equal or better on
+all three games, and SM64DS event-bound is pixel-exact across 200 frames.
 
 **Cycle model** (`cpu_mem.h`, `interp.cpp`, `mem/timing.*`). Region timing
 tables per 16 KB (ARM9 bus) / 32 KB (ARM7) give N/S costs for 16- and 32-bit
