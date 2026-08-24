@@ -23,9 +23,10 @@ nothing has been.
 
 **Pinned registers.** Guest r0–r7, r13, r14 live in x19–x28 (callee-saved),
 r8–r12 in x9–x13 (spilled by the call stubs), the cycle budget in w8, the
-page-table base in x14, the per-page timing table in x15, `CpuContext*` in
-x29. Guest NZCV live in the host NZCV; the rest of CPSR stays in memory.
-Because every block agrees on this, linked blocks reconcile nothing.
+page-table base in x14, the per-page timing table in x15, the code-arena base
+in x18, `CpuContext*` in x29. Guest NZCV live in the host NZCV; the rest of
+CPSR stays in memory. Because every block agrees on this, linked blocks
+reconcile nothing.
 
 **Blocks** are straight-line runs ending at the first branch (or 64
 instructions), laid out as a *hot* section (the fast paths, in guest order)
@@ -42,9 +43,13 @@ reads its operands from the words after the `bl` through x30 and skips them:
 `bl poll; .word next_key`, `bl link; .word key`. A linked `bl link` becomes a
 bare `b` whose literal is never executed, so a linked branch costs one
 instruction. Indirect branches go through a per-CPU stub that updates T,
-charges the pipeline refill and looks the key up in a 64 K-entry
-direct-mapped LUT (`(native offset << 32) | key`, key = pc | T), falling back
-to a hash map and then to translation. The budget register holds
+charges the pipeline refill and looks the key up in a direct-mapped LUT
+(`(native offset << 32) | key`, key = pc | T), falling back to a hash map and
+then to translation. The LUTs sit at the front of the code arena and the arena
+base is pinned in x18, so the probe materialises no constants and the same
+register serves both the probe and the jump to the block: **seven instructions
+on the ARM9, eight on the ARM7** (`ubfx`, `ldr`, `eor`, `cbnz`, `lsr`, `add`,
+`br`). See "The branch LUT" below for the sizing. The budget register holds
 `budget - 1`, so every budget test is one `tbnz w8, #31` (the stubs add and
 subtract the one at the C boundary).
 
@@ -185,14 +190,54 @@ register save/restore per entry is the rest. Next on this axis: refilling
 the budget in place from the poll stub while the other CPU is halted and
 no event is due, so the ARM9 never leaves translated code between slices.
 
+### The branch LUT
+
+**64 K entries, 512 KB per CPU** — deliberately *not* the technique's sizing.
+`docs/techniques/01` §3b uses 1024 entries (8 KB) so the table stays inside
+L1D, and reimplementing that here was tried on 2026-08-24 and **reverted: it
+is 1.6-2.7 % slower on the device.**
+
+Miss counts (SM64DS 300 frames from direct boot, via a temporary counter in
+`jit_h_lookup` — the dispatch stub's only miss path) against per-frame mean on
+the RK3566 (`bench3.sh <bin> 600 3`, three reps, replayed scenes):
+
+| `LUT_BITS` | size/CPU | misses | sm64 | mlbis |
+|---|---|---|---|---|
+| 10 | 8 KB | 120,859 | 9.155 (+1.6 %) | 6.271 (+1.6 %) |
+| 13 | 64 KB | 17,809 | 9.019 | 6.196 |
+| **16** | **512 KB** | **4,421** | **8.983** | **6.156** |
+| 17 | 1 MB | — | 8.998 | 6.158 |
+| 18 | 2 MB | — | 8.990 | 6.194 |
+
+Three things the footprint argument missed:
+
+- **The table is touched sparsely.** Only entries for live blocks are ever
+  read, so the working set is the number of hot blocks — a few thousand lines —
+  not the table size. Those lines stay cached; the other 500 KB is never
+  fetched. "512 KB does not fit in L2" was the wrong model.
+- **Our miss path is far dearer than the technique's.** A miss here is
+  `call_pure` (spill, flags, budget) into `jit_h_lookup` and an
+  `unordered_map::find` — call it ~100 cycles — where the technique falls into
+  a hand-written `cpu_block_lookup_base`. Capacity is worth more to us than
+  footprint is, which is the opposite of the trade the technique makes.
+- **Translated code is only 6-11 % of the process.** The renderer dominates,
+  so anything won on the dispatch path is diluted roughly tenfold in frame
+  time. Dispatch has to get *much* cheaper before it shows up at all.
+
+Going above 64 K gains nothing, so the table is not capacity-starved either;
+16 bits is the plateau.
+
 Next, in order, each measured on the device with the strict slice diff kept
 green:
 
 1. The translated code itself (≈18 cycles per guest instruction): the
-   dispatcher for indirect branches (`bx lr`: LUT probe + refill-cost stub,
-   ~45 instructions and an indirect-branch mispredict), conditional
-   execution without the pending flush, link through a second entry point
-   that skips the budget test, shift-by-register clamps.
+   dispatcher for indirect branches (`bx lr`: the LUT probe is down from ~15
+   instructions to 7, which measured as noise — the refill-cost arithmetic
+   ahead of it is still ~20 instructions with internal branches and is the
+   real target), conditional execution without the pending flush and via
+   `csel` rather than a branch, link through a second entry point that skips
+   the budget test, shift-by-register clamps. Note the dilution above: at
+   6-11 % of the process, translated code needs a *large* win to move a frame.
 2. ARM7 data-cost path (still the full main-RAM rule inline, ~12
    instructions); inline `MSR SPSR` and `LDR pc` for the ARM7 BIOS IRQ
    handler (MPH's ARM7 spins in BIOS `swi 3` with five fallbacks per loop).

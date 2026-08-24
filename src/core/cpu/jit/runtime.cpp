@@ -63,6 +63,7 @@ void emit_load_caller_saved_guest(Emitter& e) {
   e.ldr_x(17, R_CTX, OFF_JIT);
   e.ldr_x(R_PT, 17, OFF_JC_PT);
   e.ldr_x(R_TIM, 17, OFF_JC_TIM);
+  e.ldr_x(R_ARENA, 17, OFF_JC_ARENA);
 }
 // Merge host NZCV into ctx.cpsr (tmp registers: 17 and 30 are free in stubs).
 void emit_save_flags(Emitter& e, u32 t0, u32 t1) {
@@ -123,6 +124,7 @@ namespace {
 
 void emit_stubs(Runtime& rt) {
   Emitter e(rt.arena, rt.cap);
+  e.set_pos(LUT_AREA);          // the branch LUTs live at the front of the arena
 
   // ---- enter(ctx, native): C-callable, saves the callee-saved registers ----------
   rt.enter = reinterpret_cast<void (*)(CpuContext*, const void*)>(e.cur());
@@ -294,16 +296,20 @@ void emit_stubs(Runtime& rt) {
   for (int c = 0; c < 2; ++c) {
     JitCpu& jc = rt.cpus[c];
 
-    // dispatch: w0 = key
+    // dispatch: w0 = key. The LUT is at a fixed offset inside the arena and
+    // the arena base is pinned in R_ARENA, so the probe needs no constant
+    // materialisation: seven instructions for CPU0, eight for CPU1.
     jc.dispatch = e.cur();
-    e.mov_imm64(1, reinterpret_cast<u64>(jc.lut));
     e.ubfx(2, 0, 1, LUT_BITS);
-    e.ldr_x_reg(3, 1, 2, true, true);
+    if (c != 0) {
+      const bool ok = e.orr_imm(2, 2, static_cast<u32>(LUT_STRIDE / 8));   // index into the second LUT
+      assert(ok && "LUT_STRIDE/8 must be a logical immediate"); (void)ok;
+    }
+    e.ldr_x_reg(3, R_ARENA, 2, true, true);
     e.eor_reg(4, 3, 0);
     size_t miss = e.cbnz_fwd(4);
     e.lsr_imm(3, 3, 32, true);
-    e.mov_imm64(5, reinterpret_cast<u64>(rt.arena));
-    e.add_reg(3, 5, 3, LSL, 0, true);
+    e.add_reg(3, R_ARENA, 3, LSL, 0, true);
     e.br(3);
     e.bind(miss);
     e.mov(1, 0);
@@ -485,7 +491,7 @@ void emit_stubs(Runtime& rt) {
 
   rt.stubs_end = (e.size() + 63) & ~size_t{63};
   rt.pos = rt.stubs_end;
-  sync_icache(rt.arena, rt.stubs_end);
+  sync_icache(rt.arena + LUT_AREA, rt.stubs_end - LUT_AREA);
 }
 
 // ---- code page tracking ----------------------------------------------------------------
@@ -803,7 +809,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     r.arena = static_cast<u8*>(p);
     r.cap = ARENA_BYTES;
     for (int c = 0; c < 2; ++c) {
-      r.cpus[c].lut = new u64[LUT_SIZE];
+      r.cpus[c].lut = reinterpret_cast<u64*>(r.arena + c * LUT_STRIDE);
       for (u32 i = 0; i < LUT_SIZE; ++i) r.cpus[c].lut[i] = LUT_EMPTY_KEY;
     }
     emit_stubs(r);
@@ -827,6 +833,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     jc.arm9 = c == 0;
     jc.hot.pt = ctx.page_table.raw();
     jc.hot.timing = reinterpret_cast<const u8*>(c == 0 ? ctx.timing9 : ctx.timing7);
+    jc.hot.arena = r.arena;
     ctx.jit = &jc;
     ctx.jit_timing_changed = &on_timing_changed;
     (c == 0 ? nds.run_arm9 : nds.run_arm7) = &run;

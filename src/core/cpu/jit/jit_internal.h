@@ -24,6 +24,11 @@ namespace ds::jit {
 //   x9-x13            guest r8-r12   (caller-saved: the call stubs spill them)
 //   x14               page-table base for this CPU
 //   x15               per-page timing table (timing9 or timing7)
+//   x18               base of the code arena: the branch LUTs sit at its front
+//                     and every block pointer is a 32-bit offset from it, so
+//                     one register serves the dispatch probe and the jump.
+//                     Linux leaves the platform register alone; C code may
+//                     clobber it, so the call stubs reload it like x14/x15.
 //   x19-x26           guest r0-r7    (callee-saved: survive C calls)
 //   x27, x28          guest r13, r14
 //   x29               CpuContext*
@@ -31,7 +36,7 @@ namespace ds::jit {
 //                     arguments (instruction, key, ...) through it
 //
 // Guest NZCV live in the host NZCV; the rest of CPSR lives in memory.
-constexpr u32 R_BUDGET = 8, R_PT = 14, R_TIM = 15, R_CTX = 29, R_LR = 30;
+constexpr u32 R_BUDGET = 8, R_PT = 14, R_TIM = 15, R_ARENA = 18, R_CTX = 29, R_LR = 30;
 constexpr u32 SCRATCH0 = 0, SCRATCH1 = 1, SCRATCH2 = 2, SCRATCH3 = 3, SCRATCH4 = 4, SCRATCH5 = 5, SCRATCH6 = 6, SCRATCH7 = 7;
 constexpr u32 R_FN = 16;        // function address for the call stubs
 
@@ -51,6 +56,7 @@ constexpr u32 OFF_ALERTS   = offsetof(CpuContext, hot) + offsetof(JitHot, alerts
 constexpr u32 OFF_JIT      = offsetof(CpuContext, jit);
 constexpr u32 OFF_JC_PT    = 0;    // JitCpuHot::pt
 constexpr u32 OFF_JC_TIM   = 8;    // JitCpuHot::timing
+constexpr u32 OFF_JC_ARENA = 16;   // JitCpuHot::arena
 inline constexpr u32 off_reg(u32 r) { return OFF_REGS + 4 * r; }
 
 // Alert bits (JitHot::alerts): set by the runtime while translated code is
@@ -79,15 +85,36 @@ struct Block {
   bool dead;
 };
 
+// Direct-mapped branch-target cache, one per CPU, indexed by `(key >> 1)`.
+// Each entry is one u64, `(native offset << 32) | key`, so a probe is a single
+// load and a tag compare.
+//
+// Size: 64 K entries, 512 KB per CPU. This is *not* the technique's sizing
+// (docs/techniques/01 §3b uses 1024 entries / 8 KB, to stay inside L1D) and
+// the difference was measured, not assumed: on the RK3566, 1024 entries costs
+// 1.6-2.7 % of frame time against 64 K, and 8 K entries is the break-even.
+// Bigger than 64 K gains nothing. See README.md, "The branch LUT", for the
+// numbers and why the technique's footprint argument does not transfer here.
+// To re-measure, change LUT_BITS and time the device; the arena reserves room
+// for LUT_BITS_MAX either way. Miss rate needs a temporary counter in
+// `jit_h_lookup`, which is the dispatch stub's only miss path.
 constexpr u32 LUT_BITS = 16;
+constexpr u32 LUT_BITS_MAX = 16;
 constexpr u32 LUT_SIZE = 1u << LUT_BITS;
 constexpr u32 LUT_EMPTY_KEY = 0xFFFFFFFFu;
+// Arena layout: [CPU0 LUT][CPU1 LUT][stubs][blocks...]. The reservation is
+// fixed at the maximum so the per-CPU offsets are constants in the stubs;
+// only the first LUT_SIZE entries of each are ever touched.
+constexpr size_t LUT_STRIDE = (size_t{1} << LUT_BITS_MAX) * 8;   // 512 KB
+constexpr size_t LUT_AREA   = 2 * LUT_STRIDE;
+static_assert(LUT_BITS <= LUT_BITS_MAX, "the arena only reserves room for LUT_BITS_MAX");
 
 // Standard-layout head of JitCpu: translated code reaches these through
 // CpuContext::jit with fixed offsets.
 struct JitCpuHot {
   u64*      pt;        // page-table entries
   const u8* timing;    // timing9 (per 4 KB) or timing7 (per 32 KB), 4 bytes per entry
+  u8*       arena;     // Runtime::arena: LUT base and block-pointer base (R_ARENA)
 };
 
 struct JitCpu {
@@ -95,7 +122,7 @@ struct JitCpu {
   CpuContext* ctx = nullptr;
   NDS*  nds = nullptr;
   bool  arm9 = false;
-  u64*  lut = nullptr;                       // LUT_SIZE entries: (native offset << 32) | key
+  u64*  lut = nullptr;                       // into the arena: LUT_SIZE entries, (native offset << 32) | key
   std::unordered_map<u32, Block*> blocks;
   std::vector<Block*> all_blocks;            // for flushes
   u8*   dispatch = nullptr;                  // w0 = key -> jumps to the block
