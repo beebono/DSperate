@@ -134,6 +134,11 @@ void Bus::update_wram() {
 }
 
 void Bus::update_vram() {
+  // The escape hatch. A band worker reads texture and texture-palette VRAM
+  // directly, and this is the only place either can move: neither view is
+  // ever mapped into a CPU's address space, so a game that wants to write a
+  // texture bank must first switch it out of texture mode, through here.
+  nds_.gpu3d.sync_raster();
   // The probe counts only remaps that actually change the views a band worker
   // indexes: most VRAMCNT traffic moves capture or BG banks and would not
   // disturb an async raster at all.

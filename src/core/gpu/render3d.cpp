@@ -193,7 +193,7 @@ void Renderer3D::Slope<side>::edge_params(s32* length, s32* coverage) const {
 struct Renderer3D::Pool {
   explicit Pool(u32 n) {
     threads_.reserve(n);
-    for (u32 i = 0; i < n; ++i) threads_.emplace_back([this, i] { loop(i + 1); });
+    for (u32 i = 0; i < n; ++i) threads_.emplace_back([this, i] { loop(i); });
   }
   ~Pool() {
     { std::lock_guard<std::mutex> lk(m_); stop_ = true; ++generation_; }
@@ -202,17 +202,23 @@ struct Renderer3D::Pool {
   }
   u32 workers() const { return static_cast<u32>(threads_.size()); }
 
-  void run(const std::function<void(u32)>& fn, u32 jobs) {
+  // Hand the bands to the workers and return. The caller (the emulation
+  // thread) carries on and waits per band, at the line each band's output is
+  // first read -- see Renderer3D::sync_line.
+  void dispatch(const std::function<void(u32)>& fn, u32 jobs) {
     {
       std::lock_guard<std::mutex> lk(m_);
       job_ = &fn; jobs_ = jobs; remaining_ = static_cast<u32>(threads_.size());
+      done_bits_ = 0;
       ++generation_;
     }
     start_.notify_all();
-    fn(0);                                  // band 0 on the calling thread
+  }
+
+  void wait_bits(u32 mask) {
+    if (!mask) return;
     std::unique_lock<std::mutex> lk(m_);
-    done_.wait(lk, [this] { return remaining_ == 0; });
-    job_ = nullptr;
+    done_.wait(lk, [this, mask] { return (done_bits_ & mask) == mask; });
   }
 
 private:
@@ -228,7 +234,9 @@ private:
       lk.unlock();
       if (fn && index < jobs) (*fn)(index);
       lk.lock();
-      if (--remaining_ == 0) done_.notify_one();
+      done_bits_ |= 1u << index;
+      --remaining_;
+      done_.notify_all();
     }
   }
   std::vector<std::thread> threads_;
@@ -236,7 +244,7 @@ private:
   std::condition_variable start_, done_;
   const std::function<void(u32)>* job_ = nullptr;
   u64 generation_ = 0;
-  u32 jobs_ = 0, remaining_ = 0;
+  u32 jobs_ = 0, remaining_ = 0, done_bits_ = 0;
   bool stop_ = false;
 };
 
@@ -1560,6 +1568,10 @@ void Renderer3D::clear_line(s32 y) {
 }
 
 void Renderer3D::render(const Gpu3D& gx) {
+  // Before anything: the previous frame's bands read the texture cache and
+  // this object's state, and the identical-frame path below mutates the cache
+  // even when it renders nothing.
+  sync_all();
   gx_ = &gx;
   rs_ = &gx.render_state();
   vm_ = &nds_.bus.vram_map();
@@ -1593,17 +1605,19 @@ void Renderer3D::render(const Gpu3D& gx) {
   texels_out_ = nullptr;
 
   const u32 nb = band_count(edge_count_);
-  if (nb <= 1) { render_band(0, 192, out_.data()); return; }
+  if (nb <= 1) { pending_bands_ = 0; render_band(0, 192, out_.data()); return; }
 
   if (bands_.size() < nb - 1) {
     while (bands_.size() < nb - 1) bands_.push_back(std::make_unique<Renderer3D>(nds_));
   }
-  if (!pool_ || pool_->workers() != nb - 1) pool_ = std::make_unique<Pool>(nb - 1);
+  if (!pool_ || pool_->workers() != nb) pool_ = std::make_unique<Pool>(nb);
 
   compute_bands(nb);
   const Gpu3D& gxr = gx;
   u32* const dst = out_.data();
-  std::function<void(u32)> job = [this, &gxr, dst](u32 i) {
+  // The job outlives this call now, so it is a member, and every band runs on
+  // a worker -- the emulation thread's job is to go on emulating.
+  job_fn_ = [this, &gxr, dst](u32 i) {
     const auto t0 = std::chrono::steady_clock::now();
     const s32 y0 = band_y_[i], y1 = band_y_[i + 1];
     if (y0 >= y1) { if (prof::enabled && i < 8) band_ns_[i] = 0; return; }
@@ -1613,7 +1627,9 @@ void Renderer3D::render(const Gpu3D& gx) {
     // Each band writes its own slot, so no synchronisation; measurement only.
     if (prof::enabled && i < 8) band_ns_[i] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   };
-  pool_->run(job, nb);
+  pending_bands_ = nb;
+  pool_->dispatch(job_fn_, nb);
+  if (!async_) sync_all();
   // The emulation thread waits for the slowest band, so that -- not the sum --
   // is what the 3D raster costs the frame. Both are recorded: the gap between
   // them is what balancing the bands could recover.
@@ -1657,12 +1673,59 @@ void Renderer3D::compute_bands(u32 nb) {
   const u32 total = cum[192];
   band_y_[0] = 0;
   band_y_[nb] = 192;
-  for (u32 b = 1; b < nb; ++b) {
-    const u32 target = static_cast<u32>((static_cast<u64>(total) * b) / nb);
-    s32 y = band_y_[b - 1];
-    while (y < 192 && cum[static_cast<u32>(y)] < target) ++y;
-    band_y_[b] = y;
+
+  // Equal shares are wrong when the bands are not needed at the same time.
+  // The raster is dispatched at line 215 and band b's output is first read at
+  // display line band_y_[b] of the next frame, so band b has
+  // (263 - 215) + band_y_[b] lines to finish in -- 48 for the first one.
+  // Sized equally, band 0 carries a third of the frame's raster and cannot
+  // make that, and the emulation thread waits at line 0 having gained
+  // nothing. So the shares follow the deadlines: a small first band, a large
+  // last one. The deadlines depend on the split, so it is solved once from
+  // the equal-work split and then refined.
+  auto split_with = [&](const std::array<u32, 9>& weight, u32 wsum) {
+    u32 acc = 0;
+    for (u32 b = 1; b < nb; ++b) {
+      acc += weight[b - 1];
+      const u32 target = static_cast<u32>((static_cast<u64>(total) * acc) / wsum);
+      s32 y = band_y_[b - 1];
+      while (y < 192 && cum[static_cast<u32>(y)] < target) ++y;
+      band_y_[b] = y;
+    }
+  };
+  std::array<u32, 9> weight{};
+  u32 wsum = 0;
+  for (u32 b = 0; b < nb; ++b) { weight[b] = 1; ++wsum; }
+  split_with(weight, wsum);                       // equal work, to get deadlines
+  for (int pass = 0; pass < 2; ++pass) {
+    wsum = 0;
+    for (u32 b = 0; b < nb; ++b) { weight[b] = 48 + static_cast<u32>(band_y_[b]); wsum += weight[b]; }
+    split_with(weight, wsum);
   }
+}
+
+// Wait for the band that owns display line `y`, and no other: the bands are
+// independent and each writes only its own output lines, so the compositor
+// can read the top of the frame while the bottom is still being drawn.
+void Renderer3D::sync_line(s32 y) {
+  if (!pending_bands_) return;
+  u32 b = 0;
+  while (b + 1 < pending_bands_ && y >= band_y_[b + 1]) ++b;
+  { DS_PROF(R3D_WAIT); pool_->wait_bits(1u << b); }
+  waited_bits_ |= 1u << b;
+  if (waited_bits_ == (1u << pending_bands_) - 1) { pending_bands_ = 0; waited_bits_ = 0; }
+}
+
+// Wait for all of them: before the next frame's raster, and whenever
+// something is about to change what the workers are reading (Bus::update_vram
+// is the only way texture VRAM or its banking can move -- the texture and
+// texture-palette views are never mapped into either CPU's address space).
+void Renderer3D::sync_all() {
+  if (!pending_bands_) return;
+  { DS_PROF(R3D_WAIT); pool_->wait_bits((1u << pending_bands_) - 1); }
+  prof::add(prof::C_R3D_SYNC_ALL, 1);
+  pending_bands_ = 0;
+  waited_bits_ = 0;
 }
 
 // How many bands to split the frame into. DS_R3D_THREADS overrides the count

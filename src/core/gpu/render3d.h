@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include <functional>
+#include <cstdlib>
 #include "core/types.h"
 #include "core/gpu/texcache.h"
 
@@ -206,6 +208,20 @@ private:
   // slowest band, so the cut follows the work instead.
   void compute_bands(u32 nb);
   std::array<s32, 9> band_y_{};
+
+public:
+  // The raster runs on the workers while the emulation thread carries on.
+  // sync_line waits for the one band that owns a display line; sync_all waits
+  // for all of them and is the escape hatch for anything that would change
+  // what the workers read.
+  void sync_line(s32 y);
+  void sync_all();
+  bool raster_pending() const { return pending_bands_ != 0; }
+private:
+  std::function<void(u32)> job_fn_;   // outlives the dispatch, unlike a local
+  u32 pending_bands_ = 0;             // bands in flight (0 = nothing running)
+  u32 waited_bits_ = 0;
+  bool async_ = std::getenv("DS_R3D_SYNC") == nullptr;
 
   u32  edge_count_ = 0;
   u32* out_dst_ = nullptr;                              // where final_pass writes

@@ -910,7 +910,10 @@ void Gpu3D::set_render_xpos(u16 value, u16 mask) {
   render_xpos_ = (render_xpos_ & ~mask) | (value & mask & 0x1FF);
 }
 
+void Gpu3D::sync_raster() { renderer_.sync_all(); }
+
 const u32* Gpu3D::line(u32 y) {
+  renderer_.sync_line(static_cast<s32>(y));
   const u32* raw = renderer_.raw_line(y);
   const u32 xpos = render_xpos_;
   if (xpos == 0) return raw;

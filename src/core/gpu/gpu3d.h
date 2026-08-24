@@ -103,6 +103,10 @@ public:
   void vblank();            // VCount 192: latch registers, sort, swap buffers
   void render_frame();      // VCount 215: rasterise the latched frame
   const u32* line(u32 y);   // 3D output for display line y, X-scrolled (RGB666 + 5-bit alpha at 24-28)
+  // Force the asynchronous raster to finish. Called wherever something is
+  // about to change what its workers are reading -- in practice only
+  // Bus::update_vram, since texture VRAM is unreachable any other way.
+  void sync_raster();
   void set_render_xpos(u16 value, u16 mask);
 
   void check_fifo_irq();
