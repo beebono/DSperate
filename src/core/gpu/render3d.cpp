@@ -562,7 +562,24 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   const s32 xv0 = ca - xstart;
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   if (xdiff != 0 && !linear) {
-    // The common case: one pass for all five, narrowed as it is stored.
+    // A span whose colour endpoints agree -- most of them, and every span of
+    // flat-shaded content -- interpolates nothing across r, g and b: fill the
+    // three buffers with the constant and stage only s and t. This is
+    // DraStic's set_buffer8 against interpolate_rgb, which it takes for 83 %
+    // of SM64DS's spans and 100 % of Meteos's.
+    if (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2]) {
+      prof::add(prof::C_SPAN_FLAT_RGB, 1);
+      // The kernels write whole vectors past n; match that, the buffers carry
+      // the slack for it.
+      const u32 fill = (n + 7) & ~7u;
+      std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
+      std::memset(sb.vg + off, static_cast<u8>((static_cast<u32>(al[1]) >> 3) & 0xFF), fill);
+      std::memset(sb.vb + off, static_cast<u8>((static_cast<u32>(al[2]) >> 3) & 0xFF), fill);
+      kern::active::span_attrs2n(al, ar, sb.fac + off, n, sb.sc + off, sb.tc + off);
+      return;
+    }
+    prof::add(prof::C_SPAN_LERP_RGB, 1);
+    // One pass for all five, narrowed as it is stored.
     kern::active::span_attrs5n(al, ar, sb.fac + off, n, sb.vr + off, sb.vg + off, sb.vb + off, sb.sc + off, sb.tc + off);
     return;
   }

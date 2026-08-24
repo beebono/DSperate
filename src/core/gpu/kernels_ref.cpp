@@ -288,6 +288,13 @@ void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const
   for (int k = 0; k < 5; ++k) span_attr_persp(y0[k], y1[k], fac, n, out[k]);
 }
 
+void span_attrs2n(const s32* y0, const s32* y1, const u32* fac, u32 n, s16* sc, s16* tc) {
+  s32 tmp[2][272];
+  span_attr_persp(y0[3], y1[3], fac, n, tmp[0]);
+  span_attr_persp(y0[4], y1[4], fac, n, tmp[1]);
+  for (u32 i = 0; i < n; ++i) { sc[i] = static_cast<s16>(tmp[0][i]); tc[i] = static_cast<s16>(tmp[1][i]); }
+}
+
 void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
   s32 tmp[5][272];
   s32* out[5] = {tmp[0], tmp[1], tmp[2], tmp[3], tmp[4]};

@@ -474,12 +474,23 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
     // transparent (a text layer with nothing on this line, which most HUD
     // layers are most of the time) is empty, and neither the tile rows
     // nor the kernel are needed.
-    bool uniform = true;
-    for (u32 t = 0, x = xoff & ~7u; t < 33; ++t, x += 8) {
-      const u32 mx = (x & 0xF8) >> 2, blk = (x & widexmask) ? 1 : 0;
-      if (map[blk]) std::memcpy(&tiles[t], map[blk] + mx, 2); else tiles[t] = vm.read16(vv, tilemap + mx + (blk << 11));
-      uniform &= tiles[t] == tiles[0];
+    // A map row is contiguous: 32 entries per screen block, wrapping into the
+    // next block on a wide map. Two memcpys, not thirty-three, and the wrap
+    // is the only place the block can change (DraStic's
+    // setup_tile_map_entries_4bpp_asm costs 38 instructions a line).
+    {
+      u32 done = 0, mx = (xoff & 0xF8) >> 2, blk = ((xoff & ~7u) & widexmask) ? 1 : 0;
+      while (done < 33) {
+        const u32 avail = (64 - mx) / 2, take = avail < 33 - done ? avail : 33 - done;
+        if (map[blk]) std::memcpy(tiles + done, map[blk] + mx, take * 2);
+        else for (u32 k = 0; k < take; ++k) tiles[done + k] = vm.read16(vv, tilemap + mx + k * 2 + (blk << 11));
+        done += take;
+        mx = 0;
+        if (widexmask) blk ^= 1;
+      }
     }
+    bool uniform = true;
+    for (u32 t = 1; t < 33; ++t) uniform &= tiles[t] == tiles[0];
     if (uniform) {
       const u32 ty = (tiles[0] & (1 << 11)) ? 7 - ty0 : ty0;
       const u32 a = c256 ? tileset + ((tiles[0] & 0x3FF) << 6) + (ty << 3) : tileset + ((tiles[0] & 0x3FF) << 5) + (ty << 2);
@@ -492,23 +503,34 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
     // all blank (different tiles, all index 0 on this row -- most of what a
     // HUD or a text layer holds) needs neither the kernel nor the extended
     // palettes, and drops out of the priority select entirely.
+    // A tile row is 4 bytes at a 4-aligned address (8 at 8-aligned for 256
+    // colours) and a block is 16 KB, so a row can never cross one: the block
+    // lookup is an index, without direct()'s crossing test per tile. Split by
+    // depth so the row size, shifts and stores are constants in the loop.
     u64 rowacc = 0;
-    for (u32 t = 0; t < 33; ++t) {
-      const u16 tile = tiles[t];
-      const u32 ty = (tile & (1 << 11)) ? 7 - ty0 : ty0;
-      ctl[t] = static_cast<u8>((tile >> 12) | ((tile >> 6) & 0x10));
-      palmask |= 1u << (tile >> 12);
-      if (c256) {
-        const u32 a = tileset + ((tile & 0x3FF) << 6) + (ty << 3);
+    const u32 amask = vv.addr_mask();
+    if (c256) {
+      for (u32 t = 0; t < 33; ++t) {
+        const u16 tile = tiles[t];
+        const u32 ty = (tile & (1 << 11)) ? 7 - ty0 : ty0;
+        ctl[t] = static_cast<u8>((tile >> 12) | ((tile >> 6) & 0x10));
+        palmask |= 1u << (tile >> 12);
+        const u32 a = tileset + ((tile & 0x3FF) << 6) + (ty << 3), am = a & amask;
         u64 row;
-        if (const u8* p = vv.direct(a, 8)) std::memcpy(&row, p, 8);
+        if (const u8* p = vv.ptr[am / VramView::BLOCK]) std::memcpy(&row, p + (am & (VramView::BLOCK - 1)), 8);
         else { row = 0; for (u32 i = 0; i < 8; ++i) row |= static_cast<u64>(vm.read8(vv, a + i)) << (8 * i); }
         std::memcpy(rows + t * 8, &row, 8);
         rowacc |= row;
-      } else {
-        const u32 a = tileset + ((tile & 0x3FF) << 5) + (ty << 2);
+      }
+    } else {
+      for (u32 t = 0; t < 33; ++t) {
+        const u16 tile = tiles[t];
+        const u32 ty = (tile & (1 << 11)) ? 7 - ty0 : ty0;
+        ctl[t] = static_cast<u8>((tile >> 12) | ((tile >> 6) & 0x10));
+        palmask |= 1u << (tile >> 12);
+        const u32 a = tileset + ((tile & 0x3FF) << 5) + (ty << 2), am = a & amask;
         u32 row;
-        if (const u8* p = vv.direct(a, 4)) std::memcpy(&row, p, 4);
+        if (const u8* p = vv.ptr[am / VramView::BLOCK]) std::memcpy(&row, p + (am & (VramView::BLOCK - 1)), 4);
         else { row = 0; for (u32 i = 0; i < 4; ++i) row |= static_cast<u32>(vm.read8(vv, a + i)) << (8 * i); }
         std::memcpy(rows + t * 4, &row, 4);
         rowacc |= row;
@@ -974,12 +996,24 @@ void Engine2D::setup_tables() {
   tables_[T_OBJ_DIRECT] = rgb555_table();
   tables_[T_OBJ_STD] = tables_[T_OBJ_EXT] = tables_[T_BACKDROP];
   if ((layer_enable_ & 0x10) && num_sprites_) {
-    // Which OBJ palettes the line's opaque paletted sprite pixels use.
+    // Which OBJ palettes the line's opaque paletted sprite pixels use. Eight
+    // attribute bytes at a time: OA_BITMAP (bit 3) and OA_STDPAL (bit 6) are
+    // shifted onto OA_OPAQUE's bit 7 so the three tests are one mask each, and
+    // neither shift can carry into the next byte.
     bool any_std = false, any_ext = false;
-    for (u32 i = 0; i < 256; ++i) {
-      const u8 a = obj_attr_[i];
-      if ((a & (OA_OPAQUE | OA_BITMAP)) != OA_OPAQUE) continue;
-      if (a & OA_STDPAL) any_std = true; else any_ext = true;
+    {
+      constexpr u64 OP = 0x8080808080808080ull, BM = 0x0808080808080808ull, SP = 0x4040404040404040ull;
+      u64 std_acc = 0, ext_acc = 0;
+      for (u32 i = 0; i < 256; i += 8) {
+        u64 v;
+        std::memcpy(&v, &obj_attr_[i], 8);
+        const u64 paletted = v & OP & ~((v & BM) << 4);   // opaque and not a bitmap sprite
+        const u64 stdpal = (v & SP) << 1;
+        std_acc |= paletted & stdpal;
+        ext_acc |= paletted & ~stdpal;
+      }
+      any_std = std_acc != 0;
+      any_ext = ext_acc != 0;
     }
     if (any_std) tables_[T_OBJ_STD] = obj_std_pal18();
     if (any_ext) {

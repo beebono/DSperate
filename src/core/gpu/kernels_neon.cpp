@@ -601,6 +601,32 @@ void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const
 // channel the shader reads and texture coordinates to the s16 the sampler
 // truncates to. Eight pixels a step, so the stores are whole vectors and the
 // span buffers are a third of the size.
+// s and t only: three of the five attribute chains, and three of the five
+// stores per eight pixels, go with the colour.
+void span_attrs2n(const s32* y0, const s32* y1, const u32* fac, u32 n, s16* sc, s16* tc) {
+  const uint32x4_t k256 = vdupq_n_u32(256);
+  int32x4_t base[2]; uint32x4_t d[2]; bool up[2], flat[2];
+  for (int k = 0; k < 2; ++k) {
+    const s32 a = y0[k + 3], b = y1[k + 3];
+    flat[k] = a == b;
+    up[k] = a < b;
+    base[k] = vdupq_n_s32(flat[k] ? a : (up[k] ? a : b));
+    d[k] = vdupq_n_u32(static_cast<u32>(up[k] ? b - a : a - b));
+  }
+  s16* const tout[2] = {sc, tc};
+  for (u32 i = 0; i < n; i += 8) {
+    const uint32x4_t f0 = vld1q_u32(fac + i), f1 = vld1q_u32(fac + i + 4);
+    const uint32x4_t i0 = vsubq_u32(k256, f0), i1 = vsubq_u32(k256, f1);
+    for (int k = 0; k < 2; ++k) {
+      int32x4_t v0, v1;
+      if (flat[k]) { v0 = base[k]; v1 = base[k]; }
+      else { v0 = mul_hi8_add(base[k], d[k], up[k] ? f0 : i0); v1 = mul_hi8_add(base[k], d[k], up[k] ? f1 : i1); }
+      vst1q_s16(tout[k] + i, vreinterpretq_s16_u16(vcombine_u16(vmovn_u32(vreinterpretq_u32_s32(v0)),
+                                                                vmovn_u32(vreinterpretq_u32_s32(v1)))));
+    }
+  }
+}
+
 void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
   const uint32x4_t k256 = vdupq_n_u32(256);
   int32x4_t base[5]; uint32x4_t d[5]; bool up[5], flat[5];

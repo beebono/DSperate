@@ -257,6 +257,15 @@ static void test_span() {
       CHECK_SAME("span_attrs5n b", ba8, bb8, n);
       CHECK_SAME("span_attrs5n s", sa16, sb16, n * 2);
       CHECK_SAME("span_attrs5n t", ta16, tb16, n * 2);
+      // The s/t-only twin, and its agreement with the five-attribute kernel
+      // on the two attributes they share.
+      kern::ref::span_attrs2n(ys0, ys1, fa, n, sa16, ta16);
+      N::span_attrs2n(ys0, ys1, fa, n, sb16, tb16);
+      CHECK_SAME("span_attrs2n s", sa16, sb16, n * 2);
+      CHECK_SAME("span_attrs2n t", ta16, tb16, n * 2);
+      kern::ref::span_attrs5n(ys0, ys1, fa, n, ra8, ga8, ba8, sb16, tb16);
+      CHECK_SAME("span_attrs2n vs 5n s", sa16, sb16, n * 2);
+      CHECK_SAME("span_attrs2n vs 5n t", ta16, tb16, n * 2);
     }
     if (kind != 2) {   // linear attributes: |y1 - y0| * xdiff < 2^32
       kern::ref::span_attr_linear(y0, y1, xv0, n, xdiff, oa); N::span_attr_linear(y0, y1, xv0, n, xdiff, ob);
