@@ -162,7 +162,47 @@ private:
   u8  tex8(u32 addr) const;
   u16 tex16(u32 addr) const;
   u16 pal16(u32 addr) const;
-  struct SpanBuf;
+  // A batch is up to BATCH_PX pixels and one more span (which may itself be a
+  // full 256-pixel scanline) can always be staged before the flush, so the
+  // buffers hold both plus the vector slack.
+  static constexpr u32 BATCH_PX = 256;
+  static constexpr u32 BATCH_CAP = BATCH_PX + 256 + 16;
+  struct SpanBuf {
+    s32 x0;
+    // Every array carries sixteen entries of slack: the stages round the span
+    // length up to their vector width (four, eight or sixteen pixels) and write
+    // whole vectors, so the tail of a short span runs past `n`.
+    alignas(16) u32 fac[BATCH_CAP];
+    alignas(16) s32 z[BATCH_CAP];
+    // The pixel stages read colour as a 6-bit channel and texture coordinates
+    // as s16, so the span keeps them in those widths (a third of the bytes and
+    // eight pixels a vector instead of four).
+    alignas(16) u8  vr[BATCH_CAP], vg[BATCH_CAP], vb[BATCH_CAP];
+    alignas(16) s16 sc[BATCH_CAP], tc[BATCH_CAP];
+    alignas(16) u8 pass[BATCH_CAP];      // depth pre-pass result (kern depth_candidates)
+    alignas(16) u32 tcol[BATCH_CAP];     // texels for the span (textured polygons), colour15 and
+    alignas(16) u32 talp[BATCH_CAP];     // 5-bit alpha, gathered once per span
+    alignas(16) u32 col[BATCH_CAP];      // shaded pixel records (18-bit colour, alpha 24-28)
+  };
+
+  // One buffer per renderer, not one per call: a batch is staged into it
+  // across several calls before the pixel stages run over the whole thing.
+  SpanBuf spanbuf_;
+  // One staged span of the polygon currently being batched. The pixel stages
+  // (texel gather and shading) run once over the whole batch instead of once
+  // per span, which is what DraStic's 256-pixel flush buys
+  // (docs/techniques/02 s3). Everything here is what the resolve still needs
+  // per span: its scanline, its candidate range, where it sits in the batch
+  // buffers, and the three-part edge/fill decisions.
+  struct SpanJob {
+    s32 y, ca, cb; u32 off;
+    s32 xdraw, lim0, lim1, lim2;
+    s32 l_cov, r_cov;
+    int yedge;
+    bool l_fill, r_fill, wf_skip;
+  };
+  std::array<SpanJob, 256> jobs_{};
+  u32 njobs_ = 0, batch_px_ = 0;
   u32  texture_sample(const Shade& sh, s32 s, s32 t, u32* alpha) const;
   template <bool textured> u32 shade_pixel(const Shade& sh, u32 vr, u32 vg, u32 vb, s32 s, s32 t) const;
   void plot_translucent(u32 addr, u32 color, u32 z, u32 polyattr, bool shadow);
@@ -182,14 +222,18 @@ private:
   static const void* select_gather4(const Shade& sh);
 #endif
   void span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
-                  const s32* al, const s32* ar, bool with_attrs) const;
+                  const s32* al, const s32* ar, bool with_attrs, u32 off) const;
   void span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar) const;
   void setup_left_edge(Edge& e, s32 y) const;
   void setup_right_edge(Edge& e, s32 y) const;
   void setup_polygon(Edge& e, const Polygon& p);
   void setup_shade(Shade& sh, const Polygon& p);
   void render_shadow_mask_line(Edge& e, s32 y);
+  // Stage one span into the batch (everything up to and including the
+  // attribute interpolation, which is per span by construction); the pixel
+  // stages and the resolve wait for flush_batch.
   void render_polygon_line(Edge& e, s32 y);
+  void flush_batch(const Shade& sh, int mode);
   // Rasterise lines [ya, yb) polygon at a time rather than line at a time:
   // the active set for the whole chunk is merged once, then each polygon
   // draws every line it covers inside the chunk before the next one starts.

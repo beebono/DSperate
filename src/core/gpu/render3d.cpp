@@ -281,23 +281,6 @@ u16 Renderer3D::pal16(u32 addr) const {
 //
 // Span stage buffers: one entry per pixel of the current span, index 0 at
 // screen x `x0` (the kernels round their counts up to 4: padded).
-struct Renderer3D::SpanBuf {
-  s32 x0;
-  // Every array carries sixteen entries of slack: the stages round the span
-  // length up to their vector width (four, eight or sixteen pixels) and write
-  // whole vectors, so the tail of a short span runs past `n`.
-  alignas(16) u32 fac[256 + 16];
-  alignas(16) s32 z[256 + 16];
-  // The pixel stages read colour as a 6-bit channel and texture coordinates
-  // as s16, so the span keeps them in those widths (a third of the bytes and
-  // eight pixels a vector instead of four).
-  alignas(16) u8  vr[256 + 16], vg[256 + 16], vb[256 + 16];
-  alignas(16) s16 sc[256 + 16], tc[256 + 16];
-  alignas(16) u8 pass[256 + 16];      // depth pre-pass result (kern depth_candidates)
-  alignas(16) u32 tcol[256 + 16];     // texels for the span (textured polygons), colour15 and
-  alignas(16) u32 talp[256 + 16];     // 5-bit alpha, gathered once per span
-  alignas(16) u32 col[256 + 16];      // shaded pixel records (18-bit colour, alpha 24-28)
-};
 
 namespace {
 inline u32 c15_to_18(u16 c, u32 shift) { u32 v = (shift == 0 ? (c << 1) : (c >> shift)) & 0x3E; if (v) ++v; return v; }
@@ -545,17 +528,19 @@ void Renderer3D::setup_polygon(Edge& e, const Polygon& p) {
 // the kernels (kern::active). This is Interp<0> (setup, set_x, interpolate,
 // interpolate_z) evaluated for the whole span at once.
 void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
-                            const s32* al, const s32* ar, bool with_attrs) const {
-  sb.x0 = xa;
+                            const s32* al, const s32* ar, bool with_attrs, u32 off) const {
+  // x0 is the screen x that maps to buffer index 0, so a span staged at batch
+  // offset `off` sets it back by that much and every stage indexes correctly.
+  sb.x0 = xa - static_cast<s32>(off);
   const u32 n = static_cast<u32>(xb - xa);
   const s32 xdiff = (xend + 1) - xstart;
   const s32 xv0 = xa - xstart;
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   const bool use_factor = xdiff != 0 && (!linear || wbuffer);
-  if (use_factor) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac);
-  if (xdiff == 0) { for (u32 i = 0; i < n; ++i) sb.z[i] = zl; }
-  else if (wbuffer) kern::active::span_attr_persp(zl, zr, sb.fac, n, sb.z);
-  else kern::active::span_z_linear(zl, zr, xv0, n, xdiff, (1 << 22) / xdiff, sb.z);
+  if (use_factor) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac + off);
+  if (xdiff == 0) { for (u32 i = 0; i < n; ++i) sb.z[off + i] = zl; }
+  else if (wbuffer) kern::active::span_attr_persp(zl, zr, sb.fac + off, n, sb.z + off);
+  else kern::active::span_z_linear(zl, zr, xv0, n, xdiff, (1 << 22) / xdiff, sb.z + off);
   if (with_attrs) span_attrs(sb, xstart, xend, xa, xb, wl, wr, al, ar);
 }
 
@@ -672,7 +657,7 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   if (x < 0) x = 0;
   const s32 xa = x, xb = std::min(xend + 1, 256);
   SpanBuf sb;
-  if (xb > xa) span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, nullptr, nullptr, false);
+  if (xb > xa) span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, nullptr, nullptr, false, 0);
   const int mode = pick_depth_mode(p);
 
   // Set stencil bits where the depth test fails; draw nothing.
@@ -1356,16 +1341,20 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   // (against the top pixel, or the one underneath where the top carries
   // edge flags); attributes are interpolated and the span resolved only
   // within that range, and an occluded span costs its depth stage alone.
-  SpanBuf sb;
+  // Stage this span into the batch. The pixel stages and the resolve wait
+  // until the batch is full or the polygon ends (flush_batch).
+  SpanBuf& sb = spanbuf_;
+  const u32 off = batch_px_;
   s32 ca = xa, cb = xa;
   if (xb > xa) {
-    span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, nullptr, nullptr, false);
+    span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, nullptr, nullptr, false, off);
     if (sh.shadow) {
       // Shadow polygons test against whichever pixel their stencil names; no pre-pass.
-      std::memset(sb.pass, 1, static_cast<size_t>(xb - xa)); cb = xb;
+      std::memset(sb.pass + off, 1, static_cast<size_t>(xb - xa)); cb = xb;
     } else {
       const u32 row = row_of(y) + 1 + xa;
-      const u32 r = kern::active::depth_candidates(mode, sb.z, &depth_[row], &attr_[row], static_cast<u32>(xb - xa), sb.pass);
+      const u32 r = kern::active::depth_candidates(mode, sb.z + off, &depth_[row], &attr_[row],
+                                                   static_cast<u32>(xb - xa), sb.pass + off);
       if (r) { ca = xa + static_cast<s32>(r >> 16); cb = xa + static_cast<s32>(r & 0xFFFF); }
     }
   }
@@ -1377,8 +1366,36 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
                      iend->interpolate(vrcur->tex[0], vrnext->tex[0]), iend->interpolate(vrcur->tex[1], vrnext->tex[1])};
   span_attrs(sb, xstart, xend, ca, cb, wl, wr, al, ar);
 
-  // One instantiation per (depth mode, textured, AA, shadow): the inner loop
-  // then branches only on per-pixel data.
+  SpanJob& j = jobs_[njobs_++];
+  j.y = y; j.ca = ca; j.cb = cb; j.off = off + static_cast<u32>(ca - xa);
+  j.xdraw = x; j.yedge = yedge; j.l_cov = l_cov; j.r_cov = r_cov;
+  j.lim0 = std::min({xstart + l_len, xend + 1, 256});
+  j.lim1 = std::min({xend - r_len + 1, xend + 1, 256});
+  j.lim2 = std::min(xend + 1, 256);
+  j.l_fill = l_fill; j.r_fill = r_fill; j.wf_skip = wireframe && !yedge;
+  batch_px_ += static_cast<u32>(xb - xa);
+
+  e.xl = e.left.step();
+  e.xr = e.right.step();
+}
+
+// Run the pixel stages once over everything staged, then resolve span by span.
+//
+// This is the point of the batching: span_texels and span_shade are called
+// once for up to BATCH_PX pixels instead of once per span, and our spans
+// average 13-35 pixels (scenes/README.md). Their per-call setup -- the Shade
+// fields, the gather function pointer, the blend-mode decision -- is paid once
+// for the batch, which is what DraStic's flush does (docs/techniques/02 s3).
+//
+// Batching is safe across the spans of one polygon because they lie on
+// distinct scanlines, so no span in the batch reads a pixel another one
+// writes.
+void Renderer3D::flush_batch(const Shade& sh, int mode) {
+  if (!njobs_) { batch_px_ = 0; return; }
+  prof::add(prof::C_BATCHES, 1); prof::add(prof::C_BATCH_SPANS, njobs_); prof::add(prof::C_BATCH_PX, batch_px_);
+  SpanBuf& sb = spanbuf_;
+  const u32 dispcnt = sh.dispcnt;
+
   using ResolveFn = void (Renderer3D::*)(const Shade&, const SpanBuf&, s32, s32, s32, int, int, s32, s32, s32&);
   static constexpr ResolveFn kResolve[4][2][2][2] = {
 #define DS_R(m) {{{&Renderer3D::resolve_span<m, false, false, false>, &Renderer3D::resolve_span<m, false, false, true>},   \
@@ -1398,28 +1415,32 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   };
   if (!sh.shadow && !sh.wireframe && sh.blendmode != 2) {
     resolve = kResolveVec[mode][sh.textured][(dispcnt >> 4) & 1];
-    if (sh.textured) { span_texels(sh, sb, ca, cb); span_shade<true>(sh, sb, ca, cb); }
-    else span_shade<false>(sh, sb, ca, cb);
+    // One pass over the whole batch. x0 = 0 makes buffer index equal screen x
+    // for the call, so [0, batch_px_) addresses everything staged.
+    sb.x0 = 0;
+    if (sh.textured) { span_texels(sh, sb, 0, static_cast<s32>(batch_px_)); span_shade<true>(sh, sb, 0, static_cast<s32>(batch_px_)); }
+    else span_shade<false>(sh, sb, 0, static_cast<s32>(batch_px_));
   }
 #endif
-  auto draw_span = [&](s32 xlimit, int part, int edge) {
-    if (x >= xlimit) return;
-    const s32 lo = std::max(x, ca), hi = std::min(xlimit, cb);
-    if (lo < hi) (this->*resolve)(sh, sb, y, lo, hi, part, edge, l_cov, r_cov, xcov);
-    x = xlimit;
-  };
-
-  s32 xlimit = std::min({xstart + l_len, xend + 1, 256});
-  if (l_cov & static_cast<s32>(0x80000000u)) { xcov = (l_cov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
-  if (!l_fill) x = xlimit; else draw_span(xlimit, 0, yedge | 0x1);
-  xlimit = std::min({xend - r_len + 1, xend + 1, 256});
-  if (wireframe && !yedge) x = std::max(x, xlimit); else draw_span(xlimit, 1, yedge);
-  xlimit = std::min(xend + 1, 256);
-  if (r_cov & static_cast<s32>(0x80000000u)) { xcov = (r_cov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
-  if (r_fill) draw_span(xlimit, 2, yedge | 0x2);
-
-  e.xl = e.left.step();
-  e.xr = e.right.step();
+  for (u32 k = 0; k < njobs_; ++k) {
+    const SpanJob& j = jobs_[k];
+    // Put the origin back where this span's pixels are: buffer index for
+    // screen x is j.off + (x - j.ca).
+    sb.x0 = j.ca - static_cast<s32>(j.off);
+    s32 x = j.xdraw, xcov = 0;
+    auto draw_span = [&](s32 xlimit, int part, int edge) {
+      if (x >= xlimit) return;
+      const s32 lo = std::max(x, j.ca), hi = std::min(xlimit, j.cb);
+      if (lo < hi) (this->*resolve)(sh, sb, j.y, lo, hi, part, edge, j.l_cov, j.r_cov, xcov);
+      x = xlimit;
+    };
+    if (j.l_cov & static_cast<s32>(0x80000000u)) { xcov = (j.l_cov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
+    if (!j.l_fill) x = j.lim0; else draw_span(j.lim0, 0, j.yedge | 0x1);
+    if (j.wf_skip) x = std::max(x, j.lim1); else draw_span(j.lim1, 1, j.yedge);
+    if (j.r_cov & static_cast<s32>(0x80000000u)) { xcov = (j.r_cov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
+    if (j.r_fill) draw_span(j.lim2, 2, j.yedge | 0x2);
+  }
+  njobs_ = 0; batch_px_ = 0;
 }
 
 // Rasterise lines [ya, yb) polygon at a time. The active set is merged once
@@ -1465,19 +1486,28 @@ void Renderer3D::render_chunk(s32 ya, s32 yb) {
     const s32 hi = p.ybot < yb ? p.ybot : yb;
     // A polygon whose ytop is inside the chunk starts at its own top line;
     // one that began earlier carries the edge state it already has.
-    for (s32 y = lo; y < hi; ++y) {
-      if (y < p.ybot || (y == p.ytop && p.ybot == p.ytop)) {
-        line_touched_[y] = true;
-        if (p.shadow_mask) render_shadow_mask_line(e, y);
-        else render_polygon_line(e, y);
-      }
-    }
+    const int mode = pick_depth_mode(p);
+    // One batch per polygon, flushed when it fills. Everything staged shares a
+    // Shade and a depth mode, so the kernel selection in flush_batch is made
+    // once for up to BATCH_PX pixels instead of once per span.
+    auto line = [&](s32 y) {
+      line_touched_[y] = true;
+      if (p.shadow_mask) { flush_batch(e.sh, mode); render_shadow_mask_line(e, y); return; }
+      // A span can be 256 pixels wide, so flush before staging one that might
+      // not fit rather than after overrunning.
+      if (batch_px_ >= BATCH_PX || njobs_ == jobs_.size()) flush_batch(e.sh, mode);
+      render_polygon_line(e, y);
+      // Batching only pays where the pixel stages are worth amortising. An
+      // untextured polygon's shading is a handful of NEON ops over a dozen
+      // pixels, less than the per-span bookkeeping the batch costs, so those
+      // flush immediately and keep the old one-span-at-a-time shape.
+      if (!e.sh.textured) flush_batch(e.sh, mode);
+    };
+    for (s32 y = lo; y < hi; ++y)
+      if (y < p.ybot || (y == p.ytop && p.ybot == p.ytop)) line(y);
     // Flat polygons (ybot == ytop) draw their single line at ytop.
-    if (p.ybot == p.ytop && p.ytop >= ya && p.ytop < yb) {
-      line_touched_[p.ytop] = true;
-      if (p.shadow_mask) render_shadow_mask_line(e, p.ytop);
-      else render_polygon_line(e, p.ytop);
-    }
+    if (p.ybot == p.ytop && p.ytop >= ya && p.ytop < yb) line(p.ytop);
+    flush_batch(e.sh, mode);
     if (p.ybot > yb) active_[keep++] = active_[k];
   }
   active_count_ = keep;
