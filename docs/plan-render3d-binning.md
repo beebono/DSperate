@@ -60,23 +60,47 @@ flush loop. Unbatched, those values were computed and consumed in registers.
 Benefit scales with pixels, cost with spans, so the tax per pixel is
 `1 / mean_span`:
 
-| scene | mean span | spans per pixel | px/polygon | mean batch fill | result |
+| scene | mean span | spans per pixel | mean | p90 | over-budget |
 |---|---|---|---|---|---|
-| `mlbis` | **13 px** | **0.077** | 142 | **55 %** | **+6.99 % over-budget** |
-| `dbori` | 17 px | 0.059 | — | — | pending |
-| `meteos` | 28 px | 0.036 | — | — | (2D scene) |
-| `sm64` | 32 px | 0.031 | 369 | 72 % | **-17.08 % over-budget** |
-| `etody` | 35 px | **0.029** | 1073 | 84 % | pending |
+| `etody` | 35 px | **0.029** | **-0.53 %** | **-5.40 %** | -0.10 % |
+| `sm64` | 32 px | 0.031 | -0.19 % | +0.10 % | **-17.09 %** |
+| `dbori` | 17 px | 0.059 | +0.74 % | +1.54 % | +0.31 % |
+| `mlbis` | **13 px** | **0.077** | **+1.79 %** | **+2.91 %** | **+6.88 %** |
 
-Both orderings put `mlbis` at one end and `sm64`/`etody` at the other, and the
-two measured scenes sit exactly where the model says. A batch is flushed per
-polygon, so a `mlbis` polygon at 142 px **can never fill one** — it pays the
-full per-span bookkeeping and takes 55 % of the amortisation.
+8 paired reps per scene, 1800 frames, saves passed. Every mean and p90 figure
+above is significant (|t| = 3.6 to 18.4) and unanimous or near-unanimous in
+sign across reps.
 
-**Prediction to test before building anything:** `dbori` at 0.059 lands nearer
-`mlbis` than `sm64`, i.e. neutral-to-regressive. The A/B running now answers
-this for free. If `dbori` and `etody` land out of order, this section is wrong
-and the rest of the plan needs rethinking.
+**The mean-family ordering is monotone in `spans per pixel` across all four
+scenes, with no exceptions**, and the crossover sits between 0.031 and 0.059.
+That is the prediction of §1 and it is confirmed: `dbori` at 0.059 did land
+nearer `mlbis` than `sm64`.
+
+A batch is flushed per polygon, so a `mlbis` polygon at 142 px **can never
+fill one** — it pays the full per-span bookkeeping and takes 55 % of the
+amortisation. `etody` at 1073 px fills four and takes 84 %.
+
+### The over-budget column does not follow, and that is a second effect
+
+`sm64` is off the model. It gains **-17.09 % over-budget frames (t = -21.55,
+0/8)** on a flat mean and a p99 that is *worse* by 2.55 %. Nothing in the
+fill argument predicts that, and the fill argument does not get credit for it.
+
+The mechanism is visible in where the budget line falls. `sm64` is over budget
+on 28.5 % of frames, so 16.715 ms sits near its 71st percentile — in the thick
+of the distribution, not the tail. Batching pushes the middle of the
+distribution down across that line while adding variance at the extreme, which
+is exactly a lower over-budget count with a worse p99.
+
+`etody` shows the complement: a large, clean **p90 win (-5.40 %, t = -18.4,
+0/8)** that buys almost no frames back, because its p90 is 23.5 ms and its
+whole upper distribution stays far above budget regardless.
+
+So there are two independent effects and they must be measured separately:
+per-pixel amortisation (tracks `1/mean_span`, §1) and distribution shape
+relative to the budget line (scene-specific, not modelled). **Do not fold the
+branch in on the `sm64` over-budget number** — two of four scenes regress on
+the mean family, and that number is not the thing §1 fixes.
 
 ### The previous save attempt gated on the wrong axis
 
@@ -213,7 +237,7 @@ carried.
 
 | # | Work | Cost | Kill if |
 |---|---|---|---|
-| **0** | Read `dbori`/`etody` off the running A/B; check §1's ordering | free | ordering violated → §1 is wrong, re-scope |
+| ~~0~~ | ~~Read `dbori`/`etody`; check §1's ordering~~ | done | **ordering confirmed monotone, 4/4** |
 | **0b** | `DS_PROFILE` batch fill per scene (`3d batches flushed` / `spans batched` / `pixels batched`) | 5 replays | fill does not track the result ordering |
 | **1** | §4 chunk sweep: `CHUNK` 14 vs 6, paired, 5 scenes | 1 build, 1 sweep | no scene beyond noise → drop §4, keep §1-3 |
 | **2** | §3 bind resolve fn in `setup_shade` | small | — (correctness-neutral, keep if not worse) |
