@@ -62,6 +62,9 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
 
 int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
+  // A whole 1800-frame dump is ~708 MB, so a window can be selected: the
+  // frame-budget report below names the frames worth looking at.
+  int dump_from = 0, dump_count = 0;
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit9 = true, jit7 = true;
@@ -81,6 +84,8 @@ int main(int argc, char** argv) {
     else if (arg("--trace")) trace = argv[++i];
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
+    else if (arg("--dump-from")) dump_from = std::atoi(argv[++i]);    // first frame to dump
+    else if (arg("--dump-count")) dump_count = std::atoi(argv[++i]);  // how many (0 = to the end)
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
@@ -168,7 +173,8 @@ int main(int argc, char** argv) {
     }
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
     nds.run_frame();
-    if (dump_out) {   // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
+    if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
+      // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
       std::fwrite(nds.gpu.framebuffer(1), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
     }
@@ -215,6 +221,34 @@ int main(int argc, char** argv) {
                  v[n / 2], sum / n, pct(0.90), pct(0.99), v.back(), v.front(), sum);
     std::fprintf(stderr, "frame budget: %zu of %zu frames over %.3f ms (%.2f%%)\n",
                  over, n, BUDGET_MS, 100.0 * static_cast<double>(over) / static_cast<double>(n));
+
+    // Where the overruns are, not just how many. A count says the run stutters;
+    // this says which frames to re-run with --dump-from/--dump-count and look
+    // at. `frame_ms` is in run order, unlike the sorted copy above.
+    if (over) {
+      size_t worst_i = 0, bursts = 0, longest = 0, longest_at = 0, cur = 0, cur_at = 0;
+      for (size_t i = 0; i < frame_ms.size(); ++i) {
+        if (frame_ms[i] > frame_ms[worst_i]) worst_i = i;
+        if (frame_ms[i] > BUDGET_MS) {
+          if (cur == 0) { ++bursts; cur_at = i; }
+          if (++cur > longest) { longest = cur; longest_at = cur_at; }
+        } else cur = 0;
+      }
+      std::fprintf(stderr, "  worst frame #%zu at %.3f ms; %zu bursts, longest %zu frames from #%zu\n",
+                   worst_i, frame_ms[worst_i], bursts, longest, longest_at);
+      // Ten windows over the run: a flat row is steady load, a spike is a
+      // section that chugs and is worth dumping.
+      constexpr size_t W = 10;
+      const size_t span = (frame_ms.size() + W - 1) / W;
+      std::fprintf(stderr, "  over-budget per %zu-frame window:", span);
+      for (size_t w = 0; w < W; ++w) {
+        size_t c = 0;
+        for (size_t i = w * span; i < std::min(frame_ms.size(), (w + 1) * span); ++i)
+          if (frame_ms[i] > BUDGET_MS) ++c;
+        std::fprintf(stderr, " %zu", c);
+      }
+      std::fputc('\n', stderr);
+    }
   }
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
