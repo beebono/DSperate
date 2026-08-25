@@ -528,37 +528,31 @@ void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac)
   uint32x4_t bad = vdupq_n_u32(0);
   uint32x4_t den;
   if (w0d == w1d) {
-    // W does not vary across the span, so xv*w0d + (xdiff-xv)*w1d collapses to
-    // xdiff*w0d -- the same value in every lane and every iteration (the
-    // identity holds exactly in wrapping 32-bit arithmetic). The reciprocal is
-    // then computed once for the span instead of once per four pixels, and the
-    // zero test and the den step leave the loop with it. This is DraStic's
-    // render_polygon_setup_perspective_steps_w_constant_asm, and it covers
-    // 76 % of this kernel's pixels on SM64DS -- see docs/profile-vs-drastic.md.
+    // W does not vary across the span, so the denominator collapses to the
+    // constant xdiff*w0d and the factor num/den is *linear in x*. DraStic's
+    // render_polygon_setup_perspective_steps_w_constant_asm exploits that
+    // fully: it multiplies an iota vector by the span's step once and the
+    // inner loop is a single add, with no division anywhere. This is that.
+    //
+    // The step is held in 16.16, so the ramp accumulates a rounded step and
+    // drifts from the exact quotient by up to a couple of units over a long
+    // span. That is a deliberate departure from bit-exactness -- see
+    // docs/techniques/02 and the measurements in the commit.
     const u32 dscalar = static_cast<u32>(xdiff) * static_cast<u32>(w0d);
     if (dscalar == 0) {
       const uint32x4_t z = vdupq_n_u32(0);
       for (u32 i = 0; i < n; i += 4) vst1q_u32(fac + i, z);
       return;
     }
-    const uint32x4_t d = vdupq_n_u32(dscalar);
-    const float32x4_t fd = vcvtq_f32_u32(d);
-    float32x4_t rcp = vrecpeq_f32(fd);
-    rcp = vmulq_f32(rcp, vrecpsq_f32(fd, rcp));
+    const u32 A = static_cast<u32>(w0n) << 8;
+    const u32 step = static_cast<u32>((static_cast<u64>(A) << 16) / dscalar);
+    uint32x4_t acc = vmulq_u32(vreinterpretq_u32_s32(vaddq_s32(vdupq_n_s32(xv0), kLane)), vdupq_n_u32(step));
+    const uint32x4_t inc = vdupq_n_u32(step * 4);
     for (u32 i = 0; i < n; i += 4) {
-      uint32x4_t q = vcvtq_u32_f32(vmulq_f32(vcvtq_f32_u32(num), rcp));
-      const uint32x4_t unsafe = vorrq_u32(vcgeq_u32(q, big), vcltq_u32(vaddq_u32(num, d), num));
-      uint32x4_t r = vsubq_u32(num, vmulq_u32(q, d));
-      const uint32x4_t over = vcgtq_u32(r, num);
-      q = vaddq_u32(q, over);
-      r = vaddq_u32(r, vandq_u32(over, d));
-      const uint32x4_t under = vcgeq_u32(r, d);
-      q = vsubq_u32(q, under);
-      r = vsubq_u32(r, vandq_u32(under, d));
-      bad = vorrq_u32(bad, vorrq_u32(unsafe, vorrq_u32(vcgeq_u32(r, d), vcgtq_u32(r, num))));
-      vst1q_u32(fac + i, q);
-      num = vaddq_u32(num, dnum);
+      vst1q_u32(fac + i, vshrq_n_u32(acc, 16));
+      acc = vaddq_u32(acc, inc);
     }
+    return;
   } else {
     den = vreinterpretq_u32_s32(vaddq_s32(vmulq_s32(x0, vdupq_n_s32(w0d)),
                                           vmulq_s32(vsubq_s32(vdupq_n_s32(xdiff), x0), vdupq_n_s32(w1d))));
