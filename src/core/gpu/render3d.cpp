@@ -1465,7 +1465,7 @@ Renderer3D::ResolveFn Renderer3D::select_resolve(const Shade& sh) {
 
 // One span's three-part walk: the left edge run, the interior, the right edge
 // run, each clipped to the range the depth pre-pass left alive.
-void Renderer3D::resolve_one(const Shade& sh, const SpanJob& j) {
+[[gnu::always_inline]] inline void Renderer3D::resolve_one(const Shade& sh, const SpanJob& j) {
   SpanBuf& sb = spanbuf_;
   // Put the origin back where this span's pixels are: buffer index for
   // screen x is j.off + (x - j.ca).

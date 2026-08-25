@@ -263,7 +263,13 @@ private:
   static ResolveFn select_resolve(const Shade& sh);
   // One span's three-part edge/fill walk. Shared by the batched path (over
   // jobs_) and the unbatched one (a job that never reaches the array).
-  void resolve_one(const Shade& sh, const SpanJob& j);
+  //
+  // always_inline, and not negotiable: left to itself GCC emits this as a
+  // real call with a 112-byte frame and five register-pair saves, paid once
+  // per span on BOTH paths. Measured, that call cost 93-176 cycles a span --
+  // 1.5-3.1 % of frame across four scenes, which is more than everything
+  // the batching decision is worth put together.
+  [[gnu::always_inline]] inline void resolve_one(const Shade& sh, const SpanJob& j);
   void render_shadow_mask_line(Edge& e, s32 y);
   // Stage one span into the batch (everything up to and including the
   // attribute interpolation, which is per span by construction); the pixel
