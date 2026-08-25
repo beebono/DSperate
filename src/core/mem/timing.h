@@ -23,6 +23,23 @@ enum Region : u8 {
 //   [1] data N16, [2] data N32, [3] data S32, in ARM9 cycles.
 class Timing {
 public:
+  // ARM7 precomputed data-cost table (docs/plan-cpu.md §A). The ARM7 rule --
+  // costs add when code and data share a region, overlap into a max when they
+  // do not -- has exactly one dynamic input, the data page; `nc`, `cdi`,
+  // `code_main` and the access width are all known when a block is translated.
+  // So the whole model is evaluated here once and the recompiler spends a
+  // load, replacing a mispredictable branch over up to fourteen instructions.
+  //
+  // 32 bytes per 32 KB page: [code_main][cdi][nc_idx][word]. It is allocated
+  // after the raw ARM7 bus table so the pinned timing register still points at
+  // the raw table and every existing user of it is unchanged; the recompiler
+  // reaches the cost table with one add of COST7_OFFSET.
+  static constexpr u32 COST7_STRIDE = 32;
+  static constexpr u32 BUS7_BYTES   = 0x20000 * 4;
+  static constexpr u32 COST7_OFFSET = BUS7_BYTES;
+  static constexpr u32 COST7_BYTES  = 0x20000 * COST7_STRIDE;
+  static constexpr u32 NC7_SLOTS    = 4;
+
   Timing();
   void reset();
 
@@ -38,11 +55,24 @@ public:
   void notify_cpu9(const CpuContext& cpu);
 
   const u8 (*cpu9() const)[4] { return reinterpret_cast<const u8 (*)[4]>(cpu9_.get()); }
-  const u8 (*cpu7() const)[4] { return reinterpret_cast<const u8 (*)[4]>(bus7_.get()); }
+  const u8 (*cpu7() const)[4] { return reinterpret_cast<const u8 (*)[4]>(bus7()); }
+
+  // Base of the ARM7 cost table. It sits at +COST7_OFFSET from the raw bus
+  // table, which is what the recompiler pins, so one add reaches it.
+  const u8* cost7() const { return tim7_.get() + COST7_OFFSET; }
+  // Slot for a code-fetch cost, or -1 when this `nc` was not one of the values
+  // the region table produces (the recompiler then keeps the inline model).
+  int nc7_index(u32 nc) const {
+    for (u32 i = 0; i < NC7_SLOTS; ++i) if (nc7_values_[i] == nc) return static_cast<int>(i);
+    return -1;
+  }
+  static u32 cost7_offset(bool code_main, bool cdi, u32 nc_idx, bool word) {
+    return (code_main ? 16u : 0u) + (cdi ? 8u : 0u) + nc_idx * 2u + (word ? 1u : 0u);
+  }
   u32 region(bool arm9, u32 addr) const { return arm9 ? regions9_[addr >> 14] : regions7_[addr >> 15]; }
   void dma_cost(bool arm9, u32 addr, bool word, u32& n, u32& s) const {
     if (arm9) { const u8* t = &bus9_[(addr >> 14) * 8]; n = t[word ? 6 : 4]; s = t[word ? 7 : 5]; }
-    else      { const u8* t = &bus7_[(addr >> 15) * 4]; n = t[word ? 2 : 0]; s = t[word ? 3 : 1]; }
+    else      { const u8* t = &bus7()[(addr >> 15) * 4]; n = t[word ? 2 : 0]; s = t[word ? 3 : 1]; }
   }
 
   // PU map for the ARM9: per 4 KB, bit 4 = data cacheable, bit 6 = code cacheable.
@@ -51,7 +81,14 @@ public:
 private:
   std::unique_ptr<u8[]> bus9_;     // 0x40000 * 8
   std::unique_ptr<u8[]> regions9_; // 0x40000
-  std::unique_ptr<u8[]> bus7_;     // 0x20000 * 4
+  // [0, BUS7_BYTES) the raw ARM7 bus table, then the precomputed cost table.
+  std::unique_ptr<u8[]> tim7_;
+  u8* bus7() const { return tim7_.get(); }
+  u8* cost7_rw() const { return tim7_.get() + COST7_OFFSET; }
+  void build_cost7();                                  // full: rescan nc values, then all pages
+  void build_cost7_range(u32 first_page, u32 last_page);
+  u32  nc7_values_[NC7_SLOTS] = {};
+  bool cost7_ready_ = false;   // set_region7 keeps the table current once this is true
   std::unique_ptr<u8[]> regions7_; // 0x20000
   std::unique_ptr<u8[]> cpu9_;     // 0x100000 * 4
 };

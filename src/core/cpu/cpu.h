@@ -70,6 +70,9 @@ struct CpuContext {
   // S32 (ARM9 cycles). Per-32 KB for the ARM7: N16, S16, N32, S32.
   const u8 (*timing9)[4];
   const u8 (*timing7)[4];
+  // ARM7 precomputed data cost (mem::Timing::cost7), used by the recompiler's
+  // single-access path; it reaches this from timing7 with one add.
+  const u8* cost7;
   u32 code_cycles;         // ARM9: cost of the most recent prefetch. ARM7: code-region table index.
   u32 data_cycles;         // accumulated data-access cost of the current instruction
   u32 code_region, data_region;   // high byte of the address (ARM7 main-RAM overlap rules)

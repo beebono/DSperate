@@ -167,6 +167,17 @@ struct Runtime {
   bool cyclog = false;    // DS_DEBUG_CYCLES: log the budget after every instruction (needs strict)
   bool hist = false;      // DS_JIT_HIST: histogram of fallback executions by pc
   bool fastcost = false;  // DS_JIT_FASTCOST: measurement knob (inexact data-cost arithmetic)
+  // DS_JIT_COSTPROBE_PART: which half of the per-access cost model the probe
+  // duplicates -- 1 = the timing-table lookup, 2 = the combine arithmetic,
+  // 3 (default) = both. Splits §A's price between the load and the maths.
+  int  costprobe_part = 3;
+  bool nocost7 = false;   // DS_JIT_NOCOST7: keep the inline ARM7 cost model, so the
+                          // precomputed table can be A/B'd inside one binary.
+  int  costprobe = 0;     // DS_JIT_COSTPROBE: 1 = both CPUs, 9 or 7 = that CPU only.
+                          // Emit the data-cost sequence twice, the first copy's
+                          // result discarded into a dead scratch. Semantics and frame output are
+                          // unchanged (the budget is still charged exactly once), so the A/B runs
+                          // the identical workload; the delta prices the per-access cost accounting.
   std::unordered_map<u64, u64> fallback_hist;
   Stats stats;
 };

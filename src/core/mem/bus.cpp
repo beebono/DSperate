@@ -45,8 +45,10 @@ void Bus::reset() {
   timing_.reset();
   nds_.cpu(Cpu::ARM9).timing9 = timing_.cpu9();
   nds_.cpu(Cpu::ARM9).timing7 = timing_.cpu7();
+  nds_.cpu(Cpu::ARM9).cost7 = timing_.cost7();
   nds_.cpu(Cpu::ARM7).timing9 = timing_.cpu9();
   nds_.cpu(Cpu::ARM7).timing7 = timing_.cpu7();
+  nds_.cpu(Cpu::ARM7).cost7 = timing_.cost7();
   map_fixed_regions();
   update_wram();
   update_vram();

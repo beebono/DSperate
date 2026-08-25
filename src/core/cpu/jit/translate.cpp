@@ -612,12 +612,31 @@ private:
     default: break;
     }
   }
+  // DS_JIT_COSTPROBE selects both CPUs (1) or one of them (9 / 7).
+  bool costprobe_on() const {
+    const int c = rt().costprobe;
+    return c == 1 || (c == 9 && a9_) || (c == 7 && !a9_);
+  }
   // Data cost of one access at `waddr` into `wcost`.
   void emit_data_cost(u32 waddr, u32 wcost, bool word, bool seq) {
     const u32 k = a9_ ? (seq ? 3 : (word ? 2 : 1)) : (seq ? (word ? 3 : 1) : (word ? 2 : 0));
-    e().lsr_imm(wcost, waddr, a9_ ? 12 : 15);
-    e().add_reg(wcost, R_TIM, wcost, LSL, 2, true);
-    e().ldrb(wcost, wcost, k);
+    // DS_JIT_COSTPROBE: emit the lookup twice; the second overwrites the first,
+    // so the value used is unchanged and only the cost of computing it doubles.
+    for (int rep = (costprobe_on() && (rt().costprobe_part & 1)) ? 1 : 0; rep >= 0; --rep) {
+      e().lsr_imm(wcost, waddr, a9_ ? 12 : 15);
+      e().add_reg(wcost, R_TIM, wcost, LSL, 2, true);
+      e().ldrb(wcost, wcost, k);
+    }
+  }
+
+  // Slot in mem::Timing's precomputed ARM7 cost table for a single access with
+  // these translate-time constants, or -1 when the table does not cover this
+  // block's code-fetch cost and the caller must keep the inline model.
+  int cost7_slot(bool cdi, bool word) const {
+    if (a9_ || rt().nocost7) return -1;
+    const int ni = cpu_.nds->bus.timing().nc7_index(numC_nonseq7());
+    if (ni < 0) return -1;
+    return static_cast<int>(mem::Timing::cost7_offset(code_region7_ == 0x02, cdi, static_cast<u32>(ni), word));
   }
   // wd = max(wa, wb) without flags: wa + max(wb - wa, 0)
   void emit_max(u32 wd, u32 wa, u32 wb, u32 tmp) {
@@ -629,16 +648,22 @@ private:
   // (ARM7 main-RAM rule). `wd` is w6; temporaries w4 (ARM9) or w2-w5 (ARM7).
   void emit_charge_data(u32 wd, u32 waddr, bool cdi) {
     flush_pending();
+    // DS_JIT_COSTPROBE: a second copy charged to a dead scratch instead of the
+    // budget. The emitted work doubles, the emulated cycle count does not.
+    if (costprobe_on() && (rt().costprobe_part & 2)) emit_charge_data_body(wd, waddr, cdi, SCRATCH3);
+    emit_charge_data_body(wd, waddr, cdi, R_BUDGET);
+  }
+  void emit_charge_data_body(u32 wd, u32 waddr, bool cdi, u32 wbudget) {
     if (rt().fastcost) {   // DS_JIT_FASTCOST: measurement knob, inexact: numC + numD
       e().add_imm(SCRATCH5, wd, a9_ ? numC(pc_) : numC_nonseq7());
-      e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH5);
+      e().sub_reg(wbudget, wbudget, SCRATCH5);
       return;
     }
     if (a9_) {
       // cost = max(nc + nd - 6, nc, nd) with nd >= 1 (timing tables never
       // hold 0): nc <= 1 -> nd; nc <= 6 -> max(nc, nd); else nc + max(nd - 6, 0).
       const u32 nc = numC(pc_);
-      if (nc <= 1) { e().sub_reg(R_BUDGET, R_BUDGET, wd); return; }
+      if (nc <= 1) { e().sub_reg(wbudget, wbudget, wd); return; }
       if (nc <= 6) {
         e().sub_imm(SCRATCH4, wd, nc);
         e().bic_reg(SCRATCH4, SCRATCH4, SCRATCH4, ASR, 31);
@@ -648,7 +673,7 @@ private:
         e().bic_reg(SCRATCH4, SCRATCH4, SCRATCH4, ASR, 31);
         e().add_imm(SCRATCH4, SCRATCH4, nc);
       }
-      e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH4);
+      e().sub_reg(wbudget, wbudget, SCRATCH4);
       return;
     }
     // ARM7 (temps w2-w5; `wd` is w6 and w7 holds a writeback value).
@@ -678,7 +703,7 @@ private:
       e().add_imm(SCRATCH5, wd, nc + (cdi ? 1 : 0));
     }
     e().bind(done);
-    e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH5);
+    e().sub_reg(wbudget, wbudget, SCRATCH5);
   }
   // One load or store at the address in w1. The fast path inlines the
   // page-table lookup and the access; the cold path calls the slow helper
@@ -690,8 +715,23 @@ private:
   void emit_single(Mem m, u32 wdata, u32 dst, bool wb, u32 wb_reg, bool cdi) {
     flush_pending();
     const bool word = is_word(m);
-    auto cost = [&] { emit_data_cost(SCRATCH1, SCRATCH6, word, false); };
-    auto charge = [&] { if (wb) e().mov(host_reg(wb_reg), SCRATCH7); emit_charge_data(SCRATCH6, SCRATCH1, cdi); };
+    // ARM7: one load from the precomputed table replaces the timing lookup and
+    // the branchy region combine (docs/plan-cpu.md §A). Issued in the same two
+    // places as the inline model, so the scheduling is unchanged.
+    const int slot7 = cost7_slot(cdi, word);
+    auto cost = [&] {
+      if (slot7 < 0) { emit_data_cost(SCRATCH1, SCRATCH6, word, false); return; }
+      e().lsr_imm(SCRATCH6, SCRATCH1, 15);
+      e().add_reg(SCRATCH6, R_TIM, SCRATCH6, LSL, 5, true);
+      e().add_imm(SCRATCH6, SCRATCH6, mem::Timing::COST7_OFFSET, true);
+      e().ldrb(SCRATCH6, SCRATCH6, static_cast<u32>(slot7));
+    };
+    auto charge = [&] {
+      if (wb) e().mov(host_reg(wb_reg), SCRATCH7);
+      if (slot7 < 0) { emit_charge_data(SCRATCH6, SCRATCH1, cdi); return; }
+      flush_pending();
+      e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH6);
+    };
     std::vector<size_t> fail;
     e().lsr_imm(SCRATCH2, SCRATCH1, mem::PAGE_SHIFT);
     e().ldr_x_reg(SCRATCH2, R_PT, SCRATCH2, true, true);
