@@ -30,6 +30,26 @@ else()
   endif()
 endif()
 
+# -O3 in place of CMake's default -O2 for the optimised configurations.
+# Measured on the RK3566 against the five replay scenes, paired interleaved
+# reps: -4.35 % (mlbis), -4.53 % (meteos), -5.92 % (sm64), -6.15 % (etody),
+# -7.75 % (dbori) of frame time, faster in 40 of 40 reps, frames byte-identical
+# on every scene. The win is renderer-side (2D select -8 %, 3D spans -5 %,
+# geometry -9 %); CPU barely moves, because the recompiler emits its own code
+# and compiler flags cannot reach it. See docs/plan-cpu.md.
+foreach(cfg RELEASE RELWITHDEBINFO)
+  string(REPLACE "-O2" "-O3" CMAKE_C_FLAGS_${cfg}   "${CMAKE_C_FLAGS_${cfg}}")
+  string(REPLACE "-O2" "-O3" CMAKE_CXX_FLAGS_${cfg} "${CMAKE_CXX_FLAGS_${cfg}}")
+endforeach()
+
+# The toolchain defaults to -fstack-protector-strong, which guards 462 sites in
+# the core objects and costs -1.07 % (sm64) / -2.50 % (dbori) of frame time.
+# Basic -fstack-protector keeps 76 of them -- the functions with actual arrays,
+# which is what a malicious ROM would target -- and recovers the whole
+# difference: it measured level with -fno-stack-protector (-1.02 % / -2.43 %),
+# so there is no safety traded for the speed. Do not "upgrade" this to -strong.
+add_compile_options(-fstack-protector)
+
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 add_subdirectory(src/core)
