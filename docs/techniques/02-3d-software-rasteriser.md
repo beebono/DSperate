@@ -242,6 +242,81 @@ all. Each stage is a flat loop over contiguous `int32` arrays with no control
 flow, which NEON handles at eight pixels per iteration; the per-pixel decisions
 that would have been branches become **byte masks** consumed by later stages.
 
+### The attribute pipeline is flattened until the span boundaries vanish
+
+The interpolation is three stages, and only the middle one knows what a span
+is.
+
+**1. Per-span endpoints, in C.** `render_polygon_edge_interpolate_x_c` (144
+instructions, no divides, no SIMD) walks the edges once per polygon and leaves
+each span's starting value and step in arrays indexed by span.
+
+**2. Broadcast them per pixel, in assembly.**
+`render_polygon_setup_rgb_interpolants_asm` is two nested loops -- the outer
+over *spans* (`subs w2, w2, #1`), the inner over pixels eight at a time. It
+loads a span's base and step with `ld1r` (load-replicate), `dup`s them across
+vectors, and does nothing but **store**:
+
+```
+    ld1r  {v0.2s}, [x4], #4        ; this span's base
+    dup   v4.4s, v0.s[0]
+    st1   {v4.4s-v5.4s}, [x9], #32 ; eight pixels of it
+    st1   {v18.8h}, [x1], #16
+    subs  w3, w3, #0x8
+    b.gt  ...                      ; inner: pixels
+    subs  w2, w2, #0x1
+    b.ne  ...                      ; outer: spans
+```
+
+There is no arithmetic in the inner loop at all. It expands per-span constants
+into per-pixel arrays: a 32-bit accumulator base and a 16-bit step, per
+channel.
+
+**3. One flat pass over the whole batch.**
+`render_polygon_interpolate_rgb_asm` then has **no span loop** -- just
+`subs w3, w3, #8` over the batch's total pixel count. It reads the per-pixel
+factor, the base and the step, and does `base + step * factor` with a widening
+multiply-accumulate:
+
+```
+    ld1   {v0.4s}, [x2], #16       ; the factor, per pixel
+    ld1   {v1.4s-v2.4s}, [x7], #32 ; base
+    ld1   {v7.8h}, [x1], #16       ; step
+    smlal v1.4s, v7.4h, v0.4h
+    shrn  v18.4h, v1.4s, #16
+    shrn  v18.8b, v18.8h, #2
+    st1   {v18.8b}, [x0], #8
+```
+
+Three channels per iteration, eight pixels at a time, straight through the
+batch. **The span structure has been flattened away before the expensive stage
+runs.** That is what the batching is really for: not just amortising a call,
+but turning a ragged set of 13-to-35-pixel spans into one contiguous vector
+loop.
+
+`render_polygon_setup_uv_interpolants_asm` is the same shape for texture
+coordinates.
+
+### The constant-W perspective factor is a ramp, not a division
+
+`render_polygon_setup_perspective_steps_w_constant_asm` shows how far the
+uniformity test pays off. With W constant the factor is *linear in x*, so the
+kernel needs no division anywhere: it multiplies a constant iota vector
+(0,1,2,3...) by the span's step once, then the inner loop is a single add.
+
+```
+    ld1   {v0.4s-v1.4s}, [x6]      ; iota_u32_value: 0,1,2,3,4,5,6,7
+    dup   v2.4s, w5                ; this span's step
+    mul   v4.4s, v0.4s, v2.4s
+    shl   v3.4s, v2.4s, #3         ; step * 8
+    shrn  v6.4h, v4.4s, #16        ; <- inner loop starts
+    st1   {v6.8h}, [x0], #16
+    add   v4.4s, v4.4s, v3.4s      ; forward difference, no divide
+    subs  w4, w4, #0x8
+```
+
+Outer loop over spans again. Per pixel it costs a narrow, a store and an add.
+
 ### Masks and counts
 
 `render_polygon_depth_compare_less_than_asm` is a good example of the whole
@@ -392,6 +467,8 @@ testable.
 | 9 / 8 / 10-way kernel specialisation | Zero unpredictable branches in inner loops |
 | Fused resolve (edge + fog + convert + store) | One pass over the tile instead of four |
 | Spans batched to 256 px across scanlines before the pipeline runs | Kernel selection is paid once per 256 pixels, not once per scanline |
+| Per-span interpolants broadcast into per-pixel arrays | The interpolation kernel has no span loop: one flat pass over the batch |
+| Constant-W perspective factor as an iota ramp | No division at all; one add per vector |
 | Stage-at-a-time span pipeline (SoA) | Every stage vectorises; branches become masks |
 | Mask + surviving-pixel count from depth test | Later stages skipped when a span is occluded |
 | Eight-way unrolled scalar texel gather | Covers load latency on an in-order core |
