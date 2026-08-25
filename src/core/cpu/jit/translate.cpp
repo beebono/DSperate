@@ -229,6 +229,7 @@ private:
   u32 pending_ = 0;          // static cycles not yet subtracted from the budget
   u32 charged_ahead_ = 0;    // cycles already charged before a conditional instruction's body
   bool ended_ = false;
+  bool dp_csel_ = false;   // arm_data_processing: write SCRATCH6, not the guest register
   const u8* t7_ = nullptr;
   u32 code_region7_ = 0;
   // Thumb BL pairing: static lr value after a BL prefix at the previous address.
@@ -904,7 +905,9 @@ void Translator::arm_data_processing(u32 instr, AOp op) {
     rn_v = reg_operand(rn, pc_ + 12);
   }
 
-  const u32 dst = test ? SCRATCH6 : host_reg(rd);
+  // csel form: compute into a scratch so the guest register is only written by
+  // the select that follows (dp_csel_, set by translate_arm).
+  const u32 dst = (test || dp_csel_) ? SCRATCH6 : host_reg(rd);
   const u32 a = to_reg(rn_v, SCRATCH4);
   auto b_reg = [&]() { return to_reg(op2, SCRATCH5); };
 
@@ -1105,6 +1108,18 @@ void Translator::arm_msr(u32 instr, AOp op) {
 // Instructions whose whole cost is the static fetch cost (plus static
 // extras): a conditional one charges numC before the condition test, so the
 // skipped path needs no code of its own.
+// Conditional instructions that can be predicated with a select rather than a
+// branch: data processing with a register destination and no flag write, whose
+// body is a pure computation into that register. Register-shifted operands are
+// excluded -- their cycle cost is not the plain numC the select form charges.
+bool use_csel_op(AOp op, u32 instr) {
+  if (op != AOp::DpImm && op != AOp::DpImmShift) return false;
+  if (instr & (1u << 20)) return false;                 // S: writes flags
+  const u32 opcode = (instr >> 21) & 0xF;
+  if (opcode >= 8 && opcode <= 0xB) return false;        // TST/TEQ/CMP/CMN: no destination
+  return ((instr >> 12) & 0xF) != 15;                    // PC destination falls back
+}
+
 bool arm_simple_cost(AOp op) {
   switch (op) {
   case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift: case AOp::Mrs: case AOp::Clz: case AOp::Pld: case AOp::Mcr:
@@ -1149,12 +1164,21 @@ void Translator::translate_arm(u32 instr) {
 
   size_t skip = 0;
   const bool conditional = cond != 0xE;
-  const bool precharged = conditional && arm_simple_cost(op);
-  if (conditional) {
+  // Predicate with a `csel` instead of branching around the body, for the
+  // shapes where the body is a plain value computation: data processing that
+  // writes a register and not the flags. The result goes to a scratch and the
+  // select commits it, so the guest register is untouched when the condition
+  // fails. One never-mispredicting instruction replaces a data-dependent
+  // branch, and the cost is charged unconditionally -- which is what the
+  // instruction costs either way, and what `precharged` already arranged.
+  const bool csel_form = conditional && !rt().nocsel && use_csel_op(op, instr);
+  const bool precharged = conditional && !csel_form && arm_simple_cost(op);
+  if (conditional && !csel_form) {
     if (precharged) { const u32 c = numC(pc_); add_pending(c); flush_pending(); charged_ahead_ = c; }
     else flush_pending();
     skip = hot_.b_cond_fwd(invert(static_cast<Cond>(cond)));
   }
+  dp_csel_ = csel_form;
 
   switch (op) {
   case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift:
@@ -1210,6 +1234,13 @@ void Translator::translate_arm(u32 instr) {
   case AOp::Ldm: arm_ldm_stm(instr, true); break;
   case AOp::Stm: arm_ldm_stm(instr, false); break;
   default: break;
+  }
+
+  if (csel_form) {
+    dp_csel_ = false;
+    const u32 rd = (instr >> 12) & 0xF;
+    e().csel(host_reg(rd), SCRATCH6, host_reg(rd), static_cast<Cond>(cond));
+    return;
   }
 
   if (conditional) {

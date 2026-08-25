@@ -171,6 +171,8 @@ struct Runtime {
   // duplicates -- 1 = the timing-table lookup, 2 = the combine arithmetic,
   // 3 (default) = both. Splits §A's price between the load and the maths.
   int  costprobe_part = 3;
+  bool nocsel = false;    // DS_JIT_NOCSEL: branch around conditional data-processing instead
+                          // of selecting, so the csel form can be A/B'd inside one binary.
   bool nocost7 = false;   // DS_JIT_NOCOST7: keep the inline ARM7 cost model, so the
                           // precomputed table can be A/B'd inside one binary.
   int  costprobe = 0;     // DS_JIT_COSTPROBE: 1 = both CPUs, 9 or 7 = that CPU only.

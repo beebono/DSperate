@@ -828,6 +828,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     r.cyclog = std::getenv("DS_DEBUG_CYCLES") != nullptr;
     r.hist = std::getenv("DS_JIT_HIST") != nullptr;
     r.fastcost = std::getenv("DS_JIT_FASTCOST") != nullptr;
+    r.nocsel  = std::getenv("DS_JIT_NOCSEL") != nullptr;
     r.nocost7 = std::getenv("DS_JIT_NOCOST7") != nullptr;
     if (const char* cp = std::getenv("DS_JIT_COSTPROBE")) r.costprobe = std::atoi(cp);
     if (const char* pp = std::getenv("DS_JIT_COSTPROBE_PART")) r.costprobe_part = std::atoi(pp);
