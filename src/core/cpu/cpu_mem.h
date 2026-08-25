@@ -15,9 +15,15 @@ namespace ds {
 
 inline u32 rotr32(u32 v, u32 n) { n &= 31; return n ? (v >> n) | (v << (32 - n)) : v; }
 
+// DS_CENSUS=1 (interp.cpp): every executed data access, for sizing the JIT's
+// per-access cost accounting. Null unless the census is on; the interpreter is
+// the only caller of data_cost, so this never reaches a shipped fast path.
+extern void (*g_census_access)(bool a9, u32 addr, bool seq);
+
 // ---- cost model -------------------------------------------------------------
 // width: 0 = 8/16-bit, 1 = 32-bit.
 inline void data_cost(CpuContext& cpu, u32 addr, int width, bool seq) {
+  if (g_census_access) g_census_access(cpu.which == Cpu::ARM9, addr, seq);
   u32 c;
   if (cpu.which == Cpu::ARM9) {
     const u8* t = cpu.timing9[addr >> 12];   // TCM windows are baked into the table

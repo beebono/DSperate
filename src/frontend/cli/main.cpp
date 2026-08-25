@@ -7,6 +7,7 @@
 // and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py
 // and the SPU output (--dump-audio, raw s16 stereo at 32768 Hz).
 #include "core/nds.h"
+#include "core/cpu/interp/interp.h"
 #include "core/input/input_log.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
@@ -196,6 +197,7 @@ int main(int argc, char** argv) {
 #if DSPERATE_JIT
   if (ds::prof::enabled && (jit9 || jit7)) ds::jit::report(stderr);
 #endif
+  ds::interp::census_report(nds.frame_count);
   if (!frame_ms.empty()) {
     std::vector<double> v = frame_ms;
     std::sort(v.begin(), v.end());
