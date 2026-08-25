@@ -146,6 +146,7 @@ private:
   std::array<u16, 2048> order_{};        // edge indices sorted by ytop, stable
   std::array<u16, 194> bucket_{};        // order_ offset where ytop == y starts (193 = end)
   std::array<u16, 2048> active_buf_[2]{};
+  std::array<u16, 2048> enter_{};   // chunk's entering polygons, re-sorted into list order
   u16* active_ = nullptr; u16* active_next_ = nullptr;
   u32 active_count_ = 0;
   std::array<bool, 192> line_touched_{};   // a polygon was active on the line (final pass needed)

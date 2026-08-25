@@ -1436,9 +1436,19 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
 void Renderer3D::render_chunk(s32 ya, s32 yb) {
   for (s32 y = ya; y < yb; ++y) { clear_line(y); line_touched_[y] = false; prev_shadow_mask_[static_cast<u32>((y + 1) & (RING - 1))] = false; }
   // Merge in everything that starts anywhere in the chunk, keeping list order.
+  //
+  // order_ is sorted by ytop and only then by list index, so the slice for a
+  // whole chunk spans several ytop buckets and is NOT in list order -- merging
+  // it directly puts the active list out of order and changes which polygon
+  // reaches a pixel first. (render_line could merge its slice directly because
+  // a single bucket is one ytop and therefore already in list order.) Sort the
+  // slice by index first; it is at most the polygon count and this runs once
+  // per chunk, not once per line.
   {
-    const u16* in = &order_[bucket_[ya]];
     const u32 nin = bucket_[yb] - bucket_[ya];
+    std::copy(&order_[bucket_[ya]], &order_[bucket_[ya]] + nin, enter_.begin());
+    std::sort(enter_.begin(), enter_.begin() + nin);
+    const u16* in = enter_.data();
     u32 a = 0, b = 0, n = 0;
     while (a < active_count_ || b < nin) {
       if (b >= nin || (a < active_count_ && active_[a] < in[b])) active_next_[n++] = active_[a++];
