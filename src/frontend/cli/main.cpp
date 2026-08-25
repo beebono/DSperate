@@ -202,8 +202,19 @@ int main(int argc, char** argv) {
     std::vector<double> v = frame_ms;
     std::sort(v.begin(), v.end());
     double sum = 0; for (double x : v) sum += x;
-    std::fprintf(stderr, "frame ms: median %.3f mean %.3f p90 %.3f min %.3f total %.1f\n",
-                 v[v.size() / 2], sum / v.size(), v[(v.size() * 9) / 10], v.front(), sum);
+    const size_t n = v.size();
+    auto pct = [&](double p) { return v[std::min(n - 1, static_cast<size_t>(p * n))]; };
+    // A DS frame is 1/59.8261 s. A frame that takes longer than that is one the
+    // emulator could not deliver in real time -- which is what a dropped frame
+    // and an audio underrun actually are. The mean hides these completely: a
+    // change can improve the mean while making the tail worse, and the tail is
+    // what is felt. Report both.
+    constexpr double BUDGET_MS = 1000.0 / 59.8261;
+    size_t over = 0; for (double x : v) if (x > BUDGET_MS) ++over;
+    std::fprintf(stderr, "frame ms: median %.3f mean %.3f p90 %.3f p99 %.3f max %.3f min %.3f total %.1f\n",
+                 v[n / 2], sum / n, pct(0.90), pct(0.99), v.back(), v.front(), sum);
+    std::fprintf(stderr, "frame budget: %zu of %zu frames over %.3f ms (%.2f%%)\n",
+                 over, n, BUDGET_MS, 100.0 * static_cast<double>(over) / static_cast<double>(n));
   }
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
