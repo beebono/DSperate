@@ -470,6 +470,26 @@ template <bool textured>
 
 // ---- polygon setup ------------------------------------------------------------------
 
+void Renderer3D::refresh_edge_state(Edge& e) const {
+  const Polygon& p = *e.poly;
+  e.vcl = &gx_->vertex(p.vtx[e.cur_vl]); e.vnl = &gx_->vertex(p.vtx[e.next_vl]);
+  e.vcr = &gx_->vertex(p.vtx[e.cur_vr]); e.vnr = &gx_->vertex(p.vtx[e.next_vr]);
+  e.wcl = p.w[e.cur_vl]; e.wnl = p.w[e.next_vl];
+  e.wcr = p.w[e.cur_vr]; e.wnr = p.w[e.next_vr];
+  e.zcl = p.z[e.cur_vl]; e.znl = p.z[e.next_vl];
+  e.zcr = p.z[e.cur_vr]; e.znr = p.z[e.next_vr];
+  e.nx_l = e.left.negative  || !e.left.xmajor;
+  e.nx_r = e.right.negative || !e.right.xmajor;
+  e.px_l = !e.left.negative  && e.left.xmajor;
+  e.px_r = !e.right.negative && e.right.xmajor;
+  e.lneg_xm = e.left.negative && e.left.xmajor;
+  e.lxm = e.left.xmajor; e.rxm = e.right.xmajor;
+  e.same_incr = e.left.increment == e.right.increment;
+  e.l_incr0 = e.left.increment == 0;
+  e.r_incr0 = e.right.increment == 0;
+  e.next_sx_differ = e.vnl->sx != e.vnr->sx;
+}
+
 void Renderer3D::setup_left_edge(Edge& e, s32 y) const {
   const Polygon& p = *e.poly;
   while (y >= gx_->vertex(p.vtx[e.next_vl]).sy && e.cur_vl != p.vbot) {
@@ -479,6 +499,7 @@ void Renderer3D::setup_left_edge(Edge& e, s32 y) const {
   }
   const Vertex &a = gx_->vertex(p.vtx[e.cur_vl]), &b = gx_->vertex(p.vtx[e.next_vl]);
   e.xl = e.left.setup(a.sx, b.sx, a.sy, b.sy, p.w[e.cur_vl], p.w[e.next_vl], y, p.wbuffer);
+  refresh_edge_state(e);
 }
 
 void Renderer3D::setup_right_edge(Edge& e, s32 y) const {
@@ -490,6 +511,7 @@ void Renderer3D::setup_right_edge(Edge& e, s32 y) const {
   }
   const Vertex &a = gx_->vertex(p.vtx[e.cur_vr]), &b = gx_->vertex(p.vtx[e.next_vr]);
   e.xr = e.right.setup(a.sx, b.sx, a.sy, b.sy, p.w[e.cur_vr], p.w[e.next_vr], y, p.wbuffer);
+  refresh_edge_state(e);
 }
 
 void Renderer3D::setup_polygon(Edge& e, const Polygon& p) {
@@ -519,6 +541,7 @@ void Renderer3D::setup_polygon(Edge& e, const Polygon& p) {
     setup_left_edge(e, p.ytop);
     setup_right_edge(e, p.ytop);
   }
+  refresh_edge_state(e);
 }
 
 // ---- scanline rendering ------------------------------------------------------------
@@ -819,6 +842,7 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
   sh.gather4 = nullptr;
   sh.vec = false;
 #endif
+  sh.always_fill = (sh.dispcnt & ((1 << 4) | (1 << 5))) || (sh.polyalpha < 31 && (sh.dispcnt & (1 << 3))) || sh.wireframe;
   sh.mode = pick_depth_mode(p);
   sh.resolve = select_resolve(sh);
 }
@@ -1277,9 +1301,7 @@ void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32
 void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   const Polygon& p = *e.poly;
   const Shade& sh = e.sh;
-  const u32 dispcnt = sh.dispcnt;
   const bool wireframe = sh.wireframe;
-  const u32 polyalpha = sh.polyalpha;
   prev_shadow_mask_[static_cast<u32>((y + 1) & (RING - 1))] = false;
 
   if (p.ytop != p.ybot) {
@@ -1287,36 +1309,38 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
     if (y >= gx_->vertex(p.vtx[e.next_vr]).sy && e.cur_vr != p.vbot) setup_right_edge(e, y);
   }
   s32 xstart = e.xl, xend = e.xr;
-  s32 wl = e.left.interp.interpolate(p.w[e.cur_vl], p.w[e.next_vl]);
-  s32 wr = e.right.interp.interpolate(p.w[e.cur_vr], p.w[e.next_vr]);
-  s32 zl = e.left.interp.interpolate_z(p.z[e.cur_vl], p.z[e.next_vl]);
-  s32 zr = e.right.interp.interpolate_z(p.z[e.cur_vr], p.z[e.next_vr]);
+  s32 wl = e.left.interp.interpolate(e.wcl, e.wnl);
+  s32 wr = e.right.interp.interpolate(e.wcr, e.wnr);
+  s32 zl = e.left.interp.interpolate_z(e.zcl, e.znl);
+  s32 zr = e.right.interp.interpolate_z(e.zcr, e.znr);
   // Right vertical edges are pushed one pixel left unless the span is a
   // single pixel at the screen's left edge.
-  if (e.right.increment == 0 && (e.left.increment != 0 || xstart != xend) && xend != 0) --xend;
+  if (e.r_incr0 && (!e.l_incr0 || xstart != xend) && xend != 0) --xend;
 
   const Vertex *vlcur, *vlnext, *vrcur, *vrnext;
   const Interp<1>* istart; const Interp<1>* iend;
   bool l_fill, r_fill; s32 l_len, r_len, l_cov, r_cov;
-  const bool always_fill = (dispcnt & ((1 << 4) | (1 << 5))) || (polyalpha < 31 && (dispcnt & (1 << 3))) || wireframe;
+  // Everything below that is not a function of y comes out of the Edge; only
+  // the bottom-line test and the edge_params (which walk dx) are per scanline.
+  const bool ybot_line = y == p.ybot - 1;
+  const bool bottom_fill = ybot_line && e.next_sx_differ;
   if (xstart > xend) {
     // Swapped edges: the hardware walks them backwards, which breaks the
     // X-major edge lengths (and the AA on them) in a specific way.
-    vlcur = &gx_->vertex(p.vtx[e.cur_vr]); vlnext = &gx_->vertex(p.vtx[e.next_vr]);
-    vrcur = &gx_->vertex(p.vtx[e.cur_vl]); vrnext = &gx_->vertex(p.vtx[e.next_vl]);
+    vlcur = e.vcr; vlnext = e.vnr;
+    vrcur = e.vcl; vrnext = e.vnl;
     istart = &e.right.interp; iend = &e.left.interp;
     e.right.edge_params<true>(&l_len, &l_cov);
     e.left.edge_params<true>(&r_len, &r_cov);
     std::swap(xstart, xend); std::swap(wl, wr); std::swap(zl, zr);
-    if (always_fill) { l_fill = r_fill = true; }
+    if (sh.always_fill) { l_fill = r_fill = true; }
     else {
-      l_fill = (e.right.negative || !e.right.xmajor) || ((y == p.ybot - 1) && e.right.xmajor && (vlnext->sx != vrnext->sx));
-      r_fill = (!e.left.negative && e.left.xmajor) || (!(e.left.negative && e.left.xmajor) && e.right.increment == 0) ||
-               ((y == p.ybot - 1) && e.left.xmajor && (vlnext->sx != vrnext->sx));
+      l_fill = e.nx_r || (bottom_fill && e.rxm);
+      r_fill = e.px_l || (!e.lneg_xm && e.r_incr0) || (bottom_fill && e.lxm);
     }
   } else {
-    vlcur = &gx_->vertex(p.vtx[e.cur_vl]); vlnext = &gx_->vertex(p.vtx[e.next_vl]);
-    vrcur = &gx_->vertex(p.vtx[e.cur_vr]); vrnext = &gx_->vertex(p.vtx[e.next_vr]);
+    vlcur = e.vcl; vlnext = e.vnl;
+    vrcur = e.vcr; vrnext = e.vnr;
     istart = &e.left.interp; iend = &e.right.interp;
     e.left.edge_params<false>(&l_len, &l_cov);
     e.right.edge_params<false>(&r_len, &r_cov);
@@ -1324,12 +1348,11 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
     // right edges when > 1 or vertical; the bottom pixel of a negative
     // X-major edge fills next to a flat bottom; fully overlapping identical
     // edges fill. AA, edge marking, blended translucency or wireframe fill all.
-    if (always_fill) { l_fill = r_fill = true; }
+    if (sh.always_fill) { l_fill = r_fill = true; }
     else {
-      l_fill = ((e.left.negative || !e.left.xmajor) || ((y == p.ybot - 1) && e.left.xmajor && (vlnext->sx != vrnext->sx))) ||
-               ((e.left.increment == e.right.increment) && (xstart + l_len == xend + 1));
-      r_fill = (!e.right.negative && e.right.xmajor) || (e.right.increment == 0) ||
-               ((y == p.ybot - 1) && e.right.xmajor && (vlnext->sx != vrnext->sx));
+      l_fill = e.nx_l || (bottom_fill && e.lxm) ||
+               (e.same_incr && (xstart + l_len == xend + 1));
+      r_fill = e.px_r || e.r_incr0 || (bottom_fill && e.rxm);
     }
   }
 

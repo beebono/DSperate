@@ -142,6 +142,10 @@ public:
     ResolveFn resolve;
     int mode;      // pick_depth_mode
     bool vec;      // the NEON resolve applies (no shadow / wireframe / blend 2)
+    // Edges all fill when AA, edge marking, blended translucency or wireframe
+    // is on. Built from dispcnt, polyalpha and wireframe -- all fixed for the
+    // polygon -- and so decided here rather than on every scanline.
+    bool always_fill;
   };
 private:
 
@@ -163,6 +167,23 @@ private:
     s32 xl, xr;
     u32 cur_vl, cur_vr, next_vl, next_vr;
     Shade sh;
+    // Everything the per-scanline path needs that only changes when an edge
+    // is set up. Slope::step advances dx and y and nothing else, so the slope
+    // shape (negative / xmajor / increment) and the current vertex pair hold
+    // for a whole run of scanlines -- refresh_edge_state recomputes these at
+    // the vertex boundaries instead. This is DraStic's "decide it at bin
+    // time" applied to the fill rules (docs/techniques/02 s2); the vertex
+    // pointers in particular were two indirections per scanline.
+    const Vertex *vcl, *vnl, *vcr, *vnr;   // vertex(vtx[cur_vl]) and friends
+    s32 wcl, wnl, wcr, wnr;                // p.w[cur_vl] and friends
+    s32 zcl, znl, zcr, znr;                // p.z[cur_vl] and friends
+    bool nx_l, nx_r;        // negative || !xmajor
+    bool px_l, px_r;        // !negative && xmajor
+    bool lneg_xm;           // left.negative && left.xmajor
+    bool lxm, rxm;          // xmajor
+    bool same_incr;         // left.increment == right.increment
+    bool l_incr0, r_incr0;  // increment == 0
+    bool next_sx_differ;    // vnl->sx != vnr->sx (symmetric, so swap-safe)
   };
   std::array<Edge, 2048> edges_{};
   // Per-line active polygon set: polygons enter at their top line (buckets
@@ -252,6 +273,9 @@ private:
   void setup_left_edge(Edge& e, s32 y) const;
   void setup_right_edge(Edge& e, s32 y) const;
   void setup_polygon(Edge& e, const Polygon& p);
+  // Recompute Edge's cached per-edge-segment state. Called from the two edge
+  // setups (so it cannot be missed) and once per polygon for the flat case.
+  void refresh_edge_state(Edge& e) const;
   void setup_shade(Shade& sh, const Polygon& p);
   // The resolve kernel for a decoded Shade (the dispatch tables live with
   // flush_batch in render3d.cpp).
