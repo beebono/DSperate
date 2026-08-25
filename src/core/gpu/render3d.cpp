@@ -492,40 +492,11 @@ void Renderer3D::setup_right_edge(Edge& e, s32 y) const {
   e.xr = e.right.setup(a.sx, b.sx, a.sy, b.sy, p.w[e.cur_vr], p.w[e.next_vr], y, p.wbuffer);
 }
 
-// Batch a polygon's spans only when they are wide enough to pay for the
-// bookkeeping. The batch amortises the pixel stages over PIXELS while the
-// SpanJob costs a store and a reload per SPAN, so the tax per pixel is
-// 1 / mean_span -- and measured across four scenes the sign of the whole
-// change is monotone in exactly that quantity, crossing over somewhere
-// between 17 and 32 pixels (docs/plan-render3d-binning.md s1).
-//
-// Mean span width is the polygon's area over its line count. The area is the
-// shoelace sum over the screen positions, exact for the convex polygons the
-// DS produces, and this runs once per polygon in a function that already
-// walks the vertices.
-#ifndef DS_R3D_BATCH_MIN
-#define DS_R3D_BATCH_MIN 24
-#endif
-static bool batch_worth_it(const Gpu3D& gx, const Polygon& p) {
-  s64 two_area = 0;
-  const u32 n = p.nverts;
-  for (u32 i = 0; i < n; ++i) {
-    const Vertex& a = gx.vertex(p.vtx[i]);
-    const Vertex& b = gx.vertex(p.vtx[i + 1 == n ? 0 : i + 1]);
-    two_area += static_cast<s64>(a.sx) * b.sy - static_cast<s64>(b.sx) * a.sy;
-  }
-  if (two_area < 0) two_area = -two_area;
-  const s64 lines = p.ybot > p.ytop ? p.ybot - p.ytop : 1;
-  return two_area >= 2 * static_cast<s64>(DS_R3D_BATCH_MIN) * lines;
-}
-
 void Renderer3D::setup_polygon(Edge& e, const Polygon& p) {
   const u32 n = p.nverts;
   u32 vtop = p.vtop, vbot = p.vbot;
   e.poly = &p;
   setup_shade(e.sh, p);
-  e.sh.batch = batch_worth_it(*gx_, p);
-  prof::add(e.sh.batch ? prof::C_POLY_BATCHED : prof::C_POLY_DIRECT, 1);
   e.cur_vl = vtop; e.cur_vr = vtop;
   if (p.facing) {
     e.next_vl = e.cur_vl + 1; if (e.next_vl >= n) e.next_vl = 0;
@@ -1398,11 +1369,7 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
                      iend->interpolate(vrcur->tex[0], vrnext->tex[0]), iend->interpolate(vrcur->tex[1], vrnext->tex[1])};
   span_attrs(sb, xstart, xend, ca, cb, wl, wr, al, ar);
 
-  // A batching polygon leaves its span in jobs_ for flush_batch; one that is
-  // not worth batching keeps the job in registers and resolves it here, so a
-  // narrow span never pays the store-and-reload the batch is built on.
-  SpanJob local;
-  SpanJob& j = sh.batch ? jobs_[njobs_++] : local;
+  SpanJob& j = jobs_[njobs_++];
   j.y = y; j.ca = ca; j.cb = cb; j.off = off + static_cast<u32>(ca - xa);
   j.xdraw = x; j.yedge = yedge; j.l_cov = l_cov; j.r_cov = r_cov;
   j.lim0 = std::min({xstart + l_len, xend + 1, 256});
@@ -1410,22 +1377,7 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   j.lim2 = std::min(xend + 1, 256);
   j.l_fill = l_fill; j.r_fill = r_fill; j.wf_skip = wireframe && !yedge;
 
-  if (sh.batch) {
-    batch_px_ += static_cast<u32>(xb - xa);
-  } else {
-    prof::add(prof::C_BATCHES, 1); prof::add(prof::C_BATCH_SPANS, 1); prof::add(prof::C_BATCH_PX, static_cast<u64>(xb - xa));
-#if DSPERATE_NEON
-    if (sh.vec) {
-      // x0 = 0 makes buffer index equal the coordinate passed, so the stages
-      // run over exactly the [off, off + len) this span was staged into.
-      sb.x0 = 0;
-      const s32 lo = static_cast<s32>(off), hi = lo + (xb - xa);
-      if (sh.textured) { span_texels(sh, sb, lo, hi); span_shade<true>(sh, sb, lo, hi); }
-      else span_shade<false>(sh, sb, lo, hi);
-    }
-#endif
-    resolve_one(sh, j);
-  }
+  batch_px_ += static_cast<u32>(xb - xa);
 
   e.xl = e.left.step();
   e.xr = e.right.step();
@@ -1566,8 +1518,12 @@ void Renderer3D::render_chunk(s32 ya, s32 yb) {
       if (p.shadow_mask) { flush_batch(e.sh); render_shadow_mask_line(e, y); return; }
       // A span can be 256 pixels wide, so flush before staging one that might
       // not fit rather than after overrunning.
-      if (e.sh.batch && (batch_px_ >= BATCH_PX || njobs_ == jobs_.size())) flush_batch(e.sh);
+      if (batch_px_ >= BATCH_PX || njobs_ == jobs_.size()) flush_batch(e.sh);
       render_polygon_line(e, y);
+      // Batching only pays where the pixel stages are worth amortising. An
+      // untextured polygon's shading is a handful of NEON ops over a dozen
+      // pixels, so those flush immediately.
+      if (!e.sh.textured) flush_batch(e.sh);
     };
     for (s32 y = lo; y < hi; ++y)
       if (y < p.ybot || (y == p.ytop && p.ybot == p.ytop)) line(y);

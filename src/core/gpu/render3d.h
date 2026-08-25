@@ -142,11 +142,6 @@ public:
     ResolveFn resolve;
     int mode;      // pick_depth_mode
     bool vec;      // the NEON resolve applies (no shadow / wireframe / blend 2)
-    // Batch this polygon's spans, or resolve each one as it is rasterised.
-    // Batching amortises the pixel stages over pixels but costs bookkeeping
-    // per span, so it pays only above a mean span width
-    // (docs/plan-render3d-binning.md s1).
-    bool batch;
   };
 private:
 
