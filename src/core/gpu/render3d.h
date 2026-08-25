@@ -59,7 +59,18 @@ private:
   // (render_chunk), so every line of the chunk must be writable while any
   // polygon in it is being drawn. CHUNK lines, plus one border line either
   // side for the final pass, rounded up to a power of two for the masking.
-  static constexpr int W = 258, CHUNK = 14, RING = 16, RSIZE = W * RING;
+  //
+  // RING is a build-time knob (-DDS_R3D_RING=): the live tile is
+  // 3 * W * RING * 2 words of colour/depth/attr plus a 256-byte stencil row
+  // per line, which at RING 16 is 99 KB -- three times the 32-36 KB DraStic
+  // sizes its bins to, and well past the A55's 32 KB L1D. RING 8 halves it.
+  // Must be a power of two (row_of masks with it) and at least CHUNK + 2.
+#ifndef DS_R3D_RING
+#define DS_R3D_RING 16
+#endif
+  static constexpr int W = 258, RING = DS_R3D_RING, CHUNK = RING - 2, RSIZE = W * RING;
+  static_assert((RING & (RING - 1)) == 0, "RING must be a power of two");
+  static_assert(CHUNK >= 2, "CHUNK must leave room for the final pass lag");
   // Ring row of frame line y (-1 and 192 are the border rows); the pixel
   // address of (x, y) is row_of(y) + 1 + x, the pixel underneath RSIZE on.
   static constexpr u32 row_of(s32 y) { return static_cast<u32>((y + 1) & (RING - 1)) * W; }
@@ -93,6 +104,11 @@ private:
 
   // Everything the per-pixel work needs from the polygon and the render
   // state, decoded once per polygon.
+  struct SpanBuf;
+public:
+  struct Shade;
+private:
+  using ResolveFn = void (Renderer3D::*)(const Shade&, const SpanBuf&, s32, s32, s32, int, int, s32, s32, s32&);
 public:
   // Everything a span needs from its polygon, decoded once (the NEON gather
   // helpers in render3d.cpp take it, hence public).
@@ -117,6 +133,20 @@ public:
     // NEON builds: the four-texel gather specialised for (format, S wrap,
     // T wrap), or nullptr for the per-lane sampler (render3d.cpp).
     const void* gather4;
+    // The resolve kernel, the depth mode and whether the vector path applies,
+    // all bound once here instead of re-derived on every flush -- which for a
+    // polygon that does not batch is once per scanline. Same shape as
+    // gather4 above; DraStic makes the equivalent choice at bin time and it
+    // is the reason its flush has no indirect calls at all
+    // (docs/techniques/02 s2).
+    ResolveFn resolve;
+    int mode;      // pick_depth_mode
+    bool vec;      // the NEON resolve applies (no shadow / wireframe / blend 2)
+    // Batch this polygon's spans, or resolve each one as it is rasterised.
+    // Batching amortises the pixel stages over pixels but costs bookkeeping
+    // per span, so it pays only above a mean span width
+    // (docs/plan-render3d-binning.md s1).
+    bool batch;
   };
 private:
 
@@ -228,12 +258,18 @@ private:
   void setup_right_edge(Edge& e, s32 y) const;
   void setup_polygon(Edge& e, const Polygon& p);
   void setup_shade(Shade& sh, const Polygon& p);
+  // The resolve kernel for a decoded Shade (the dispatch tables live with
+  // flush_batch in render3d.cpp).
+  static ResolveFn select_resolve(const Shade& sh);
+  // One span's three-part edge/fill walk. Shared by the batched path (over
+  // jobs_) and the unbatched one (a job that never reaches the array).
+  void resolve_one(const Shade& sh, const SpanJob& j);
   void render_shadow_mask_line(Edge& e, s32 y);
   // Stage one span into the batch (everything up to and including the
   // attribute interpolation, which is per span by construction); the pixel
   // stages and the resolve wait for flush_batch.
   void render_polygon_line(Edge& e, s32 y);
-  void flush_batch(const Shade& sh, int mode);
+  void flush_batch(const Shade& sh);
   // Rasterise lines [ya, yb) polygon at a time rather than line at a time:
   // the active set for the whole chunk is merged once, then each polygon
   // draws every line it covers inside the chunk before the next one starts.
