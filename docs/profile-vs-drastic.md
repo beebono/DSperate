@@ -79,9 +79,24 @@ their staging is hand-written assembly and ours is intrinsics.
 **Every place we are behind is a decision made too late.** The three large
 ratios are all the same defect in different clothes:
 
-- `render_polygon_line` is 4.3× `render_polygon_flush_1x` because theirs is a
-  dispatcher and ours re-derives per-polygon facts on every scanline. §2 packs
-  those into a descriptor word at bin time.
+- `render_polygon_line` is 4.3× `render_polygon_flush_1x`, and a static trace
+  of DraStic's flow says why: **they batch spans across scanlines to 256 pixels
+  before running the pipeline at all** (`render_polygon_setup_1x`, see
+  [techniques/02 §3](techniques/02-3d-software-rasteriser.md)). Their driver
+  runs once per batch; ours runs once per polygon *per scanline*. Against our
+  own census that is a 7–15× difference in how often the whole
+  select-and-set-up sequence is paid:
+
+  | | polygons | px/polygon | DraStic flushes | our calls | ratio |
+  |---|---|---|---|---|---|
+  | sm64 | 469 k | 369 | 1.4 | 11.5 | **8.0×** |
+  | mlbis | 731 k | 142 | 1.0 | 11.2 | **11.2×** |
+  | dbori | 331 k | 275 | 1.1 | 16.2 | **15.1×** |
+  | etody | 172 k | 1073 | 4.2 | 30.4 | **7.3×** |
+
+  Our driver is *cheaper per call* than theirs — theirs runs ~8–12 kernels a
+  batch — which is why the measured cost ratio is 4.3× and not 8–15×. The
+  defect is frequency, not weight.
 - `span_factor` is 3.4× their perspective setup, and the reason is narrower
   than "they step and we do not" — **we already forward-difference**
   (`num += dnum; den += dden` per iteration). What costs us is the *division*:

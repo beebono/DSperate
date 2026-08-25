@@ -152,9 +152,70 @@ once.
 
 ## 3. The span pipeline: stages over arrays, not branches over pixels
 
-`render_polygon_flush_1x` is where pixels are produced, and it does **not** loop
-over pixels. It loops over *stages*, each of which is a separate NEON kernel
-applied to the whole span:
+### Spans are batched to 256 pixels before any of it runs
+
+This is the part that makes the rest affordable, and it is visible in
+`render_polygon_setup_1x`, the caller of the flush.
+
+Once a polygon's edges have been walked into a per-scanline table of span
+lengths, `render_polygon_setup_1x` does not render a scanline at a time. It
+walks that table accumulating a **span count** and a **running pixel total**,
+skipping zero-length rows, and compares the running total against `0x100`:
+
+```
+    add   w8, w6, w19          ; running total + this span's length
+    cmp   w8, #0x100           ; 256 pixels
+    b.hi  <flush and restart>
+    add   w22, w22, #0x1       ; else take this span into the batch
+```
+
+When the batch would exceed **256 pixels** it calls `render_polygon_flush_1x`
+once for everything accumulated so far — passing the span-table pointer, the
+first scanline, the *span count* and the *total pixel count* — then advances
+the scanline cursor by the span count and starts a new batch from the current
+span. A polygon that fits in 256 pixels is flushed exactly once, for all of
+its scanlines together.
+
+So the unit of work is neither a pixel nor a span nor a scanline. It is **a
+batch of up to 256 pixels drawn from consecutive scanlines of one polygon**,
+and `flush_1x` loops over the spans inside it.
+
+### Which is why the kernels can be so specialised
+
+`render_polygon_flush_1x` is 628 instructions containing **39 direct calls and
+not one indirect call** — no function pointers, no dispatch table. The
+alternatives sit at distinct call sites and a branch picks one:
+`depth_compare_less_than_asm` or `_less_than_constant_asm` or `_equal_asm` or
+`_equal_constant_asm`; `setup_perspective_steps_asm` or
+`..._w_constant_asm`; `load_texels_asm` or `load_texels_paletted_asm`; three
+different writebacks. A single pass through the function executes perhaps eight
+to twelve of the thirty-eight.
+
+All of that selection — every branch, and the texture-address thunk below —
+happens **once per 256-pixel batch**. That is the whole economic argument for
+133 hand-written kernels. The dispatch is not cheap in itself; it is simply
+amortised over two hundred and fifty-six pixels and several scanlines.
+
+The texture-address selection shows the same shape. There are nine wrap-mode
+kernels and **none of them has a direct caller**: `generate_texture_addresses`
+is a 44-instruction thunk that reads the wrap nibble out of the polygon,
+compares its way down four bits, and **tail-branches** (`b`, never `bl`) to the
+right one:
+
+```
+    ldrh  w6, [x0, #2]
+    and   w6, w6, #0xf
+    ...
+    b     <..._wrap_wrap_asm>
+```
+
+Five compares and a jump, once per batch, to remove two unpredictable branches
+from an inner loop that will run up to 256 times.
+
+### The stages
+
+Within a batch, `flush_1x` does **not** loop over pixels. It loops over
+*stages*, each of which is a separate NEON kernel applied to the whole batch:
 
 ```
 setup_perspective_steps        →  per-span setup
@@ -242,9 +303,12 @@ load latency overlaps the narrowing chain.
 A55's FP is adequate but integer SIMD is wider and the DS's own arithmetic is
 fixed-point anyway, so this is both faster and more accurate to the hardware.
 
-**One call covers a whole polygon.** The interpolation kernels take a table of
+**One call covers a whole batch.** The interpolation kernels take a table of
 per-span lengths and loop over spans internally, rewinding pointers between them
-(`add x2, x2, w6, sxtw #1`), rather than being called once per span.
+(`add x2, x2, w6, sxtw #1`), rather than being called once per span. The batch
+is the 256-pixel group assembled by `render_polygon_setup_1x` (§3), so for most
+polygons this is genuinely one call for the entire polygon, and for a large one
+it is a handful.
 
 ---
 
@@ -327,6 +391,7 @@ testable.
 | AND/OR uniformity test per polygon | Selects kernels that skip interpolation |
 | 9 / 8 / 10-way kernel specialisation | Zero unpredictable branches in inner loops |
 | Fused resolve (edge + fog + convert + store) | One pass over the tile instead of four |
+| Spans batched to 256 px across scanlines before the pipeline runs | Kernel selection is paid once per 256 pixels, not once per scanline |
 | Stage-at-a-time span pipeline (SoA) | Every stage vectorises; branches become masks |
 | Mask + surviving-pixel count from depth test | Later stages skipped when a span is occluded |
 | Eight-way unrolled scalar texel gather | Covers load latency on an in-order core |
