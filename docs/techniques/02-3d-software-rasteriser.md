@@ -297,6 +297,17 @@ loop.
 `render_polygon_setup_uv_interpolants_asm` is the same shape for texture
 coordinates.
 
+> **Why the flattening does not port to us, measured.** The planes are the
+> whole cost of the scheme, and DraStic pays it because it has to: its spans
+> arrive from a table that `edge_interpolate_x_c` filled, so materialising
+> per-pixel base and step is simply how the data reaches the kernel. We
+> compute each span's endpoints inline and hand them to `span_attrs5n` in
+> registers, so the same planes are pure added traffic. Probed on the
+> batching branch by writing the six planes and reading none of them:
+> **+0.63 % on sm64 and +1.72 % on etody, slower in 3 of 3 paired reps** —
+> a floor the flat pass would have to beat before it broke even. The
+> perspective ramp below is a different matter and does port.
+
 ### The constant-W perspective factor is a ramp, not a division
 
 `render_polygon_setup_perspective_steps_w_constant_asm` shows how far the
