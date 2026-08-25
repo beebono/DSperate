@@ -269,6 +269,19 @@ void output_line(const Pixel* src, u16 reg, u32* dst) {
 // span; the scalar forms here are the specification.
 
 void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac) {
+  if (w0d == w1d) {
+    // W constant across the span: the denominator collapses to xdiff*w0d and
+    // the factor is linear in x, so it is generated as a 16.16 ramp with no
+    // division -- DraStic's setup_perspective_steps_w_constant. The rounded
+    // step makes this an approximation of num/den, deliberately; the
+    // reference carries it too so that the portable build and the NEON build
+    // stay identical (frame dumps are compared across hosts).
+    const u32 d = static_cast<u32>(xdiff) * static_cast<u32>(w0d);
+    if (d == 0) { for (u32 i = 0; i < n; ++i) fac[i] = 0; return; }
+    const u32 step = static_cast<u32>((static_cast<u64>(static_cast<u32>(w0n) << 8) << 16) / d);
+    for (u32 i = 0; i < n; ++i) fac[i] = (static_cast<u32>(xv0 + static_cast<s32>(i)) * step) >> 16;
+    return;
+  }
   for (u32 i = 0; i < n; ++i) {
     const s32 xv = xv0 + static_cast<s32>(i);
     const u32 num = static_cast<u32>(xv * w0n) << 8;
