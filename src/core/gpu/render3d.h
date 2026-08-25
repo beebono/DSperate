@@ -54,7 +54,12 @@ public:
 
 private:
   NDS& nds_;
-  static constexpr int W = 258, RING = 4, RSIZE = W * RING;
+  // The ring holds a whole chunk of scanlines at once, not just the line
+  // being drawn: polygons are rasterised chunk at a time in list order
+  // (render_chunk), so every line of the chunk must be writable while any
+  // polygon in it is being drawn. CHUNK lines, plus one border line either
+  // side for the final pass, rounded up to a power of two for the masking.
+  static constexpr int W = 258, CHUNK = 14, RING = 16, RSIZE = W * RING;
   // Ring row of frame line y (-1 and 192 are the border rows); the pixel
   // address of (x, y) is row_of(y) + 1 + x, the pixel underneath RSIZE on.
   static constexpr u32 row_of(s32 y) { return static_cast<u32>((y + 1) & (RING - 1)) * W; }
@@ -66,8 +71,13 @@ private:
   // The second half of each buffer holds the pixel underneath (for AA).
   std::array<u32, RSIZE * 2> color_{}, depth_{}, attr_{};
   std::array<u32, 256 * 192> out_{};   // finished lines
-  std::array<u8, 512> stencil_{};
-  bool prev_shadow_mask_ = false;
+  std::array<u8, 256 * RING> stencil_{};   // one row per ring line: see render_chunk
+  // "the polygon drawn immediately before this one on THIS line was a shadow
+  // mask", which is what decides whether the stencil row is cleared or added
+  // to. Per ring line, not global: render_chunk draws a polygon's whole run of
+  // lines before moving to the next polygon, so a single flag would carry one
+  // line's state onto the next.
+  std::array<bool, RING> prev_shadow_mask_{};
 
   // Perspective-correct interpolation factor between two endpoints.
   template <int dir> struct Interp {
@@ -179,7 +189,13 @@ private:
   void setup_shade(Shade& sh, const Polygon& p);
   void render_shadow_mask_line(Edge& e, s32 y);
   void render_polygon_line(Edge& e, s32 y);
-  void render_line(s32 y);
+  // Rasterise lines [ya, yb) polygon at a time rather than line at a time:
+  // the active set for the whole chunk is merged once, then each polygon
+  // draws every line it covers inside the chunk before the next one starts.
+  // Per pixel the order is unchanged -- a pixel belongs to one line, and the
+  // polygons still reach it in list order -- which is what the blend and
+  // stencil rules depend on.
+  void render_chunk(s32 ya, s32 yb);
 
   // ---- banded parallel rasterising ---------------------------------------
   //

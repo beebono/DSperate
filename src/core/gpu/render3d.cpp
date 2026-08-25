@@ -254,7 +254,7 @@ Renderer3D::~Renderer3D() = default;
 void Renderer3D::reset() {
   color_.fill(0); depth_.fill(0); attr_.fill(0); out_.fill(0);
   stencil_.fill(0);
-  prev_shadow_mask_ = false;
+  prev_shadow_mask_.fill(false);
   out_dst_ = out_.data();
   for (auto& b : bands_) b->reset();
 }
@@ -622,8 +622,9 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   u32 polyalpha = (p.attr >> 16) & 0x1F;
   const bool wireframe = polyalpha == 0;
 
-  if (!prev_shadow_mask_) std::memset(&stencil_[256 * (y & 1)], 0, 256);
-  prev_shadow_mask_ = true;
+  const u32 srow = static_cast<u32>((y + 1) & (RING - 1));
+  if (!prev_shadow_mask_[srow]) std::memset(&stencil_[256 * srow], 0, 256);
+  prev_shadow_mask_[srow] = true;
 
   if (p.ytop != p.ybot) {
     if (y >= gx_->vertex(p.vtx[e.next_vl]).sy && e.cur_vl != p.vbot) setup_left_edge(e, y);
@@ -688,10 +689,10 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
         default: return !depth_pass<3>(a, z, da);
         }
       };
-      if (fails(addr, dstattr)) stencil_[256 * (y & 1) + x] = 1;
+      if (fails(addr, dstattr)) stencil_[256 * static_cast<u32>((y + 1) & (RING - 1)) + x] = 1;
       if (dstattr & 0xF) {
         addr += RSIZE;
-        if (fails(addr, attr_[addr])) stencil_[256 * (y & 1) + x] |= 2;
+        if (fails(addr, attr_[addr])) stencil_[256 * static_cast<u32>((y + 1) & (RING - 1)) + x] |= 2;
       }
     }
   };
@@ -713,7 +714,7 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
 template <int mode, bool textured, bool aa, bool shadow>
 void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
   const u32 polyattr = sh.polyattr;
-  const u8* stencil = &stencil_[256 * (y & 1)];
+  const u8* stencil = &stencil_[256 * static_cast<u32>((y + 1) & (RING - 1))];
   const u8* ra = sb.vr; const u8* ga = sb.vg; const u8* ba = sb.vb;
   const s16* sa = sb.sc; const s16* ta = sb.tc;
   for (s32 x = xa; x < xb; ++x) {
@@ -1290,7 +1291,7 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   const u32 dispcnt = sh.dispcnt;
   const bool wireframe = sh.wireframe;
   const u32 polyalpha = sh.polyalpha;
-  prev_shadow_mask_ = false;
+  prev_shadow_mask_[static_cast<u32>((y + 1) & (RING - 1))] = false;
 
   if (p.ytop != p.ybot) {
     if (y >= gx_->vertex(p.vtx[e.next_vl]).sy && e.cur_vl != p.vbot) setup_left_edge(e, y);
@@ -1421,13 +1422,23 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   e.xr = e.right.step();
 }
 
-void Renderer3D::render_line(s32 y) {
-  clear_line(y);
-  // Merge the polygons starting on this line into the active list (both
-  // sorted by list index), render, then drop the ones that end here.
+// Rasterise lines [ya, yb) polygon at a time. The active set is merged once
+// for the whole chunk (polygons entering on any of its lines), then each
+// polygon in list order draws every line it covers inside the chunk.
+//
+// Per pixel this is the same order as line-at-a-time rendering: a pixel
+// belongs to exactly one line, and the polygons still reach it in list order,
+// which is what the translucent blend rules, the polygon-id stencil and the
+// depth interactions depend on. The edge walk is if anything more natural
+// this way -- Slope::step already advances one line at a time and the cursors
+// live in the Edge, so a polygon's lines are still visited in order without
+// gaps.
+void Renderer3D::render_chunk(s32 ya, s32 yb) {
+  for (s32 y = ya; y < yb; ++y) { clear_line(y); line_touched_[y] = false; prev_shadow_mask_[static_cast<u32>((y + 1) & (RING - 1))] = false; }
+  // Merge in everything that starts anywhere in the chunk, keeping list order.
   {
-    const u16* in = &order_[bucket_[y]];
-    const u32 nin = bucket_[y + 1] - bucket_[y];
+    const u16* in = &order_[bucket_[ya]];
+    const u32 nin = bucket_[yb] - bucket_[ya];
     u32 a = 0, b = 0, n = 0;
     while (a < active_count_ || b < nin) {
       if (b >= nin || (a < active_count_ && active_[a] < in[b])) active_next_[n++] = active_[a++];
@@ -1437,15 +1448,27 @@ void Renderer3D::render_line(s32 y) {
     active_count_ = n;
   }
   u32 keep = 0;
-  line_touched_[y] = active_count_ != 0;
   for (u32 k = 0; k < active_count_; ++k) {
     Edge& e = edges_[active_[k]];
     const Polygon& p = *e.poly;
-    if (y < p.ybot || (y == p.ytop && p.ybot == p.ytop)) {
-      if (p.shadow_mask) render_shadow_mask_line(e, y);
-      else render_polygon_line(e, y);
+    const s32 lo = p.ytop > ya ? p.ytop : ya;
+    const s32 hi = p.ybot < yb ? p.ybot : yb;
+    // A polygon whose ytop is inside the chunk starts at its own top line;
+    // one that began earlier carries the edge state it already has.
+    for (s32 y = lo; y < hi; ++y) {
+      if (y < p.ybot || (y == p.ytop && p.ybot == p.ytop)) {
+        line_touched_[y] = true;
+        if (p.shadow_mask) render_shadow_mask_line(e, y);
+        else render_polygon_line(e, y);
+      }
     }
-    if (y + 1 < p.ybot) active_[keep++] = active_[k];
+    // Flat polygons (ybot == ytop) draw their single line at ytop.
+    if (p.ybot == p.ytop && p.ytop >= ya && p.ytop < yb) {
+      line_touched_[p.ytop] = true;
+      if (p.shadow_mask) render_shadow_mask_line(e, p.ytop);
+      else render_polygon_line(e, p.ytop);
+    }
+    if (p.ybot > yb) active_[keep++] = active_[k];
   }
   active_count_ = keep;
 }
@@ -1841,12 +1864,23 @@ void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
   auto t = timing ? now() : std::chrono::steady_clock::time_point{};
   auto lap = [&](u64& into) { if (!timing) return; const auto n = now(); into += static_cast<u64>((n - t).count()); t = n; };
 
-  render_line(first); if (first < y0) render_line(y0);
-  lap(spans_ns);
-  for (s32 y = y0; y < y1; ++y) {
-    if (y + 1 < 192) { render_line(y + 1); lap(spans_ns); }
-    else { clear_border(192); lap(final_ns); }
-    final_pass(y);
+  // Rasterise a chunk at a time, then run the final pass over every line the
+  // chunk completed. A line's final pass reads its two neighbours, so it lags
+  // the raster by one line; CHUNK is two short of RING so the two lines still
+  // waiting on it are never the ones the next chunk overwrites.
+  s32 rasterised = first;   // lines [first, rasterised) are drawn
+  s32 done = y0;            // next line still needing its final pass
+  while (done < y1) {
+    if (rasterised < 192) {
+      const s32 end = rasterised + CHUNK < 192 ? rasterised + CHUNK : 192;
+      render_chunk(rasterised, end);
+      rasterised = end;
+      lap(spans_ns);
+    }
+    s32 upto = rasterised - 1;
+    if (rasterised >= 192) { clear_border(192); upto = 192; lap(final_ns); }
+    if (upto > y1) upto = y1;
+    while (done < upto) { final_pass(done); ++done; }
     lap(final_ns);
   }
   prof::add_ns(prof::R3D_SPANS, spans_ns);
