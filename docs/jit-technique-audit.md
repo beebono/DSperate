@@ -1,5 +1,16 @@
 # The recompiler, checked against the techniques
 
+> **Superseded ranking, 2026-08-25.** This document's conclusion — "nothing
+> left in the recompiler is worth more than about 2 %, and the 3D rasteriser is
+> ~35 % of the frame" — is wrong, and it sent a whole session at the renderer.
+> Measured against DraStic on the identical workload, **our CPU emulation is
+> 5.2x theirs and is 50 % of our frame, while our renderer already matches
+> their 2D and beats their 3D**. The frame-share numbers below could not see it:
+> `perf` samples all four threads (inflating the threaded renderer against
+> serial CPU work) and CPU cost never aggregates under any one symbol.
+> The *findings* in sections A-F are sound and are now the plan — see
+> [plan-cpu.md](plan-cpu.md). Only the ranking was wrong.
+
 This is an audit of **our** JIT (`src/core/cpu/jit/`) against the techniques
 described in [techniques/01-arm-to-aarch64-jit.md](techniques/01-arm-to-aarch64-jit.md).
 It is not a description of DraStic; it is a list of where we match, where we
