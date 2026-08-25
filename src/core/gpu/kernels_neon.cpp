@@ -283,13 +283,16 @@ void obj_row_bmp16(const u16* col, u32 n, u8 attr, u8 alpha, u16* v, u8* oattr, 
   }
 }
 
-void layer16_3d(const u32* line3d, u16* v) {
+bool layer16_3d(const u32* line3d, u16* v) {
   const uint16x8_t lane = {0, 1, 2, 3, 4, 5, 6, 7}, opq = vdupq_n_u16(LV_OPAQUE);
+  uint16x8_t any = vdupq_n_u16(0);
   for (u32 i = 0; i < 256; i += 8) {
     const uint16x8_t alpha = vcombine_u16(vmovn_u32(vshrq_n_u32(vld1q_u32(line3d + i), 24)), vmovn_u32(vshrq_n_u32(vld1q_u32(line3d + i + 4), 24)));
     const uint16x8_t m = vmvnq_u16(vceqq_u16(alpha, vdupq_n_u16(0)));
+    any = vorrq_u16(any, m);
     vst1q_u16(v + i, vandq_u16(m, vorrq_u16(opq, vaddq_u16(lane, vdupq_n_u16(static_cast<u16>(i))))));
   }
+  return vmaxvq_u16(any) != 0;
 }
 
 bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {

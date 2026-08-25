@@ -56,7 +56,7 @@ namespace ds::gpu::kern {
   void NS##obj_row_idx16(const u8* idx, u32 n, u16 pal_base, u8 attr, u16* v, u8* oattr, u8* oalpha);        \
   void NS##obj_row_bmp16(const u16* col, u32 n, u8 attr, u8 alpha, u16* v, u8* oattr, u8* oalpha);           \
   /* 3D layer as a layer line: 0x8000 | x where the alpha is non-zero, 0 elsewhere. */                       \
-  void NS##layer16_3d(const u32* line3d, u16* v);                                                           \
+  bool NS##layer16_3d(const u32* line3d, u16* v);                                                           \
   /* Text BG row, 16-colour tiles: n tiles of 4 packed bytes (low nibble first); ctl[t] = palette number      \
      (bits 0-3) | 0x10 for a horizontally flipped tile. Writes 8*n values 0x8000 | pal << 4 | idx (0 for       \
      index 0); returns whether any is opaque. */                                                             \

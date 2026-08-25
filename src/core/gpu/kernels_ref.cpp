@@ -197,8 +197,10 @@ void obj_row_bmp16(const u16* col, u32 n, u8 attr, u8 alpha, u16* v, u8* oattr, 
   for (u32 i = 0; i < n; ++i) obj_plot(i, col[i], col[i] & 0x8000, attr, alpha, v, oattr, oalpha);
 }
 
-void layer16_3d(const u32* line3d, u16* v) {
-  for (u32 i = 0; i < 256; ++i) v[i] = (line3d[i] >> 24) ? static_cast<u16>(LV_OPAQUE | i) : 0;
+bool layer16_3d(const u32* line3d, u16* v) {
+  u32 any = 0;
+  for (u32 i = 0; i < 256; ++i) { const u32 a = line3d[i] >> 24; any |= a; v[i] = a ? static_cast<u16>(LV_OPAQUE | i) : 0; }
+  return any != 0;
 }
 
 bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {
