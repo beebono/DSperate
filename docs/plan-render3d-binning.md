@@ -229,30 +229,84 @@ Lowest priority of the five, and listed so it is not lost.
 
 ---
 
+## Results so far
+
+### s4, footprint: confirmed, and the cheapest win here
+
+`RING` 16 -> 8 halves the live tile from 99 KB to 50 KB (24.75 KB of it the
+hot top layer, which now fits the A55's 32 KB L1D). Paired, 1800 frames, 6
+reps, output byte-identical:
+
+| scene | mean | p90 | over-budget |
+|---|---|---|---|
+| `mlbis` | **-1.64 %** (t = -18.3, 0/6) | -0.99 % | **-9.03 %** (t = -15.8, 0/6) |
+| `sm64` | **-0.91 %** (t = -17.6, 0/6) | -0.89 % | -1.01 % |
+| `etody` | -0.69 % (t = -2.6) | +0.69 % | +0.17 % |
+| `meteos` | -0.63 % (t = -4.1, 0/6) | -0.72 % | -2.20 % |
+| `dbori` | -0.30 % (t = -3.9, 0/6) | **-1.33 %** (t = -29.3, 0/6) | -0.20 % |
+
+Every scene improves on the mean, five for five, and it is orthogonal to
+anything about spans -- a smaller tile helps whichever path runs. The
+residency argument in s4 is real, so s5's fused per-bin resolve and s4's
+depth/attr packing both gain value.
+
+### The first gate attempt regressed, and the cause was not the gate
+
+Factoring the per-span edge/fill walk into `resolve_one` so the batched and
+direct paths could share it turned it into a **real call with a 112-byte
+frame and five register-pair saves, taken once per span on both paths**.
+Against `st-base`, 6 paired reps:
+
+| scene | gate vs st-base | ungated batch was | implied cycles/span |
+|---|---|---|---|
+| `etody` | +1.47 % | -0.53 % | 93 |
+| `sm64` | +1.51 % | -0.19 % | 117 |
+| `dbori` | +0.80 % | +0.74 % | 94 |
+| `mlbis` | +3.07 % | +1.79 % | 176 |
+
+A near-constant per-span tax across four scenes with very different polygon
+mixes is the signature of a per-span call, and the disassembly showed it
+directly. `always_inline` removes the symbol and both call sites.
+
+**So that run says nothing about s1's premise** -- the cost introduced was
+larger than the cost under test. Stage 3's kill criterion (mlbis not rescued)
+technically fired and is explicitly **not** being called on this evidence.
+
+Two lessons worth carrying, both already paid for once here:
+
+- Sharing code between a hot path and a cold one is not free. The saving s1
+  is chasing is tens of cycles a span; a call frame is roughly a hundred.
+  Check the disassembly for the symbol before believing any measurement of a
+  refactor like this.
+- `objdump` on the host silently produces an **empty file** for an aarch64
+  binary rather than failing. Use `aarch64-linux-gnu-objdump`, and check the
+  output size before reading a conclusion out of it.
+
+---
+
 ## Staging
 
 Each stage is independently measurable and independently revertable. Kill
 criteria are stated so a stage that does not pay gets dropped rather than
 carried.
 
-| # | Work | Cost | Kill if |
+| # | Work | Cost | Status / kill if |
 |---|---|---|---|
-| ~~0~~ | ~~Read `dbori`/`etody`; check §1's ordering~~ | done | **ordering confirmed monotone, 4/4** |
-| **0b** | `DS_PROFILE` batch fill per scene (`3d batches flushed` / `spans batched` / `pixels batched`) | 5 replays | fill does not track the result ordering |
-| **1** | §4 chunk sweep: `CHUNK` 14 vs 6, paired, 5 scenes | 1 build, 1 sweep | no scene beyond noise → drop §4, keep §1-3 |
-| **2** | §3 bind resolve fn in `setup_shade` | small | — (correctness-neutral, keep if not worse) |
-| **3** | §1 fast path: skip `SpanJob` when a polygon cannot fill a batch (threshold on polygon pixel count, swept: 128/192/256) | medium | `mlbis` regression not removed → the tax is not `SpanJob`, re-diagnose |
-| **4** | §1 proper: span table from a separate edge pass, batch = 4 words | **large** | only start if stage 3 confirms the mechanism |
-| **5** | §2 constant W, then Z, then U/V | medium each | per-attribute; drop any that does not pay |
-| **6** | §4 pack `depth_`+`attr_` | medium | — |
-| **7** | §5 fused resolve, sized on `dbori` | medium | `dbori` does not move → drop |
+| ~~0~~ | ~~Check s1's ordering on `dbori`/`etody`~~ | done | **confirmed monotone, 4/4** |
+| ~~1~~ | ~~s4 chunk sweep, `RING` 16 vs 8~~ | done | **-0.30 to -1.64 % mean, 5/5 scenes** |
+| ~~2~~ | ~~s3 bind resolve fn in `setup_shade`~~ | done | landed, output-neutral |
+| **3** | s1 fast path: skip `SpanJob` below a mean-span threshold (24 px; sweep 16/32) | medium | **re-running after the inline fix** -- mlbis regression not removed => the tax is not `SpanJob`, re-diagnose |
+| 4 | s1 proper: span table from a separate edge pass, batch = 4 words | **large** | only start if stage 3 confirms the mechanism |
+| 5 | s2 constant W, then Z, then U/V | medium each | per-attribute; drop any that does not pay |
+| 6 | s4 pack `depth_`+`attr_` into one buffer | medium | promoted: s4 is confirmed |
+| 7 | s5 fused resolve, sized on `dbori` | medium | promoted: s4 is confirmed; `dbori` does not move => drop |
 
-Stages 1-3 are cheap and could all land before stage 4 is decided. Stage 4 is
-the only architectural change here and it must not be started on the strength
-of this document alone — stage 3 exists to test its premise for a fraction of
-the cost.
-
----
+Two cheap items are also now known to be worth doing regardless of stage 3:
+the shoelace in `batch_worth_it` runs once per polygon **per band** (three
+times a frame) because every band repeats `build_edges`, and `Shade` grew by
+a 16-byte pointer-to-member inside a 2048-entry array. Neither is large
+enough to explain the regression above, and both should be cleaned up before
+stage 3's result is read as final.
 
 ## Measurement protocol
 
