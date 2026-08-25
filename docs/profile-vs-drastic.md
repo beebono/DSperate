@@ -1,5 +1,30 @@
 # Our profile against DraStic's, function by function
 
+> **Read the absolute comparison first.** Everything below is a share *of each
+> emulator's own code*, which is scale-free: we come out ahead on the pixel
+> kernels here while being **2.8x slower overall**. Measured 2026-08-25, same
+> ROM, same starting state, 300 frames from direct boot, DraStic's own
+> `--benchmark` ablation against our stage timers:
+>
+> | | ours | DraStic | ratio |
+> |---|---|---|---|
+> | **CPU (both cores, incl. memory/IO helpers)** | **4.11 ms** | **0.80 ms** | **5.2x** |
+> | 2D engines | 1.92 | 1.99 | 1.0x |
+> | 3D raster (critical path) | 0.88 | 1.07 | **0.8x** |
+> | 3D geometry | 0.14 | 0.13 | 1.1x |
+> | SPU | 0.37 | 0.03 | 11.4x |
+> | **whole frame** | **8.28** | **2.98** | **2.8x** |
+>
+> CPU is 50 % of our frame and 27 % of theirs. The renderer is not the
+> problem; it already matches or beats DraStic. The whole gap is CPU
+> emulation, and `jit-technique-audit.md` had the number all along -- ~18 host
+> cycles per guest instruction against their ~4.5.
+>
+> Per-symbol `perf` shares could not see this: translated code is its own
+> `[JIT]` DSO, but everything the guest triggers is scattered across fifty
+> symbols of our own DSO and never aggregates. Only a timer bracketing the
+> whole CPU run shows it.
+
 [techniques/00](techniques/00-method-and-measurements.md) compares the two
 emulators by *subsystem bucket*. This compares them by *function*: for each
 role in the pipeline, what does DraStic spend there, and what do we spend on
