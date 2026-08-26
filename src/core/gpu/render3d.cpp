@@ -1394,6 +1394,7 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
       if (r) { ca = xa + static_cast<s32>(r >> 16); cb = xa + static_cast<s32>(r & 0xFFFF); }
     }
   }
+  if (prof::enabled) prof::add(cb > ca ? prof::C_SPAN_DRAWN : (xb > xa ? prof::C_SPAN_OCCLUDED : prof::C_SPAN_EMPTY), 1);
   if (cb <= ca) { e.xl = e.left.step(); e.xr = e.right.step(); return; }
   // Attributes at both ends of the span: r g b s t.
   const s32 al[5] = {istart->interpolate(vlcur->fcol[0], vlnext->fcol[0]), istart->interpolate(vlcur->fcol[1], vlnext->fcol[1]), istart->interpolate(vlcur->fcol[2], vlnext->fcol[2]),
@@ -1450,10 +1451,9 @@ template <typename Range>
   auto draw_span = [&](s32 xlimit, int part, int edge) {
     if (x >= xlimit) return;
     const s32 lo = std::max(x, j.ca), hi = std::min(xlimit, j.cb);
-    if (lo < hi) { prof::add(prof::C_RESOLVE_CALLS, 1); range(j.y, lo, hi, part, edge, j.l_cov, j.r_cov, xcov); }
+    if (lo < hi) range(j.y, lo, hi, part, edge, j.l_cov, j.r_cov, xcov);
     x = xlimit;
   };
-  prof::add(prof::C_RESOLVE_PARTS, 1);
   if (j.l_cov & static_cast<s32>(0x80000000u)) { xcov = (j.l_cov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
   if (!j.l_fill) x = j.lim0; else draw_span(j.lim0, 0, j.yedge | 0x1);
   if (j.wf_skip) x = std::max(x, j.lim1); else draw_span(j.lim1, 1, j.yedge);
