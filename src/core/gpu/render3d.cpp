@@ -1547,6 +1547,7 @@ void Renderer3D::render_chunk(s32 ya, s32 yb) {
     // once per span. A polygon whose spans are too narrow for that to pay
     // never enters the batch at all -- render_polygon_line resolves it
     // directly and jobs_ is not touched.
+    prof::add(prof::C_CHUNK_ENTRIES, 1);
     auto line = [&](s32 y) {
       line_touched_[y] = true;
       if (p.shadow_mask) { flush_batch(e.sh); render_shadow_mask_line(e, y); return; }
@@ -1968,7 +1969,14 @@ void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
   s32 done = y0;            // next line still needing its final pass
   while (done < y1) {
     if (rasterised < 192) {
-      const s32 end = rasterised + CHUNK < 192 ? rasterised + CHUNK : 192;
+      // Stop at the last line this band can use. final_pass(y1-1) reads y1, so
+      // y1 + 1 is the exclusive bound; rounding up to a whole CHUNK instead
+      // rasterises lines that belong to the next band, which draws them again.
+      // That overlap is proportional to CHUNK and was 18.8 % of all polygon
+      // lines at CHUNK 14, 8.2 % at CHUNK 6 (sm64, 3 bands).
+      const s32 want = y1 + 1 < 192 ? y1 + 1 : 192;
+      s32 end = rasterised + CHUNK < 192 ? rasterised + CHUNK : 192;
+      if (end > want) end = want;
       render_chunk(rasterised, end);
       rasterised = end;
       lap(spans_ns);

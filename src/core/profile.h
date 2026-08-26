@@ -53,6 +53,7 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   // have to intercept, and therefore what it would cost to slow-path.
   C_W_PALETTE, C_W_OAM,
   C_RESOLVE_CALLS, C_RESOLVE_PARTS,
+  C_CHUNK_ENTRIES,
   // Census: the per-scanline change-detection compares in engine2d.
   C_2D_CMP_BGPAL, C_2D_CMP_BGEXT, C_2D_CMP_OBJPAL, C_2D_CMP_OBJEXT, C_2D_CMP_OAM,
   C_2D_CMPD_BGPAL, C_2D_CMPD_BGEXT, C_2D_CMPD_OBJPAL, C_2D_CMPD_OBJEXT, C_2D_CMPD_OAM,
