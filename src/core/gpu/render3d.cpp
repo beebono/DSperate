@@ -1194,7 +1194,7 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
 }
 
 template <int mode, bool textured, bool aa>
-void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
+[[gnu::always_inline]] inline void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
   const u32 polyattr = sh.polyattr;
   const uint32x4_t lane = {0, 1, 2, 3};
   const uint32x4_t v_alpha_ref = vdupq_n_u32(sh.alpha_ref), v31 = vdupq_n_u32(31), v0 = vdupq_n_u32(0);
@@ -1416,30 +1416,20 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   e.xr = e.right.step();
 }
 
-// Run the pixel stages once over everything staged, then resolve span by span.
-//
-// This is the point of the batching: span_texels and span_shade are called
-// once for up to BATCH_PX pixels instead of once per span, and our spans
-// average 13-35 pixels (scenes/README.md). Their per-call setup -- the Shade
-// fields, the gather function pointer, the blend-mode decision -- is paid once
-// for the batch, which is what DraStic's flush does (docs/techniques/02 s3).
-//
-// Batching is safe across the spans of one polygon because they lie on
-// distinct scanlines, so no span in the batch reads a pixel another one
-// writes.
+// The resolve kernel for a decoded Shade.
 Renderer3D::ResolveFn Renderer3D::select_resolve(const Shade& sh) {
   static constexpr ResolveFn kResolve[4][2][2][2] = {
-#define DS_R(m) {{{&Renderer3D::resolve_span<m, false, false, false>, &Renderer3D::resolve_span<m, false, false, true>},   \
-                  {&Renderer3D::resolve_span<m, false, true, false>,  &Renderer3D::resolve_span<m, false, true, true>}},  \
-                 {{&Renderer3D::resolve_span<m, true, false, false>,  &Renderer3D::resolve_span<m, true, false, true>},   \
-                  {&Renderer3D::resolve_span<m, true, true, false>,   &Renderer3D::resolve_span<m, true, true, true>}}}
+#define DS_R(m) {{{&Renderer3D::resolve_batch<m, false, false, false>, &Renderer3D::resolve_batch<m, false, false, true>},   \
+                  {&Renderer3D::resolve_batch<m, false, true, false>,  &Renderer3D::resolve_batch<m, false, true, true>}},  \
+                 {{&Renderer3D::resolve_batch<m, true, false, false>,  &Renderer3D::resolve_batch<m, true, false, true>},   \
+                  {&Renderer3D::resolve_batch<m, true, true, false>,   &Renderer3D::resolve_batch<m, true, true, true>}}}
     DS_R(0), DS_R(1), DS_R(2), DS_R(3)
 #undef DS_R
   };
 #if DSPERATE_NEON
   static constexpr ResolveFn kResolveVec[4][2][2] = {
-#define DS_V(m) {{&Renderer3D::resolve_span_vec<m, false, false>, &Renderer3D::resolve_span_vec<m, false, true>},   \
-                 {&Renderer3D::resolve_span_vec<m, true, false>,  &Renderer3D::resolve_span_vec<m, true, true>}}
+#define DS_V(m) {{&Renderer3D::resolve_batch_vec<m, false, false>, &Renderer3D::resolve_batch_vec<m, false, true>},   \
+                 {&Renderer3D::resolve_batch_vec<m, true, false>,  &Renderer3D::resolve_batch_vec<m, true, true>}}
     DS_V(0), DS_V(1), DS_V(2), DS_V(3)
 #undef DS_V
   };
@@ -1449,17 +1439,18 @@ Renderer3D::ResolveFn Renderer3D::select_resolve(const Shade& sh) {
 }
 
 // One span's three-part walk: the left edge run, the interior, the right edge
-// run, each clipped to the range the depth pre-pass left alive.
-[[gnu::always_inline]] inline void Renderer3D::resolve_one(const Shade& sh, const SpanJob& j) {
-  SpanBuf& sb = spanbuf_;
+// run, each clipped to the range the depth pre-pass left alive. `range` draws
+// one clipped run; the batch kernels pass their own body, which inlines here.
+template <typename Range>
+[[gnu::always_inline]] inline void Renderer3D::walk_span(const SpanJob& j, Range&& range) {
   // Put the origin back where this span's pixels are: buffer index for
   // screen x is j.off + (x - j.ca).
-  sb.x0 = j.ca - static_cast<s32>(j.off);
+  spanbuf_.x0 = j.ca - static_cast<s32>(j.off);
   s32 x = j.xdraw, xcov = 0;
   auto draw_span = [&](s32 xlimit, int part, int edge) {
     if (x >= xlimit) return;
     const s32 lo = std::max(x, j.ca), hi = std::min(xlimit, j.cb);
-    if (lo < hi) { prof::add(prof::C_RESOLVE_CALLS, 1); (this->*sh.resolve)(sh, sb, j.y, lo, hi, part, edge, j.l_cov, j.r_cov, xcov); }
+    if (lo < hi) { prof::add(prof::C_RESOLVE_CALLS, 1); range(j.y, lo, hi, part, edge, j.l_cov, j.r_cov, xcov); }
     x = xlimit;
   };
   prof::add(prof::C_RESOLVE_PARTS, 1);
@@ -1469,6 +1460,30 @@ Renderer3D::ResolveFn Renderer3D::select_resolve(const Shade& sh) {
   if (j.r_cov & static_cast<s32>(0x80000000u)) { xcov = (j.r_cov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
   if (j.r_fill) draw_span(j.lim2, 2, j.yedge | 0x2);
 }
+
+// One call per batch instead of 2.4-2.9 per span. The range body inlines into
+// the job loop, so the kernel's 272-byte frame, its twelve register-pair saves
+// and every piece of setup that depends only on the Shade are paid once for
+// the whole batch and lifted out of the loop by the compiler.
+template <int mode, bool textured, bool aa, bool shadow>
+void Renderer3D::resolve_batch(const Shade& sh, const SpanJob* jobs, u32 n) {
+  const SpanBuf& sb = spanbuf_;
+  for (u32 k = 0; k < n; ++k)
+    walk_span(jobs[k], [&](s32 y, s32 lo, s32 hi, int part, int edge, s32 lc, s32 rc, s32& xc) {
+      resolve_span<mode, textured, aa, shadow>(sh, sb, y, lo, hi, part, edge, lc, rc, xc);
+    });
+}
+
+#if DSPERATE_NEON
+template <int mode, bool textured, bool aa>
+void Renderer3D::resolve_batch_vec(const Shade& sh, const SpanJob* jobs, u32 n) {
+  const SpanBuf& sb = spanbuf_;
+  for (u32 k = 0; k < n; ++k)
+    walk_span(jobs[k], [&](s32 y, s32 lo, s32 hi, int part, int edge, s32 lc, s32 rc, s32& xc) {
+      resolve_span_vec<mode, textured, aa>(sh, sb, y, lo, hi, part, edge, lc, rc, xc);
+    });
+}
+#endif
 
 // Run the pixel stages once over everything staged, then resolve span by span.
 //
@@ -1494,7 +1509,7 @@ void Renderer3D::flush_batch(const Shade& sh) {
     else span_shade<false>(sh, sb, 0, static_cast<s32>(batch_px_));
   }
 #endif
-  for (u32 k = 0; k < njobs_; ++k) resolve_one(sh, jobs_[k]);
+  (this->*sh.resolve)(sh, jobs_.data(), njobs_);
   njobs_ = 0; batch_px_ = 0;
 }
 

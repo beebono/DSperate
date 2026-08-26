@@ -112,7 +112,11 @@ private:
 public:
   struct Shade;
 private:
-  using ResolveFn = void (Renderer3D::*)(const Shade&, const SpanBuf&, s32, s32, s32, int, int, s32, s32, s32&);
+  struct SpanJob;
+  // Resolves a whole batch: the kernel loops jobs_ itself, so its prologue
+  // and the setup that depends only on the Shade are paid once per batch
+  // rather than 2.4-2.9 times per span.
+  using ResolveFn = void (Renderer3D::*)(const Shade&, const SpanJob*, u32);
 public:
   // Everything a span needs from its polygon, decoded once (the NEON gather
   // helpers in render3d.cpp take it, hence public).
@@ -257,11 +261,16 @@ private:
   template <bool textured> u32 shade_pixel(const Shade& sh, u32 vr, u32 vg, u32 vb, s32 s, s32 t) const;
   void plot_translucent(u32 addr, u32 color, u32 z, u32 polyattr, bool shadow);
   template <int mode> bool depth_pass(u32 addr, s32 z, u32 dstattr) const;
+  // One contiguous range of one span. Called only from the batch kernels and
+  // from the vector kernel's scalar fallback, so it inlines into them and the
+  // Shade-dependent setup lifts out of the job loop on its own.
   template <int mode, bool textured, bool aa, bool shadow> void resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
+  template <int mode, bool textured, bool aa, bool shadow> void resolve_batch(const Shade& sh, const SpanJob* jobs, u32 n);
 #if DSPERATE_NEON
   // Four pixels per step; same results as resolve_span (the specification),
   // for polygons without shadow / wireframe / toon shading.
-  template <int mode, bool textured, bool aa> void resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
+  template <int mode, bool textured, bool aa> [[gnu::always_inline]] inline void resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
+  template <int mode, bool textured, bool aa> void resolve_batch_vec(const Shade& sh, const SpanJob* jobs, u32 n);
   void texture_gather4(const Shade& sh, const s16* sa, const s16* ta, u32* colour, u32* alpha) const;
   // A textured span's texels, gathered once into the span buffer before the
   // resolve loop reads them (removes an indirect call per four pixels).
@@ -284,15 +293,15 @@ private:
   // The resolve kernel for a decoded Shade (the dispatch tables live with
   // flush_batch in render3d.cpp).
   static ResolveFn select_resolve(const Shade& sh);
-  // One span's three-part edge/fill walk. Shared by the batched path (over
-  // jobs_) and the unbatched one (a job that never reaches the array).
+  // One span's three-part edge/fill walk (left edge run, interior, right
+  // edge run), clipped to the range the depth pre-pass left alive. `range`
+  // draws one clipped run; the batch kernels pass their own inlined body.
   //
   // always_inline, and not negotiable: left to itself GCC emits this as a
   // real call with a 112-byte frame and five register-pair saves, paid once
-  // per span on BOTH paths. Measured, that call cost 93-176 cycles a span --
-  // 1.5-3.1 % of frame across four scenes, which is more than everything
-  // the batching decision is worth put together.
-  [[gnu::always_inline]] inline void resolve_one(const Shade& sh, const SpanJob& j);
+  // per span. Measured, that call cost 93-176 cycles a span -- 1.5-3.1 % of
+  // frame across four scenes.
+  template <typename Range> [[gnu::always_inline]] inline void walk_span(const SpanJob& j, Range&& range);
   void render_shadow_mask_line(Edge& e, s32 y);
   // Stage one span into the batch (everything up to and including the
   // attribute interpolation, which is per span by construction); the pixel
