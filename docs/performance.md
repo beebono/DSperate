@@ -11,8 +11,10 @@ scenes (`scenes/README.md`). Where a number is an estimate or a fit, it says so.
 
 **Status, 2026-08-26:** the gap is **2.94x in instructions per frame, emulation
 code against emulation code**, and the device and qemu instruments now agree to
-within 5 % on both sides — see §1. The plan is a single rewrite that deletes the
-rasteriser's per-scanline level; §7.
+within 5 % on both sides — see §1. **The batching/binning restructure this page
+spent three rounds planning is finished and is not the lever** — the whole
+rasteriser holds ~6.5 % of removable per-span overhead, and the per-span
+preamble §2 fitted does not exist. The gap is per-pixel work volume; §7.
 
 ---
 
@@ -219,6 +221,24 @@ etody 44.9. A least-squares fit gives **~816 instructions fixed per span plus
 ~30 per pixel** — good for mlbis/dbori/sm64, ~15 % off for meteos/etody, so
 directional rather than exact. DraStic shows no per-span term at all.
 
+> ## OVERTURNED, 2026-08-26. There is no per-span preamble.
+>
+> The fit above is an *inference from a correlation across five scenes*, not a
+> measurement, and a direct per-call/per-pixel split of the device instruction
+> profile refutes it. `walk_span`'s per-span and per-part overhead inside the
+> whole resolve group is **0.31 % of frame — about 11 instructions per span,
+> not 816.** The staging kernels' preamble is ~63 per span. Neither is
+> anywhere near the intercept the fit produced.
+>
+> **Why the fit lied.** "Instructions per resolved pixel is monotone in mean
+> span" has a second explanation it cannot distinguish from a fixed per-span
+> cost: scenes with short spans also have more polygons, more edges, more
+> overdraw and different texture formats. The regression confounded span
+> length with scene composition and attributed all of it to an intercept.
+>
+> **Do not fit a per-unit cost across scenes. Split the profile by call site.**
+> See §7.
+
 ### Why (b) bites: the mean span lies
 
 Span-length histogram (`C_SL0..6`, `C_SLPX0..6`):
@@ -320,10 +340,59 @@ and sm64 averages **11.5 scanlines per polygon** (5,241,970 lines / 455,437
 polygons) — **12,441 instructions per polygon, 11.7x DraStic's 1,064.5.**
 
 At 455,437 polygons over 1800 frames that is **2.88 M instructions per frame,
-13.1 % of our 21.97 M total**, and it is the ceiling on commit 3 of the
-refactor plan. Not all of it is removable — the depth pre-pass and the parts of
-`span_stage` that depend on live `depth_`/`attr_` cannot be hoisted — but the
-interpolation and edge setup can.
+13.1 % of our 21.97 M total**, and it is the ceiling on the whole rewrite.
+
+### The depth pre-pass: hoistable, but not worth hoisting
+
+This page used to claim the depth pre-pass "cannot be hoisted". **That is
+wrong, and the reason given was wrong.** Both halves were checked 2026-08-26:
+
+*It is legal.* A DS polygon is convex, so it has exactly one span per scanline;
+writes for line y touch `row_of(y)` and `row_of(y) + RSIZE` only, and reads for
+line y' touch `row_of(y')`. Distinct lines are disjoint. This is the same
+invariant `flush_batch` already documents and relies on, so the pre-pass for
+every scanline of a polygon may legally run before any of that polygon's pixels
+are written. What actually blocks it is *addressing*, not correctness:
+`depth_candidates` reads one contiguous depth-buffer run per scanline, so
+batching means N discontiguous source runs and needs a segmented kernel.
+
+*DraStic does batch it.* Its two depth-load variants sum to **exactly**
+`render_polygon_flush_1x`'s call count — one depth load per batch, 1.58 per
+polygon against our 11.5 per polygon:
+
+| DraStic | calls | per polygon | instr/polygon |
+|---|---|---|---|
+| `render_polygon_load_depth_asm_1x` | 1,659,600 | 1.00 | 90.5 |
+| `render_polygon_load_depth_colors_id_asm_1x` | 960,333 | 0.58 | 127.6 |
+| `render_polygon_depth_compare_less_than_asm` | 1,912,839 | 1.16 | 189.5 |
+| `..._less_than_constant_asm` | 791,908 | 0.48 | 152.8 |
+| `render_polygon_alpha_combine_depth_asm` | 127,463 | 0.08 | 14.1 |
+| **total** | | | **574.4** |
+
+*And hoisting ours is still worth about 0.2 % of frame, not 2.9 %.* The device
+line-level profile inside `depth_candidates` (2.55 % of frame) says why — it is
+**already inlined**, so there is no call to amortise, and the cost is the
+per-pixel vector loop:
+
+| line | share of `depth_candidates` |
+|---|---|
+| `vld1q_s32(z+i)` + `vld1q_u32(dstz+i)` | **36.1 %** |
+| the rest of the loop body | 57.3 % |
+| preamble (`vdupq` x3) | 0.7 % |
+| epilogue (`vmaxvq`, the `first`/`last` scans) | 5.9 % |
+
+Only the last two rows can hoist: 6.6 % of 2.55 % = **0.17 % of frame**. Batch
+it when the segmented kernels of (b) are being written anyway, and expect
+nothing from it on its own.
+
+**A real lever fell out of this, though.** We load the framebuffer twice per
+pixel: `depth_candidates` loads `dstz` and `dstattr` in the pre-pass, and then
+`resolve_span` / `resolve_batch_vec` load `depth_`, `color_` and `attr_` again
+at writeback. DraStic's `load_depth_colors_id_asm_1x` loads depth, colour and
+id **once** and keeps them. That is memory traffic, which §6 says is where
+removal beats duplication — untested, unsized, and not part of the rewrite, but
+it is the best explanation on the page for why their depth stages are 574
+instructions per polygon and ours are ~2,500.
 
 **This supersedes the "842 vs 50.7 per line, 16.6x" figure** used to size this
 work earlier. 50.7 counted only part of DraStic's setup; the full per-polygon
@@ -471,6 +540,24 @@ the bar. A speedup that changes output is measuring a different workload.
 made us "win" on pixel kernels while being 10x slower per pixel. Compare
 instructions or milliseconds per unit of work.
 
+**A fit across scenes is an inference; a call-site split is a measurement.**
+§2 regressed instructions-per-pixel against mean span across five scenes and
+read the intercept as a fixed ~816-instruction per-span preamble. It was an
+artefact: short-span scenes also differ in polygon count, overdraw and texture
+format, and the regression could not separate those from span length. Splitting
+the same profile by call site -- per-call setup versus per-pixel loop body,
+using `addr2line -i` inline frames and the kernels' own loop line ranges --
+found 11 instructions per span, not 816, and withdrew a whole planned rewrite.
+**When the question is "is this cost fixed or per-unit", the answer comes from
+where the samples land inside the function, not from a curve through five
+points.**
+
+**Substring matching on symbol names silently corrupts a bucketing script.**
+The first pass at that split classified `span_attrs5n` against `span_attrs5`'s
+line ranges -- `"span_attrs5" in "span_attrs5n"` is true -- and reported 1.5 %
+of frame as per-call preamble that was really per-pixel loop. Match leaf
+symbol names exactly.
+
 **A share of frames is not a share of work.** The duplicate-swap skip looked
 like 2.8 ms/frame from frame counts, then like nothing from polygon counts,
 before span pixels and polygon lines gave the real answer. Three sizings, two
@@ -563,93 +650,67 @@ true statements about different questions — say which one you are answering.
 
 ---
 
-## 7. The plan: delete the per-scanline level
+## 7. Verdict: the batching restructure is finished, and the gap is per-pixel
 
-This list used to be four independent items. Items 1, 2 and 3 are now **one
-rewrite**, because each is blocked by the same thing — the existence of a
-per-scanline level in the rasteriser — and item 3 alone is worth 1-3 %. Doing
-them separately means paying the integration cost three times and landing two
-intermediate states that measure as noise.
+**This section used to plan a single rewrite deleting the rasteriser's
+per-scanline level. That plan is withdrawn. It was sized off §2's fitted
+per-span preamble, and that preamble does not exist.**
 
-### Why this and nothing else
+### The measurement that settles it
 
-| | excess/frame | share of the 14.74 M gap |
+Every stage of the 3D raster, split into the overhead batching can remove and
+the per-pixel work it cannot. Device instruction profile, sm64, 1800 frames:
+
+| stage | per-span / per-call | per-pixel |
 |---|---|---|
-| 3D raster, **total** | 6.57 M | 44.5 % |
-| — of which, per-polygon setup done per scanline | **2.88 M** | 19.5 % |
-| — of which, the per-span shade preamble | **~2.4-2.7 M** | ~17 % |
-| everything else in the raster | ~1.1 M | ~8 % |
-| next-largest subsystem (CPU/JIT) | 2.24 M | 15.2 % |
+| **resolve / shade** (17.4 % of frame) | **0.31 %** | **17.09 %** |
+| staging kernels (`span_stage`, `span_attrs*`) | 0.84 % | 6.76 % |
+| staging driver dispatch | 0.65 % | — |
+| depth pre-pass (`depth_candidates`) | 0.19 % | 2.36 % |
+| per-scanline derivation | ≤4.48 % | — |
 
-The two fixed costs are **~5.5 M/frame — a quarter of every instruction we
-execute, and ~37 % of the entire gap.** DraStic's counterpart for both jobs is
-1,064.5 instructions per polygon, or 0.27 M/frame. They are the same defect
-twice: work done per scanline or per span that they do once per polygon or once
-per batch.
+**Total removable overhead across the whole rasteriser: ~6.5 %** — and that
+counts all 4.48 % of the per-scanline derivation, most of which is irreducible
+per-line work (the SpanJob writes, the edge step, the clamps). Realistically
+2-4 %. It cannot close a 2.94x gap.
 
-Sizings: the 2.88 M is an exact count (§3, `render_polygon_line` 841.5/line +
-`span_stage` 239.4/line x 11.5 scanlines/polygon vs 1,064.5/polygon). The
-shade term is the ~816-instructions-per-span intercept of the five-scene fit in
-§2, which is directional (~15 % off on meteos and etody) — treat it as
-2.4-2.7 M, not a precise figure. Not all of either is removable: the depth
-pre-pass and the parts of `span_stage` that depend on live `depth_`/`attr_`
-cannot hoist. **Credible landing zone: 3-4.5 M/frame, 14-20 % of our
-instructions.**
+### Why the parts kept looking too small
 
-### The rewrite, in three parts that ship together
+Because the batching was already done. `BATCH_PX` = 256 crossing scanlines,
+`resolve_batch` (c70cd69) collapsing 2.4-2.9 kernel calls a span into one a
+batch, the resolve kernel and gather bound per polygon (f1f49f7): those landed
+before this round started. Every fresh decomposition kept rediscovering a
+finished job. **The correct reading of "each piece is too small to justify" was
+never "do them all together" — it was "this work is complete".**
 
-**(a) Precompute the whole polygon's scanlines up front.** One per-polygon pass
-producing arrays indexed by scanline — `xstart`, `xend`, both endpoints'
-w/z/rgb/st, and the fill and coverage flags. Replaces the per-scanline
-`setup_left_edge`/`setup_right_edge`, the fourteen `Interp::interpolate` calls
-(~69/line), `edge_params` (~48/line) and the staging block in
-`render_polygon_line` (~90/line). `Slope::step` is already a linear recurrence,
-so this is a tight loop with the fill rules decided once. This is DraStic's
-`setup_spans_asm_1x` + `interpolate_edges` + `setup_edge_markers`.
+### Where the gap actually is
 
-**(b) Make the staging kernels segmented.** *This is the part the old list
-understated, and the one that decides whether (a) actually pays.*
-`kern::active::span_factor` and `span_attrs5n` are invoked **once per scanline**
-— roughly 314 and 456 instructions per call for a 13-35 pixel span. They cannot
-simply move to once-per-batch: the perspective factor depends on each span's own
-endpoints. They need a segmented form — an array of per-scanline descriptors
-processed as one run with per-segment constants reloaded in the loop, or
-per-pixel step values emitted during (a). Skip this and the per-span preamble
-survives the restructure and only half the win lands.
+`resolve_span_vec` is **10.1 % of every instruction we execute**, and 58 % of
+the resolve group. The group runs at **~43 instructions per resolved pixel**
+against DraStic's 5.2 (derived: 2,912 polygon lines/frame x 32.3 px mean x
+94 % depth survival = ~88 k resolved pixels/frame against 3.82 M instructions).
+At 88 k pixels a frame that is the 3D raster's entire 6.57 M/frame excess.
 
-**(c) Delete the per-part walk.** `walk_span` still makes three `draw_span`
-calls per span even after `resolve_batch` hoisted the call overhead (both
-`resolve_span<...>` specialisations are still 6.3 % of our instructions on
-device). Write per-pixel edge/part/coverage flag bytes during staging so
-`resolve_*` becomes one flat pass over `[0, batch_px_)` with no span structure
-at all. The open problem — each span writing a different `row0` — is solved with
-a per-pixel destination index written during staging; `batch_px_` is 256, so
-that is 1 KB.
+The lever is the cost of the per-pixel kernel itself -- what it loads, how many
+passes it makes over a pixel, and how much of the DS's blend/stencil/AA
+semantics it evaluates per pixel rather than selecting once. Two concrete
+leads, neither sized yet:
 
-Mode specialisation, the fourth thing DraStic does (306 `render_*` variants), is
-**already done** on our side via `select_resolve` / `select_gather4`. Not a
-lever.
+1. **We read the framebuffer twice per pixel.** `depth_candidates` loads `dstz`
+   and `dstattr` in the pre-pass; `resolve_span_vec` then loads `depth_`,
+   `color_` and `attr_` again at writeback. DraStic's
+   `load_depth_colors_id_asm_1x` loads depth, colour and id once and keeps
+   them (§3). Memory traffic, so price it by removal, not duplication.
+2. **`span_factor`'s per-pixel division emulation is 1.73 % of frame** on its
+   own -- `vrecpe` plus a Newton step plus two exactness fixups per four
+   pixels. DraStic's constant-W path avoids division entirely and we already
+   take it when W is constant; the general path is the cost.
 
-### What to watch while doing it
+### Still worth doing, independently
 
-- **Byte-identical output is the bar.** `--dump-frames` on both builds, `cmp`.
-  A speedup that changes output is measuring a different workload.
-- **This trades instructions for memory traffic.** The precompute arrays are new
-  writes and reads. §6's lesson is that duplication *underestimates*
-  memory-bound costs, so price by removal and paired A/B on device, never by
-  prediction. Keep the arrays small and consumed immediately — `RING=8` already
-  showed we are sensitive to tile footprint. DraStic writes a per-scanline span
-  array too, so the shape is proven.
-- **It collides with the band split.** Each band worker must precompute only its
-  own slice of a polygon's scanlines, or the precompute happens N times.
-
-### Then
-
-4. **The 2D dirty bit** — 14.4 % of the gap, fully designed and priced (§5), and
-   the only other item with a measured ceiling. Independent of the raster work,
-   so it is the right thing to pick up alongside it.
-5. **SPU blocking** (3.5 %) — same shape as the renderer's fix, so cheaper after
-   it than before.
-6. **CPU/JIT** (15.2 %) has no identified single lever yet; the ARM7 combine and
-   per-access cost accounting are the two candidates, at a measured 5.58 %
-   ceiling for the latter.
+- **The 2D dirty bit** -- 14.4 % of the gap, designed, and the only item on
+  this page with a measured ceiling (§5: -1.65 % to -7.52 %). Nothing about the
+  raster verdict touches it. **This is now the best-sized work available.**
+- **SPU blocking** (3.5 %).
+- **CPU / JIT** (15.2 %) -- no single lever identified; the ARM7 combine and
+  per-access cost accounting (5.58 % ceiling) are the candidates.
