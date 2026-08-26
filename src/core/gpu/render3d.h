@@ -257,6 +257,38 @@ private:
   };
   std::array<SpanJob, 256> jobs_{};
   u32 njobs_ = 0, batch_px_ = 0;
+
+  // One scanline's geometry and endpoint attributes: everything the
+  // per-scanline path needs that is a function of the polygon and y alone,
+  // with no framebuffer state in it.
+  //
+  // precompute_lines derives a whole run of scanlines at once, so the edge
+  // walk, the fourteen interpolations, the swapped-edge decision and the fill
+  // rules are one loop over the run instead of a fresh derivation inside the
+  // per-scanline path. That is DraStic's structure -- its edge and span setup
+  // is all per-polygon (render_polygon_setup_spans_asm_1x,
+  // render_polygon_interpolate_edges, render_polygon_edge_interpolate_*) and
+  // its scanline loop is pointer arithmetic against the array those produce.
+  // See docs/performance.md s3 and s7.
+  struct LineSpan {
+    s32 xstart, xend;        // span endpoints, the right-edge push-left applied
+    s32 wl, wr, zl, zr;      // endpoint w / z, swapped-edge order applied
+    s32 al[5], ar[5];        // endpoint r g b s t, swapped-edge order applied
+    s32 l_len, r_len, l_cov, r_cov;
+    s32 xa, xb;              // the clipped screen range [xa, xb)
+    int yedge;
+    bool l_fill, r_fill, wf_skip;
+  };
+  // render_band rasterises at most CHUNK scanlines per render_chunk call, and
+  // a polygon's run inside one chunk is bounded by that.
+  std::array<LineSpan, CHUNK> lines_{};
+  // Walk the edges over scanlines [y0, y1) filling lines_[0 .. y1-y0), and
+  // leave the edge cursors stepped past y1-1 exactly as the per-scanline path
+  // left them.
+  void precompute_lines(Edge& e, s32 y0, s32 y1);
+  // The half of the old render_polygon_line that framebuffer state reaches:
+  // the depth pre-pass, the attribute staging and the batch job.
+  void stage_line(Edge& e, s32 y, const LineSpan& ls);
   u32  texture_sample(const Shade& sh, s32 s, s32 t, u32* alpha) const;
   template <bool textured> u32 shade_pixel(const Shade& sh, u32 vr, u32 vg, u32 vb, s32 s, s32 t) const;
   void plot_translucent(u32 addr, u32 color, u32 z, u32 polyattr, bool shadow);
@@ -303,10 +335,6 @@ private:
   // frame across four scenes.
   template <typename Range> [[gnu::always_inline]] inline void walk_span(const SpanJob& j, Range&& range);
   void render_shadow_mask_line(Edge& e, s32 y);
-  // Stage one span into the batch (everything up to and including the
-  // attribute interpolation, which is per span by construction); the pixel
-  // stages and the resolve wait for flush_batch.
-  void render_polygon_line(Edge& e, s32 y);
   void flush_batch(const Shade& sh);
   // Rasterise lines [ya, yb) polygon at a time rather than line at a time:
   // the active set for the whole chunk is merged once, then each polygon
