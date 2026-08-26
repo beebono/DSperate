@@ -56,6 +56,52 @@ translated guest code, theirs is 87.2 % / 9.7 %. This is not a bloated JIT. The
 excess is spread across our own C++, which is exactly the uniform-across-
 subsystems signature that made this hard to find.
 
+### The headline is measured against a contaminated DraStic run — re-measure it
+
+Both numbers in the table above come from `perf stat` on
+`drastic-sym --benchmark 300 --input-playback sm64ds`, and **that invocation is
+wrong twice over**: the bare name fails to open the recording (DraStic then
+free-runs the ROM from direct boot, rc=0), and `--benchmark` replays from
+savestates that do not exist. §6 records that using either inflated the
+instruction ratio by ~50 %.
+
+An exact host-side count (2026-08-26, qemu + `libhotblocks`, per-symbol, both
+emulators single-threaded, DraStic's frameskip disabled and libSDL2 excluded)
+puts the core ratio at **3.04x**, not 4.5x — and 4.5 / 1.5 = 3.0, exactly the
+inflation §6 predicts. **Treat 4.31x and 5.5 M/frame as unverified** until the
+device run is repeated with `--input-playback input_record/<name>.ir` and no
+`--benchmark`.
+
+### Exact counts, per symbol (qemu, 2026-08-26)
+
+Ours: sm64 scene, 1800 frames, `DS_R3D_THREADS=1`. DraStic: its own 2143-frame
+recording, `threaded_3d = 0`, `frameskip_type = 0`. Not the same content, so
+read the ratios as indicative and the per-polygon figures below as the real
+result. Reproduces to 1,021 instructions in 39.5 billion.
+
+| subsystem | ours /frame | DraStic /frame | ratio |
+|---|---|---|---|
+| 3D raster | 9,647,233 | 3,081,820 | 3.13x |
+| 2D render | 3,496,482 | 1,373,218 | 2.55x |
+| CPU / JIT | 3,392,746 | 1,149,877 | 2.95x |
+| MMIO | 1,767,032 | 320,532 | **5.51x** |
+| 3D geometry | 1,524,826 | 734,217 | 2.08x |
+| SPU | 744,968 | 229,871 | 3.24x |
+| DMA / timers | 562,326 | 100,079 | **5.62x** |
+| **core total** | **21,968,886** | **7,225,657** | **3.04x** |
+
+**libSDL2 is 49.3 % of DraStic's process** even with `SDL_VIDEODRIVER=dummy`,
+and a single unexported function at `+0xc1de8` is 37 % of everything — 5.27 M
+instructions per frame. Our CLI has no display path, so it is excluded above;
+never quote a DraStic total without saying which side of that line it falls on.
+
+Two cross-checks that the instrument is sound: qemu counted exactly 5,241,970
+calls to `render_polygon_line`, and `DS_PROFILE=1` counts exactly 5,241,970
+polygon lines; and the implied 32.3 px mean span matches the 31.6 px measured
+on device.
+
+---|
+
 ---
 
 ## 2. Inside the 3D raster — half the gap
@@ -175,6 +221,47 @@ each, which is why it reads as a flat tail:
 **So this is a campaign, not a refactor.** The change that subsumes the most of
 it is DraStic's structure: precompute every scanline's span endpoints and edge
 attributes once per polygon, leaving the scanline loop as pointer arithmetic.
+
+### Priced exactly: 11.7x on per-polygon setup
+
+The qemu run settles what the per-scanline structure actually costs, because
+DraStic's edge and span setup is all per-polygon and can simply be divided by
+its polygon count (`render_polygon_setup_1x` and `render_polygon_setup_spans_asm_1x`
+agree exactly, 1,088,143 calls).
+
+| DraStic, per polygon | instr |
+|---|---|
+| `render_polygon_edge_interpolate_x_c` | 191.1 |
+| `render_polygon_edge_interpolate_parameters_asm` | 183.3 |
+| `render_polygon_setup_1x` | 128.7 |
+| `render_polygon_interpolate_edges` (2 clones) | 219.4 |
+| `render_polygon_setup_spans_asm_1x` | 107.9 |
+| `render_polygon_edge_perspective_coefficients_asm` | 99.2 |
+| `render_polygon_edge_interpolate_w_asm` | 81.4 |
+| `render_polygon_edge_perspective_steps_asm` | 53.5 |
+| **total** | **1,064.5** |
+
+Ours, the same job, done once per scanline instead of once per polygon:
+`render_polygon_line` **841.5** + `span_stage` **239.4** = 1,081 per scanline,
+and sm64 averages **11.5 scanlines per polygon** (5,241,970 lines / 455,437
+polygons) — **12,441 instructions per polygon, 11.7x DraStic's 1,064.5.**
+
+At 455,437 polygons over 1800 frames that is **2.88 M instructions per frame,
+13.1 % of our 21.97 M total**, and it is the ceiling on commit 3 of the
+refactor plan. Not all of it is removable — the depth pre-pass and the parts of
+`span_stage` that depend on live `depth_`/`attr_` cannot be hoisted — but the
+interpolation and edge setup can.
+
+**This supersedes the "842 vs 50.7 per line, 16.6x" figure** used to size this
+work earlier. 50.7 counted only part of DraStic's setup; the full per-polygon
+total divided by our 11.5 scanlines is ~93 per line, so the true ratio is
+11.7x, not 16.6x. Bigger than any win taken this round by an order of
+magnitude, but not as large as advertised.
+
+**Corroborating the same structure from the other end:** DraStic runs its pixel
+kernels ~1.15 times per polygon (`render_polygon_shade`,
+`render_polygon_interpolate_uv_asm`) — a whole polygon is usually one batch. We
+call `flush_batch` **3.64 times per polygon**.
 
 ### `resolve_one`, sized
 
@@ -323,6 +410,29 @@ bytes and evicts nothing, so it prices the *cheapest* pass; removal recovers the
 one that drags 1.5 KB per scanline through a 32 KB L1D. The "duplication
 overestimates" argument is about instruction scheduling and applies only to
 ALU-bound costs.
+
+**A tool that reports per-symbol counts beats one that reports shares.**
+qemu-user's `libhotblocks` (patched for an unbounded dump and a periodic
+snapshot) gives exact instructions *and* call counts per function for both
+emulators — no sampling, reproducible to 1,021 instructions in 39.5 billion.
+Everything in §1 that used to be a share is now a count. Three traps in
+building it, each of which silently produced a wrong answer first:
+
+- **qemu maps guest images `r--p`, not `r-xp`** — their pages are translated,
+  never executed natively. Filtering the guest's `/proc/<pid>/maps` on the exec
+  bit attributes 100 % of samples to "unknown".
+- **Snapshot the map late, or repeatedly.** A JIT's code buffer is mapped after
+  startup, so a map taken at t=1s loses every instruction the recompiler
+  emitted. Anything not file-backed *is* translated code; bucket it as such.
+- **Disable the other emulator's frameskip.** DraStic paces against wall-clock
+  and qemu is ~50x slower than real time, so it sits past `BEHIND_THRESH` and
+  drops nearly every *video* frame while the emulated frame count stays
+  identical. Nothing in the output reveals it. See [drastic-under-qemu].
+
+**Never edit a shell script while bash is running it.** `sed -i` on
+`drablocks.sh` mid-run made bash resume at a shifted byte offset and re-execute
+the launch line, so two DraStic runs wrote to one output file — the same
+double-run contamination as the earlier `.25` sweep, from a new cause.
 
 **Match the workload, and check the tool actually did what you asked.**
 DraStic's `--input-playback` takes a **path including the `.ir` extension**
