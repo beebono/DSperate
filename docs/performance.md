@@ -9,6 +9,11 @@ us.
 Everything here is measured on the RK3566 handhelds against the five replay
 scenes (`scenes/README.md`). Where a number is an estimate or a fit, it says so.
 
+**Status, 2026-08-26:** the gap is **2.94x in instructions per frame, emulation
+code against emulation code**, and the device and qemu instruments now agree to
+within 5 % on both sides — see §1. The plan is a single rewrite that deletes the
+rasteriser's per-scanline level; §7.
+
 ---
 
 ## 1. The headline
@@ -17,70 +22,110 @@ Against DraStic on a matched SM64DS gameplay replay, emulation code only:
 
 | metric | ours | DraStic | ratio |
 |---|---|---|---|
-| CPU-time per frame | 18.87 ms | 4.38 ms | **4.31x** |
-| instructions per frame | 24.66 M | ~5.5 M | **~4.5x** |
-| IPC | 0.688 | 0.635 | 1.08x *(ours better)* |
-| L1D refills per 1k instructions | 4.75 | 4.53 | 1.05x *(ours worse)* |
+| **instructions per frame, emulation code only** | **22.29 M** | **7.58 M** | **2.94x** |
+| instructions per frame, whole process | 23.00 M | 14.93 M | 1.54x |
+| emulation share of process instructions | 96.9 % | **50.8 %** | |
+| IPC (whole process) | 0.689 | 0.696 | 0.99x *(theirs marginally better)* |
+| CPU-time per frame, emulation (derived) | 16.7 ms | 5.5 ms | 3.03x |
 
-**The gap is instruction volume at per-instruction parity.** The time ratio and
-the instruction ratio are the same number, so there is nothing left over for
-stalls, cache layout or data-structure size to explain. Two independent routes
-agree on the volume figure: `time_ratio x IPC_ratio` = 4.67x, and their implied
-frame count from the established 4.38 ms/frame gives 4.45x.
+Device, `/storage/dsperate/pmu2.sh` on 192.168.1.20, 2026-08-26: three
+interleaved reps of a HEAD build against DraStic's 2143-frame
+`input_record/sm64scene.ir`, plus a `perf record -e instructions` DSO split on
+both sides. Our instruction count reproduces to six parts in 10^5 across reps.
+
+**The gap is instruction volume at per-instruction parity.** The derived time
+ratio (3.03x) and the counted instruction ratio (2.94x) are the same number, so
+there is nothing left over for stalls, cache layout or data-structure size to
+explain. IPC is within 1 %.
 
 This kills the cache/memory hypothesis as a *global* explanation. We are not
-slower per unit of work; we do about four and a half times the units.
+slower per unit of work; we do about three times the units.
 
 It also explains why the two largest wins on this project are both build flags
 (`-O3`, then LTO) and why deleting the 2D compares pays: all three remove
 instructions.
 
+For context on the whole-system figure: our CLI has no display or audio output
+path, and DraStic's is half its process. Emulation-against-emulation is the
+honest comparison for deciding what to optimise, but a real frontend would put
+that cost on us too, and the whole-process ratio is only 1.54x.
+
+**Where we actually stand on this rig:** 11.07 ms mean wall-clock per frame,
+**276-282 of 1800 frames over the 16.715 ms DS budget (15.3-15.7 %)**, against
+a DraStic that frame-caps at 59 fps with headroom to spare.
+
 ### Where the instructions are
 
-| group | ours M/frame | theirs M/frame | ratio | **excess** | share of gap |
+Ranked by **excess instructions per frame** — ours minus theirs, not a ratio —
+off the exact per-symbol counts below. Total excess is 14.74 M/frame.
+
+| group | ours /frame | theirs /frame | ratio | **excess** | **share of gap** |
 |---|---|---|---|---|---|
-| **3D raster** | 12.19 | 2.28 | 5.35x | **9.91** | **51.5 %** |
-| CPU + memory + IO + sched | 5.94 | 0.88 | **6.75x** | 5.06 | 26.3 % |
-| 2D | 3.64 | 1.35 | 2.70x | 2.29 | 11.9 % |
-| 3D geometry | 2.06 | 0.58 | 3.55x | 1.48 | 7.7 % |
-| SPU | 0.79 | 0.29 | 2.72x | 0.50 | 2.6 % |
+| **3D raster** | 9,647,233 | 3,081,820 | 3.13x | **6.57 M** | **44.5 %** |
+| CPU / JIT | 3,392,746 | 1,149,877 | 2.95x | 2.24 M | 15.2 % |
+| 2D | 3,496,482 | 1,373,218 | 2.55x | 2.12 M | 14.4 % |
+| MMIO | 1,767,032 | 320,532 | **5.51x** | 1.45 M | 9.8 % |
+| 3D geometry | 1,524,826 | 734,217 | 2.08x | 0.79 M | 5.4 % |
+| SPU | 744,968 | 229,871 | 3.24x | 0.52 M | 3.5 % |
+| DMA / timers | 562,326 | 100,079 | **5.62x** | 0.46 M | 3.1 % |
+| unbucketed | 833,273 | 236,043 | — | 0.60 M | 4.1 % |
 
-CPU/memory/IO/scheduler are grouped because **their boundaries are not
-comparable across the two codebases** — DraStic's memory and IO helpers
-(`arm64_store_memory32_arm9`, `store_io_register_arm9_32`) live in its main
-binary, ours are split across `mem/`, `io/` and the JIT stubs. Split apart they
-produce nonsense like "scheduler 75x" off a 0.01 M/frame denominator.
+**Rank by excess, never by ratio.** MMIO and DMA have the worst ratios on the
+page and are together 12.9 % of the gap; the 3D raster has a middling 3.13x and
+is 44.5 % of it. A large ratio on a small denominator is not a lever.
 
-The DSO shape rules out the obvious suspect: ours is 85.6 % own code / 11.5 %
-translated guest code, theirs is 87.2 % / 9.7 %. This is not a bloated JIT. The
-excess is spread across our own C++, which is exactly the uniform-across-
-subsystems signature that made this hard to find.
+Memory and IO boundaries are **not comparable across the two codebases** —
+DraStic's helpers (`arm64_store_memory32_arm9`, `store_io_register_arm9_32`)
+live in its main binary, ours are split across `mem/`, `io/` and the JIT stubs.
+Read CPU/JIT, MMIO and DMA as one 28 % block rather than three lines.
 
-### 4.5x or 3.0x? The two instruments disagree — settle it on device
+The DSO shape rules out the obvious suspect: of emulation code, ours is 87.2 %
+own C++ / 12.8 % translated guest code, theirs 92.1 % / 7.9 %. This is not a
+bloated JIT. The excess is spread across our own C++, which is exactly the
+uniform-across-subsystems signature that made this hard to find.
 
-An exact host-side count (below) puts the core ratio at **3.04x**, against the
-**~4.5x** in the table above. Both are defensible and they are not measuring
-quite the same thing:
+### SETTLED: the device and qemu now agree, at parity
 
-- **Their 5.5 M/frame was *implied*, not counted.** It comes from IPC and cycle
-  ratios, and one of the two routes that "independently" agree
-  (`ratio_time x ratio_IPC`) reuses the time ratio it is checking. qemu counts
-  DraStic's emulation code directly at **7.23 M/frame** — 31 % higher, and that
-  alone moves 4.5x to ~3.4x.
-- **The recordings differ.** The device pass used a 1805-frame DraStic replay;
-  the qemu pass used the 2143-frame `sm64ds.rec`. Neither matches our 1800-frame
-  `sm64.dsin` frame for frame.
-- **Thread counts differ.** Device: both threaded. qemu: both single-threaded,
-  which for us removes the band split entirely.
+This page used to carry two irreconcilable figures — a device-measured **4.5x**
+and a qemu-counted **3.04x**. Re-run on device 2026-08-26 with the corrected
+invocation and a DSO split, they agree:
 
-`/storage/dsperate/pmu.sh` on 192.168.1.20 has been corrected — it had kept the
-discarded first-pass invocation (`--benchmark 300 --input-playback sm64ds`,
-wrong twice over) even though the reported numbers were redone without it. It
-now aborts if DraStic prints `couldn't open`, reports the emulated frame count,
-and defaults to `input_record/sm64scene.ir` (2143 frames, installed alongside).
-Re-running it is what settles this.
+| instructions/frame, emulation only | device (`pmu2.sh`) | qemu (`libhotblocks`) | agreement |
+|---|---|---|---|
+| ours | 22.29 M | 21.97 M | +1.5 % |
+| DraStic | 7.58 M | 7.23 M | +4.9 % |
+| **ratio** | **2.94x** | **3.04x** | |
+
+Two instruments, two different recordings, two different thread configurations,
+both landing at ~3x. **Quote 2.94x. The 4.5x and the 4.31x were wrong** — their
+5.5 M/frame was *implied* from IPC and cycle ratios, never counted, and one of
+the two routes that "independently" agreed (`ratio_time x ratio_IPC`) reused
+the time ratio it was checking.
+
+**The DSO split is not optional on device, and `perf stat` alone is useless
+here.** libSDL2 is **47.3 %** of DraStic's process instructions on device —
+close enough to the 49.3 % qemu found to confirm it is real per-frame work and
+not a wall-clock spin, even though DraStic frame-caps at 59 fps on this rig.
+Without splitting it out, `perf stat` reports 1.54x.
+
+**One claim did not survive and is now open.** The old "L1D refills per 1k
+instructions: 4.75 vs 4.53, within 5 %" is not supported. Whole-process, the
+device measures **4.92 (ours) against 2.96 (theirs)** — but theirs is diluted
+by SDL and `perf stat` cannot attribute cache events per DSO, so this instrument
+cannot settle it either way. L2D refills go the other direction (2.14 vs 3.08).
+IPC parity holds regardless, so memory is still not the story; the specific
+L1D number just should not be quoted until something can attribute it per DSO.
+
+`/storage/dsperate/pmu2.sh` on 192.168.1.20 is the script: three interleaved
+reps, abort on `couldn't open`, emulated-frame count reported, DSO split on both
+sides. It supersedes `pmu.sh`, which took one unpaired rep, pointed at a stale
+binary (`dsperate.cmp`, four code commits behind) and had no DSO split.
 
 ### Exact counts, per symbol (qemu, 2026-08-26)
+
+**These are the numbers to work from.** They are exact per-symbol counts, and
+the device run above independently confirms both totals to within 5 %, so the
+subsystem split below can be trusted even though the two recordings differ.
 
 Ours: sm64 scene, 1800 frames, `DS_R3D_THREADS=1`. DraStic: its own 2143-frame
 recording, `threaded_3d = 0`, `frameskip_type = 0`. Not the same content, so
@@ -108,11 +153,31 @@ calls to `render_polygon_line`, and `DS_PROFILE=1` counts exactly 5,241,970
 polygon lines; and the implied 32.3 px mean span matches the 31.6 px measured
 on device.
 
----|
+**A third, from the device.** Ranking our own process by instructions retired
+(`perf record -e instructions`, sm64, 1800 frames) puts the per-scanline level
+at the top of the whole emulator:
+
+| symbol | % of all our instructions |
+|---|---|
+| `render_polygon_line` | **10.72 %** |
+| `resolve_batch_vec<1, true, true>` | 6.98 % |
+| `Engine2D::render_line` | 4.76 % |
+| `Engine2D::draw_bg_text` | 4.51 % |
+| `resolve_span<1, true, true, false>` | 4.13 % |
+| `resolve_batch_vec<1, false, true>` | 4.07 % |
+| `span_stage` | 3.31 % |
+| `flush_batch` | 2.11 % |
+| `build_edges` | 1.49 % |
+
+DraStic's own hot list on the same instrument is the mirror image: after the
+libSDL2 cluster, `render_scanline_tiled_span_4bpp_asm` (1.48 %),
+`render_polygon_load_depth_colors_id_asm_1x` (1.27 %), `render_polygon_shade`
+(1.22 %), `render_polygon_interpolate_uv_asm` (1.05 %) — pixel kernels, no
+per-scanline driver anywhere near the top.
 
 ---
 
-## 2. Inside the 3D raster — half the gap
+## 2. Inside the 3D raster — 44.5 % of the gap
 
 Instructions per frame by stage (sm64):
 
@@ -288,7 +353,7 @@ problem is `row0` — each span writes a different framebuffer row.
 
 ## 4. The other subsystems
 
-### CPU — 26 % of the gap, worst ratio (6.75x)
+### CPU / JIT — 15.2 % of the gap (2.95x); with MMIO and DMA, 28 %
 
 **23.4 host cycles per guest instruction against DraStic's 4.6**, and
 `jit-technique-audit.md` had that number long before it was believed. Bucketed
@@ -313,7 +378,7 @@ share of CPU: translated guest code 50.6 % (sm64) / 56.3 % (meteos), JIT stubs
   pc-relative — which killed the "resolve the page statically" idea before any
   device time was spent on it.
 
-### 2D — 11.9 % of the gap, best ratio (2.70x)
+### 2D — 14.4 % of the gap (2.55x)
 
 The five `memcmp` sites in `engine2d.cpp` ask "did anything change" by
 rescanning, and the `_checked_` flags are cleared **per scanline**, so each runs
@@ -331,7 +396,7 @@ Over 99.9 % of that scanning finds nothing.
 | etody | +1.05 % | −1.65 % |
 | dbori | +0.28 % *(t=1.5, unresolved)* | −1.91 % |
 
-### SPU — 2.6 % of the gap
+### SPU — 3.5 % of the gap
 
 546 output samples a frame, each mixing 16 channels — 8,738 per-channel
 operations with nothing amortised, the same shape as the renderer's per-span
@@ -403,7 +468,7 @@ be worth up to 3 %.
 the bar. A speedup that changes output is measuring a different workload.
 
 **A share is not an absolute.** Comparing shares of each emulator's own code
-made us "win" on pixel kernels while being 4.5x slower there. Compare
+made us "win" on pixel kernels while being 10x slower per pixel. Compare
 instructions or milliseconds per unit of work.
 
 **A share of frames is not a share of work.** The duplicate-swap skip looked
@@ -477,7 +542,7 @@ never from memory.
 
 **Profile by instructions when the question is volume.** Every ranking on this
 project was cycle- or sample-based, which cannot separate "hot because it
-stalls" from "hot because there is a lot of it". Against a 4.5x volume gap,
+stalls" from "hot because there is a lot of it". Against a ~3x volume gap,
 `perf record -e instructions` is the ranking that matters. Note `addr2line`
 needs `-i` for inline-aware attribution or NEON intrinsics are credited to the
 header and 27 % of samples fall out of the mapping.
@@ -487,15 +552,104 @@ header and 27 % of samples fall out of the mapping.
 profile, and not in any technique document, so nothing in the normal workflow
 points at it — and it has twice been the largest win available.
 
+**Check which binary the measurement script points at.** `pmu.sh` still named
+`dsperate.cmp`, four code commits behind HEAD, long after those commits landed.
+A benchmark harness pinned to a filename silently measures last week's code.
+
+**Split the other process by DSO before comparing totals.** Half of DraStic's
+instructions are libSDL2, and our CLI has no counterpart. Comparing whole
+processes gives 1.54x; comparing emulation to emulation gives 2.94x. Both are
+true statements about different questions — say which one you are answering.
+
 ---
 
-## 7. Next
+## 7. The plan: delete the per-scanline level
 
-1. **Per-polygon precompute of span endpoints and edge attributes.** Subsumes
-   the interpolation (~69/line), edge setup (~48/line) and part of staging.
-   Biggest lever; interacts with the chunked/threaded band structure, since each
-   band worker would precompute its own slice.
-2. **Batch `resolve_one`** via per-pixel edge flags — ~10x fewer kernel calls.
-3. **Hoist the batch-invariant kernel preamble** into a context struct — small
-   (~1-3 %), mechanical, and quick to measure.
-4. **The 2D dirty bit**, when its slow-path work is worth scheduling.
+This list used to be four independent items. Items 1, 2 and 3 are now **one
+rewrite**, because each is blocked by the same thing — the existence of a
+per-scanline level in the rasteriser — and item 3 alone is worth 1-3 %. Doing
+them separately means paying the integration cost three times and landing two
+intermediate states that measure as noise.
+
+### Why this and nothing else
+
+| | excess/frame | share of the 14.74 M gap |
+|---|---|---|
+| 3D raster, **total** | 6.57 M | 44.5 % |
+| — of which, per-polygon setup done per scanline | **2.88 M** | 19.5 % |
+| — of which, the per-span shade preamble | **~2.4-2.7 M** | ~17 % |
+| everything else in the raster | ~1.1 M | ~8 % |
+| next-largest subsystem (CPU/JIT) | 2.24 M | 15.2 % |
+
+The two fixed costs are **~5.5 M/frame — a quarter of every instruction we
+execute, and ~37 % of the entire gap.** DraStic's counterpart for both jobs is
+1,064.5 instructions per polygon, or 0.27 M/frame. They are the same defect
+twice: work done per scanline or per span that they do once per polygon or once
+per batch.
+
+Sizings: the 2.88 M is an exact count (§3, `render_polygon_line` 841.5/line +
+`span_stage` 239.4/line x 11.5 scanlines/polygon vs 1,064.5/polygon). The
+shade term is the ~816-instructions-per-span intercept of the five-scene fit in
+§2, which is directional (~15 % off on meteos and etody) — treat it as
+2.4-2.7 M, not a precise figure. Not all of either is removable: the depth
+pre-pass and the parts of `span_stage` that depend on live `depth_`/`attr_`
+cannot hoist. **Credible landing zone: 3-4.5 M/frame, 14-20 % of our
+instructions.**
+
+### The rewrite, in three parts that ship together
+
+**(a) Precompute the whole polygon's scanlines up front.** One per-polygon pass
+producing arrays indexed by scanline — `xstart`, `xend`, both endpoints'
+w/z/rgb/st, and the fill and coverage flags. Replaces the per-scanline
+`setup_left_edge`/`setup_right_edge`, the fourteen `Interp::interpolate` calls
+(~69/line), `edge_params` (~48/line) and the staging block in
+`render_polygon_line` (~90/line). `Slope::step` is already a linear recurrence,
+so this is a tight loop with the fill rules decided once. This is DraStic's
+`setup_spans_asm_1x` + `interpolate_edges` + `setup_edge_markers`.
+
+**(b) Make the staging kernels segmented.** *This is the part the old list
+understated, and the one that decides whether (a) actually pays.*
+`kern::active::span_factor` and `span_attrs5n` are invoked **once per scanline**
+— roughly 314 and 456 instructions per call for a 13-35 pixel span. They cannot
+simply move to once-per-batch: the perspective factor depends on each span's own
+endpoints. They need a segmented form — an array of per-scanline descriptors
+processed as one run with per-segment constants reloaded in the loop, or
+per-pixel step values emitted during (a). Skip this and the per-span preamble
+survives the restructure and only half the win lands.
+
+**(c) Delete the per-part walk.** `walk_span` still makes three `draw_span`
+calls per span even after `resolve_batch` hoisted the call overhead (both
+`resolve_span<...>` specialisations are still 6.3 % of our instructions on
+device). Write per-pixel edge/part/coverage flag bytes during staging so
+`resolve_*` becomes one flat pass over `[0, batch_px_)` with no span structure
+at all. The open problem — each span writing a different `row0` — is solved with
+a per-pixel destination index written during staging; `batch_px_` is 256, so
+that is 1 KB.
+
+Mode specialisation, the fourth thing DraStic does (306 `render_*` variants), is
+**already done** on our side via `select_resolve` / `select_gather4`. Not a
+lever.
+
+### What to watch while doing it
+
+- **Byte-identical output is the bar.** `--dump-frames` on both builds, `cmp`.
+  A speedup that changes output is measuring a different workload.
+- **This trades instructions for memory traffic.** The precompute arrays are new
+  writes and reads. §6's lesson is that duplication *underestimates*
+  memory-bound costs, so price by removal and paired A/B on device, never by
+  prediction. Keep the arrays small and consumed immediately — `RING=8` already
+  showed we are sensitive to tile footprint. DraStic writes a per-scanline span
+  array too, so the shape is proven.
+- **It collides with the band split.** Each band worker must precompute only its
+  own slice of a polygon's scanlines, or the precompute happens N times.
+
+### Then
+
+4. **The 2D dirty bit** — 14.4 % of the gap, fully designed and priced (§5), and
+   the only other item with a measured ceiling. Independent of the raster work,
+   so it is the right thing to pick up alongside it.
+5. **SPU blocking** (3.5 %) — same shape as the renderer's fix, so cheaper after
+   it than before.
+6. **CPU/JIT** (15.2 %) has no identified single lever yet; the ARM7 combine and
+   per-access cost accounting are the two candidates, at a measured 5.58 %
+   ceiling for the latter.
