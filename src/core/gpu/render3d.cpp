@@ -1363,6 +1363,16 @@ void Renderer3D::render_polygon_line(Edge& e, s32 y) {
   const s32 xa = x, xb = std::min(xend + 1, 256);
   const int mode = sh.mode;
   prof::add(prof::C_POLY_LINES, 1); prof::add(prof::C_SPAN_PIXELS, xb > xa ? static_cast<u64>(xb - xa) : 0);
+  if (prof::enabled) {
+    const u32 len = xb > xa ? static_cast<u32>(xb - xa) : 0;
+    const u32 b = len <= 4 ? 0 : len <= 8 ? 1 : len <= 16 ? 2 : len <= 32 ? 3 : len <= 64 ? 4 : len <= 128 ? 5 : 6;
+    prof::add(static_cast<prof::Counter>(prof::C_SL0 + b), 1);
+    prof::add(static_cast<prof::Counter>(prof::C_SLPX0 + b), len);
+  }
+  if (prof::enabled && prof::census_same_list) {   // work a content check would have skipped
+    prof::add(prof::C_POLY_LINES_SAME, 1);
+    prof::add(prof::C_SPAN_PIXELS_SAME, xb > xa ? static_cast<u64>(xb - xa) : 0);
+  }
   // Depth first: the pre-pass finds the pixels the span can still write
   // (against the top pixel, or the one underneath where the top carries
   // edge flags); attributes are interpolated and the span resolved only

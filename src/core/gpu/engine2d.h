@@ -157,6 +157,7 @@ private:
   // against a copy on every line, as OAM can be written mid-frame).
   alignas(16) std::array<u16, 512> oam_copy_{};
   bool oam_lists_valid_ = false;
+  bool oam_checked_ = false;        // DS_2D_CMPFRAME: OAM compared once this frame
   struct LineSprites { u8 count; u8 idx[128]; };
   std::array<LineSprites, 256> line_sprites_{};
   void rebuild_sprite_lists(const u16* oam);

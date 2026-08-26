@@ -18,6 +18,36 @@ namespace ds::gpu {
 
 namespace {
 
+// Census of the per-scanline change detection: every compare that actually
+// runs, and whether it found a difference. These sites answer "did anything
+// change" by rescanning the source each line; the counters size what a
+// write-path dirty bit would replace. Counts only executed compares -- the
+// `!have_` short circuit skips the memcmp on the first call.
+// Two measurement knobs, so both arms can be A/B'd inside one binary:
+//
+//   DS_2D_CMPPROBE=1  run each compare twice and throw the first result away.
+//                     Semantics and output are untouched by construction, so
+//                     the paired delta prices one pass of the compares. This
+//                     OVERestimates removal (the duplicate has nothing to
+//                     overlap with) -- report it as a ceiling.
+//   DS_2D_CMPFRAME=1  clear the per-line `_checked_` flags once per frame
+//                     instead of once per scanline, so each compare runs once
+//                     a frame. This is the optimistic floor for what a
+//                     write-path dirty bit could buy, and it is NOT correct in
+//                     general: a mid-frame palette or OAM write stops being
+//                     seen. Check the frames before believing the number.
+bool cmp_probe() { static const bool on = std::getenv("DS_2D_CMPPROBE") != nullptr; return on; }
+bool cmp_frame() { static const bool on = std::getenv("DS_2D_CMPFRAME") != nullptr; return on; }
+static volatile int g_cmp_sink;
+
+inline bool cmp_differs(const void* a, const void* b, size_t n, prof::Counter calls, prof::Counter diff) {
+  prof::add(calls, 1);
+  if (cmp_probe()) g_cmp_sink = std::memcmp(a, b, n) != 0;   // discarded duplicate
+  const bool d = std::memcmp(a, b, n) != 0;
+  if (d) prof::add(diff, 1);
+  return d;
+}
+
 // BGR555 palette entry -> 18-bit record. Bit 15 of a palette entry is the low
 // green bit on paletted graphics (not on direct colour, VRAM or FIFO display).
 inline Pixel rgb15_to_18(u16 c) {
@@ -222,7 +252,7 @@ const Pixel* Engine2D::std_pal18() {
   if (!pal18_checked_) {
     pal18_checked_ = true;
     const u16* src = palette();
-    if (!pal18_have_ || std::memcmp(src, pal_copy_.data(), 512) != 0) {
+    if (!pal18_have_ || cmp_differs(src, pal_copy_.data(), 512, prof::C_2D_CMP_BGPAL, prof::C_2D_CMPD_BGPAL)) {
       std::memcpy(pal_copy_.data(), src, 512);
       kern::active::palette_to_18(pal_copy_.data(), pal18_.data(), 256);
       pal18_have_ = true;
@@ -242,7 +272,7 @@ const Pixel* Engine2D::ext_pal18(u32 slot, u32 pal) {
     alignas(16) u16 tmp[256];
     const u16* src = reinterpret_cast<const u16*>(v.direct(addr, 512));
     if (!src) { for (u32 i = 0; i < 256; ++i) tmp[i] = vram().read16(v, addr + i * 2); src = tmp; }
-    if (!(extpal_have_ & (1ull << n)) || std::memcmp(src, copy, 512) != 0) {
+    if (!(extpal_have_ & (1ull << n)) || cmp_differs(src, copy, 512, prof::C_2D_CMP_BGEXT, prof::C_2D_CMPD_BGEXT)) {
       std::memcpy(copy, src, 512);
       kern::active::palette_to_18(copy, dst, 256);
       extpal_have_ |= 1ull << n;
@@ -323,7 +353,7 @@ void Engine2D::render_line(u32 line) {
   if (forced_blank_) { out_.fill(0xFF3F3F3F); return; }
 
   for (auto& p : bg_) p.any = false;
-  pal18_checked_ = false; extpal_checked_ = 0; objpal_checked_ = false; objext_checked_ = 0;
+  if (!cmp_frame() || line == 0) { pal18_checked_ = false; extpal_checked_ = 0; objpal_checked_ = false; objext_checked_ = 0; }
   if (prof::enabled) {
     prof::add(prof::C_2D_LINES, 1);
     if ((layer_enable_ & 0x10) && num_sprites_) prof::add(prof::C_2D_OBJ_LINES, 1);
@@ -743,7 +773,11 @@ void Engine2D::render_sprites(u32 line) {
   static const s32 widths[16]  = {8, 16, 8, 8, 16, 32, 8, 8, 32, 32, 16, 8, 64, 64, 32, 8};
   static const s32 heights[16] = {8, 8, 16, 8, 16, 8, 32, 8, 32, 16, 32, 8, 64, 32, 64, 8};
 
-  if (!oam_lists_valid_ || std::memcmp(oam, oam_copy_.data(), 1024) != 0) rebuild_sprite_lists(oam);
+  if (line == 0) oam_checked_ = false;
+  if (!cmp_frame() || !oam_checked_) {
+    oam_checked_ = true;
+    if (!oam_lists_valid_ || cmp_differs(oam, oam_copy_.data(), 1024, prof::C_2D_CMP_OAM, prof::C_2D_CMPD_OAM)) rebuild_sprite_lists(oam);
+  }
   // (A mosaic sprite's candidacy is still its own box; the mosaic only
   // changes which of its rows is drawn.)
   const LineSprites& ls = line_sprites_[line & 0xFF];
@@ -968,7 +1002,7 @@ const Pixel* Engine2D::obj_std_pal18() {
   if (!objpal_checked_) {
     objpal_checked_ = true;
     const u16* src = palette() + 0x100;
-    if (!objpal_have_ || std::memcmp(src, objpal_copy_.data(), 512) != 0) {
+    if (!objpal_have_ || cmp_differs(src, objpal_copy_.data(), 512, prof::C_2D_CMP_OBJPAL, prof::C_2D_CMPD_OBJPAL)) {
       std::memcpy(objpal_copy_.data(), src, 512);
       kern::active::palette_to_18(objpal_copy_.data(), objpal18_.data(), 256);
       objpal_have_ = true;
@@ -985,7 +1019,7 @@ void Engine2D::obj_ext_pal18(u32 pal) {
   alignas(16) u16 tmp[256];
   const u16* src = reinterpret_cast<const u16*>(v.direct(addr, 512));
   if (!src) { for (u32 i = 0; i < 256; ++i) tmp[i] = vram().read16(v, addr + i * 2); src = tmp; }
-  if (!(objext_have_ & (1u << pal)) || std::memcmp(src, copy, 512) != 0) {
+  if (!(objext_have_ & (1u << pal)) || cmp_differs(src, copy, 512, prof::C_2D_CMP_OBJEXT, prof::C_2D_CMPD_OBJEXT)) {
     std::memcpy(copy, src, 512);
     kern::active::palette_to_18(copy, objext18_.data() + pal * 256, 256);
     objext_have_ |= 1u << pal;

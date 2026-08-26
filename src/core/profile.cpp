@@ -13,6 +13,7 @@ namespace ds::prof {
 
 bool enabled = false;
 bool async_window = false;
+bool census_same_list = false;
 const char* const names[COUNT] = {
   "cpu arm9", "cpu arm7", "dma", "gx geometry",
   "2d bg draw", "2d obj draw", "2d window", "2d select", "2d effects", "output", "capture",
@@ -27,7 +28,19 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "cycles arm9 awake+spinning", "cycles arm7 awake+spinning", "cycles one spinning, other halted", "cycles all idle (halt or spin)",
   "host ns arm9 in spin slices", "host ns arm7 in spin slices", "host ns arm9 working", "host ns arm7 working", "cycles skipped by idle-loop detect", "idle veto: dma", "idle veto: gx busy", "idle veto: irq pending", "idle veto: pc filter", "idle veto: arm9 not a loop", "idle veto: arm7 not a loop", "idle skip allowed",
   "2d lines rendered", "2d text bg lines", "2d affine bg lines", "2d extended bg lines", "2d 3d-layer lines", "2d lines with sprites", "2d lines with windows", "2d lines with colour effect", "2d lines where an effect can apply", "2d flat lines (no effect possible)", "2d plane selects",
-  "2d lines: 0 layers", "2d lines: 1 layer", "2d lines: 2 layers", "2d lines: 3 layers", "2d lines: 4+ layers", "2d lines: 1 layer, fully opaque", "2d lines with obj pixels", "2d lines with 3d pixels", "2d lines with a window", "2d bg lines 16-colour text", "2d bg lines 256-colour text", "2d bg lines direct colour", "2d bg lines empty (transparent row)", "2d 3d-layer lines with nothing visible", "2d fast lines: backdrop only", "2d fast lines: one opaque layer", "2d full lines: effect mode live", "2d full lines: translucent 3d", "2d full lines: semi/bitmap sprites", "2d full lines: second target needed", "2d full lines: fade only", "3d spans: constant colour", "3d spans: interpolated colour", "3d band 0 ns", "3d band 1 ns", "3d band 2 ns", "3d band 3 ns", "3d band phase ns (slowest band)", "3d band ns summed (all bands)", "async probe: frames measured", "async probe: texture vram changed by next line 0", "async probe: texture vram changed by next swap", "async probe: vramcnt rewritten by next line 0", "async probe: vramcnt rewritten by next swap", "3d raster force-joined (vram touched)", "3d batches flushed", "3d spans batched", "3d pixels batched"};
+  "2d lines: 0 layers", "2d lines: 1 layer", "2d lines: 2 layers", "2d lines: 3 layers", "2d lines: 4+ layers", "2d lines: 1 layer, fully opaque", "2d lines with obj pixels", "2d lines with 3d pixels", "2d lines with a window", "2d bg lines 16-colour text", "2d bg lines 256-colour text", "2d bg lines direct colour", "2d bg lines empty (transparent row)", "2d 3d-layer lines with nothing visible", "2d fast lines: backdrop only", "2d fast lines: one opaque layer", "2d full lines: effect mode live", "2d full lines: translucent 3d", "2d full lines: semi/bitmap sprites", "2d full lines: second target needed", "2d full lines: fade only", "3d spans: constant colour", "3d spans: interpolated colour", "3d band 0 ns", "3d band 1 ns", "3d band 2 ns", "3d band 3 ns", "3d band phase ns (slowest band)", "3d band ns summed (all bands)", "async probe: frames measured", "async probe: texture vram changed by next line 0", "async probe: texture vram changed by next swap", "async probe: vramcnt rewritten by next line 0", "async probe: vramcnt rewritten by next swap", "3d raster force-joined (vram touched)", "3d batches flushed", "3d spans batched", "3d pixels batched",
+  "gx swap_buffers (new list)", "gx swaps whose list is unchanged", "gx vblanks with no swap", "gx no-swap frames rejected by the register compare",
+  "gx reject cause: dispcnt/alpha_ref", "gx reject cause: clear attrs", "gx reject cause: fog", "gx reject cause: edge/toon",
+  "gx polygons submitted (summed over swaps)", "gx vertices submitted (summed over swaps)", "gx polygons in the largest swap", "gx vertices in the largest swap",
+  "gx compare bytes if scanned in full", "gx compare bytes until the first difference", "gx compares run (counts matched)",
+  "gx compare bytes, identical lists", "gx compares, identical lists", "gx compare bytes in full, differing lists", "gx compare bytes to first difference, differing lists", "gx compares, differing lists",
+  "gx polygons in identical-list swaps", "gx vertices in identical-list swaps",
+  "3d polygon lines in identical-list frames", "3d span pixels in identical-list frames",
+  "3d spans len 1-4", "3d spans len 5-8", "3d spans len 9-16", "3d spans len 17-32", "3d spans len 33-64", "3d spans len 65-128", "3d spans len 129-256",
+  "3d span pixels in len 1-4", "3d span pixels in len 5-8", "3d span pixels in len 9-16", "3d span pixels in len 17-32", "3d span pixels in len 33-64", "3d span pixels in len 65-128", "3d span pixels in len 129-256",
+  "stores into palette space", "stores into oam space",
+  "2d compares: bg palette (512B)", "2d compares: bg ext palette (512B)", "2d compares: obj palette (512B)", "2d compares: obj ext palette (512B)", "2d compares: oam (1024B)",
+  "2d compares that differed: bg palette", "2d compares that differed: bg ext palette", "2d compares that differed: obj palette", "2d compares that differed: obj ext palette", "2d compares that differed: oam"};
 
 static_assert(sizeof(count_names) / sizeof(*count_names) == C_COUNT,
               "count_names must have exactly one entry per Counter enumerator");
