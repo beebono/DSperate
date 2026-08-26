@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
-//
-// Interpreter memory access: page-table fast path, Bus slow path, and the
-// per-access cycle cost (docs/ARCHITECTURE.md §4). `seq` marks the second and
-// later words of a burst (LDM/STM/LDRD), which cost S instead of N.
+
 #pragma once
 #include "core/cpu/cpu.h"
 #include "core/mem/bus.h"

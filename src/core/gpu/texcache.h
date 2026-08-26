@@ -13,12 +13,12 @@ namespace ds::gpu {
 //
 // Sampling a DS texture from VRAM costs a texel load, a palette load and for
 // the compressed format a palette-info load and a four-colour decode — a
-// chain of dependent loads per pixel that the in-order core cannot hide
-// (docs/ARCHITECTURE.md §5.2). DS textures are small (a few KB) and most of
-// them are reused every frame, so the cache decodes each (format, address,
-// size, palette) once into one 32-bit word per texel — the 16-bit colour the
-// sampler would return in the low half, the 5-bit alpha above it — and the
-// span kernels sample with a single load per texel.
+// chain of dependent loads per pixel that the in-order core cannot hide.
+// DS textures are small (a few KB) and most of them are reused every frame,
+// so the cache decodes each (format, address, size, palette) once into one
+// 32-bit word per texel — the 16-bit colour the sampler would return in
+// the low half, the 5-bit alpha above it — and the span kernels sample
+// with a single load per texel.
 //
 // Validity is checked by content, not by write tracking: the first time a
 // texture is used in a frame, its source bytes (texels, the compressed

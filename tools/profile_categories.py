@@ -13,7 +13,7 @@ usage:
   tools/profile_categories.py build/aarch64 report.txt [--detail] [--nm aarch64-linux-gnu-nm]
 
 JIT blocks need DS_PERF_MAP=1 at record time and the /tmp/perf-<pid>.map
-file next to perf at report time (see docs/TRACING.md).
+file next to perf at report time.
 """
 import argparse, collections, os, re, subprocess, sys
 

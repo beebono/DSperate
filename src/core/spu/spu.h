@@ -18,7 +18,7 @@ namespace ds::spu {
 // are fetched through a 32-byte per-channel FIFO like the hardware does
 // (16-byte bursts, never from the ARM7 BIOS). The integer arithmetic and its
 // truncation points follow melonDS so the output can be compared sample for
-// sample (docs/ARCHITECTURE.md §6).
+// sample.
 //
 // Output is interleaved s16 stereo at 32768 Hz in a ring the frontend
 // drains; the oldest samples are overwritten when nobody drains it.

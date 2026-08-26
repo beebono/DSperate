@@ -8,7 +8,7 @@ namespace ds::mem {
 
 // The single memory abstraction shared by the interpreter, the JIT and DMA.
 //
-// Design (docs/ARCHITECTURE.md §2): one flat table of 8-byte tagged entries,
+// Design: one flat table of 8-byte tagged entries,
 // one per 2 KB guest page, covering the whole 32-bit guest address space so that
 // no address ever needs masking before lookup. The entry stores a *pre-biased*
 // host base so that `host_base + guest_addr` addresses the byte directly; the

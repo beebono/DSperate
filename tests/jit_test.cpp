@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Recompiler vs interpreter differential test (AArch64 only; see
-// docs/ARCHITECTURE.md §6 item 2). Random straight-line ARM and Thumb
-// sequences run on two machines, one per engine, from identical state; the
-// registers, flags, consumed cycles and memory must agree afterwards. The
-// first disagreement prints the sequence, which names the broken instruction.
+// Recompiler vs interpreter differential test (AArch64 only).
+// Random straight-line ARM and Thumb sequences run on two machines,
+// one per engine, from identical state; the registers, flags, consumed cycles
+// and memory must agree afterwards. The first disagreement prints the
+// sequence, which names the broken instruction.
 #include "core/nds.h"
 #include "core/cpu/interp/interp.h"
 #include "core/cpu/jit/jit.h"

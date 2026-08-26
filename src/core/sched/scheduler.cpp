@@ -24,7 +24,7 @@ Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) {
   // Read once: a function-local static costs an acquire load per use.
   if (const char* q = std::getenv("DS_QUANTUM")) { set_quantum(std::atoll(q)); quantum_forced_ = true; }
   debug_slices_ = std::getenv("DS_DEBUG_SLICES") != nullptr;
-  idle_skip_ = std::getenv("DS_IDLE_SKIP") != nullptr;   // opt-in: see docs/IDLE-LOOP.md
+  idle_skip_ = std::getenv("DS_IDLE_SKIP") != nullptr;
   reset();
 }
 

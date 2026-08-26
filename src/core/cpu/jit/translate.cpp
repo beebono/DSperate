@@ -716,9 +716,6 @@ private:
   void emit_single(Mem m, u32 wdata, u32 dst, bool wb, u32 wb_reg, bool cdi) {
     flush_pending();
     const bool word = is_word(m);
-    // ARM7: one load from the precomputed table replaces the timing lookup and
-    // the branchy region combine (docs/performance.md §4). Issued in the same two
-    // places as the inline model, so the scheduling is unchanged.
     const int slot7 = cost7_slot(cdi, word);
     auto cost = [&] {
       if (slot7 < 0) { emit_data_cost(SCRATCH1, SCRATCH6, word, false); return; }

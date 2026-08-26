@@ -89,8 +89,7 @@ struct Block {
 // Each entry is one u64, `(native offset << 32) | key`, so a probe is a single
 // load and a tag compare.
 //
-// Size: 64 K entries, 512 KB per CPU. This is *not* the technique's sizing
-// (docs/techniques/01 §3b uses 1024 entries / 8 KB, to stay inside L1D) and
+// Size: 64 K entries, 512 KB per CPU. This is *not* the technique's sizing and
 // the difference was measured, not assumed: on the RK3566, 1024 entries costs
 // 1.6-2.7 % of frame time against 64 K, and 8 K entries is the break-even.
 // Bigger than 64 K gains nothing. See README.md, "The branch LUT", for the

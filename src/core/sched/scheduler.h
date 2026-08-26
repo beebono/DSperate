@@ -18,7 +18,7 @@ struct NDS;
 // (CpuContext::hot.cycle_budget) handed out by the scheduler: the budget is the
 // distance to the next pending event, and the engine (interpreter or JIT) runs
 // until the sign bit sets. That single check is the only scheduling test in the
-// hot path (docs/ARCHITECTURE.md §4).
+// hot path.
 //
 // The ARM7 runs at half clock; its budget is issued in ARM7 cycles and the
 // scheduler converts.
@@ -100,10 +100,10 @@ public:
   // save/restore and a fire_due that had nothing to fire).
   u64 run_until_frame();
 
-  // The same, as a state machine for the recompiler's native slice loop
-  // (docs/ARCHITECTURE.md §4): every call runs the scheduler up to the next
-  // entry into translated code and returns it; the loop enters it and calls
-  // again when the code leaves. Interpreted CPUs and DMA run inside.
+  // The same, as a state machine for the recompiler's native slice loop:
+  // every call runs the scheduler up to the next entry into translated
+  // code and returns it; the loop enters it and calls again when the
+  // code leaves. Interpreted CPUs and DMA run inside.
   SliceNext slice_next();
 
 

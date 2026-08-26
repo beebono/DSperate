@@ -2,8 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // ARM -> AArch64 recompiler: public interface. See README.md in this
-// directory for the design; docs/ARCHITECTURE.md §3 for the CpuContext
-// contract it relies on.
+// directory for the design.
 #pragma once
 #include "core/cpu/cpu.h"
 
@@ -34,8 +33,8 @@ void detach(NDS& nds);
 // RunFn entry: runs `cpu` until its budget is exhausted or it halts.
 void run(CpuContext& cpu);
 
-// Native slice loop (docs/ARCHITECTURE.md §4): the scheduler's slice state
-// machine (Scheduler::slice_next) is driven from a loop in the code arena
+// Native slice loop:the scheduler's slice state machine
+// (Scheduler::slice_next) is driven from a loop in the code arena
 // that saves the callee-saved registers once and enters translated code
 // without the per-entry frame. `lookup` is the block lookup that
 // run() does before each entry (translating or resetting the arena as

@@ -20,9 +20,7 @@ namespace ds { void (*g_census_access)(bool, u32, bool) = nullptr; }
 namespace ds::interp {
 
 // DS_CENSUS=1: count the executed guest instruction stream by shape, to size
-// recompiler work against real denominators (docs/performance.md). Counting is a
-// workload property, not a host property, so this runs on any host under
-// --interp; it is never compiled into the fast paths.
+// recompiler work against real denominators.
 namespace census {
 
 struct Counts {
@@ -42,8 +40,6 @@ struct Counts {
   u64 same_page = 0, pc_rel = 0, sp_rel = 0;
   u64 charged = 0, charged_seq = 0;   // every access that runs the cost model
   u32 last_page = 0xFFFFFFFFu;
-  // MMIO: what actually leaves the recompiler's inline page-table path
-  // (docs/performance.md -- the slow-access path is 15 % of the frame).
   u64 mmio = 0;
   std::map<u32, u64> mmio_hits;       // address -> executions
   u64 indirect = 0;                   // the dispatcher's denominator

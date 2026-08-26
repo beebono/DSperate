@@ -10,8 +10,8 @@ struct NDS;
 
 // Per-CPU state, shared by the interpreter and (on AArch64) the recompiler.
 //
-// Layout is a contract with the JIT (docs/ARCHITECTURE.md §3), so the struct is
-// `standard-layout`, offsets are static_asserted, and fields the JIT touches are
+// Layout is a contract with the JIT, so the struct is `standard-layout`,
+// offsets are static_asserted, and fields the JIT touches are
 // grouped into `JitHot` so they sit within one signed-9-bit / scaled-12-bit
 // immediate range of a single base register.
 //
@@ -64,7 +64,7 @@ struct CpuContext {
   u32 itcm_size;           // effective ITCM window (bytes), 0 when disabled
   u32 dtcm_base, dtcm_mask;// DTCM window: (addr & dtcm_mask) == dtcm_base
 
-  // ---- cycle accounting (see docs/ARCHITECTURE.md §4 and interp.cpp) ----
+  // ---- cycle accounting ----
   // Per-4 KB timing for the ARM9: [0] code cost in ARM9 cycles or 0xFF when
   // the page is instruction-cacheable; [1] data N16, [2] data N32, [3] data
   // S32 (ARM9 cycles). Per-32 KB for the ARM7: N16, S16, N32, S32.

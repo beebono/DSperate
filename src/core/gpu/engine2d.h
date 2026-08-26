@@ -39,7 +39,7 @@ enum TableId : u8 { T_BG0 = 0, T_BG1, T_BG2, T_BG3, T_OBJ_STD, T_OBJ_EXT, T_OBJ_
 
 // One 2D engine (A at 0x04000000, B at 0x04001000).
 //
-// Rendering is a deferred-palette line pipeline (docs/ARCHITECTURE.md §5.1):
+// Rendering is a deferred-palette line pipeline:
 // every enabled background is rasterised into a u16 line of palette indices
 // or RGB555 (bit 15 = opaque), sprites are pre-rendered one line ahead into
 // their own u16 line with an attribute byte, then a window plane and a

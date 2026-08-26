@@ -269,7 +269,6 @@ private:
   // is all per-polygon (render_polygon_setup_spans_asm_1x,
   // render_polygon_interpolate_edges, render_polygon_edge_interpolate_*) and
   // its scanline loop is pointer arithmetic against the array those produce.
-  // See docs/performance.md s3 and s7.
   struct LineSpan {
     s32 xstart, xend;        // span endpoints, the right-edge push-left applied
     s32 wl, wr, zl, zr;      // endpoint w / z, swapped-edge order applied

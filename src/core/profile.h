@@ -66,10 +66,6 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
 // branches that each added a counter produces.
 extern const char* const count_names[];
 
-// The 3D raster runs on several band threads (docs/THREADED-RASTER.md), so the
-// accumulators are per thread: a single set of globals put every worker's
-// `+=` on one cache line, and the ping-pong showed up as time charged to the
-// stage being measured. Each thread owns an Accum; `report` sums them.
 struct Accum {
   u64 ns[COUNT] = {};
   u64 count[C_COUNT] = {};

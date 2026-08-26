@@ -5,9 +5,9 @@
 #include "core/gpu/engine2d.h"
 
 // Line-stage kernels of the 2D pipeline and the output stage, as free
-// functions over plane pointers (docs/ARCHITECTURE.md §5): every stage is a
-// straight pass over the line with no data-dependent control flow, so each
-// has a portable C++ reference (kernels_ref.cpp) and, on AArch64, a NEON twin
+// functions over plane pointers: every stage is a straight pass over
+// the line with no data-dependent control flow, so each has a portable
+// C++ reference (kernels_ref.cpp) and, on AArch64, a NEON twin
 // (kernels_neon.cpp) with the same name and signature. `kern::active` is the
 // one the renderer calls; tests/kernels_test.cpp diffs the two vector by
 // vector, and the AArch64 frame dumps are compared with the host's.

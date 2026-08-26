@@ -12,7 +12,7 @@ namespace {
 
 // Main-RAM burst patterns (unit costs in system cycles; 0 ends the pattern).
 // Generated from the run-length description of the hardware behaviour as
-// measured by the melonDS project (GPLv3), see docs/ARCHITECTURE.md §4.
+// measured by the melonDS project (GPLv3).
 struct Burst { u8 data[256]; };
 Burst make(std::initializer_list<std::pair<u8, u16>> rle) {
   Burst b{}; u32 i = 0;

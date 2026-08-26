@@ -4,11 +4,6 @@
 // Idle-loop detection: proving that a CPU sitting in a polling loop can be
 // skipped to the next scheduled event instead of interpreted or recompiled.
 //
-// The scheduler already runs long slices when *both* CPUs are halted, but a
-// game that polls a flag instead of using HALT keeps its CPU awake and costs
-// full price for doing nothing. Measured on gameplay scenes, that is a third
-// of all emulated cycles in some titles (docs/IDLE-LOOP.md).
-//
 // A loop is skippable only when executing N iterations is indistinguishable
 // from executing none, so the analysis demands all of:
 //

@@ -1104,7 +1104,7 @@ void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const
   // planes. It is now done inside span_shade, a vector at a time, so the
   // texels go gather -> registers -> shaded record without a round trip
   // through memory: it was 8 bytes a pixel written and 8 read back, on a
-  // pipeline that measures memory-bound (refs/docs/render/RENDER_PLAN_V3 §5).
+  // pipeline that measures memory-bound.
 }
 
 // A texel vector unpacked to the four 6-bit byte planes the shader wants:
@@ -1622,9 +1622,6 @@ void Renderer3D::render_chunk(s32 ya, s32 yb) {
         render_shadow_mask_line(e, y);
       }
     } else if (ry1 > ry0) {
-      // Derive the whole run's geometry and endpoint attributes first, then
-      // stage line by line. The edges are walked once for the run instead of
-      // being re-derived inside each scanline (docs/performance.md s7).
       precompute_lines(e, ry0, ry1);
       for (s32 y = ry0; y < ry1; ++y) {
         line_touched_[y] = true;
