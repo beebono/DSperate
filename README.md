@@ -1,6 +1,6 @@
 # DSperate (Nintendo DS Emulator)
 
-AI DISCLAIMER: Claude Code is used here. A lot. I am not smart enough to keep track
+AI DISCLAIMER: Agentic coding is used here. A lot. I am not smart enough to keep track
 of all of this with the wet electric meat lump that sits inside my skull.
 
 An attempt at a Nintendo DS emulator that reimplements DraStic JIT + NEON Rendering
