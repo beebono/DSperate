@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/gpu3d.h"
 #include "core/nds.h"
+#include "core/profile.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -25,6 +26,136 @@ constexpr u8 CMD_PARAMS[256] = {
   3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
   // 0x80-0xFF: none
 };
+
+// ---- census (DS_CENSUS_GX=1) -----------------------------------------------
+// Is the polygon list a game submits on a SWAP_BUFFERS actually different from
+// the one we last rasterised? `render_identical_` below only ever answers "no
+// swap happened at all", so a game that re-runs its render loop and resubmits
+// byte-identical geometry is fully re-rasterised. This hash sizes what a
+// content comparison would recover. It walks every polygon and every vertex,
+// so it is off unless asked for.
+//
+// The vertex indices in Polygon::vtx are absolute into the double-buffered
+// vertex RAM and therefore alternate with the bank -- hash the vertex records
+// they point at, never the indices themselves.
+bool census_gx() { static const bool on = std::getenv("DS_CENSUS_GX") != nullptr; return on; }
+
+inline void fnv(u64& h, u64 v) { h = (h ^ v) * 0x100000001B3ull; }
+
+u64 census_list_hash(const Polygon* const* polys, u32 n, const Vertex* vram) {
+  u64 h = 0xCBF29CE484222325ull;
+  fnv(h, n);
+  for (u32 i = 0; i < n; ++i) {
+    const Polygon& p = *polys[i];
+    fnv(h, p.nverts); fnv(h, p.attr); fnv(h, p.texparam); fnv(h, p.texpal);
+    fnv(h, p.wbuffer); fnv(h, p.degenerate); fnv(h, p.facing); fnv(h, p.translucent);
+    fnv(h, p.shadow_mask); fnv(h, p.shadow);
+    fnv(h, p.vtop); fnv(h, p.vbot);
+    fnv(h, static_cast<u32>(p.ytop)); fnv(h, static_cast<u32>(p.ybot));
+    fnv(h, static_cast<u32>(p.xtop)); fnv(h, static_cast<u32>(p.xbot));
+    fnv(h, p.sort_key);
+    for (u32 v = 0; v < p.nverts && v < 10; ++v) {
+      fnv(h, static_cast<u32>(p.z[v])); fnv(h, static_cast<u32>(p.w[v]));
+      const Vertex& vt = vram[p.vtx[v]];
+      for (int c = 0; c < 4; ++c) fnv(h, static_cast<u32>(vt.pos[c]));
+      for (int c = 0; c < 3; ++c) fnv(h, static_cast<u32>(vt.col[c]));
+      for (int c = 0; c < 3; ++c) fnv(h, static_cast<u32>(vt.fcol[c]));
+      fnv(h, static_cast<u16>(vt.tex[0])); fnv(h, static_cast<u16>(vt.tex[1]));
+      fnv(h, vt.clipped);
+      fnv(h, static_cast<u32>(vt.sx)); fnv(h, static_cast<u32>(vt.sy));
+    }
+  }
+  return h;
+}
+
+// Would a straight comparison against the previous frame beat hashing? The
+// polygon and vertex RAM are already double-buffered, so last frame's list is
+// still resident in the other bank -- a compare needs no copy and no saved
+// state, and unlike a hash it can stop at the first difference. This models
+// that: bytes scanned before the first mismatch against bytes if scanned in
+// full. Measurement only; it does the naive byte walk on purpose.
+//
+// Polygon::vtx (bytes 0-19) holds ABSOLUTE vertex indices, so the two banks
+// differ there by vram_base() on every polygon -- compare it bias-corrected
+// and the rest of the struct flat.
+// DS_R3D_SKIPDUP=1: keep the previous rendered frame when a SWAP_BUFFERS
+// submits the same geometry as the last one. The polygon and vertex RAM are
+// double-buffered, so the previous list is still in the other bank -- this is
+// an exact comparison, not a hash, so there is no collision risk, and it stops
+// at the first difference (measured: 1-20% of the data on four of five scenes).
+//
+// It must walk fields rather than memcmp the arrays: vtx/z/w are fixed
+// 10-element slots of which only `nverts` are written, so the tails hold stale
+// data, and vtx holds bank-biased absolute indices.
+bool skip_dup() { static const bool on = std::getenv("DS_R3D_SKIPDUP") != nullptr; return on; }
+
+bool lists_equal(const Polygon* a, const Polygon* b, u32 npoly, u32 abase, u32 bbase, const Vertex* vram) {
+  for (u32 i = 0; i < npoly; ++i) {
+    const Polygon& p = a[i]; const Polygon& q = b[i];
+    if (p.nverts != q.nverts) return false;
+    if (std::memcmp(&p.attr, &q.attr, 12) != 0) return false;          // attr, texparam, texpal
+    if (p.wbuffer != q.wbuffer) return false;
+    if (std::memcmp(&p.degenerate, &q.degenerate, 5) != 0) return false;
+    if (std::memcmp(&p.vtop, &q.vtop, 28) != 0) return false;          // vtop..sort_key
+    const u32 nv = p.nverts <= 10 ? p.nverts : 10;
+    if (std::memcmp(p.z, q.z, nv * 4) != 0) return false;
+    if (std::memcmp(p.w, q.w, nv * 4) != 0) return false;
+    for (u32 v = 0; v < nv; ++v) {
+      if (p.vtx[v] - abase != q.vtx[v] - bbase) return false;
+      const Vertex& s0 = vram[p.vtx[v]]; const Vertex& t0 = vram[q.vtx[v]];
+      if (std::memcmp(s0.pos, t0.pos, 16) != 0) return false;
+      if (std::memcmp(s0.col, t0.col, 12) != 0) return false;
+      if (std::memcmp(s0.tex, t0.tex, 4) != 0) return false;
+      if (s0.clipped != t0.clipped) return false;
+      if (std::memcmp(&s0.sx, &t0.sx, 8) != 0) return false;
+      if (std::memcmp(s0.fcol, t0.fcol, 12) != 0) return false;
+    }
+  }
+  return true;
+}
+
+struct CmpModel { u64 early, full; };
+
+// NOTE: the polygon array is NOT flat-comparable. `vtx`, `z` and `w` are
+// fixed 10-element slots of which only `nverts` are ever written (see
+// submit_polygon), so the tails hold stale data from whatever polygon last
+// occupied the slot. A straight memcmp over pram_ mismatches on that garbage
+// immediately. Compare the live fields only -- the same set the hash covers,
+// in the same order.
+CmpModel census_compare(const Polygon* a, const Polygon* b, u32 npoly, u32 abase, u32 bbase,
+                        const Vertex* va, const Vertex* vb) {
+  CmpModel m{0, 0};
+  bool done = false;
+  auto eq = [&](const void* x, const void* y, u32 n) {
+    m.full += n;
+    if (done) return;
+    m.early += n;
+    if (std::memcmp(x, y, n) != 0) done = true;
+  };
+  for (u32 i = 0; i < npoly; ++i) {
+    const Polygon& p = a[i]; const Polygon& q = b[i];
+    eq(&p.nverts, &q.nverts, 4);
+    eq(&p.attr, &q.attr, 12);                       // attr, texparam, texpal
+    eq(&p.wbuffer, &q.wbuffer, 1);
+    eq(&p.degenerate, &q.degenerate, 5);            // the five flag bytes
+    eq(&p.vtop, &q.vtop, 28);                       // vtop..sort_key, contiguous
+    const u32 nv = p.nverts == q.nverts && p.nverts <= 10 ? p.nverts : 0;
+    eq(p.z, q.z, nv * 4);
+    eq(p.w, q.w, nv * 4);
+    for (u32 v = 0; v < nv; ++v) {
+      m.full += 2;
+      if (!done) { m.early += 2; if (p.vtx[v] - abase != q.vtx[v] - bbase) done = true; }
+      const Vertex& s0 = va[p.vtx[v]]; const Vertex& t0 = vb[q.vtx[v]];
+      eq(s0.pos, t0.pos, 16);
+      eq(s0.col, t0.col, 12);
+      eq(s0.tex, t0.tex, 4);
+      eq(&s0.clipped, &t0.clipped, 1);
+      eq(&s0.sx, &t0.sx, 8);                        // sx, sy contiguous
+      eq(s0.fcol, t0.fcol, 12);
+    }
+  }
+  return m;
+}
 
 inline void mtx_identity(s32* m) {
   for (int i = 0; i < 16; ++i) m[i] = 0;
@@ -863,6 +994,14 @@ void Gpu3D::vblank() {
                  dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_.level(), gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
   if (!geometry_on_) return;
   if (rendering_on_) {
+    // The render registers this frame against the ones the last render used.
+    // Both the no-swap path and the duplicate-list skip need this answer.
+    const bool same_disp  = rstate_.dispcnt == dispcnt_ && rstate_.alpha_ref == alpha_ref_;
+    const bool same_clear = rstate_.clear_attr1 == clear_attr1_ && rstate_.clear_attr2 == clear_attr2_;
+    const bool same_fog   = rstate_.fog_color == fog_color_ && rstate_.fog_offset == fog_offset_ * 0x200u
+      && std::equal(fog_density_.begin(), fog_density_.end(), rstate_.fog_density.begin() + 1);
+    const bool same_et    = rstate_.edge == edge_ && rstate_.toon == toon_;
+    const bool same_regs  = same_disp && same_clear && same_fog && same_et;
     if (flush_request_) {
       if (num_polygons_) {
         // Opaque polygons first, then translucent; each group sorted by
@@ -875,15 +1014,66 @@ void Gpu3D::vblank() {
                          [](const Polygon* a, const Polygon* b) { return a->sort_key < b->sort_key; });
       }
       render_count_ = num_polygons_;
-      render_identical_ = false;
+      // A swap that resubmits the same geometry with the same render state
+      // produces the same picture: keep the previous output (the rasteriser
+      // still checks its textures itself).
+      render_identical_ = skip_dup() && same_regs && rendered_before_
+        && num_polygons_ == prev_swap_polys_ && num_vertices_ == prev_swap_verts_
+        && lists_equal(&pram_[bank_ * PRAM_BANK], &pram_[(bank_ ^ 1) * PRAM_BANK], num_polygons_,
+                       bank_ * VRAM_BANK, (bank_ ^ 1) * VRAM_BANK, vram_.data());
+      prev_swap_polys_ = num_polygons_; prev_swap_verts_ = num_vertices_; rendered_before_ = true;
+      if (prof::enabled) {
+        prof::add(prof::C_GX_SWAP, 1);
+        // Sums, plus a running max kept by adding the shortfall (vblank is
+        // always the emulation thread, so this accumulator is the only one).
+        prof::add(prof::C_GX_SWAP_POLYS, num_polygons_);
+        prof::add(prof::C_GX_SWAP_VERTS, num_vertices_);
+        if (num_polygons_ > prof::count(prof::C_GX_SWAP_MAXPOLYS))
+          prof::add(prof::C_GX_SWAP_MAXPOLYS, num_polygons_ - prof::count(prof::C_GX_SWAP_MAXPOLYS));
+        if (num_vertices_ > prof::count(prof::C_GX_SWAP_MAXVERTS))
+          prof::add(prof::C_GX_SWAP_MAXVERTS, num_vertices_ - prof::count(prof::C_GX_SWAP_MAXVERTS));
+        if (census_gx()) {
+          const u64 h = census_list_hash(render_polys_.data(), render_count_, vram_.data());
+          prof::census_same_list = census_have_prev_ && h == census_prev_hash_;
+          if (prof::census_same_list) {
+            prof::add(prof::C_GX_SWAP_SAME_CONTENT, 1);
+            // How much geometry is actually in the frames we could skip?
+            prof::add(prof::C_GX_SAME_POLYS, num_polygons_);
+            prof::add(prof::C_GX_SAME_VERTS, num_vertices_);
+          }
+          census_prev_hash_ = h; census_have_prev_ = true;
+          // The compare alternative, on the same frames.
+          if (census_have_prev_counts_ && num_polygons_ == census_prev_polys_ && num_vertices_ == census_prev_verts_) {
+            const u32 other = bank_ ^ 1;
+            const CmpModel m = census_compare(&pram_[bank_ * PRAM_BANK], &pram_[other * PRAM_BANK], num_polygons_,
+                                              bank_ * VRAM_BANK, other * VRAM_BANK, vram_.data(), vram_.data());
+            prof::add(prof::C_GX_CMP_RUNS, 1);
+            prof::add(prof::C_GX_CMP_FULL, m.full);
+            prof::add(prof::C_GX_CMP_EARLY, m.early);
+            // Split by outcome: an identical list must be scanned in full, a
+            // differing one stops early -- averaging the two hides both.
+            if (m.early == m.full) { prof::add(prof::C_GX_CMP_RUNS_SAME, 1); prof::add(prof::C_GX_CMP_FULL_SAME, m.full); }
+            else { prof::add(prof::C_GX_CMP_RUNS_DIFF, 1); prof::add(prof::C_GX_CMP_FULL_DIFF, m.full); prof::add(prof::C_GX_CMP_EARLY_DIFF, m.early); }
+          }
+          census_prev_polys_ = num_polygons_; census_prev_verts_ = num_vertices_; census_have_prev_counts_ = true;
+        }
+      }
     } else {
       // Same polygon list as last time; identical output if the render
       // registers match what that render used (melonDS's RenderFrameIdentical).
-      render_identical_ = rstate_.dispcnt == dispcnt_ && rstate_.alpha_ref == alpha_ref_
-        && rstate_.clear_attr1 == clear_attr1_ && rstate_.clear_attr2 == clear_attr2_
-        && rstate_.fog_color == fog_color_ && rstate_.fog_offset == fog_offset_ * 0x200u
-        && rstate_.edge == edge_ && rstate_.toon == toon_
-        && std::equal(fog_density_.begin(), fog_density_.end(), rstate_.fog_density.begin() + 1);
+      // Split by register group so the census can say which one rejects a
+      // frame -- the conjunction is unchanged, only its short-circuiting is.
+      render_identical_ = same_regs;
+      if (prof::enabled) {
+        prof::add(prof::C_GX_NOSWAP, 1);
+        if (!render_identical_) {
+          prof::add(prof::C_GX_NOSWAP_REGS_DIFFER, 1);
+          if (!same_disp)  prof::add(prof::C_GX_RD_DISPCNT, 1);
+          if (!same_clear) prof::add(prof::C_GX_RD_CLEAR, 1);
+          if (!same_fog)   prof::add(prof::C_GX_RD_FOG, 1);
+          if (!same_et)    prof::add(prof::C_GX_RD_EDGETOON, 1);
+        }
+      }
     }
     rstate_.dispcnt = dispcnt_;
     rstate_.alpha_ref = alpha_ref_;

@@ -201,6 +201,12 @@ private:
   u32 render_count_ = 0;
   bool render_identical_ = false;
   u32 flush_request_ = 0, flush_attr_ = 0;
+  u64 census_prev_hash_ = 0;          // DS_CENSUS_GX: hash of the last submitted list
+  bool census_have_prev_ = false;
+  u32 census_prev_polys_ = 0, census_prev_verts_ = 0;
+  bool census_have_prev_counts_ = false;
+  u32 prev_swap_polys_ = 0, prev_swap_verts_ = 0;   // DS_R3D_SKIPDUP: the other bank's list size
+  bool rendered_before_ = false;
 
   Vertex* cur_vram() { return &vram_[bank_ * VRAM_BANK]; }
   Polygon* cur_pram() { return &pram_[bank_ * PRAM_BANK]; }
