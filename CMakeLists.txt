@@ -50,6 +50,19 @@ endforeach()
 # so there is no safety traded for the speed. Do not "upgrade" this to -strong.
 add_compile_options(-fstack-protector)
 
+# Link-time optimisation. Measured on the RK3566 against the five replay
+# scenes, 8 paired interleaved reps of 1800 frames each, two binaries:
+# -2.97 % (dbori), -2.78 % (sm64), -2.15 % (mlbis), -1.65 % (etody),
+# -0.65 % (meteos) of frame time, faster in 39 of 40 reps, frames
+# byte-identical on all five. The binary is 625 KB smaller.
+#
+# An earlier session built LTO, read it as "slower", and filed it unresolved --
+# from the same under-powered sequential sweep that also mis-called the stack
+# protector. A null from three unpaired reps is not a result. It matters here
+# because the DraStic gap is ~4.5x *instruction volume* (docs/profile-vs-drastic.md),
+# and cross-TU inlining removes instructions in every subsystem at once.
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 add_subdirectory(src/core)
