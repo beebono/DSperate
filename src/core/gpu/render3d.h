@@ -65,8 +65,12 @@ private:
   // per line, which at RING 16 is 99 KB -- three times the 32-36 KB DraStic
   // sizes its bins to, and well past the A55's 32 KB L1D. RING 8 halves it.
   // Must be a power of two (row_of masks with it) and at least CHUNK + 2.
+  //
+  // 8 is the default because it measured faster on every scene: -0.30 % to
+  // -1.64 % of frame time, mlbis over-budget frames -9.03 %, output
+  // byte-identical. 16 remains selectable for comparison.
 #ifndef DS_R3D_RING
-#define DS_R3D_RING 16
+#define DS_R3D_RING 8
 #endif
   static constexpr int W = 258, RING = DS_R3D_RING, CHUNK = RING - 2, RSIZE = W * RING;
   static_assert((RING & (RING - 1)) == 0, "RING must be a power of two");
