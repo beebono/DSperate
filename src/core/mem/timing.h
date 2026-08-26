@@ -23,7 +23,7 @@ enum Region : u8 {
 //   [1] data N16, [2] data N32, [3] data S32, in ARM9 cycles.
 class Timing {
 public:
-  // ARM7 precomputed data-cost table (docs/plan-cpu.md §A). The ARM7 rule --
+  // ARM7 precomputed data-cost table (docs/performance.md §4). The ARM7 rule --
   // costs add when code and data share a region, overlap into a max when they
   // do not -- has exactly one dynamic input, the data page; `nc`, `cdi`,
   // `code_main` and the access width are all known when a block is translated.

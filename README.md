@@ -24,6 +24,9 @@ plays it.
 The 2D line stages exist as portable C++ with a NEON twin of the same name and
 signature (`src/core/gpu/kernels_ref.cpp`, `kernels_neon.cpp`, diffed against
 each other by `tests/kernels_test.cpp`); the 3D rasteriser is threaded by band.
+[docs/performance.md](docs/performance.md) is the single reconciled account of
+where the time goes, what has been measured, and what is next.
+
 [docs/techniques](docs/techniques) documents the DraStic techniques being
 reimplemented and the measurements behind them;
 [src/core/cpu/jit/README.md](src/core/cpu/jit/README.md) describes the

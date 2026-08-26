@@ -717,7 +717,7 @@ private:
     flush_pending();
     const bool word = is_word(m);
     // ARM7: one load from the precomputed table replaces the timing lookup and
-    // the branchy region combine (docs/plan-cpu.md §A). Issued in the same two
+    // the branchy region combine (docs/performance.md §4). Issued in the same two
     // places as the inline model, so the scheduling is unchanged.
     const int slot7 = cost7_slot(cdi, word);
     auto cost = [&] {

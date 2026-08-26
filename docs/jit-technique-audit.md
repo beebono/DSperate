@@ -1,15 +1,22 @@
 # The recompiler, checked against the techniques
 
-> **Superseded ranking, 2026-08-25.** This document's conclusion — "nothing
-> left in the recompiler is worth more than about 2 %, and the 3D rasteriser is
-> ~35 % of the frame" — is wrong, and it sent a whole session at the renderer.
-> Measured against DraStic on the identical workload, **our CPU emulation is
-> 5.2x theirs and is 50 % of our frame, while our renderer already matches
-> their 2D and beats their 3D**. The frame-share numbers below could not see it:
-> `perf` samples all four threads (inflating the threaded renderer against
-> serial CPU work) and CPU cost never aggregates under any one symbol.
-> The *findings* in sections A-F are sound and are now the plan — see
-> [plan-cpu.md](plan-cpu.md). Only the ranking was wrong.
+> **Superseded ranking, corrected twice.** This document's conclusion —
+> "nothing left in the recompiler is worth more than about 2 %, and the 3D
+> rasteriser is ~35 % of the frame" — is wrong, and it sent a whole session at
+> the renderer. A first correction over-swung the other way ("the whole gap is
+> CPU; the renderer already beats theirs"), which was an artifact of measuring
+> 300 boot frames.
+>
+> The settled answer is in [performance.md](performance.md): the gap is ~4.5x
+> **instruction volume** spread across every subsystem, of which the 3D raster
+> is 51 % and the CPU group 26 %. The frame-share numbers below could not see
+> any of it — `perf` samples all four threads, and CPU cost never aggregates
+> under any one symbol.
+>
+> The **findings** in sections A-F are sound and still stand; only the ranking
+> was wrong. In particular "36.8 bytes / ~9 host instructions per guest
+> instruction" and "23.4 host cycles against DraStic's 4.6" are the numbers
+> that turned out to frame everything, years before they were believed.
 
 This is an audit of **our** JIT (`src/core/cpu/jit/`) against the techniques
 described in [techniques/01-arm-to-aarch64-jit.md](techniques/01-arm-to-aarch64-jit.md).

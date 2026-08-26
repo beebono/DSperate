@@ -36,7 +36,7 @@ endif()
 # -7.75 % (dbori) of frame time, faster in 40 of 40 reps, frames byte-identical
 # on every scene. The win is renderer-side (2D select -8 %, 3D spans -5 %,
 # geometry -9 %); CPU barely moves, because the recompiler emits its own code
-# and compiler flags cannot reach it. See docs/plan-cpu.md.
+# and compiler flags cannot reach it. See docs/performance.md.
 foreach(cfg RELEASE RELWITHDEBINFO)
   string(REPLACE "-O2" "-O3" CMAKE_C_FLAGS_${cfg}   "${CMAKE_C_FLAGS_${cfg}}")
   string(REPLACE "-O2" "-O3" CMAKE_CXX_FLAGS_${cfg} "${CMAKE_CXX_FLAGS_${cfg}}")
@@ -59,7 +59,7 @@ add_compile_options(-fstack-protector)
 # An earlier session built LTO, read it as "slower", and filed it unresolved --
 # from the same under-powered sequential sweep that also mis-called the stack
 # protector. A null from three unpaired reps is not a result. It matters here
-# because the DraStic gap is ~4.5x *instruction volume* (docs/profile-vs-drastic.md),
+# because the DraStic gap is ~4.5x *instruction volume* (docs/performance.md),
 # and cross-TU inlining removes instructions in every subsystem at once.
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
