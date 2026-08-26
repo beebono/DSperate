@@ -56,21 +56,29 @@ translated guest code, theirs is 87.2 % / 9.7 %. This is not a bloated JIT. The
 excess is spread across our own C++, which is exactly the uniform-across-
 subsystems signature that made this hard to find.
 
-### The headline is measured against a contaminated DraStic run — re-measure it
+### 4.5x or 3.0x? The two instruments disagree — settle it on device
 
-Both numbers in the table above come from `perf stat` on
-`drastic-sym --benchmark 300 --input-playback sm64ds`, and **that invocation is
-wrong twice over**: the bare name fails to open the recording (DraStic then
-free-runs the ROM from direct boot, rc=0), and `--benchmark` replays from
-savestates that do not exist. §6 records that using either inflated the
-instruction ratio by ~50 %.
+An exact host-side count (below) puts the core ratio at **3.04x**, against the
+**~4.5x** in the table above. Both are defensible and they are not measuring
+quite the same thing:
 
-An exact host-side count (2026-08-26, qemu + `libhotblocks`, per-symbol, both
-emulators single-threaded, DraStic's frameskip disabled and libSDL2 excluded)
-puts the core ratio at **3.04x**, not 4.5x — and 4.5 / 1.5 = 3.0, exactly the
-inflation §6 predicts. **Treat 4.31x and 5.5 M/frame as unverified** until the
-device run is repeated with `--input-playback input_record/<name>.ir` and no
-`--benchmark`.
+- **Their 5.5 M/frame was *implied*, not counted.** It comes from IPC and cycle
+  ratios, and one of the two routes that "independently" agree
+  (`ratio_time x ratio_IPC`) reuses the time ratio it is checking. qemu counts
+  DraStic's emulation code directly at **7.23 M/frame** — 31 % higher, and that
+  alone moves 4.5x to ~3.4x.
+- **The recordings differ.** The device pass used a 1805-frame DraStic replay;
+  the qemu pass used the 2143-frame `sm64ds.rec`. Neither matches our 1800-frame
+  `sm64.dsin` frame for frame.
+- **Thread counts differ.** Device: both threaded. qemu: both single-threaded,
+  which for us removes the band split entirely.
+
+`/storage/dsperate/pmu.sh` on 192.168.1.20 has been corrected — it had kept the
+discarded first-pass invocation (`--benchmark 300 --input-playback sm64ds`,
+wrong twice over) even though the reported numbers were redone without it. It
+now aborts if DraStic prints `couldn't open`, reports the emulated frame count,
+and defaults to `input_record/sm64scene.ir` (2143 frames, installed alongside).
+Re-running it is what settles this.
 
 ### Exact counts, per symbol (qemu, 2026-08-26)
 
@@ -434,14 +442,34 @@ building it, each of which silently produced a wrong answer first:
 the launch line, so two DraStic runs wrote to one output file — the same
 double-run contamination as the earlier `.25` sweep, from a new cause.
 
-**Match the workload, and check the tool actually did what you asked.**
-DraStic's `--input-playback` takes a **path including the `.ir` extension**
-(`input_record/sm64ds.ir`); given a bare name it prints `Couldn't open ... for
-input playback.` **and carries on running the ROM free from direct boot** —
-rc=0, no failure. Separately, `--benchmark` loads per-phase savestates that do
-not exist, so it runs direct-boot ablations across 7 phases. Using either by
-mistake inflated our measured instruction ratio by ~50 %. Grep every run for
-`couldn.t open`. Plain `--input-playback <path>.ir` terminates on its own.
+**The one DraStic invocation that is correct** — everything else on this page
+depends on it, and it has now gone wrong twice:
+
+```
+cd /storage/drabench
+SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+  ./drastic-sym --input-playback input_record/sm64scene.ir "/roms/nds/Super Mario 64 DS.nds"
+```
+
+- **The path needs the directory and the extension.** Given a bare name DraStic
+  prints `Couldn't open ... for input playback.` and **carries on running the
+  ROM free from direct boot** — rc=0, no failure, wrong workload.
+- **Never `--benchmark`.** It loads per-phase savestates that do not exist, so
+  it runs direct-boot ablations across 7 phases instead of the replay.
+- Either mistake inflates the measured instruction ratio by ~50 %. **Grep every
+  run for `couldn.t open`** — `/storage/dsperate/pmu.sh` now aborts on it.
+- **`grep -c '^vf ticks'` is the exact emulated frame count**
+  (`system_frame_sync` prints it unconditionally, once per frame). Check it
+  against the recording: the last record’s frame number is where playback ends.
+- Set `frameskip_type = 0` in `config/drastic.cfg` for any measured run. It
+  matters enormously off-device (see the qemu trap above) and costs nothing on
+  device.
+- Plain `--input-playback <path>.ir` terminates on its own.
+
+Recordings are 10-byte records (u32 frame, u32 buttons, u8 touch x, u8 touch y).
+`input_record/sm64ds.ir` is `sm64.rec` renamed and runs **4205** frames from
+boot; `sm64scene.ir` is the 230-byte `sm64ds.rec` and runs **2143**, which is
+the one to use against our 1800-frame scene.
 
 **libSDL2's share depends on the mode**: 50.6 % of DraStic's process
 instructions under playback, 0.37 % under `--benchmark`. Renormalise per run,
