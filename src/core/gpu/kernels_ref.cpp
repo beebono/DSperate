@@ -294,6 +294,13 @@ void output_line(const Pixel* src, u16 reg, u32* dst) {
   expand_colours(dst);
 }
 
+void scale_row(const u32* src, const u16* xrun, u32* dst) {
+  for (u32 s = 0; s < 256; ++s) {
+    const u32 c = src[s];
+    for (u32 x = xrun[s]; x < xrun[s + 1]; ++x) dst[x] = c;
+  }
+}
+
 
 // ---- 3D span stages ------------------------------------------------------------
 // These are Renderer3D::Interp<0> (render3d.cpp) applied to every pixel of a

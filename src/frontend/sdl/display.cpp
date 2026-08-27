@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace ds::sdl {
 
@@ -14,6 +16,31 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   win_ = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
+
+  // Per-scanline scaling renders into the window surface, which cannot
+  // coexist with an SDL_Renderer on the same window, so it is decided here
+  // and the renderer is skipped entirely.
+  //
+  // On by default: against the software renderer it removes SDL's texture
+  // upload, scaled blit and surface copy in favour of one write (etody, both
+  // boards: ~15 % less emu+present work per frame, and the shoulders of the
+  // over-budget clusters with it). --accel keeps the GLES renderer and
+  // --linear the renderer's smooth scaling, both of which need draw();
+  // DS_SCANLINE_SCALE=0/1 overrides either way.
+  const char* sl = std::getenv("DS_SCANLINE_SCALE");
+  scaled_ = sl && *sl ? std::strcmp(sl, "0") != 0 : !accel && !linear;
+  if (scaled_) {
+    if (accel) std::fprintf(stderr, "DS_SCANLINE_SCALE renders on the CPU; --accel ignored\n");
+    if (!SDL_GetWindowSurface(win_)) {
+      std::fprintf(stderr, "window surface unavailable (%s); using the framebuffer path\n", SDL_GetError());
+      scaled_ = false;
+    } else {
+      layout();
+      build_scale();
+      std::fprintf(stderr, "video: window surface, %s driver, scanline scaling\n", SDL_GetCurrentVideoDriver());
+      return true;
+    }
+  }
 
   // Software by default, which is not the obvious choice and was measured.
   //
@@ -65,6 +92,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
 }
 
 void Display::close() {
+  surf_ = nullptr;   // owned by SDL, freed with the window
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
   if (win_) { SDL_DestroyWindow(win_); win_ = nullptr; }
@@ -76,7 +104,7 @@ void Display::close() {
 // screen.
 void Display::layout() {
   int w = 0, h = 0;
-  SDL_GetRendererOutputSize(ren_, &w, &h);
+  if (!out_size(w, h)) return;
   const int sw = static_cast<int>(SCREEN_W), sh = static_cast<int>(SCREEN_H);
   const bool across = layout_ == Layout::Horizontal;
   const int cols = across ? 2 : 1, rows = across ? 1 : 2;
@@ -100,6 +128,8 @@ void Display::toggle_fullscreen() {
   fullscreen_ = !fullscreen_;
   SDL_SetWindowFullscreen(win_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
   layout();
+  build_scale();
+  margins_dirty_ = true;
 }
 
 bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
@@ -111,6 +141,92 @@ bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
     return true;
   }
   return false;
+}
+
+// ---- per-scanline scaling ---------------------------------------------------
+
+// The renderer's output size, or the window surface's when there is no
+// renderer. Both are in pixels, which is what the views are in.
+bool Display::out_size(int& w, int& h) const {
+  if (ren_) return SDL_GetRendererOutputSize(ren_, &w, &h) == 0;
+  if (!win_) return false;
+  SDL_Surface* s = SDL_GetWindowSurface(win_);
+  if (!s) return false;
+  w = s->w; h = s->h;
+  return true;
+}
+
+void Display::build_scale() {
+  if (!scaled_ || !win_) return;
+  surf_ = SDL_GetWindowSurface(win_);        // recreated by SDL on resize
+  if (!surf_) { scaled_ = false; return; }
+  if (surf_->format->BytesPerPixel != 4) {
+    std::fprintf(stderr, "window surface is %d bpp, not 32; using the framebuffer path\n",
+                 surf_->format->BytesPerPixel);
+    scaled_ = false;
+    return;
+  }
+  scaled_w_ = surf_->w; scaled_h_ = surf_->h;
+
+  // Inverse of the dst_x -> src_x = dst_x * SCREEN_W / rect.w map used by
+  // draw() and map_point(), so the two paths land pixels in the same places:
+  // source pixel s covers [xrun[s], xrun[s+1]). Both views are the same
+  // width, so one table serves both.
+  const int rw = views_[0].rect.w;
+  xrun_.resize(static_cast<size_t>(SCREEN_W) + 1);
+  for (u32 i = 0; i <= SCREEN_W; ++i)
+    xrun_[i] = static_cast<u16>((static_cast<u32>(i) * rw + SCREEN_W - 1) / SCREEN_W);
+}
+
+// The screen rects are overwritten in full every frame, so only the letterbox
+// around them is cleared, and only when the layout changed under it -- the
+// surface keeps its contents between frames. On a panel the screens fill
+// exactly there is nothing to clear at all.
+void Display::clear_margins(u32* px, u32 pitch) const {
+  int x0 = scaled_w_, y0 = scaled_h_, x1 = 0, y1 = 0;
+  for (const View& v : views_) {
+    x0 = std::min(x0, v.rect.x); y0 = std::min(y0, v.rect.y);
+    x1 = std::max(x1, v.rect.x + v.rect.w); y1 = std::max(y1, v.rect.y + v.rect.h);
+  }
+  auto band = [&](int by0, int by1, int bx0, int bx1) {
+    if (by1 <= by0 || bx1 <= bx0) return;
+    for (int y = by0; y < by1; ++y)
+      std::memset(px + static_cast<size_t>(y) * pitch + bx0, 0, static_cast<size_t>(bx1 - bx0) * sizeof(u32));
+  };
+  band(0, y0, 0, scaled_w_);                 // above
+  band(y1, scaled_h_, 0, scaled_w_);         // below
+  band(y0, y1, 0, x0);                       // left
+  band(y0, y1, x1, scaled_w_);               // right
+}
+
+bool Display::begin_frame(Target out[SCREENS]) {
+  if (!scaled_) return false;
+  // SDL hands back a new surface after a resize; the pointer is only valid
+  // until then, so it is fetched every frame rather than cached across one.
+  SDL_Surface* s = SDL_GetWindowSurface(win_);
+  if (!s) return false;
+  if (s != surf_ || s->w != scaled_w_ || s->h != scaled_h_) {
+    layout();
+    build_scale();
+    if (!scaled_) return false;
+    margins_dirty_ = true;
+  }
+  if (SDL_MUSTLOCK(s) && SDL_LockSurface(s) != 0) {
+    std::fprintf(stderr, "SDL_LockSurface: %s\n", SDL_GetError());
+    return false;
+  }
+  u32* base = static_cast<u32*>(s->pixels);
+  const u32 stride = static_cast<u32>(s->pitch) / sizeof(u32);
+  if (margins_dirty_) { clear_margins(base, stride); margins_dirty_ = false; }
+  for (const View& v : views_)
+    out[v.screen] = Target{base + static_cast<size_t>(v.rect.y) * stride + v.rect.x,
+                           stride, static_cast<u32>(v.rect.h), xrun_.data()};
+  return true;
+}
+
+void Display::end_frame() {
+  if (SDL_MUSTLOCK(surf_)) SDL_UnlockSurface(surf_);
+  SDL_UpdateWindowSurface(win_);
 }
 
 } // namespace ds::sdl

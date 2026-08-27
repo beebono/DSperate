@@ -48,6 +48,23 @@ public:
   void set_powcnt(u16 value);
 
   const u32* framebuffer(int screen) const { return fb_[screen].data(); }   // 0 = top, 1 = bottom
+
+  // A frontend-owned, panel-sized destination for one screen. When set, the
+  // output stage scales each line into it as the line is produced instead of
+  // filling fb_ for the frontend to rescale afterwards: the source line is
+  // still in L1 at that moment, which is most of the point -- rescaling the
+  // finished framebuffer re-reads it cold, and that read is what makes the
+  // separate pass slow. fb_ is left untouched while a target is set; nothing
+  // else reads it (display capture works off the engine's own output).
+  struct ScaleTarget {
+    u32* px = nullptr;          // top-left of this screen's rect in the frontend's buffer
+    u32 pitch = 0;              // destination pitch, in u32
+    u32 h = 0;                  // destination rect height, in pixels
+    const u16* xrun = nullptr;  // 257 entries; see kern::scale_row
+  };
+  // Both screens or neither: pass a null `px` to go back to fb_.
+  void set_scale_target(int screen, const ScaleTarget& t) { scale_[screen] = t; }
+  bool scaling() const { return scale_[0].px && scale_[1].px; }
   u16 line() const { return line_; }
 
   Engine2D engine[2];
@@ -66,6 +83,10 @@ private:
   alignas(16) std::array<u16, 256> fifo_line_{};
   bool run_fifo_ = false;
   std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb_{};
+  ScaleTarget scale_[2];
+  // The output stage's line buffer when scaling: output_line writes here
+  // instead of into fb_, at the same cost, and scale_row reads it back hot.
+  alignas(16) std::array<std::array<u32, SCREEN_W>, 2> line_out_{};
   const u32* line3d_ = nullptr;   // 3D output for the line being drawn
 
   // Engine B's share of a display line, run alongside engine A's. The two
@@ -80,6 +101,7 @@ private:
   static void engine_b_job(void* self);
 
   void draw_line(u32 line);
+  void emit_scaled(int screen, u32 line, const u32* src);
   void output_a(u32 line, u32* dst);
   void output_b(u32 line, u32* dst);
   void capture(u32 line);

@@ -7,6 +7,7 @@
 #include "core/profile.h"
 
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 
 namespace ds::gpu {
@@ -295,8 +296,12 @@ void Gpu::draw_line(u32 line) {
     engine[1].render_line(line);
   }
   DS_PROF(OUTPUT);
-  u32* dst_a = fb_[swap_ ? 0 : 1].data() + line * SCREEN_W;
-  u32* dst_b = fb_[swap_ ? 1 : 0].data() + line * SCREEN_W;
+  // POWCNT1 bit 15 decides which engine is on which screen; everything below
+  // is written in engine order and lands on the screen that bit selects.
+  const int screen_a = swap_ ? 0 : 1, screen_b = swap_ ? 1 : 0;
+  const bool scaled = scaling();
+  u32* dst_a = scaled ? line_out_[0].data() : fb_[screen_a].data() + line * SCREEN_W;
+  u32* dst_b = scaled ? line_out_[1].data() : fb_[screen_b].data() + line * SCREEN_W;
   if (screens_on_) {
     // The common display modes go through one fused kernel (copy, master
     // brightness, 6->8 bit expansion); the others build the line first.
@@ -305,7 +310,25 @@ void Gpu::draw_line(u32 line) {
     if ((engine[1].dispcnt() >> 16) & 1) kern::active::output_line(engine[1].output(), master_bright_[1], dst_b);
     else { output_b(line, dst_b); expand_colours(dst_b); }
   } else { for (u32 i = 0; i < 256; ++i) dst_a[i] = dst_b[i] = 0xFF000000; }
+  if (scaled) { emit_scaled(screen_a, line, dst_a); emit_scaled(screen_b, line, dst_b); }
   if (capture_on_) { DS_PROF(CAPTURE); capture(line); }
+}
+
+// One source line to the destination rows it covers. Destination row y takes
+// source row y * 192 / h, so source line `line` owns rows
+// [ceil(line*h/192), ceil((line+1)*h/192)) -- usually two or three of them.
+// The first is scaled and the rest copied from it: at that point it is the
+// hottest line in the machine, and a copy beats redoing the run fill.
+void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
+  const ScaleTarget& t = scale_[screen];
+  const u32 y0 = (line * t.h + SCREEN_H - 1) / SCREEN_H;
+  const u32 y1 = ((line + 1) * t.h + SCREEN_H - 1) / SCREEN_H;
+  if (y0 >= y1) return;                      // downscale: this line is dropped
+  u32* row = t.px + static_cast<size_t>(y0) * t.pitch;
+  kern::active::scale_row(src, t.xrun, row);
+  const size_t bytes = static_cast<size_t>(t.xrun[SCREEN_W]) * sizeof(u32);
+  for (u32 y = y0 + 1; y < y1; ++y)
+    std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
 }
 
 static inline u32 rgb15_to_18_plain(u16 c) {

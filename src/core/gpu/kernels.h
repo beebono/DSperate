@@ -73,6 +73,13 @@ namespace ds::gpu::kern {
   void NS##expand_colours(u32* dst);                                                                         \
   /* Both in one pass from the engine's composite line. */                                                   \
   void NS##output_line(const Pixel* src, u16 reg, u32* dst);                                                 \
+  /* Nearest-neighbour scale of one output line to `xrun[256]` destination pixels, for frontends that own a  \
+     panel-sized buffer and scale as the line is produced rather than rescaling the framebuffer afterwards.  \
+     `xrun` has 257 entries: source pixel s covers destination [xrun[s], xrun[s+1]), which is the inverse of \
+     the usual dst_x -> src_x = dst_x * 256 / width map, so each source pixel is one contiguous run and no   \
+     gather is needed. Monotonic and non-decreasing; a zero-length run (destination narrower than 256) is    \
+     skipped. */                                                                                             \
+  void NS##scale_row(const u32* src, const u16* xrun, u32* dst);                                             \
   /* 3D span stages (render3d.cpp), `n` pixels from span offset `xv0`. Perspective factor with 8 fractional   \
      bits: num = (xv*w0n) << 8 (32-bit wrap), den = xv*w0d + (xdiff-xv)*w1d, 0 when den is 0. */             \
   void NS##span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac);                      \

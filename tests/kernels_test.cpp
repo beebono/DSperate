@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <vector>
 #include <random>
 
 using namespace ds;
@@ -212,6 +213,53 @@ static void test_output() {
   }
 }
 
+// scale_row at the destination widths that matter (the two boards' panels and
+// the window sizes), plus the degenerate ones: 1:1, downscale, and a width
+// that is not a multiple of the vector step.
+static void test_scale_row() {
+  static const u32 widths[] = {1, 100, 255, 256, 257, 320, 512, 640, 720, 721, 1280, 1440};
+  alignas(16) u32 src[256];
+  for (u32 w : widths) {
+    const u32 it = w;                          // CHECK_SAME reports it as the iteration
+    std::vector<u16> xrun(257);
+    for (u32 i = 0; i <= 256; ++i) xrun[i] = static_cast<u16>((i * w + 255) / 256);
+    std::vector<u32> da(w, 0xDEADBEEF), db(w, 0xDEADBEEF);
+    for (u32& v : src) v = rng();
+    kern::ref::scale_row(src, xrun.data(), da.data());
+    N::scale_row(src, xrun.data(), db.data());
+    CHECK_SAME("scale_row", da.data(), db.data(), w * sizeof(u32));
+    // Every destination pixel written, and written with the source pixel the
+    // frontend's dst_x -> src_x map picks -- the two must agree or the
+    // scanline path lands pixels somewhere draw() would not.
+    for (u32 x = 0; x < w; ++x)
+      if (da[x] != src[x * 256 / w]) { std::printf("scale_row w=%u x=%u map mismatch\n", w, x); ++failures; break; }
+  }
+}
+
+// The vertical half of the same map, which lives in Gpu::emit_scaled: source
+// line L owns destination rows [ceil(L*h/192), ceil((L+1)*h/192)). Every row
+// of the destination must be claimed by exactly one source line, or the
+// scanline path leaves gaps (or writes rows twice) where draw() would not.
+static void test_scale_rows_cover() {
+  static const u32 heights[] = {1, 96, 191, 192, 193, 240, 384, 480, 540, 541, 1080, 1200};
+  for (u32 h : heights) {
+    std::vector<u8> hits(h, 0);
+    for (u32 line = 0; line < 192; ++line) {
+      const u32 y0 = (line * h + 191) / 192, y1 = ((line + 1) * h + 191) / 192;
+      for (u32 y = y0; y < y1; ++y) {
+        if (y >= h) { std::printf("emit_scaled h=%u line=%u row %u out of range\n", h, line, y); ++failures; break; }
+        ++hits[y];
+      }
+      // And the row each destination row would be sampled from must be the
+      // one draw() picks for it.
+      for (u32 y = y0; y < y1 && y < h; ++y)
+        if (y * 192 / h != line) { std::printf("emit_scaled h=%u row=%u maps to %u not %u\n", h, y, y * 192 / h, line); ++failures; }
+    }
+    for (u32 y = 0; y < h; ++y)
+      if (hits[y] != 1) { std::printf("emit_scaled h=%u row %u written %u times\n", h, y, hits[y]); ++failures; break; }
+  }
+}
+
 // 3D span stages: random spans and endpoints; every branch of the reference
 // (ascending / descending / equal attributes, all span widths, numerator wrap).
 static void test_span() {
@@ -352,6 +400,8 @@ int main() {
   test_translucent_3d();
   test_composite();
   test_output();
+  test_scale_row();
+  test_scale_rows_cover();
   test_span();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
 #if DSPERATE_NEON

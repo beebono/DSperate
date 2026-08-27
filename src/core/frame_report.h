@@ -25,7 +25,14 @@ namespace ds {
 // what is felt. Report both.
 inline constexpr double kFrameBudgetMs = 1000.0 / 59.8261;
 
-inline void frame_report(const std::vector<double>& frame_ms) {
+// `label` names the series: the default "frame" is the emulation-only slice
+// described above. The SDL frontend also prints a "work" series (emulation +
+// present, pacing still excluded) because a change can move cost between the
+// two slices -- per-scanline scaling deliberately does -- and then neither
+// slice alone can say what happened to the over-budget clusters. The work
+// series is only meaningful with the present unblocked (--no-vsync);
+// with vsync on its tail measures the display refresh, as above.
+inline void frame_report(const std::vector<double>& frame_ms, const char* label = "frame") {
   if (frame_ms.empty()) return;
   std::vector<double> v = frame_ms;
   std::sort(v.begin(), v.end());
@@ -33,10 +40,10 @@ inline void frame_report(const std::vector<double>& frame_ms) {
   const size_t n = v.size();
   auto pct = [&](double p) { return v[std::min(n - 1, static_cast<size_t>(p * n))]; };
   size_t over = 0; for (double x : v) if (x > kFrameBudgetMs) ++over;
-  std::fprintf(stderr, "frame ms: median %.3f mean %.3f p90 %.3f p99 %.3f max %.3f min %.3f total %.1f\n",
-               v[n / 2], sum / n, pct(0.90), pct(0.99), v.back(), v.front(), sum);
-  std::fprintf(stderr, "frame budget: %zu of %zu frames over %.3f ms (%.2f%%)\n",
-               over, n, kFrameBudgetMs, 100.0 * static_cast<double>(over) / static_cast<double>(n));
+  std::fprintf(stderr, "%s ms: median %.3f mean %.3f p90 %.3f p99 %.3f max %.3f min %.3f total %.1f\n",
+               label, v[n / 2], sum / n, pct(0.90), pct(0.99), v.back(), v.front(), sum);
+  std::fprintf(stderr, "%s budget: %zu of %zu frames over %.3f ms (%.2f%%)\n",
+               label, over, n, kFrameBudgetMs, 100.0 * static_cast<double>(over) / static_cast<double>(n));
 
   // Where the overruns are, not just how many. A count says the run stutters;
   // this says which frames to re-run with --dump-from/--dump-count and look

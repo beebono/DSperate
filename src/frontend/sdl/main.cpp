@@ -188,8 +188,8 @@ int main(int argc, char** argv) {
   // sleeps, and either one would peg every frame at the refresh interval and
   // hide exactly the clusters this is here to find.
   const double ticks_to_ms = 1e3 / static_cast<double>(SDL_GetPerformanceFrequency());
-  std::vector<double> frame_ms;
-  if (frame_limit > 0) frame_ms.reserve(static_cast<size_t>(frame_limit));
+  std::vector<double> frame_ms, work_ms;   // emu slice; emu + present slice
+  if (frame_limit > 0) { frame_ms.reserve(static_cast<size_t>(frame_limit)); work_ms.reserve(static_cast<size_t>(frame_limit)); }
   Uint64 pace_ticks = 0, draw_ticks_total = 0;
   while (!input.quit() && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
     SDL_Event e;
@@ -199,18 +199,33 @@ int main(int argc, char** argv) {
     else if (log.writing()) log.write(in);
     ds::input::apply(nds, in);
 
+    // With per-scanline scaling the core writes straight into the panel-sized
+    // texture, so the lock has to happen before the frame runs and the scale
+    // cost lands inside run_frame() rather than in the present. DS_FPS's
+    // emu/draw split shifts accordingly; the total is what compares.
+    ds::sdl::Display::Target target[2];
+    const bool scaled = display.begin_frame(target);
+    for (int i = 0; i < 2; ++i)
+      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun}
+                                         : ds::gpu::Gpu::ScaleTarget{});
+
     const Uint64 t0 = SDL_GetPerformanceCounter();
     nds.run_frame();
 
     const Uint64 t1 = SDL_GetPerformanceCounter();
-    const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
-    display.draw(fb);
+    if (scaled) {
+      display.end_frame();
+    } else {
+      const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
+      display.draw(fb);
+    }
     audio.push(nds);
     const Uint64 t2 = SDL_GetPerformanceCounter();
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;
     draw_ticks_total += t2 - t1;
     frame_ms.push_back(static_cast<double>(t1 - t0) * ticks_to_ms);
+    work_ms.push_back(static_cast<double>(t2 - t0) * ticks_to_ms);
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
     if (audio.active()) {
@@ -247,6 +262,10 @@ int main(int argc, char** argv) {
   // Emulation work only -- see frame_report.h. The two excluded costs are
   // named on their own line so a CLI/SDL disagreement can be attributed.
   ds::frame_report(frame_ms);
+  // The same statistics over emulation + present, which is what a missed
+  // display frame actually is. Only worth reading with --no-vsync: with
+  // vsync on the present blocks and the tail pins to the refresh.
+  ds::frame_report(work_ms, "work");
   if (!frame_ms.empty())
     std::fprintf(stderr, "  (emulation only; excluded: present %.1f ms, pacing %.1f ms total over %zu frames)\n",
                  static_cast<double>(draw_ticks_total) * ticks_to_ms,

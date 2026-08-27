@@ -543,6 +543,20 @@ void output_line(const Pixel* src, u16 reg, u32* dst) {
   }
 }
 
+// Runs are short (2-3 pixels at the scales the handhelds use, more on a wide
+// panel), so this stores a quad when one fits and falls back to scalar for the
+// tail rather than setting up a vector loop that rarely runs.
+void scale_row(const u32* src, const u16* xrun, u32* dst) {
+  for (u32 s = 0; s < 256; ++s) {
+    const u32 c = src[s];
+    u32 x = xrun[s];
+    const u32 end = xrun[s + 1];
+    const uint32x4_t v = vdupq_n_u32(c);
+    for (; x + 4 <= end; x += 4) vst1q_u32(dst + x, v);
+    for (; x < end; ++x) dst[x] = c;
+  }
+}
+
 
 // ---- 3D span stages ------------------------------------------------------------
 // Four pixels per step (the buffers are 256 wide, so rounding `n` up is safe).
