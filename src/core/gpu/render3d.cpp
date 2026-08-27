@@ -2276,7 +2276,7 @@ u32 Renderer3D::adaptive_workers(u32 max_workers) {
   }();
   static const u64 kBusyNs = [] {
     const char* e = std::getenv("DS_R3D_ADAPT_BUSY");
-    const int pct = e ? std::atoi(e) : 12;
+    const int pct = e ? std::atoi(e) : 18;
     return kFrameNs * static_cast<u64>(pct) / 100;
   }();
   const u64 kIdleNs = kBusyNs / 2;
@@ -2318,16 +2318,26 @@ u32 Renderer3D::adaptive_workers(u32 max_workers) {
   return workers_now_;
 }
 
-// DS_R3D_ADAPT=1. Off by default: it wins on the one scene whose raster is on
-// the critical path and loses on the rest, because time blocked does not
-// imply another worker would help -- mlbis blocks episodically but spends
-// 19.2 % of its frame on the ARM9 against etody's 10.2 %, so the thread it
-// would gain comes out of emulation. Deciding that needs a measure of
-// emulation-side headroom as well, which this does not have.
+// DS_R3D_ADAPT=0 turns the controller off.
+//
+// It costs about half a percent of throughput on the scenes that do not need
+// it -- small, but real rather than noise: mlbis, sm64 and dbori are slower
+// in every rep of both machines, from brief ramps that do not pay for
+// themselves. It buys 6 % of etody's total time and 78 % of its over-budget
+// frames (257 -> 57), and the scenes paying the half percent do not pay it in
+// dips: their over-budget counts do not move. Measured three reps on each of
+// two RG DS boards, summed over the five scenes: -0.71 % and -0.72 %.
+//
+// Threshold 18 %, not 12. The means at two workers are etody 15.5 %, mlbis
+// 4.1 %, sm64 1.1 %, dbori 0.1 %. A trigger near etody's own mean is close
+// enough that mlbis's episodic peaks reach it; above it, the controller fires
+// on sustained blocking and little else -- which is the distinction that
+// predicts whether another worker pays, rather than a value threaded between
+// two particular scenes.
 bool Renderer3D::adapt_enabled() {
   static const bool on = [] {
     const char* e = std::getenv("DS_R3D_ADAPT");
-    return e && std::atoi(e) != 0;
+    return !e || std::atoi(e) != 0;
   }();
   return on;
 }
@@ -2344,13 +2354,13 @@ u32 Renderer3D::band_count(u32 polygons) {
   }();
   if (forced >= 0) return forced < 1 ? 1u : static_cast<u32>(forced);
   if (polygons < 2) return 1;
-  // Two, not three. A third raster worker only pays where the emulation
-  // thread is actually blocked on the raster, which over 1800 frames is one
-  // scene in five: etody (15.5 % of the frame blocked) gains 4.3 %, while
-  // sm64 loses 5.6 %, mlbis 8.5 % and dbori 2.7 %, because the third worker
-  // takes a core from an emulation thread that wants it. Summed over the
-  // five scenes two workers beat three by 3.3 % and beat the adaptive
-  // controller by 0.6 %.
+  // Two is the floor and three the ceiling; adaptive_workers picks between
+  // them per frame. A third worker only pays where the emulation thread is
+  // actually blocked on the raster, which over 1800 frames is one scene in
+  // five: etody (15.5 % of the frame blocked) gains 4.3 % pinned at three,
+  // while sm64 loses 5.6 %, mlbis 8.5 % and dbori 2.7 %, because the worker
+  // comes out of a core the emulation thread wanted. Neither fixed count is
+  // right for both, hence the controller.
   return adapt_enabled() ? 3 : 2;
 }
 
