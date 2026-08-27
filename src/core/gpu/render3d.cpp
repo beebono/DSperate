@@ -209,8 +209,8 @@ struct Renderer3D::Pool {
   void dispatch(const std::function<void(u32)>& fn, u32 jobs, u32 bins) {
     {
       std::lock_guard<std::mutex> lk(m_);
-      job_ = &fn; jobs_ = jobs; remaining_ = static_cast<u32>(threads_.size());
-      done_bits_ = 0;
+      job_ = &fn; jobs_ = jobs; remaining_.store(static_cast<u32>(threads_.size()), std::memory_order_relaxed);
+      done_bits_.store(0, std::memory_order_relaxed);
       nbins_ = bins;
       // Before the generation bump, not after: a worker that wakes on the new
       // generation must never see the previous frame's exhausted counter and
@@ -229,14 +229,26 @@ struct Renderer3D::Pool {
   u32 bins() const { return nbins_; }
 
   void mark_done(u32 bin) {
-    { std::lock_guard<std::mutex> lk(m_); done_bits_ |= u64{1} << bin; }
+    { std::lock_guard<std::mutex> lk(m_); done_bits_.fetch_or(u64{1} << bin, std::memory_order_release); }
     done_.notify_all();
   }
 
-  void wait_bits(u64 mask) {
-    if (!mask) return;
-    std::unique_lock<std::mutex> lk(m_);
-    done_.wait(lk, [this, mask] { return (done_bits_ & mask) == mask; });
+  // Returns how long the caller was actually blocked, in nanoseconds.
+  //
+  // Most display lines find their bin already drawn, so the common case takes
+  // no lock at all and costs one atomic load -- which is also what keeps the
+  // clock reads off the fast path. The blocking case is the signal the thread
+  // count is chosen from: it is the emulation thread standing still, waiting
+  // for a strip of the frame it is about to composite.
+  u64 wait_bits(u64 mask) {
+    if (!mask) return 0;
+    if ((done_bits_.load(std::memory_order_acquire) & mask) == mask) return 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+      std::unique_lock<std::mutex> lk(m_);
+      done_.wait(lk, [this, mask] { return (done_bits_.load(std::memory_order_relaxed) & mask) == mask; });
+    }
+    return static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   }
 
   // Every worker has returned from the job, not merely finished its bins.
@@ -247,9 +259,14 @@ struct Renderer3D::Pool {
   // while its worker is still executing -- and the caller of sync_all goes on
   // to reassign job_fn_, destroying the std::function under it. Bin bits are
   // what a display line waits for; this is what the frame boundary waits for.
-  void wait_idle() {
-    std::unique_lock<std::mutex> lk(m_);
-    done_.wait(lk, [this] { return remaining_ == 0; });
+  u64 wait_idle() {
+    if (remaining_.load(std::memory_order_acquire) == 0) return 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+      std::unique_lock<std::mutex> lk(m_);
+      done_.wait(lk, [this] { return remaining_.load(std::memory_order_relaxed) == 0; });
+    }
+    return static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   }
 
 private:
@@ -265,7 +282,7 @@ private:
       lk.unlock();
       if (fn && index < jobs) (*fn)(index);
       lk.lock();
-      --remaining_;
+      remaining_.fetch_sub(1, std::memory_order_release);
       done_.notify_all();
     }
   }
@@ -274,9 +291,10 @@ private:
   std::condition_variable start_, done_;
   const std::function<void(u32)>* job_ = nullptr;
   u64 generation_ = 0;
-  u64 done_bits_ = 0;
+  std::atomic<u64> done_bits_{0};
   std::atomic<u32> next_bin_{0};
-  u32 jobs_ = 0, remaining_ = 0, nbins_ = 0;
+  std::atomic<u32> remaining_{0};
+  u32 jobs_ = 0, nbins_ = 0;
   bool stop_ = false;
 };
 
@@ -1966,16 +1984,25 @@ void Renderer3D::render(const Gpu3D& gx) {
   build_edges(gx);
   texels_out_ = nullptr;
 
-  const u32 nb = band_count(edge_count_);
-  if (nb <= 1) { pending_bands_ = 0; render_band(0, 192, out_.data()); return; }
+  const u32 maxb = band_count(edge_count_);
+  if (maxb <= 1) { pending_bands_ = 0; wait_ns_ = 0; render_band(0, 192, out_.data()); return; }
 
-  if (bands_.size() < nb - 1) {
-    while (bands_.size() < nb - 1) bands_.push_back(std::make_unique<Renderer3D>(nds_));
+  // The pool is always the maximum size and only `nb` of it is given work, so
+  // ramping the thread count costs a dispatch flag rather than creating and
+  // joining threads mid-scene.
+  if (bands_.size() < maxb - 1) {
+    while (bands_.size() < maxb - 1) bands_.push_back(std::make_unique<Renderer3D>(nds_));
   }
-  if (!pool_ || pool_->workers() != nb) pool_ = std::make_unique<Pool>(nb);
+  if (!pool_ || pool_->workers() != maxb) pool_ = std::make_unique<Pool>(maxb);
 
-  nbins_ = bin_count(nb);
-  compute_bins(nbins_, nb);
+  const u32 nb = (adapt_enabled() && !threads_forced()) ? adaptive_workers(maxb) : maxb;
+  wait_ns_ = 0;   // consumed by adaptive_workers; start the next frame's tally
+
+  // Bins are cut for the maximum, not for `nb`, so that a ramp changes one
+  // thing at a time: the same strips are drawn either way, by more or fewer
+  // threads. Cutting them for `nb` would re-slice the frame on every ramp.
+  nbins_ = bin_count(maxb);
+  compute_bins(nbins_, maxb);
   const Gpu3D& gxr = gx;
   u32* const dst = out_.data();
   // The job outlives this call now, so it is a member, and every worker runs
@@ -2046,7 +2073,7 @@ u32 Renderer3D::bin_count(u32 workers) {
     const char* e = std::getenv("DS_R3D_BINS");
     return e ? std::atoi(e) : -1;
   }();
-  u32 n = forced > 0 ? static_cast<u32>(forced) : workers;
+  u32 n = forced > 0 ? static_cast<u32>(forced) : 8;
   if (n < workers) n = workers;
   if (n > MAX_BINS) n = MAX_BINS;
   if (n > 192) n = 192;
@@ -2081,9 +2108,12 @@ Renderer3D::Split Renderer3D::split_mode() {
       if (!std::strcmp(e, "taper")) return Split::Taper;
       if (!std::strcmp(e, "stair")) return Split::Ascending;
     }
-    const char* v = std::getenv("DS_R3D_EVEN");   // the earlier spelling
-    if (v && std::atoi(v) != 0) return Split::Even;
-    return Split::Ascending;
+    // Even is the default. Ascending is the deadline shape and is right only
+    // while every bin starts at once, which stopped being true when the frame
+    // was cut into more bins than workers; measured at eight bins it costs
+    // etody two thirds of its over-budget frames (188 against 64) and sm64
+    // 2 % of its total.
+    return Split::Even;
   }();
   return mode;
 }
@@ -2153,16 +2183,18 @@ void Renderer3D::compute_bins(u32 nbins, u32 workers) {
 // Wait for the band that owns display line `y`, and no other: the bands are
 // independent and each writes only its own output lines, so the compositor
 // can read the top of the frame while the bottom is still being drawn.
+// Wait for the band that owns display line `y`, and no other: the bands are
+// independent and each writes only its own output lines, so the compositor
+// can read the top of the frame while the bottom is still being drawn.
 void Renderer3D::sync_line(s32 y) {
   if (!pending_bands_) return;
   u32 b = 0;
   while (b + 1 < pending_bands_ && y >= bin_y_[b + 1]) ++b;
-  { DS_PROF(R3D_WAIT); pool_->wait_bits(u64{1} << b); }
+  { DS_PROF(R3D_WAIT); wait_ns_ += pool_->wait_bits(u64{1} << b); }
   waited_bits_ |= u64{1} << b;
   const u64 all = pending_bands_ >= 64 ? ~u64{0} : (u64{1} << pending_bands_) - 1;
   if (waited_bits_ == all) { pending_bands_ = 0; waited_bits_ = 0; }
 }
-
 // Wait for all of them: before the next frame's raster, and whenever
 // something is about to change what the workers are reading (Bus::update_vram
 // is the only way texture VRAM or its banking can move -- the texture and
@@ -2172,7 +2204,7 @@ void Renderer3D::sync_all() {
   // pending_bands_ once it has waited for every bin, and a worker can still
   // be inside the job at that point -- it marks its last bin done from in
   // there. Waiting on an idle pool costs one uncontended lock.
-  if (pool_) { DS_PROF(R3D_WAIT); pool_->wait_idle(); }
+  if (pool_) { DS_PROF(R3D_WAIT); wait_ns_ += pool_->wait_idle(); }
   if (!pending_bands_) return;
   prof::add(prof::C_R3D_SYNC_ALL, 1);
   pending_bands_ = 0;
@@ -2190,6 +2222,121 @@ void Renderer3D::sync_all() {
 // and is not worth computing, so the only frames kept on one thread are the
 // ones with almost nothing in them, where the thread wake-up (a broadcast and
 // a barrier, tens of microseconds) could plausibly exceed the work.
+// How many bins to cut the frame into for `workers` threads.
+//
+// More bins than workers is what lets a heavy strip be absorbed by threads
+// that finish theirs early, and it does work: at twelve bins the three
+// workers came out even (2400 / 2367 / 2357 ms against 1148 / 1863 / 2972)
+// and the emulation thread's wait fell from 304 ms to 71 ms over 900 frames
+// of sm64.
+//
+// It still loses. Every boundary duplicates two scanlines -- a bin rasterises
+// from y0-1, because final_pass(y0) reads the line above, and through y1,
+// because final_pass(y1-1) reads the line below -- and re-runs seed_active.
+// At twelve bins that is 22 of 192 lines drawn twice, and the total raster
+// work rose 19 % (5983 -> 7124 ms) to save 233 ms of waiting. Device totals
+// over 1800 frames of sm64: 18801 ms at three bins, 18934 at six, 19655 at
+// twelve, 20394 at twenty-four; meteos is flat to slightly worse.
+//
+// The reason the trade is bad here is that the raster is already
+// asynchronous: the emulation thread waits for a band for 2.4 % of the frame,
+// so balancing the workers has almost nothing to win, while the duplicated
+// lines are paid in full and compete with the emulation thread for cores.
+// DraStic bins into twelve fixed 16-line strips (video_3d_bin_polygons_1x,
+// twelve polygon-index lists of stride 0x1004), but its bins are lists of
+// polygons handed to a rasteriser that does not re-walk edges per bin, so it
+// does not pay this. So the default is one bin per worker -- the machinery is
+// here, and DS_R3D_BINS turns it up, if the boundary cost is ever removed.
+// How many workers to run this frame, from how long the emulation thread
+// spent blocked on the raster in the frames before it.
+//
+// A fixed count cannot be right for every scene, because what an extra raster
+// thread is worth is exactly what the compositor is waiting for, and that
+// differs by a factor of six between scenes. Measured over 900 frames with
+// eight even bins: sm64 blocks in sync_line for 2.4 % of the frame, so a
+// third worker buys almost nothing and mostly takes a core off emulation --
+// it measures 19605 ms against 18963 at two. etody blocks for 15.8 %, and the
+// third worker cuts the raster phase from 6156 ms to 4878 and the waiting
+// from 3337 ms to 1286, worth 14100 ms against 14679. Same binary, same
+// bins, opposite answers.
+//
+// Games move between the two regimes within a scene -- etody alternates 3D
+// dungeons with 2D towns -- so this ramps quickly and falls back slowly. Two
+// consecutive busy frames add a worker (a dungeon should not spend a second
+// under-threaded); it takes two seconds of quiet to drop one, so a town does
+// not give the thread back before the next corridor asks for it, and a scene
+// flipping between the two does not thrash the pool.
+u32 Renderer3D::adaptive_workers(u32 max_workers) {
+  constexpr u64 kFrameNs = 16715000;            // one DS frame
+  constexpr u32 kDownFrames = 120;              // ~2 s of quiet before giving a worker back
+  // Tunable for the sweep that picked them; see the note below.
+  static const int kShift = [] {
+    const char* e = std::getenv("DS_R3D_ADAPT_SHIFT");
+    return e ? std::atoi(e) : 6;                // averaging window, ~64 frames (~1 s)
+  }();
+  static const u64 kBusyNs = [] {
+    const char* e = std::getenv("DS_R3D_ADAPT_BUSY");
+    const int pct = e ? std::atoi(e) : 12;
+    return kFrameNs * static_cast<u64>(pct) / 100;
+  }();
+  const u64 kIdleNs = kBusyNs / 2;
+
+  if (max_workers < 2) return max_workers;
+  if (workers_now_ == 0) { workers_now_ = 2; wait_ema_ = 0; }
+
+  // A long average, not a run of frames.
+  //
+  // The first version counted consecutive frames over the threshold, which
+  // measures the wrong thing: what separates the regimes is the *mean* time
+  // blocked, while a burst of heavy frames happens in all of them. sm64's
+  // worst burst is 122 frames, so a short attack trips on it and the slow
+  // decay then latches the count high: measured, that put sm64 at three
+  // workers almost permanently and cost 5 % (19287 ms against 18297 at two).
+  //
+  // The window has to be long for a second reason. Blocked time at two
+  // workers, b=8 even, over 900 frames: etody 15.5 %, mlbis 4.1 %, sm64
+  // 1.1 %, dbori 0.1 %. Only etody wants the extra thread and its 15.5 % is
+  // *sustained*; mlbis's 4.1 % is episodic, and over a short window its
+  // excursions cross any threshold etody needs. Averaging over about a second
+  // separates sustained from episodic, which is the actual distinction.
+  wait_ema_ += (static_cast<s64>(wait_ns_) - wait_ema_) >> kShift;
+  const u64 avg = wait_ema_ > 0 ? static_cast<u64>(wait_ema_) : 0;
+
+  // Ramping up needs only the average to cross, so a dungeon is served within
+  // the averaging window; giving a worker back needs the average low *and*
+  // held there, so a town does not hand it over before the next corridor.
+  if (avg > kBusyNs) {
+    quiet_frames_ = 0;
+    if (workers_now_ < max_workers) ++workers_now_;
+  } else if (avg < kIdleNs) {
+    if (++quiet_frames_ >= kDownFrames && workers_now_ > 2) { --workers_now_; quiet_frames_ = 0; }
+  } else {
+    quiet_frames_ = 0;
+  }
+  if (workers_now_ > max_workers) workers_now_ = max_workers;
+  if (prof::enabled && workers_now_ <= 4) prof::add(static_cast<prof::Counter>(prof::C_R3D_W1 + workers_now_ - 1), 1);
+  return workers_now_;
+}
+
+// DS_R3D_ADAPT=1. Off by default: it wins on the one scene whose raster is on
+// the critical path and loses on the rest, because time blocked does not
+// imply another worker would help -- mlbis blocks episodically but spends
+// 19.2 % of its frame on the ARM9 against etody's 10.2 %, so the thread it
+// would gain comes out of emulation. Deciding that needs a measure of
+// emulation-side headroom as well, which this does not have.
+bool Renderer3D::adapt_enabled() {
+  static const bool on = [] {
+    const char* e = std::getenv("DS_R3D_ADAPT");
+    return e && std::atoi(e) != 0;
+  }();
+  return on;
+}
+
+bool Renderer3D::threads_forced() {
+  static const bool on = std::getenv("DS_R3D_THREADS") != nullptr;
+  return on;
+}
+
 u32 Renderer3D::band_count(u32 polygons) {
   static const int forced = [] {
     const char* e = std::getenv("DS_R3D_THREADS");
@@ -2197,7 +2344,14 @@ u32 Renderer3D::band_count(u32 polygons) {
   }();
   if (forced >= 0) return forced < 1 ? 1u : static_cast<u32>(forced);
   if (polygons < 2) return 1;
-  return 3;
+  // Two, not three. A third raster worker only pays where the emulation
+  // thread is actually blocked on the raster, which over 1800 frames is one
+  // scene in five: etody (15.5 % of the frame blocked) gains 4.3 %, while
+  // sm64 loses 5.6 %, mlbis 8.5 % and dbori 2.7 %, because the third worker
+  // takes a core from an emulation thread that wants it. Summed over the
+  // five scenes two workers beat three by 3.3 % and beat the adaptive
+  // controller by 0.6 %.
+  return adapt_enabled() ? 3 : 2;
 }
 
 // Set up a worker to render a band of the frame the coordinator has latched.

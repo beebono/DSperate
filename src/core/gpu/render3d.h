@@ -391,6 +391,12 @@ private:
   static Split split_mode();
   void compute_bins(u32 nbins, u32 workers);
   static u32 bin_count(u32 workers);
+  u32 adaptive_workers(u32 max_workers);
+  static bool threads_forced();
+  static bool adapt_enabled();
+  u32 workers_now_ = 0, quiet_frames_ = 0;
+  s64 wait_ema_ = 0;             // averaged block time, the regime signal
+  u64 wait_ns_ = 0;              // emulation thread blocked on the raster, this frame
   std::array<s32, MAX_BINS + 1> bin_y_{};
   u32 nbins_ = 0;
 
