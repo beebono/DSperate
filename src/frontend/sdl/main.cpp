@@ -144,7 +144,26 @@ int main(int argc, char** argv) {
 
   u32 init = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
   if (audio_on) init |= SDL_INIT_AUDIO;
-  if (SDL_Init(init) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
+  // Prefer KMSDRM, fall back to whatever SDL would have picked.
+  //
+  // Going straight to the display, with no compositor between us and the
+  // panel, is worth more than anything in the renderer: etody over 1800
+  // frames on the portrait board measures 10779 ms with 3 frames over budget
+  // against 14535 and 128 through sway, both software. But DRM master is
+  // exclusive -- a running compositor holds it, and no arrangement lets both
+  // drive the same panel -- so this can only be an attempt. When a compositor
+  // is up, SDL_Init with the KMSDRM hint fails and we re-init with the
+  // default, which finds Wayland and works as before. So one binary is right
+  // whether it is launched from a desktop or with the UI stopped, and a
+  // launcher that stops the compositor for the session gets the fast path.
+  // SDL_VIDEODRIVER in the environment is honoured and skips all of this.
+  bool tried_kms = false;
+  if (!std::getenv("SDL_VIDEODRIVER")) {
+    SDL_SetHint(SDL_HINT_VIDEODRIVER, "kmsdrm");
+    tried_kms = SDL_Init(init) == 0;
+    if (!tried_kms) SDL_SetHint(SDL_HINT_VIDEODRIVER, "");
+  }
+  if (!tried_kms && SDL_Init(init) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
 
   ds::sdl::Display display;
   if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; }
