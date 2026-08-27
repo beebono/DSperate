@@ -383,7 +383,13 @@ private:
   // the slowest -- 6.96 ms against the 5.06 ms an even three-way split of the
   // same 15.19 ms would have cost.
   static constexpr u32 MAX_BINS = 32;
-  void compute_bins(u32 nbins);
+  // How the bins are sized. Ascending is the deadline shape (small first bin,
+  // large last) and is right while bins == workers, when they all start at
+  // once; the others are for the binned regime, where they do not.
+  // DS_R3D_SPLIT=stair|even|desc|taper.
+  enum class Split { Ascending, Even, Descending, Taper };
+  static Split split_mode();
+  void compute_bins(u32 nbins, u32 workers);
   static u32 bin_count(u32 workers);
   std::array<s32, MAX_BINS + 1> bin_y_{};
   u32 nbins_ = 0;

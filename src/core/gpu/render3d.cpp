@@ -1975,7 +1975,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   if (!pool_ || pool_->workers() != nb) pool_ = std::make_unique<Pool>(nb);
 
   nbins_ = bin_count(nb);
-  compute_bins(nbins_);
+  compute_bins(nbins_, nb);
   const Gpu3D& gxr = gx;
   u32* const dst = out_.data();
   // The job outlives this call now, so it is a member, and every worker runs
@@ -2072,7 +2072,23 @@ u32 Renderer3D::bin_count(u32 workers) {
 //
 // The polygons' line ranges are already known -- build_edges has just walked
 // them -- so this is a difference array and a prefix sum over 192 entries.
-void Renderer3D::compute_bins(u32 nbins) {
+Renderer3D::Split Renderer3D::split_mode() {
+  static const Split mode = [] {
+    const char* e = std::getenv("DS_R3D_SPLIT");
+    if (e) {
+      if (!std::strcmp(e, "even")) return Split::Even;
+      if (!std::strcmp(e, "desc")) return Split::Descending;
+      if (!std::strcmp(e, "taper")) return Split::Taper;
+      if (!std::strcmp(e, "stair")) return Split::Ascending;
+    }
+    const char* v = std::getenv("DS_R3D_EVEN");   // the earlier spelling
+    if (v && std::atoi(v) != 0) return Split::Even;
+    return Split::Ascending;
+  }();
+  return mode;
+}
+
+void Renderer3D::compute_bins(u32 nbins, u32 workers) {
   std::array<s32, 194> delta{};
   for (u32 i = 0; i < edge_count_; ++i) {
     const Polygon& p = *edges_[i].poly;
@@ -2104,9 +2120,32 @@ void Renderer3D::compute_bins(u32 nbins) {
   u32 wsum = 0;
   for (u32 b = 0; b < nbins; ++b) { weight[b] = 1; ++wsum; }
   split_with(weight, wsum);                       // equal work, to get deadlines
+  if (split_mode() == Split::Even) return;
+
+  // The ramp shapes, refined twice because the deadlines depend on the split.
+  //
+  // Ascending is the deadline shape and it is only correct while every bin
+  // *starts* at the same moment, which is true exactly when there is one bin
+  // per worker. Beyond that bins are claimed in sequence, so a late bin does
+  // not begin until a worker frees up and most of its runway is already gone
+  // -- and Ascending hands it the largest share: at eight bins the last is
+  // 4.5x the first (10 12 16 19 24 30 36 45), which is one worker still
+  // grinding while the others have nothing left to claim. Descending is the
+  // opposite bet, sized for when a bin starts rather than when it is due.
   for (int pass = 0; pass < 2; ++pass) {
     wsum = 0;
-    for (u32 b = 0; b < nbins; ++b) { weight[b] = 48 + static_cast<u32>(bin_y_[b]); wsum += weight[b]; }
+    for (u32 b = 0; b < nbins; ++b) {
+      u32 w;
+      switch (split_mode()) {
+      case Split::Descending: w = 48 + static_cast<u32>(192 - bin_y_[b + 1]); break;
+      // Ramp while the bins can still be started early -- one per worker --
+      // then flat, so the head keeps the deadline taper that gets line 0 out
+      // and the tail has no bin big enough to strand anyone.
+      case Split::Taper: w = 48 + static_cast<u32>(bin_y_[b < workers ? b : workers - 1]); break;
+      default: w = 48 + static_cast<u32>(bin_y_[b]); break;
+      }
+      weight[b] = w; wsum += w;
+    }
     split_with(weight, wsum);
   }
 }
