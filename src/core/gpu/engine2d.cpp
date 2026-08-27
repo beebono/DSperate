@@ -400,19 +400,32 @@ void Engine2D::render_line(u32 line) {
     // contributes rather than run in full for every line (§5.1).
     prof::add(prof::C_2D_FLAT_LINES, 1);
     DS_PROF(SELECT);
-    u32 nlayers = 0; int only = -1;
-    for (int n = 0; n < 4; ++n) if (bg_[n].any) { ++nlayers; only = n; }
+    u32 nlayers = 0;
+    for (int n = 0; n < 4; ++n) if (bg_[n].any) ++nlayers;
     const bool objs = (layer_enable_ & 0x10) && num_sprites_ && obj_prio_mask_;
     if (!objs) {
       // Nothing on the line: the backdrop shows everywhere (windows
       // inhibit layers, never the backdrop).
       if (nlayers == 0) { prof::add(prof::C_2D_FAST_BACKDROP, 1); out_.fill(std_pal18()[0] | 0xFF000000); return; }
-      // One layer covering every pixel, no window to punch through it:
-      // the select can only ever pick that layer, so resolve it directly.
-      if (nlayers == 1 && !(dispcnt_ & 0xE000) && line_all_opaque(bg_[only])) {
-        prof::add(prof::C_2D_FAST_ONE, 1);
-        kern::active::resolve16_one(bg_[only].v(), bg_[only].table, out_.data());
-        return;
+      // With no windows or opaque OBJ pixels, the highest-priority BG that
+      // covers the complete line wins everywhere.  Lower-priority planes still
+      // exist, but cannot affect a flat line, so avoid selecting them pixel by
+      // pixel.  This is the same whole-line shortcut as the one-layer case,
+      // generalized to the common fully-covered HUD/background stack.
+      if (!(dispcnt_ & 0xE000) && !obj_prio_mask_) {
+        int winner = -1, winner_prio = 4;
+        for (int bg = 0; bg < 4; ++bg) {
+          if (!(layer_enable_ & (1 << bg)) || !bg_[bg].any || !line_all_opaque(bg_[bg])) continue;
+          const int prio = bgcnt_[bg] & 3;
+          if (prio < winner_prio || (prio == winner_prio && bg < winner)) {
+            winner = bg; winner_prio = prio;
+          }
+        }
+        if (winner >= 0) {
+          prof::add(prof::C_2D_FAST_ONE, 1);
+          kern::active::resolve16_one(bg_[winner].v(), bg_[winner].table, out_.data());
+          return;
+        }
       }
     }
     select_layers_flat();
@@ -634,9 +647,12 @@ void Engine2D::draw_bg_affine(u32 line, int bg) {
   const bool mosaic = (cnt & (1 << 6)) && bg_mosaic_w_ > 0;
   const u32 mw = bg_mosaic_w_ + 1;
 
-  for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy) {
-    s32 fx = rx, fy = ry;
-    if (mosaic) { const s32 m = i % mw; fx -= m * dx; fy -= m * dy; }
+  u32 mosaic_phase = 0;
+  s32 mosaic_rx = rx, mosaic_ry = ry;
+  for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy,
+       mosaic_phase = mosaic ? ((mosaic_phase + 1 == mw) ? 0 : mosaic_phase + 1) : 0) {
+    if (mosaic && mosaic_phase == 0) { mosaic_rx = rx; mosaic_ry = ry; }
+    const s32 fx = mosaic ? mosaic_rx : rx, fy = mosaic ? mosaic_ry : ry;
     if ((fx | fy) & overflow) continue;
     const u32 tile = vram_fetch8(vm, vv, tilemap + (((fy & coordmask) >> 11) << yshift) + ((fx & coordmask) >> 11));
     const u8 idx = vram_fetch8(vm, vv, tileset + (tile << 6) + (((fy >> 8) & 7) << 3) + ((fx >> 8) & 7));
@@ -667,9 +683,12 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
     const u32 base = (cnt & 0x1F00) << 6;
     const bool direct = cnt & (1 << 2);
     if (direct) plane.table = rgb555_table();
-    for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy) {
-      s32 fx = rx, fy = ry;
-      if (mosaic) { const s32 m = i % mw; fx -= m * dx; fy -= m * dy; }
+    u32 mosaic_phase = 0;
+    s32 mosaic_rx = rx, mosaic_ry = ry;
+    for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy,
+         mosaic_phase = mosaic ? ((mosaic_phase + 1 == mw) ? 0 : mosaic_phase + 1) : 0) {
+      if (mosaic && mosaic_phase == 0) { mosaic_rx = rx; mosaic_ry = ry; }
+      const s32 fx = mosaic ? mosaic_rx : rx, fy = mosaic ? mosaic_ry : ry;
       if ((fx & ofx) || (fy & ofy)) continue;
       const u32 off = (((fy & ymask) >> 8) << yshift) + ((fx & xmask) >> 8);
       if (direct) {
@@ -690,9 +709,12 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
     u32 tileset = (cnt & 0x003C) << 12, tilemap = (cnt & 0x1F00) << 3;
     if (!num_) { tileset += (dispcnt_ & 0x07000000) >> 8; tilemap += (dispcnt_ & 0x38000000) >> 11; }
     u32 palmask = 0;
-    for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy) {
-      s32 fx = rx, fy = ry;
-      if (mosaic) { const s32 m = i % mw; fx -= m * dx; fy -= m * dy; }
+    u32 mosaic_phase = 0;
+    s32 mosaic_rx = rx, mosaic_ry = ry;
+    for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy,
+         mosaic_phase = mosaic ? ((mosaic_phase + 1 == mw) ? 0 : mosaic_phase + 1) : 0) {
+      if (mosaic && mosaic_phase == 0) { mosaic_rx = rx; mosaic_ry = ry; }
+      const s32 fx = mosaic ? mosaic_rx : rx, fy = mosaic ? mosaic_ry : ry;
       if ((fx | fy) & overflow) continue;
       const u16 tile = vram_fetch16(vm, vv, tilemap + ((((fy & coordmask) >> 11) << yshift) + ((fx & coordmask) >> 11)) * 2);
       u32 tx = (fx >> 8) & 7, ty = (fy >> 8) & 7;
@@ -725,9 +747,12 @@ void Engine2D::draw_bg_large(u32 line) {
   s32 rx = ref_x_int_[0], ry = ref_y_int_[0];
   const bool mosaic = (cnt & (1 << 6)) && bg_mosaic_w_ > 0;
   const u32 mw = bg_mosaic_w_ + 1;
-  for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy) {
-    s32 fx = rx, fy = ry;
-    if (mosaic) { const s32 m = i % mw; fx -= m * dx; fy -= m * dy; }
+  u32 mosaic_phase = 0;
+  s32 mosaic_rx = rx, mosaic_ry = ry;
+  for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy,
+       mosaic_phase = mosaic ? ((mosaic_phase + 1 == mw) ? 0 : mosaic_phase + 1) : 0) {
+    if (mosaic && mosaic_phase == 0) { mosaic_rx = rx; mosaic_ry = ry; }
+    const s32 fx = mosaic ? mosaic_rx : rx, fy = mosaic ? mosaic_ry : ry;
     if ((fx & ofx) || (fy & ofy)) continue;
     const u8 idx = vram_fetch8(vm, vv, (((fy & ymask) >> 8) << yshift) + ((fx & xmask) >> 8));
     if (!idx) continue;
@@ -1069,6 +1094,7 @@ void Engine2D::select_layers() {
   top16_.fill(LV_OPAQUE); top_tid_.fill(T_BACKDROP);
   second16_.fill(0); second_tid_.fill(T_NONE);   // nothing beneath: colour 0, no layer id (never a blend target), as the reference
   const bool objs = (layer_enable_ & 0x10) && num_sprites_;
+  const bool no_windows = !(dispcnt_ & 0xE000);
   // Lowest priority first; within a priority BG3..BG0 then OBJ, later wins.
   for (int prio = 3; prio >= 0; --prio) {
     for (int bg = 3; bg >= 0; --bg) {
@@ -1077,10 +1103,13 @@ void Engine2D::select_layers() {
       const Layer& p = bg_[bg];
       if (!p.any) continue;
       prof::add(prof::C_2D_SELECTS, 1);
-      kern::active::select16(p.v(), win_.data(), 1 << bg, static_cast<u8>(bg), top16_.data(), top_tid_.data(), second16_.data(), second_tid_.data());
+      if (no_windows) kern::active::select16_nowin(p.v(), static_cast<u8>(bg), top16_.data(), top_tid_.data(), second16_.data(), second_tid_.data());
+      else kern::active::select16(p.v(), win_.data(), 1 << bg, static_cast<u8>(bg), top16_.data(), top_tid_.data(), second16_.data(), second_tid_.data());
     }
-    if (objs && (obj_prio_mask_ & (1 << prio)))
-      kern::active::select16_obj(obj_v_.data(), obj_attr_.data(), win_.data(), prio, top16_.data(), top_tid_.data(), second16_.data(), second_tid_.data());
+    if (objs && (obj_prio_mask_ & (1 << prio))) {
+      if (no_windows) kern::active::select16_obj_nowin(obj_v_.data(), obj_attr_.data(), prio, top16_.data(), top_tid_.data(), second16_.data(), second_tid_.data());
+      else kern::active::select16_obj(obj_v_.data(), obj_attr_.data(), win_.data(), prio, top16_.data(), top_tid_.data(), second16_.data(), second_tid_.data());
+    }
   }
   resolve_full();
 }
@@ -1126,6 +1155,7 @@ void Engine2D::select_top_only() {
   setup_tables();
   top16_.fill(LV_OPAQUE); top_tid_.fill(T_BACKDROP);
   const bool objs = (layer_enable_ & 0x10) && num_sprites_;
+  const bool no_windows = !(dispcnt_ & 0xE000);
   for (int prio = 3; prio >= 0; --prio) {
     for (int bg = 3; bg >= 0; --bg) {
       if (!(layer_enable_ & (1 << bg))) continue;
@@ -1133,9 +1163,13 @@ void Engine2D::select_top_only() {
       const Layer& p = bg_[bg];
       if (!p.any) continue;
       prof::add(prof::C_2D_SELECTS, 1);
-      kern::active::select16_flat(p.v(), win_.data(), 1 << bg, static_cast<u8>(bg), top16_.data(), top_tid_.data());
+      if (no_windows) kern::active::select16_flat_nowin(p.v(), static_cast<u8>(bg), top16_.data(), top_tid_.data());
+      else kern::active::select16_flat(p.v(), win_.data(), 1 << bg, static_cast<u8>(bg), top16_.data(), top_tid_.data());
     }
-    if (objs && (obj_prio_mask_ & (1 << prio))) kern::active::select16_obj_flat(obj_v_.data(), obj_attr_.data(), win_.data(), prio, top16_.data(), top_tid_.data());
+    if (objs && (obj_prio_mask_ & (1 << prio))) {
+      if (no_windows) kern::active::select16_obj_flat_nowin(obj_v_.data(), obj_attr_.data(), prio, top16_.data(), top_tid_.data());
+      else kern::active::select16_obj_flat(obj_v_.data(), obj_attr_.data(), win_.data(), prio, top16_.data(), top_tid_.data());
+    }
   }
 }
 

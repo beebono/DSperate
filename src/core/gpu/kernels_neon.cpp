@@ -256,10 +256,26 @@ void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const 
     }
     vst1q_u8(top_kind + i, kind);
     vst1q_u8(top_alpha + i, al);
-    for (u32 k = 0; k < 16; ++k) {
-      const u8 t = top_tid[i + k];
-      top_px[i + k] = (line3d && t == 0) ? line3d[i + k] : (tables[t][top[i + k] & 0x7FFF] | 0xFF000000);
-      second_px[i + k] = tables[second_tid[i + k]][second[i + k] & 0x7FFF] | 0xFF000000;
+    // Layer ids normally occur in runs.  Hoist both table pointers when the
+    // whole block is uniform, avoiding two pointer-table loads per pixel.
+    // The 3D override must remain per-pixel, so it disables only the top
+    // lookup hoist when BG0 is the selected layer.
+    const u8 t0 = top_tid[i], s0 = second_tid[i];
+    const bool top_run = vmaxvq_u8(tt) == vminvq_u8(tt) && !(line3d && t0 == T_BG0);
+    const bool second_run = vmaxvq_u8(st) == vminvq_u8(st);
+    if (top_run && second_run) {
+      const Pixel* top_tab = tables[t0];
+      const Pixel* second_tab = tables[s0];
+      for (u32 k = 0; k < 16; ++k) {
+        top_px[i + k] = top_tab[top[i + k] & 0x7FFF] | 0xFF000000;
+        second_px[i + k] = second_tab[second[i + k] & 0x7FFF] | 0xFF000000;
+      }
+    } else {
+      for (u32 k = 0; k < 16; ++k) {
+        const u8 t = top_tid[i + k];
+        top_px[i + k] = (line3d && t == T_BG0) ? line3d[i + k] : (tables[t][top[i + k] & 0x7FFF] | 0xFF000000);
+        second_px[i + k] = tables[second_tid[i + k]][second[i + k] & 0x7FFF] | 0xFF000000;
+      }
     }
   }
 }
@@ -302,7 +318,9 @@ bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {
     const uint8x8_t raw = vreinterpret_u8_u32(vdup_n_u32(w));
     const uint8x8x2_t nib = vzip_u8(vand_u8(raw, vdup_n_u8(0xF)), vshr_n_u8(raw, 4));
     uint8x8_t idx = nib.val[0];
-    if (ctl[t] & 0x10) idx = vrev64_u8(idx);
+    const uint8x8_t rev = vrev64_u8(idx);
+    const uint8x8_t mask = vbsl_u8(vdup_n_u8((ctl[t] & 0x10) ? 0xFF : 0), vdup_n_u8(0xFF), vdup_n_u8(0x00));
+    idx = vbsl_u8(mask, rev, idx);
     const uint16x8_t i16 = vmovl_u8(idx);
     const uint16x8_t m = vmvnq_u16(vceqq_u16(i16, vdupq_n_u16(0)));
     vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | ((ctl[t] & 0xF) << 4))))));
@@ -315,7 +333,9 @@ bool text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v) {
   uint8x8_t any = vdup_n_u8(0);
   for (u32 t = 0; t < n; ++t, rows += 8, v += 8) {
     uint8x8_t idx = vld1_u8(rows);
-    if (ctl[t] & 0x10) idx = vrev64_u8(idx);
+    const uint8x8_t rev = vrev64_u8(idx);
+    const uint8x8_t mask = vbsl_u8(vdup_n_u8((ctl[t] & 0x10) ? 0xFF : 0), vdup_n_u8(0xFF), vdup_n_u8(0x00));
+    idx = vbsl_u8(mask, rev, idx);
     const uint16x8_t i16 = vmovl_u8(idx);
     const uint16x8_t m = vmvnq_u16(vceqq_u16(i16, vdupq_n_u16(0)));
     vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | (ext ? (ctl[t] & 0xF) << 8 : 0))))));
@@ -356,6 +376,22 @@ inline void merge16(uint8x16_t m8, uint16x8_t v0, uint16x8_t v1, uint8x16_t tid,
 // a vector-to-scalar readback, which on an in-order core costs more than the
 // merge it skips even on a line that is mostly transparent (measured on the
 // A55: -17 % at every density, and -22 % with the wider step).
+void select16_nowin(const u16* v, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  const uint8x16_t vtid = vdupq_n_u8(tid);
+  for (u32 i = 0; i < 256; i += 16)
+    merge16(opaque_mask(vld1q_u16(v + i), vld1q_u16(v + i + 8)), vld1q_u16(v + i), vld1q_u16(v + i + 8), vtid,
+            top + i, top_tid + i, second + i, second_tid + i);
+}
+
+void select16_obj_nowin(const u16* v, const u8* attr, u32 prio, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  const uint8x16_t vprio = vdupq_n_u8(static_cast<u8>(prio));
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t a = vld1q_u8(attr + i);
+    const uint8x16_t m8 = vandq_u8(vtstq_u8(a, vdupq_n_u8(OA_OPAQUE)), vceqq_u8(vandq_u8(a, vdupq_n_u8(OA_PRIO)), vprio));
+    merge16(m8, vld1q_u16(v + i), vld1q_u16(v + i + 8), obj_tid16(a), top + i, top_tid + i, second + i, second_tid + i);
+  }
+}
+
 void select16(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid) {
   const uint8x16_t vtid = vdupq_n_u8(tid);
   for (u32 i = 0; i < 256; i += 32) {
@@ -374,6 +410,22 @@ void select16_obj(const u16* v, const u8* attr, const u8* win, u32 prio, u16* to
     uint8x16_t m8 = vandq_u8(vtstq_u8(a, vdupq_n_u8(OA_OPAQUE)), vceqq_u8(vandq_u8(a, vdupq_n_u8(OA_PRIO)), vprio));
     m8 = vandq_u8(m8, win_mask(win + i, 0x10));
     merge16(m8, vld1q_u16(v + i), vld1q_u16(v + i + 8), obj_tid16(a), top + i, top_tid + i, second + i, second_tid + i);
+  }
+}
+
+void select16_flat_nowin(const u16* v, u8 tid, u16* top, u8* top_tid) {
+  const uint8x16_t vtid = vdupq_n_u8(tid);
+  for (u32 i = 0; i < 256; i += 16)
+    merge16(opaque_mask(vld1q_u16(v + i), vld1q_u16(v + i + 8)), vld1q_u16(v + i), vld1q_u16(v + i + 8), vtid,
+            top + i, top_tid + i, nullptr, nullptr);
+}
+
+void select16_obj_flat_nowin(const u16* v, const u8* attr, u32 prio, u16* top, u8* top_tid) {
+  const uint8x16_t vprio = vdupq_n_u8(static_cast<u8>(prio));
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16_t a = vld1q_u8(attr + i);
+    const uint8x16_t m8 = vandq_u8(vtstq_u8(a, vdupq_n_u8(OA_OPAQUE)), vceqq_u8(vandq_u8(a, vdupq_n_u8(OA_PRIO)), vprio));
+    merge16(m8, vld1q_u16(v + i), vld1q_u16(v + i + 8), obj_tid16(a), top + i, top_tid + i, nullptr, nullptr);
   }
 }
 

@@ -154,6 +154,9 @@ public:
     // is on. Built from dispcnt, polyalpha and wireframe -- all fixed for the
     // polygon -- and so decided here rather than on every scanline.
     bool always_fill;
+    // Attributes uniform across the polygon, determined once during setup.
+    // This avoids rechecking the same endpoints on every scanline.
+    bool attrs_constant, rgb_constant;
   };
 private:
 
@@ -201,6 +204,9 @@ private:
   std::array<u16, 194> bucket_{};        // order_ offset where ytop == y starts (193 = end)
   std::array<u16, 2048> active_buf_[2]{};
   std::array<u16, 2048> enter_{};   // chunk's entering polygons, re-sorted into list order
+  // Dense bin-local membership for large entry slices. Materialising in edge
+  // order avoids the O(n log n) sort when a tile starts many polygons.
+  std::array<u64, 32> enter_bits_{};
   u16* active_ = nullptr; u16* active_next_ = nullptr;
   u32 active_count_ = 0;
   std::array<bool, 192> line_touched_{};   // a polygon was active on the line (final pass needed)
@@ -313,7 +319,7 @@ private:
 #endif
   void span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
                   const s32* al, const s32* ar, bool with_attrs, u32 off) const;
-  void span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar) const;
+  void span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar, bool attrs_constant, bool rgb_constant) const;
   void setup_left_edge(Edge& e, s32 y) const;
   void setup_right_edge(Edge& e, s32 y) const;
   void setup_polygon(Edge& e, const Polygon& p);

@@ -25,6 +25,11 @@ namespace ds::gpu::kern {
   /* The same without the second record, for lines no colour effect can touch. */                           \
   void NS##select16_flat(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid);              \
   void NS##select16_obj_flat(const u16* v, const u8* attr, const u8* win, u32 prio, u16* top, u8* top_tid);  \
+  /* Window-free variants: the common no-window line skips loading and testing the window plane. */ \
+  void NS##select16_nowin(const u16* v, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid); \
+  void NS##select16_obj_nowin(const u16* v, const u8* attr, u32 prio, u16* top, u8* top_tid, u16* second, u8* second_tid); \
+  void NS##select16_flat_nowin(const u16* v, u8 tid, u16* top, u8* top_tid); \
+  void NS##select16_obj_flat_nowin(const u16* v, const u8* attr, u32 prio, u16* top, u8* top_tid);  \
   /* Winning values through their tables (index = value & 0x7FFF) to 18-bit records with alpha 0xFF. */     \
   void NS##resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pixel* out);             \
   /* The same for a line that is one layer through one table (the single-opaque-layer fast path). */         \

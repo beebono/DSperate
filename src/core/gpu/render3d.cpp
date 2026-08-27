@@ -297,6 +297,15 @@ inline void rgb15_to_666(u16 c, u32& r, u32& g, u32& b) { r = c15_to_18(c, 0); g
   if (sh.trep) { if (sh.tflip && (t & height)) t = (height - 1) - (t & (height - 1)); else t &= height - 1; }
   else { if (t < 0) t = 0; else if (t >= height) t = height - 1; }
   const u32 texpal = sh.texpal, alpha0 = sh.alpha0;
+  // Cached texels already contain the decoded RGB555 colour and alpha.  Use
+  // them in the scalar sampler too; otherwise non-NEON builds pay the full
+  // dependent VRAM/palette lookup cost despite setup_shade having populated
+  // the same cache for the vector gather path.
+  if (sh.texels) {
+    const u32 packed = sh.texels[static_cast<u32>(t * width + s)];
+    *alpha = packed >> 16;
+    return packed & 0xFFFF;
+  }
   if (sh.tex_ptr) {
     // Texel and palette reads straight from host memory.
     const u8* tp = sh.tex_ptr; const u16* pp = sh.pal_ptr;
@@ -561,18 +570,38 @@ void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   const bool use_factor = xdiff != 0 && (!linear || wbuffer);
   if (use_factor) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac + off);
-  if (xdiff == 0) { for (u32 i = 0; i < n; ++i) sb.z[off + i] = zl; }
+  // A constant depth needs no reciprocal or per-pixel interpolation.  Flat
+  // geometry is common in the DS scenes, and keeping this out of the span
+  // kernel also makes the depth pre-pass a straight fill.
+  if (xdiff == 0 || zl == zr) { for (u32 i = 0; i < n; ++i) sb.z[off + i] = zl; }
   else if (wbuffer) kern::active::span_attr_persp(zl, zr, sb.fac + off, n, sb.z + off);
   else kern::active::span_z_linear(zl, zr, xv0, n, xdiff, (1 << 22) / xdiff, sb.z + off);
-  if (with_attrs) span_attrs(sb, xstart, xend, xa, xb, wl, wr, al, ar);
+  if (with_attrs) span_attrs(sb, xstart, xend, xa, xb, wl, wr, al, ar, false, false);
 }
 
 // The five attributes for screen pixels [ca, cb) of the span (a sub-range of
 // the staged span, normally the depth pre-pass's candidate range).
-void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar) const {
+void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar, bool attrs_constant, bool rgb_constant) const {
   const u32 off = static_cast<u32>(ca - sb.x0), n = static_cast<u32>(cb - ca);
   const s32 xdiff = (xend + 1) - xstart;
   const s32 xv0 = ca - xstart;
+
+  // Match DraStic's constant-attribute polygon variant: when both ends of the
+  // surviving range agree, no interpolation stage is needed at all.  Keep
+  // the narrowed representations used by the pixel stages, rather than
+  // materialising the old s32 planes just to truncate them again.
+  if (attrs_constant || (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2] &&
+      al[3] == ar[3] && al[4] == ar[4])) {
+    const u32 fill = (n + 7) & ~7u;
+    std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
+    std::memset(sb.vg + off, static_cast<u8>((static_cast<u32>(al[1]) >> 3) & 0xFF), fill);
+    std::memset(sb.vb + off, static_cast<u8>((static_cast<u32>(al[2]) >> 3) & 0xFF), fill);
+    for (u32 i = 0; i < n; ++i) {
+      sb.sc[off + i] = static_cast<s16>(al[3]);
+      sb.tc[off + i] = static_cast<s16>(al[4]);
+    }
+    return;
+  }
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   if (xdiff != 0 && !linear) {
     // A span whose colour endpoints agree -- most of them, and every span of
@@ -580,7 +609,7 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
     // three buffers with the constant and stage only s and t. This is
     // DraStic's set_buffer8 against interpolate_rgb, which it takes for 83 %
     // of SM64DS's spans and 100 % of Meteos's.
-    if (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2]) {
+    if (rgb_constant || (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2])) {
       prof::add(prof::C_SPAN_FLAT_RGB, 1);
       // The kernels write whole vectors past n; match that, the buffers carry
       // the slack for it.
@@ -612,7 +641,7 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   // although constant-W content (which is what makes a span linear) is
   // exactly where flat colour is most common. Meteos takes this branch for
   // every span it draws.
-  if (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2]) {
+  if (rgb_constant || (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2])) {
     prof::add(prof::C_SPAN_FLAT_RGB, 1);
     const u32 fill = (n + 7) & ~7u;
     std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
@@ -631,7 +660,8 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   const bool wireframe = polyalpha == 0;
 
   const u32 srow = static_cast<u32>((y + 1) & (RING - 1));
-  if (!prev_shadow_mask_[srow]) std::memset(&stencil_[256 * srow], 0, 256);
+  u8* const shadow_stencil = &stencil_[256 * srow];
+  if (!prev_shadow_mask_[srow]) std::memset(shadow_stencil, 0, 256);
   prev_shadow_mask_[srow] = true;
 
   if (p.ytop != p.ybot) {
@@ -684,9 +714,10 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   const int mode = pick_depth_mode(p);
 
   // Set stencil bits where the depth test fails; draw nothing.
+  const u32 row = row_of(y) + 1;
   auto stencil_span = [&](s32 xlimit) {
     for (; x < xlimit; ++x) {
-      u32 addr = row_of(y) + 1 + x;
+      u32 addr = row + static_cast<u32>(x);
       const s32 z = sb.z[x - sb.x0];
       const u32 dstattr = attr_[addr];
       auto fails = [&](u32 a, u32 da) {
@@ -697,10 +728,10 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
         default: return !depth_pass<3>(a, z, da);
         }
       };
-      if (fails(addr, dstattr)) stencil_[256 * static_cast<u32>((y + 1) & (RING - 1)) + x] = 1;
+      if (fails(addr, dstattr)) shadow_stencil[x] = 1;
       if (dstattr & 0xF) {
         addr += RSIZE;
-        if (fails(addr, attr_[addr])) stencil_[256 * static_cast<u32>((y + 1) & (RING - 1)) + x] |= 2;
+        if (fails(addr, attr_[addr])) shadow_stencil[x] |= 2;
       }
     }
   };
@@ -723,12 +754,13 @@ template <int mode, bool textured, bool aa, bool shadow>
 void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
   const u32 polyattr = sh.polyattr;
   const u8* stencil = &stencil_[256 * static_cast<u32>((y + 1) & (RING - 1))];
+  const u32 row = row_of(y) + 1;
   const u8* ra = sb.vr; const u8* ga = sb.vg; const u8* ba = sb.vb;
   const s16* sa = sb.sc; const s16* ta = sb.tc;
   for (s32 x = xa; x < xb; ++x) {
     const u32 i = static_cast<u32>(x - sb.x0);
     if (!sb.pass[i]) continue;    // neither the top pixel nor the one underneath can take it
-    u32 addr = row_of(y) + 1 + x;
+    u32 addr = row + static_cast<u32>(x);
     u32 dstattr = attr_[addr];
     if (shadow) {
       const u8 st = stencil[x];
@@ -798,6 +830,20 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
   sh.trep = p.texparam & (1 << 17); sh.tflip = p.texparam & (1 << 19);
   sh.alpha0 = (p.texparam & (1 << 29)) ? 0 : 31;
   sh.texpal = p.texpal;
+  // DraStic decides constant attributes at polygon setup.  The endpoint values
+  // are then identical on every scanline, so span_attrs can skip five repeated
+  // comparisons (and take the fill path immediately).
+  sh.attrs_constant = true;
+  sh.rgb_constant = true;
+  const Vertex& v0 = gx_->vertex(p.vtx[0]);
+  for (u32 i = 1; i < p.nverts; ++i) {
+    const Vertex& v = gx_->vertex(p.vtx[i]);
+    for (int c = 0; c < 3; ++c) {
+      if (v.fcol[c] != v0.fcol[c]) sh.rgb_constant = false;
+    }
+    if (v.tex[0] != v0.tex[0] || v.tex[1] != v0.tex[1]) sh.attrs_constant = false;
+  }
+  sh.attrs_constant = sh.rgb_constant && sh.attrs_constant;
   // Direct pointers: every 16 KB block of the texture's range must be mapped
   // to one bank and follow the previous one in host memory.
   auto direct_range = [](const VramView& v, u32 addr, u32 len) -> const u8* {
@@ -1449,7 +1495,7 @@ void Renderer3D::stage_line(Edge& e, s32 y, const LineSpan& ls) {
   }
   if (prof::enabled) prof::add(cb > ca ? prof::C_SPAN_DRAWN : (xb > xa ? prof::C_SPAN_OCCLUDED : prof::C_SPAN_EMPTY), 1);
   if (cb <= ca) return;
-  span_attrs(sb, ls.xstart, ls.xend, ca, cb, ls.wl, ls.wr, ls.al, ls.ar);
+  span_attrs(sb, ls.xstart, ls.xend, ca, cb, ls.wl, ls.wr, ls.al, ls.ar, sh.attrs_constant, sh.rgb_constant);
 
   SpanJob& j = jobs_[njobs_++];
   j.y = y; j.ca = ca; j.cb = cb; j.off = off + static_cast<u32>(ca - xa);
@@ -1582,8 +1628,29 @@ void Renderer3D::render_chunk(s32 ya, s32 yb) {
   // per chunk, not once per line.
   {
     const u32 nin = bucket_[yb] - bucket_[ya];
-    std::copy(&order_[bucket_[ya]], &order_[bucket_[ya]] + nin, enter_.begin());
-    std::sort(enter_.begin(), enter_.begin() + nin);
+    if (nin < 32) {
+      // Small bins are cheaper to sort than to touch the complete membership
+      // bitmap. This is the common case for sparse scenes.
+      std::copy(&order_[bucket_[ya]], &order_[bucket_[ya]] + nin, enter_.begin());
+      std::sort(enter_.begin(), enter_.begin() + nin);
+    } else {
+      // order_ is bucketed by ytop, not by submission order. For a busy
+      // tile, mark its local entries and materialise them in edge/list order;
+      // this is linear in the fixed 2048-polygon list and avoids the sort's
+      // log(n) work on the hot bin boundary.
+      for (u32 i = bucket_[ya]; i < bucket_[yb]; ++i) {
+        const u32 id = order_[i];
+        enter_bits_[id >> 6] |= u64{1} << (id & 63);
+      }
+      u32 out = 0;
+      for (u32 id = 0; id < edge_count_; ++id) {
+        const u64 bit = u64{1} << (id & 63);
+        if (enter_bits_[id >> 6] & bit) {
+          enter_[out++] = static_cast<u16>(id);
+          enter_bits_[id >> 6] &= ~bit;
+        }
+      }
+    }
     const u16* in = enter_.data();
     u32 a = 0, b = 0, n = 0;
     while (a < active_count_ || b < nin) {
@@ -1748,7 +1815,12 @@ void Renderer3D::clear_border(s32 y) {
   const u32 clearz = ((rs_->clear_attr2 & 0x7FFF) * 0x200) + 0x1FF;
   const u32 polyid = rs_->clear_attr1 & 0x3F000000;
   const u32 row = row_of(y);
-  for (u32 x = row; x < row + W; ++x) { color_[x] = 0; depth_[x] = clearz; attr_[x] = polyid; }
+  // The border is a constant row. Bulk fills avoid three scalar stores per
+  // pixel and keep the clear in the same cache-friendly shape as the tile
+  // buffers used by the rasteriser.
+  std::fill(color_.begin() + row, color_.begin() + row + W, 0u);
+  std::fill(depth_.begin() + row, depth_.begin() + row + W, clearz);
+  std::fill(attr_.begin() + row, attr_.begin() + row + W, polyid);
 }
 
 void Renderer3D::clear_line(s32 y) {
@@ -1776,7 +1848,12 @@ void Renderer3D::clear_line(s32 y) {
     const u32 a = (rs_->clear_attr1 >> 16) & 0x1F;
     const u32 c = r | (g << 8) | (b << 16) | (a << 24);
     polyid |= (rs_->clear_attr1 & 0x8000);
-    for (int x = 0; x < 256; ++x) { color[x] = c; depth[x] = clearz; attr[x] = polyid; }
+    // Most frames use a solid clear. Keep this path bulk-oriented: unlike the
+    // image clear above, every destination value is uniform and needs no per
+    // pixel address or VRAM lookup.
+    std::fill(color, color + 256, c);
+    std::fill(depth, depth + 256, clearz);
+    std::fill(attr, attr + 256, polyid);
   }
 }
 

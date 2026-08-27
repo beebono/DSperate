@@ -126,10 +126,39 @@ void select16_obj(const u16* v, const u8* attr, const u8* win, u32 prio, u16* to
   }
 }
 
+void select16_nowin(const u16* v, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  for (u32 i = 0; i < 256; ++i) {
+    if (!(v[i] & LV_OPAQUE)) continue;
+    second[i] = top[i]; second_tid[i] = top_tid[i];
+    top[i] = v[i]; top_tid[i] = tid;
+  }
+}
+
+void select16_obj_nowin(const u16* v, const u8* attr, u32 prio, u16* top, u8* top_tid, u16* second, u8* second_tid) {
+  for (u32 i = 0; i < 256; ++i) {
+    const u8 a = attr[i];
+    if (!(a & OA_OPAQUE) || (a & OA_PRIO) != prio) continue;
+    second[i] = top[i]; second_tid[i] = top_tid[i];
+    top[i] = v[i]; top_tid[i] = obj_tid(a);
+  }
+}
+
 void select16_flat(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid) {
   for (u32 i = 0; i < 256; ++i) {
     if (!(v[i] & LV_OPAQUE) || !(win[i] & wbit)) continue;
     top[i] = v[i]; top_tid[i] = tid;
+  }
+}
+
+void select16_flat_nowin(const u16* v, u8 tid, u16* top, u8* top_tid) {
+  for (u32 i = 0; i < 256; ++i) if (v[i] & LV_OPAQUE) { top[i] = v[i]; top_tid[i] = tid; }
+}
+
+void select16_obj_flat_nowin(const u16* v, const u8* attr, u32 prio, u16* top, u8* top_tid) {
+  for (u32 i = 0; i < 256; ++i) {
+    const u8 a = attr[i];
+    if (!(a & OA_OPAQUE) || (a & OA_PRIO) != prio) continue;
+    top[i] = v[i]; top_tid[i] = obj_tid(a);
   }
 }
 
