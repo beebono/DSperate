@@ -323,6 +323,7 @@ private:
   void setup_left_edge(Edge& e, s32 y) const;
   void setup_right_edge(Edge& e, s32 y) const;
   void setup_polygon(Edge& e, const Polygon& p);
+  void rewind_edge(Edge& e);
   // Recompute Edge's cached per-edge-segment state. Called from the two edge
   // setups (so it cannot be missed) and once per polygon for the flat case.
   void refresh_edge_state(Edge& e) const;
@@ -374,8 +375,18 @@ private:
   // Where to cut the screen into bands. Equal thirds of Y left band 2 with
   // 1.85x band 0's polygon lines on SM64DS, and the frame waits for the
   // slowest band, so the cut follows the work instead.
-  void compute_bands(u32 nb);
-  std::array<s32, 9> band_y_{};
+  // Bin cut points. The frame is split into more bins than there are workers
+  // and each worker takes the next unclaimed one, so a bin that turns out
+  // heavy is absorbed by the others finishing theirs early. A static split
+  // cannot do that: measured per band on the device the three came out
+  // 2.47 / 5.75 / 6.96 ms, a 2.8x spread, and the emulation thread waits for
+  // the slowest -- 6.96 ms against the 5.06 ms an even three-way split of the
+  // same 15.19 ms would have cost.
+  static constexpr u32 MAX_BINS = 32;
+  void compute_bins(u32 nbins);
+  static u32 bin_count(u32 workers);
+  std::array<s32, MAX_BINS + 1> bin_y_{};
+  u32 nbins_ = 0;
 
 public:
   // The raster runs on the workers while the emulation thread carries on.
@@ -387,14 +398,15 @@ public:
   bool raster_pending() const { return pending_bands_ != 0; }
 private:
   std::function<void(u32)> job_fn_;   // outlives the dispatch, unlike a local
-  u32 pending_bands_ = 0;             // bands in flight (0 = nothing running)
-  u32 waited_bits_ = 0;
+  u32 pending_bands_ = 0;             // bins in flight (0 = nothing running)
+  u64 waited_bits_ = 0;
   bool async_ = std::getenv("DS_R3D_SYNC") == nullptr;
 
   u32  edge_count_ = 0;
   u32* out_dst_ = nullptr;                              // where final_pass writes
   std::vector<const u32*>* texels_out_ = nullptr;       // coordinator records decoded textures
   const std::vector<const u32*>* texels_in_ = nullptr;  // worker reads them back
+  s32  rendered_upto_ = 0;    // lines this instance has already rasterised this frame
   u32  setup_poly_ = 0;                                 // polygon index during build_edges
   std::vector<const u32*> poly_texels_;
   std::vector<std::unique_ptr<Renderer3D>> bands_;      // workers 1..n-1 (band 0 is this)

@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/render3d.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -205,20 +206,50 @@ struct Renderer3D::Pool {
   // Hand the bands to the workers and return. The caller (the emulation
   // thread) carries on and waits per band, at the line each band's output is
   // first read -- see Renderer3D::sync_line.
-  void dispatch(const std::function<void(u32)>& fn, u32 jobs) {
+  void dispatch(const std::function<void(u32)>& fn, u32 jobs, u32 bins) {
     {
       std::lock_guard<std::mutex> lk(m_);
       job_ = &fn; jobs_ = jobs; remaining_ = static_cast<u32>(threads_.size());
       done_bits_ = 0;
+      nbins_ = bins;
+      // Before the generation bump, not after: a worker that wakes on the new
+      // generation must never see the previous frame's exhausted counter and
+      // conclude there is nothing to do.
+      next_bin_.store(0, std::memory_order_relaxed);
       ++generation_;
     }
     start_.notify_all();
   }
 
-  void wait_bits(u32 mask) {
+  // The next bin no worker has taken, or >= nbins when they are all claimed.
+  // Bins are handed out in ascending Y so the top of the frame is always the
+  // work in flight first -- that is the deadline order, since band b's output
+  // is first read at display line bin_y_[b].
+  u32 claim() { return next_bin_.fetch_add(1, std::memory_order_acq_rel); }
+  u32 bins() const { return nbins_; }
+
+  void mark_done(u32 bin) {
+    { std::lock_guard<std::mutex> lk(m_); done_bits_ |= u64{1} << bin; }
+    done_.notify_all();
+  }
+
+  void wait_bits(u64 mask) {
     if (!mask) return;
     std::unique_lock<std::mutex> lk(m_);
     done_.wait(lk, [this, mask] { return (done_bits_ & mask) == mask; });
+  }
+
+  // Every worker has returned from the job, not merely finished its bins.
+  //
+  // The two are no longer the same. A worker signals a bin from inside the
+  // job (mark_done) so the compositor can read that strip while the rest of
+  // the frame is still being drawn, which means the last bin can be marked
+  // while its worker is still executing -- and the caller of sync_all goes on
+  // to reassign job_fn_, destroying the std::function under it. Bin bits are
+  // what a display line waits for; this is what the frame boundary waits for.
+  void wait_idle() {
+    std::unique_lock<std::mutex> lk(m_);
+    done_.wait(lk, [this] { return remaining_ == 0; });
   }
 
 private:
@@ -234,7 +265,6 @@ private:
       lk.unlock();
       if (fn && index < jobs) (*fn)(index);
       lk.lock();
-      done_bits_ |= 1u << index;
       --remaining_;
       done_.notify_all();
     }
@@ -244,7 +274,9 @@ private:
   std::condition_variable start_, done_;
   const std::function<void(u32)>* job_ = nullptr;
   u64 generation_ = 0;
-  u32 jobs_ = 0, remaining_ = 0, done_bits_ = 0;
+  u64 done_bits_ = 0;
+  std::atomic<u32> next_bin_{0};
+  u32 jobs_ = 0, remaining_ = 0, nbins_ = 0;
   bool stop_ = false;
 };
 
@@ -520,6 +552,46 @@ void Renderer3D::setup_right_edge(Edge& e, s32 y) const {
   }
   const Vertex &a = gx_->vertex(p.vtx[e.cur_vr]), &b = gx_->vertex(p.vtx[e.next_vr]);
   e.xr = e.right.setup(a.sx, b.sx, a.sy, b.sy, p.w[e.cur_vr], p.w[e.next_vr], y, p.wbuffer);
+  refresh_edge_state(e);
+}
+
+// Put a polygon's edge cursors back where setup_polygon leaves them: at its
+// own top line, ready to be walked downwards.
+//
+// The chunk loop assumes an entering polygon's cursors still sit at ytop, and
+// with one band per Renderer3D that held -- build_edges put them there and
+// nothing had stepped them yet. With the frame cut into bins claimed by
+// whichever worker is free, one instance renders several bins, and
+// consecutive bins overlap by the line or two that final_pass needs either
+// side of a boundary. A polygon whose ytop falls in that overlap is entered
+// twice on the same instance, and the second entry would otherwise walk from
+// wherever the first entry left the cursors.
+void Renderer3D::rewind_edge(Edge& e) {
+  const Polygon& p = *e.poly;
+  const u32 n = p.nverts;
+  u32 vtop = p.vtop, vbot = p.vbot;
+  e.cur_vl = vtop; e.cur_vr = vtop;
+  if (p.facing) {
+    e.next_vl = e.cur_vl + 1; if (e.next_vl >= n) e.next_vl = 0;
+    e.next_vr = e.cur_vr - 1; if (static_cast<s32>(e.next_vr) < 0) e.next_vr = n - 1;
+  } else {
+    e.next_vl = e.cur_vl - 1; if (static_cast<s32>(e.next_vl) < 0) e.next_vl = n - 1;
+    e.next_vr = e.cur_vr + 1; if (e.next_vr >= n) e.next_vr = 0;
+  }
+  if (p.ybot == p.ytop) {
+    // Flat polygon: a single span from the leftmost to the rightmost vertex.
+    vtop = 0; vbot = 0;
+    for (u32 i : {1u, n - 1}) {
+      if (gx_->vertex(p.vtx[i]).sx < gx_->vertex(p.vtx[vtop]).sx) vtop = i;
+      if (gx_->vertex(p.vtx[i]).sx > gx_->vertex(p.vtx[vbot]).sx) vbot = i;
+    }
+    e.cur_vl = vtop; e.next_vl = vtop; e.cur_vr = vbot; e.next_vr = vbot;
+    e.xl = e.left.setup_dummy(gx_->vertex(p.vtx[e.cur_vl]).sx, p.wbuffer);
+    e.xr = e.right.setup_dummy(gx_->vertex(p.vtx[e.cur_vr]).sx, p.wbuffer);
+  } else {
+    setup_left_edge(e, p.ytop);
+    setup_right_edge(e, p.ytop);
+  }
   refresh_edge_state(e);
 }
 
@@ -1902,23 +1974,32 @@ void Renderer3D::render(const Gpu3D& gx) {
   }
   if (!pool_ || pool_->workers() != nb) pool_ = std::make_unique<Pool>(nb);
 
-  compute_bands(nb);
+  nbins_ = bin_count(nb);
+  compute_bins(nbins_);
   const Gpu3D& gxr = gx;
   u32* const dst = out_.data();
-  // The job outlives this call now, so it is a member, and every band runs on
-  // a worker -- the emulation thread's job is to go on emulating.
-  job_fn_ = [this, &gxr, dst](u32 i) {
+  // The job outlives this call now, so it is a member, and every worker runs
+  // on a pool thread -- the emulation thread's job is to go on emulating.
+  // Each worker takes bins until they run out, rather than owning one band,
+  // so an uneven split costs the frame nothing: whoever is free next picks up
+  // the next strip of the frame.
+  job_fn_ = [this, &gxr, dst](u32 w) {
     const auto t0 = std::chrono::steady_clock::now();
-    const s32 y0 = band_y_[i], y1 = band_y_[i + 1];
-    if (y0 >= y1) { if (prof::enabled && i < 8) band_ns_[i] = 0; return; }
     Renderer3D* r = this;
-    if (i != 0) { r = bands_[i - 1].get(); r->prepare_worker(gxr, &poly_texels_); }
-    r->render_band(y0, y1, dst);
-    // Each band writes its own slot, so no synchronisation; measurement only.
-    if (prof::enabled && i < 8) band_ns_[i] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
+    if (w != 0) { r = bands_[w - 1].get(); r->prepare_worker(gxr, &poly_texels_); }
+    for (;;) {
+      const u32 b = pool_->claim();
+      if (b >= nbins_) break;
+      const s32 y0 = bin_y_[b], y1 = bin_y_[b + 1];
+      if (y0 < y1) r->render_band(y0, y1, dst);
+      pool_->mark_done(b);
+    }
+    // Per worker now, not per bin: what a thread spent on the frame. Each
+    // writes its own slot, so no synchronisation; measurement only.
+    if (prof::enabled && w < 8) band_ns_[w] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   };
-  pending_bands_ = nb;
-  pool_->dispatch(job_fn_, nb);
+  pending_bands_ = nbins_;
+  pool_->dispatch(job_fn_, nb, nbins_);
   if (!async_) sync_all();
   // The emulation thread waits for the slowest band, so that -- not the sum --
   // is what the 3D raster costs the frame. Both are recorded: the gap between
@@ -1935,17 +2016,63 @@ void Renderer3D::render(const Gpu3D& gx) {
   }
 }
 
-// Cut points for `nb` bands, equalising the work rather than the height.
+// How many bins to cut the frame into for `workers` threads.
+//
+// More bins than workers is what lets a heavy strip be absorbed by threads
+// that finish theirs early, and it does work: at twelve bins the three
+// workers came out even (2400 / 2367 / 2357 ms against 1148 / 1863 / 2972)
+// and the emulation thread's wait fell from 304 ms to 71 ms over 900 frames
+// of sm64.
+//
+// It still loses. Every boundary duplicates two scanlines -- a bin rasterises
+// from y0-1, because final_pass(y0) reads the line above, and through y1,
+// because final_pass(y1-1) reads the line below -- and re-runs seed_active.
+// At twelve bins that is 22 of 192 lines drawn twice, and the total raster
+// work rose 19 % (5983 -> 7124 ms) to save 233 ms of waiting. Device totals
+// over 1800 frames of sm64: 18801 ms at three bins, 18934 at six, 19655 at
+// twelve, 20394 at twenty-four; meteos is flat to slightly worse.
+//
+// The reason the trade is bad here is that the raster is already
+// asynchronous: the emulation thread waits for a band for 2.4 % of the frame,
+// so balancing the workers has almost nothing to win, while the duplicated
+// lines are paid in full and compete with the emulation thread for cores.
+// DraStic bins into twelve fixed 16-line strips (video_3d_bin_polygons_1x,
+// twelve polygon-index lists of stride 0x1004), but its bins are lists of
+// polygons handed to a rasteriser that does not re-walk edges per bin, so it
+// does not pay this. So the default is one bin per worker -- the machinery is
+// here, and DS_R3D_BINS turns it up, if the boundary cost is ever removed.
+u32 Renderer3D::bin_count(u32 workers) {
+  static const int forced = [] {
+    const char* e = std::getenv("DS_R3D_BINS");
+    return e ? std::atoi(e) : -1;
+  }();
+  u32 n = forced > 0 ? static_cast<u32>(forced) : workers;
+  if (n < workers) n = workers;
+  if (n > MAX_BINS) n = MAX_BINS;
+  if (n > 192) n = 192;
+  return n;
+}
+
+// Cut points for `nbins` bins.
 //
 // The cost model is the number of polygons covering each line: measured per
 // band on the device, time tracked polygon-lines (1.38M / 1.55M / 2.55M for
 // 5.35 / 8.11 / 6.42 s) and not span pixels, which were nearly equal across
 // the bands. Every line also costs a clear and a final pass whatever covers
-// it, hence the +1: a band of empty lines is not free.
+// it, hence the +1: a bin of empty lines is not free.
+//
+// Shares follow the deadlines rather than being equal. The raster is
+// dispatched at line 215 and bin b's output is first read at display line
+// bin_y_[b] of the next frame, so bin b has (263 - 215) + bin_y_[b] lines to
+// finish in -- 48 for the first one. Sized equally, the first bin cannot make
+// that and the emulation thread waits at line 0 having gained nothing: with
+// equal cuts and three bins the workers evened out but the wait *rose*, 304
+// ms to 760. The deadlines depend on the split, so it is solved once from the
+// equal-work split and then refined.
 //
 // The polygons' line ranges are already known -- build_edges has just walked
 // them -- so this is a difference array and a prefix sum over 192 entries.
-void Renderer3D::compute_bands(u32 nb) {
+void Renderer3D::compute_bins(u32 nbins) {
   std::array<s32, 194> delta{};
   for (u32 i = 0; i < edge_count_; ++i) {
     const Polygon& p = *edges_[i].poly;
@@ -1961,35 +2088,25 @@ void Renderer3D::compute_bands(u32 nb) {
     cum[y + 1] = cum[y] + static_cast<u32>(active) + 1;
   }
   const u32 total = cum[192];
-  band_y_[0] = 0;
-  band_y_[nb] = 192;
-
-  // Equal shares are wrong when the bands are not needed at the same time.
-  // The raster is dispatched at line 215 and band b's output is first read at
-  // display line band_y_[b] of the next frame, so band b has
-  // (263 - 215) + band_y_[b] lines to finish in -- 48 for the first one.
-  // Sized equally, band 0 carries a third of the frame's raster and cannot
-  // make that, and the emulation thread waits at line 0 having gained
-  // nothing. So the shares follow the deadlines: a small first band, a large
-  // last one. The deadlines depend on the split, so it is solved once from
-  // the equal-work split and then refined.
-  auto split_with = [&](const std::array<u32, 9>& weight, u32 wsum) {
+  bin_y_[0] = 0;
+  bin_y_[nbins] = 192;
+  auto split_with = [&](const std::array<u32, MAX_BINS + 1>& weight, u32 wsum) {
     u32 acc = 0;
-    for (u32 b = 1; b < nb; ++b) {
+    for (u32 b = 1; b < nbins; ++b) {
       acc += weight[b - 1];
       const u32 target = static_cast<u32>((static_cast<u64>(total) * acc) / wsum);
-      s32 y = band_y_[b - 1];
+      s32 y = bin_y_[b - 1];
       while (y < 192 && cum[static_cast<u32>(y)] < target) ++y;
-      band_y_[b] = y;
+      bin_y_[b] = y;
     }
   };
-  std::array<u32, 9> weight{};
+  std::array<u32, MAX_BINS + 1> weight{};
   u32 wsum = 0;
-  for (u32 b = 0; b < nb; ++b) { weight[b] = 1; ++wsum; }
+  for (u32 b = 0; b < nbins; ++b) { weight[b] = 1; ++wsum; }
   split_with(weight, wsum);                       // equal work, to get deadlines
   for (int pass = 0; pass < 2; ++pass) {
     wsum = 0;
-    for (u32 b = 0; b < nb; ++b) { weight[b] = 48 + static_cast<u32>(band_y_[b]); wsum += weight[b]; }
+    for (u32 b = 0; b < nbins; ++b) { weight[b] = 48 + static_cast<u32>(bin_y_[b]); wsum += weight[b]; }
     split_with(weight, wsum);
   }
 }
@@ -2000,10 +2117,11 @@ void Renderer3D::compute_bands(u32 nb) {
 void Renderer3D::sync_line(s32 y) {
   if (!pending_bands_) return;
   u32 b = 0;
-  while (b + 1 < pending_bands_ && y >= band_y_[b + 1]) ++b;
-  { DS_PROF(R3D_WAIT); pool_->wait_bits(1u << b); }
-  waited_bits_ |= 1u << b;
-  if (waited_bits_ == (1u << pending_bands_) - 1) { pending_bands_ = 0; waited_bits_ = 0; }
+  while (b + 1 < pending_bands_ && y >= bin_y_[b + 1]) ++b;
+  { DS_PROF(R3D_WAIT); pool_->wait_bits(u64{1} << b); }
+  waited_bits_ |= u64{1} << b;
+  const u64 all = pending_bands_ >= 64 ? ~u64{0} : (u64{1} << pending_bands_) - 1;
+  if (waited_bits_ == all) { pending_bands_ = 0; waited_bits_ = 0; }
 }
 
 // Wait for all of them: before the next frame's raster, and whenever
@@ -2011,8 +2129,12 @@ void Renderer3D::sync_line(s32 y) {
 // is the only way texture VRAM or its banking can move -- the texture and
 // texture-palette views are never mapped into either CPU's address space).
 void Renderer3D::sync_all() {
+  // Unconditionally, not just while bins are outstanding: sync_line clears
+  // pending_bands_ once it has waited for every bin, and a worker can still
+  // be inside the job at that point -- it marks its last bin done from in
+  // there. Waiting on an idle pool costs one uncontended lock.
+  if (pool_) { DS_PROF(R3D_WAIT); pool_->wait_idle(); }
   if (!pending_bands_) return;
-  { DS_PROF(R3D_WAIT); pool_->wait_bits((1u << pending_bands_) - 1); }
   prof::add(prof::C_R3D_SYNC_ALL, 1);
   pending_bands_ = 0;
   waited_bits_ = 0;
@@ -2062,6 +2184,7 @@ void Renderer3D::build_edges(const Gpu3D& gx) {
     setup_polygon(edges_[n++], *polys[i]);
   }
   edge_count_ = n;
+  rendered_upto_ = 0;   // cursors are fresh at ytop again; nothing re-entered yet
   // Bucket the polygons by their top line (counting sort, list order kept).
   // A polygon above the screen starts at line 0; one below it is dropped.
   auto top_line = [&](const Polygon& p) { return p.ytop < 0 ? 0 : p.ytop; };
@@ -2098,6 +2221,18 @@ void Renderer3D::seed_active(s32 y) {
 void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
   out_dst_ = dst;
   const s32 first = y0 > 0 ? y0 - 1 : 0;
+  const s32 last = y1 + 1 < 192 ? y1 + 1 : 192;
+  // Bins overlap by the line or two final_pass needs either side of a
+  // boundary, so a polygon starting in the overlap is entered twice when the
+  // same instance draws both bins. seed_active only re-seeds polygons that
+  // began strictly above `first`; the ones starting inside the overlap are
+  // merged by render_chunk, which expects their cursors still at ytop. Put
+  // them back. order_ is bucketed by ytop, so this is exactly that slice.
+  if (rendered_upto_ > first) {
+    const s32 hi = rendered_upto_ < last ? rendered_upto_ : last;
+    for (u32 i = bucket_[first]; i < bucket_[hi]; ++i) rewind_edge(edges_[order_[i]]);
+  }
+  if (last > rendered_upto_) rendered_upto_ = last;
   seed_active(first);
   if (y0 == 0) { DS_PROF(R3D_CLEAR); clear_border(-1); }
   // The stage timers are accumulated in locals and flushed once per band
