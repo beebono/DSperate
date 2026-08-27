@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "display.h"
+#include "display_wl.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -37,7 +38,20 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     } else {
       layout();
       build_scale();
-      std::fprintf(stderr, "video: window surface, %s driver, scanline scaling\n", SDL_GetCurrentVideoDriver());
+      // Tier 1 on top of the same scanline path: same targets, but the
+      // pixels land in a CMA dmabuf instead of the shm surface.
+      const char* dmenv = std::getenv("DS_DMABUF");
+      const bool dm_forbidden = dmenv && !std::strcmp(dmenv, "0");
+      const bool dm_required = dmenv && !std::strcmp(dmenv, "1");
+      if (scaled_ && !dm_forbidden) {
+        int w = 0, h = 0;
+        out_size(w, h);
+        auto dm = std::make_unique<DmabufOut>();
+        if (dm->open(win_, w, h)) dm_ = std::move(dm);
+        else if (dm_required) { std::fprintf(stderr, "DS_DMABUF=1 but the dmabuf path failed\n"); return false; }
+      }
+      std::fprintf(stderr, "video: %s, %s driver, scanline scaling\n",
+                   dm_ ? "dmabuf" : "window surface", SDL_GetCurrentVideoDriver());
       return true;
     }
   }
@@ -92,6 +106,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
 }
 
 void Display::close() {
+  if (dm_) { dm_->close(); dm_.reset(); }
   surf_ = nullptr;   // owned by SDL, freed with the window
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
@@ -150,6 +165,9 @@ bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
 bool Display::out_size(int& w, int& h) const {
   if (ren_) return SDL_GetRendererOutputSize(ren_, &w, &h) == 0;
   if (!win_) return false;
+  // On the dmabuf tier the window size is the truth: the shm surface can lag
+  // a configure by a frame, and the two must not disagree mid-rebuild.
+  if (dm_) { SDL_GetWindowSize(win_, &w, &h); return w > 0 && h > 0; }
   SDL_Surface* s = SDL_GetWindowSurface(win_);
   if (!s) return false;
   w = s->w; h = s->h;
@@ -201,6 +219,48 @@ void Display::clear_margins(u32* px, u32 pitch) const {
 
 bool Display::begin_frame(Target out[SCREENS]) {
   if (!scaled_) return false;
+  if (dm_) {
+    // A configure (fullscreen granted, output reconfigured) resizes the
+    // window under us; the buffers must follow before anything writes at the
+    // new geometry. The shm path below re-checks its surface the same way.
+    int w = 0, h = 0;
+    SDL_GetWindowSize(win_, &w, &h);
+    if (w != dm_->width() || h != dm_->height()) {
+      SDL_Window* win = win_;
+      dm_->close();
+      if (!dm_->open(win, w, h)) {
+        std::fprintf(stderr, "video: dmabuf resize failed; window surface from here\n");
+        dm_.reset();
+        margins_dirty_ = true;
+        layout();
+        build_scale();
+        // fall through to the shm path below
+      } else {
+        layout();
+        build_scale();
+        dm_margins_ = 0;
+      }
+    }
+  }
+  if (dm_) {
+    if (u32* px = dm_->begin_frame()) {
+      const u32 stride = static_cast<u32>(dm_->width());
+      if (margins_dirty_) { clear_margins(px, stride); margins_dirty_ = false; }
+      // Every buffer needs its margins cleared once, not just the first.
+      static_assert(DmabufOut::BUFS <= 8, "margin bookkeeping");
+      if (dm_margins_ < DmabufOut::BUFS) { clear_margins(px, stride); ++dm_margins_; }
+      for (const View& v : views_)
+        out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x,
+                               stride, static_cast<u32>(v.rect.h), xrun_.data()};
+      dm_frame_ = true;
+      return true;
+    }
+    // Protocol death mid-run: drop the tier, keep playing on shm.
+    std::fprintf(stderr, "video: dmabuf path lost; window surface from here\n");
+    dm_->close();
+    dm_.reset();
+    margins_dirty_ = true;
+  }
   // SDL hands back a new surface after a resize; the pointer is only valid
   // until then, so it is fetched every frame rather than cached across one.
   SDL_Surface* s = SDL_GetWindowSurface(win_);
@@ -225,6 +285,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
 }
 
 void Display::end_frame() {
+  if (dm_frame_) { dm_frame_ = false; dm_->end_frame(); return; }
   if (SDL_MUSTLOCK(surf_)) SDL_UnlockSurface(surf_);
   SDL_UpdateWindowSurface(win_);
 }

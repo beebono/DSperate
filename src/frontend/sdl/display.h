@@ -2,9 +2,11 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
 #include "core/types.h"
+#include "display_wl.h"   // complete type for the unique_ptr
 
 #include <SDL2/SDL.h>
 
+#include <memory>
 #include <vector>
 
 namespace ds::sdl {
@@ -47,6 +49,12 @@ public:
   // here first measures the scaling win on its own, on the path that ships.
   //
   // Renderer-based drawing (draw(), --accel) is unavailable while this is on.
+  //
+  // Destination tiers, tried in order at open():
+  //  1. dmabuf (display_wl.h): CMA buffers on SDL's Wayland surface. The
+  //     compositor samples them zero-copy, or scans them out directly when
+  //     the surface qualifies. DS_DMABUF=0 disables, =1 requires (fail loud).
+  //  2. window surface: SDL's shm path. Always available under a compositor.
   struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; };
 
   bool scaling() const { return scaled_; }
@@ -82,8 +90,11 @@ private:
   Layout        layout_ = Layout::Vertical;
 
   bool              scaled_ = false;
+  std::unique_ptr<DmabufOut> dm_;  // tier 1; null on the surface tier
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL
   bool              margins_dirty_ = true;
+  int               dm_margins_ = 0;      // dmabuf buffers whose letterbox is cleared
+  bool              dm_frame_ = false;    // current begin_frame targeted the dmabuf
   int               scaled_w_ = 0, scaled_h_ = 0;
   std::vector<u16>  xrun_;     // 257 entries; see kern::scale_row
 };
