@@ -6,7 +6,7 @@
 
 namespace ds::sdl {
 
-bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout_mode) {
+bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout_mode, bool accel) {
   layout_ = layout_mode;
   const bool across = layout_ == Layout::Horizontal;
   const int w = static_cast<int>(SCREEN_W) * (across ? 2 : 1) * scale, h = static_cast<int>(SCREEN_H) * (across ? 1 : 2) * scale;
@@ -15,9 +15,27 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
 
-  const u32 rflags = SDL_RENDERER_ACCELERATED | (vsync ? static_cast<u32>(SDL_RENDERER_PRESENTVSYNC) : 0u);
+  // Software by default, which is not the obvious choice and was measured.
+  //
+  // Everything the emulator draws is already in a CPU buffer, so the only
+  // work the GPU does is scale 256x192 per screen up to the panel -- which a
+  // Mali does nearly for free, while the CPU does not. That reasoning is
+  // wrong on these handhelds: the GLES path also costs a texture upload per
+  // frame and, more to the point, the driver's own threads, on a four-core
+  // board where the emulation thread, the 2D engine-B worker and two or three
+  // raster workers already want every core.
+  //
+  // etody, 1800 frames, SDL fullscreen on two RG DS boards -- software
+  // against opengles2: 14173 ms and 14452 against 15426 and 15508, with
+  // over-budget frames 112 and 142 against 305 and 294, and p99 ~2.7 ms
+  // lower. The median is marginally *worse* (the CPU scale is a small fixed
+  // cost per frame) and the tail is much better (the driver is not competing
+  // for a core). --accel selects GLES, which is likely the better choice
+  // anywhere the GPU is not sharing a die with four A55s.
+  const u32 rflags = (accel ? static_cast<u32>(SDL_RENDERER_ACCELERATED) : static_cast<u32>(SDL_RENDERER_SOFTWARE))
+                   | (vsync ? static_cast<u32>(SDL_RENDERER_PRESENTVSYNC) : 0u);
   ren_ = SDL_CreateRenderer(win_, -1, rflags);
-  if (!ren_) {   // KMSDRM without GLES, or a headless test box
+  if (!ren_ && accel) {   // KMSDRM without GLES, or a headless test box
     std::fprintf(stderr, "accelerated renderer unavailable (%s); falling back to software\n", SDL_GetError());
     ren_ = SDL_CreateRenderer(win_, -1, SDL_RENDERER_SOFTWARE);
   }

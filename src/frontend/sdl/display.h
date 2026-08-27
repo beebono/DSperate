@@ -23,7 +23,7 @@ public:
   // right): the latter matches handhelds whose two panels sit horizontally
   // in the compositor's canvas, so touch coordinates line up.
   enum class Layout { Vertical, Horizontal };
-  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout = Layout::Vertical);
+  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout = Layout::Vertical, bool accel = false);
   void close();
 
   void draw(const u32* const fb[SCREENS]);

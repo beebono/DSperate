@@ -33,6 +33,8 @@ const char* kUsage =
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) or horizontal: screens stacked or side by side\n"
     "  --linear        smooth scaling instead of nearest\n"
+    "  --accel         GPU renderer; the default is software, which measures faster\n"
+    "                  on the handhelds (the GL driver's threads cost more than the scale)\n"
     "  --no-audio      run without sound (frames are paced by the clock)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
     "  --interp        interpreter instead of the recompiler\n"
@@ -75,7 +77,7 @@ int main(int argc, char** argv) {
   int scale = 2;
   long frame_limit = 0;
   const char *record = nullptr, *replay = nullptr, *save_arg = nullptr;
-  bool fullscreen = false, linear = false, audio_on = true, jit = true, vsync = true;
+  bool fullscreen = false, linear = false, accel = false, audio_on = true, jit = true, vsync = true;
   ds::sdl::Display::Layout layout = ds::sdl::Display::Layout::Vertical;
   long quantum = 0;   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
 
@@ -97,6 +99,7 @@ int main(int argc, char** argv) {
     else if (arg("--save")) save_arg = argv[++i];
     else if (!std::strcmp(argv[i], "--fullscreen")) fullscreen = true;
     else if (!std::strcmp(argv[i], "--linear")) linear = true;
+    else if (!std::strcmp(argv[i], "--accel")) accel = true;
     else if (!std::strcmp(argv[i], "--no-audio")) audio_on = false;
     else if (!std::strcmp(argv[i], "--no-vsync")) vsync = false;
     else if (!std::strcmp(argv[i], "--interp")) jit = false;
@@ -144,7 +147,7 @@ int main(int argc, char** argv) {
   if (SDL_Init(init) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
 
   ds::sdl::Display display;
-  if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout)) { SDL_Quit(); return 1; }
+  if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; }
 
   ds::sdl::Audio audio;
   if (audio_on) audio.open();
