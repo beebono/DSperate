@@ -13,6 +13,7 @@
 #include "core/cpu/jit/jit.h"
 #endif
 #include "core/profile.h"
+#include "core/frame_report.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -96,6 +97,14 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
     else rom = argv[i];
   }
+  // A replay is recorded under direct boot (the SDL frontend has no other
+  // mode), so replaying without --direct boots the firmware instead and the
+  // inputs land in its setup wizard -- a run that looks fast because it draws
+  // nothing. The frame count and cycle total are identical either way, so
+  // there is no other sign it happened.
+  if (replay && !direct)
+    std::fprintf(stderr, "warning: --replay without --direct boots the firmware, not the ROM;"
+                         " the replay will not reproduce the recorded session\n");
   std::fprintf(stderr, "DSperate 0.0.1 (%s%s)\n",
 #if DSPERATE_JIT
               "jit",
@@ -204,52 +213,7 @@ int main(int argc, char** argv) {
   if (ds::prof::enabled && (jit9 || jit7)) ds::jit::report(stderr);
 #endif
   ds::interp::census_report(nds.frame_count);
-  if (!frame_ms.empty()) {
-    std::vector<double> v = frame_ms;
-    std::sort(v.begin(), v.end());
-    double sum = 0; for (double x : v) sum += x;
-    const size_t n = v.size();
-    auto pct = [&](double p) { return v[std::min(n - 1, static_cast<size_t>(p * n))]; };
-    // A DS frame is 1/59.8261 s. A frame that takes longer than that is one the
-    // emulator could not deliver in real time -- which is what a dropped frame
-    // and an audio underrun actually are. The mean hides these completely: a
-    // change can improve the mean while making the tail worse, and the tail is
-    // what is felt. Report both.
-    constexpr double BUDGET_MS = 1000.0 / 59.8261;
-    size_t over = 0; for (double x : v) if (x > BUDGET_MS) ++over;
-    std::fprintf(stderr, "frame ms: median %.3f mean %.3f p90 %.3f p99 %.3f max %.3f min %.3f total %.1f\n",
-                 v[n / 2], sum / n, pct(0.90), pct(0.99), v.back(), v.front(), sum);
-    std::fprintf(stderr, "frame budget: %zu of %zu frames over %.3f ms (%.2f%%)\n",
-                 over, n, BUDGET_MS, 100.0 * static_cast<double>(over) / static_cast<double>(n));
-
-    // Where the overruns are, not just how many. A count says the run stutters;
-    // this says which frames to re-run with --dump-from/--dump-count and look
-    // at. `frame_ms` is in run order, unlike the sorted copy above.
-    if (over) {
-      size_t worst_i = 0, bursts = 0, longest = 0, longest_at = 0, cur = 0, cur_at = 0;
-      for (size_t i = 0; i < frame_ms.size(); ++i) {
-        if (frame_ms[i] > frame_ms[worst_i]) worst_i = i;
-        if (frame_ms[i] > BUDGET_MS) {
-          if (cur == 0) { ++bursts; cur_at = i; }
-          if (++cur > longest) { longest = cur; longest_at = cur_at; }
-        } else cur = 0;
-      }
-      std::fprintf(stderr, "  worst frame #%zu at %.3f ms; %zu bursts, longest %zu frames from #%zu\n",
-                   worst_i, frame_ms[worst_i], bursts, longest, longest_at);
-      // Ten windows over the run: a flat row is steady load, a spike is a
-      // section that chugs and is worth dumping.
-      constexpr size_t W = 10;
-      const size_t span = (frame_ms.size() + W - 1) / W;
-      std::fprintf(stderr, "  over-budget per %zu-frame window:", span);
-      for (size_t w = 0; w < W; ++w) {
-        size_t c = 0;
-        for (size_t i = w * span; i < std::min(frame_ms.size(), (w + 1) * span); ++i)
-          if (frame_ms[i] > BUDGET_MS) ++c;
-        std::fprintf(stderr, " %zu", c);
-      }
-      std::fputc('\n', stderr);
-    }
-  }
+  ds::frame_report(frame_ms);
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));

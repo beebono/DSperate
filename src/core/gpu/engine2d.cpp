@@ -407,23 +407,22 @@ void Engine2D::render_line(u32 line) {
       // Nothing on the line: the backdrop shows everywhere (windows
       // inhibit layers, never the backdrop).
       if (nlayers == 0) { prof::add(prof::C_2D_FAST_BACKDROP, 1); out_.fill(std_pal18()[0] | 0xFF000000); return; }
-      // With no windows or opaque OBJ pixels, the highest-priority BG that
-      // covers the complete line wins everywhere.  Lower-priority planes still
-      // exist, but cannot affect a flat line, so avoid selecting them pixel by
-      // pixel.  This is the same whole-line shortcut as the one-layer case,
-      // generalized to the common fully-covered HUD/background stack.
+      // With no windows and no OBJ pixels, a BG that covers the complete line
+      // hides everything below it -- so the select can be skipped and that one
+      // layer resolved directly. It has to be the *topmost* layer with content
+      // though: an opaque layer under a sparse one is not what shows through
+      // the sparse layer's transparent pixels. Walk the planes in the order
+      // select_layers applies them, topmost first -- priority 0..3, and BG0
+      // before BG3 within a priority, since the later select wins -- and let
+      // the first one with content decide.
       if (!(dispcnt_ & 0xE000) && !obj_prio_mask_) {
-        int winner = -1, winner_prio = 4;
-        for (int bg = 0; bg < 4; ++bg) {
-          if (!(layer_enable_ & (1 << bg)) || !bg_[bg].any || !line_all_opaque(bg_[bg])) continue;
-          const int prio = bgcnt_[bg] & 3;
-          if (prio < winner_prio || (prio == winner_prio && bg < winner)) {
-            winner = bg; winner_prio = prio;
-          }
-        }
-        if (winner >= 0) {
+        int top = -1;
+        for (int prio = 0; prio < 4 && top < 0; ++prio)
+          for (int bg = 0; bg < 4; ++bg)
+            if ((layer_enable_ & (1 << bg)) && bg_[bg].any && (bgcnt_[bg] & 3) == prio) { top = bg; break; }
+        if (top >= 0 && line_all_opaque(bg_[top])) {
           prof::add(prof::C_2D_FAST_ONE, 1);
-          kern::active::resolve16_one(bg_[winner].v(), bg_[winner].table, out_.data());
+          kern::active::resolve16_one(bg_[top].v(), bg_[top].table, out_.data());
           return;
         }
       }

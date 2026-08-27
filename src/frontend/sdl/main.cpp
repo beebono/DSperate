@@ -7,6 +7,7 @@
 // games expect them.
 #include "core/nds.h"
 #include "core/profile.h"
+#include "core/frame_report.h"
 #include "core/input/input_log.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
@@ -38,7 +39,9 @@ const char* kUsage =
     "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
-    "  --replay F      play the inputs in F instead of the controls; quits at its end\n";
+    "  --replay F      play the inputs in F instead of the controls; quits at its end\n"
+    "  --save F        battery save to start from, instead of <rom>.sav\n"
+    "                  (a --replay never writes the save back, so a scene repeats)\n";
 
 // Battery save file next to the ROM.
 std::string save_path(const std::string& rom) {
@@ -71,7 +74,7 @@ int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr;
   int scale = 2;
   long frame_limit = 0;
-  const char *record = nullptr, *replay = nullptr;
+  const char *record = nullptr, *replay = nullptr, *save_arg = nullptr;
   bool fullscreen = false, linear = false, audio_on = true, jit = true, vsync = true;
   ds::sdl::Display::Layout layout = ds::sdl::Display::Layout::Vertical;
   long quantum = 0;   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
@@ -91,6 +94,7 @@ int main(int argc, char** argv) {
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
+    else if (arg("--save")) save_arg = argv[++i];
     else if (!std::strcmp(argv[i], "--fullscreen")) fullscreen = true;
     else if (!std::strcmp(argv[i], "--linear")) linear = true;
     else if (!std::strcmp(argv[i], "--no-audio")) audio_on = false;
@@ -115,8 +119,16 @@ int main(int argc, char** argv) {
 #else
   (void)jit;
 #endif
-  const std::string sav = save_path(rom);
+  // A replay is a measurement, not a play session: it must start from the
+  // same battery save every time or it is not reproducible, and writing back
+  // would mean the second run of a scene no longer matches the first. The CLI
+  // has always loaded --save read-only for this reason; match it here, and
+  // take an explicit --save too so both frontends can be pointed at the same
+  // scene save rather than one silently picking up <rom>.sav.
+  const std::string sav = save_arg ? std::string(save_arg) : save_path(rom);
   load_save(nds, sav);
+  const bool save_readonly = replay != nullptr;
+  if (save_readonly) std::fprintf(stderr, "save: read-only for the replay\n");
 
   ds::input::Log log;
   if (record && replay) { std::fprintf(stderr, "--record and --replay are exclusive\n"); return 2; }
@@ -149,6 +161,14 @@ int main(int argc, char** argv) {
   Uint64 fps_mark = SDL_GetPerformanceCounter();
   Uint64 emu_ticks = 0, draw_ticks = 0;
   u64 frames = 0;
+  // Per-frame emulation time, for the same report the CLI prints. Only the
+  // run_frame() slice goes in: the present blocks on vsync and audio.pace()
+  // sleeps, and either one would peg every frame at the refresh interval and
+  // hide exactly the clusters this is here to find.
+  const double ticks_to_ms = 1e3 / static_cast<double>(SDL_GetPerformanceFrequency());
+  std::vector<double> frame_ms;
+  if (frame_limit > 0) frame_ms.reserve(static_cast<size_t>(frame_limit));
+  Uint64 pace_ticks = 0, draw_ticks_total = 0;
   while (!input.quit() && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) input.handle(e, display);
@@ -167,7 +187,10 @@ int main(int argc, char** argv) {
     const Uint64 t2 = SDL_GetPerformanceCounter();
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;
+    draw_ticks_total += t2 - t1;
+    frame_ms.push_back(static_cast<double>(t1 - t0) * ticks_to_ms);
 
+    const Uint64 t3 = SDL_GetPerformanceCounter();
     if (audio.active()) {
       audio.pace();
     } else {
@@ -181,7 +204,9 @@ int main(int argc, char** argv) {
       }
     }
 
-    if (++frames % 300 == 0 && nds.cart && nds.cart->sram_dirty()) write_save(nds, sav);
+    pace_ticks += SDL_GetPerformanceCounter() - t3;
+
+    if (++frames % 300 == 0 && !save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, sav);
 
     if (show_fps && frames % 60 == 0) {   // DS_FPS=1: speed and audio slack
       const Uint64 now = SDL_GetPerformanceCounter();
@@ -195,8 +220,15 @@ int main(int argc, char** argv) {
     }
   }
 
-  if (nds.cart && nds.cart->sram_dirty()) write_save(nds, sav);
+  if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, sav);
   if (log.writing()) std::fprintf(stderr, "recorded %u frames to %s\n", log.frames(), record);
+  // Emulation work only -- see frame_report.h. The two excluded costs are
+  // named on their own line so a CLI/SDL disagreement can be attributed.
+  ds::frame_report(frame_ms);
+  if (!frame_ms.empty())
+    std::fprintf(stderr, "  (emulation only; excluded: present %.1f ms, pacing %.1f ms total over %zu frames)\n",
+                 static_cast<double>(draw_ticks_total) * ticks_to_ms,
+                 static_cast<double>(pace_ticks) * ticks_to_ms, frame_ms.size());
   log.close();
   ds::prof::report();
   input.close();
