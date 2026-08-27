@@ -61,10 +61,19 @@ public:
   // read, and before the next dispatch().
   void dispatch() {
     const u32 n = req_.load(std::memory_order_relaxed) + 1;
-    req_.store(n, std::memory_order_release);
+    // Sequentially consistent, and it has to be. This and the worker's park
+    // are a Dekker pair -- one stores req_ then reads parked_, the other
+    // stores parked_ then reads req_ -- and release/acquire on *different*
+    // objects does not order a store followed by a load. With the weaker
+    // ordering both sides could read stale: the dispatch sees parked_ false
+    // and skips the notify while the worker sees the old req_ and sleeps,
+    // and wait() then spins on ack_ for ever. That is not theoretical; it
+    // hung a 1800-frame run with the emulation thread at 99.9 % CPU and every
+    // worker blocked on a futex.
+    req_.store(n, std::memory_order_seq_cst);
     // Only take the lock when the worker may already have parked. Spinning
     // workers see the store without it, so the common handoff is lock-free.
-    if (parked_.load(std::memory_order_acquire)) {
+    if (parked_.load(std::memory_order_seq_cst)) {
       std::lock_guard<std::mutex> lk(m_);
       cv_.notify_one();
     }
@@ -108,16 +117,17 @@ private:
         if (quit_.load(std::memory_order_relaxed)) return;
         if (--spins > 0) { cpu_relax(); r = req_.load(std::memory_order_acquire); continue; }
         std::unique_lock<std::mutex> lk(m_);
-        parked_.store(true, std::memory_order_release);
-        // Re-check under the lock: a dispatch that raced the park would have
-        // seen parked_ false and skipped the notify, so it must be caught here.
-        r = req_.load(std::memory_order_acquire);
+        parked_.store(true, std::memory_order_seq_cst);
+        // Re-check after publishing parked_, with the same total order the
+        // dispatch side uses: a dispatch that raced the park would have seen
+        // parked_ false and skipped the notify, so it must be caught here.
+        r = req_.load(std::memory_order_seq_cst);
         if (r == last && !quit_.load(std::memory_order_relaxed))
           cv_.wait(lk, [&] {
             r = req_.load(std::memory_order_acquire);
             return r != last || quit_.load(std::memory_order_relaxed);
           });
-        parked_.store(false, std::memory_order_release);
+        parked_.store(false, std::memory_order_seq_cst);
         if (quit_.load(std::memory_order_relaxed)) return;
         spins = kSpin;
       }
