@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include "core/types.h"
 #include "core/gpu/engine2d.h"
+#include "core/gpu/line_worker.h"
 
 #include <array>
 
@@ -66,6 +67,17 @@ private:
   bool run_fifo_ = false;
   std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb_{};
   const u32* line3d_ = nullptr;   // 3D output for the line being drawn
+
+  // Engine B's share of a display line, run alongside engine A's. The two
+  // engines share no mutable state -- the only statics they reach are the
+  // read-only colour tables -- and no CPU runs inside the HBlank callback, so
+  // the pair sees exactly the register and VRAM state the sequential order
+  // saw. DS_2D_THREAD=0 forces the sequential path for comparison.
+  LineWorker eng_b_;
+  u32 eng_b_line_ = 0;
+  bool eng_b_sprites_ = false;
+  bool par_2d_ = false;
+  static void engine_b_job(void* self);
 
   void draw_line(u32 line);
   void output_a(u32 line, u32* dst);

@@ -15,7 +15,18 @@ static void ev_scanline(NDS& nds, u32) { nds.gpu.on_scanline_start(); }
 static void ev_hblank(NDS& nds, u32)   { nds.gpu.on_hblank(); }
 static void ev_fifo(NDS& nds, u32 x)   { nds.gpu.on_display_fifo(x); }
 
-Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {}
+Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
+  // DS_2D_THREAD=0 keeps engine B on the emulation thread. The two paths must
+  // produce identical frames; the env var is what makes that checkable.
+  const char* e = std::getenv("DS_2D_THREAD");
+  if (!e || std::atoi(e) != 0) {
+    // The only statics the two engines share are the colour tables, built by
+    // magic statics (thread-safe init) and read-only afterwards; every other
+    // buffer, cache and palette copy is per-engine.
+    eng_b_.start(&Gpu::engine_b_job, this);
+    par_2d_ = eng_b_.running();
+  }
+}
 
 void Gpu::reset() {
   line_ = 0;
@@ -114,7 +125,11 @@ void Gpu::on_hblank() {
   if (line_ < 192) {
     draw_line(line_);
     // Sprites are rendered one line ahead of the backgrounds.
-    if (line_ < 191) { DS_PROF(OBJ_DRAW); engine[0].render_sprites(line_ + 1); engine[1].render_sprites(line_ + 1); }
+    if (line_ < 191) {
+      DS_PROF(OBJ_DRAW);
+      engine[0].render_sprites(line_ + 1);
+      if (!par_2d_) engine[1].render_sprites(line_ + 1);   // else the worker did it
+    }
     nds_.dma.check(Cpu::ARM9, dma::MODE9_HBLANK);
   } else if (line_ == 215) {
     // The 3D frame flushed at VBlank is rasterised now, ahead of the next
@@ -255,11 +270,30 @@ void Gpu::on_display_fifo(u32 x) {
 
 // ---- output stage -----------------------------------------------------------
 
+// Engine B's half of a display line: its own render, and the sprites for the
+// next line, which only ever feed engine B's own next render_line. Nothing
+// here is reachable from engine A.
+void Gpu::engine_b_job(void* self) {
+  Gpu& g = *static_cast<Gpu*>(self);
+  g.engine[1].render_line(g.eng_b_line_);
+  if (g.eng_b_sprites_) g.engine[1].render_sprites(g.eng_b_line_ + 1);
+}
+
 void Gpu::draw_line(u32 line) {
   line3d_ = nds_.gpu3d.line(line);
   engine[0].set_3d_line(line3d_);
-  engine[0].render_line(line);
-  engine[1].render_line(line);
+  if (par_2d_) {
+    // Engine B (and its next line's sprites) go to the worker; engine A runs
+    // here. Joined below, before anything reads engine B's output.
+    eng_b_line_ = line;
+    eng_b_sprites_ = line < 191;
+    eng_b_.dispatch();
+    engine[0].render_line(line);
+    eng_b_.wait();
+  } else {
+    engine[0].render_line(line);
+    engine[1].render_line(line);
+  }
   DS_PROF(OUTPUT);
   u32* dst_a = fb_[swap_ ? 0 : 1].data() + line * SCREEN_W;
   u32* dst_b = fb_[swap_ ? 1 : 0].data() + line * SCREEN_W;
