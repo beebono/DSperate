@@ -286,6 +286,12 @@ private:
       done_.notify_all();
     }
   }
+public:
+  void debug_dump(FILE* f) {
+    std::fprintf(f, "  band pool: workers %zu generation %llu jobs %u nbins %u next_bin %u remaining %u done_bits %016llx stop %d\n",
+                 threads_.size(), (unsigned long long)generation_, jobs_, nbins_, next_bin_.load(std::memory_order_relaxed),
+                 remaining_.load(std::memory_order_relaxed), (unsigned long long)done_bits_.load(std::memory_order_relaxed), stop_ ? 1 : 0);
+  }
   std::vector<std::thread> threads_;
   std::mutex m_;
   std::condition_variable start_, done_;
@@ -2255,6 +2261,11 @@ void Renderer3D::compute_bins(u32 nbins, u32 workers) {
 // Wait for the band that owns display line `y`, and no other: the bands are
 // independent and each writes only its own output lines, so the compositor
 // can read the top of the frame while the bottom is still being drawn.
+void Renderer3D::debug_dump(FILE* f) {
+  std::fprintf(f, "  raster: async %d pending_bands %u waited_bits %016llx nbins %u\n", async_ ? 1 : 0, pending_bands_, (unsigned long long)waited_bits_, nbins_);
+  if (pool_) pool_->debug_dump(f);
+}
+
 void Renderer3D::sync_line(s32 y) {
   if (!pending_bands_) return;
   u32 b = 0;

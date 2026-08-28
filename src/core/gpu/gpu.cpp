@@ -280,6 +280,12 @@ void Gpu::engine_b_job(void* self) {
   if (g.eng_b_sprites_) g.engine[1].render_sprites(g.eng_b_line_ + 1);
 }
 
+void Gpu::debug_dump(FILE* f) {
+  std::fprintf(f, "  gpu: line %u eng_b_line %u par_2d %d frame_ready %d\n", line_, eng_b_line_, par_2d_ ? 1 : 0, nds_.frame_ready ? 1 : 0);
+  eng_b_.debug_dump(f);
+  nds_.gpu3d.debug_dump(f);
+}
+
 void Gpu::draw_line(u32 line) {
   line3d_ = nds_.gpu3d.line(line);
   engine[0].set_3d_line(line3d_);

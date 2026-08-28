@@ -16,6 +16,8 @@
 #include "core/frame_report.h"
 
 #include <cstdio>
+#include <thread>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -170,6 +172,25 @@ int main(int argc, char** argv) {
   // spread 13 % run to run at a flat temperature, which buries any change
   // worth measuring; the median frame rejects the transient stalls that cause
   // it, and p90 still shows them if they matter.
+  // DS_WATCHDOG=<seconds>: a frame that makes no progress for that long is a
+  // hang; dump the display/raster hand-off state and abort, so the state is
+  // in the log instead of needing a debugger on the stuck process.
+  std::atomic<bool> wd_stop{false};
+  std::thread wd;
+  if (const char* w = std::getenv("DS_WATCHDOG")) {
+    const int limit = std::atoi(w);
+    wd = std::thread([&nds, &wd_stop, limit] {
+      ds::u64 last = ~ds::u64{0}; int still = 0;
+      while (!wd_stop.load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        const ds::u64 fc = nds.frame_count;
+        if (fc == last) { if (++still >= limit) {
+          std::fprintf(stderr, "[watchdog] no progress for %d s at frame %llu:\n", limit, (unsigned long long)fc);
+          nds.gpu.debug_dump(stderr); std::fflush(stderr); std::abort(); } }
+        else { last = fc; still = 0; }
+      }
+    });
+  }
   std::vector<double> frame_ms;
   frame_ms.reserve(static_cast<size_t>(frames));
   for (int i = 0; i < frames; ++i) {
@@ -214,6 +235,7 @@ int main(int argc, char** argv) {
     frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     if (per_frame && trace) { std::fprintf(stderr, "frame %d arm9 %llu arm7 %llu\n", i, ts.executed[0] - last9, ts.executed[1] - last7); last9 = ts.executed[0]; last7 = ts.executed[1]; }
   }
+  wd_stop.store(true); if (wd.joinable()) wd.join();
   if (dump_out) std::fclose(dump_out);
   if (audio_out) std::fclose(audio_out);
   if (ts.pc_hist) {

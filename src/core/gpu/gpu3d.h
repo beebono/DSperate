@@ -113,6 +113,7 @@ public:
   // about to change what its workers are reading -- in practice only
   // Bus::update_vram, since texture VRAM is unreachable any other way.
   void sync_raster();
+  void debug_dump(FILE* f) { renderer_.debug_dump(f); }
   void set_render_xpos(u16 value, u16 mask);
 
   void check_fifo_irq();

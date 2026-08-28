@@ -90,7 +90,11 @@ every frame, and `DS_FRAME_DUMP=<frame>:<path>` writes that frame's RAM, so
 two builds can be diffed to the first frame their *state* differs -- usually
 long before the first pixel does. `DS_IDLE_SKIP=0|1|all` sets the idle-loop
 skip: `1` (default) skips only an ARM9 GXSTAT poll while a swap is pending;
-`all` skips every proven poll loop.
+`all` skips every proven poll loop. `DS_JIT_CHURN=1` prints, at exit, who invalidated
+translated code and which blocks were retranslated. `DS_WATCHDOG=<seconds>` (CLI)
+aborts a run whose frame count stops advancing for that long, after printing the
+display-line and raster hand-off state -- the log then holds what a debugger on
+the stuck process would have shown.
 
 `--record scene.dsin` writes what you play, one 8-byte record per frame, and
 `--replay scene.dsin` plays it back (in the window, or headlessly with

@@ -95,6 +95,10 @@ private:
   // the pair sees exactly the register and VRAM state the sequential order
   // saw. DS_2D_THREAD=0 forces the sequential path for comparison.
   LineWorker eng_b_;
+public:
+  // DS_WATCHDOG: where the display pipeline stands when a frame stalls.
+  void debug_dump(FILE* f);
+private:
   u32 eng_b_line_ = 0;
   bool eng_b_sprites_ = false;
   bool par_2d_ = false;

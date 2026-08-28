@@ -428,6 +428,9 @@ private:
   std::vector<std::unique_ptr<Renderer3D>> bands_;      // workers 1..n-1 (band 0 is this)
   u64 band_ns_[8] = {};                                 // DS_PROFILE: last frame's per-band wall time
   struct Pool;
+public:
+  void debug_dump(FILE* f);   // DS_WATCHDOG: band hand-off state
+private:
   std::unique_ptr<Pool> pool_;
 
   u32  fog_density(u32 addr) const;
