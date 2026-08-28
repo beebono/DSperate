@@ -24,6 +24,7 @@
 #include "core/types.h"
 
 #include <atomic>
+#include <cstdio>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -56,6 +57,11 @@ public:
   }
 
   bool running() const { return thread_.joinable(); }
+  // Hand-off state, for a stalled-frame watchdog (DS_WATCHDOG).
+  void debug_dump(FILE* f) const {
+    std::fprintf(f, "  line worker: running %d req %u ack %u parked %d\n", running() ? 1 : 0,
+                 req_.load(std::memory_order_relaxed), ack_.load(std::memory_order_relaxed), parked_.load(std::memory_order_relaxed) ? 1 : 0);
+  }
 
   // Hand the job over. Must be paired with wait() before the job's output is
   // read, and before the next dispatch().
@@ -71,6 +77,14 @@ public:
     // hung a 1800-frame run with the emulation thread at 99.9 % CPU and every
     // worker blocked on a futex.
     req_.store(n, std::memory_order_seq_cst);
+    // The fence is for qemu-user. On AArch64 the compiler emits stlr/ldar for
+    // seq_cst and leans on the architecture's rule that an ldar cannot pass an
+    // earlier stlr; qemu's TCG models the pair as plain release/acquire, so on
+    // an x86 host the store and the load below reorder and the Dekker check
+    // fails -- caught by DS_WATCHDOG: req one ahead of ack, worker parked, in
+    // 1 of ~6 headless dbori runs. Real hardware never needs it; one dmb per
+    // display line is nothing.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     // Only take the lock when the worker may already have parked. Spinning
     // workers see the store without it, so the common handoff is lock-free.
     if (parked_.load(std::memory_order_seq_cst)) {
@@ -118,6 +132,7 @@ private:
         if (--spins > 0) { cpu_relax(); r = req_.load(std::memory_order_acquire); continue; }
         std::unique_lock<std::mutex> lk(m_);
         parked_.store(true, std::memory_order_seq_cst);
+        std::atomic_thread_fence(std::memory_order_seq_cst);   // see dispatch()
         // Re-check after publishing parked_, with the same total order the
         // dispatch side uses: a dispatch that raced the park would have seen
         // parked_ false and skipped the notify, so it must be caught here.
