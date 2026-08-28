@@ -69,9 +69,18 @@ measured decision, ranked by likely payoff:
    clips (the colour truncation is idempotent, applied once) —
    `submit_polygon` 535 → 493 insn/polygon on GSDD, 453 → 386 on dbori;
    exact. Cumulative from 885b774, non-spin: GSDD 51.2 → 47.1 M
-   (−8.1 %), dbori 25.6 → 24.1 M (−5.7 %). Left in geometry: the
-   per-command execute loop (`run_to_slow` self ~5.5 k/call) and the
-   per-vertex transform (4.18).
+   (−8.1 %), dbori 25.6 → 24.1 M (−5.7 %). *Execute loop:* the
+   per-command timing helpers, `execute` and `exec_single` pinned inline
+   (LTO had left them as calls), the FIFO IRQ check gated on the mode and
+   the GXFIFO-DMA check on a kept armed flag: a further −0.8 % / −1.0 %.
+   Tried and rejected, measured: a NEON form of the vertex transform
+   (110 → 118 insn/vertex; the scalar `smull`/`smaddl` chain is already
+   the better AArch64 code). **Item closed in its exact form**: what is
+   left is per-command work at ~65 insn/command in the execute loop,
+   ~110/vertex and ~495/polygon, all of it arithmetic the hardware also
+   does; DraStic's remaining gap (4.17/4.18) is the log-replay model,
+   which this project has decided against. Final, excluding both thread
+   spin-waits: GSDD 46.0 M, dbori 23.3 M non-spin insn/frame.
 4. ~~**DMA per unit through the bus** (4.8, 4.9)~~ — done in the exact
    form: a word transfer between two direct-mapped pages (and a GXFIFO
    feed from one) runs to the page end on host pointers — one page-table
