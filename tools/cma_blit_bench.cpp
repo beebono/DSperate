@@ -25,6 +25,15 @@
 // the write volume by 4x on the portrait board:
 //   ./cma_blit_bench --w 720 --h 1280 --layout vertical      # .25
 //   ./cma_blit_bench --w 1280 --h 480 --layout horizontal    # .20, both panels
+//
+// --rot: the .25 scanout case. The output is scanned in panel orientation
+// (720x1280 portrait) while the layout is landscape, so the scale-out must
+// write rotated: a logical row becomes a destination *column*. Naive 4-byte
+// column writes would be the worst pattern CMA could see; instead 8 logical
+// rows are staged hot and stored as 8-wide (32-byte) blocks marching down
+// the buffer -- the pattern the emulator's rotated scale-out would use. The
+// same tiling runs against malloc and CMA:
+//   ./cma_blit_bench --w 720 --h 1280 --rot                  # .25 scanout
 
 #include <algorithm>
 #include <cstdint>
@@ -151,9 +160,94 @@ void release(Target& t) {
 
 struct Result { std::vector<double> clear, blit; };
 
+#ifdef ROT_NEON
+#include <arm_neon.h>
+// The staging gather above is 16 scattered scalar loads per 64-byte store;
+// this replaces it with an in-register transpose: 4x4 blocks of u32 are
+// loaded as rows (sequential 16-byte vector loads within each staging row),
+// transposed with TRN/zip pairs, and four transposed blocks concatenate into
+// one 64-byte destination-row store.
+static inline void trn4(uint32x4_t r[4]) {
+  uint32x4x2_t a = vtrnq_u32(r[0], r[1]), b = vtrnq_u32(r[2], r[3]);
+  r[0] = vcombine_u32(vget_low_u32(a.val[0]),  vget_low_u32(b.val[0]));
+  r[1] = vcombine_u32(vget_low_u32(a.val[1]),  vget_low_u32(b.val[1]));
+  r[2] = vcombine_u32(vget_high_u32(a.val[0]), vget_high_u32(b.val[0]));
+  r[3] = vcombine_u32(vget_high_u32(a.val[1]), vget_high_u32(b.val[1]));
+}
+#endif
+
+// Rotated (ccw) blit: logical landscape lw x lh = h x w scaled from the DS
+// screens, written into the w x h portrait buffer as dst[y][x] =
+// logical[lw-1-y][x]. Eight logical rows at a time are built in a hot
+// staging tile, then stored transposed: for each logical x (a destination
+// row), one 8-u32 contiguous block. Only the store pattern differs from the
+// straight blit; the source work is identical.
+void blit_rot(uint32_t* dst, int w, int h, const uint32_t* src, const Rect& r,
+              const std::vector<int>& xmap) {
+  // r is the screen's rect in the logical landscape (lw = h, lh = w).
+  //
+  // 16 logical rows per tile so every destination store is one full 64-byte
+  // cache line (write-allocate never reads a half-written line back), and
+  // the staging pitch is padded off the power of two so the transposed reads
+  // do not alias into one cache set.
+#ifndef ROT_T
+#define ROT_T 16
+#endif
+  constexpr int T = ROT_T, PITCH = 2048 + 24;
+  alignas(64) static uint32_t tile[T * PITCH];
+  const int lw = h;
+  for (int ly0 = 0; ly0 < r.h; ly0 += T) {
+    const int rows = std::min(T, r.h - ly0);
+    for (int t = 0; t < rows; ++t) {
+      const uint32_t* s = src + static_cast<size_t>((ly0 + t) * SCREEN_H / r.h) * SCREEN_W;
+      uint32_t* d = tile + t * PITCH;
+      for (int x = 0; x < r.w; ++x) d[x] = s[xmap[x]];
+    }
+    if (rows < T)   // partial last tile: pad so the store loop stays full-width
+      for (int t = rows; t < T; ++t) std::memcpy(tile + t * PITCH, tile + (rows - 1) * PITCH, static_cast<size_t>(r.w) * 4);
+    // The rect's logical x span becomes a destination row span, its y span a
+    // destination column span: one 64-byte store per destination row.
+#ifdef ROT_NEON
+    // 4 destination rows per step, each taking 4 transposed 4x4 blocks.
+    for (int lx = 0; lx + 4 <= r.w; lx += 4) {
+      uint32x4_t blk[4][4];   // blk[g] = staging rows 4g..4g+3 at columns lx..lx+3
+      for (int g = 0; g < 4; ++g) {
+        for (int i = 0; i < 4; ++i) blk[g][i] = vld1q_u32(tile + (4 * g + i) * PITCH + lx);
+        trn4(blk[g]);
+      }
+      for (int i = 0; i < 4; ++i) {
+        uint32_t* d = dst + static_cast<size_t>(lw - 1 - (r.x + lx + i)) * w + (r.y + ly0);
+        vst1q_u32(d + 0,  blk[0][i]);
+        vst1q_u32(d + 4,  blk[1][i]);
+        vst1q_u32(d + 8,  blk[2][i]);
+        vst1q_u32(d + 12, blk[3][i]);
+      }
+    }
+    for (int lx = r.w & ~3; lx < r.w; ++lx) {
+#else
+    for (int lx = 0; lx < r.w; ++lx) {
+#endif
+      uint32_t* d = dst + static_cast<size_t>(lw - 1 - (r.x + lx)) * w + (r.y + ly0);
+      const uint32_t* srcc = tile + lx;
+#ifdef ROT_STNP
+      // Gather into locals, then store the whole run non-temporally: the
+      // destination is never read back, so skip the cache entirely.
+      uint32_t buf[T];
+      for (int t = 0; t < T; ++t) buf[t] = srcc[t * PITCH];
+      for (int t = 0; t < T; t += 8) {
+        __asm__ volatile("ldp q0, q1, [%1]\n\tstnp q0, q1, [%0]"
+                         :: "r"(d + t), "r"(buf + t) : "q0", "q1", "memory");
+      }
+#else
+      for (int t = 0; t < T; ++t) d[t] = srcc[t * PITCH];
+#endif
+    }
+  }
+}
+
 void run(Target& t, int w, int h, const Rect rects[SCREENS],
          const std::vector<int> xmap[SCREENS], const uint32_t* const fb[SCREENS],
-         int frames, bool sync, Result& out) {
+         int frames, bool sync, bool rot, Result& out) {
   const size_t bytes = static_cast<size_t>(w) * h * 4;
   for (int f = 0; f < frames; ++f) {
     if (sync && t.dmabuf_fd >= 0) {
@@ -163,7 +257,9 @@ void run(Target& t, int w, int h, const Rect rects[SCREENS],
     const double t0 = now_ms();
     std::memset(t.px, 0, bytes);            // what SDL_RenderClear costs us
     const double t1 = now_ms();
-    for (int i = 0; i < SCREENS; ++i) blit(t.px, w, fb[i], rects[i], xmap[i]);
+    for (int i = 0; i < SCREENS; ++i)
+      if (rot) blit_rot(t.px, w, h, fb[i], rects[i], xmap[i]);
+      else blit(t.px, w, fb[i], rects[i], xmap[i]);
     const double t2 = now_ms();
     if (sync && t.dmabuf_fd >= 0) {
       dma_buf_sync s = {DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE};
@@ -187,7 +283,7 @@ void report(const char* name, const Result& r, size_t clear_bytes, size_t blit_b
 
 int main(int argc, char** argv) {
   int w = 720, h = 1280, frames = 300, warmup = 60, rounds = 3;
-  bool across = false, sync = false;
+  bool across = false, sync = false, rot = false;
   const char* heap = "/dev/dma_heap/linux,cma";
 
   for (int i = 1; i < argc; ++i) {
@@ -199,6 +295,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--rounds")) rounds = std::atoi(next());
     else if (!std::strcmp(argv[i], "--layout")) across = !std::strcmp(next(), "horizontal");
     else if (!std::strcmp(argv[i], "--sync")) sync = true;
+    else if (!std::strcmp(argv[i], "--rot")) { rot = true; across = true; }
     else if (!std::strcmp(argv[i], "--heap")) heap = next();
     else { std::fprintf(stderr, "usage: %s [--w N] [--h N] [--layout vertical|horizontal]\n"
                                 "          [--frames N] [--warmup N] [--rounds N] [--sync] [--heap PATH]\n", argv[0]);
@@ -206,7 +303,9 @@ int main(int argc, char** argv) {
   }
 
   Rect rects[SCREENS];
-  layout(w, h, across, rects);
+  // Rotated: the layout happens in the logical landscape (h x w), the buffer
+  // stays portrait (w x h).
+  layout(rot ? h : w, rot ? w : h, across, rects);
 
   std::vector<int> xmap[SCREENS];
   size_t blit_px = 0;
@@ -229,8 +328,9 @@ int main(int argc, char** argv) {
 
   const size_t bytes = static_cast<size_t>(w) * h * 4;
   const double scale = static_cast<double>(rects[0].w) / SCREEN_W;
-  std::printf("%dx%d %s, scale x%.2f, %zu KiB buffer, %zu KiB blitted per frame\n",
-              w, h, across ? "horizontal" : "vertical", scale, bytes / 1024, blit_px * 4 / 1024);
+  std::printf("%dx%d %s%s, scale x%.2f, %zu KiB buffer, %zu KiB blitted per frame\n",
+              w, h, across ? "horizontal" : "vertical", rot ? " ROTATED (tiled ccw)" : "",
+              scale, bytes / 1024, blit_px * 4 / 1024);
   std::printf("%d rounds of %d frames (%d discarded as warm-up), dma-buf sync %s\n\n",
               rounds, frames, warmup, sync ? "on" : "off");
 
@@ -247,12 +347,12 @@ int main(int argc, char** argv) {
   Result rm, rc;
   for (int r = 0; r < rounds; ++r) {
     Result warm;
-    run(mem, w, h, rects, xmap, fb, warmup, sync, warm);
-    run(mem, w, h, rects, xmap, fb, frames, sync, rm);
+    run(mem, w, h, rects, xmap, fb, warmup, sync, rot, warm);
+    run(mem, w, h, rects, xmap, fb, frames, sync, rot, rm);
     if (have_cma) {
       Result warm2;
-      run(cma, w, h, rects, xmap, fb, warmup, sync, warm2);
-      run(cma, w, h, rects, xmap, fb, frames, sync, rc);
+      run(cma, w, h, rects, xmap, fb, warmup, sync, rot, warm2);
+      run(cma, w, h, rects, xmap, fb, frames, sync, rot, rc);
     }
   }
 
