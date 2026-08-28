@@ -40,9 +40,21 @@ measured decision, ranked by likely payoff:
    build except through `DS_SPU_BATCH=1`. The inexact rows (5.4, 5.6, 5.9,
    5.11) stay `no`: they would change what Rhythm Heaven's just-in-time
    stream writer sees, and the remaining per-sample channel work is small.
-3. **Geometry executed per slice, not logged per frame** (4.17, 4.18) —
-   `process_geometry_commands` is DraStic's largest non-render function and
-   it runs once; ours runs after every ARM9 slice.
+3. **Geometry: per-word enqueue, per-polygon constants, batched vertex
+   transform** (4.17, 4.18) — *not* frame-granular replay. The per-slice
+   `run_to` is an inline idle test and `run_to_slow` runs only 148–567×
+   a frame, so dispatch count is not the cost; and the games drive the
+   engine at FIFO pace (`check_fifo_irq` 23 k/frame on GSDD, FIFO-full
+   stalls live), which replay would have to fake. qemu census on 885b774,
+   per frame: GSDD title 13.5 M geometry of 51 M (20 %; largest share of
+   any scene), dbori 4.7 M of 25.6 M. Where it sits: `gxfifo_write`
+   65 insn/word × 52 k words = 3.4 M (GSDD) / 1.4 M (dbori);
+   `submit_polygon` 455–537 insn × 5.3 k = 2.8 M / 0.6 M; `run_to_slow`
+   self (execute loop, per-command transform/lighting) 3.3 M / 1.6 M;
+   `submit_vertex` ~105 insn × 14 k = 1.5 M / 0.4 M; `exec_single`
+   dispatch 34–44 insn × 41 k = 1.4 M / 0.4 M. Targets in that order:
+   the enqueue path, the polygon submit constants, DraStic's batched
+   vertex transform (4.18) — keeping execution slice-granular.
 4. **DMA per unit through the bus** (4.8, 4.9) — 7.7 k instructions a frame
    in DraStic for the whole subsystem; ours pays a bus round-trip per word.
 5. **JIT: ITCM tag-free tables, three arenas, known-constant tracking,
