@@ -109,7 +109,7 @@ nearly the entire frame.
 | JIT support code (dispatch, block lookup, memory and I/O helpers) | 12.0 % |
 | 3D geometry | 2.7 % |
 | Scheduler / events | 1.7 % |
-| SPU | 1.1 % |
+| SPU (all C, no assembly) | 1.1 % |
 | Kernel, libc, startup, long tail | ~10 % |
 | Texture cache | 0.04 % |
 
@@ -134,10 +134,14 @@ Sample counts per thread on the benchmark run: 5,518 / 1,870 / 1,510 / 1,318 —
 one main thread and three workers, on a four-core device. Call graphs show the
 split cleanly:
 
-- 2D runs **on the main thread**, synchronously inside the scheduler:
+- 2D engine A runs **on the main thread**, reached from the scheduler:
   `recompiler_entry_direct → execute_events → event_scanline_start_function →
   update_frame → video_render_scanlines → video_2d_render_scanlines →
-  render_scanline → …`
+  render_scanline → …`. Note the entry point is the *VBlank* scanline event:
+  the whole frame is rendered in one batch there unless the guest changed
+  2D state mid-frame, and engine B is rendered on a worker
+  (`video_render_thread`) at the same time — see
+  [04 §5](04-scheduler-deferral-and-memory.md).
 - 3D runs **on the workers**, `video_3d_render_thread → video_3d_render_bins_1x`,
   with the main thread joining the same work via `update_frame_3d_1x`.
 
@@ -146,6 +150,10 @@ split cleanly:
 - [01 — The ARM→AArch64 recompiler](01-arm-to-aarch64-jit.md)
 - [02 — The 3D software rasteriser](02-3d-software-rasteriser.md)
 - [03 — The 2D engines and the scanline pipeline](03-2d-engines-and-scanline-pipeline.md)
+- [04 — The scheduler, deferred rendering, DMA and the memory system](04-scheduler-deferral-and-memory.md)
+- [05 — The SPU and audio output](05-spu-and-audio-output.md)
+- [06 — Implementation checklist](06-implementation-checklist.md) — every
+  high-level item above in one table, for auditing DSperate against it
 
 ## Confidence
 

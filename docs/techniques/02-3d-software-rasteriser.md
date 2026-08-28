@@ -20,6 +20,14 @@ ideas do the work:
    every stage is a flat SIMD loop over an array and every conditional becomes a
    mask.
 
+Before any of this runs, the guest's command stream has to reach the
+rasteriser — and it does not do so at write time. GXFIFO writes are *logged*
+and replayed once at VBlank, with the vertex transform run as a batch over the
+result; `GXSTAT` reads replay the log on demand so the deferral stays
+observable-correct. That is the geometry engine's own technique and is
+described in [04 §6](04-scheduler-deferral-and-memory.md); everything below
+starts from the transformed polygon list it produces.
+
 ---
 
 ## 1. Binning: twelve tiles of sixteen scanlines

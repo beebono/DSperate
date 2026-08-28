@@ -37,17 +37,20 @@ recompiler_entry_direct
                   → render_scanline_tiled_span_4bpp_asm
 ```
 
-This is deliberate and it is the accuracy/speed trade the whole design rests on.
-The 3D engine can be deferred to worker threads because the DS's 3D hardware
-latches its geometry once per frame — nothing a game does mid-frame changes what
-has already been submitted. The 2D engines have no such property: scroll
-registers, palettes, blend coefficients, window bounds and even BG modes are
-routinely rewritten during HBlank, and raster effects depend on that. So 2D is
-rendered synchronously at each scanline event, seeing exactly the register state
-the guest has established at that moment.
+The call graph is accurate but misleading about *when*. The entry is the
+VBlank scanline event, not every scanline event: in the common case
+`update_frame` renders all 192 lines of engine A in one call while a worker
+thread renders engine B. The 2D engines have no once-per-frame latch like the
+3D engine — scroll registers, palettes, blend coefficients, window bounds and
+even BG modes are routinely rewritten during HBlank, and raster effects depend
+on that — so DraStic *journals* every mid-frame 2D write with the scanline it
+happened on and replays the journal line by line as it renders. The pipeline
+below therefore sees exactly the register state the guest had established at
+each line, without having been invoked at each line. The mechanism is in
+[04 §5](04-scheduler-deferral-and-memory.md).
 
-The cost of that choice is that 2D cannot be parallelised. The response is to
-make each scanline extremely cheap.
+What remains true is that each line must still be composited, in full, for two
+engines, every frame. The response is to make each scanline extremely cheap.
 
 ---
 
@@ -298,7 +301,7 @@ justified it and not elsewhere.
 
 | Technique | Effect |
 |---|---|
-| 2D on the main thread, per scanline | Mid-frame register writes are exact |
+| Per-scanline pipeline, batched per frame with a write journal (04 §5) | Mid-frame register writes are exact, rendering is not per-line |
 | 1 bit per pixel visibility masks | A whole scanline is two NEON registers |
 | NEON movemask idiom (`and` + `addp` tree) | Byte comparisons fold to bitmasks cheaply |
 | Bit-parallel priority encoder | First *and* second layer for 256 px in ~14 insns/layer |
