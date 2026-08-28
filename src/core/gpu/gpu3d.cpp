@@ -913,7 +913,9 @@ void Gpu3D::submit_polygon() {
     if (vt.sy > ybot || (vt.sy == ybot && vt.sx > xbot)) { xbot = vt.sx; ybot = vt.sy; vbot = i; }
     const u32 w = static_cast<u32>(vt.pos[3]);
     if (w == 0) poly->degenerate = true;
-    while ((w >> wsize) && wsize < 32) wsize += 4;
+    // Smallest multiple of 4 that shifts w to zero, capped at 32 -- what
+    // `while ((w >> wsize) && wsize < 32) wsize += 4` converges to.
+    if (w) { const u32 need = (35 - static_cast<u32>(__builtin_clz(w))) & ~3u; if (need > wsize) wsize = need; }
   }
   poly->vtop = vtop; poly->vbot = vbot; poly->ytop = ytop; poly->ybot = ybot; poly->xtop = xtop; poly->xbot = xbot;
   if (ybot > 192) poly->degenerate = true;
