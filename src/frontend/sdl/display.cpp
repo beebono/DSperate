@@ -26,14 +26,21 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   // coexist with an SDL_Renderer on the same window, so it is decided here
   // and the renderer is skipped entirely.
   //
-  // On by default: against the software renderer it removes SDL's texture
-  // upload, scaled blit and surface copy in favour of one write (etody, both
-  // boards: ~15 % less emu+present work per frame, and the shoulders of the
-  // over-budget clusters with it). --accel keeps the GLES renderer and
-  // --linear the renderer's smooth scaling, both of which need draw();
+  // Default on under Wayland only: there the window surface is a cheap shm
+  // attach and the mode removes SDL's texture upload, scaled blit and
+  // surface copy in favour of one write (etody, both boards: ~15 % less
+  // emu+present work per frame, and the shoulders of the over-budget
+  // clusters with it) -- and it is the write path the dmabuf tier builds
+  // on. On KMSDRM the window surface is a shadow-buffer blit, not the
+  // flipping renderer path, and defaulting to it measured 16 % *slower*
+  // (etody 1800 frames: 13985 ms against 12269 through the renderer), so
+  // the renderer stays the default there. --accel keeps the GLES renderer
+  // and --linear the renderer's smooth scaling, both of which need draw();
   // DS_SCANLINE_SCALE=0/1 overrides either way.
+  const char* vd = SDL_GetCurrentVideoDriver();
   const char* sl = std::getenv("DS_SCANLINE_SCALE");
-  scaled_ = sl && *sl ? std::strcmp(sl, "0") != 0 : !accel && !linear;
+  scaled_ = sl && *sl ? std::strcmp(sl, "0") != 0
+                      : !accel && !linear && vd && !std::strcmp(vd, "wayland");
   if (scaled_) {
     if (accel) std::fprintf(stderr, "DS_SCANLINE_SCALE renders on the CPU; --accel ignored\n");
     if (!SDL_GetWindowSurface(win_)) {
