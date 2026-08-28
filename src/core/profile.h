@@ -55,6 +55,11 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   C_RESOLVE_CALLS, C_RESOLVE_PARTS,
   C_CHUNK_ENTRIES,
   C_SPAN_EMPTY, C_SPAN_OCCLUDED, C_SPAN_DRAWN,
+  // Census: drawn spans/pixels by resolve path. vec = NEON batch kernel; the
+  // rest name why a Shade fell back to the scalar resolve_span.
+  // Census: geometry-engine register reads (the ARM9 polling GXSTAT).
+  C_GX_READ, C_GX_READ_GXSTAT, C_GX_READ_GXSTAT_BUSY, C_GX_READ_GXSTAT_PIPE, C_GX_READ_GXSTAT_FIFO, C_GX_RUN_SLOW, C_GX_RUN_SLOW_EXEC,
+  C_RES_VEC_SPANS, C_RES_VEC_PX, C_RES_TOON_SPANS, C_RES_TOON_PX, C_RES_SHADOW_SPANS, C_RES_SHADOW_PX, C_RES_WIRE_SPANS, C_RES_WIRE_PX,
   // Census: the per-scanline change-detection compares in engine2d.
   C_2D_CMP_BGPAL, C_2D_CMP_BGEXT, C_2D_CMP_OBJPAL, C_2D_CMP_OBJEXT, C_2D_CMP_OAM,
   C_2D_CMPD_BGPAL, C_2D_CMPD_BGEXT, C_2D_CMPD_OBJPAL, C_2D_CMPD_OBJEXT, C_2D_CMPD_OAM,

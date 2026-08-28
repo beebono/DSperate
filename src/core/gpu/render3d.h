@@ -213,6 +213,10 @@ private:
 
   const Gpu3D* gx_ = nullptr;
   const RenderState* rs_ = nullptr;
+  // The 32-entry toon table as three 6-bit byte planes, expanded once per
+  // frame from rs_->toon for the vector toon / highlight stages (flush_batch).
+  alignas(16) u8 toon6_[3][32] = {};
+  void expand_toon();
   const VramMap* vm_ = nullptr;
   mutable TextureCache texcache_;
   bool rendered_once_ = false;   // the colour buffer holds a rendered frame

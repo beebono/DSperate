@@ -42,6 +42,8 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "3d resolve kernel calls", "3d resolve parts entered",
   "3d polygon-chunk entries",
   "3d spans empty (no pixels)", "3d spans fully occluded by depth", "3d spans that draw",
+  "gx reg reads", "gx reads of GXSTAT", "gx GXSTAT reads while busy (bit27)", "gx GXSTAT reads with pipe non-empty", "gx GXSTAT reads with fifo non-empty", "gx run_to_slow calls", "gx run_to_slow calls that executed",
+  "3d drawn spans: vec path", "3d drawn pixels: vec path", "3d drawn spans: scalar (toon/highlight)", "3d drawn pixels: scalar (toon/highlight)", "3d drawn spans: scalar (shadow)", "3d drawn pixels: scalar (shadow)", "3d drawn spans: scalar (wireframe)", "3d drawn pixels: scalar (wireframe)",
   "2d compares: bg palette (512B)", "2d compares: bg ext palette (512B)", "2d compares: obj palette (512B)", "2d compares: obj ext palette (512B)", "2d compares: oam (1024B)",
   "2d compares that differed: bg palette", "2d compares that differed: bg ext palette", "2d compares that differed: obj palette", "2d compares that differed: obj ext palette", "2d compares that differed: oam"};
 

@@ -337,6 +337,13 @@ inline u32 c15_to_18(u16 c, u32 shift) { u32 v = (shift == 0 ? (c << 1) : (c >> 
 inline void rgb15_to_666(u16 c, u32& r, u32& g, u32& b) { r = c15_to_18(c, 0); g = c15_to_18(c, 4); b = c15_to_18(c, 9); }
 }
 
+void Renderer3D::expand_toon() {
+  for (u32 i = 0; i < 32; ++i) {
+    u32 r, g, b; rgb15_to_666(rs_->toon[i], r, g, b);
+    toon6_[0][i] = static_cast<u8>(r); toon6_[1][i] = static_cast<u8>(g); toon6_[2][i] = static_cast<u8>(b);
+  }
+}
+
 // Texel at 12.4 coordinates (s, t): RGB555 colour, 5-bit alpha.
 [[gnu::always_inline]] inline u32 Renderer3D::texture_sample(const Shade& sh, s32 s, s32 t, u32* alpha) const {
   u32 addr = sh.base;
@@ -669,6 +676,36 @@ void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s
   if (with_attrs) span_attrs(sb, xstart, xend, xa, xb, wl, wr, al, ar, false, false);
 }
 
+// Constant-attribute fills for span_attrs. These used to be three libc memset
+// calls plus a scalar loop over sc/tc -- for the 60 % of SM64DS's polygon
+// lines that are eight pixels or shorter, that was ~170 instructions of call
+// overhead and loop to store five constants (qemu hotblocks, 2026-08-27).
+// The buffers carry sixteen entries of slack past any staged span, so whole
+// vectors are stored from `n` rounded up.
+namespace {
+[[gnu::always_inline]] inline void fill_rgb_const(u8* vr, u8* vg, u8* vb, u32 n, const s32* a) {
+#if DSPERATE_NEON
+  const uint8x16_t r = vdupq_n_u8(static_cast<u8>(static_cast<u32>(a[0]) >> 3));
+  const uint8x16_t g = vdupq_n_u8(static_cast<u8>(static_cast<u32>(a[1]) >> 3));
+  const uint8x16_t b = vdupq_n_u8(static_cast<u8>(static_cast<u32>(a[2]) >> 3));
+  for (u32 i = 0; i < n; i += 16) { vst1q_u8(vr + i, r); vst1q_u8(vg + i, g); vst1q_u8(vb + i, b); }
+#else
+  const u32 fill = (n + 7) & ~7u;
+  std::memset(vr, static_cast<u8>((static_cast<u32>(a[0]) >> 3) & 0xFF), fill);
+  std::memset(vg, static_cast<u8>((static_cast<u32>(a[1]) >> 3) & 0xFF), fill);
+  std::memset(vb, static_cast<u8>((static_cast<u32>(a[2]) >> 3) & 0xFF), fill);
+#endif
+}
+[[gnu::always_inline]] inline void fill_st_const(s16* sc, s16* tc, u32 n, const s32* a) {
+#if DSPERATE_NEON
+  const int16x8_t s = vdupq_n_s16(static_cast<s16>(a[3])), t = vdupq_n_s16(static_cast<s16>(a[4]));
+  for (u32 i = 0; i < n; i += 8) { vst1q_s16(sc + i, s); vst1q_s16(tc + i, t); }
+#else
+  for (u32 i = 0; i < n; ++i) { sc[i] = static_cast<s16>(a[3]); tc[i] = static_cast<s16>(a[4]); }
+#endif
+}
+} // namespace
+
 // The five attributes for screen pixels [ca, cb) of the span (a sub-range of
 // the staged span, normally the depth pre-pass's candidate range).
 void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar, bool attrs_constant, bool rgb_constant) const {
@@ -682,14 +719,8 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   // materialising the old s32 planes just to truncate them again.
   if (attrs_constant || (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2] &&
       al[3] == ar[3] && al[4] == ar[4])) {
-    const u32 fill = (n + 7) & ~7u;
-    std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
-    std::memset(sb.vg + off, static_cast<u8>((static_cast<u32>(al[1]) >> 3) & 0xFF), fill);
-    std::memset(sb.vb + off, static_cast<u8>((static_cast<u32>(al[2]) >> 3) & 0xFF), fill);
-    for (u32 i = 0; i < n; ++i) {
-      sb.sc[off + i] = static_cast<s16>(al[3]);
-      sb.tc[off + i] = static_cast<s16>(al[4]);
-    }
+    fill_rgb_const(sb.vr + off, sb.vg + off, sb.vb + off, n, al);
+    fill_st_const(sb.sc + off, sb.tc + off, n, al);
     return;
   }
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
@@ -703,10 +734,7 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
       prof::add(prof::C_SPAN_FLAT_RGB, 1);
       // The kernels write whole vectors past n; match that, the buffers carry
       // the slack for it.
-      const u32 fill = (n + 7) & ~7u;
-      std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
-      std::memset(sb.vg + off, static_cast<u8>((static_cast<u32>(al[1]) >> 3) & 0xFF), fill);
-      std::memset(sb.vb + off, static_cast<u8>((static_cast<u32>(al[2]) >> 3) & 0xFF), fill);
+      fill_rgb_const(sb.vr + off, sb.vg + off, sb.vb + off, n, al);
       kern::active::span_attrs2n(al, ar, sb.fac + off, n, sb.sc + off, sb.tc + off);
       return;
     }
@@ -717,11 +745,8 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   }
   if (xdiff == 0) {
     // Degenerate span: every pixel is the left endpoint.
-    const u32 fill = (n + 7) & ~7u;
-    std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
-    std::memset(sb.vg + off, static_cast<u8>((static_cast<u32>(al[1]) >> 3) & 0xFF), fill);
-    std::memset(sb.vb + off, static_cast<u8>((static_cast<u32>(al[2]) >> 3) & 0xFF), fill);
-    for (u32 i = 0; i < n; ++i) { sb.sc[off + i] = static_cast<s16>(al[3]); sb.tc[off + i] = static_cast<s16>(al[4]); }
+    fill_rgb_const(sb.vr + off, sb.vg + off, sb.vb + off, n, al);
+    fill_st_const(sb.sc + off, sb.tc + off, n, al);
     return;
   }
   // The linear span gets the same two-way split the perspective one above
@@ -733,10 +758,7 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   // every span it draws.
   if (rgb_constant || (al[0] == ar[0] && al[1] == ar[1] && al[2] == ar[2])) {
     prof::add(prof::C_SPAN_FLAT_RGB, 1);
-    const u32 fill = (n + 7) & ~7u;
-    std::memset(sb.vr + off, static_cast<u8>((static_cast<u32>(al[0]) >> 3) & 0xFF), fill);
-    std::memset(sb.vg + off, static_cast<u8>((static_cast<u32>(al[1]) >> 3) & 0xFF), fill);
-    std::memset(sb.vb + off, static_cast<u8>((static_cast<u32>(al[2]) >> 3) & 0xFF), fill);
+    fill_rgb_const(sb.vr + off, sb.vg + off, sb.vb + off, n, al);
     kern::active::span_attrs2n_lin(al, ar, xv0, n, xdiff, sb.sc + off, sb.tc + off);
     return;
   }
@@ -973,7 +995,7 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
   }
 #if DSPERATE_NEON
   sh.gather4 = select_gather4(sh);
-  sh.vec = !sh.shadow && !sh.wireframe && sh.blendmode != 2;
+  sh.vec = !sh.shadow && !sh.wireframe;   // toon / highlight (blendmode 2) are vector stages in flush_batch
 #else
   sh.gather4 = nullptr;
   sh.vec = false;
@@ -1552,15 +1574,18 @@ void Renderer3D::stage_line(Edge& e, s32 y, const LineSpan& ls) {
   prev_shadow_mask_[static_cast<u32>((y + 1) & (RING - 1))] = false;
 
   const s32 xa = ls.xa, xb = ls.xb;
+  // One load of the profiling flag for the whole line: the kernels between
+  // the checks are opaque to the compiler, so every test re-read it (~50 insn/line).
+  const bool pe = prof::enabled;
   const int mode = sh.mode;
-  prof::add(prof::C_POLY_LINES, 1); prof::add(prof::C_SPAN_PIXELS, xb > xa ? static_cast<u64>(xb - xa) : 0);
-  if (prof::enabled) {
+  if (pe) { prof::add(prof::C_POLY_LINES, 1); prof::add(prof::C_SPAN_PIXELS, xb > xa ? static_cast<u64>(xb - xa) : 0); }
+  if (pe) {
     const u32 len = xb > xa ? static_cast<u32>(xb - xa) : 0;
     const u32 b = len <= 4 ? 0 : len <= 8 ? 1 : len <= 16 ? 2 : len <= 32 ? 3 : len <= 64 ? 4 : len <= 128 ? 5 : 6;
     prof::add(static_cast<prof::Counter>(prof::C_SL0 + b), 1);
     prof::add(static_cast<prof::Counter>(prof::C_SLPX0 + b), len);
   }
-  if (prof::enabled && prof::census_same_list) {   // work a content check would have skipped
+  if (pe && prof::census_same_list) {   // work a content check would have skipped
     prof::add(prof::C_POLY_LINES_SAME, 1);
     prof::add(prof::C_SPAN_PIXELS_SAME, xb > xa ? static_cast<u64>(xb - xa) : 0);
   }
@@ -1583,8 +1608,14 @@ void Renderer3D::stage_line(Edge& e, s32 y, const LineSpan& ls) {
       if (r) { ca = xa + static_cast<s32>(r >> 16); cb = xa + static_cast<s32>(r & 0xFFFF); }
     }
   }
-  if (prof::enabled) prof::add(cb > ca ? prof::C_SPAN_DRAWN : (xb > xa ? prof::C_SPAN_OCCLUDED : prof::C_SPAN_EMPTY), 1);
+  if (pe) prof::add(cb > ca ? prof::C_SPAN_DRAWN : (xb > xa ? prof::C_SPAN_OCCLUDED : prof::C_SPAN_EMPTY), 1);
   if (cb <= ca) return;
+  if (pe) {
+    // Keyed on the reason, not sh.vec, so the census reads the same on a host build.
+    const prof::Counter c = sh.shadow ? prof::C_RES_SHADOW_SPANS : sh.wireframe ? prof::C_RES_WIRE_SPANS
+                          : sh.blendmode == 2 ? prof::C_RES_TOON_SPANS : prof::C_RES_VEC_SPANS;
+    prof::add(c, 1); prof::add(static_cast<prof::Counter>(c + 1), static_cast<u64>(cb - ca));
+  }
   span_attrs(sb, ls.xstart, ls.xend, ca, cb, ls.wl, ls.wr, ls.al, ls.ar, sh.attrs_constant, sh.rgb_constant);
 
   SpanJob& j = jobs_[njobs_++];
@@ -1686,8 +1717,45 @@ void Renderer3D::flush_batch(const Shade& sh) {
     // One pass over the whole batch. x0 = 0 makes buffer index equal screen x
     // for the call, so [0, batch_px_) addresses everything staged.
     sb.x0 = 0;
+    const u32 n16 = (batch_px_ + 15) & ~15u;
+    // Toon: the vertex colour is replaced by toon[vr >> 1] before texturing
+    // (shade_pixel), a 32-entry lookup on the red plane -- one table
+    // instruction per plane. Highlight: all three planes take vr, and the
+    // toon colour is added to the shaded result with a clamp at 63 (below).
+    const bool toonmode = sh.blendmode == 2;
+    if (toonmode) {
+      if (!sh.highlight) {
+        const uint8x16x2_t tr = {vld1q_u8(toon6_[0]), vld1q_u8(toon6_[0] + 16)};
+        const uint8x16x2_t tg = {vld1q_u8(toon6_[1]), vld1q_u8(toon6_[1] + 16)};
+        const uint8x16x2_t tb = {vld1q_u8(toon6_[2]), vld1q_u8(toon6_[2] + 16)};
+        for (u32 i = 0; i < n16; i += 16) {
+          const uint8x16_t idx = vshrq_n_u8(vld1q_u8(sb.vr + i), 1);
+          vst1q_u8(sb.vr + i, vqtbl2q_u8(tr, idx));
+          vst1q_u8(sb.vg + i, vqtbl2q_u8(tg, idx));
+          vst1q_u8(sb.vb + i, vqtbl2q_u8(tb, idx));
+        }
+      } else {
+        for (u32 i = 0; i < n16; i += 16) { const uint8x16_t r = vld1q_u8(sb.vr + i); vst1q_u8(sb.vg + i, r); vst1q_u8(sb.vb + i, r); }
+      }
+    }
     if (sh.textured) { span_texels(sh, sb, 0, static_cast<s32>(batch_px_)); span_shade<true>(sh, sb, 0, static_cast<s32>(batch_px_)); }
     else span_shade<false>(sh, sb, 0, static_cast<s32>(batch_px_));
+    if (toonmode && sh.highlight) {
+      // vr still holds the vertex red (span_shade only reads the planes).
+      const uint8x16x2_t tr = {vld1q_u8(toon6_[0]), vld1q_u8(toon6_[0] + 16)};
+      const uint8x16x2_t tg = {vld1q_u8(toon6_[1]), vld1q_u8(toon6_[1] + 16)};
+      const uint8x16x2_t tb = {vld1q_u8(toon6_[2]), vld1q_u8(toon6_[2] + 16)};
+      const uint8x16_t v63 = vdupq_n_u8(63);
+      for (u32 i = 0; i < n16; i += 16) {
+        const uint8x16_t idx = vshrq_n_u8(vld1q_u8(sb.vr + i), 1);
+        u8* rec = reinterpret_cast<u8*>(sb.col + i);
+        uint8x16x4_t c = vld4q_u8(rec);
+        c.val[0] = vminq_u8(vaddq_u8(c.val[0], vqtbl2q_u8(tr, idx)), v63);
+        c.val[1] = vminq_u8(vaddq_u8(c.val[1], vqtbl2q_u8(tg, idx)), v63);
+        c.val[2] = vminq_u8(vaddq_u8(c.val[2], vqtbl2q_u8(tb, idx)), v63);
+        vst4q_u8(rec, c);
+      }
+    }
   }
 #endif
   (this->*sh.resolve)(sh, jobs_.data(), njobs_);
@@ -1954,6 +2022,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   sync_all();
   gx_ = &gx;
   rs_ = &gx.render_state();
+  expand_toon();
   vm_ = &nds_.bus.vram_map();
   texv_ = &vm_->texture;
   palv_ = &vm_->texpal;
@@ -2368,6 +2437,7 @@ u32 Renderer3D::band_count(u32 polygons) {
 void Renderer3D::prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels) {
   gx_ = &gx;
   rs_ = &gx.render_state();
+  expand_toon();
   vm_ = &nds_.bus.vram_map();
   texv_ = &vm_->texture;
   palv_ = &vm_->texpal;

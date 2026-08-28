@@ -397,10 +397,12 @@ void Gpu3D::finish_work(s32 cycles) {
 }
 
 void Gpu3D::run_to_slow(u64 arm9_time) {
+  prof::add(prof::C_GX_RUN_SLOW, 1);
   const u64 now = arm9_time >> 1;
   cycle_count_ -= static_cast<s32>(now - timestamp_);
   timestamp_ = now;
   if (cycle_count_ <= 0) {
+    if (prof::enabled && !pipe_.empty()) prof::add(prof::C_GX_RUN_SLOW_EXEC, 1);
     while (cycle_count_ <= 0 && !pipe_.empty()) {
       if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
       if (num_tests_ == 0) gxstat_ &= ~(1u << 0);
@@ -1124,17 +1126,32 @@ const u32* Gpu3D::line(u32 y) {
 
 u32 Gpu3D::read(u32 addr, u32 width) {
   const u32 r = addr - 0x04000000;
+  if ((r & ~3u) == 0x600) {
+    // GXSTAT first, ahead of the width split and the switch: a game waiting
+    // for a swap polls it tens of thousands of times a frame (Dragon Ball
+    // Origins: ~25k/frame through its intro, 99.98 % of them with the engine
+    // idle and a flush pending, so run_to() returns at once). Measured under
+    // qemu the read is ~64 instructions either way: the cost is sched.now(),
+    // the run_to test and composing the value, not the dispatch. The poll
+    // itself is what the idle-loop skip (DS_IDLE_SKIP) removes.
+    if (prof::enabled) {
+      prof::add(prof::C_GX_READ, 1); prof::add(prof::C_GX_READ_GXSTAT, 1);
+      if (gxstat_ & (1u << 27)) prof::add(prof::C_GX_READ_GXSTAT_BUSY, 1);
+      if (!pipe_.empty()) prof::add(prof::C_GX_READ_GXSTAT_PIPE, 1);
+      if (fifo_.level()) prof::add(prof::C_GX_READ_GXSTAT_FIFO, 1);
+    }
+    run_to(nds_.sched.now());
+    const u32 level = fifo_.level();
+    const u32 v = gxstat_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13) | (level << 16) |
+                  (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
+    return width == 32 ? v : width == 16 ? (v >> ((addr & 2) * 8)) & 0xFFFF : (v >> ((addr & 3) * 8)) & 0xFF;
+  }
   if (width == 8) { const u32 v = read(addr & ~3u, 32); return (v >> ((addr & 3) * 8)) & 0xFF; }
   if (width == 16) { const u32 v = read(addr & ~3u, 32); return (v >> ((addr & 2) * 8)) & 0xFFFF; }
+  prof::add(prof::C_GX_READ, 1);
   switch (r) {
   case 0x60: return dispcnt_;
   case 0x320: return 46;                         // RDLINES_COUNT: rendering keeps up
-  case 0x600: {
-    run_to(nds_.sched.now());
-    const u32 level = fifo_.level();
-    return gxstat_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13) | (level << 16) |
-           (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
-  }
   case 0x604: return num_polygons_ | (num_vertices_ << 16);
   case 0x620: return static_cast<u32>(pos_test_[0]);
   case 0x624: return static_cast<u32>(pos_test_[1]);
