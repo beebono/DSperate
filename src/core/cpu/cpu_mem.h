@@ -53,21 +53,21 @@ inline u32 mem_read32(CpuContext& cpu, u32 addr, bool seq = false) {
 inline void mem_write8(CpuContext& cpu, u32 addr, u8 v, bool seq = false) {
   data_cost(cpu, addr, 0, seq);
   bool code = false;
-  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { *p = v; if (code) mem::code_written(p, 1); return; }
+  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 1); else *p = v; return; }
   cpu.nds->bus.write8(cpu.which, addr, v);
 }
 inline void mem_write16(CpuContext& cpu, u32 addr, u16 v, bool seq = false) {
   addr &= ~1u;
   data_cost(cpu, addr, 0, seq);
   bool code = false;
-  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 2); if (code) mem::code_written(p, 2); return; }
+  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 2); else std::memcpy(p, &v, 2); return; }
   cpu.nds->bus.write16(cpu.which, addr, v);
 }
 inline void mem_write32(CpuContext& cpu, u32 addr, u32 v, bool seq = false) {
   addr &= ~3u;
   data_cost(cpu, addr, 1, seq);
   bool code = false;
-  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 4); if (code) mem::code_written(p, 4); return; }
+  if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 4); else std::memcpy(p, &v, 4); return; }
   cpu.nds->bus.write32(cpu.which, addr, v);
 }
 

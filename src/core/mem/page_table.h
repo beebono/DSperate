@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include <cstring>
 #include "core/types.h"
 #include "core/profile.h"
 
@@ -29,6 +30,20 @@ namespace ds::mem {
 // hook; without one the call is a null check.
 extern void (*code_write_hook)(u8* host, u32 len);
 inline void code_written(u8* host, u32 len) { if (code_write_hook) code_write_hook(host, len); }
+// A store landing on a CODE page. Silent-store elimination first: a value
+// identical to what is already there changes no translation, so it is not
+// reported at all -- a game re-uploading the same overlay, or clearing a
+// region that is already clear, costs a compare and nothing else (DraStic's
+// second SMC filter; the third, whether a block actually covers the bytes,
+// is the hook's business).
+struct CodeStoreStats { u64 silent = 0, changed = 0; };
+extern CodeStoreStats code_store_stats;
+inline void store_code(u8* host, const void* v, u32 len) {
+  if (std::memcmp(host, v, len) == 0) { ++code_store_stats.silent; return; }
+  std::memcpy(host, v, len);
+  ++code_store_stats.changed;
+  code_written(host, len);
+}
 
 constexpr u32 PAGE_SHIFT = 11;
 constexpr u32 PAGE_SIZE  = 1u << PAGE_SHIFT;      // 2 KB

@@ -20,6 +20,10 @@
 #include "core/nds.h"
 
 #include <cstdio>
+#include <map>
+#include <vector>
+#include <algorithm>
+#include <type_traits>
 #include <string>
 #include <cstring>
 #include <unistd.h>
@@ -115,6 +119,7 @@ void emit_poll(Emitter& e, std::vector<size_t>& leave) {
 }
 
 } // namespace
+static void invalidate_blocks(const u8* host_page, std::vector<Block*> victims);
 
 // Scheduler::slice_next, C-callable (scheduler.cpp): returns the context to
 // enter in x0 (nullptr at the end of the run) and the native entry in x1.
@@ -494,6 +499,33 @@ void emit_stubs(Runtime& rt) {
   sync_icache(rt.arena + LUT_AREA, rt.stubs_end - LUT_AREA);
 }
 
+// DS_JIT_CHURN=1: who invalidates what, and what gets retranslated. Printed at exit.
+namespace churn {
+struct Key { u32 pc; u8 dma, cpu; bool operator<(const Key& o) const { return pc != o.pc ? pc < o.pc : dma != o.dma ? dma < o.dma : cpu < o.cpu; } };
+static std::map<Key, u64> writers;             // writer pc -> invalidations
+static std::map<u32, u64> victims_by_page;     // guest page of a killed block -> kills
+static std::map<u32, u64> retrans;             // guest pc -> translations
+static u64 inval = 0, killed = 0, trans = 0, frames_seen = 0, range_miss = 0;
+static bool on() { static const bool e = std::getenv("DS_JIT_CHURN") != nullptr; return e; }
+static void report() {
+  auto top = [](auto& m, const char* what, int n, auto print) {
+    using K = std::remove_const_t<std::remove_reference_t<decltype(m.begin()->first)>>;
+    std::vector<std::pair<u64, K>> v; for (auto& kv : m) v.push_back({kv.second, kv.first});
+    std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    std::fprintf(stderr, "[churn] top %s (%zu distinct):\n", what, m.size());
+    for (int i = 0; i < n && i < (int)v.size(); ++i) print(v[i].first, v[i].second);
+  };
+  auto pk = [](u64 n, const Key& k) { std::fprintf(stderr, "   %10llu  pc %08x %s arm%d\n", (unsigned long long)n, k.pc, k.dma ? "DMA" : "cpu", k.cpu); };
+  auto pa = [](u64 n, u32 a) { std::fprintf(stderr, "   %10llu  %08x\n", (unsigned long long)n, a); };
+  std::fprintf(stderr, "[churn] frames %llu invalidations %llu blocks killed %llu translations %llu | code-page stores: silent %llu changed %llu, changed-but-no-block %llu\n",
+               (unsigned long long)frames_seen, (unsigned long long)inval, (unsigned long long)killed, (unsigned long long)trans,
+               (unsigned long long)mem::code_store_stats.silent, (unsigned long long)mem::code_store_stats.changed, (unsigned long long)range_miss);
+  top(writers, "writers (pc of the store / DMA start)", 15, pk);
+  top(victims_by_page, "invalidated guest pages (2 KB)", 15, pa);
+  top(retrans, "retranslated block pcs", 20, pa);
+}
+}  // namespace churn
+
 // ---- code page tracking ----------------------------------------------------------------
 
 const u8* host_page_of(const u8* p) { return reinterpret_cast<const u8*>(reinterpret_cast<u64>(p) & ~u64{mem::PAGE_SIZE - 1}); }
@@ -508,8 +540,8 @@ void set_code_tag(const u8* host_page, bool on) {
 void code_write_hook(u8* host, u32 len) {
   const u8* first = host_page_of(host);
   const u8* last = host_page_of(host + len - 1);
-  invalidate_host_page(first);
-  if (last != first) invalidate_host_page(last);
+  invalidate_host_range(first, host, host + len - 1);
+  if (last != first) invalidate_host_range(last, host, host + len - 1);
 }
 
 void kill_block(JitCpu& jc, Block* b) {
@@ -625,6 +657,7 @@ static void perf_map_stubs(const Runtime& r) {
 
 Block* translate(JitCpu& jc, u32 key) {
   Runtime& r = g_rt;
+  if (churn::on()) { churn::trans++; churn::retrans[key_pc(key)]++; }
   if (r.pos + BLOCK_MARGIN > r.cap) return nullptr;
   Block* b = new Block{};
   b->key = key;
@@ -647,6 +680,7 @@ Block* translate(JitCpu& jc, u32 key) {
   const u8* p0 = jc.ctx->page_table.read_ptr(pc);
   const u8* p1 = jc.ctx->page_table.read_ptr(pc + b->guest_len - 1);
   b->npages = 0;
+  b->host_lo = p0; b->host_hi = p1;
   if (p0) b->host_pages[b->npages++] = host_page_of(p0);
   if (p1 && host_page_of(p1) != (p0 ? host_page_of(p0) : nullptr)) b->host_pages[b->npages++] = host_page_of(p1);
   for (u32 i = 0; i < b->npages; ++i) {
@@ -670,12 +704,60 @@ const u8* find_native(JitCpu& jc, u32 key) {
   return b ? b->entry : nullptr;
 }
 
+
+// Does the block's code on `page` overlap the written bytes [lo, hi]? A block
+// spans at most two pages, which need not be adjacent in host memory, so the
+// test is per page: on its first page the code runs from host_lo to the page
+// end (or host_hi if that is the only page), on its second from the page
+// start to host_hi. An unmapped end (null) is treated as covering the page.
+static bool block_touched(const Block* b, const u8* page, const u8* lo, const u8* hi) {
+  if (!b->host_lo || !b->host_hi) return true;
+  const u8* seg_lo; const u8* seg_hi;
+  if (page == b->host_pages[0]) { seg_lo = b->host_lo; seg_hi = (b->npages == 1) ? b->host_hi : page + mem::PAGE_SIZE - 1; }
+  else                          { seg_lo = page; seg_hi = b->host_hi; }
+  return lo <= seg_hi && hi >= seg_lo;
+}
+
+// A store changed bytes [lo, hi] on `host_page` (both on that page): kill the
+// blocks whose code they belong to, and only those -- data sharing a 2 KB page
+// with code is the common case, not the exception (DraStic's third filter).
+void invalidate_host_range(const u8* host_page, const u8* lo, const u8* hi) {
+  auto it = g_rt.code_pages.find(host_page);
+  if (it == g_rt.code_pages.end()) return;
+  std::vector<Block*>& list = it->second;
+  std::vector<Block*> victims;
+  for (size_t k = 0; k < list.size();) {
+    if (block_touched(list[k], host_page, lo, hi)) { victims.push_back(list[k]); list[k] = list.back(); list.pop_back(); }
+    else ++k;
+  }
+  if (victims.empty()) { churn::range_miss++; return; }
+  if (list.empty()) { g_rt.code_pages.erase(it); set_code_tag(host_page, false); }
+  invalidate_blocks(host_page, std::move(victims));
+}
+
 void invalidate_host_page(const u8* host_page) {
   auto it = g_rt.code_pages.find(host_page);
   if (it == g_rt.code_pages.end()) return;
   std::vector<Block*> victims = std::move(it->second);
   g_rt.code_pages.erase(it);
   set_code_tag(host_page, false);
+  invalidate_blocks(host_page, std::move(victims));
+}
+
+// Kill `victims`, all of which lived on `host_page` and have already been
+// unlinked from that page's list.
+static void invalidate_blocks(const u8* host_page, std::vector<Block*> victims) {
+  if (churn::on()) {
+    static bool reg = (std::atexit(churn::report), true); (void)reg;
+    CpuContext* ctx = g_rt.cpus[0].ctx ? g_rt.cpus[0].ctx : g_rt.cpus[1].ctx;
+    const CpuContext* run = ctx->nds->sched.running();
+    const bool dma = ctx->nds->sched.in_dma();
+    const u8 cpu = run ? (run->which == Cpu::ARM9 ? 9 : 7) : 0;
+    const u32 pc = run ? run->hot.regs[15] : 0;
+    churn::writers[churn::Key{pc, dma, cpu}]++;
+    churn::inval++; churn::killed += victims.size(); churn::frames_seen = ctx->nds->frame_count;
+    for (Block* b : victims) churn::victims_by_page[key_pc(b->key) & ~(mem::PAGE_SIZE - 1)]++;
+  }
   for (Block* b : victims) {
     JitCpu& jc = jc_of(b);
     kill_block(jc, b);
@@ -783,7 +865,7 @@ extern "C" u32 jit_h_ld32(CpuContext* cpu, u32 addr) {
 extern "C" void jit_h_st8(CpuContext* cpu, u32 addr, u32 v) {
   g_rt.stats.slow_accesses++;
   bool code = false;
-  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { *p = static_cast<u8>(v); if (code) mem::code_written(p, 1); }
+  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { const u8 b8 = static_cast<u8>(v); if (code) mem::store_code(p, &b8, 1); else *p = b8; }
   else if ((addr & 0xFF000000) == 0x04000000) cpu->nds->io.write(cpu->which, addr, 8, v);
   else cpu->nds->bus.write8(cpu->which, addr, static_cast<u8>(v));
   if (cpu->halted) cpu->hot.alerts |= ALERT_HALTED;
@@ -793,7 +875,7 @@ extern "C" void jit_h_st16(CpuContext* cpu, u32 addr, u32 v) {
   addr &= ~1u;
   bool code = false;
   const u16 h = static_cast<u16>(v);
-  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { std::memcpy(p, &h, 2); if (code) mem::code_written(p, 2); }
+  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &h, 2); else std::memcpy(p, &h, 2); }
   else if ((addr & 0xFF000000) == 0x04000000) cpu->nds->io.write(cpu->which, addr, 16, v);
   else cpu->nds->bus.write16(cpu->which, addr, h);
   if (cpu->halted) cpu->hot.alerts |= ALERT_HALTED;
@@ -802,7 +884,7 @@ extern "C" void jit_h_st32(CpuContext* cpu, u32 addr, u32 v) {
   g_rt.stats.slow_accesses++;
   addr &= ~3u;
   bool code = false;
-  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 4); if (code) mem::code_written(p, 4); }
+  if (u8* p = cpu->page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 4); else std::memcpy(p, &v, 4); }
   else if ((addr & 0xFF000000) == 0x04000000) cpu->nds->io.write(cpu->which, addr, 32, v);
   else cpu->nds->bus.write32(cpu->which, addr, v);
   if (cpu->halted) cpu->hot.alerts |= ALERT_HALTED;

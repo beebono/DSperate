@@ -331,12 +331,12 @@ u32 Bus::dma_read32(Cpu cpu, u32 addr) {
 }
 void Bus::dma_write16(Cpu cpu, u32 addr, u16 v) {
   addr &= ~1u; bool code = false;
-  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 2); if (code) code_written(p, 2); return; }
+  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { if (code) store_code(p, &v, 2); else std::memcpy(p, &v, 2); return; }
   io_write(cpu, addr, 16, v);
 }
 void Bus::dma_write32(Cpu cpu, u32 addr, u32 v) {
   addr &= ~3u; bool code = false;
-  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { std::memcpy(p, &v, 4); if (code) code_written(p, 4); return; }
+  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { if (code) store_code(p, &v, 4); else std::memcpy(p, &v, 4); return; }
   io_write(cpu, addr, 32, v);
 }
 

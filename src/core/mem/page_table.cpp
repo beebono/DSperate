@@ -10,6 +10,7 @@
 namespace ds::mem {
 
 void (*code_write_hook)(u8* host, u32 len) = nullptr;
+CodeStoreStats code_store_stats;
 bool (*PageTable::code_query)(const u8* host_page) = nullptr;
 
 static constexpr size_t TABLE_BYTES = size_t{PAGE_COUNT} * sizeof(Entry);

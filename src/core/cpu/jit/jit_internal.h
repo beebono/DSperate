@@ -81,6 +81,8 @@ struct Block {
   u32  guest_len;    // bytes of guest code covered
   const u8* host_pages[2];   // 2 KB host pages the guest code lives in (0-2 used)
   u32  npages;
+  const u8* host_lo;         // first and last host byte of the guest code: a store that
+  const u8* host_hi;         // touches neither page's part of [lo, hi] leaves the block alone
   u8   owner;        // index into Runtime::cpus
   bool dead;
 };
@@ -187,6 +189,7 @@ Runtime& rt();
 
 // Runtime services used by the translator.
 void   invalidate_host_page(const u8* host_page);
+void   invalidate_host_range(const u8* host_page, const u8* lo, const u8* hi);
 void   invalidate_cpu(JitCpu& jc);
 void   lut_insert(JitCpu& jc, Block* b);
 Block* translate(JitCpu& jc, u32 key);          // null when the arena is full

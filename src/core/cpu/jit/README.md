@@ -102,10 +102,18 @@ dead; when they are not, a shared stub merges (`bl merge_keep_cv` /
 other CPU's mapping and DMA see the same `TAG_CODE` bit; remaps re-apply it
 through `PageTable::code_query`, and `set_code_host` finds the guest pages of
 a host page through a reverse index rebuilt lazily after a remap. Every store
-path that lands on a tagged page reports through `mem::code_written`; the
-runtime kills the blocks on that page (entry patched to a redirect into the
-dispatcher, LUT/map entries removed) and raises the alert word so a block
-currently executing leaves at its next poll.
+path that lands on a tagged page goes through `mem::store_code`, which filters
+twice before anything is invalidated (DraStic's second and third SMC stages):
+a value identical to what is already there is not a modification and is not
+reported at all, and a changed store kills only the blocks whose guest bytes
+it overlaps (`invalidate_host_range`; a `Block` records its first and last
+host byte), not every block on the 2 KB page. Both matter: on Golden Sun Dark
+Dawn ITCM data shares a page with the hot ITCM routines, and before the
+filters each data store there killed ~26 blocks -- 1.9k retranslations a
+frame, 7 % of the frame; after, ~60. A killed block has its entry patched to
+a redirect into the dispatcher and its LUT/map entries removed, and the alert
+word is raised so a block currently executing leaves at its next poll.
+`DS_JIT_CHURN=1` reports the writers, the pages and the retranslated blocks.
 
 **Interrupts** are taken on the C side: translated code leaves when a poll
 finds `irq_pending` set with I clear, `run()` calls `check_irq()`, and
