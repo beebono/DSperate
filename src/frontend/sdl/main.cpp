@@ -173,11 +173,14 @@ int main(int argc, char** argv) {
   ds::sdl::Display display2;   // dual-window: the bottom screen's own window
   if (dual_window) {
     if (SDL_GetNumVideoDisplays() < 2) { std::fprintf(stderr, "--dual-window needs two video displays\n"); SDL_Quit(); return 1; }
-    // Screen 1 (bottom, the touchscreen) goes to display 0: on the dual-panel
-    // handhelds DSI-1 -- the first display -- is, unintuitively, the lower
-    // panel.
-    if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel, 0, 1) ||
-        !display2.open("DSperate (bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, 0)) { SDL_Quit(); return 1; }
+    // Which display is the physical bottom panel depends on the driver, both
+    // verified on the dual-panel board: under KMSDRM display 0 is DSI-1,
+    // which is -- unintuitively -- the lower panel, while sway's canvas
+    // arranges the outputs the other way around.
+    const char* vd = SDL_GetCurrentVideoDriver();
+    const int bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
+    if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel, 0, 1 - bottom_display) ||
+        !display2.open("DSperate (bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
   } else if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; }
 
