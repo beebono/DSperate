@@ -182,6 +182,26 @@ int main(int argc, char** argv) {
     }
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
     nds.run_frame();
+    if (static const bool fh = std::getenv("DS_FRAME_HASH") != nullptr; fh) {
+      auto fnv = [](const ds::u8* p, size_t n, ds::u64 h) { for (size_t k = 0; k < n; ++k) h = (h ^ p[k]) * 1099511628211ull; return h; };
+      ds::u64 h = 1469598103934665603ull;
+      h = fnv(nds.bus.main_ram.get(), 4u << 20, h);
+      h = fnv(nds.bus.shared_wram.get(), 32u << 10, h);
+      h = fnv(nds.bus.arm7_wram.get(), 64u << 10, h);
+      h = fnv(nds.bus.dtcm.get(), 16u << 10, h);
+      const auto& a9 = nds.cpu(ds::Cpu::ARM9).hot; const auto& a7 = nds.cpu(ds::Cpu::ARM7).hot;
+      std::fprintf(stderr, "[fh] %d mem %016llx a9", i, (unsigned long long)h);
+      for (int r = 0; r < 16; ++r) std::fprintf(stderr, " %08x", a9.regs[r]);
+      std::fprintf(stderr, " %08x a7", a9.cpsr);
+      for (int r = 0; r < 16; ++r) std::fprintf(stderr, " %08x", a7.regs[r]);
+      std::fprintf(stderr, " %08x\n", a7.cpsr);
+      static const char* dumpf = std::getenv("DS_FRAME_DUMP");   // "<frame>:<path>": write main RAM + WRAM + DTCM after that frame
+      if (dumpf && std::atoi(dumpf) == i) {
+        FILE* f = std::fopen(std::strchr(dumpf, ':') + 1, "wb");
+        std::fwrite(nds.bus.main_ram.get(), 1, 4u << 20, f); std::fwrite(nds.bus.shared_wram.get(), 1, 32u << 10, f);
+        std::fwrite(nds.bus.arm7_wram.get(), 1, 64u << 10, f); std::fwrite(nds.bus.dtcm.get(), 1, 16u << 10, f); std::fclose(f);
+      }
+    }
     if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
       // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);

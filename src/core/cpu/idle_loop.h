@@ -28,9 +28,14 @@ struct CpuContext;
 
 namespace ds::cpu {
 
+// Which addresses a loop's loads may touch. RamOnly: backed RAM. GxstatOnly:
+// RAM plus GXSTAT, and at least one load must be GXSTAT (the swap-wait shape).
+// All: RAM plus the scheduled-event register set (see safe_poll_address).
+enum class IdlePorts : u8 { RamOnly, GxstatOnly, All };
+
 // True when the CPU's next instruction lies inside a proven idle loop.
 // Cheap on the repeat path: one hash lookup plus one page-table probe per load.
-bool in_idle_loop(CpuContext& cpu);
+bool in_idle_loop(CpuContext& cpu, IdlePorts ports = IdlePorts::All);
 
 // Guest code or a memory mapping changed: drop the structural cache.
 void invalidate_idle_loops();

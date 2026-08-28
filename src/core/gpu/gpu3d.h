@@ -85,6 +85,9 @@ public:
   }
   u32  read(u32 addr, u32 width);
   void write(u32 addr, u32 width, u32 value);
+  // A DMA word landing on GXFIFO, without the bus and I/O dispatch a
+  // register write goes through (the same semantics as write(0x04000400, 32)).
+  void gxfifo_dma_write(u32 value) { if (geometry_on_) gxfifo_write(value); }
 
   // POWCNT1 bit 3 (geometry) and bit 2 (rendering).
   void set_powcnt(u16 value);
@@ -98,6 +101,9 @@ public:
   bool stalled() const { return stalled_; }
   // Nothing to execute and nothing to raise: run_to would only stamp the time.
   bool idle() const { return !geometry_on_ || flush_request_ || (pipe_.empty() && !(gxstat_ & (1u << 27))); }
+  // A swap has been issued and waits for VBlank: the engine accepts nothing
+  // and changes nothing until then, so a loop polling GXSTAT can be skipped.
+  bool swap_pending() const { return flush_request_ != 0; }
 
   // Display timing hooks.
   void vblank();            // VCount 192: latch registers, sort, swap buffers

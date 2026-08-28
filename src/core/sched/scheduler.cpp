@@ -24,7 +24,8 @@ Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) {
   // Read once: a function-local static costs an acquire load per use.
   if (const char* q = std::getenv("DS_QUANTUM")) { set_quantum(std::atoll(q)); quantum_forced_ = true; }
   debug_slices_ = std::getenv("DS_DEBUG_SLICES") != nullptr;
-  idle_skip_ = std::getenv("DS_IDLE_SKIP") != nullptr;
+  if (const char* e = std::getenv("DS_IDLE_SKIP"))
+    idle_skip_ = (e[0] == '0') ? 0 : (std::strcmp(e, "all") == 0 || e[0] == '2') ? 2 : 1;
   reset();
 }
 
@@ -96,6 +97,12 @@ void Scheduler::rescan() {
 bool Scheduler::machine_idle(bool& skip9, bool& skip7) const {
   skip9 = skip7 = false;
   if (!idle_skip_) return both_idle();
+  // Swap-wait mode: nothing below is worth its cost unless the game has issued
+  // a swap and is waiting for VBlank to perform it -- one load decides that
+  // before the PC ring, the body walk or the DMA probes are touched, so a
+  // scene that never waits this way pays only this test per slice.
+  const bool gx_only = idle_skip_ == 1;
+  if (gx_only && !nds_.gpu3d.swap_pending()) return both_idle();
   CpuContext& a9 = const_cast<CpuContext&>(nds_.cpu(Cpu::ARM9));
   CpuContext& a7 = const_cast<CpuContext&>(nds_.cpu(Cpu::ARM7));
   if (nds_.dma.any_running(Cpu::ARM9) || nds_.dma.any_running(Cpu::ARM7)) { prof::add(prof::C_IDLE_NO_DMA, 1); return false; }
@@ -120,7 +127,10 @@ bool Scheduler::machine_idle(bool& skip9, bool& skip7) const {
     if (c.hot.irq_pending && !(c.hot.cpsr & 0x80)) { prof::add(prof::C_IDLE_NO_IRQ, 1); return false; }
     if (c.halted) continue;
     if (!repeated[i]) { prof::add(prof::C_IDLE_NO_FILTER, 1); return false; }
-    if (!cpu::in_idle_loop(c)) { prof::add(i ? prof::C_IDLE_NO_LOOP7 : prof::C_IDLE_NO_LOOP9, 1); return false; }
+    // Swap-wait mode: the ARM9 loop must read GXSTAT and no other device; the
+    // ARM7 (which cannot see GXSTAT) may only spin on RAM.
+    const cpu::IdlePorts ports = !gx_only ? cpu::IdlePorts::All : i == 0 ? cpu::IdlePorts::GxstatOnly : cpu::IdlePorts::RamOnly;
+    if (!cpu::in_idle_loop(c, ports)) { prof::add(i ? prof::C_IDLE_NO_LOOP7 : prof::C_IDLE_NO_LOOP9, 1); return false; }
     skip[i] = true;
   }
   prof::add(prof::C_IDLE_OK, 1);

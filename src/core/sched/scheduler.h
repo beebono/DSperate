@@ -129,7 +129,11 @@ private:
   bool quantum_forced_ = false;         // DS_QUANTUM given
   bool in_dma_ = false;                 // inside Dma::run (a preempt there would corrupt the DMA's budget)
   bool debug_slices_ = false;           // DS_DEBUG_SLICES
-  bool idle_skip_ = false;              // DS_IDLE_SKIP enables idle-loop skipping (off: it does not pay)
+  // Idle-loop skip mode (DS_IDLE_SKIP): 0 off; 1 (default) only while the ARM9
+  // is in a poll loop on GXSTAT with a swap pending -- the one shape measured
+  // to pay (Dragon Ball Origins); 2 = "all": any proven poll loop, which costs
+  // 7-10 % on scenes that never spin and moved Etrian Odyssey's frames.
+  u8 idle_skip_ = 1;
   // The event table is split by field and gated by a bitmask: firing scans
   // only the armed events (typically six to eight of the twenty) and touches
   // three cache lines of deadlines instead of eight of interleaved records.

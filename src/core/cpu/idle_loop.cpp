@@ -54,10 +54,14 @@ inline u32 cache_slot(u32 pc) { return (pc >> 2) & (CACHE_SIZE - 1); }
 // returns is the same on every iteration and reading it is pure, with two
 // exceptions whose reads have side effects and must never be skipped over:
 // the IPC receive FIFO and the gamecard data port, which both pop.
-inline bool safe_poll_address(CpuContext& cpu, u32 addr) {
+inline bool safe_poll_address(CpuContext& cpu, u32 addr, IdlePorts ports, bool& gxstat) {
   if (cpu.page_table.read_ptr(addr)) return true;          // plain RAM
   if ((addr & 0x0F000000u) != 0x04000000u) return false;   // not I/O at all
   const u32 port = addr & 0x0FFFFFFCu;
+  if (ports != IdlePorts::All) {
+    if (ports == IdlePorts::GxstatOnly && port == 0x04000600) { gxstat = true; return true; }
+    return false;
+  }
   // Only registers that change at a scheduled event, never between two of
   // them. Anything the scheduler derives from the current time (VCOUNT,
   // DISPSTAT's blank bits, the timer counters) advances *inside* a slice --
@@ -266,7 +270,7 @@ void analyse(CpuContext& cpu, u32 pc, Verdict& v) {
 
 }  // namespace
 
-bool in_idle_loop(CpuContext& cpu) {
+bool in_idle_loop(CpuContext& cpu, IdlePorts ports) {
   ++g_stats.queries;
   g_reject = IdleReject::None;
   if (cpu.thumb()) return reject(IdleReject::Thumb);
@@ -280,13 +284,17 @@ bool in_idle_loop(CpuContext& cpu) {
 
   // Re-check every load against the live registers: the same code may run with
   // a base pointer into MMIO, where the read itself can have a side effect.
+  bool gxstat = false;
   for (u32 i = 0; i < v.load_count; ++i) {
     const LoadSite& site = v.loads[i];
     const u32 addr = site.base == 0xFF
                        ? site.addr
                        : cpu.hot.regs[site.base] + static_cast<u32>(site.offset);
-    if (!safe_poll_address(cpu, addr)) return reject(IdleReject::Mmio);
+    if (!safe_poll_address(cpu, addr, ports, gxstat)) return reject(IdleReject::Mmio);
   }
+  // The swap-wait shape is a loop *on GXSTAT*; a RAM-only loop that happens
+  // to run while a swap is pending is not what this mode is for.
+  if (ports == IdlePorts::GxstatOnly && !gxstat) return reject(IdleReject::Mmio);
   ++g_stats.hits;
   return true;
 }
