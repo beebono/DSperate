@@ -116,7 +116,11 @@ public:
   void debug_dump(FILE* f) { renderer_.debug_dump(f); }
   void set_render_xpos(u16 value, u16 mask);
 
+  // The FIFO IRQ line follows the FIFO level in the two IRQ modes; with the
+  // mode off the line is already down (the GXSTAT write handlers call the
+  // full check), so the per-command path tests the mode first.
   void check_fifo_irq();
+  void check_fifo_irq_fast() { if (gxstat_ >> 30) check_fifo_irq(); }
   void check_fifo_dma();
 
   u32 dispcnt() const { return dispcnt_; }
@@ -239,18 +243,21 @@ private:
   Entry fifo_read();
   void gxfifo_write(u32 value);
   void run_to_slow(u64 arm9_time);
-  void execute();
-  void exec_single(u8 cmd, u32 param);
+  __attribute__((always_inline)) void execute();       // one call site: the run_to_slow loop
+  __attribute__((always_inline)) void exec_single(u8 cmd, u32 param);   // one call site: execute()
   void exec_multi(u8 cmd);
 
   // Timing helpers.
-  void add_cycles(s32 n);
+  // Per-command timing helpers: called once per command from the execute
+  // loop, so they are forced inline (LTO left them as calls: ~15 insn of
+  // call overhead each at 15 k+ calls a frame).
+  __attribute__((always_inline)) void add_cycles(s32 n);
   void next_vertex_slot();
   void stall_polygon_pipeline(s32 delay, s32 nonstall_delay);
-  void vtx_cmd_submit();
-  void vtx_cmd_delayed6();
-  void vtx_cmd_delayed8();
-  void vtx_cmd_delayed4();
+  __attribute__((always_inline)) void vtx_cmd_submit();
+  __attribute__((always_inline)) void vtx_cmd_delayed6();
+  __attribute__((always_inline)) void vtx_cmd_delayed8();
+  __attribute__((always_inline)) void vtx_cmd_delayed4();
   void finish_work(s32 cycles);
 
   // Geometry.

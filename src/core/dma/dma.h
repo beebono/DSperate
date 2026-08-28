@@ -59,6 +59,9 @@ public:
   // per word and once per catch-up, and the eight-channel scan cost more than
   // the events it was there to avoid (178k instructions a frame, measured).
   bool cart_armed() const { return cart_armed_; }
+  // An enabled ARM9 channel in GXFIFO start mode exists: the geometry engine
+  // asks after every command it retires, so the answer is kept, not searched.
+  bool gx_armed() const { return gx_armed_; }
 
   // Run the CPU's DMA channels for up to `budget` cycles (that CPU's clock).
   // Returns cycles consumed.
@@ -67,6 +70,7 @@ public:
 private:
   void update_cart_armed();
   bool cart_armed_ = false;
+  bool gx_armed_ = false;
   NDS& nds_;
   u8 running_mask_[2] = {};   // per CPU, bit n = channel n running (any_running is one load)
   void set_running(Channel& c, u32 v) {

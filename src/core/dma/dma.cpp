@@ -35,7 +35,7 @@ Dma::Dma(NDS& nds) : nds_(nds) { reset(); }
 void Dma::reset() {
   running_mask_[0] = running_mask_[1] = 0;
   for (int i = 0; i < 8; ++i) { ch_[i] = Channel{}; ch_[i].cpu = i < 4 ? Cpu::ARM9 : Cpu::ARM7; ch_[i].num = i & 3; ch_[i].burst_table = MRAM_DUMMY.data; }
-  cart_armed_ = false;
+  cart_armed_ = false; gx_armed_ = false;
 }
 
 void Dma::write_src(Cpu cpu, int n, u32 v) { channel(cpu, n).src = v & (cpu == Cpu::ARM9 ? 0x0FFFFFFF : 0x07FFFFFF); }
@@ -47,7 +47,7 @@ void Dma::write_cnt(Cpu cpu, int n, u32 v) {
   c.cnt = v;
   if ((old & 0x80000000) || !(v & 0x80000000)) {
     // This path can clear the enable bit without the channel ever starting.
-    if (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART) update_cart_armed();
+    update_cart_armed();
     return;
   }
   c.cur_src = c.src; c.cur_dst = c.dst;
@@ -84,10 +84,11 @@ void Dma::check(Cpu cpu, u32 mode) {
 }
 void Dma::stop(Cpu cpu, u32 mode) {
   for (int n = 0; n < 4; ++n) { Channel& c = channel(cpu, n); if (c.start_mode == mode) c.cnt &= ~0x80000000u; }
-  if (mode == MODE9_CART || mode == MODE7_CART) update_cart_armed();
+  update_cart_armed();
 }
 void Dma::update_cart_armed() {
   cart_armed_ = in_mode(Cpu::ARM9, MODE9_CART) || in_mode(Cpu::ARM7, MODE7_CART);
+  gx_armed_ = in_mode(Cpu::ARM9, MODE9_GXFIFO);
 }
 
 bool Dma::in_mode(Cpu cpu, u32 mode) const {

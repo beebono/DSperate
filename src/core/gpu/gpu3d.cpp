@@ -472,7 +472,7 @@ Gpu3D::Entry Gpu3D::fifo_read() {
       if (stall_n_ == 0) stalled_ = false;
     }
     check_fifo_dma();
-    check_fifo_irq();
+    check_fifo_irq_fast();
   }
   return e;
 }
@@ -488,7 +488,7 @@ void Gpu3D::check_fifo_irq() {
 }
 
 void Gpu3D::check_fifo_dma() {
-  if (fifo_n_ < 128) nds_.dma.check(Cpu::ARM9, dma::MODE9_GXFIFO);
+  if (fifo_n_ < 128 && nds_.dma.gx_armed()) nds_.dma.check(Cpu::ARM9, dma::MODE9_GXFIFO);
 }
 
 // Packed command port: up to four command bytes followed by their parameters.
