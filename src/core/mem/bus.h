@@ -31,6 +31,10 @@ public:
   u32 tcm_prev_itcm_ = 0, tcm_prev_dtcm_base_ = 0, tcm_prev_dtcm_size_ = 0;   // windows mapped by the last update_tcm   // CP15 (ARM9)
   void update_wram();                 // WRAMCNT
   void update_vram();                 // VRAMCNT A-I
+  // Lazy 2D (see gpu.h): trap ARM9 stores into the 2D engines' VRAM windows
+  // (and, with `lcdc`, the LCDC window) so the first one in a frame can force
+  // the deferred render to catch up before the bytes change.
+  void set_vram_trap(bool on, bool lcdc);
 
   // DMA accesses (no CPU cycle accounting; page-table fast path then MMIO).
   u16 dma_read16(Cpu cpu, u32 addr);

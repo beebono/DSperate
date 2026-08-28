@@ -18,12 +18,13 @@ namespace ds::gpu {
 
 namespace {
 
-// Census of the per-scanline change detection: every compare that actually
-// runs, and whether it found a difference. These sites answer "did anything
-// change" by rescanning the source each line; the counters size what a
-// write-path dirty bit would replace. Counts only executed compares -- the
-// `!have_` short circuit skips the memcmp on the first call.
-// Two measurement knobs, so both arms can be A/B'd inside one binary:
+// Census of the per-scanline change detection that remains: the extended
+// palettes live in VRAM, which the write journal does not cover, so they are
+// still validated by rescanning the source each line. (The standard palettes
+// and OAM are journaled and compare a generation word instead.) Counts only
+// executed compares -- the `!have_` short circuit skips the memcmp on the
+// first call. Two measurement knobs, so both arms can be A/B'd inside one
+// binary:
 //
 //   DS_2D_CMPPROBE=1  run each compare twice and throw the first result away.
 //                     Semantics and output are untouched by construction, so
@@ -32,10 +33,9 @@ namespace {
 //                     overlap with) -- report it as a ceiling.
 //   DS_2D_CMPFRAME=1  clear the per-line `_checked_` flags once per frame
 //                     instead of once per scanline, so each compare runs once
-//                     a frame. This is the optimistic floor for what a
-//                     write-path dirty bit could buy, and it is NOT correct in
-//                     general: a mid-frame palette or OAM write stops being
-//                     seen. Check the frames before believing the number.
+//                     a frame. This is the optimistic floor for extending the
+//                     journal to VRAM, and it is NOT correct in general: a
+//                     mid-frame extended-palette change stops being seen.
 bool cmp_probe() { static const bool on = std::getenv("DS_2D_CMPPROBE") != nullptr; return on; }
 bool cmp_frame() { static const bool on = std::getenv("DS_2D_CMPFRAME") != nullptr; return on; }
 static volatile int g_cmp_sink;
@@ -63,7 +63,10 @@ inline Pixel rgb15_to_18(u16 c) {
 Engine2D::Engine2D(NDS& nds, int num) : nds_(nds), num_(num) { reset(); }
 
 void Engine2D::reset() {
-  enabled_ = false;
+  g_dispcnt_ = 0; g_bgcnt_.fill(0); g_wincnt_.fill(0); g_bldcnt_ = g_bldalpha_ = 0; g_enabled_ = false;
+  journal_.clear(); jpos_ = 0;
+  enabled_ = false; screen_ = 1 - num_; master_bright_ = 0;
+  pal_.fill(0); oam_.fill(0); pal_gen_ = oam_gen_ = 1;
   dispcnt_ = 0; dispcnt_hist_.fill(0);
   bgcnt_.fill(0); bghofs_.fill(0); bgvofs_.fill(0);
   pa_.fill(0); pb_.fill(0); pc_.fill(0); pd_.fill(0);
@@ -77,9 +80,9 @@ void Engine2D::reset() {
   bg_mosaic_latch_ = obj_mosaic_latch_ = true;
   bg_mosaic_line_ = obj_mosaic_line_ = 0;
   for (auto& p : bg_) { p.vs.fill(0); p.any = false; p.table = nullptr; }
-  pal18_checked_ = pal18_have_ = false; extpal_checked_ = extpal_have_ = 0; obj_prio_mask_ = 0;
+  pal18_gen_ = objpal18_gen_ = 0; extpal_checked_ = extpal_have_ = 0; objext_checked_ = objext_have_ = 0; obj_prio_mask_ = 0;
   obj_v_.fill(0); obj_attr_.fill(0); obj_alpha_.fill(0); obj_win_.fill(0); num_sprites_ = 0;
-  oam_lists_valid_ = false;
+  oam_lists_gen_ = 0;
   out_.fill(0);
   line3d_ = nullptr;
 }
@@ -91,18 +94,118 @@ u32 Engine2D::read(u32 addr, u32 width) {
   if (width == 32) return read(addr, 16) | (read(addr + 2, 16) << 16);
   if (width == 8) { const u32 v = read(addr & ~1u, 16); return (addr & 1) ? (v >> 8) & 0xFF : v & 0xFF; }
   switch (r) {
-  case 0x00: return dispcnt_ & 0xFFFF;
-  case 0x02: return dispcnt_ >> 16;
-  case 0x08: case 0x0A: case 0x0C: case 0x0E: return bgcnt_[(r - 8) / 2];
-  case 0x48: return wincnt_[0] | (wincnt_[1] << 8);
-  case 0x4A: return wincnt_[2] | (wincnt_[3] << 8);
-  case 0x50: return bldcnt_;
-  case 0x52: return bldalpha_;
+  case 0x00: return g_dispcnt_ & 0xFFFF;
+  case 0x02: return g_dispcnt_ >> 16;
+  case 0x08: case 0x0A: case 0x0C: case 0x0E: return g_bgcnt_[(r - 8) / 2];
+  case 0x48: return g_wincnt_[0] | (g_wincnt_[1] << 8);
+  case 0x4A: return g_wincnt_[2] | (g_wincnt_[3] << 8);
+  case 0x50: return g_bldcnt_;
+  case 0x52: return g_bldalpha_;
   default: return 0;      // write-only registers read as zero
   }
 }
 
+// Guest side: keep the read mirror current, then hand the write to the
+// journal. Byte writes outside the byte-addressed registers merge with the
+// mirror into a halfword here, so the journal only ever carries what
+// apply_write handles.
 void Engine2D::write(u32 addr, u32 width, u32 value) {
+  const u32 r = addr & 0xFFF;
+  if (width == 8) {
+    if (r < 4) {                                   // DISPCNT bytes
+      const u32 shift = r * 8;
+      g_dispcnt_ = (g_dispcnt_ & ~(0xFFu << shift)) | ((value & 0xFF) << shift);
+      if (num_) g_dispcnt_ &= 0xC0B1FFF7;
+      queue(J_REG, r, 8, value & 0xFF);
+      return;
+    }
+    // BG0HOFS on engine A also scrolls the 3D layer, even with the engine powered down.
+    if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value & 0xFF), 0x00FF);
+    if (!num_ && r == 0x11) nds_.gpu3d.set_render_xpos(static_cast<u16>(value << 8), 0xFF00);
+    if (!g_enabled_) return;
+    switch (r) {
+    case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
+    case 0x4C: case 0x4D: case 0x52: case 0x53: case 0x54:
+      queue(J_REG, r, 8, value & 0xFF); return;
+    case 0x48: case 0x49: case 0x4A: case 0x4B:
+      g_wincnt_[r - 0x48] = static_cast<u8>(value); queue(J_REG, r, 8, value & 0xFF); return;
+    default: break;
+    }
+    const u32 cur = read(addr & ~1u, 16);
+    const u16 merged = (addr & 1) ? static_cast<u16>((cur & 0x00FF) | (value << 8)) : static_cast<u16>((cur & 0xFF00) | (value & 0xFF));
+    write(addr & ~1u, 16, merged);
+    return;
+  }
+  if (width == 32) {
+    switch (r) {
+    case 0x00: g_dispcnt_ = num_ ? (value & 0xC0B1FFF7) : value; queue(J_REG, 0, 32, value); return;
+    case 0x28: case 0x2C: case 0x38: case 0x3C: if (g_enabled_) queue(J_REG, r, 32, value); return;
+    default: write(addr, 16, value & 0xFFFF); write(addr + 2, 16, value >> 16); return;
+    }
+  }
+  value &= 0xFFFF;
+  switch (r) {
+  case 0x00: g_dispcnt_ = (g_dispcnt_ & 0xFFFF0000) | value; if (num_) g_dispcnt_ &= 0xC0B1FFF7; queue(J_REG, r, 16, value); return;
+  case 0x02: g_dispcnt_ = (g_dispcnt_ & 0x0000FFFF) | (value << 16); if (num_) g_dispcnt_ &= 0xC0B1FFF7; queue(J_REG, r, 16, value); return;
+  default: break;
+  }
+  if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value), 0xFFFF);
+  if (!g_enabled_) return;
+  switch (r) {
+  case 0x08: case 0x0A: case 0x0C: case 0x0E: g_bgcnt_[(r - 8) / 2] = static_cast<u16>(value); break;
+  case 0x48: g_wincnt_[0] = value & 0xFF; g_wincnt_[1] = value >> 8; break;
+  case 0x4A: g_wincnt_[2] = value & 0xFF; g_wincnt_[3] = value >> 8; break;
+  case 0x50: g_bldcnt_ = value & 0x3FFF; break;
+  case 0x52: g_bldalpha_ = value & 0x1F1F; break;
+  default: if (r >= 0x56) return; break;      // nothing there: not worth a journal entry
+  }
+  queue(J_REG, r, 16, value);
+}
+
+void Engine2D::powcnt_write(u16 value) {
+  g_enabled_ = value & (num_ ? 1 << 9 : 1 << 1);
+  queue(J_POWCNT, 0, 16, value);
+}
+void Engine2D::master_bright_write(u16 value) { queue(J_MBRIGHT, 0, 16, value); }
+void Engine2D::palette_written(u32 off, u32 width, u32 value) { queue(J_PAL, off, width, value); }
+void Engine2D::oam_written(u32 off, u32 width, u32 value) { queue(J_OAM, off, width, value); }
+
+void Engine2D::queue(u8 kind, u32 addr, u32 width, u32 value) {
+  const u32 stamp = nds_.gpu.journal_stamp();
+  if (stamp == Gpu::NO_STAMP) { apply(kind, addr, width, value); return; }
+  journal_.push_back(JEntry{static_cast<u16>(stamp), kind, static_cast<u8>(width), static_cast<u16>(addr), value});
+}
+
+void Engine2D::replay_to(u32 stamp) {
+  while (jpos_ < journal_.size() && journal_[jpos_].stamp <= stamp) {
+    const JEntry& e = journal_[jpos_++];
+    apply(e.kind, e.addr, e.width, e.value);
+  }
+}
+void Engine2D::apply_pending() { replay_to(0xFFFF); }
+void Engine2D::frame_done() {
+  // Nothing may be left: a stamp the render never reached would be a write
+  // the frame silently lost.
+  if (jpos_ != journal_.size()) { std::fprintf(stderr, "[eng%d] journal not drained: %zu of %zu\n", num_, jpos_, journal_.size()); std::abort(); }
+  journal_.clear(); jpos_ = 0;
+}
+
+void Engine2D::apply(u8 kind, u32 addr, u32 width, u32 value) {
+  switch (kind) {
+  case J_REG: apply_write(addr, width, value); return;
+  case J_PAL: std::memcpy(reinterpret_cast<u8*>(pal_.data()) + addr, &value, width / 8); ++pal_gen_; return;
+  case J_OAM: std::memcpy(reinterpret_cast<u8*>(oam_.data()) + addr, &value, width / 8); ++oam_gen_; return;
+  case J_POWCNT:
+    enabled_ = value & (num_ ? 1 << 9 : 1 << 1);
+    screen_ = (value & (1 << 15)) ? num_ : 1 - num_;   // bit 15: engine A on the top screen
+    return;
+  case J_MBRIGHT: master_bright_ = static_cast<u16>(value); return;
+  }
+}
+
+// Render side. `addr` here is the register offset; byte writes only reach
+// the byte-addressed registers (write() merged the rest).
+void Engine2D::apply_write(u32 addr, u32 width, u32 value) {
   const u32 r = addr & 0xFFF;
   if (width == 8) {
     if (r < 4) {                                   // DISPCNT bytes
@@ -111,9 +214,6 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
       if (num_) dispcnt_ &= 0xC0B1FFF7;
       return;
     }
-    // BG0HOFS on engine A also scrolls the 3D layer, even with the engine powered down.
-    if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value & 0xFF), 0x00FF);
-    if (!num_ && r == 0x11) nds_.gpu3d.set_render_xpos(static_cast<u16>(value << 8), 0xFF00);
     if (!enabled_) return;
     switch (r) {
     case 0x40: win0_[1] = value; return; case 0x41: win0_[0] = value; return;
@@ -126,14 +226,8 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
     case 0x52: bldalpha_ = (bldalpha_ & 0x1F00) | (value & 0x1F); eva_ = value & 0x1F; if (eva_ > 16) eva_ = 16; return;
     case 0x53: bldalpha_ = (bldalpha_ & 0x001F) | ((value & 0x1F) << 8); evb_ = value & 0x1F; if (evb_ > 16) evb_ = 16; return;
     case 0x54: evy_ = value & 0x1F; if (evy_ > 16) evy_ = 16; return;
-    default: break;
+    default: return;
     }
-    // Other byte writes merge into the halfword (affine references included,
-    // which go through the 16-bit path's sign extension).
-    const u32 cur = read(addr & ~1u, 16);
-    const u16 merged = (addr & 1) ? static_cast<u16>((cur & 0x00FF) | (value << 8)) : static_cast<u16>((cur & 0xFF00) | (value & 0xFF));
-    write(addr & ~1u, 16, merged);
-    return;
   }
   if (width == 32) {
     switch (r) {
@@ -143,7 +237,7 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
       { const int i = r >= 0x38; s32 v = static_cast<s32>(value << 4) >> 4;
         if ((r & 0xF) == 0x8) { ref_x_[i] = v; ref_x_reload_[i] = v; } else { ref_y_[i] = v; ref_y_reload_[i] = v; } }
       return;
-    default: write(addr, 16, value & 0xFFFF); write(addr + 2, 16, value >> 16); return;
+    default: apply_write(addr, 16, value & 0xFFFF); apply_write(addr + 2, 16, value >> 16); return;
     }
   }
   // 16-bit.
@@ -152,7 +246,6 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
   case 0x02: dispcnt_ = (dispcnt_ & 0x0000FFFF) | (value << 16); if (num_) dispcnt_ &= 0xC0B1FFF7; return;
   default: break;
   }
-  if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value), 0xFFFF);
   // Everything below is ignored while the engine is powered down (POWCNT1),
   // which is the behaviour the reference implementation models.
   if (!enabled_) return;
@@ -193,15 +286,15 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
 
 // ---- per-line state ---------------------------------------------------------
 
-void Engine2D::update_windows(u32 vcount) {
+void Engine2D::update_windows(u32 line) {
   if (!enabled_) return;
   // Vertical window edges are evaluated every line, windows enabled or not.
-  const u8 y = vcount & 0xFF;
+  const u8 y = line & 0xFF;
   if (y == win0_[3]) win0_active_ &= ~1; else if (y == win0_[2]) win0_active_ |= 1;
   if (y == win1_[3]) win1_active_ &= ~1; else if (y == win1_[2]) win1_active_ |= 1;
 }
 
-void Engine2D::pre_draw(bool frame_reset) {
+void Engine2D::pre_draw(u32 line, bool frame_reset) {
   if (!enabled_) return;
   // Turning a layer on takes two lines (sprites: one) to show; turning it off
   // and forcing blank apply at once.
@@ -210,7 +303,7 @@ void Engine2D::pre_draw(bool frame_reset) {
   obj_enable_ = ((dispcnt_hist_[1] & dispcnt_) >> 12) & 1;
   forced_blank_ = ((dispcnt_hist_[2] | dispcnt_) >> 7) & 1;
 
-  if (bg_mosaic_latch_) bg_mosaic_line_ = nds_.io.vcount;
+  if (bg_mosaic_latch_) bg_mosaic_line_ = line;
   for (int i = 0; i < 2; ++i) {
     if (!(bgcnt_[2 + i] & (1 << 6)) || bg_mosaic_latch_) { ref_x_int_[i] = ref_x_[i]; ref_y_int_[i] = ref_y_[i]; }
   }
@@ -218,7 +311,7 @@ void Engine2D::pre_draw(bool frame_reset) {
     if (frame_reset || obj_mosaic_y_ == obj_mosaic_h_) { obj_mosaic_y_ = 0; obj_mosaic_latch_ = true; }
     else { obj_mosaic_y_ = (obj_mosaic_y_ + 1) & 0xF; obj_mosaic_latch_ = false; }
   }
-  if (obj_mosaic_latch_) obj_mosaic_line_ = frame_reset ? 0 : (nds_.io.vcount + 1);
+  if (obj_mosaic_latch_) obj_mosaic_line_ = frame_reset ? 0 : (line + 1);
 }
 
 void Engine2D::post_draw(bool frame_reset) {
@@ -240,7 +333,6 @@ void Engine2D::post_draw(bool frame_reset) {
 const VramMap& Engine2D::vram() const { return nds_.bus.vram_map(); }
 const VramView& Engine2D::bg_vram() const { return num_ ? vram().bbg : vram().abg; }
 const VramView& Engine2D::obj_vram() const { return num_ ? vram().bobj : vram().aobj; }
-const u16* Engine2D::palette() const { return reinterpret_cast<const u16*>(nds_.bus.palette.get() + (num_ ? 0x400 : 0)); }
 u16 Engine2D::bg_extpal(u32 slot, u32 pal, u32 idx) const {
   return vram().read16(num_ ? vram().bbg_extpal : vram().abg_extpal, slot * 0x2000 + pal * 0x200 + idx * 2);
 }
@@ -249,14 +341,9 @@ u16 Engine2D::obj_extpal(u32 idx) const {
 }
 
 const Pixel* Engine2D::std_pal18() {
-  if (!pal18_checked_) {
-    pal18_checked_ = true;
-    const u16* src = palette();
-    if (!pal18_have_ || cmp_differs(src, pal_copy_.data(), 512, prof::C_2D_CMP_BGPAL, prof::C_2D_CMPD_BGPAL)) {
-      std::memcpy(pal_copy_.data(), src, 512);
-      kern::active::palette_to_18(pal_copy_.data(), pal18_.data(), 256);
-      pal18_have_ = true;
-    }
+  if (pal18_gen_ != pal_gen_) {
+    pal18_gen_ = pal_gen_;
+    kern::active::palette_to_18(palette(), pal18_.data(), 256);
   }
   return pal18_.data();
 }
@@ -297,7 +384,7 @@ void Engine2D::debug_dump(u32 line) {
   u32 objop = 0; for (u32 i = 0; i < 256; ++i) objop += (obj_attr_[i] & 0x80) != 0;
   std::fprintf(stderr, "\n[eng%d] sprites on line %u: %u, opaque obj pixels %u, objvram blocks:", num_, line, num_sprites_, objop);
   for (u32 b = 0; b < obj_vram().blocks(); ++b) std::fprintf(stderr, " %x", obj_vram().mask[b]);
-  const u16* oam = reinterpret_cast<const u16*>(nds_.bus.oam.get() + (num_ ? 0x400 : 0));
+  const u16* oam = oam_.data();
   std::fprintf(stderr, "\n[eng%d] oam[0..3]:", num_);
   for (int n = 0; n < 4; ++n) std::fprintf(stderr, " %04x/%04x/%04x", oam[n * 4], oam[n * 4 + 1], oam[n * 4 + 2]);
   render_line(line);
@@ -353,7 +440,7 @@ void Engine2D::render_line(u32 line) {
   if (forced_blank_) { out_.fill(0xFF3F3F3F); return; }
 
   for (auto& p : bg_) p.any = false;
-  if (!cmp_frame() || line == 0) { pal18_checked_ = false; extpal_checked_ = 0; objpal_checked_ = false; objext_checked_ = 0; }
+  if (!cmp_frame() || line == 0) { extpal_checked_ = 0; objext_checked_ = 0; }
   if (prof::enabled) {
     prof::add(prof::C_2D_LINES, 1);
     if ((layer_enable_ & 0x10) && num_sprites_) prof::add(prof::C_2D_OBJ_LINES, 1);
@@ -793,15 +880,11 @@ void Engine2D::render_sprites(u32 line) {
   obj_v_.fill(0); obj_attr_.fill(0); obj_alpha_.fill(0); obj_win_.fill(0);
   if (!obj_enable_) return;
 
-  const u16* oam = reinterpret_cast<const u16*>(nds_.bus.oam.get() + (num_ ? 0x400 : 0));
+  const u16* oam = oam_.data();
   static const s32 widths[16]  = {8, 16, 8, 8, 16, 32, 8, 8, 32, 32, 16, 8, 64, 64, 32, 8};
   static const s32 heights[16] = {8, 8, 16, 8, 16, 8, 32, 8, 32, 16, 32, 8, 64, 32, 64, 8};
 
-  if (line == 0) oam_checked_ = false;
-  if (!cmp_frame() || !oam_checked_) {
-    oam_checked_ = true;
-    if (!oam_lists_valid_ || cmp_differs(oam, oam_copy_.data(), 1024, prof::C_2D_CMP_OAM, prof::C_2D_CMPD_OAM)) rebuild_sprite_lists(oam);
-  }
+  if (oam_lists_gen_ != oam_gen_) { oam_lists_gen_ = oam_gen_; rebuild_sprite_lists(oam); }
   // (A mosaic sprite's candidacy is still its own box; the mosaic only
   // changes which of its rows is drawn.)
   const LineSprites& ls = line_sprites_[line & 0xFF];
@@ -834,7 +917,6 @@ void Engine2D::render_sprites(u32 line) {
 // list only prunes the 128-entry scan.
 void Engine2D::rebuild_sprite_lists(const u16* oam) {
   static const s32 heights[16] = {8, 8, 16, 8, 16, 8, 32, 8, 32, 16, 32, 8, 64, 32, 64, 8};
-  std::memcpy(oam_copy_.data(), oam, 1024);
   for (auto& l : line_sprites_) l.count = 0;
   for (int n = 0; n < 128; ++n) {
     const u16* attr = &oam[n * 4];
@@ -846,7 +928,6 @@ void Engine2D::rebuild_sprite_lists(const u16* oam) {
     const u32 y = attr[0] & 0xFF;
     for (s32 i = 0; i < bh; ++i) { LineSprites& l = line_sprites_[(y + i) & 0xFF]; l.idx[l.count++] = static_cast<u8>(n); }
   }
-  oam_lists_valid_ = true;
 }
 
 void Engine2D::draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, bool window) {
@@ -1023,14 +1104,9 @@ void Engine2D::build_window_plane() {
 // OBJ palettes as 18-bit records: the standard one (palette RAM + 0x200) and
 // the extended one (8 KB of VRAM), reconverted when the bytes changed.
 const Pixel* Engine2D::obj_std_pal18() {
-  if (!objpal_checked_) {
-    objpal_checked_ = true;
-    const u16* src = palette() + 0x100;
-    if (!objpal_have_ || cmp_differs(src, objpal_copy_.data(), 512, prof::C_2D_CMP_OBJPAL, prof::C_2D_CMPD_OBJPAL)) {
-      std::memcpy(objpal_copy_.data(), src, 512);
-      kern::active::palette_to_18(objpal_copy_.data(), objpal18_.data(), 256);
-      objpal_have_ = true;
-    }
+  if (objpal18_gen_ != pal_gen_) {
+    objpal18_gen_ = pal_gen_;
+    kern::active::palette_to_18(palette() + 0x100, objpal18_.data(), 256);
   }
   return objpal18_.data();
 }

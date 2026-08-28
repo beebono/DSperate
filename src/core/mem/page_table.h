@@ -81,6 +81,13 @@ public:
 
   void set_code(u32 guest, u32 size, bool is_code);
 
+  // Write trap: stores to every mapped page in [guest, guest+size) take the
+  // slow path (the entry keeps its base, so loads stay direct) until the trap
+  // is lifted again. Only entries with a host base are touched. The region
+  // must hold no read-only or MMIO pages: their SPECIAL bit means something
+  // else and lifting the trap would clear it.
+  void set_write_trap(u32 guest, u32 size, bool on);
+
   // Tag (or untag) every entry in the low 256 MB of guest space that maps the
   // given 2 KB host page. Code pages are tracked by host address so that the
   // other CPU's view and DMA see the same tag; `map` re-applies tags through

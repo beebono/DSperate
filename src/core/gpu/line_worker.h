@@ -2,16 +2,15 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // One worker thread that runs a fixed job on request, for engine B's share of
-// a display line while the calling thread renders engine A's.
+// a run of display lines while the calling thread renders engine A's.
 //
-// The handoff has to be cheap: it happens once per display line, 192 times a
-// frame, against a job of tens of microseconds. A condition variable costs
-// more to wake than the job saves at that granularity -- DraStic sidesteps
-// this by deferring both engines and handing off once a frame instead
-// (video_render_scanlines takes the threaded path only when the whole frame
-// is still pending), which is not open to us: the per-line 2D pass is what
-// lets the 3D band raster stay pipelined against the display, so the lines
-// cannot be batched to the end of the frame.
+// With lazy 2D (gpu.h) the common frame hands off once, at the last display
+// line, for all 192 lines -- the shape DraStic's video_render_scanlines
+// takes when the whole frame is still pending. But a frame that falls back
+// to per-line rendering (a VRAM store mid-frame, display capture, the
+// display FIFO) hands off once per line, 192 times a frame, against a job of
+// tens of microseconds, and a condition variable costs more to wake than the
+// job saves at that granularity.
 //
 // So the wait spins first and only falls back to sleeping once the spin
 // budget is gone. A run of display lines keeps the worker hot and every

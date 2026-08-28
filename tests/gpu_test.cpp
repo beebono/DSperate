@@ -20,7 +20,8 @@ static void w16(NDS& nds, u32 addr, u16 v) { nds.bus.dma_write16(Cpu::ARM9, addr
 
 // Render `line` on engine A and return the composite (before master brightness).
 static const gpu::Pixel* render_a(NDS& nds, u32 line) {
-  nds.gpu.engine[0].pre_draw(false); nds.gpu.engine[0].pre_draw(false); nds.gpu.engine[0].pre_draw(false);   // enable latches
+  nds.gpu.engine[0].apply_pending();   // the writes above went to the journal
+  nds.gpu.engine[0].pre_draw(line, false); nds.gpu.engine[0].pre_draw(line, false); nds.gpu.engine[0].pre_draw(line, false);   // enable latches
   nds.gpu.engine[0].render_sprites(line);
   nds.gpu.engine[0].render_line(line);
   return nds.gpu.engine[0].output();
@@ -122,6 +123,7 @@ static void test_sprites_and_window() {
   w16(nds, 0x04000048, 0x0010);                              // WININ: OBJ
   w16(nds, 0x0400004A, 0x0000);                              // WINOUT: nothing
   write9(nds, 0x04000000, 32, 0x00011010 | (1 << 13));
+  nds.gpu.engine[0].apply_pending();
   for (u32 l = 0; l <= 3; ++l) nds.gpu.engine[0].update_windows(l);   // the y1 edge at line 0 arms the window
   out = render_a(nds, 3);
   CHECK_EQ(out[10] & 0xFFFFFF, rgb18(0x7FFF));
@@ -146,11 +148,66 @@ static void test_register_access() {
   CHECK_EQ(nds.bus.dma_read16(Cpu::ARM9, 0x04000008), 0u);
 }
 
+
+// Lazy rendering. A frame driven through the display callbacks, with writes
+// landing mid-frame at every point the journal has to distinguish: during a
+// line, during its HBlank, into the palette, into VRAM (the write trap), and
+// a VRAMCNT remap. The batched frame must equal the per-line frame, and each
+// write must show from exactly the line it landed on.
+static void run_display_frame(NDS& nds, void (*mid)(NDS&, u32 line, bool hblank)) {
+  nds.gpu.begin_frame();                       // line 0 is entered without a scanline event, as run_frame does
+  for (u32 l = 0; l < 263; ++l) {
+    if (l) nds.gpu.on_scanline_start();
+    mid(nds, l, false);
+    nds.gpu.on_hblank();
+    mid(nds, l, true);
+  }
+}
+static void lazy_setup(NDS& nds) {
+  nds.io.powcnt1 = 0x820F; nds.gpu.set_powcnt(0x820F);     // both engines, A on top
+  nds.bus.dma_write16(Cpu::ARM9, 0x04000240, 0x0081);       // bank A as BG-A
+  write9(nds, 0x04000000, 32, 0x00010100);                   // mode 0, BG0 on, display mode 1
+  w16(nds, 0x04000008, 0x0004);                              // BG0CNT: 16 colour, tiles at 0x4000, map at 0
+  w16(nds, 0x05000000, 0x7C00);                              // backdrop blue
+  w16(nds, 0x05000002, 0x001F);                              // idx 1 red
+  for (u32 y = 0; y < 8; ++y) write9(nds, 0x06004020 + y * 4, 32, 0x11111111);   // tile 1: solid idx 1
+  for (u32 ty = 0; ty < 24; ++ty) w16(nds, 0x06000000 + ty * 64, 0x0001);         // tile 1 at column 0 of every row; the rest tile 0 (empty)
+}
+static void lazy_mid(NDS& nds, u32 line, bool hblank) {
+  if (line == 50 && !hblank) w16(nds, 0x05000002, 0x03E0);                       // idx 1 green: from line 50
+  if (line == 80 && hblank)  w16(nds, 0x05000000, 0x0000);                       // backdrop black: from line 81
+  if (line == 110 && !hblank) w16(nds, 0x04000010, 4);                            // scroll 4: tile 1 covers x 0..3 from line 110
+  if (line == 130 && !hblank) write9(nds, 0x06004020 + 2 * 4, 32, 0x00000000);   // tile row 2 cleared through the write trap: line 130 (130 & 7 = 2) sees it, 122 did not
+  if (line == 160 && hblank) nds.bus.dma_write16(Cpu::ARM9, 0x04000240, 0x0080);  // bank A to LCDC: BG0 reads nothing from line 161
+}
+static u32 px(const NDS& nds, u32 line, u32 x) { return nds.gpu.framebuffer(0)[line * 256 + x] & 0xFFFFFF; }
+static void test_lazy_journal() {
+  NDS lazy, direct;
+  lazy.gpu.set_lazy(true); direct.gpu.set_lazy(false);
+  for (NDS* n : {&lazy, &direct}) { lazy_setup(*n); run_display_frame(*n, lazy_mid); }
+  CHECK(std::memcmp(lazy.gpu.framebuffer(0), direct.gpu.framebuffer(0), 256 * 192 * 4) == 0);
+  CHECK(std::memcmp(lazy.gpu.framebuffer(1), direct.gpu.framebuffer(1), 256 * 192 * 4) == 0);
+  const u32 red = px(lazy, 2, 0), blue = px(lazy, 2, 8);   // a layer takes two lines to switch on: lines 0-1 are backdrop
+  CHECK(red != blue);
+  CHECK_EQ(px(lazy, 49, 0), red);
+  const u32 green = px(lazy, 50, 0); CHECK(green != red);                    // palette write during line 50
+  CHECK_EQ(px(lazy, 80, 8), blue);
+  const u32 black = px(lazy, 81, 8); CHECK(black != blue);                   // palette write in HBlank 80
+  CHECK_EQ(px(lazy, 109, 6), green);
+  CHECK_EQ(px(lazy, 110, 6), black); CHECK_EQ(px(lazy, 110, 2), green);      // scroll from line 110
+  CHECK_EQ(px(lazy, 122, 2), green);                                          // tile row 2 before the VRAM write
+  CHECK_EQ(px(lazy, 130, 2), black);                                          // ... cleared from line 130
+  CHECK_EQ(px(lazy, 131, 2), green);                                          // other rows untouched
+  CHECK_EQ(px(lazy, 160, 2), green);
+  CHECK_EQ(px(lazy, 161, 2), black);                                          // remap in HBlank 160
+}
+
 int main() {
   test_vram_views();
   test_text_bg_and_backdrop();
   test_sprites_and_window();
   test_register_access();
+  test_lazy_journal();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("gpu: ok");
   return 0;

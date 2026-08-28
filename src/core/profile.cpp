@@ -39,6 +39,7 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "3d spans len 1-4", "3d spans len 5-8", "3d spans len 9-16", "3d spans len 17-32", "3d spans len 33-64", "3d spans len 65-128", "3d spans len 129-256",
   "3d span pixels in len 1-4", "3d span pixels in len 5-8", "3d span pixels in len 9-16", "3d span pixels in len 17-32", "3d span pixels in len 33-64", "3d span pixels in len 65-128", "3d span pixels in len 129-256",
   "stores into palette space", "stores into oam space",
+  "2d lazy frames", "2d vram trap hits",
   "3d resolve kernel calls", "3d resolve parts entered",
   "3d polygon-chunk entries",
   "3d spans empty (no pixels)", "3d spans fully occluded by depth", "3d spans that draw",

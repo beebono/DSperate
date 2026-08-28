@@ -95,8 +95,11 @@ void Bus::map_fixed_regions() {
   pt9.unmap(0xFFFF0000, 0x10000);
   map_page_aligned(pt9, 0xFFFF0000, BIOS9_SIZE, bios9.get(), RO, 0xFFFFFFFFu - 0xFFF);
   pt9.map(0xFFFFF000, 0x1000, bios9.get(), RO);
-  map_page_aligned(pt9, 0x05000000, PALETTE_SIZE, palette.get(), RW, 0x06000000);
-  map_page_aligned(pt9, 0x07000000, OAM_SIZE, oam.get(), RW, 0x08000000);
+  // Palette and OAM read directly but store through the slow path: the 2D
+  // engines render lazily from their own copies, and every store has to be
+  // journaled (Gpu::palette_store / oam_store).
+  map_page_aligned(pt9, 0x05000000, PALETTE_SIZE, palette.get(), RO, 0x06000000);
+  map_page_aligned(pt9, 0x07000000, OAM_SIZE, oam.get(), RO, 0x08000000);
   // ARM7: BIOS at 0, private WRAM at 03800000 (default mapping; WRAMCNT may
   // put shared WRAM in 03000000-037FFFFF, handled in update_wram).
   pt7.map(0x00000000, BIOS7_SIZE, bios7.get(), RO);
@@ -182,8 +185,12 @@ void Bus::update_vram() {
     if (!(vram_map_.lcdc_mask & (1u << i))) continue;
     for (u32 mirror = 0x06800000; mirror < 0x07000000; mirror += 0x100000) set_pages(h9, mirror + lcdc_base[i], VRAM_BANK_SIZES[i], banks[i]);
   }
+  // A remap mid-frame changes what the deferred 2D render reads: it catches
+  // up first, and the write trap (which remap would drop) is re-armed after.
+  const bool trapped = nds_.gpu.vram_remap_begin();
   pt9.remap(0x06000000, 0x01000000, h9, RW);
   pt7.remap(0x06000000, 0x01000000, h7, RW);
+  nds_.gpu.vram_remap_end(trapped);
   if (watch_on && (watch_addr >> 24) == 0x06) { pt9.map_mmio(watch_addr & ~0x7FFu, 0x800); pt7.map_mmio(watch_addr & ~0x7FFu, 0x800); }
   if (probing) {
     const auto differs = [](const gpu::VramView& a, const gpu::VramView& b) {
@@ -251,10 +258,9 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
   tcm_prev_itcm_ = 0; tcm_prev_dtcm_size_ = 0;
   map_page_aligned(pt, 0x02000000, MAIN_RAM_SIZE, main_ram.get(), RW, 0x03000000);
   pt.map_mmio(0x04000000, 0x01000000);
-  map_page_aligned(pt, 0x05000000, PALETTE_SIZE, palette.get(), RW, 0x06000000);
-  map_page_aligned(pt, 0x07000000, OAM_SIZE, oam.get(), RW, 0x08000000);
+  map_page_aligned(pt, 0x05000000, PALETTE_SIZE, palette.get(), RO, 0x06000000);   // stores journaled, see map_fixed_regions
+  map_page_aligned(pt, 0x07000000, OAM_SIZE, oam.get(), RO, 0x08000000);
   pt.map_mmio(0x08000000, 0x02000000);
-  (void)RO;
   update_wram();
   update_vram();
   // The TCM windows are baked into the cost table: rebuild the old and the
@@ -315,8 +321,28 @@ void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
       std::fprintf(stderr, "[watch] cpu%d write%u %08x = %08x pc %08x frame %llu line %u\n", cpu == Cpu::ARM9 ? 9 : 7, width, addr, v, nds_.cpu(cpu).hot.regs[15], (unsigned long long)nds_.frame_count, nds_.gpu.line());
     std::memcpy(main_ram.get() + (addr & (MAIN_RAM_SIZE - 1)), &v, width / 8); return;
   }
-  if ((addr & 0xFF000000) == 0x04000000) nds_.io.write(cpu, addr, width, v);
-  else if ((addr & 0xFF000000) == 0x06000000) vram_write(cpu, addr, width, v);
+  switch (addr >> 24) {
+  case 0x04: nds_.io.write(cpu, addr, width, v); return;
+  case 0x05: nds_.gpu.palette_store(cpu, addr, width, v); return;
+  case 0x07: nds_.gpu.oam_store(cpu, addr, width, v); return;
+  case 0x06: {
+    // Overlapping-bank blocks always land here; directly mapped pages only
+    // while the lazy-2D write trap holds them. The trap sees the store before
+    // the bytes change, and a trapped code page still owes the SMC report.
+    nds_.gpu.vram_store_trap(cpu, addr);
+    const Entry e = nds_.cpu(cpu).page_table.entry(addr);
+    if ((e & TAG_CODE) && (e & BASE_MASK)) { store_code(reinterpret_cast<u8*>(((e & BASE_MASK) << 2) + addr), &v, width / 8); return; }
+    vram_write(cpu, addr, width, v);
+    return;
+  }
+  default: return;
+  }
+}
+
+void Bus::set_vram_trap(bool on, bool lcdc) {
+  PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
+  pt9.set_write_trap(0x06000000, 0x00800000, on);              // the four engine windows
+  if (lcdc) pt9.set_write_trap(0x06800000, 0x00800000, on);    // LCDC and its 1 MB mirrors
 }
 
 u16 Bus::dma_read16(Cpu cpu, u32 addr) {

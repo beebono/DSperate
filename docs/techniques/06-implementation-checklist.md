@@ -4,7 +4,7 @@ A compressed index of every high-level technique in documents 01–05, one line
 each, for auditing DSperate against DraStic. Each row names the technique,
 the DraStic document that describes it, and a column for our status.
 
-Audited 2026-08-28 against `src/` at 5e99f73 by reading the code, not by measurement; `partial`/`equiv` rows are judgement calls and say why. The **DSperate** column uses: `same` (we do this), `equiv` (we
+Audited 2026-08-28 against `src/` at 5e99f73 by reading the code, not by measurement; `partial`/`equiv` rows are judgement calls and say why. Rows 4.11–4.16 re-audited after lazy 2D landed (same day). The **DSperate** column uses: `same` (we do this), `equiv` (we
 achieve the same effect a different way — say how in a note), `partial`,
 `no`, or `n/a` (does not apply to our design — say why). The point is not to
 copy DraStic row by row; it is to make sure every deliberate *omission* is a
@@ -13,14 +13,15 @@ already settled carry a note.
 
 ## Audit summary (2026-08-28)
 
-105 rows: 41 `same`, 21 `equiv`, 14 `partial`, 19 `no`, 6 `n/a`, 4 marked
-high priority. Where DSperate departs it is usually because it chose
+105 rows: 43 `same`, 24 `equiv`, 13 `partial`, 16 `no`, 5 `n/a`, none
+still marked high priority. Where DSperate departs it is usually because it chose
 hardware-exact, melonDS-comparable behaviour (DMA per unit, SPU per sample,
 geometry per slice) over DraStic's deferral — those are the rows worth a
 measured decision, ranked by likely payoff:
 
-1. **Lazy 2D with a write journal** (4.12–4.15) — high priority; per-line
-   rendering plus 192 worker hand-offs a frame.
+1. ~~**Lazy 2D with a write journal** (4.12–4.15)~~ — done: one batch at
+   the last display line, one worker hand-off, per-engine journal; frames
+   byte-identical on all five scenes in every mode (see the 04 §5 rows).
 2. **SPU mixed per sample as a scheduler event** (5.1, 5.4, 5.6, 5.9, 5.11) —
    ~546 events and 16 FIFO-fed channel steps per frame where DraStic does
    one call; check `SPU` in the profile before deciding.
@@ -120,7 +121,7 @@ measured decision, ranked by likely payoff:
 
 ## 04 — Scheduler, deferral, DMA, memory
 
-> **HIGH PRIORITY: lazy 2D (rows 4.11–4.16).** DSperate renders both 2D engines synchronously at every HBlank (`Gpu::on_hblank` → `Gpu::draw_line`, `src/core/gpu/gpu.cpp`), with a worker dispatch/join per line. DraStic renders the frame in one batch at VBlank, journals mid-frame writes, and hands engine B to a worker once. This is the largest unexploited item on the list; see [04 §5](04-scheduler-deferral-and-memory.md).
+> **Lazy 2D (rows 4.11–4.16) — done.** `Gpu` (`src/core/gpu/gpu.cpp`) journals every 2D register, palette, OAM, POWCNT and MASTER_BRIGHT write per engine with the display line it first affects, and renders the frame in one batch at the last display line's HBlank — engine B on the line worker, engine A on the emulation thread, one hand-off — replaying the journal in front of each line. VRAM, which the journal cannot cover, is handled by a page-table write trap on the pages the engines read: the first trapped store of a frame renders every line whose HBlank has passed *before* the bytes change, then the frame continues per line. Capture and FIFO frames run per line from the start. Verified byte-identical against the per-line renderer on all five recorded scenes (1800 frames each; lazy, `DS_2D_LAZY=0`, `DS_2D_THREAD=0`, interpreter and JIT). Census (`DS_PROFILE=1`): mlbis/meteos/sm64 batch ~1800 of 1800 frames with 13–17 trap hits per run; etody 970, dbori 814 (the rest are capture frames). Choice recorded here: DraStic ignores CPU stores into VRAM mid-frame; we detect them and fall back, so the output stays hardware-exact. Measured on the RG DS (`dsperate` CLI, 900 frames, 3 paired reps each, warm-up run discarded), mean frame ms base → lazy: meteos 6.07 → 5.34 (−12 %), sm64 7.88 → 7.01 (−11 %), mlbis 1.93 → 1.52 (−21 %), dbori 7.29 → 6.73 (−7 %), etody 10.33 → 10.24 (flat: half its frames capture, per-line by design). Medians move the same way.
 
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
@@ -134,12 +135,12 @@ measured decision, ranked by likely payoff:
 | 4.8 | Whole-transfer DMA over a 16-entry 8 MB region table | 04 §4 | no | `Dma::run` executes per unit against a budget with burst timing (melonDS model); each word goes through `bus.dma_read32/write32` |
 | 4.9 | DMA cycle cost from static seq/non-seq tables; completion as event | 04 §4 | no | per-unit burst tables; the copy is not front-loaded |
 | 4.10 | Coarse (64 KB) / fine (2 KB) code bitmaps ORed over DMA destination | 04 §4 | equiv | DMA words take the tagged-page store path → `store_code`; no separate bitmap |
-| 4.11 | HBlank DMA into VRAM forces 2D render catch-up first | 04 §4 | n/a | 2D is synchronous, VRAM is always current |
-| 4.12 | 2D rendered as one batch at VBlank when nothing changed mid-frame | 04 §5 | **no — HIGH PRIORITY** | `Gpu::on_hblank` → `draw_line` renders both engines every line (`src/core/gpu/gpu.cpp`) |
-| 4.13 | Engine B rendered on a worker thread, engine A on main | 04 §5 | partial — **HIGH PRIORITY** | we dispatch/join the engine-B worker per line (192 hand-offs/frame); DraStic does it once per frame |
-| 4.14 | Per-engine journal of mid-frame register/palette/OAM writes, replayed per line | 04 §5 | **no — HIGH PRIORITY** | prerequisite for 4.12; we apply writes directly and rely on per-line rendering for correctness |
-| 4.15 | Copy-on-first-write shadow palette/OAM; journal only if value changed | 04 §5 | no | part of the 4.12–4.14 cluster |
-| 4.16 | VRAM bank remaps deferred to next render | 04 §5 | partial | `update_vram` is immediate but skips remaps that do not change the effective windows |
+| 4.11 | HBlank DMA into VRAM forces 2D render catch-up first | 04 §4 | equiv | any store into VRAM the engines read (DMA or CPU) hits the page-table write trap and catches the render up first (`Gpu::vram_store_trap`); DraStic only catches HBlank DMA |
+| 4.12 | 2D rendered as one batch at VBlank when nothing changed mid-frame | 04 §5 | same | one `render_lines(0, 191)` at the HBlank of line 191; writes mid-frame do not break the batch (journal), VRAM stores do (trap → per-line for the rest of the frame); capture / FIFO frames per line |
+| 4.13 | Engine B rendered on a worker thread, engine A on main | 04 §5 | same | one `LineWorker` dispatch per batch (per line only in fallback frames); each engine's output stage runs on its own thread |
+| 4.14 | Per-engine journal of mid-frame register/palette/OAM writes, replayed per line | 04 §5 | same | `Engine2D::queue` / `replay_to`, stamped `line*2 + phase` so writes before and after a line's scanline start (window edges) replay in order; POWCNT and MASTER_BRIGHT ride the same journal |
+| 4.15 | Copy-on-first-write shadow palette/OAM; journal only if value changed | 04 §5 | equiv | the engine keeps a render-side palette/OAM copy the journal feeds; the guest bytes stay live, so no copy-on-write; silent stores dropped in `Gpu::palette_store` / `oam_store`; palette/OAM pages are permanently slow-path for stores (~400/frame) |
+| 4.16 | VRAM bank remaps deferred to next render | 04 §5 | equiv | not deferred: `update_vram` catches the render up to the current line, remaps, re-arms the trap, and the frame stays batched |
 | 4.17 | Geometry commands logged, replayed once at VBlank | 04 §6 | no | `Gpu3D::run_to` executes queued commands after every ARM9 slice (slice-granular, not frame-granular) |
 | 4.18 | Vertex transform as a batched kernel after replay | 04 §6 | no | vertices transformed as commands execute |
 | 4.19 | `GXSTAT` (and FIFO IRQ/DMA) computed by replaying the log on demand | 04 §6 | same | register reads call `run_to` first; `swap_pending()` feeds idle skip — see Dragon Ball GXSTAT poll note |

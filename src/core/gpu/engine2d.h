@@ -4,6 +4,7 @@
 #include "core/types.h"
 
 #include <array>
+#include <vector>
 
 namespace ds { struct NDS; }
 
@@ -39,6 +40,17 @@ enum TableId : u8 { T_BG0 = 0, T_BG1, T_BG2, T_BG3, T_OBJ_STD, T_OBJ_EXT, T_OBJ_
 
 // One 2D engine (A at 0x04000000, B at 0x04001000).
 //
+// Lazy rendering. The engine has a guest side and a render side. Register,
+// palette, OAM, POWCNT and MASTER_BRIGHT writes update a guest-visible mirror
+// at once (reads come from it) and are journaled with the display line they
+// first affect (Gpu::journal_stamp); the render side -- the register file the
+// line pipeline reads, its own palette and OAM copies, and every per-line
+// latch -- only moves when replay_to() consumes the journal in front of the
+// line being rendered. That lets Gpu render the frame in one batch at the last
+// display line (or catch up part-way when VRAM changes) and still see each
+// mid-frame write on exactly the line it landed on. Silent stores are dropped
+// at the source (palette/OAM) so the journal only holds changes.
+//
 // Rendering is a deferred-palette line pipeline:
 // every enabled background is rasterised into a u16 line of palette indices
 // or RGB555 (bit 15 = opaque), sprites are pre-rendered one line ahead into
@@ -52,17 +64,25 @@ public:
   Engine2D(NDS& nds, int num);
   void reset();
 
-  // Register access (addr is the full 0x040000xx / 0x040010xx address).
+  // Guest side (addr is the full 0x040000xx / 0x040010xx address).
   u32  read(u32 addr, u32 width);
   void write(u32 addr, u32 width, u32 value);
+  void powcnt_write(u16 value);                          // POWCNT1: enable (bit 1 for A, 9 for B) and screen swap (bit 15)
+  void master_bright_write(u16 value);                   // this engine's MASTER_BRIGHT
+  void palette_written(u32 off, u32 width, u32 value);   // off within this engine's 1 KB (BG 0x000, OBJ 0x200); guest bytes already changed
+  void oam_written(u32 off, u32 width, u32 value);       // off within this engine's 1 KB
 
-  // POWCNT1 gating (bit 1 for A, bit 9 for B).
-  void set_enabled(bool on) { enabled_ = on; }
+  // Render side.
+  void replay_to(u32 stamp);               // apply every journal entry stamped <= stamp
+  void apply_pending();                    // apply the whole journal now (tests, debug dumps)
+  void frame_done();                       // every display line rendered: the journal must be drained
   bool enabled() const { return enabled_; }
+  u16  master_bright() const { return master_bright_; }
+  int  screen() const { return screen_; }  // 0 = top, 1 = bottom
 
   // Per-line hooks, in the order the hardware applies them.
-  void update_windows(u32 vcount);         // at scanline start
-  void pre_draw(bool frame_reset);         // at HBlank, before drawing
+  void update_windows(u32 line);           // at scanline start
+  void pre_draw(u32 line, bool frame_reset);   // at HBlank, before drawing `line`
   void render_sprites(u32 line);           // sprites for `line` (pre-rendered one line ahead)
   void render_line(u32 line);              // BG + composite for `line` into output()
   void post_draw(bool frame_reset);        // at HBlank, after drawing
@@ -75,7 +95,7 @@ public:
   // bits 24-28, alpha 0 = transparent); nullptr when there is no 3D output.
   void set_3d_line(const Pixel* line) { line3d_ = line; }
 
-  u32 dispcnt() const { return dispcnt_; }
+  u32 dispcnt() const { return dispcnt_; }   // render side
   void debug_dump(u32 line);   // stderr dump of register/latch state and a rendered line (debug builds of the CLI)
   void debug_outhash(u32 line);   // DS_DEBUG_OUTHASH: per-frame / per-line output hashes
   bool forced_blank() const { return forced_blank_; }
@@ -83,7 +103,30 @@ public:
 private:
   NDS& nds_;
   const int num_;
+
+  // Guest-visible mirror of the readable registers and the enable gate.
+  u32 g_dispcnt_ = 0;
+  std::array<u16, 4> g_bgcnt_{};
+  std::array<u8, 4> g_wincnt_{};
+  u16 g_bldcnt_ = 0, g_bldalpha_ = 0;
+  bool g_enabled_ = false;
+
+  // Journal of guest writes not yet seen by the render side, in stamp order.
+  enum JKind : u8 { J_REG, J_PAL, J_OAM, J_POWCNT, J_MBRIGHT };
+  struct JEntry { u16 stamp; u8 kind; u8 width; u16 addr; u32 value; };
+  std::vector<JEntry> journal_;
+  size_t jpos_ = 0;
+  void queue(u8 kind, u32 addr, u32 width, u32 value);   // journal, or apply now when nothing is pending
+  void apply(u8 kind, u32 addr, u32 width, u32 value);
+  void apply_write(u32 addr, u32 width, u32 value);       // register write, render side
+
+  // Render side: registers, palette and OAM copies (kept by the journal).
   bool enabled_ = false;
+  int screen_ = 1;
+  u16 master_bright_ = 0;
+  alignas(16) std::array<u16, 512> pal_{};   // BG 0-255, OBJ 256-511
+  alignas(16) std::array<u16, 512> oam_{};
+  u32 pal_gen_ = 1, oam_gen_ = 1;            // bumped on every change, so caches compare a word, not the bytes
 
   // Registers.
   u32 dispcnt_ = 0;
@@ -126,10 +169,9 @@ private:
   alignas(16) std::array<u8, 256 + 16> obj_attr_{};  // bits 0-1 priority, bit 2 semi, bit 3 bitmap, bit 4 mosaic, bit 5 sprite-touched, bit 6 standard palette, bit 7 opaque
   alignas(16) std::array<u8, 256 + 16> obj_alpha_{}; // bitmap sprites: EVA (alpha+1)
   alignas(16) std::array<u8, 256> obj_win_{};
-  // OBJ palettes as 18-bit records, validated per line on first use.
+  // OBJ palettes as 18-bit records, rebuilt when the palette copy's generation moves.
   alignas(16) std::array<Pixel, 256> objpal18_{};
-  alignas(16) std::array<u16, 256> objpal_copy_{};
-  bool objpal_checked_ = false, objpal_have_ = false;
+  u32 objpal18_gen_ = 0;
   alignas(16) std::array<Pixel, 4096> objext18_{};
   alignas(16) std::array<u16, 4096> objext_copy_{};
   u16 objext_checked_ = 0, objext_have_ = 0;   // per 256-entry palette
@@ -139,13 +181,13 @@ private:
   // Per-line resolve tables by TableId.
   const Pixel* tables_[T_COUNT] = {};
   static const Pixel zero_table_[256];
-  // Palettes as 18-bit records: the standard BG palette and the extended
-  // palettes by slot and number. A conversion is reused across lines while
-  // the source bytes still equal the copy taken at conversion time (checked
-  // once per line on first use; palette RAM and VRAM can change mid-frame).
+  // Palettes as 18-bit records: the standard BG palette (rebuilt when
+  // pal_gen_ moves) and the extended palettes by slot and number. An extended
+  // palette lives in VRAM, which the journal does not cover, so its
+  // conversion is reused across lines while the source bytes still equal the
+  // copy taken at conversion time (checked once per line on first use).
   alignas(16) std::array<Pixel, 256> pal18_{};
-  alignas(16) std::array<u16, 256> pal_copy_{};
-  bool pal18_checked_ = false, pal18_have_ = false;
+  u32 pal18_gen_ = 0;
   alignas(16) std::array<Pixel, 4 * 16 * 256> extpal18_{};
   alignas(16) std::array<u16, 4 * 16 * 256> extpal_copy_{};
   u64 extpal_checked_ = 0, extpal_have_ = 0;
@@ -153,11 +195,8 @@ private:
   const Pixel* std_pal18();
   const Pixel* ext_pal18(u32 slot, u32 pal);
   u32 num_sprites_ = 0;
-  // Sprite candidates per line, rebuilt when the OAM bytes change (compared
-  // against a copy on every line, as OAM can be written mid-frame).
-  alignas(16) std::array<u16, 512> oam_copy_{};
-  bool oam_lists_valid_ = false;
-  bool oam_checked_ = false;        // DS_2D_CMPFRAME: OAM compared once this frame
+  // Sprite candidates per line, rebuilt when the OAM copy's generation moves.
+  u32 oam_lists_gen_ = 0;
   struct LineSprites { u8 count; u8 idx[128]; };
   std::array<LineSprites, 256> line_sprites_{};
   void rebuild_sprite_lists(const u16* oam);
@@ -174,7 +213,7 @@ private:
   const VramMap& vram() const;
   const VramView& bg_vram() const;
   const VramView& obj_vram() const;
-  const u16* palette() const;                      // 512 entries (BG) ; +256 = OBJ
+  const u16* palette() const { return pal_.data(); }   // render-side copy: 256 BG entries, then 256 OBJ
   u16 bg_extpal(u32 slot, u32 pal, u32 idx) const;
   u16 obj_extpal(u32 idx) const;
 

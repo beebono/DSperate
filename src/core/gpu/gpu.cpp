@@ -19,6 +19,7 @@ static void ev_fifo(NDS& nds, u32 x)   { nds.gpu.on_display_fifo(x); }
 Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
   // DS_2D_THREAD=0 keeps engine B on the emulation thread. The two paths must
   // produce identical frames; the env var is what makes that checkable.
+  if (const char* l = std::getenv("DS_2D_LAZY")) lazy_enabled_ = std::atoi(l) != 0;
   const char* e = std::getenv("DS_2D_THREAD");
   if (!e || std::atoi(e) != 0) {
     // The only statics the two engines share are the colour tables, built by
@@ -30,9 +31,11 @@ Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
 }
 
 void Gpu::reset() {
-  line_ = 0;
-  frame_begun_ = false; screens_on_ = false; swap_ = false;
-  master_bright_[0] = master_bright_[1] = 0;
+  disarm_trap();
+  line_ = 0; hblank_done_ = false;
+  lazy_frame_ = per_line_ = false; render_next_ = SCREEN_H;
+  frame_begun_ = false; screens_on_ = false;
+  master_bright_g_[0] = master_bright_g_[1] = 0;
   capcnt_ = 0; capture_on_ = false;
   fifo_.fill(0); fifo_rd_ = fifo_wr_ = 0; fifo_line_.fill(0); run_fifo_ = false;
   for (auto& fb : fb_) fb.fill(0);
@@ -51,7 +54,7 @@ u32 Gpu::reg_read(u32 addr, u32 width) {
       switch (a) {
       case 0x64: return capcnt_ & 0xFFFF;
       case 0x66: return capcnt_ >> 16;
-      case 0x6C: return master_bright_[0];
+      case 0x6C: return master_bright_g_[0];
       default: return 0;
       }
     };
@@ -60,7 +63,7 @@ u32 Gpu::reg_read(u32 addr, u32 width) {
     return (rd16(r & ~1u) >> ((r & 1) * 8)) & 0xFF;
   }
   if (r >= 0x1064 && r < 0x1070) {
-    const u32 v = (r & ~1u) == 0x106C ? master_bright_[1] : 0;
+    const u32 v = (r & ~1u) == 0x106C ? master_bright_g_[1] : 0;
     return width == 8 ? (v >> ((r & 1) * 8)) & 0xFF : v;
   }
   return engine[r >= 0x1000].read(addr, width);
@@ -68,12 +71,14 @@ u32 Gpu::reg_read(u32 addr, u32 width) {
 
 void Gpu::reg_write(u32 addr, u32 width, u32 value) {
   const u32 r = addr - 0x04000000;
+  // MASTER_BRIGHT: guest copy here, render-side copy through the engine's journal.
+  auto mb = [&](int e, u16 v) { master_bright_g_[e] = v; engine[e].master_bright_write(v); };
   if (r >= 0x64 && r < 0x70) {
     if (width == 32) {
       switch (r) {
       case 0x64: capcnt_ = value & 0xEF3F1F1F; return;
       case 0x68: fifo_[fifo_wr_] = value & 0xFFFF; fifo_[fifo_wr_ + 1] = value >> 16; fifo_wr_ = (fifo_wr_ + 2) & 0xF; return;
-      case 0x6C: master_bright_[0] = value & 0xC01F; return;
+      case 0x6C: mb(0, value & 0xC01F); return;
       default: return;
       }
     }
@@ -83,7 +88,7 @@ void Gpu::reg_write(u32 addr, u32 width, u32 value) {
       case 0x66: capcnt_ = (capcnt_ & 0x0000FFFF) | ((value & 0xEF3F) << 16); return;
       case 0x68: fifo_[fifo_wr_] = value; return;
       case 0x6A: fifo_[fifo_wr_ + 1] = value; fifo_wr_ = (fifo_wr_ + 2) & 0xF; return;   // the write pointer advances on the high half
-      case 0x6C: master_bright_[0] = value & 0xC01F; return;
+      case 0x6C: mb(0, value & 0xC01F); return;
       default: return;
       }
     }
@@ -95,25 +100,87 @@ void Gpu::reg_write(u32 addr, u32 width, u32 value) {
     case 0x68: fifo_[fifo_wr_] = static_cast<u16>(value * 0x0101); return;
     case 0x6A: fifo_[fifo_wr_ + 1] = static_cast<u16>(value * 0x0101); return;
     case 0x6B: fifo_wr_ = (fifo_wr_ + 2) & 0xF; return;
-    case 0x6C: master_bright_[0] = (master_bright_[0] & 0xFF00) | (value & 0x1F); return;
-    case 0x6D: master_bright_[0] = (master_bright_[0] & 0x00FF) | ((value & 0xC0) << 8); return;
+    case 0x6C: mb(0, (master_bright_g_[0] & 0xFF00) | (value & 0x1F)); return;
+    case 0x6D: mb(0, (master_bright_g_[0] & 0x00FF) | ((value & 0xC0) << 8)); return;
     default: return;
     }
   }
   if (r >= 0x1064 && r < 0x1070) {
-    if (r == 0x106C && width >= 16) master_bright_[1] = value & 0xC01F;
-    else if (r == 0x106C) master_bright_[1] = (master_bright_[1] & 0xFF00) | (value & 0x1F);
-    else if (r == 0x106D) master_bright_[1] = (master_bright_[1] & 0x00FF) | ((value & 0xC0) << 8);
+    if (r == 0x106C && width >= 16) mb(1, value & 0xC01F);
+    else if (r == 0x106C) mb(1, (master_bright_g_[1] & 0xFF00) | (value & 0x1F));
+    else if (r == 0x106D) mb(1, (master_bright_g_[1] & 0x00FF) | ((value & 0xC0) << 8));
     return;
   }
-  engine[r >= 0x1000].write(addr, width, value);
+  const int e = r >= 0x1000;
+  engine[e].write(addr, width, value);
+  // Engine A switching to VRAM display mid-frame starts reading an LCDC bank
+  // the trap does not cover: render the rest of the frame per line.
+  if (e == 0 && (r & 0xFFF) < 4 && trap_armed_ && !trap_lcdc_ && ((engine[0].read(0x04000000, 32) >> 16) & 3) == 2) fall_back_per_line();
 }
 
 void Gpu::set_powcnt(u16 value) {
-  engine[0].set_enabled(value & (1 << 1));
-  engine[1].set_enabled(value & (1 << 9));
+  engine[0].powcnt_write(value);
+  engine[1].powcnt_write(value);
   nds_.gpu3d.set_powcnt(value);
-  swap_ = value & (1 << 15);
+}
+
+// ---- slow-path stores and the VRAM trap ---------------------------------------
+
+// Palette and OAM: the guest bytes change now, the engine copy through the
+// journal. A store of the value already there changes nothing anywhere and is
+// not journaled (silent-store elimination). Byte stores are applied, as the
+// direct mapping applied them before.
+void Gpu::palette_store(Cpu cpu, u32 addr, u32 width, u32 value) {
+  const u32 off = addr & 0x7FF, n = width / 8;
+  u8* host = nds_.bus.palette.get() + off;
+  if (std::memcmp(host, &value, n) == 0) return;
+  if (nds_.cpu(cpu).page_table.entry(addr) & mem::TAG_CODE) mem::store_code(host, &value, n); else std::memcpy(host, &value, n);
+  engine[off >> 10].palette_written(off & 0x3FF, width, value);
+}
+void Gpu::oam_store(Cpu cpu, u32 addr, u32 width, u32 value) {
+  const u32 off = addr & 0x7FF, n = width / 8;
+  u8* host = nds_.bus.oam.get() + off;
+  if (std::memcmp(host, &value, n) == 0) return;
+  if (nds_.cpu(cpu).page_table.entry(addr) & mem::TAG_CODE) mem::store_code(host, &value, n); else std::memcpy(host, &value, n);
+  engine[off >> 10].oam_written(off & 0x3FF, width, value);
+}
+
+// A store into VRAM the engines can see, before it lands. Only ARM9 reaches
+// the engine windows; the LCDC window matters only while it is displayed.
+void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
+  if (!trap_armed_ || cpu != Cpu::ARM9) return;
+  if (addr >= 0x06800000 && !trap_lcdc_) return;
+  prof::add(prof::C_2D_TRAP_HITS, 1);
+  fall_back_per_line();
+}
+
+bool Gpu::vram_remap_begin() {
+  catch_up();
+  const bool was = trap_armed_;
+  if (was) disarm_trap();
+  return was;
+}
+void Gpu::vram_remap_end(bool trapped) { if (trapped) arm_trap(); }
+
+void Gpu::arm_trap() {
+  trap_lcdc_ = ((engine[0].dispcnt() >> 16) & 3) == 2;
+  nds_.bus.set_vram_trap(true, trap_lcdc_);
+  trap_armed_ = true;
+}
+void Gpu::disarm_trap() {
+  if (!trap_armed_) return;
+  nds_.bus.set_vram_trap(false, trap_lcdc_);
+  trap_armed_ = false;
+}
+
+void Gpu::catch_up() {
+  const u32 f = frontier();
+  if (render_next_ < f && render_next_ < SCREEN_H) render_lines(render_next_, (f < SCREEN_H ? f : SCREEN_H) - 1);
+}
+void Gpu::fall_back_per_line() {
+  catch_up();
+  per_line_ = true;
+  disarm_trap();
 }
 
 // ---- timing -----------------------------------------------------------------
@@ -121,27 +188,29 @@ void Gpu::set_powcnt(u16 value) {
 void Gpu::on_hblank() {
   nds_.io.set_hblank(true);
   const bool frame_reset = line_ == 262;
-  engine[0].pre_draw(frame_reset);
-  engine[1].pre_draw(frame_reset);
-  if (line_ < 192) {
-    draw_line(line_);
-    // Sprites are rendered one line ahead of the backgrounds.
-    if (line_ < 191) {
-      DS_PROF(OBJ_DRAW);
-      engine[0].render_sprites(line_ + 1);
-      if (!par_2d_) engine[1].render_sprites(line_ + 1);   // else the worker did it
-    }
+  if (line_ < SCREEN_H) {
+    // Display line: rendered now in per-line mode, or all together at the
+    // last one. The per-line latches (pre/post_draw, the sprites one line
+    // ahead) run inside step_engine, in front of the journal replay.
+    if (lazy_frame_ && !per_line_) { if (line_ == SCREEN_H - 1) render_lines(render_next_, SCREEN_H - 1); }
+    else render_lines(line_, line_);
+    hblank_done_ = true;
     nds_.dma.check(Cpu::ARM9, dma::MODE9_HBLANK);
-  } else if (line_ == 215) {
-    // The 3D frame flushed at VBlank is rasterised now, ahead of the next
-    // frame's display lines.
-    nds_.gpu3d.render_frame();
-    if (probe_enabled_) async_probe_start();
-  } else if (line_ == 262) {
-    engine[0].render_sprites(0); engine[1].render_sprites(0);
+  } else {
+    hblank_done_ = true;
+    engine[0].pre_draw(line_, frame_reset);
+    engine[1].pre_draw(line_, frame_reset);
+    if (line_ == 215) {
+      // The 3D frame flushed at VBlank is rasterised now, ahead of the next
+      // frame's display lines.
+      nds_.gpu3d.render_frame();
+      if (probe_enabled_) async_probe_start();
+    } else if (line_ == 262) {
+      engine[0].render_sprites(0); engine[1].render_sprites(0);
+    }
+    engine[0].post_draw(frame_reset);
+    engine[1].post_draw(frame_reset);
   }
-  engine[0].post_draw(frame_reset);
-  engine[1].post_draw(frame_reset);
   nds_.sched.schedule(EventId::VBlank_Scanline, nds_.sched.event_time() + (CYCLES_PER_SCANLINE - HBLANK_START), ev_scanline);
 }
 
@@ -199,8 +268,10 @@ void Gpu::async_probe_check(bool at_line0) {
 void Gpu::on_scanline_start() {
   nds_.io.set_hblank(false);
   line_ = static_cast<u16>((line_ + 1) % SCANLINES_PER_FRAME);
-  engine[0].update_windows(line_);
-  engine[1].update_windows(line_);
+  hblank_done_ = false;
+  // Display lines evaluate their window edges inside step_engine; the rest
+  // of the frame is applied directly (nothing is pending by then).
+  if (line_ >= SCREEN_H) { engine[0].update_windows(line_); engine[1].update_windows(line_); }
   if (line_ == 0) {
     if (probe_enabled_) async_probe_check(true);
     begin_frame();
@@ -226,7 +297,7 @@ void Gpu::begin_frame() {
   frame_begun_ = true;
   if (std::getenv("DS_DEBUG_GPU"))
     std::fprintf(stderr, "[gpu] frame %llu powcnt %04x dispcntA %08x dispcntB %08x mb %04x/%04x cap %08x vramcnt %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                 static_cast<unsigned long long>(nds_.frame_count), nds_.io.powcnt1, engine[0].dispcnt(), engine[1].dispcnt(), master_bright_[0], master_bright_[1], capcnt_,
+                 static_cast<unsigned long long>(nds_.frame_count), nds_.io.powcnt1, engine[0].dispcnt(), engine[1].dispcnt(), master_bright_g_[0], master_bright_g_[1], capcnt_,
                  nds_.io.vramcnt[0], nds_.io.vramcnt[1], nds_.io.vramcnt[2], nds_.io.vramcnt[3], nds_.io.vramcnt[4], nds_.io.vramcnt[5], nds_.io.vramcnt[6], nds_.io.vramcnt[7], nds_.io.vramcnt[8]);
   if (std::getenv("DS_DEBUG_VRAMNZ")) {
     std::fprintf(stderr, "[vram] frame %llu nz:", static_cast<unsigned long long>(nds_.frame_count));
@@ -245,6 +316,12 @@ void Gpu::begin_frame() {
   // or a DMA channel is waiting on it.
   run_fifo_ = uses_fifo() || nds_.dma.in_mode(Cpu::ARM9, dma::MODE9_DISPLAY_FIFO);
   if (capcnt_ & (1u << 31)) capture_on_ = true;
+  // The frame's rendering mode. The FIFO is sampled per line and capture
+  // writes VRAM the guest may read back per line: both stay per-line.
+  render_next_ = 0;
+  per_line_ = false;
+  lazy_frame_ = lazy_enabled_ && !run_fifo_ && !capture_on_;
+  if (lazy_frame_) { arm_trap(); prof::add(prof::C_2D_LAZY_FRAMES, 1); }
 }
 
 // ---- main-memory display FIFO -----------------------------------------------
@@ -269,55 +346,86 @@ void Gpu::on_display_fifo(u32 x) {
   } else sample_fifo(253, 3);
 }
 
-// ---- output stage -----------------------------------------------------------
+// ---- rendering and the output stage ------------------------------------------
 
-// Engine B's half of a display line: its own render, and the sprites for the
-// next line, which only ever feed engine B's own next render_line. Nothing
-// here is reachable from engine A.
+// Engine B's share of a run of display lines. Nothing here is reachable from
+// engine A: the engines' state is disjoint and the output stage writes each
+// engine's screen and line buffer.
 void Gpu::engine_b_job(void* self) {
   Gpu& g = *static_cast<Gpu*>(self);
-  g.engine[1].render_line(g.eng_b_line_);
-  if (g.eng_b_sprites_) g.engine[1].render_sprites(g.eng_b_line_ + 1);
+  for (u32 l = g.eng_b_first_; l <= g.eng_b_last_; ++l) g.step_engine(1, l);
 }
 
 void Gpu::debug_dump(FILE* f) {
-  std::fprintf(f, "  gpu: line %u eng_b_line %u par_2d %d frame_ready %d\n", line_, eng_b_line_, par_2d_ ? 1 : 0, nds_.frame_ready ? 1 : 0);
+  std::fprintf(f, "  gpu: line %u hblank_done %d render_next %u lazy %d per_line %d trap %d eng_b %u..%u par_2d %d frame_ready %d\n", line_, hblank_done_ ? 1 : 0, render_next_,
+               lazy_frame_ ? 1 : 0, per_line_ ? 1 : 0, trap_armed_ ? 1 : 0, eng_b_first_, eng_b_last_, par_2d_ ? 1 : 0, nds_.frame_ready ? 1 : 0);
   eng_b_.debug_dump(f);
   nds_.gpu3d.debug_dump(f);
 }
 
-void Gpu::draw_line(u32 line) {
-  line3d_ = nds_.gpu3d.line(line);
-  engine[0].set_3d_line(line3d_);
+// Render display lines [first, last] of both engines: one hand-off to the
+// worker for engine B's run, engine A's run here.
+void Gpu::render_lines(u32 first, u32 last) {
   if (par_2d_) {
-    // Engine B (and its next line's sprites) go to the worker; engine A runs
-    // here. Joined below, before anything reads engine B's output.
-    eng_b_line_ = line;
-    eng_b_sprites_ = line < 191;
+    eng_b_first_ = first; eng_b_last_ = last;
     eng_b_.dispatch();
-    engine[0].render_line(line);
+    for (u32 l = first; l <= last; ++l) step_engine(0, l);
     eng_b_.wait();
   } else {
-    engine[0].render_line(line);
-    engine[1].render_line(line);
+    for (u32 l = first; l <= last; ++l) step_engine(0, l);
+    for (u32 l = first; l <= last; ++l) step_engine(1, l);
   }
-  DS_PROF(OUTPUT);
-  // POWCNT1 bit 15 decides which engine is on which screen; everything below
-  // is written in engine order and lands on the screen that bit selects.
-  const int screen_a = swap_ ? 0 : 1, screen_b = swap_ ? 1 : 0;
+  render_next_ = last + 1;
+  if (render_next_ == SCREEN_H) {
+    engine[0].frame_done(); engine[1].frame_done();
+    disarm_trap();
+  }
+}
+
+// One engine's display line, in hardware order: the writes stamped before
+// the scanline start, the window edges, the writes of the line itself, the
+// HBlank latches, the line, its output, the next line's sprites.
+void Gpu::step_engine(int e, u32 line) {
+  Engine2D& en = engine[e];
+  en.replay_to(line * 2);
+  en.update_windows(line);
+  en.replay_to(line * 2 + 1);
+  en.pre_draw(line, false);
+  if (e == 0) { line3d_ = nds_.gpu3d.line(line); en.set_3d_line(line3d_); }
+  en.render_line(line);
+  output_engine(e, line);
+  if (e == 0 && capture_on_) { DS_PROF(CAPTURE); capture(line); }
+  // Sprites are rendered one line ahead of the backgrounds.
+  if (line < SCREEN_H - 1) {
+    prof::Scope* sc = (e == 0 && prof::enabled) ? new prof::Scope(prof::OBJ_DRAW) : nullptr;
+    en.render_sprites(line + 1);
+    delete sc;
+  }
+  en.post_draw(false);
+}
+
+// The output stage for one engine's line: display mode, master brightness,
+// 6->8 bit expansion, into the screen POWCNT1 bit 15 gives it (or scaled
+// straight into the frontend's buffer).
+void Gpu::output_engine(int e, u32 line) {
+  prof::Scope* sc = (e == 0 && prof::enabled) ? new prof::Scope(prof::OUTPUT) : nullptr;
+  const Engine2D& en = engine[e];
+  const int screen = en.screen();
   const bool scaled = scaling();
-  u32* dst_a = scaled ? line_out_[0].data() : fb_[screen_a].data() + line * SCREEN_W;
-  u32* dst_b = scaled ? line_out_[1].data() : fb_[screen_b].data() + line * SCREEN_W;
+  u32* dst = scaled ? line_out_[e].data() : fb_[screen].data() + line * SCREEN_W;
   if (screens_on_) {
     // The common display modes go through one fused kernel (copy, master
     // brightness, 6->8 bit expansion); the others build the line first.
-    if (((engine[0].dispcnt() >> 16) & 3) == 1) kern::active::output_line(engine[0].output(), master_bright_[0], dst_a);
-    else { output_a(line, dst_a); expand_colours(dst_a); }
-    if ((engine[1].dispcnt() >> 16) & 1) kern::active::output_line(engine[1].output(), master_bright_[1], dst_b);
-    else { output_b(line, dst_b); expand_colours(dst_b); }
-  } else { for (u32 i = 0; i < 256; ++i) dst_a[i] = dst_b[i] = 0xFF000000; }
-  if (scaled) { emit_scaled(screen_a, line, dst_a); emit_scaled(screen_b, line, dst_b); }
-  if (capture_on_) { DS_PROF(CAPTURE); capture(line); }
+    if (e == 0) {
+      if (((en.dispcnt() >> 16) & 3) == 1) kern::active::output_line(en.output(), en.master_bright(), dst);
+      else { output_a(line, dst); expand_colours(dst); }
+    } else {
+      if ((en.dispcnt() >> 16) & 1) kern::active::output_line(en.output(), en.master_bright(), dst);
+      else { output_b(dst); expand_colours(dst); }
+    }
+  } else { for (u32 i = 0; i < 256; ++i) dst[i] = 0xFF000000; }
+  if (scaled) emit_scaled(screen, line, dst);
+  delete sc;
 }
 
 // One source line to the destination rows it covers. Destination row y takes
@@ -357,15 +465,14 @@ void Gpu::output_a(u32 line, u32* dst) {
   }
   case 3: for (u32 i = 0; i < 256; ++i) dst[i] = rgb15_to_18_plain(fifo_line_[i]); break;
   }
-  apply_master_brightness(master_bright_[0], dst);
+  apply_master_brightness(engine[0].master_bright(), dst);
 }
 
-void Gpu::output_b(u32 line, u32* dst) {
-  (void)line;
+void Gpu::output_b(u32* dst) {
   if (!((engine[1].dispcnt() >> 16) & 1)) { for (u32 i = 0; i < 256; ++i) dst[i] = 0xFF3F3F3F; return; }
   const Pixel* src = engine[1].output();
   for (u32 i = 0; i < 256; ++i) dst[i] = src[i];
-  apply_master_brightness(master_bright_[1], dst);
+  apply_master_brightness(engine[1].master_bright(), dst);
 }
 
 // Display capture: blends source A (engine A composite or the 3D layer) with

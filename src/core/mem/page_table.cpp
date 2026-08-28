@@ -140,6 +140,16 @@ void PageTable::set_code_host(const u8* host_page, bool is_code) {
   }
 }
 
+void PageTable::set_write_trap(u32 guest, u32 size, bool on) {
+  assert((guest % PAGE_SIZE) == 0 && (size % PAGE_SIZE) == 0);
+  const u32 first = guest >> PAGE_SHIFT, count = size >> PAGE_SHIFT;
+  for (u32 p = first; p < first + count; ++p) {
+    const Entry e = table_[p];
+    if (!(e & BASE_MASK)) continue;
+    table_[p] = on ? (e | TAG_SPECIAL) : (e & ~TAG_SPECIAL);
+  }
+}
+
 void PageTable::set_code(u32 guest, u32 size, bool is_code) {
   u32 first = guest >> PAGE_SHIFT;
   u32 last  = (guest + size - 1) >> PAGE_SHIFT;
