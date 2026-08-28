@@ -36,6 +36,13 @@ enum class EventId : u8 {
 // DraStic does — which is 5-10 % faster and what the frontends run with.
 constexpr u32 LOCKSTEP_QUANTUM = 128;
 constexpr u32 INTERLEAVE_QUANTUM = LOCKSTEP_QUANTUM;   // the core's default (the verification harness)
+// Event-bound is still capped: the SDK's IPCSYNC boot handshake counts down
+// with a retry timeout on the ARM7 side, and lets one CPU run more than
+// ~2.5 k ARM9 cycles unanswered and it never completes (SM64DS: 2048 boots,
+// 2560 does not). The cap used to be implicit -- the SPU mixed one sample per
+// 2048-cycle event, so no slice was ever longer -- and became explicit when
+// the SPU started mixing in batches. Same slice count as before, so no cost.
+constexpr u32 EVENT_BOUND_QUANTUM = 2048;
 
 using EventFn = void (*)(NDS& nds, u32 param);
 

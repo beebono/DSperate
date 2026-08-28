@@ -29,6 +29,7 @@ static s16 psg_sample(u32 duty, u32 phase) { return phase < 7 - duty ? -0x7FFF :
 
 void Spu::reset() {
   dbg_ = std::getenv("DS_DEBUG_SPU") != nullptr;
+  if (const char* b = std::getenv("DS_SPU_BATCH")) batch_ = std::clamp(std::atoi(b), 1, 64);
   for (auto& c : ch_) c = Channel{};
   for (auto& cp : cap_) cp = Capture{};
   cnt_ = 0; bias_ = 0; master_ = 0; muted_ = true;
@@ -64,6 +65,7 @@ void Spu::cap_set_cnt(Capture& cp, u8 v) {
 }
 
 u32 Spu::read(u32 addr, u32 width) {
+  catch_up();                             // SOUNDxCNT.31 / capture busy clear as samples end
   u32 v = 0;
   if (addr < 0x04000500) {
     const Channel& c = ch_[(addr >> 4) & 0xF];
@@ -85,6 +87,7 @@ u32 Spu::read(u32 addr, u32 width) {
 }
 
 void Spu::write(u32 addr, u32 width, u32 value) {
+  catch_up();
   if (dbg_ && (addr >= 0x04000500 || (width == 32 && (addr & 0xC) == 0 && (value & 0x80000000u)))) std::fprintf(stderr, "[spu] mix %llu f%llu line %u w%u %08x = %08x\n", (unsigned long long)(mix_at_ / MIX_PERIOD), (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
   // Merge narrower writes into the 32-bit register image first; the side
   // effects below see the whole word.
@@ -307,11 +310,19 @@ void Spu::cap_run(Capture& cp, s32 sample) {
 // from the late time would accumulate into a slow sample clock (measured
 // 0.036 %; enough for Rhythm Heaven's just-in-time stream writer to overtake
 // the FIFO prefetch and play next-lap samples).
+//
+// One event mixes a batch: it fires at the nominal time of the batch's last
+// sample and mixes everything due (less whatever a register access already
+// caught up), then schedules the next batch end. Sample times are unchanged;
+// only the event count is (~546/frame -> ~34).
 void Spu::ev_mix(NDS& nds, u32) {
-  nds.spu.mix();
-  nds.spu.mix_at_ += MIX_PERIOD;
-  nds.sched.schedule(EventId::Spu, nds.spu.mix_at_, ev_mix);
+  Spu& s = nds.spu;
+  s.run_to(nds.sched.event_time());
+  const u32 n = ((s.cap_[0].cnt | s.cap_[1].cnt) & 0x80) ? 1 : s.batch_;
+  nds.sched.schedule(EventId::Spu, s.mix_at_ + (n - 1) * MIX_PERIOD, ev_mix);
 }
+
+void Spu::catch_up() { run_to(nds_.sched.now()); }
 
 void Spu::push(s16 l, s16 r) {
   ring_[wr_ * 2] = l; ring_[wr_ * 2 + 1] = r;

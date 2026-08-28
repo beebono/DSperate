@@ -31,7 +31,15 @@ public:
   u32  read(u32 addr, u32 width);
   void write(u32 addr, u32 width, u32 value);
 
-  void set_powcnt2(u16 v) { muted_ = !(v & 1); }
+  void set_powcnt2(u16 v) { catch_up(); muted_ = !(v & 1); }
+
+  // Mix every sample whose nominal time is <= `t`. Samples are produced in
+  // batches (DS_SPU_BATCH, default 16) from one scheduler event, so anything
+  // that observes or changes SPU state between events calls this first: the
+  // register paths do, and the result is sample-for-sample what one event
+  // per sample produced. Capture forces a batch of one, since it writes RAM.
+  void run_to(u64 t) { while (mix_at_ <= t) { mix(); mix_at_ += MIX_PERIOD; } }
+  void catch_up();
 
   // Output ring (stereo frames). `take` copies up to `max_frames` frames into
   // `dst` (2 * frames s16) and returns the count.
@@ -101,6 +109,7 @@ private:
   bool cap_warned_ = false;
   bool dbg_ = false;                     // DS_DEBUG_SPU: log control/key-on writes
   u64  mix_at_ = 0;                      // nominal time of the next sample
+  u32  batch_ = 16;                      // samples per mix event (DS_SPU_BATCH)
 
   static constexpr size_t RING_FRAMES = 16384;   // half a second
   std::array<s16, RING_FRAMES * 2> ring_{};

@@ -36,6 +36,7 @@ struct Rig {
     for (size_t done = 0; done < frames;) {         // in ring-sized chunks
       const size_t n = std::min<size_t>(frames - done, 4096);
       nds.sched.run_until(nds.sched.now() + spu::Spu::MIX_PERIOD * n);
+      nds.spu.run_to(nds.sched.now());              // samples are mixed in batches; take what is due
       const size_t got = nds.spu.take(out.data() + done * 2, n);   // the scheduler may stop a slice short
       CHECK(got > 0);
       done += got;

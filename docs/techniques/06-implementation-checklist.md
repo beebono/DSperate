@@ -22,9 +22,24 @@ measured decision, ranked by likely payoff:
 1. ~~**Lazy 2D with a write journal** (4.12–4.15)~~ — done: one batch at
    the last display line, one worker hand-off, per-engine journal; frames
    byte-identical on all five scenes in every mode (see the 04 §5 rows).
-2. **SPU mixed per sample as a scheduler event** (5.1, 5.4, 5.6, 5.9, 5.11) —
-   ~546 events and 16 FIFO-fed channel steps per frame where DraStic does
-   one call; check `SPU` in the profile before deciding.
+2. ~~**SPU mixed per sample as a scheduler event** (5.1)~~ — done, the
+   exact half: one event per 16 samples (`DS_SPU_BATCH`), channels still
+   stepped per sample, register reads/writes catch the mixer up first, so
+   `DS_SPU_BATCH=1` reproduces the old output byte for byte. Two things it
+   surfaced: (a) the per-sample event had been the *de-facto interleave
+   cap* — the SDK's IPCSYNC boot countdown never completes when one CPU
+   runs > ~2.5 k cycles unanswered (SM64DS: 2048 boots, 2560 does not), so
+   event-bound mode now caps slices at `EVENT_BOUND_QUANTUM` = 2048
+   explicitly; (b) with the cap doing that job, both-halted slices run to
+   the real deadline: meteos 654 k → 402 k slices per 600 frames. Host
+   callgrind, 120 frames: SM64DS −0.5 %, meteos −0.8 % instructions
+   (`fire_due` halved). Guest
+   timing shifts by a constant phase (meteos ARM7 driver +14 lines; SM64DS,
+   etody, dbori frame hashes move as in the timer-race notes; mlbis and
+   meteos hashes unchanged), so audio is not byte-comparable to the old
+   build except through `DS_SPU_BATCH=1`. The inexact rows (5.4, 5.6, 5.9,
+   5.11) stay `no`: they would change what Rhythm Heaven's just-in-time
+   stream writer sees, and the remaining per-sample channel work is small.
 3. **Geometry executed per slice, not logged per frame** (4.17, 4.18) —
    `process_geometry_commands` is DraStic's largest non-render function and
    it runs once; ours runs after every ARM9 slice.
@@ -153,7 +168,7 @@ measured decision, ranked by likely payoff:
 
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
-| 5.1 | Mix once per frame at VBlank | 05 §1 | no | `ev_mix` fires every 2048 cycles: one scheduler event per output sample (~546/frame) |
+| 5.1 | Mix once per frame at VBlank | 05 §1 | partial | `ev_mix` mixes a batch of 16 samples per event (~34/frame, `DS_SPU_BATCH`); a batch of one while capture is on (it writes RAM); register accesses run the mixer up to now() first |
 | 5.2 | Fixed-point cycle→sample conversion with carried remainder | 05 §1 | n/a | native 32.768 kHz, no rate conversion in the core |
 | 5.3 | Catch-up mix on the audio driver's timer overflow (ARM7 timer 1) | 05 §1 | n/a | mixing is per sample |
 | 5.4 | Resampling folded into playback: 32.32 cursor, nearest sample, no intermediate mix | 05 §2 | no | hardware-exact per-channel timers stepped per sample; SDL resamples the 32 kHz output |

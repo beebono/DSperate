@@ -41,7 +41,7 @@ bool Scheduler::a9_gx_stalled(const CpuContext& cpu) const {
 
 void Scheduler::set_quantum(s64 q) {
   if (quantum_forced_) return;
-  quantum_ = q <= 0 ? std::numeric_limits<s64>::max() : q;
+  quantum_ = q <= 0 ? EVENT_BOUND_QUANTUM : q;
 }
 
 void Scheduler::reset() {
