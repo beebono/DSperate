@@ -13,6 +13,10 @@ choice anyway.
   *functions* come from the dlopen'd library (libwayland marshals by
   interface content, not identity).
 - `linux-dmabuf-v1.{h,c}`: wayland-protocols stable/linux-dmabuf, same scanner.
+- `xdg-shell.{h,c}`: wayland-protocols stable/xdg-shell, same scanner. Only
+  used to ask for fullscreen on a *specific* output (SDL cannot on Wayland --
+  window positions are a client illusion there); the xdg_toplevel itself is
+  SDL's, fetched via SDL_SysWMinfo.
 - `wayland-client{,-core}.h`, `wayland-util.h`, `wayland-version.h`: copied
   from libwayland 1.22 (MIT), with one local change: the prototypes of the
   thirteen functions `wl_dyn.h` maps to pointers are wrapped in

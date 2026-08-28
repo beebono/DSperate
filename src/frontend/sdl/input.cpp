@@ -70,7 +70,12 @@ void Input::touch_at(int wx, int wy, Display& display) {
   touching_ = true; touched_ = true; touch_x_ = sx; touch_y_ = sy;
 }
 
-void Input::handle(const SDL_Event& e, Display& display) {
+void Input::handle(const SDL_Event& e, Display& display, Display* second) {
+  // Route window-addressed events to the window they happened on; keyboard
+  // and controller input is global.
+  auto owner = [&](u32 wid) -> Display& {
+    return (second && wid == second->window_id()) ? *second : display;
+  };
   B b;
   switch (e.type) {
   case SDL_QUIT: quit_ = true; break;
@@ -80,7 +85,7 @@ void Input::handle(const SDL_Event& e, Display& display) {
     if (e.key.repeat) break;
     const bool down = e.type == SDL_KEYDOWN;
     if (down && e.key.keysym.sym == SDLK_ESCAPE) { quit_ = true; break; }
-    if (down && e.key.keysym.sym == SDLK_f) { display.toggle_fullscreen(); break; }
+    if (down && e.key.keysym.sym == SDLK_f) { display.toggle_fullscreen(); if (second) second->toggle_fullscreen(); break; }
     if (key_button(e.key.keysym.sym, b)) set(b, down);
     break;
   }
@@ -101,10 +106,10 @@ void Input::handle(const SDL_Event& e, Display& display) {
     break;
 
   case SDL_MOUSEBUTTONDOWN:
-    if (e.button.button == SDL_BUTTON_LEFT) touch_at(e.button.x, e.button.y, display);
+    if (e.button.button == SDL_BUTTON_LEFT) touch_at(e.button.x, e.button.y, owner(e.button.windowID));
     break;
   case SDL_MOUSEMOTION:
-    if (e.motion.state & SDL_BUTTON_LMASK) touch_at(e.motion.x, e.motion.y, display);
+    if (e.motion.state & SDL_BUTTON_LMASK) touch_at(e.motion.x, e.motion.y, owner(e.motion.windowID));
     break;
   case SDL_MOUSEBUTTONUP:
     if (e.button.button == SDL_BUTTON_LEFT) touching_ = false;
@@ -114,15 +119,16 @@ void Input::handle(const SDL_Event& e, Display& display) {
   // window coordinates.
   case SDL_FINGERDOWN:
   case SDL_FINGERMOTION: {
+    Display& d = owner(e.tfinger.windowID);
     int w = 0, h = 0;
-    display.output_size(w, h);
-    touch_at(static_cast<int>(e.tfinger.x * w), static_cast<int>(e.tfinger.y * h), display);
+    d.output_size(w, h);
+    touch_at(static_cast<int>(e.tfinger.x * w), static_cast<int>(e.tfinger.y * h), d);
     break;
   }
   case SDL_FINGERUP: touching_ = false; break;
 
   case SDL_WINDOWEVENT:
-    if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) display.on_resize();
+    if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) owner(e.window.windowID).on_resize();
     else if (e.window.event == SDL_WINDOWEVENT_CLOSE) quit_ = true;
     break;
 

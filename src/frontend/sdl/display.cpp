@@ -9,12 +9,16 @@
 
 namespace ds::sdl {
 
-bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout_mode, bool accel) {
+bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout_mode, bool accel, int only_screen, int display_index) {
   layout_ = layout_mode;
-  const bool across = layout_ == Layout::Horizontal;
-  const int w = static_cast<int>(SCREEN_W) * (across ? 2 : 1) * scale, h = static_cast<int>(SCREEN_H) * (across ? 1 : 2) * scale;
+  only_screen_ = only_screen;
+  display_index_ = display_index;
+  nviews_ = only_screen_ >= 0 ? 1 : SCREENS;
+  const bool across = only_screen_ < 0 && layout_ == Layout::Horizontal;
+  const int cols = only_screen_ >= 0 ? 1 : (across ? 2 : 1), rows = only_screen_ >= 0 ? 1 : (across ? 1 : 2);
+  const int w = static_cast<int>(SCREEN_W) * cols * scale, h = static_cast<int>(SCREEN_H) * rows * scale;
   const u32 flags = static_cast<u32>(SDL_WINDOW_RESIZABLE) | (fullscreen ? static_cast<u32>(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u);
-  win_ = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
+  win_ = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED_DISPLAY(display_index), SDL_WINDOWPOS_CENTERED_DISPLAY(display_index), w, h, flags);
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
 
@@ -47,7 +51,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
         int w = 0, h = 0;
         out_size(w, h);
         auto dm = std::make_unique<DmabufOut>();
-        if (dm->open(win_, w, h)) dm_ = std::move(dm);
+        if (dm->open(win_, w, h, only_screen_ >= 0 ? display_index_ : -1)) dm_ = std::move(dm);
         else if (dm_required) { std::fprintf(stderr, "DS_DMABUF=1 but the dmabuf path failed\n"); return false; }
       }
       std::fprintf(stderr, "video: %s, %s driver, scanline scaling\n",
@@ -121,6 +125,12 @@ void Display::layout() {
   int w = 0, h = 0;
   if (!out_size(w, h)) return;
   const int sw = static_cast<int>(SCREEN_W), sh = static_cast<int>(SCREEN_H);
+  if (only_screen_ >= 0) {
+    const double s = std::min(static_cast<double>(w) / sw, static_cast<double>(h) / sh);
+    const int dw = static_cast<int>(sw * s), dh = static_cast<int>(sh * s);
+    views_[0] = View{only_screen_, SDL_Rect{(w - dw) / 2, (h - dh) / 2, dw, dh}};
+    return;
+  }
   const bool across = layout_ == Layout::Horizontal;
   const int cols = across ? 2 : 1, rows = across ? 1 : 2;
   const double s = std::min(static_cast<double>(w) / (sw * cols), static_cast<double>(h) / (sh * rows));
@@ -132,7 +142,8 @@ void Display::layout() {
 void Display::draw(const u32* const fb[SCREENS]) {
   SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
   SDL_RenderClear(ren_);
-  for (const View& v : views_) {
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
     SDL_UpdateTexture(tex_[v.screen], nullptr, fb[v.screen], static_cast<int>(SCREEN_W) * 4);
     SDL_RenderCopy(ren_, tex_[v.screen], nullptr, &v.rect);
   }
@@ -148,7 +159,8 @@ void Display::toggle_fullscreen() {
 }
 
 bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
-  for (const View& v : views_) {
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
     if (wx < v.rect.x || wx >= v.rect.x + v.rect.w || wy < v.rect.y || wy >= v.rect.y + v.rect.h) continue;
     screen = v.screen;
     sx = (wx - v.rect.x) * static_cast<int>(SCREEN_W) / v.rect.w;
@@ -202,7 +214,8 @@ void Display::build_scale() {
 // exactly there is nothing to clear at all.
 void Display::clear_margins(u32* px, u32 pitch) const {
   int x0 = scaled_w_, y0 = scaled_h_, x1 = 0, y1 = 0;
-  for (const View& v : views_) {
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
     x0 = std::min(x0, v.rect.x); y0 = std::min(y0, v.rect.y);
     x1 = std::max(x1, v.rect.x + v.rect.w); y1 = std::max(y1, v.rect.y + v.rect.h);
   }
@@ -228,7 +241,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
     if (w != dm_->width() || h != dm_->height()) {
       SDL_Window* win = win_;
       dm_->close();
-      if (!dm_->open(win, w, h)) {
+      if (!dm_->open(win, w, h, only_screen_ >= 0 ? display_index_ : -1)) {
         std::fprintf(stderr, "video: dmabuf resize failed; window surface from here\n");
         dm_.reset();
         margins_dirty_ = true;
@@ -249,9 +262,11 @@ bool Display::begin_frame(Target out[SCREENS]) {
       // Every buffer needs its margins cleared once, not just the first.
       static_assert(DmabufOut::BUFS <= 8, "margin bookkeeping");
       if (dm_margins_ < DmabufOut::BUFS) { clear_margins(px, stride); ++dm_margins_; }
-      for (const View& v : views_)
+      for (int i = 0; i < nviews_; ++i) {
+        const View& v = views_[i];
         out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x,
                                stride, static_cast<u32>(v.rect.h), xrun_.data()};
+      }
       dm_frame_ = true;
       return true;
     }
@@ -278,9 +293,11 @@ bool Display::begin_frame(Target out[SCREENS]) {
   u32* base = static_cast<u32*>(s->pixels);
   const u32 stride = static_cast<u32>(s->pitch) / sizeof(u32);
   if (margins_dirty_) { clear_margins(base, stride); margins_dirty_ = false; }
-  for (const View& v : views_)
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
     out[v.screen] = Target{base + static_cast<size_t>(v.rect.y) * stride + v.rect.x,
                            stride, static_cast<u32>(v.rect.h), xrun_.data()};
+  }
   return true;
 }
 

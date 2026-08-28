@@ -27,7 +27,12 @@ public:
   // right): the latter matches handhelds whose two panels sit horizontally
   // in the compositor's canvas, so touch coordinates line up.
   enum class Layout { Vertical, Horizontal };
-  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout = Layout::Vertical, bool accel = false);
+  // `only_screen` >= 0 shows just that DS screen, filling the window: the
+  // dual-window mode opens one Display per screen, each fullscreen on its
+  // own video display (`display_index`). One window per output is also what
+  // direct scanout requires -- a surface spanning two outputs can be lifted
+  // onto neither output's plane.
+  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout = Layout::Vertical, bool accel = false, int only_screen = -1, int display_index = 0);
   void close();
 
   void draw(const u32* const fb[SCREENS]);
@@ -86,6 +91,9 @@ private:
   SDL_Renderer* ren_ = nullptr;
   SDL_Texture*  tex_[SCREENS] = {nullptr, nullptr};
   View          views_[SCREENS] = {};
+  int           nviews_ = SCREENS;
+  int           only_screen_ = -1;
+  int           display_index_ = 0;
   bool          fullscreen_ = false;
   Layout        layout_ = Layout::Vertical;
 

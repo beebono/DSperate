@@ -32,6 +32,8 @@ const char* kUsage =
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) or horizontal: screens stacked or side by side\n"
+    "  --dual-window   one window per video display, one DS screen each (dual-panel\n"
+    "                  handhelds; also what direct scanout needs on them)\n"
     "  --linear        smooth scaling instead of nearest\n"
     "  --accel         GPU renderer; the default is software, which measures faster\n"
     "                  on the handhelds (the GL driver's threads cost more than the scale)\n"
@@ -79,6 +81,7 @@ int main(int argc, char** argv) {
   const char *record = nullptr, *replay = nullptr, *save_arg = nullptr;
   bool fullscreen = false, linear = false, accel = false, audio_on = true, jit = true, vsync = true;
   ds::sdl::Display::Layout layout = ds::sdl::Display::Layout::Vertical;
+  bool dual_window = false;
   long quantum = 0;   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
 
   for (int i = 1; i < argc; ++i) {
@@ -87,6 +90,7 @@ int main(int argc, char** argv) {
     else if (arg("--bios7")) bios7 = argv[++i];
     else if (arg("--firmware")) fw = argv[++i];
     else if (arg("--scale")) scale = std::atoi(argv[++i]);
+    else if (arg("--dual-window")) dual_window = true;
     else if (arg("--layout")) {
       const char* l = argv[++i];
       if (!std::strcmp(l, "horizontal")) layout = ds::sdl::Display::Layout::Horizontal;
@@ -166,7 +170,13 @@ int main(int argc, char** argv) {
   if (!tried_kms && SDL_Init(init) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
 
   ds::sdl::Display display;
-  if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; }
+  ds::sdl::Display display2;   // dual-window: the bottom screen's own window
+  if (dual_window) {
+    if (SDL_GetNumVideoDisplays() < 2) { std::fprintf(stderr, "--dual-window needs two video displays\n"); SDL_Quit(); return 1; }
+    if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel, 0, 0) ||
+        !display2.open("DSperate (bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, 1)) { SDL_Quit(); return 1; }
+    if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
+  } else if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; }
 
   ds::sdl::Audio audio;
   if (audio_on) audio.open();
@@ -193,7 +203,7 @@ int main(int argc, char** argv) {
   Uint64 pace_ticks = 0, draw_ticks_total = 0;
   while (!input.quit() && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
     SDL_Event e;
-    while (SDL_PollEvent(&e)) input.handle(e, display);
+    while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
     ds::input::Frame in = input.frame();
     if (log.reading()) { if (!log.read(in)) break; }   // the controls still quit; the log ends the run
     else if (log.writing()) log.write(in);
@@ -204,7 +214,8 @@ int main(int argc, char** argv) {
     // cost lands inside run_frame() rather than in the present. DS_FPS's
     // emu/draw split shifts accordingly; the total is what compares.
     ds::sdl::Display::Target target[2];
-    const bool scaled = display.begin_frame(target);
+    bool scaled = display.begin_frame(target);
+    if (dual_window) scaled = display2.begin_frame(target) && scaled;
     for (int i = 0; i < 2; ++i)
       nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun}
                                          : ds::gpu::Gpu::ScaleTarget{});
@@ -215,9 +226,11 @@ int main(int argc, char** argv) {
     const Uint64 t1 = SDL_GetPerformanceCounter();
     if (scaled) {
       display.end_frame();
+      if (dual_window) display2.end_frame();
     } else {
       const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
       display.draw(fb);
+      if (dual_window) display2.draw(fb);
     }
     audio.push(nds);
     const Uint64 t2 = SDL_GetPerformanceCounter();
@@ -275,6 +288,7 @@ int main(int argc, char** argv) {
   input.close();
   audio.close();
   display.close();
+  display2.close();
   SDL_Quit();
   return 0;
 }

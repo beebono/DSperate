@@ -5,6 +5,7 @@
 
 #include "wl/wayland-client.h"
 #include "wl/linux-dmabuf-v1.h"
+#include "wl/xdg-shell.h"
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -31,11 +32,34 @@ namespace {
 
 constexpr u32 FMT_XRGB8888 = 0x34325258;   // 'XR24'; the core writes 0xAARRGGBB and we are opaque
 
-struct Globals { zwp_linux_dmabuf_v1* dmabuf; wl_compositor* comp; wl_event_queue* q; };
+// The globals are bound once per process and never destroyed: proxies we
+// create can be referenced by events queued for OTHER dispatchers -- the
+// compositor sends wl_surface.enter to SDL's queue naming *our* wl_output
+// binding -- so tearing them down on a close/reopen leaves a dangling proxy
+// in a queue we don't control (measured as a use-after-free inside SDL's
+// dispatch on the first fullscreen configure). Four proxies and a queue for
+// the lifetime of the connection is the correct price.
+struct Globals {
+  wl_display* dpy = nullptr;
+  wl_event_queue* q = nullptr;
+  wl_registry* reg = nullptr;
+  zwp_linux_dmabuf_v1* dmabuf = nullptr;
+  wl_compositor* comp = nullptr;
+  wl_output* outputs[4] = {};
+  int n_outputs = 0;
+  bool tried = false;
+};
+Globals g_;
 
 void on_global(void* data, wl_registry* reg, u32 name, const char* iface, u32 ver) {
   Globals* g = static_cast<Globals*>(data);
-  if (!std::strcmp(iface, zwp_linux_dmabuf_v1_interface.name)) {
+  if (!std::strcmp(iface, wl_output_interface.name)) {
+    if (g->n_outputs < 4) {
+      wl_output* o = static_cast<wl_output*>(wl_registry_bind(reg, name, &wl_output_interface, 1));
+      wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(o), g->q);
+      g->outputs[g->n_outputs++] = o;
+    }
+  } else if (!std::strcmp(iface, zwp_linux_dmabuf_v1_interface.name)) {
     // v3 create_params semantics are all we use; they are unchanged in v4.
     g->dmabuf = static_cast<zwp_linux_dmabuf_v1*>(
         wl_registry_bind(reg, name, &zwp_linux_dmabuf_v1_interface, ver < 3 ? ver : 3));
@@ -47,6 +71,23 @@ void on_global(void* data, wl_registry* reg, u32 name, const char* iface, u32 ve
 }
 void on_global_remove(void*, wl_registry*, u32) {}
 const wl_registry_listener reg_listener = { on_global, on_global_remove };
+
+// Bind the globals on first use; idempotent, failure sticky for the session.
+bool globals_init(wl_display* dpy) {
+  if (g_.tried) return g_.dpy == dpy && g_.dmabuf;
+  g_.tried = true;
+  g_.dpy = dpy;
+  g_.q = wl_display_create_queue(dpy);
+  if (!g_.q) return false;
+  g_.reg = wl_display_get_registry(dpy);
+  // The registry inherits SDL's default queue; move it to ours before any
+  // dispatch can deliver its events to SDL's handlers.
+  wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(g_.reg), g_.q);
+  wl_registry_add_listener(g_.reg, &reg_listener, &g_);
+  wl_display_roundtrip_queue(dpy, g_.q);
+  if (!g_.dmabuf) std::fprintf(stderr, "dmabuf: compositor lacks zwp_linux_dmabuf_v1\n");
+  return g_.dmabuf != nullptr;
+}
 
 } // namespace
 
@@ -70,7 +111,7 @@ bool DmabufOut::alloc_buf(Buf& b) {
   b.px = static_cast<u32*>(m);
   std::memset(b.px, 0, b.bytes);
 
-  zwp_linux_buffer_params_v1* p = zwp_linux_dmabuf_v1_create_params(dmabuf_);
+  zwp_linux_buffer_params_v1* p = zwp_linux_dmabuf_v1_create_params(g_.dmabuf);
   zwp_linux_buffer_params_v1_add(p, b.fd, 0, 0, w_ * 4, 0, 0);   // plane 0, LINEAR
   b.wb = zwp_linux_buffer_params_v1_create_immed(p, w_, h_, FMT_XRGB8888, 0);
   zwp_linux_buffer_params_v1_destroy(p);
@@ -86,7 +127,7 @@ void DmabufOut::drop_buf(Buf& b) {
   b = Buf{};
 }
 
-bool DmabufOut::open(SDL_Window* win, int w, int h) {
+bool DmabufOut::open(SDL_Window* win, int w, int h, int output_index) {
   if (!wldyn::load()) { std::fprintf(stderr, "dmabuf: no libwayland (%s)\n", wldyn::error()); return false; }
 
   SDL_SysWMinfo wm;
@@ -98,19 +139,27 @@ bool DmabufOut::open(SDL_Window* win, int w, int h) {
   dpy_ = static_cast<wl_display*>(wm.info.wl.display);
   surf_ = static_cast<wl_surface*>(wm.info.wl.surface);
   w_ = w; h_ = h;
+  if (!globals_init(dpy_)) { dpy_ = nullptr; surf_ = nullptr; return false; }
+  q_ = g_.q;
 
-  q_ = wl_display_create_queue(dpy_);
-  if (!q_) return false;
-  reg_ = wl_display_get_registry(dpy_);
-  // The registry inherits SDL's default queue; move it to ours before any
-  // dispatch can deliver its events to SDL's handlers.
-  wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(reg_), q_);
-  Globals g = { nullptr, nullptr, q_ };
-  wl_registry_add_listener(reg_, &reg_listener, &g);
-  wl_display_roundtrip_queue(dpy_, q_);
-  dmabuf_ = g.dmabuf;
-  comp_ = g.comp;
-  if (!dmabuf_) { std::fprintf(stderr, "dmabuf: compositor lacks zwp_linux_dmabuf_v1\n"); close(); return false; }
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+  if (output_index >= 0) {
+    if (output_index >= g_.n_outputs) {
+      std::fprintf(stderr, "dmabuf: output %d of %d not present\n", output_index, g_.n_outputs);
+      close();
+      return false;
+    }
+    // The toplevel is SDL's; the request only needs its proxy and our
+    // wl_output bind. The compositor answers with a configure carrying the
+    // output's size, which the caller's per-frame size check then follows.
+    if (auto* tl = static_cast<xdg_toplevel*>(wm.info.wl.xdg_toplevel))
+      xdg_toplevel_set_fullscreen(tl, g_.outputs[output_index]);
+    else
+      std::fprintf(stderr, "dmabuf: SDL exposes no xdg_toplevel; cannot target output %d\n", output_index);
+  }
+#else
+  (void)output_index;
+#endif
 
   for (Buf& b : bufs_)
     if (!alloc_buf(b)) { close(); return false; }
@@ -119,8 +168,8 @@ bool DmabufOut::open(SDL_Window* win, int w, int h) {
   // Fullscreen and opaque are two of the three scanout conditions (the third
   // -- an untransformed output -- is the compositor's). SDL declares opacity
   // from the window's pixel format, which has alpha, so declare it ourselves.
-  if (comp_) {
-    wl_region* r = wl_compositor_create_region(comp_);
+  if (g_.comp) {
+    wl_region* r = wl_compositor_create_region(g_.comp);
     wl_region_add(r, 0, 0, w_, h_);
     wl_surface_set_opaque_region(surf_, r);
     wl_region_destroy(r);
@@ -129,12 +178,10 @@ bool DmabufOut::open(SDL_Window* win, int w, int h) {
 }
 
 void DmabufOut::close() {
+  // Only per-instance objects die here; the globals (queue included) live for
+  // the connection -- see the comment on Globals.
   for (Buf& b : bufs_) drop_buf(b);
-  if (comp_) { wl_proxy_destroy(reinterpret_cast<wl_proxy*>(comp_)); comp_ = nullptr; }
-  if (dmabuf_) { wl_proxy_destroy(reinterpret_cast<wl_proxy*>(dmabuf_)); dmabuf_ = nullptr; }
-  if (reg_) { wl_proxy_destroy(reinterpret_cast<wl_proxy*>(reg_)); reg_ = nullptr; }
-  if (q_) { wl_event_queue_destroy(q_); q_ = nullptr; }
-  dpy_ = nullptr; surf_ = nullptr; cur_ = -1; dead_ = false;
+  dpy_ = nullptr; surf_ = nullptr; q_ = nullptr; cur_ = -1; dead_ = false;
 }
 
 u32* DmabufOut::begin_frame() {

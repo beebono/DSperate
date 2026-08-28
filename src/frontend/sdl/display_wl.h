@@ -34,7 +34,9 @@ struct wl_event_queue;
 struct wl_registry;
 struct wl_compositor;
 struct wl_buffer;
+struct wl_output;
 struct zwp_linux_dmabuf_v1;
+struct xdg_toplevel;
 
 namespace ds::sdl {
 
@@ -45,7 +47,14 @@ public:
   // False if any precondition is missing (no libwayland, not the wayland
   // video driver, no dmabuf global, CMA allocation failed); the caller logs
   // and uses another path. w/h is the buffer size in pixels.
-  bool open(SDL_Window* win, int w, int h);
+  //
+  // `output_index` >= 0 asks the compositor to fullscreen this window on
+  // that output (registry advertisement order). SDL cannot: Wayland has no
+  // client-side window positions, so SDL's display-index parameters are
+  // no-ops there and the request must go through the window's own
+  // xdg_toplevel. Without it a dual-window layout lands wherever the
+  // compositor pleases -- and a mis-placed surface can never scan out.
+  bool open(SDL_Window* win, int w, int h, int output_index = -1);
   void close();
 
   int width() const { return w_; }
@@ -73,10 +82,7 @@ private:
 
   struct wl_display* dpy_ = nullptr;      // SDL's; not ours to destroy
   struct wl_surface* surf_ = nullptr;     // SDL's; not ours to destroy
-  struct wl_event_queue* q_ = nullptr;
-  struct wl_registry* reg_ = nullptr;
-  struct zwp_linux_dmabuf_v1* dmabuf_ = nullptr;
-  struct wl_compositor* comp_ = nullptr;  // our own bind, for the opaque region
+  struct wl_event_queue* q_ = nullptr;    // the process-wide globals' queue
   Buf bufs_[BUFS];
   int cur_ = -1;
   int w_ = 0, h_ = 0;

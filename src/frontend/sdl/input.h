@@ -18,8 +18,10 @@ public:
   void open_controllers();
   void close();
 
-  // Feeds one SDL event; `display` maps window points onto the screens.
-  void handle(const SDL_Event& e, Display& display);
+  // Feeds one SDL event; `display` maps window points onto the screens. In
+  // dual-window mode `second` is the other window: pointer, touch and window
+  // events are routed to whichever owns the event's windowID.
+  void handle(const SDL_Event& e, Display& display, Display* second = nullptr);
   // The state for the coming frame. A press and release that both arrived
   // since the last frame (a quick tap between two polls, common when frames
   // take 30 ms) still count as held for this frame: the release lands on
