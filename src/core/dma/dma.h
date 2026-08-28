@@ -26,6 +26,12 @@ struct Channel {
   u32 running = 0;          // 0 idle, 1 running, 2 running (first access of a burst)
   bool in_progress = false;
   const u8* burst_table = nullptr; u32 burst_pos = 0;
+  // Unit-timing cache: the bus tables are per 16 KB (ARM9) / 32 KB (ARM7)
+  // block, so the four lookups unit_cycles() makes are constant until cur_src
+  // or cur_dst leaves its block. Keyed on the block indices.
+  u32 tim_key_src = ~0u, tim_key_dst = ~0u;
+  u32 src_rgn = 0, dst_rgn = 0;
+  u32 src_n = 0, src_s = 0, dst_n = 0, dst_s = 0;
 };
 
 // Eight DMA channels (4 per CPU). A running channel stalls its CPU; the

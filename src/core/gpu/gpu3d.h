@@ -95,12 +95,12 @@ public:
   // Advance the engine to `arm9_time` (scheduler time, ARM9 cycles). The
   // idle check is inline: the scheduler calls this after every ARM9 slice.
   void run_to(u64 arm9_time) {
-    if (!geometry_on_ || flush_request_ || (pipe_.empty() && !(gxstat_ & (1u << 27)))) { timestamp_ = arm9_time >> 1; return; }
+    if (!geometry_on_ || flush_request_ || (pipe_n_ == 0 && !(gxstat_ & (1u << 27)))) { timestamp_ = arm9_time >> 1; return; }
     run_to_slow(arm9_time);
   }
   bool stalled() const { return stalled_; }
   // Nothing to execute and nothing to raise: run_to would only stamp the time.
-  bool idle() const { return !geometry_on_ || flush_request_ || (pipe_.empty() && !(gxstat_ & (1u << 27))); }
+  bool idle() const { return !geometry_on_ || flush_request_ || (pipe_n_ == 0 && !(gxstat_ & (1u << 27))); }
   // A swap has been issued and waits for VBlank: the engine accepts nothing
   // and changes nothing until then, so a loop polling GXSTAT can be skipped.
   bool swap_pending() const { return flush_request_ != 0; }
@@ -134,10 +134,25 @@ private:
   Renderer3D renderer_;
 
   struct Entry { u32 param; u8 cmd; };
-  Fifo<Entry, 256> fifo_;
-  Fifo<Entry, 4> pipe_;
-  Fifo<Entry, 64> stall_queue_;
+  // The command pipe (4), the FIFO (256) and the CPU's stalled writes (64)
+  // are one ring in arrival order: the pipe is its head, the FIFO the middle,
+  // the stall queue the tail. Only the three counts move on a push or pop;
+  // no entry is ever copied between stages. Visible state is unchanged:
+  // GXSTAT reports fifo_n_, the pipe refills to 3+ from the FIFO on a pop.
+  static constexpr u32 PIPE_DEPTH = 4, FIFO_DEPTH = 256, STALL_DEPTH = 64, RING = 512;
+  std::array<Entry, RING> ring_{};
+  u32 ring_rd_ = 0, ring_wr_ = 0;
+  u32 pipe_n_ = 0, fifo_n_ = 0, stall_n_ = 0;
   bool stalled_ = false;
+  bool pipe_empty() const { return pipe_n_ == 0; }
+  u32  fifo_level() const { return fifo_n_; }
+  void ring_push(const Entry& e) { ring_[ring_wr_] = e; ring_wr_ = (ring_wr_ + 1) & (RING - 1); }
+  // Status side effects of an entry entering the pipe or FIFO (not the stall queue).
+  void note_enqueued(u8 cmd) {
+    gxstat_ |= (1u << 27);
+    if (static_cast<u8>(cmd - 0x11) <= 1) { gxstat_ |= (1u << 14); ++num_pushpop_; }      // 0x11, 0x12
+    else if (static_cast<u8>(cmd - 0x70) <= 2) { gxstat_ |= (1u << 0); ++num_tests_; }    // 0x70-0x72
+  }
 
   // Command assembly for packed GXFIFO writes.
   u32 num_cmds_ = 0, cur_cmd_ = 0, param_count_ = 0, total_params_ = 0;

@@ -276,7 +276,7 @@ void Gpu3D::reset_render_state() {
 }
 
 void Gpu3D::reset() {
-  fifo_.clear(); pipe_.clear(); stall_queue_.clear(); stalled_ = false;
+  ring_rd_ = ring_wr_ = pipe_n_ = fifo_n_ = stall_n_ = 0; stalled_ = false;
   num_cmds_ = cur_cmd_ = param_count_ = total_params_ = 0;
   exec_params_.fill(0); exec_count_ = 0;
   timestamp_ = 0; cycle_count_ = 0;
@@ -402,14 +402,14 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
   cycle_count_ -= static_cast<s32>(now - timestamp_);
   timestamp_ = now;
   if (cycle_count_ <= 0) {
-    if (prof::enabled && !pipe_.empty()) prof::add(prof::C_GX_RUN_SLOW_EXEC, 1);
-    while (cycle_count_ <= 0 && !pipe_.empty()) {
+    if (prof::enabled && pipe_n_) prof::add(prof::C_GX_RUN_SLOW_EXEC, 1);
+    while (cycle_count_ <= 0 && pipe_n_) {
       if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
       if (num_tests_ == 0) gxstat_ &= ~(1u << 0);
       execute();
     }
   }
-  if (cycle_count_ <= 0 && pipe_.empty()) {
+  if (cycle_count_ <= 0 && pipe_n_ == 0) {
     if (gxstat_ & (1u << 27)) finish_work(-cycle_count_); else cycle_count_ = 0;
     if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
     if (num_tests_ == 0) gxstat_ &= ~(1u << 0);
@@ -419,31 +419,41 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
 // ---- FIFO ---------------------------------------------------------------------
 
 void Gpu3D::fifo_write(const Entry& e) {
-  if (fifo_.empty() && !pipe_.full()) pipe_.push(e);
-  else {
-    if (fifo_.full()) {
-      // The CPU stalls until the FIFO drains; writes already in flight (an
-      // STM's remaining registers) queue up behind it.
-      if (stall_queue_.full()) { static int n = 0; if (n++ < 8) std::fprintf(stderr, "[gx] stall queue overflow: fifo %u running %d dma %d stalled %d now %llu\n", fifo_.level(), nds_.sched.running() ? (nds_.sched.running()->which == Cpu::ARM9 ? 9 : 7) : 0, nds_.sched.in_dma(), stalled_, (unsigned long long)nds_.sched.now()); return; }
-      stall_queue_.push(e);
-      if (!stalled_) { stalled_ = true; nds_.sched.gx_fifo_full(); }
-      return;
-    }
-    fifo_.push(e);
-  }
-  gxstat_ |= (1u << 27);
-  if (e.cmd == 0x11 || e.cmd == 0x12) { gxstat_ |= (1u << 14); ++num_pushpop_; }
-  else if (e.cmd == 0x70 || e.cmd == 0x71 || e.cmd == 0x72) { gxstat_ |= (1u << 0); ++num_tests_; }
+  // Order of tests follows frequency: a frame is tens of thousands of words
+  // into a FIFO that is neither empty nor full.
+  if (fifo_n_ - 1 < FIFO_DEPTH - 1) { ring_push(e); ++fifo_n_; }              // 1 <= fifo_n_ < 256
+  else if (fifo_n_ == 0 && pipe_n_ < PIPE_DEPTH) { ring_push(e); ++pipe_n_; }
+  else if (fifo_n_ == FIFO_DEPTH) {
+    // The CPU stalls until the FIFO drains; writes already in flight (an
+    // STM's remaining registers) queue up behind it.
+    if (stall_n_ == STALL_DEPTH) { static int n = 0; if (n++ < 8) std::fprintf(stderr, "[gx] stall queue overflow: fifo %u running %d dma %d stalled %d now %llu\n", fifo_n_, nds_.sched.running() ? (nds_.sched.running()->which == Cpu::ARM9 ? 9 : 7) : 0, nds_.sched.in_dma(), stalled_, (unsigned long long)nds_.sched.now()); return; }
+    ring_push(e); ++stall_n_;
+    if (!stalled_) { stalled_ = true; nds_.sched.gx_fifo_full(); }
+    return;
+  } else { ring_push(e); ++fifo_n_; }                                          // FIFO empty, pipe full
+  note_enqueued(e.cmd);
 }
 
 Gpu3D::Entry Gpu3D::fifo_read() {
-  const Entry e = pipe_.pop();
-  if (pipe_.level() <= 2) {
-    if (!fifo_.empty()) pipe_.push(fifo_.pop());
-    if (!fifo_.empty()) pipe_.push(fifo_.pop());
-    if (!stall_queue_.empty()) {
-      while (!stall_queue_.empty() && !fifo_.full()) fifo_write(stall_queue_.pop());
-      if (stall_queue_.empty()) stalled_ = false;
+  const Entry e = ring_[ring_rd_];
+  ring_rd_ = (ring_rd_ + 1) & (RING - 1);
+  --pipe_n_;
+  if (pipe_n_ <= 2) {
+    // Refill the pipe with up to two FIFO entries: a count move, the entries
+    // are already in order behind it.
+    const u32 k = fifo_n_ < 2 ? fifo_n_ : 2;
+    pipe_n_ += k; fifo_n_ -= k;
+    if (stall_n_) {
+      // Stalled writes enter the FIFO (or the pipe, if it has room) now, with
+      // the status side effects they were denied when they arrived.
+      u32 idx = (ring_rd_ + pipe_n_ + fifo_n_) & (RING - 1);
+      while (stall_n_ && fifo_n_ < FIFO_DEPTH) {
+        if (fifo_n_ == 0 && pipe_n_ < PIPE_DEPTH) ++pipe_n_; else ++fifo_n_;
+        --stall_n_;
+        note_enqueued(ring_[idx].cmd);
+        idx = (idx + 1) & (RING - 1);
+      }
+      if (stall_n_ == 0) stalled_ = false;
     }
     check_fifo_dma();
     check_fifo_irq();
@@ -454,24 +464,29 @@ Gpu3D::Entry Gpu3D::fifo_read() {
 void Gpu3D::check_fifo_irq() {
   bool irq = false;
   switch (gxstat_ >> 30) {
-  case 1: irq = fifo_.level() < 128; break;
-  case 2: irq = fifo_.empty(); break;
+  case 1: irq = fifo_n_ < 128; break;
+  case 2: irq = fifo_n_ == 0; break;
   default: break;
   }
   nds_.io.set_irq_line(Cpu::ARM9, io::IRQ_GX_FIFO, irq);
 }
 
 void Gpu3D::check_fifo_dma() {
-  if (fifo_.level() < 128) nds_.dma.check(Cpu::ARM9, dma::MODE9_GXFIFO);
+  if (fifo_n_ < 128) nds_.dma.check(Cpu::ARM9, dma::MODE9_GXFIFO);
 }
 
 // Packed command port: up to four command bytes followed by their parameters.
 void Gpu3D::gxfifo_write(u32 value) {
-  if (num_cmds_ == 0) {
+  if (num_cmds_ != 0) {
+    // A parameter that does not complete its command: the common word (a
+    // 16-parameter matrix load, a vertex pair). Everything else takes the
+    // packed-command walk below.
+    if (++param_count_ < total_params_) { fifo_write(Entry{value, static_cast<u8>(cur_cmd_)}); return; }
+  } else {
     num_cmds_ = 4; cur_cmd_ = value; param_count_ = 0;
     total_params_ = CMD_PARAMS[cur_cmd_ & 0xFF];
     if (total_params_ > 0) return;
-  } else ++param_count_;
+  }
   for (;;) {
     if ((cur_cmd_ & 0xFF) || (num_cmds_ == 4 && cur_cmd_ == 0))
       fifo_write(Entry{value, static_cast<u8>(cur_cmd_ & 0xFF)});
@@ -993,7 +1008,7 @@ void Gpu3D::vblank() {
   if (std::getenv("DS_DEBUG_GX"))
     std::fprintf(stderr, "[gx] frame %llu geom %d rend %d flush %u attr %u polys %u verts %u disp3dcnt %04x alpharef %u clear %08x/%08x fifo %u gxstat %08x ie %08x if %08x\n",
                  static_cast<unsigned long long>(nds_.frame_count), geometry_on_, rendering_on_, flush_request_, flush_attr_, num_polygons_, num_vertices_,
-                 dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_.level(), gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
+                 dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_n_, gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
   if (!geometry_on_) return;
   if (rendering_on_) {
     // The render registers this frame against the ones the last render used.
@@ -1137,11 +1152,11 @@ u32 Gpu3D::read(u32 addr, u32 width) {
     if (prof::enabled) {
       prof::add(prof::C_GX_READ, 1); prof::add(prof::C_GX_READ_GXSTAT, 1);
       if (gxstat_ & (1u << 27)) prof::add(prof::C_GX_READ_GXSTAT_BUSY, 1);
-      if (!pipe_.empty()) prof::add(prof::C_GX_READ_GXSTAT_PIPE, 1);
-      if (fifo_.level()) prof::add(prof::C_GX_READ_GXSTAT_FIFO, 1);
+      if (pipe_n_) prof::add(prof::C_GX_READ_GXSTAT_PIPE, 1);
+      if (fifo_n_) prof::add(prof::C_GX_READ_GXSTAT_FIFO, 1);
     }
     run_to(nds_.sched.now());
-    const u32 level = fifo_.level();
+    const u32 level = fifo_n_;
     const u32 v = gxstat_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13) | (level << 16) |
                   (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
     return width == 32 ? v : width == 16 ? (v >> ((addr & 2) * 8)) & 0xFFFF : (v >> ((addr & 3) * 8)) & 0xFF;

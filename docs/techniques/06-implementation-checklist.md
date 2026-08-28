@@ -55,6 +55,16 @@ measured decision, ranked by likely payoff:
    dispatch 34–44 insn × 41 k = 1.4 M / 0.4 M. Targets in that order:
    the enqueue path, the polygon submit constants, DraStic's batched
    vertex transform (4.18) — keeping execution slice-granular.
+   *Enqueue path done:* pipe, FIFO and stall queue are one ring with three
+   counts (no entry is copied between stages), `gxfifo_write` takes a
+   mid-command parameter without the packed-command walk, the DMA unit
+   timing is cached per 16 KB block and a GXFIFO DMA feeds a direct-mapped
+   source page as a run. Frame hashes identical on all five scenes and
+   1800 GSDD frames. qemu census, non-spin: GSDD 51.2 → 49.7 M (−2.9 %),
+   dbori 25.6 → 24.9 M (−2.8 %); `Dma::run_channel` −0.5 M / −0.3 M,
+   geometry −1.0 M / −0.4 M. `gxfifo_write` itself is still ~65 insn a
+   word on GSDD (its words are one-parameter commands, so the walk runs
+   for most of them) — next is the submit constants, not more of this.
 4. **DMA per unit through the bus** (4.8, 4.9) — 7.7 k instructions a frame
    in DraStic for the whole subsystem; ours pays a bus round-trip per word.
 5. **JIT: ITCM tag-free tables, three arenas, known-constant tracking,

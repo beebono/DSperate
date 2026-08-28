@@ -5,6 +5,7 @@
 #include "core/mem/timing.h"
 
 #include <cstdio>
+#include <cstring>
 
 namespace ds::dma {
 
@@ -50,6 +51,7 @@ void Dma::write_cnt(Cpu cpu, int n, u32 v) {
     return;
   }
   c.cur_src = c.src; c.cur_dst = c.dst;
+  c.tim_key_src = c.tim_key_dst = ~0u;   // width may have changed: refill the timing cache
   switch (v & 0x00600000) { case 0x00000000: c.dst_inc = 1; break; case 0x00200000: c.dst_inc = -1; break; case 0x00400000: c.dst_inc = 0; break; default: c.dst_inc = 1; break; }
   switch (v & 0x01800000) { case 0x00000000: c.src_inc = 1; break; case 0x00800000: c.src_inc = -1; break; case 0x01000000: c.src_inc = 0; break; default: c.src_inc = 1; break; }
   c.start_mode = (cpu == Cpu::ARM9) ? ((v >> 27) & 7) : (((v >> 28) & 3) | 0x10);
@@ -95,12 +97,21 @@ bool Dma::in_mode(Cpu cpu, u32 mode) const {
 
 // Unit cost in system cycles (ARM7 clock); the caller doubles for the ARM9.
 u32 Dma::unit_cycles(Channel& c, bool burst_start, bool word) {
-  const mem::Timing& t = nds_.bus.timing();
   const bool a9 = c.cpu == Cpu::ARM9;
-  const u32 src_rgn = t.region(a9, c.cur_src), dst_rgn = t.region(a9, c.cur_dst);
-  u32 src_n, src_s, dst_n, dst_s;
-  t.dma_cost(a9, c.cur_src, word, src_n, src_s);
-  t.dma_cost(a9, c.cur_dst, word, dst_n, dst_s);
+  const u32 shift = a9 ? 14 : 15;
+  // `word` is fixed for the life of a transfer (it is a CNT bit), so the
+  // cached n/s costs are for the right width as long as the key matches;
+  // write_cnt resets the keys.
+  if (c.tim_key_src != (c.cur_src >> shift)) {
+    const mem::Timing& t = nds_.bus.timing();
+    c.tim_key_src = c.cur_src >> shift; c.src_rgn = t.region(a9, c.cur_src); t.dma_cost(a9, c.cur_src, word, c.src_n, c.src_s);
+  }
+  if (c.tim_key_dst != (c.cur_dst >> shift)) {
+    const mem::Timing& t = nds_.bus.timing();
+    c.tim_key_dst = c.cur_dst >> shift; c.dst_rgn = t.region(a9, c.cur_dst); t.dma_cost(a9, c.cur_dst, word, c.dst_n, c.dst_s);
+  }
+  const u32 src_rgn = c.src_rgn, dst_rgn = c.dst_rgn;
+  const u32 src_n = c.src_n, src_s = c.src_s, dst_n = c.dst_n, dst_s = c.dst_s;
   const u32 MAIN = mem::REGION_MAIN_RAM;
   if (src_rgn == MAIN) {
     if (dst_rgn == MAIN) return word ? 18 : 16;
@@ -146,7 +157,28 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
     // Bus::io_write -> Io::write -> Gpu3D::write -> gxfifo_write, ~150
     // instructions of dispatch per word, for ~22k words a frame on Dragon
     // Ball Origins.
-    if (word && a9 && c.cur_dst == 0x04000400 && c.dst_inc == 0) nds_.gpu3d.gxfifo_dma_write(bus.dma_read32(c.cpu, c.cur_src));
+    if (word && a9 && c.cur_dst == 0x04000400 && c.dst_inc == 0) {
+      // Run of words from one direct-mapped source page: skip the per-word
+      // page-table walk and loop tests. Exactly what the generic loop below
+      // would do per word (cost, stall check, feed, counters), unrolled over
+      // the page; the FIFO-full stall and the budget still end it per word.
+      if (c.src_inc == 1) {
+        const u8* p = nds_.cpu(Cpu::ARM9).page_table.read_ptr(c.cur_src);
+        if (p) {
+          u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 2;
+          for (;;) {
+            u32 v; std::memcpy(&v, p, 4);
+            nds_.gpu3d.gxfifo_dma_write(v);
+            c.cur_src += 4; c.iter_count--; c.rem_count--;
+            if (--room == 0 || c.iter_count == 0 || used >= budget || nds_.gpu3d.stalled()) break;
+            cost = unit_cycles(c, false, true); used += cost << 1;
+            p += 4;
+          }
+          continue;
+        }
+      }
+      nds_.gpu3d.gxfifo_dma_write(bus.dma_read32(c.cpu, c.cur_src));
+    }
     else if (word) bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
     else           bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
     const u32 step = word ? 4 : 2;
