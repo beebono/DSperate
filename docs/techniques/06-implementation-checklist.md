@@ -64,9 +64,25 @@ measured decision, ranked by likely payoff:
    dbori 25.6 → 24.9 M (−2.8 %); `Dma::run_channel` −0.5 M / −0.3 M,
    geometry −1.0 M / −0.4 M. `gxfifo_write` itself is still ~65 insn a
    word on GSDD (its words are one-parameter commands, so the walk runs
-   for most of them) — next is the submit constants, not more of this.
-4. **DMA per unit through the bus** (4.8, 4.9) — 7.7 k instructions a frame
-   in DraStic for the whole subsystem; ours pays a bus round-trip per word.
+   for most of them). *Submit constants, first cut:* `clip_polygon` tests
+   all six planes once and skips the three copying passes when nothing
+   clips (the colour truncation is idempotent, applied once) —
+   `submit_polygon` 535 → 493 insn/polygon on GSDD, 453 → 386 on dbori;
+   exact. Cumulative from 885b774, non-spin: GSDD 51.2 → 47.1 M
+   (−8.1 %), dbori 25.6 → 24.1 M (−5.7 %). Left in geometry: the
+   per-command execute loop (`run_to_slow` self ~5.5 k/call) and the
+   per-vertex transform (4.18).
+4. ~~**DMA per unit through the bus** (4.8, 4.9)~~ — done in the exact
+   form: a word transfer between two direct-mapped pages (and a GXFIFO
+   feed from one) runs to the page end on host pointers — one page-table
+   walk per end per run, not two per word — and the per-16 KB unit timing
+   is cached; every word is still charged, stall-checked and budget-bounded
+   as before, so the unit model (4.9) is unchanged and the copy is not
+   front-loaded. `Dma::run_channel` GSDD 7.0 → 3.1 M/frame, dbori 1.8 →
+   0.9 M; frame hashes identical everywhere. What is left is the per-word
+   unit-timing model itself (~30 insn/word) — DraStic's 7.7 k/frame is
+   what a whole-transfer copy with a static cost table buys, at the price
+   of the unit model; not worth it at 6 % of GSDD's frame.
 5. **JIT: ITCM tag-free tables, three arenas, known-constant tracking,
    check-free second entry** (1.5, 1.12, 1.23, 1.26) — each small; the
    arena flush (1.23) is the one with a visible failure mode (full arena
@@ -169,8 +185,8 @@ measured decision, ranked by likely payoff:
 | 4.5 | Timer count derived on read; overflow as an event | 04 §2 | same | `timer_value` from `start_time`; overflow scheduled from the sample point |
 | 4.6 | `irq_pending` precomputed at every IF-setting site | 04 §3 | same | `hot.irq_pending` |
 | 4.7 | `pending_actions` + alert thunks at block boundaries only | 04 §3 | same | `hot.alerts` polled after stores / at fallback |
-| 4.8 | Whole-transfer DMA over a 16-entry 8 MB region table | 04 §4 | no | `Dma::run` executes per unit against a budget with burst timing (melonDS model); each word goes through `bus.dma_read32/write32` |
-| 4.9 | DMA cycle cost from static seq/non-seq tables; completion as event | 04 §4 | no | per-unit burst tables; the copy is not front-loaded |
+| 4.8 | Whole-transfer DMA over a 16-entry 8 MB region table | 04 §4 | partial | `Dma::run` executes per unit against a budget with burst timing (melonDS model); between two direct-mapped pages (or into GXFIFO from one) a run of words goes through host pointers, one page-table walk per end per run; I/O, trapped and code pages stay per word through the bus |
+| 4.9 | DMA cycle cost from static seq/non-seq tables; completion as event | 04 §4 | no | per-unit burst tables (the per-16 KB block costs cached on the channel); the copy is not front-loaded |
 | 4.10 | Coarse (64 KB) / fine (2 KB) code bitmaps ORed over DMA destination | 04 §4 | equiv | DMA words take the tagged-page store path → `store_code`; no separate bitmap |
 | 4.11 | HBlank DMA into VRAM forces 2D render catch-up first | 04 §4 | equiv | any store into VRAM the engines read (DMA or CPU) hits the page-table write trap and catches the render up first (`Gpu::vram_store_trap`); DraStic only catches HBlank DMA |
 | 4.12 | 2D rendered as one batch at VBlank when nothing changed mid-frame | 04 §5 | same | one `render_lines(0, 191)` at the HBlank of line 191; writes mid-frame do not break the batch (journal), VRAM stores do (trap → per-line for the rest of the frame); capture / FIFO frames per line |

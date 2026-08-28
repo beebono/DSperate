@@ -260,6 +260,22 @@ int clip_against_plane(Vertex* v, int nverts, int clipstart, bool far_clip) {
 
 template <bool attribs>
 int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
+  // Most polygons need no clipping at all; the three plane passes would
+  // still copy every vertex twice each. Test once and keep only the colour
+  // truncation the passes apply (it is idempotent, so once is the same as
+  // three times). Vertices before clipstart are reused unclipped ones and
+  // are not tested by the passes either.
+  bool inside = true;
+  for (int i = clipstart; i < nverts; ++i) {
+    const Vertex& t = v[i];
+    const s32 w = t.pos[3];
+    if (t.pos[0] > w || t.pos[0] < -w || t.pos[1] > w || t.pos[1] < -w || t.pos[2] > w || t.pos[2] < -w) { inside = false; break; }
+  }
+  if (inside) {
+    for (int i = 0; i < nverts; ++i)
+      for (int k = 0; k < 3; ++k) { v[i].col[k] &= ~0xFFF; v[i].col[k] += 0xFFF; }
+    return nverts;
+  }
   nverts = clip_against_plane<2, attribs>(v, nverts, clipstart, far_clip);
   nverts = clip_against_plane<1, attribs>(v, nverts, clipstart, far_clip);
   nverts = clip_against_plane<0, attribs>(v, nverts, clipstart, far_clip);

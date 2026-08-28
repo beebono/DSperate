@@ -179,7 +179,31 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
       }
       nds_.gpu3d.gxfifo_dma_write(bus.dma_read32(c.cpu, c.cur_src));
     }
-    else if (word) bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
+    else if (word) {
+      // Run of words between two direct-mapped pages (main RAM, WRAM, VRAM
+      // without a write trap): one page-table walk per end per run instead
+      // of two per word. Same per-word cost, stall check and budget as the
+      // generic path; a code-tagged or trapped destination stays per word.
+      if (c.src_inc == 1 && c.dst_inc == 1) {
+        const u8* ps = nds_.cpu(c.cpu).page_table.read_ptr(c.cur_src);
+        bool code = false;
+        u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
+        if (pd && !code) {
+          u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 2;
+          const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) >> 2;
+          if (room_d < room) room = room_d;
+          for (;;) {
+            std::memcpy(pd, ps, 4);
+            c.cur_src += 4; c.cur_dst += 4; c.iter_count--; c.rem_count--;
+            if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
+            cost = unit_cycles(c, false, true); if (a9) cost <<= 1; used += cost;
+            ps += 4; pd += 4;
+          }
+          continue;
+        }
+      }
+      bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
+    }
     else           bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
     const u32 step = word ? 4 : 2;
     c.cur_src += c.src_inc * step;
