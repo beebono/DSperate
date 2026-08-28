@@ -195,12 +195,13 @@ int main(int argc, char** argv) {
   frame_ms.reserve(static_cast<size_t>(frames));
   for (int i = 0; i < frames; ++i) {
     const auto t0 = std::chrono::steady_clock::now();
-    if (trace && i == trace_from) {
-      nds.trace = trace_cb; nds.trace_user = &ts;
+    // The recompiler's trace emission is armed from the first frame: turning
+    // it on later drops every translated block at that frame, which changes
+    // the run being traced. TRACE_START_FRAME only gates the callback.
 #if DSPERATE_JIT
-      ds::jit::set_trace(true);
+    if (trace && i == 0) ds::jit::set_trace(true);
 #endif
-    }
+    if (trace && i == trace_from) { nds.trace = trace_cb; nds.trace_user = &ts; }
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
     nds.run_frame();
     if (static const bool fh = std::getenv("DS_FRAME_HASH") != nullptr; fh) {

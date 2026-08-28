@@ -2,6 +2,9 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
 #include <cstring>
+#include <new>
+#include <memory>
+#include <cstdlib>
 #include "core/types.h"
 #include "core/profile.h"
 
@@ -48,6 +51,25 @@ inline void store_code(u8* host, const void* v, u32 len) {
 constexpr u32 PAGE_SHIFT = 11;
 constexpr u32 PAGE_SIZE  = 1u << PAGE_SHIFT;      // 2 KB
 constexpr u32 PAGE_COUNT = 1u << (32 - PAGE_SHIFT); // 2 Mi entries = 16 MiB of table
+
+// Host backing for guest memory is allocated PAGE_SIZE-aligned, so a guest
+// page and the host page holding it are the same PAGE_SIZE window. The
+// recompiler's code tracking depends on that: it keys translated blocks by
+// `host_page_of(pointer)` and maps a host page back to the guest pages whose
+// entries point at it. With a merely 16-byte-aligned buffer a host window
+// straddles two guest pages, a block's page can differ from the page the
+// store's guest entry belongs to, and clearing one page's tag drops the tag
+// of bytes another page still covers -- after which stores into that code
+// are never reported (a stale block; seen on Mario & Luigi's overlay loads).
+struct PageBufFree { void operator()(u8* p) const { std::free(p); } };
+using PageBuf = std::unique_ptr<u8[], PageBufFree>;
+inline PageBuf alloc_page_buf(size_t bytes) {
+  const size_t n = (bytes + PAGE_SIZE - 1) & ~size_t{PAGE_SIZE - 1};
+  u8* p = static_cast<u8*>(std::aligned_alloc(PAGE_SIZE, n));
+  if (!p) throw std::bad_alloc();
+  std::memset(p, 0, n);
+  return PageBuf(p);
+}
 
 using Entry = u64;
 

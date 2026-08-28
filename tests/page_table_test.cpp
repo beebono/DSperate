@@ -10,8 +10,7 @@ using namespace ds::mem;
 
 int main() {
   PageTable pt;
-  auto ram = std::make_unique<u8[]>(64 * 1024);
-  std::memset(ram.get(), 0, 64 * 1024);
+  auto ram = alloc_page_buf(64 * 1024);   // PAGE_SIZE-aligned, as map() requires
 
   // Unmapped => slow path.
   CHECK(pt.read_ptr(0x02000000) == nullptr);

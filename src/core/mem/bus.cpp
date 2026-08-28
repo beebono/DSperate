@@ -17,10 +17,10 @@ constexpr u32 Bus::VRAM_BANK_SIZES[9];
 static u32 watch_addr = 0; static bool watch_on = false; static u32 watch_hits = 0;
 
 Bus::Bus(NDS& nds)
-    : main_ram(new u8[MAIN_RAM_SIZE]), shared_wram(new u8[SHARED_WRAM_SIZE]),
-      arm7_wram(new u8[ARM7_WRAM_SIZE]), itcm(new u8[ITCM_SIZE]),
-      dtcm(new u8[DTCM_SIZE]), vram(new u8[VRAM_TOTAL]), palette(new u8[PALETTE_SIZE]),
-      oam(new u8[OAM_SIZE]), bios9(new u8[BIOS9_SIZE]), bios7(new u8[BIOS7_SIZE]), nds_(nds) {
+    : main_ram(alloc_page_buf(MAIN_RAM_SIZE)), shared_wram(alloc_page_buf(SHARED_WRAM_SIZE)),
+      arm7_wram(alloc_page_buf(ARM7_WRAM_SIZE)), itcm(alloc_page_buf(ITCM_SIZE)),
+      dtcm(alloc_page_buf(DTCM_SIZE)), vram(alloc_page_buf(VRAM_TOTAL)), palette(alloc_page_buf(PALETTE_SIZE)),
+      oam(alloc_page_buf(OAM_SIZE)), bios9(alloc_page_buf(BIOS9_SIZE)), bios7(alloc_page_buf(BIOS7_SIZE)), nds_(nds) {
   std::memset(bios9.get(), 0, BIOS9_SIZE);
   std::memset(bios7.get(), 0, BIOS7_SIZE);
 }

@@ -99,7 +99,9 @@ dead; when they are not, a shared stub merges (`bl merge_keep_cv` /
 `adds/subs/adcs/sbcs` directly (same carry convention).
 
 **Self-modifying code.** Code pages are tracked by *host* page so that the
-other CPU's mapping and DMA see the same `TAG_CODE` bit; remaps re-apply it
+other CPU's mapping and DMA see the same `TAG_CODE` bit (which requires
+every host backing buffer to be `PAGE_SIZE`-aligned -- `alloc_page_buf` --
+so a host page is exactly one guest page; `PageTable::map` asserts it); remaps re-apply it
 through `PageTable::code_query`, and `set_code_host` finds the guest pages of
 a host page through a reverse index rebuilt lazily after a remap. Every store
 path that lands on a tagged page goes through `mem::store_code`, which filters

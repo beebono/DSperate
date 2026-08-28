@@ -41,7 +41,7 @@ PageTable::PageTable() {
 static Entry make_entry(u32 guest_page_addr, u8* host, u32 flags) {
   if (flags & PAGE_MMIO) return TAG_SPECIAL;
   auto h = reinterpret_cast<u64>(host);
-  assert((h & 3) == 0 && "host backing must be 4-byte aligned");
+  assert((h & (PAGE_SIZE - 1)) == 0 && "host backing must be PAGE_SIZE-aligned (see alloc_page_buf)");
   u64 biased = h - guest_page_addr;          // wraps; recovered by (e<<2)+addr
   assert(((biased >> 2) & ~BASE_MASK) == 0 && "host pointer does not fit in 62 bits");
   Entry e = biased >> 2;

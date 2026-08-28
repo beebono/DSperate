@@ -72,7 +72,7 @@ public:
 
   const gpu::VramMap& vram_map() const { return vram_map_; }
 
-  std::unique_ptr<u8[]> main_ram, shared_wram, arm7_wram, itcm, dtcm, vram, palette, oam, bios9, bios7;
+  PageBuf main_ram, shared_wram, arm7_wram, itcm, dtcm, vram, palette, oam, bios9, bios7;   // PAGE_SIZE-aligned, see alloc_page_buf
   u8* vram_bank(int i);
 
 private:
