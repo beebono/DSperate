@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
     else if (arg("--bios7")) bios7 = argv[++i];
     else if (arg("--firmware")) fw = argv[++i];
     else if (arg("--scale")) scale = std::atoi(argv[++i]);
-    else if (arg("--dual-window")) dual_window = true;
+    else if (!std::strcmp(argv[i], "--dual-window")) dual_window = true;
     else if (arg("--layout")) {
       const char* l = argv[++i];
       if (!std::strcmp(l, "horizontal")) layout = ds::sdl::Display::Layout::Horizontal;
