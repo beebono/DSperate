@@ -141,8 +141,14 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
     if (a9) cost <<= 1;
     used += cost;
     burst_start = false;
-    if (word) bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
-    else      bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
+    // GXFIFO feed (fixed destination 0x04000400): the word goes straight to
+    // the geometry engine. Through the bus it would be dma_write32 ->
+    // Bus::io_write -> Io::write -> Gpu3D::write -> gxfifo_write, ~150
+    // instructions of dispatch per word, for ~22k words a frame on Dragon
+    // Ball Origins.
+    if (word && a9 && c.cur_dst == 0x04000400 && c.dst_inc == 0) nds_.gpu3d.gxfifo_dma_write(bus.dma_read32(c.cpu, c.cur_src));
+    else if (word) bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
+    else           bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
     const u32 step = word ? 4 : 2;
     c.cur_src += c.src_inc * step;
     c.cur_dst += c.dst_inc * step;

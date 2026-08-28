@@ -1170,6 +1170,16 @@ u32 Gpu3D::read(u32 addr, u32 width) {
 
 void Gpu3D::write(u32 addr, u32 width, u32 value) {
   const u32 r = addr - 0x04000000;
+  // The command ports first, ahead of the width split and the register
+  // switches: a 3D frame is tens of thousands of 32-bit writes to GXFIFO or
+  // the direct command ports and a handful to anything else (Dragon Ball
+  // Origins: ~22k a frame, most of them by DMA -- see Dma::run_channel).
+  if (width == 32 && r - 0x400 < 0x1CC) {
+    if (!geometry_on_) return;
+    if (r < 0x440) gxfifo_write(value);
+    else fifo_write(Entry{value, static_cast<u8>((r & 0x1FC) >> 2)});
+    return;
+  }
   if (!rendering_on_ && r >= 0x320 && r < 0x400) return;
   if (!geometry_on_ && r >= 0x400 && r < 0x700) return;
 
