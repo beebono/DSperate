@@ -4,93 +4,119 @@ A compressed index of every high-level technique in documents 01–05, one line
 each, for auditing DSperate against DraStic. Each row names the technique,
 the DraStic document that describes it, and a column for our status.
 
-Fill the **DSperate** column with one of: `same` (we do this), `equiv` (we
+Audited 2026-08-28 against `src/` at 5e99f73 by reading the code, not by measurement; `partial`/`equiv` rows are judgement calls and say why. The **DSperate** column uses: `same` (we do this), `equiv` (we
 achieve the same effect a different way — say how in a note), `partial`,
 `no`, or `n/a` (does not apply to our design — say why). The point is not to
 copy DraStic row by row; it is to make sure every deliberate *omission* is a
 decision rather than an oversight. Rows that our own measurements have
 already settled carry a note.
 
+## Audit summary (2026-08-28)
+
+105 rows: 41 `same`, 21 `equiv`, 14 `partial`, 19 `no`, 6 `n/a`, 4 marked
+high priority. Where DSperate departs it is usually because it chose
+hardware-exact, melonDS-comparable behaviour (DMA per unit, SPU per sample,
+geometry per slice) over DraStic's deferral — those are the rows worth a
+measured decision, ranked by likely payoff:
+
+1. **Lazy 2D with a write journal** (4.12–4.15) — high priority; per-line
+   rendering plus 192 worker hand-offs a frame.
+2. **SPU mixed per sample as a scheduler event** (5.1, 5.4, 5.6, 5.9, 5.11) —
+   ~546 events and 16 FIFO-fed channel steps per frame where DraStic does
+   one call; check `SPU` in the profile before deciding.
+3. **Geometry executed per slice, not logged per frame** (4.17, 4.18) —
+   `process_geometry_commands` is DraStic's largest non-render function and
+   it runs once; ours runs after every ARM9 slice.
+4. **DMA per unit through the bus** (4.8, 4.9) — 7.7 k instructions a frame
+   in DraStic for the whole subsystem; ours pays a bus round-trip per word.
+5. **JIT: ITCM tag-free tables, three arenas, known-constant tracking,
+   check-free second entry** (1.5, 1.12, 1.23, 1.26) — each small; the
+   arena flush (1.23) is the one with a visible failure mode (full arena
+   throws away every translation).
+6. **3D: 8-way gather, AND/OR uniformity, constant-W ramp** (2.4, 2.11,
+   2.14) — kernel-level, measured territory; see the per-span notes before
+   touching.
+
 ## 01 — Recompiler
 
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
-| 1.1 | Guest r0–r14 pinned to host registers for the whole run | 01 §1 | | |
-| 1.2 | Guest r6–r14 in the AAPCS64 callee-saved range so helpers spill 6 not 15 | 01 §1 | | |
-| 1.3 | Guest CPSR flags live in host NZCV | 01 §1 | | |
-| 1.4 | One register doubles as page-table base and helper spill base | 01 §1 | | |
-| 1.5 | Two-instruction block prologue (`TBZ` on cycle sign bit); second entry point skips it | 01 §2 | | |
-| 1.6 | Cycle cost accumulated per block, one `SUB` emitted | 01 §2 | | |
-| 1.7 | Downward cycle counter tested by sign, not compared | 01 §2 | | |
-| 1.8 | Per-CPU cycle model (ARM7 ×2, ARM9 + adjustment) with per-game hacks | 01 §2 | | |
-| 1.9 | Direct linking of static branches, delayed patch list for untranslated targets | 01 §3a | | |
-| 1.10 | Link may target the check-free entry; spin-loops forced out via `mov w12,#-1` | 01 §3a | | |
-| 1.11 | 1024-entry inline direct-mapped branch-target cache in the CPU struct | 01 §3b | | |
-| 1.12 | Tag-free direct tables for ITCM (ARM 8192 / Thumb 16384 slots) | 01 §3c | | |
-| 1.13 | 32-bit cache-relative offsets for all block/metadata pointers | 01 §3b | | |
-| 1.14 | Flat 2 KB-page table per CPU (16 MB), pre-biased base, entry stored `>>2` | 01 §4 | | |
-| 1.15 | Zero entry covers unmapped, I/O and side-effect pages in one `cbz` | 01 §4 | | |
-| 1.16 | Store path flag bits: 62 = slow path, 63 = code page | 01 §4 | | |
-| 1.17 | Loads never test the flag bits | 01 §4 | | |
-| 1.18 | SMC filter 1: code-page bit test | 01 §5 | | |
-| 1.19 | SMC filter 2: silent-store elimination (compare before invalidate) | 01 §5 | | done — see JIT SMC filters note |
-| 1.20 | SMC filter 3: block-range allocation check | 01 §5 | | done — see JIT SMC filters note |
-| 1.21 | Self-invalidating block recovers PC from metadata, flushes, re-enters | 01 §5 | | |
-| 1.22 | Compressed host-offset → guest-PC map per block | 01 §5 | | |
-| 1.23 | Three code arenas (ITCM / main RAM / other) with separate flushes | 01 §6 | | |
-| 1.24 | Code grows forward, metadata backward in one arena | 01 §6 | | |
-| 1.25 | Direct opcode emission, no IR | 01 §7 | | |
-| 1.26 | Per-register known-constant tracking with `MOVZ/MOVK/ORR`-imm materialisation | 01 §7 | | |
-| 1.27 | Intra-block forward-branch fix-up pass | 01 §7 | | |
-| 1.28 | Sixteen specialised LDM/STM helpers per direction | 01 §7 | | |
-| 1.29 | GXFIFO / geometry ports recognised inline in the ARM9 32-bit store helper | 01 §8 | | done — DMA→GXFIFO dispatch bypassed; see dbori note |
+| 1.1 | Guest r0–r14 pinned to host registers for the whole run | 01 §1 | same | r0–r7, r13, r14 in x19–x28; r8–r12 in x9–x13 (`jit_internal.h`) |
+| 1.2 | Guest r6–r14 in the AAPCS64 callee-saved range so helpers spill 6 not 15 | 01 §1 | same | ten of fifteen callee-saved; call stubs spill only r8–r12 |
+| 1.3 | Guest CPSR flags live in host NZCV | 01 §1 | same | plus a flag-liveness pass DraStic does not have (bare `tst` when C/V dead) |
+| 1.4 | One register doubles as page-table base and helper spill base | 01 §1 | no | page-table base x14 and timing table x15 are separate pinned registers; spills go via x29 (`CpuContext*`) |
+| 1.5 | Two-instruction block prologue (`TBZ` on cycle sign bit); second entry point skips it | 01 §2 | partial | one `tbnz w8,#31` per block; no second check-free entry point for post-event re-entry |
+| 1.6 | Cycle cost accumulated per block, one `SUB` emitted | 01 §2 | same | static costs batched into one `sub` per run (`flush_pending`) |
+| 1.7 | Downward cycle counter tested by sign, not compared | 01 §2 | same | `budget - 1` in w8, sign-bit test |
+| 1.8 | Per-CPU cycle model (ARM7 ×2, ARM9 + adjustment) with per-game hacks | 01 §2 | equiv | interpreter model reproduced exactly (per-page timing table, CD/CDI formulas); no per-game hacks |
+| 1.9 | Direct linking of static branches, delayed patch list for untranslated targets | 01 §3a | same | `bl link; .word key` patched to a bare `b` (`jit_h_link`) |
+| 1.10 | Link may target the check-free entry; spin-loops forced out via `mov w12,#-1` | 01 §3a | equiv | no forced-negative budget; spin loops handled by idle-loop detection (`idle_loop.cpp`, DS_IDLE_SKIP) |
+| 1.11 | 1024-entry inline direct-mapped branch-target cache in the CPU struct | 01 §3b | equiv | per-CPU direct-mapped LUT at the front of the arena, 7–8 insns; sized per "The branch LUT" in jit/README |
+| 1.12 | Tag-free direct tables for ITCM (ARM 8192 / Thumb 16384 slots) | 01 §3c | no | ITCM goes through the same LUT (tagged); no tag-free table |
+| 1.13 | 32-bit cache-relative offsets for all block/metadata pointers | 01 §3b | same | LUT entry = `(native offset << 32) | key` |
+| 1.14 | Flat 2 KB-page table per CPU (16 MB), pre-biased base, entry stored `>>2` | 01 §4 | same | `PAGE_SHIFT = 11`, tagged entries, pre-biased base |
+| 1.15 | Zero entry covers unmapped, I/O and side-effect pages in one `cbz` | 01 §4 | same | `cbz` on the entry |
+| 1.16 | Store path flag bits: 62 = slow path, 63 = code page | 01 §4 | same | two tag bits: MMIO/RO and `TAG_CODE` |
+| 1.17 | Loads never test the flag bits | 01 §4 | same |  |
+| 1.18 | SMC filter 1: code-page bit test | 01 §5 | same | store path tests the tag |
+| 1.19 | SMC filter 2: silent-store elimination (compare before invalidate) | 01 §5 | same | `mem::store_code` drops identical values — done — see JIT SMC filters note |
+| 1.20 | SMC filter 3: block-range allocation check | 01 §5 | same | `invalidate_host_range` kills only overlapping blocks — done — see JIT SMC filters note |
+| 1.21 | Self-invalidating block recovers PC from metadata, flushes, re-enters | 01 §5 | equiv | killed block gets a dispatcher redirect + alert word; running block leaves at its next poll rather than re-looking-up in place |
+| 1.22 | Compressed host-offset → guest-PC map per block | 01 §5 | partial | no per-block host→guest PC map; fallback/poll sites carry the key as a literal instead |
+| 1.23 | Three code arenas (ITCM / main RAM / other) with separate flushes | 01 §6 | no | single arena, `reset_arena()` flushes everything when full |
+| 1.24 | Code grows forward, metadata backward in one arena | 01 §6 | no | metadata in a side `Block` structure |
+| 1.25 | Direct opcode emission, no IR | 01 §7 | same | `emit.h` direct encoder, no IR |
+| 1.26 | Per-register known-constant tracking with `MOVZ/MOVK/ORR`-imm materialisation | 01 §7 | partial | constants only for pc-relative operands; no per-register known-value tracking |
+| 1.27 | Intra-block forward-branch fix-up pass | 01 §7 | same | hot/cold split with fixups at the splice |
+| 1.28 | Sixteen specialised LDM/STM helpers per direction | 01 §7 | equiv | LDM/STM inlined when the transfer sits in one 2 KB page, interpreter fallback otherwise; no per-count helpers |
+| 1.29 | GXFIFO / geometry ports recognised inline in the ARM9 32-bit store helper | 01 §8 | same | done — DMA→GXFIFO dispatch bypassed; see dbori note |
 
 ## 02 — 3D rasteriser
 
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
-| 2.1 | 12 bins × 16 scanlines; ~32 KB live tile footprint | 02 §1 | | measured: pays with 2 workers / 8 even bins — see binning note |
-| 2.2 | Branch-free 12-bit bin mask from ymin/ymax | 02 §1 | | |
-| 2.3 | Bins ÷ thread count for even split on 1/2/3/4/6/12 cores | 02 §1 | | adaptive worker controller instead — see note |
-| 2.4 | AND/OR uniformity test per polygon selects `_constant` kernels | 02 §2 | | |
-| 2.5 | Specialisation matrix: 9 wrap × 8 combine × 10 resolve × 4 depth | 02 §2 | | |
-| 2.6 | Fused resolve (edge mark + fog + convert + store) chosen once per bin | 02 §2 | | |
-| 2.7 | Spans batched to 256 px across scanlines before the pipeline runs | 02 §3 | | measured flat — see per-span-cost note |
-| 2.8 | Per-256-px kernel selection; flush has 39 direct calls, no indirect | 02 §3 | | |
-| 2.9 | Stage-at-a-time SoA span pipeline; conditionals become byte masks | 02 §3 | | |
-| 2.10 | Per-span interpolants broadcast to per-pixel arrays, then one flat pass | 02 §3 | | measured: does not port (+0.6–1.7 %) — see 02 §3 |
-| 2.11 | Constant-W perspective factor as iota ramp, no division | 02 §3 | | |
-| 2.12 | Depth test emits mask + surviving count; later stages skip on zero | 02 §3 | | |
-| 2.13 | Mask-shift tail handling, no scalar epilogue | 02 §3 | | |
-| 2.14 | Eight-way unrolled scalar texel gather for in-order latency hiding | 02 §4 | | |
-| 2.15 | Software-pipelined vector loops (load next before store current) | 02 §4 | | |
-| 2.16 | Fixed point throughout, no FP | 02 §4 | | |
-| 2.17 | Texture lookup hoisted to bin time, one-entry memo | 02 §5 | | |
-| 2.18 | Opaque then translucent pass with per-tile polygon-ID stencil | 02 §6 | | |
-| 2.19 | Rear-plane bitmap path with scroll | 02 §6 | | |
-| 2.20 | Paired `_c` / `_asm` kernels, C as bit-exact reference | 02 §7 | | |
-| 2.21 | `_1x` / `_4x` (hi-res) kernel families | 02 §2 | | |
+| 2.1 | 12 bins × 16 scanlines; ~32 KB live tile footprint | 02 §1 | equiv | ring of RING=8 lines (~50 KB) per worker, chunked rasterisation; bins are horizontal bands — measured: pays with 2 workers / 8 even bins — see binning note |
+| 2.2 | Branch-free 12-bit bin mask from ymin/ymax | 02 §1 | equiv | difference array + prefix sum over polygon line ranges (`compute_bins`) |
+| 2.3 | Bins ÷ thread count for even split on 1/2/3/4/6/12 cores | 02 §1 | equiv | 8 even bins claimed dynamically by an adaptive worker count — adaptive worker controller instead — see note |
+| 2.4 | AND/OR uniformity test per polygon selects `_constant` kernels | 02 §2 | partial | `attrs_constant` / `rgb_constant` on the Shade and per-span endpoint equality (`span_attrs2n`); no per-polygon AND/OR pass |
+| 2.5 | Specialisation matrix: 9 wrap × 8 combine × 10 resolve × 4 depth | 02 §2 | partial | resolve is a `[mode][textured][aa][shadow]` template matrix; wrap modes templated in the gather (`gatherN_wraps`); no constant-attribute kernel family |
+| 2.6 | Fused resolve (edge mark + fog + convert + store) chosen once per bin | 02 §2 | equiv | `final_pass` per line does edge mark + fog + AA in one pass |
+| 2.7 | Spans batched to 256 px across scanlines before the pipeline runs | 02 §3 | no | measured flat — see per-span-cost note |
+| 2.8 | Per-256-px kernel selection; flush has 39 direct calls, no indirect | 02 §3 | same | `ResolveFn` picked once per polygon in `setup_shade`; batch loops jobs internally |
+| 2.9 | Stage-at-a-time SoA span pipeline; conditionals become byte masks | 02 §3 | same | span_factor → span_attrs5n → texels → shade → depth_candidates, all NEON passes over SpanBuf arrays |
+| 2.10 | Per-span interpolants broadcast to per-pixel arrays, then one flat pass | 02 §3 | no | measured: does not port (+0.6–1.7 %) — see 02 §3 |
+| 2.11 | Constant-W perspective factor as iota ramp, no division | 02 §3 | partial | `Interp::recip` turns the linear division into a multiply; no iota-ramp kernel for constant W |
+| 2.12 | Depth test emits mask + surviving count; later stages skip on zero | 02 §3 | equiv | `depth_candidates` returns a pass mask and first/last range, later stages clip to it |
+| 2.13 | Mask-shift tail handling, no scalar epilogue | 02 §3 | partial | arrays padded to multiples of 4/8 instead |
+| 2.14 | Eight-way unrolled scalar texel gather for in-order latency hiding | 02 §4 | partial | `gather4_impl` issues 4 independent scalar chains per vector (DraStic: 8) |
+| 2.15 | Software-pipelined vector loops (load next before store current) | 02 §4 | partial | not systematically; compiler-scheduled intrinsics |
+| 2.16 | Fixed point throughout, no FP | 02 §4 | same |  |
+| 2.17 | Texture lookup hoisted to bin time, one-entry memo | 02 §5 | same | `texcache_.lookup` once per polygon in `setup_shade` (hash map, content-validated) |
+| 2.18 | Opaque then translucent pass with per-tile polygon-ID stencil | 02 §6 | equiv | per-line shadow stencil row in the ring; opaque/translucent ordering by list |
+| 2.19 | Rear-plane bitmap path with scroll | 02 §6 | same | `clear_line` handles the rear-plane bitmap |
+| 2.20 | Paired `_c` / `_asm` kernels, C as bit-exact reference | 02 §7 | same | `kernels_ref.cpp` / `kernels_neon.cpp` diffed by `tests/kernels_test.cpp` |
+| 2.21 | `_1x` / `_4x` (hi-res) kernel families | 02 §2 | n/a | no hi-res mode |
 
 ## 03 — 2D engines
 
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
-| 3.1 | 1-bit-per-pixel visibility masks; scanline = two NEON registers | 03 §2 | | |
-| 3.2 | NEON movemask idiom (`and` + `addp` tree) for 4/8/12/16 bpp | 03 §2 | | |
-| 3.3 | Bit-parallel priority encoder yielding first *and* second layer | 03 §3 | | |
-| 3.4 | Separate OBJ first/second accumulators for forced-blend sprites | 03 §3 | | |
-| 3.5 | `_single` encoder when blending is off | 03 §3 | | |
-| 3.6 | Backdrop mask from accumulated coverage | 03 §3 | | |
-| 3.7 | Pixel select 32 px/iteration; zero mask word skips the group | 03 §4 | | |
-| 3.8 | Planar 6-bit channel split once per line; effects as byte ops | 03 §5 | | |
-| 3.9 | `tbl` + `ld2`/`st2` as a 4bpp palette unit | 03 §6 | | |
-| 3.10 | `bit` + `rev32`/`sli` branch-free H-flip, four tiles at a time | 03 §6 | | |
-| 3.11 | Windows as mask ANDs, one kernel per active-window count | 03 §7 | | |
-| 3.12 | Mosaic applied to pixels and mask before priority | 03 §7 | | |
-| 3.13 | Blank-layer elimination before the encoder | 03 §7 | | |
-| 3.14 | 3D output presented as an ordinary layer (visibility + alpha gather) | 03 §7 | | |
-| 3.15 | Fused display-capture variants | 03 §7 | | |
-| 3.16 | Assembly conversion only where profiling justified it (`obj_c` stays C) | 03 §8 | | |
+| 3.1 | 1-bit-per-pixel visibility masks; scanline = two NEON registers | 03 §2 | no | layer lines are u16 values with bit 15 = opaque; select kernels test the bit per lane |
+| 3.2 | NEON movemask idiom (`and` + `addp` tree) for 4/8/12/16 bpp | 03 §2 | n/a | no bitmask representation |
+| 3.3 | Bit-parallel priority encoder yielding first *and* second layer | 03 §3 | equiv | `select16` writes top and second value + table id per pixel in one pass (16-bit lanes, not 1-bit) |
+| 3.4 | Separate OBJ first/second accumulators for forced-blend sprites | 03 §3 | equiv | `select16_obj` carries the attribute byte (semi/bitmap) into the resolve |
+| 3.5 | `_single` encoder when blending is off | 03 §3 | same | `select16_flat` / `_flat_nowin` when `needs_second()` is false |
+| 3.6 | Backdrop mask from accumulated coverage | 03 §3 | equiv | T_BACKDROP table id where nothing won |
+| 3.7 | Pixel select 32 px/iteration; zero mask word skips the group | 03 §4 | partial | `Layer::any` skips an empty *line*; no per-32-px group skip |
+| 3.8 | Planar 6-bit channel split once per line; effects as byte ops | 03 §5 | equiv | 18-bit packed records (6 bits/channel) resolved once on the winner; effects on packed words, not planar bytes |
+| 3.9 | `tbl` + `ld2`/`st2` as a 4bpp palette unit | 03 §6 | equiv | `text_row_16` uses `vqtbl4q` for 16-colour tiles (64-byte table) |
+| 3.10 | `bit` + `rev32`/`sli` branch-free H-flip, four tiles at a time | 03 §6 | same | `vrev64` + `vbsl` on the tile control flag (`kernels_neon.cpp:321`) |
+| 3.11 | Windows as mask ANDs, one kernel per active-window count | 03 §7 | equiv | window plane byte per pixel; `_nowin` kernel variants for the common case |
+| 3.12 | Mosaic applied to pixels and mask before priority | 03 §7 | same | BG/OBJ mosaic applied on the layer lines before select |
+| 3.13 | Blank-layer elimination before the encoder | 03 §7 | same | `Layer::any` + `select_layers` |
+| 3.14 | 3D output presented as an ordinary layer (visibility + alpha gather) | 03 §7 | same | `layer16_3d`, `line_has_translucent_3d` |
+| 3.15 | Fused display-capture variants | 03 §7 | partial | one `capture(line)` path with blend branches inside |
+| 3.16 | Assembly conversion only where profiling justified it (`obj_c` stays C) | 03 §8 | same | sprite rows have NEON kernels (`obj_row_*`); affine/large BGs stay C++ |
 
 ## 04 — Scheduler, deferral, DMA, memory
 
@@ -98,50 +124,50 @@ already settled carry a note.
 
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
-| 4.1 | Delta-encoded fixed-slot event list; slice = head delta | 04 §1 | | |
-| 4.2 | Both CPUs run the same slice; ARM7 at doubled cycle cost | 04 §1 | | |
-| 4.3 | Forced task switch at next 128-cycle boundary on cross-CPU dependency | 04 §1 | | |
-| 4.4 | Scanline as two events (3,072 + 1,188 cycles) | 04 §1 | | |
-| 4.5 | Timer count derived on read; overflow as an event | 04 §2 | | |
-| 4.6 | `irq_pending` precomputed at every IF-setting site | 04 §3 | | |
-| 4.7 | `pending_actions` + alert thunks at block boundaries only | 04 §3 | | |
-| 4.8 | Whole-transfer DMA over a 16-entry 8 MB region table | 04 §4 | | |
-| 4.9 | DMA cycle cost from static seq/non-seq tables; completion as event | 04 §4 | | |
-| 4.10 | Coarse (64 KB) / fine (2 KB) code bitmaps ORed over DMA destination | 04 §4 | | |
-| 4.11 | HBlank DMA into VRAM forces 2D render catch-up first | 04 §4 | | |
+| 4.1 | Delta-encoded fixed-slot event list; slice = head delta | 04 §1 | equiv | fixed `EventId` slots, absolute `at_[]` deadlines, armed bitmask, cached `next_` |
+| 4.2 | Both CPUs run the same slice; ARM7 at doubled cycle cost | 04 §1 | same | event-bound mode (quantum 0): ARM9 slice then ARM7 with `arm7_debt_/2`; verification harness uses 128-cycle lockstep |
+| 4.3 | Forced task switch at next 128-cycle boundary on cross-CPU dependency | 04 §1 | equiv | `preempt()` on DMA start, `gx_fifo_full()` stall, LOCKSTEP_QUANTUM polling while stalled |
+| 4.4 | Scanline as two events (3,072 + 1,188 cycles) | 04 §1 | same | HBlank / VBlank_Scanline events |
+| 4.5 | Timer count derived on read; overflow as an event | 04 §2 | same | `timer_value` from `start_time`; overflow scheduled from the sample point |
+| 4.6 | `irq_pending` precomputed at every IF-setting site | 04 §3 | same | `hot.irq_pending` |
+| 4.7 | `pending_actions` + alert thunks at block boundaries only | 04 §3 | same | `hot.alerts` polled after stores / at fallback |
+| 4.8 | Whole-transfer DMA over a 16-entry 8 MB region table | 04 §4 | no | `Dma::run` executes per unit against a budget with burst timing (melonDS model); each word goes through `bus.dma_read32/write32` |
+| 4.9 | DMA cycle cost from static seq/non-seq tables; completion as event | 04 §4 | no | per-unit burst tables; the copy is not front-loaded |
+| 4.10 | Coarse (64 KB) / fine (2 KB) code bitmaps ORed over DMA destination | 04 §4 | equiv | DMA words take the tagged-page store path → `store_code`; no separate bitmap |
+| 4.11 | HBlank DMA into VRAM forces 2D render catch-up first | 04 §4 | n/a | 2D is synchronous, VRAM is always current |
 | 4.12 | 2D rendered as one batch at VBlank when nothing changed mid-frame | 04 §5 | **no — HIGH PRIORITY** | `Gpu::on_hblank` → `draw_line` renders both engines every line (`src/core/gpu/gpu.cpp`) |
 | 4.13 | Engine B rendered on a worker thread, engine A on main | 04 §5 | partial — **HIGH PRIORITY** | we dispatch/join the engine-B worker per line (192 hand-offs/frame); DraStic does it once per frame |
 | 4.14 | Per-engine journal of mid-frame register/palette/OAM writes, replayed per line | 04 §5 | **no — HIGH PRIORITY** | prerequisite for 4.12; we apply writes directly and rely on per-line rendering for correctness |
 | 4.15 | Copy-on-first-write shadow palette/OAM; journal only if value changed | 04 §5 | no | part of the 4.12–4.14 cluster |
-| 4.16 | VRAM bank remaps deferred to next render | 04 §5 | | |
-| 4.17 | Geometry commands logged, replayed once at VBlank | 04 §6 | | |
-| 4.18 | Vertex transform as a batched kernel after replay | 04 §6 | | |
-| 4.19 | `GXSTAT` (and FIFO IRQ/DMA) computed by replaying the log on demand | 04 §6 | | see Dragon Ball GXSTAT poll note |
-| 4.20 | 3D render kicked at line 215, joined at VBlank | 04 §6 | | |
-| 4.21 | Audio buffer occupancy as primary frame limiter | 04 §7 | | |
-| 4.22 | Frame skip drops rendering only (CPU/geometry/SPU still exact) | 04 §7 | | |
-| 4.23 | All thread hand-offs via mutex + condvar, no spinning | 04 §8 | | see qemu LineWorker hang note |
+| 4.16 | VRAM bank remaps deferred to next render | 04 §5 | partial | `update_vram` is immediate but skips remaps that do not change the effective windows |
+| 4.17 | Geometry commands logged, replayed once at VBlank | 04 §6 | no | `Gpu3D::run_to` executes queued commands after every ARM9 slice (slice-granular, not frame-granular) |
+| 4.18 | Vertex transform as a batched kernel after replay | 04 §6 | no | vertices transformed as commands execute |
+| 4.19 | `GXSTAT` (and FIFO IRQ/DMA) computed by replaying the log on demand | 04 §6 | same | register reads call `run_to` first; `swap_pending()` feeds idle skip — see Dragon Ball GXSTAT poll note |
+| 4.20 | 3D render kicked at line 215, joined at VBlank | 04 §6 | same | `render_frame` at VCount 215, joined by `sync_line` as display reads each band |
+| 4.21 | Audio buffer occupancy as primary frame limiter | 04 §7 | same | `Audio::pace()` sleeps above the target queue depth; wall clock only with `--no-audio` |
+| 4.22 | Frame skip drops rendering only (CPU/geometry/SPU still exact) | 04 §7 | no | no frame skip at all |
+| 4.23 | All thread hand-offs via mutex + condvar, no spinning | 04 §8 | equiv | LineWorker spins then parks; 3D workers mutex+condvar — see qemu LineWorker hang note |
 
 ## 05 — SPU
 
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
-| 5.1 | Mix once per frame at VBlank | 05 §1 | | |
-| 5.2 | Fixed-point cycle→sample conversion with carried remainder | 05 §1 | | |
-| 5.3 | Catch-up mix on the audio driver's timer overflow (ARM7 timer 1) | 05 §1 | | |
-| 5.4 | Resampling folded into playback: 32.32 cursor, nearest sample, no intermediate mix | 05 §2 | | |
-| 5.5 | Pre-multiplied `vol_l` / `vol_r` per channel; one MAC per side per sample | 05 §2 | | |
-| 5.6 | Source resolved to a host pointer at key-on; silent if not direct-mapped | 05 §2 | | |
-| 5.7 | Register writes set per-channel dirty bits; resolved at next mix | 05 §3 | | |
-| 5.8 | Only key-on is eager; busy bit cleared in the mirrored I/O word | 05 §3 | | |
-| 5.9 | ADPCM decoded one word (8 samples) at a time into a 64-entry ring | 05 §4 | | |
-| 5.10 | Loop-point predictor/index snapshot; no re-decode on loop | 05 §4 | | |
-| 5.11 | PSG as 8-entry duty tables, noise as precomputed 32 K LFSR table | 05 §5 | | |
-| 5.12 | Clamp/narrow as auto-vectorised C over the whole buffer | 05 §6 | | |
-| 5.13 | Lock-free 64 K-sample ring with 16-bit indices to the audio thread | 05 §6 | | |
-| 5.14 | Capture units emulated for timing/control only (data is silence) | 05 §6 | | accuracy trade — decide, don't copy |
-| 5.15 | Channels 0–3 keep a side sample for SOUNDCNT output select | 05 §6 | | |
-| 5.16 | `audio_sync` blocks at VBlank above ¾ buffer occupancy | 05 §7 | | |
+| 5.1 | Mix once per frame at VBlank | 05 §1 | no | `ev_mix` fires every 2048 cycles: one scheduler event per output sample (~546/frame) |
+| 5.2 | Fixed-point cycle→sample conversion with carried remainder | 05 §1 | n/a | native 32.768 kHz, no rate conversion in the core |
+| 5.3 | Catch-up mix on the audio driver's timer overflow (ARM7 timer 1) | 05 §1 | n/a | mixing is per sample |
+| 5.4 | Resampling folded into playback: 32.32 cursor, nearest sample, no intermediate mix | 05 §2 | no | hardware-exact per-channel timers stepped per sample; SDL resamples the 32 kHz output |
+| 5.5 | Pre-multiplied `vol_l` / `vol_r` per channel; one MAC per side per sample | 05 §2 | partial | `volume`/`vol_shift`/`pan` pre-decoded in `set_cnt`; pan applied in `mix()` per channel per sample |
+| 5.6 | Source resolved to a host pointer at key-on; silent if not direct-mapped | 05 §2 | no | 32-byte per-channel FIFO refilled through the bus (hardware-exact, melonDS-comparable) |
+| 5.7 | Register writes set per-channel dirty bits; resolved at next mix | 05 §3 | no | `set_cnt` decodes eagerly (cheap; no divides involved) |
+| 5.8 | Only key-on is eager; busy bit cleared in the mirrored I/O word | 05 §3 | partial | key-on eager; busy bit lives in `cnt` |
+| 5.9 | ADPCM decoded one word (8 samples) at a time into a 64-entry ring | 05 §4 | no | `next_adpcm` decodes one nibble per sample |
+| 5.10 | Loop-point predictor/index snapshot; no re-decode on loop | 05 §4 | same | `adpcm_val_loop` / `adpcm_idx_loop` |
+| 5.11 | PSG as 8-entry duty tables, noise as precomputed 32 K LFSR table | 05 §5 | no | LFSR stepped and PSG computed per sample |
+| 5.12 | Clamp/narrow as auto-vectorised C over the whole buffer | 05 §6 | n/a | clamp per sample in `mix()` |
+| 5.13 | Lock-free 64 K-sample ring with 16-bit indices to the audio thread | 05 §6 | same | 16 K-frame ring, `take()` from the frontend |
+| 5.14 | Capture units emulated for timing/control only (data is silence) | 05 §6 | no — by choice | capture implemented for the mixer-output mode; add/channel modes warn — accuracy trade — decide, don't copy |
+| 5.15 | Channels 0–3 keep a side sample for SOUNDCNT output select | 05 §6 | same | channel 1/3 bypass in `mix()` |
+| 5.16 | `audio_sync` blocks at VBlank above ¾ buffer occupancy | 05 §7 | same | `Audio::pace()` |
 
 ## Cross-cutting
 
