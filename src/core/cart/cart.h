@@ -82,6 +82,10 @@ private:
   void key1_apply_keycode(u32* keycode, u32 mod);
 
   SaveType save_type_ = SaveType::None;
+  // Infrared carts (game code 'I???': Pokémon HG/SS, B/W, B2/W2, Walk with
+  // Me): the AUXSPI bus reaches the IR chip first; its first byte is a
+  // command, 0x00 = pass the rest through to the save chip, 0x08 = ID (0xAA).
+  bool ir_cart_ = false; u8 ir_cmd_ = 0; u32 ir_pos_ = 0;
   std::vector<u8> sram_;
   bool sram_dirty_ = false;
   u32 spi_pos_ = 0; u8 spi_cmd_ = 0; u32 spi_addr_ = 0; u8 spi_status_ = 0;

@@ -8,6 +8,7 @@
 #include "core/nds.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace ds::cart {
@@ -18,17 +19,22 @@ inline u32 bswap(u32 v) { return __builtin_bswap32(v); }
 
 SaveType save_type_for(u32 code, u32& size) {
   // melonDS SaveMemType numbering: 1 = 512 B EEPROM, 2 = 8 KB, 3 = 64 KB,
-  // 4 = 128 KB EEPROM, 5 = 256 KB, 6 = 512 KB, 7 = 1 MB FLASH.
-  struct E { u32 code; u8 type; };
+  // 4 = 128 KB EEPROM, 5 = 256 KB, 6 = 512 KB, 7 = 1 MB, 8..10 = 8/16/64 MB FLASH.
+  // The table is the melonDS ROM list (save_list.inc), sorted by game code.
+  struct E { u32 code; u32 type; };
   static const E list[] = {
-    {0x45365941, 5}, {0x454C4759, 2}, {0x45354F42, 5}, {0x45474B59, 3}, {0x454B5441, 2},
-    {0x454A4C43, 2}, {0x455A5241, 2}, {0x45544D41, 2}, {0x45484D41, 5}, {0x45325041, 1},
-    {0x454F4F42, 2}, {0x455A4C59, 2}, {0x45435341, 2}, {0x45555341, 3}, {0x45465341, 5},
-    {0x454D5341, 2},
+#include "core/cart/save_list.inc"
   };
-  u8 t = 3;
-  for (const E& e : list) if (e.code == code) { t = e.type; break; }
-  static const u32 sizes[] = {0, 512, 8192, 65536, 131072, 262144, 524288, 1048576};
+  u32 t = 3;   // unknown title: 64 KB EEPROM, the most common chip
+  size_t lo = 0, hi = sizeof list / sizeof list[0];
+  while (lo < hi) {
+    const size_t mid = (lo + hi) / 2;
+    if (list[mid].code < code) lo = mid + 1;
+    else if (list[mid].code > code) hi = mid;
+    else { if (list[mid].type >= 1 && list[mid].type <= 10) t = list[mid].type; break; }
+  }
+  static const u32 sizes[] = {0, 512, 8192, 65536, 131072, 262144, 524288, 1048576,
+                              8388608, 16777216, 67108864};
   size = sizes[t];
   if (t == 1) return SaveType::EepromTiny;
   if (t <= 4) return SaveType::Eeprom;
@@ -46,6 +52,7 @@ Cart::Cart(NDS& nds, std::vector<u8> rom) : nds_(nds), rom_(std::move(rom)) {
   else chip_id_ |= (0x100 - (size >> 28)) << 8;
   u32 sram_size = 0;
   save_type_ = save_type_for(header_.game_code_u32(), sram_size);
+  ir_cart_ = (header_.game_code_u32() & 0xFF) == 'I';
   sram_.assign(sram_size, 0xFF);
 
   // Dumps often carry a decrypted secure area; the cart must hand out the
@@ -197,9 +204,19 @@ u32 Cart::command_receive() {
 }
 
 // ---- save chip --------------------------------------------------------------
-void Cart::spi_release() { spi_pos_ = 0; }
+// DS_AUXSPI_LOG=1: one line per save-chip transaction (command, address, bytes).
+static const bool g_auxspi_log = std::getenv("DS_AUXSPI_LOG") != nullptr;
+void Cart::spi_release() {
+  if (g_auxspi_log && spi_pos_) std::fprintf(stderr, "[auxspi] cmd %02x addr %06x len %u status %02x%s\n", spi_cmd_, spi_addr_, spi_pos_, spi_status_, ir_cart_ ? " (ir)" : "");
+  spi_pos_ = 0; ir_pos_ = 0;
+}
 
 u8 Cart::spi_transfer(u8 v) {
+  if (ir_cart_) {
+    if (ir_pos_++ == 0) { ir_cmd_ = v; if (g_auxspi_log && v != 0) std::fprintf(stderr, "[auxspi] ir cmd %02x\n", v); return 0; }
+    if (ir_cmd_ == 0x08) return 0xAA;
+    if (ir_cmd_ != 0x00) return 0;
+  }
   if (save_type_ == SaveType::None) return 0;
   u8 ret = 0xFF;
   if (spi_pos_ == 0) {
@@ -258,9 +275,9 @@ u8 Cart::spi_flash(u8 v) {
   const u32 mask = static_cast<u32>(sram_.size() - 1);
   switch (spi_cmd_) {
   case 0x05: return spi_status_;
-  case 0x02:   // page program
+  case 0x02:   // page program: can only clear bits (an erased page reads 0xFF)
     if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] = 0; sram_dirty_ = true; } spi_addr_++; }
+    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] &= v; sram_dirty_ = true; } spi_addr_++; }
     return 0;
   case 0x0A:   // page write
     if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
@@ -276,11 +293,11 @@ u8 Cart::spi_flash(u8 v) {
   case 0x9F: return 0xFF;
   case 0xD8:   // sector erase
     if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x10000; ++i) sram_[(spi_addr_++) & mask] = 0; sram_dirty_ = true; }
+    if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x10000; ++i) sram_[(spi_addr_++) & mask] = 0xFF; sram_dirty_ = true; }
     return 0;
   case 0xDB:   // page erase
     if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x100; ++i) sram_[(spi_addr_++) & mask] = 0; sram_dirty_ = true; }
+    if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x100; ++i) sram_[(spi_addr_++) & mask] = 0xFF; sram_dirty_ = true; }
     return 0;
   default: return 0xFF;
   }
