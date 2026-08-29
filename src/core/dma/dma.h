@@ -84,6 +84,7 @@ private:
   void start(Channel& c);
   u32  run_channel(Channel& c, u32 budget);
   u32  unit_cycles(Channel& c, bool burst_start, bool word);
+  struct RunCost; RunCost run_cost(Channel& c, bool word);
 };
 
 } // namespace ds::dma

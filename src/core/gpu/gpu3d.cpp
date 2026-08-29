@@ -498,6 +498,16 @@ void Gpu3D::gxfifo_write(u32 value) {
     // 16-parameter matrix load, a vertex pair). Everything else takes the
     // packed-command walk below.
     if (++param_count_ < total_params_) { fifo_write(Entry{value, static_cast<u8>(cur_cmd_)}); return; }
+    // The parameter completes its command. When no packed command follows
+    // (the usual case: one command per word, 40 k a frame on Golden Sun),
+    // the walk below would only shift zero bytes out; finish here.
+    fifo_write(Entry{value, static_cast<u8>(cur_cmd_)});
+    cur_cmd_ >>= 8; --num_cmds_;
+    if (cur_cmd_ == 0) { num_cmds_ = 0; return; }
+    param_count_ = 0;
+    total_params_ = CMD_PARAMS[cur_cmd_ & 0xFF];
+    if (total_params_ > 0) return;
+    // Zero-parameter commands packed behind it: the walk enqueues them.
   } else {
     num_cmds_ = 4; cur_cmd_ = value; param_count_ = 0;
     total_params_ = CMD_PARAMS[cur_cmd_ & 0xFF];

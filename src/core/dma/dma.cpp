@@ -140,6 +140,34 @@ u32 Dma::unit_cycles(Channel& c, bool burst_start, bool word) {
   return burst_start ? src_n + dst_n : src_s + dst_s;
 }
 
+// Per-word cost inside a direct-mapped run. A run never leaves its 2 KB page,
+// so it never crosses a 16 KB timing block: the region pair and the n/s costs
+// unit_cycles() looked up for the run's first word hold for the rest of it.
+// What can still vary per word is the main-RAM burst table, which is walked
+// here exactly as unit_cycles() walks it (the table is re-selected to the
+// same table when it wraps). Everything else is one constant per run.
+struct Dma::RunCost {
+  const u8* table; u32 constant;
+  [[gnu::always_inline]] u32 next(Channel& c) {
+    if (!table) return constant;
+    u32 v = c.burst_table[c.burst_pos];
+    if (v == 0) { c.burst_pos = 0; v = c.burst_table[0]; }
+    ++c.burst_pos;
+    return v;
+  }
+};
+static_assert(mem::PAGE_SIZE <= (1u << 14), "a run must stay inside one DMA timing block");
+
+Dma::RunCost Dma::run_cost(Channel& c, bool word) {
+  const u32 MAIN = mem::REGION_MAIN_RAM;
+  const bool burst = (c.src_rgn == MAIN && c.dst_rgn != MAIN && c.src_inc > 0) ||
+                     (c.dst_rgn == MAIN && c.src_rgn != MAIN && c.dst_inc > 0);
+  if (burst) return RunCost{c.burst_table, 0};
+  // Not a burst: unit_cycles(c, false, word) is a pure function of the cached
+  // regions/costs for src_inc == dst_inc == 1 (the runs' only shape).
+  return RunCost{nullptr, unit_cycles(c, false, word)};
+}
+
 u32 Dma::run_channel(Channel& c, u32 budget) {
   const bool a9 = c.cpu == Cpu::ARM9;
   const bool word = c.cnt & (1u << 26);
@@ -167,12 +195,13 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
         const u8* p = nds_.cpu(Cpu::ARM9).page_table.read_ptr(c.cur_src);
         if (p) {
           u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 2;
+          RunCost rc = run_cost(c, true);
           for (;;) {
             u32 v; std::memcpy(&v, p, 4);
             nds_.gpu3d.gxfifo_dma_write(v);
             c.cur_src += 4; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || nds_.gpu3d.stalled()) break;
-            cost = unit_cycles(c, false, true); used += cost << 1;
+            used += rc.next(c) << 1;
             p += 4;
           }
           continue;
@@ -193,11 +222,12 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 2;
           const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) >> 2;
           if (room_d < room) room = room_d;
+          RunCost rc = run_cost(c, true);
           for (;;) {
             std::memcpy(pd, ps, 4);
             c.cur_src += 4; c.cur_dst += 4; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
-            cost = unit_cycles(c, false, true); if (a9) cost <<= 1; used += cost;
+            cost = rc.next(c); if (a9) cost <<= 1; used += cost;
             ps += 4; pd += 4;
           }
           continue;

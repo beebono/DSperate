@@ -91,7 +91,15 @@ measured decision, ranked by likely payoff:
    0.9 M; frame hashes identical everywhere. What is left is the per-word
    unit-timing model itself (~30 insn/word) — DraStic's 7.7 k/frame is
    what a whole-transfer copy with a static cost table buys, at the price
-   of the unit model; not worth it at 6 % of GSDD's frame.
+   of the unit model; not worth it at 6 % of GSDD's frame. *Second cut,
+   2026-08-28:* inside a direct-mapped run the region pair and n/s costs are
+   fixed (a 2 KB page never crosses a 16 KB timing block), so the per-word
+   `unit_cycles` call is replaced by one constant or the same burst-table walk
+   (`Dma::run_cost`); and `gxfifo_write` finishes a one-parameter command
+   without the packed-command walk (40 k words a frame on GSDD). Exact on all
+   six hash sets; qemu non-spin GSDD 46.2 → 42.7 M (−7.7 %), dbori 23.3 →
+   22.4 M (−3.9 %), `gxfifo_write` 3.57 → 1.97 M. **RG DS, paired, 4 reps:
+   GSDD 27.0 → 25.6 ms mean (−5.4 %), median 31.7 → 29.8; dbori −1.6 %.**
 5. **JIT: ITCM tag-free tables, three arenas, known-constant tracking,
    check-free second entry** (1.5, 1.12, 1.23, 1.26) — each small; the
    arena flush (1.23) is the one with a visible failure mode (full arena
