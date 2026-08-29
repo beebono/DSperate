@@ -239,7 +239,7 @@ private:
   u32 vram_base() const { return bank_ * VRAM_BANK; }
 
   // FIFO.
-  void fifo_write(const Entry& e);
+  [[gnu::always_inline]] void fifo_write(const Entry& e);   // LTO outlined it out of gxfifo_write: 30 insn + a call per word
   Entry fifo_read();
   void gxfifo_write(u32 value);
   void run_to_slow(u64 arm9_time);

@@ -3,6 +3,9 @@
 #include "core/gpu/gpu3d.h"
 #include "core/nds.h"
 #include "core/profile.h"
+#if DSPERATE_NEON
+#include <arm_neon.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -169,11 +172,29 @@ inline void mtx_load_4x3(s32* m, const s32* s) {
 }
 // m = s * m, with s a 4x4 / 4x3 (implicit last column 0,0,0,1) / 3x3 matrix.
 inline void mtx_mult_4x4(s32* m, const s32* s) {
+#if DSPERATE_NEON
+  // Same 64-bit products, sums and arithmetic shift as the scalar form, two
+  // columns per vector: the clip matrix is rebuilt on the first vertex after
+  // every position-matrix change (3.5 k times a frame on Golden Sun's title,
+  // 43 % of submit_vertex), and sixteen outputs share sixteen inputs.
+  const int32x2_t t0l = vld1_s32(m), t0h = vld1_s32(m + 2), t1l = vld1_s32(m + 4), t1h = vld1_s32(m + 6);
+  const int32x2_t t2l = vld1_s32(m + 8), t2h = vld1_s32(m + 10), t3l = vld1_s32(m + 12), t3h = vld1_s32(m + 14);
+  for (int r = 0; r < 4; ++r) {
+    const int32x4_t sr = vld1q_s32(s + r * 4);
+    int64x2_t lo = vmull_lane_s32(t0l, vget_low_s32(sr), 0), hi = vmull_lane_s32(t0h, vget_low_s32(sr), 0);
+    lo = vmlal_lane_s32(lo, t1l, vget_low_s32(sr), 1);  hi = vmlal_lane_s32(hi, t1h, vget_low_s32(sr), 1);
+    lo = vmlal_lane_s32(lo, t2l, vget_high_s32(sr), 0); hi = vmlal_lane_s32(hi, t2h, vget_high_s32(sr), 0);
+    lo = vmlal_lane_s32(lo, t3l, vget_high_s32(sr), 1); hi = vmlal_lane_s32(hi, t3h, vget_high_s32(sr), 1);
+    vst1_s32(m + r * 4, vmovn_s64(vshrq_n_s64(lo, 12)));
+    vst1_s32(m + r * 4 + 2, vmovn_s64(vshrq_n_s64(hi, 12)));
+  }
+#else
   s32 t[16]; std::memcpy(t, m, sizeof t);
   for (int r = 0; r < 4; ++r)
     for (int c = 0; c < 4; ++c)
       m[r * 4 + c] = static_cast<s32>((static_cast<s64>(s[r * 4]) * t[c] + static_cast<s64>(s[r * 4 + 1]) * t[4 + c] +
                                        static_cast<s64>(s[r * 4 + 2]) * t[8 + c] + static_cast<s64>(s[r * 4 + 3]) * t[12 + c]) >> 12);
+#endif
 }
 inline void mtx_mult_4x3(s32* m, const s32* s) {
   s32 t[16]; std::memcpy(t, m, sizeof t);
@@ -232,10 +253,13 @@ int clip_against_plane(Vertex* v, int nverts, int clipstart, bool far_clip) {
   Vertex temp[10];
   int c = clipstart;
   if (clipstart == 2) { temp[0] = v[0]; temp[1] = v[1]; }
+  // The passes read one array and write the other, so the working vertex is
+  // a reference: the value copies were 60 bytes per vertex per pass, and
+  // Golden Sun's screen-sized quads clip on every frame.
   for (int i = clipstart; i < nverts; ++i) {
     const int prev = i == 0 ? nverts - 1 : i - 1;
     const int next = i + 1 >= nverts ? 0 : i + 1;
-    const Vertex vtx = v[i];
+    const Vertex& vtx = v[i];
     if (vtx.pos[comp] > vtx.pos[3]) {
       if (comp == 2 && !far_clip) return 0;       // polygons crossing the far plane are dropped unless bit 12 allows them
       if (v[prev].pos[comp] <= v[prev].pos[3]) clip_segment<comp, 1, attribs>(temp[c++], vtx, v[prev]);
@@ -246,7 +270,7 @@ int clip_against_plane(Vertex* v, int nverts, int clipstart, bool far_clip) {
   for (int i = clipstart; i < nverts; ++i) {
     const int prev = i == 0 ? nverts - 1 : i - 1;
     const int next = i + 1 >= nverts ? 0 : i + 1;
-    const Vertex vtx = temp[i];
+    const Vertex& vtx = temp[i];
     if (vtx.pos[comp] < -vtx.pos[3]) {
       if (temp[prev].pos[comp] >= -temp[prev].pos[3]) clip_segment<comp, -1, attribs>(v[c++], vtx, temp[prev]);
       if (temp[next].pos[comp] >= -temp[next].pos[3]) clip_segment<comp, -1, attribs>(v[c++], vtx, temp[next]);
@@ -420,8 +444,12 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
   if (cycle_count_ <= 0) {
     if (prof::enabled && pipe_n_) prof::add(prof::C_GX_RUN_SLOW_EXEC, 1);
     while (cycle_count_ <= 0 && pipe_n_) {
-      if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
-      if (num_tests_ == 0) gxstat_ &= ~(1u << 0);
+      // Both clears are no-ops unless a busy bit is set, which is rare
+      // between matrix-stack and test commands: one test covers them.
+      if (gxstat_ & ((1u << 14) | (1u << 0))) {
+        if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
+        if (num_tests_ == 0) gxstat_ &= ~(1u << 0);
+      }
       execute();
     }
   }
