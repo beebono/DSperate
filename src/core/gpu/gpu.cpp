@@ -20,6 +20,7 @@ Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
   // DS_2D_THREAD=0 keeps engine B on the emulation thread. The two paths must
   // produce identical frames; the env var is what makes that checkable.
   if (const char* l = std::getenv("DS_2D_LAZY")) lazy_enabled_ = std::atoi(l) != 0;
+  if (const char* l = std::getenv("DS_2D_LAZY_CAPTURE")) lazy_capture_ = std::atoi(l) != 0;
   const char* e = std::getenv("DS_2D_THREAD");
   if (!e || std::atoi(e) != 0) {
     // The only statics the two engines share are the colour tables, built by
@@ -161,6 +162,14 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
     return;
   }
   prof::add(prof::C_2D_TRAP_HITS, 1);
+  if (lazy_frame_ && !per_line_ && ++lazy_hits_ < LAZY_HIT_LIMIT) {
+    // Lines whose HBlank has passed are drawn before the bytes change; the
+    // rest of this line's stores need no trap, and the next line re-arms it.
+    catch_up();
+    disarm_trap();
+    trap_rearm_ = true;
+    return;
+  }
   fall_back_per_line();
 }
 
@@ -174,7 +183,10 @@ bool Gpu::vram_remap_begin() {
 void Gpu::vram_remap_end(bool trapped) { if (trapped) arm_trap(); }
 
 void Gpu::arm_trap() {
-  trap_lcdc_ = ((engine[0].dispcnt() >> 16) & 3) == 2;
+  // LCDC banks are trapped when engine A displays one -- or when a capture
+  // writes one, since the batched capture reads its source B and writes its
+  // destination there in line order.
+  trap_lcdc_ = ((engine[0].dispcnt() >> 16) & 3) == 2 || capture_on_;
   nds_.bus.set_vram_trap(true, trap_lcdc_);
   trap_armed_ = true;
 }
@@ -282,6 +294,7 @@ void Gpu::on_scanline_start() {
   nds_.io.set_hblank(false);
   line_ = static_cast<u16>((line_ + 1) % SCANLINES_PER_FRAME);
   hblank_done_ = false;
+  if (trap_rearm_) { trap_rearm_ = false; if (lazy_frame_ && !per_line_ && line_ < SCREEN_H) arm_trap(); }
   // Display lines evaluate their window edges inside step_engine; the rest
   // of the frame is applied directly (nothing is pending by then).
   if (line_ >= SCREEN_H) { join_b(); engine[0].update_windows(line_); engine[1].update_windows(line_); }
@@ -333,7 +346,8 @@ void Gpu::begin_frame() {
   // writes VRAM the guest may read back per line: both stay per-line.
   render_next_ = 0;
   per_line_ = false;
-  lazy_frame_ = lazy_enabled_ && !run_fifo_ && !capture_on_;
+  lazy_frame_ = lazy_enabled_ && !run_fifo_ && (!capture_on_ || lazy_capture_);
+  lazy_hits_ = 0; trap_rearm_ = false;
   // Lag mode for the per-line lines of this frame: the trap guards the line
   // in flight (capture writes only LCDC banks, which no engine reads, so
   // capture itself never needs a join).
