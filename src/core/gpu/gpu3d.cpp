@@ -90,7 +90,10 @@ u64 census_list_hash(const Polygon* const* polys, u32 n, const Vertex* vram) {
 // It must walk fields rather than memcmp the arrays: vtx/z/w are fixed
 // 10-element slots of which only `nverts` are written, so the tails hold stale
 // data, and vtx holds bank-biased absolute indices.
-bool skip_dup() { static const bool on = std::getenv("DS_R3D_SKIPDUP") != nullptr; return on; }
+// On by default since 2026-08-28: RG DS knob sweep, paired 3 reps, -0.7 % (mlbis)
+// to -2.0 % (meteos) on the five replay scenes, flat on GSDD, 1/17 reps slower.
+// DS_R3D_SKIPDUP=0 turns it off for A/B.
+bool skip_dup() { static const bool on = [] { const char* e = std::getenv("DS_R3D_SKIPDUP"); return !e || std::atoi(e) != 0; }(); return on; }
 
 bool lists_equal(const Polygon* a, const Polygon* b, u32 npoly, u32 abase, u32 bbase, const Vertex* vram) {
   for (u32 i = 0; i < npoly; ++i) {
