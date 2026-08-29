@@ -39,6 +39,8 @@ struct TraceState {
   ds::u64 recent[2][32] = {};
   unsigned recent_pos[2] = {0, 0};
   bool pc_hist = false;                       // TRACE_PC_HIST=1: uncollapsed PC histogram on stderr at exit
+  const ds::NDS* nds = nullptr;
+  bool stamp = false;                         // TRACE_TIME=1: prefix each line with the scheduler time (not the shared format)
   std::unordered_map<ds::u32, unsigned long long> hist[2];
 };
 
@@ -57,6 +59,7 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
   for (int k = 0; k < 32; ++k) if (t->recent[i][k] == h) return;
   t->recent[i][t->recent_pos[i]++ & 31] = h;
   t->count[i]++;
+  if (t->stamp) std::fprintf(t->out[i], "%llu ", (unsigned long long)t->nds->sched.now());
   std::fprintf(t->out[i], "%08x %08x %08x", pc, instr, cpu.hot.cpsr);
   for (int r = 0; r < 15; ++r) std::fprintf(t->out[i], " %08x", cpu.hot.regs[r]);
   std::fputc('\n', t->out[i]);
@@ -166,6 +169,7 @@ int main(int argc, char** argv) {
   FILE* audio_out = dump_audio ? std::fopen(dump_audio, "wb") : nullptr;
   if (dump_audio && !audio_out) { std::fprintf(stderr, "could not open %s\n", dump_audio); return 1; }
   ts.pc_hist = std::getenv("TRACE_PC_HIST") != nullptr;
+  ts.stamp = std::getenv("TRACE_TIME") != nullptr; ts.nds = &nds;
   const char* trace_start = std::getenv("TRACE_START_FRAME");   // suppress trace output before this frame
   const int trace_from = trace_start ? std::atoi(trace_start) : 0;
   // Per-frame host times. Whole-process wall clock on the device turned out to
