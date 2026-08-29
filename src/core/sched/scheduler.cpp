@@ -303,6 +303,7 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
     if (!cpu.preempt_residual) return;
     cpu.hot.cycle_budget += cpu.preempt_residual;   // overshoot of the preempted instruction comes off the residual
     cpu.preempt_residual = 0;
+    if (cpu.yielded) { cpu.yielded = false; return; }   // yield(): the rest of the slice goes to the other CPU
     if (cpu.hot.cycle_budget <= 0 || cpu.halted) return;
     if (a9_gx_stalled(cpu)) return;   // gx_fifo_full: sits out until the FIFO drains
   }
@@ -384,7 +385,8 @@ run_returned:
     if (cpu->preempt_residual) {
       cpu->hot.cycle_budget += cpu->preempt_residual;
       cpu->preempt_residual = 0;
-      if (cpu->hot.cycle_budget > 0 && !cpu->halted && !a9_gx_stalled(*cpu)) goto cpu_begin;
+      if (cpu->yielded) cpu->yielded = false;   // yield(): the rest of the slice goes to the other CPU
+      else if (cpu->hot.cycle_budget > 0 && !cpu->halted && !a9_gx_stalled(*cpu)) goto cpu_begin;
     }
   }
 cpu_done:

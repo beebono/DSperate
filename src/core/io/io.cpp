@@ -98,11 +98,17 @@ void Io::set_vblank(bool on) {
 
 // ---- IPC ------------------------------------------------------------------
 void Io::ipc_sync_write(Cpu cpu, u16 value) {
+  static const bool log = std::getenv("DS_IPC_LOG") != nullptr;
+  if (log) std::fprintf(stderr, "[ipcsync] %s out=%x irq=%d t=%llu frame %llu line %u pc %08x\n", cpu == Cpu::ARM9 ? "arm9" : "arm7", (value >> 8) & 0xF, (value >> 13) & 1,
+                        (unsigned long long)nds_.sched.now(), (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(cpu).hot.regs[15]);
   CpuIo& me = cpu_io[ci(cpu)];
   CpuIo& them = cpu_io[ci(other(cpu))];
   me.ipc_sync = (me.ipc_sync & 0x000F) | (value & 0x4F00);
   them.ipc_sync = (them.ipc_sync & 0x4F00) | ((value >> 8) & 0xF);
   if ((value & 0x2000) && (them.ipc_sync & 0x4000)) request_irq(other(cpu), IRQ_IPC_SYNC);
+  // The other CPU may be waiting on this with a tight timeout (the SDK boot
+  // handshake: Pokémon Platinum, Zelda ST, DQIX hung white at quantum >= 2048).
+  nds_.sched.yield(nds_.cpu(cpu));
 }
 
 u16 Io::ipc_fifo_cnt_read(Cpu cpu) {
@@ -139,6 +145,8 @@ void Io::ipc_fifo_send(Cpu cpu, u32 value) {
   if (!(me.ipc_fifo_cnt & 0x8000)) return;
   if (me.fifo_out.full()) { me.ipc_fifo_cnt |= 0x4000; return; }
   const bool was_empty = me.fifo_out.empty();
+  static const bool log = std::getenv("DS_IPC_LOG") != nullptr;
+  if (log) std::fprintf(stderr, "[ipcfifo] %s send %08x frame %llu line %u\n", cpu == Cpu::ARM9 ? "arm9" : "arm7", value, (unsigned long long)nds_.frame_count, nds_.gpu.line());
   me.fifo_out.push(value);
   if (was_empty && (them.ipc_fifo_cnt & 0x0400)) request_irq(other(cpu), IRQ_IPC_RECV);
 }

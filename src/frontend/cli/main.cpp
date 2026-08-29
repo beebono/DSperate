@@ -260,6 +260,16 @@ int main(int argc, char** argv) {
   if (ds::prof::enabled && (jit9 || jit7)) ds::jit::report(stderr);
 #endif
   ds::interp::census_report(nds.frame_count);
+  if (std::getenv("DS_STATE_DUMP")) {   // what each CPU is waiting on at the end of the run
+    for (int c = 0; c < 2; ++c) {
+      const ds::Cpu cpu = c == 0 ? ds::Cpu::ARM9 : ds::Cpu::ARM7;
+      const auto& ci = nds.io.cpu_io[c];
+      std::fprintf(stderr, "[state] %s pc %08x halted %d IME %x IE %08x IF %08x IE&IF %08x fifocnt %04x romctrl %08x auxspicnt %04x\n",
+                   c == 0 ? "arm9" : "arm7", nds.cpu(cpu).hot.regs[15], nds.cpu(cpu).halted, ci.ime, ci.ie, ci.if_, ci.ie & ci.if_,
+                   nds.io.read(cpu, 0x04000184, 16), nds.io.read(cpu, 0x040001A4, 32), nds.io.read(cpu, 0x040001A0, 16));
+      for (int d = 0; d < 4; ++d) std::fprintf(stderr, "[state]   dma%d cnt %08x src %08x dst %08x\n", d, nds.io.read(cpu, 0x040000B8 + d * 12, 32), nds.io.read(cpu, 0x040000B0 + d * 12, 32), nds.io.read(cpu, 0x040000B4 + d * 12, 32));
+    }
+  }
   ds::frame_report(frame_ms);
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),

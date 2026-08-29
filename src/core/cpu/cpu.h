@@ -41,6 +41,7 @@ struct CpuContext {
   Cpu  which;
   bool halted;
   s32  preempt_residual = 0;  // budget handed back when a DMA started by this CPU cuts its slice short (see Scheduler)
+  bool yielded = false;       // Scheduler::yield: the residual is not to be resumed; the other CPU runs first
   bool jumped;       // set by jump(); cleared by the interpreter before each instruction
   u8   _pad0[5];
 

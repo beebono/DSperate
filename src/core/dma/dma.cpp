@@ -287,7 +287,14 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
     c.iter_count--; c.rem_count--;
   }
   if (c.rem_count) {
-    if (c.iter_count == 0) set_running(c, 0);   // wait for the next trigger
+    if (c.iter_count == 0) {
+      set_running(c, 0);   // wait for the next trigger
+      // GXFIFO mode is level-triggered: a burst that leaves the FIFO still
+      // below half full (it was near empty) is followed by the next one at
+      // once. Waiting for the engine to drain first can deadlock when the
+      // words so far are an incomplete command (Spirit Tracks' intro).
+      if (c.start_mode == MODE9_GXFIFO) nds_.gpu3d.check_fifo_dma();
+    }
     return used;
   }
   if (!(c.cnt & (1u << 25))) { c.cnt &= ~0x80000000u; update_cart_armed(); }   // not repeating: disable

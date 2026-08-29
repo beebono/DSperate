@@ -80,6 +80,19 @@ public:
     cpu.preempt_residual += cpu.hot.cycle_budget;
     cpu.hot.cycle_budget = 0;
   }
+  // Called when `cpu` writes something the other CPU is waiting on with a
+  // tight timeout (IPCSYNC: the SDK's boot handshake sends a value and
+  // restarts unless it is echoed within ~1600 cycles, which hardware does in
+  // a few). The slice ends after the current instruction, the unrun budget
+  // is dropped from the clock like a preempt's, and the other CPU runs next
+  // instead of this one resuming -- so a slice longer than that timeout no
+  // longer lets the writer time out before the reader has run at all.
+  void yield(CpuContext& cpu) {
+    if (running_ != &cpu || cpu.hot.cycle_budget <= 0) return;
+    cpu.yielded = true;
+    cpu.preempt_residual += cpu.hot.cycle_budget;
+    cpu.hot.cycle_budget = 0;
+  }
   u64 next_deadline() const { return next_; }
   // The geometry FIFO just filled under the ARM9: in event-bound mode its
   // slice ends here (as the bus stall would), and it sits out until the
