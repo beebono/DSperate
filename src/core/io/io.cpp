@@ -45,7 +45,13 @@ void Io::update_irq(Cpu cpu) {
 }
 
 void Io::request_irq(Cpu cpu, u32 bit) {
-  cpu_io[ci(cpu)].if_ |= (1u << bit);
+  CpuIo& c = cpu_io[ci(cpu)];
+  // A level source re-requests every time it is polled (the GX FIFO IRQ on
+  // every pipe refill, 16 k a frame on Golden Sun). With the bit already set
+  // and the CPU running, update_irq would recompute irq_pending from
+  // unchanged IME/IE/IF -- every write to those recomputes it itself.
+  if ((c.if_ & (1u << bit)) && !nds_.cpu(cpu).halted) return;
+  c.if_ |= (1u << bit);
   update_irq(cpu);
 }
 
