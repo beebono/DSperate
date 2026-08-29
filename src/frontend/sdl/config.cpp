@@ -172,6 +172,9 @@ R"(# DSperate settings. Command-line flags override this file; a file named
 # jit = true                    # false = interpreter
 # quantum = 0                   # 0 = event-bound; 128 = melonDS lockstep
 # idle_skip = 1                 # 0 | 1 | all, see README
+# fast_forward = false          # start fast-forwarding (the hotkeys toggle it)
+# ff_speed = 0                  # fast-forward cap as a multiple of real time; 0 = unlimited
+# ff_skip = 3                   # while fast-forwarding, present one frame in ff_skip+1
 
 # DS buttons: a b x y l r start select up down left right.
 # Keyboard values are SDL key names ("x", "Return", "Right Shift", "F5").

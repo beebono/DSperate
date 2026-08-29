@@ -132,6 +132,12 @@ file`; `DS_STATE_DEBUG=1` prints the cycle-accounting state at both points).
 Loading a state during `--record` leaves a recording that cannot replay past
 that point; `--replay` refuses to load or save states at all.
 
+Fast forward (`Tab` held, Select+R, or the `fast_forward_toggle` hotkey)
+drops the pacing -- `[emu] ff_speed = N` caps it at N times real time -- and
+presents one frame in `ff_skip + 1` (default 3); every frame is still
+emulated, so the run stays exact, and the audio queue keeps the newest
+frames rather than falling behind.
+
 `DS_FPS=1` prints
 speed, per-stage times and audio buffer depth;
 with `--frames N` the output is comparable between runs by frame index.

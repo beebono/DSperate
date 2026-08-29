@@ -340,6 +340,15 @@ int main(int argc, char** argv) {
   Uint64 pace_ticks = 0, draw_ticks_total = 0;
   bool paused = false;
   int state_slot = 0;
+  // Fast forward: the `fast_forward` hotkey while held, or the toggle (also
+  // [emu] fast_forward = true to start that way). ff_speed caps it as a
+  // multiple of real time (0 = as fast as the machine goes); ff_skip presents
+  // one frame in ff_skip+1 -- every frame is still emulated (the display
+  // capture and VRAM feedback keep the run exact), only its scaling and
+  // present are skipped.
+  bool ff_toggle = cfg.flag("emu.fast_forward", false);
+  const int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
+  bool was_fast = false;
   // Battery save flush: once the chip has been quiet for a second, and at
   // every point a session could end (pause, lid, quit).
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
@@ -387,7 +396,7 @@ int main(int argc, char** argv) {
           flush_save();
         }
         break;
-      case A::FastForwardToggle: break;   // pacing: see below
+      case A::FastForwardToggle: ff_toggle = !ff_toggle; std::fprintf(stderr, "fast forward %s\n", ff_toggle ? "on" : "off"); break;
       default: break;
       }
     }
@@ -444,9 +453,15 @@ int main(int argc, char** argv) {
     // texture, so the lock has to happen before the frame runs and the scale
     // cost lands inside run_frame() rather than in the present. DS_FPS's
     // emu/draw split shifts accordingly; the total is what compares.
+    const bool fast = ff_toggle || input.fast_forward_held();
+    if (fast != was_fast) { was_fast = fast; next_frame = SDL_GetPerformanceCounter(); }
+    const bool present = !fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0;
     ds::sdl::Display::Target target[2];
-    bool scaled = display.begin_frame(target);
-    if (dual_window) scaled = display2.begin_frame(target) && scaled;
+    bool scaled = false;
+    if (present) {
+      scaled = display.begin_frame(target);
+      if (dual_window) scaled = display2.begin_frame(target) && scaled;
+    }
     for (int i = 0; i < 2; ++i)
       nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun}
                                          : ds::gpu::Gpu::ScaleTarget{});
@@ -455,15 +470,17 @@ int main(int argc, char** argv) {
     nds.run_frame();
 
     const Uint64 t1 = SDL_GetPerformanceCounter();
-    if (scaled) {
-      display.end_frame();
-      if (dual_window) display2.end_frame();
-    } else {
-      const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
-      display.draw(fb);
-      if (dual_window) display2.draw(fb);
+    if (present) {
+      if (scaled) {
+        display.end_frame();
+        if (dual_window) display2.end_frame();
+      } else {
+        const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
+        display.draw(fb);
+        if (dual_window) display2.draw(fb);
+      }
     }
-    audio.push(nds);
+    audio.push(nds, fast);
     const Uint64 t2 = SDL_GetPerformanceCounter();
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;
@@ -472,10 +489,12 @@ int main(int argc, char** argv) {
     work_ms.push_back(static_cast<double>(t2 - t0) * ticks_to_ms);
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
-    if (audio.active()) {
+    if (fast && ff_speed <= 0) {
+      // unthrottled
+    } else if (audio.active() && !fast) {
       audio.pace();
     } else {
-      next_frame += static_cast<Uint64>(frame_ns * ticks_per_ns);
+      next_frame += static_cast<Uint64>(frame_ns * ticks_per_ns / (fast ? ff_speed : 1));
       const Uint64 now = SDL_GetPerformanceCounter();
       if (next_frame > now) {
         const double wait_ms = (next_frame - now) / (ticks_per_ns * 1e6);

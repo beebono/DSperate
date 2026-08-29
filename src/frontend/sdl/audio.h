@@ -25,7 +25,10 @@ public:
   void close();
   bool active() const { return dev_ != 0; }
 
-  void push(NDS& nds);      // drain the SPU ring into the queue
+  // Drains the SPU ring into the queue. With `drop`, whole frames are
+  // discarded once the queue is at its target depth (fast forward: the
+  // speakers cannot keep up, so play the newest and stay in sync).
+  void push(NDS& nds, bool drop = false);
   void set_volume(int percent);   // 0..100
   int  volume() const { return volume_; }
   void set_muted(bool m) { muted_ = m; }

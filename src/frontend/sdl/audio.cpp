@@ -59,7 +59,8 @@ const std::vector<s16>& Audio::capture() {
   return mic_;
 }
 
-void Audio::push(NDS& nds) {
+void Audio::push(NDS& nds, bool drop) {
+  if (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * TARGET_FRAMES)) { nds.spu.drain(); return; }
   s16 buf[2048 * 2];
   size_t n;
   while ((n = nds.spu.take(buf, 2048)) != 0) {
