@@ -107,6 +107,15 @@ public:
 
   // IRQ lines.
   void request_irq(Cpu cpu, u32 bit);
+  // LCD-originated IRQs (HBlank, VBlank, VCount match) reach the CPU
+  // lcd_irq_delay cycles after their DISPSTAT flag (DS_LCD_IRQ_DELAY, ARM9
+  // cycles, default 4; 0 = same instant). Hardware latches the flag first and the core
+  // sees the request a little later; Art Academy's load screen polls VCOUNT
+  // for 192 and needs to read it before the VBlank IRQ takes it away.
+  void lcd_irq(Cpu cpu, u32 bit);
+  void flush_lcd_irq();
+  u32  lcd_irq_delay = 4;   // two bus cycles; 0 reproduces the old same-instant delivery
+  u32  lcd_irq_pending[2] = {0, 0};
   void update_irq(Cpu cpu);
 
   // Display status, driven by the GPU timing events.

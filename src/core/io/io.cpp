@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace ds::io {
@@ -20,7 +21,20 @@ inline Cpu other(Cpu c) { return c == Cpu::ARM9 ? Cpu::ARM7 : Cpu::ARM9; }
 
 Io::Io(NDS& nds) : nds_(nds) { reset(); }
 
+static void ev_lcd_irq(NDS& nds, u32) { nds.io.flush_lcd_irq(); }
+void Io::lcd_irq(Cpu cpu, u32 bit) {
+  if (lcd_irq_delay == 0) { request_irq(cpu, bit); return; }
+  lcd_irq_pending[ci(cpu)] |= 1u << bit;
+  nds_.sched.schedule(EventId::LcdIrq, nds_.sched.now() + lcd_irq_delay, ev_lcd_irq);
+}
+void Io::flush_lcd_irq() {
+  for (int i = 0; i < 2; ++i) for (u32 m = lcd_irq_pending[i]; m; m &= m - 1) request_irq(static_cast<Cpu>(i), static_cast<u32>(__builtin_ctz(m)));
+  lcd_irq_pending[0] = lcd_irq_pending[1] = 0;
+}
+
 void Io::reset() {
+  lcd_irq_pending[0] = lcd_irq_pending[1] = 0;
+  if (const char* e = std::getenv("DS_LCD_IRQ_DELAY")) lcd_irq_delay = static_cast<u32>(std::atoi(e));
   cpu_io[0] = CpuIo{}; cpu_io[1] = CpuIo{};
   dispstat[0] = dispstat[1] = 0; vcount = 0;
   wramcnt = 0; std::memset(vramcnt, 0, sizeof vramcnt);
@@ -62,7 +76,7 @@ void Io::set_vcount(u16 line) {
     const u16 target = static_cast<u16>((dispstat[i] >> 8) | ((dispstat[i] & 0x80) << 1));
     if (line == target) {
       dispstat[i] |= 4;
-      if (dispstat[i] & 0x20) request_irq(static_cast<Cpu>(i), IRQ_VCOUNT);
+      if (dispstat[i] & 0x20) lcd_irq(static_cast<Cpu>(i), IRQ_VCOUNT);
     } else {
       dispstat[i] &= ~4;
     }
@@ -70,13 +84,13 @@ void Io::set_vcount(u16 line) {
 }
 void Io::set_hblank(bool on) {
   for (int i = 0; i < 2; ++i) {
-    if (on) { dispstat[i] |= 2; if (dispstat[i] & 0x10) request_irq(static_cast<Cpu>(i), IRQ_HBLANK); }
+    if (on) { dispstat[i] |= 2; if (dispstat[i] & 0x10) lcd_irq(static_cast<Cpu>(i), IRQ_HBLANK); }
     else dispstat[i] &= ~2;
   }
 }
 void Io::set_vblank(bool on) {
   for (int i = 0; i < 2; ++i) {
-    if (on) { dispstat[i] |= 1; if (dispstat[i] & 0x08) request_irq(static_cast<Cpu>(i), IRQ_VBLANK); }
+    if (on) { dispstat[i] |= 1; if (dispstat[i] & 0x08) lcd_irq(static_cast<Cpu>(i), IRQ_VBLANK); }
     else dispstat[i] &= ~1;
   }
 }
@@ -210,6 +224,7 @@ u8 Io::spi_transfer(u8 value) {
       f.hold = true; f.cmd = value; f.pos = 1; f.data = 0;
       if (value == 0x06) f.status |= 2;
       if (value == 0x04) f.status &= ~2;
+      f.addr = 0;
       return 0;
     }
     switch (f.cmd) {
@@ -229,10 +244,17 @@ u8 Io::spi_transfer(u8 value) {
       f.pos++;
       return f.data;
     }
-    case 0x0A:                                          // page write: accept, ignore
-      if (f.pos < 4) f.addr = (f.addr << 8) | value;
+    case 0x0A: {                                        // page write (WEL set): into the in-memory image
+      auto& fw = nds_.firmware;
+      if (f.pos < 4) { f.addr = (f.addr << 8) | value; f.data = 0; }
+      else {
+        if ((f.status & 2) && !fw.empty()) fw[f.addr % fw.size()] = value;
+        f.data = value;
+        f.addr++;
+      }
       f.pos++;
-      return 0;
+      return f.data;
+    }
     default:
       return 0;
     }
