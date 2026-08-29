@@ -114,7 +114,7 @@ static_assert(LUT_BITS <= LUT_BITS_MAX, "the arena only reserves room for LUT_BI
 // CpuContext::jit with fixed offsets.
 struct JitCpuHot {
   u64*      pt;        // page-table entries
-  const u8* timing;    // timing9 (per 4 KB) or timing7 (per 32 KB), 4 bytes per entry
+  const u8* timing;    // timing9 (per 4 KB, 8 bytes per entry) or timing7 (per 32 KB, 4 bytes per entry)
   u8*       arena;     // Runtime::arena: LUT base and block-pointer base (R_ARENA)
 };
 

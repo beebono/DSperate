@@ -19,11 +19,11 @@ extern void (*g_census_access)(bool a9, u32 addr, bool seq);
 
 // ---- cost model -------------------------------------------------------------
 // width: 0 = 8/16-bit, 1 = 32-bit.
-inline void data_cost(CpuContext& cpu, u32 addr, int width, bool seq) {
+inline void data_cost(CpuContext& cpu, u32 addr, int width, bool seq, bool store) {
   if (g_census_access) g_census_access(cpu.which == Cpu::ARM9, addr, seq);
   u32 c;
   if (cpu.which == Cpu::ARM9) {
-    const u8* t = cpu.timing9[addr >> 12];   // TCM windows are baked into the table
+    const u8* t = cpu.timing9[addr >> 12] + (store ? 4 : 0);   // TCM windows are baked into the table
     c = seq ? t[3] : t[width ? 2 : 1];
   } else {
     const u8* t = cpu.timing7[addr >> 15];
@@ -33,39 +33,39 @@ inline void data_cost(CpuContext& cpu, u32 addr, int width, bool seq) {
 }
 
 inline u8 mem_read8(CpuContext& cpu, u32 addr, bool seq = false) {
-  data_cost(cpu, addr, 0, seq);
+  data_cost(cpu, addr, 0, seq, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) return *p;
   return cpu.nds->bus.read8(cpu.which, addr);
 }
 inline u16 mem_read16(CpuContext& cpu, u32 addr, bool seq = false) {
   addr &= ~1u;
-  data_cost(cpu, addr, 0, seq);
+  data_cost(cpu, addr, 0, seq, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
   return cpu.nds->bus.read16(cpu.which, addr);
 }
 inline u32 mem_read32(CpuContext& cpu, u32 addr, bool seq = false) {
   addr &= ~3u;
-  data_cost(cpu, addr, 1, seq);
+  data_cost(cpu, addr, 1, seq, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
   return cpu.nds->bus.read32(cpu.which, addr);
 }
 
 inline void mem_write8(CpuContext& cpu, u32 addr, u8 v, bool seq = false) {
-  data_cost(cpu, addr, 0, seq);
+  data_cost(cpu, addr, 0, seq, true);
   bool code = false;
   if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 1); else *p = v; return; }
   cpu.nds->bus.write8(cpu.which, addr, v);
 }
 inline void mem_write16(CpuContext& cpu, u32 addr, u16 v, bool seq = false) {
   addr &= ~1u;
-  data_cost(cpu, addr, 0, seq);
+  data_cost(cpu, addr, 0, seq, true);
   bool code = false;
   if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 2); else std::memcpy(p, &v, 2); return; }
   cpu.nds->bus.write16(cpu.which, addr, v);
 }
 inline void mem_write32(CpuContext& cpu, u32 addr, u32 v, bool seq = false) {
   addr &= ~3u;
-  data_cost(cpu, addr, 1, seq);
+  data_cost(cpu, addr, 1, seq, true);
   bool code = false;
   if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 4); else std::memcpy(p, &v, 4); return; }
   cpu.nds->bus.write32(cpu.which, addr, v);

@@ -66,9 +66,10 @@ struct CpuContext {
 
   // ---- cycle accounting ----
   // Per-4 KB timing for the ARM9: [0] code cost in ARM9 cycles or 0xFF when
-  // the page is instruction-cacheable; [1] data N16, [2] data N32, [3] data
-  // S32 (ARM9 cycles). Per-32 KB for the ARM7: N16, S16, N32, S32.
-  const u8 (*timing9)[4];
+  // the page is instruction-cacheable; [1] load N16, [2] load N32, [3] load
+  // S32, [5..7] the same for stores (ARM9 cycles; [4] unused). Per-32 KB for
+  // the ARM7: N16, S16, N32, S32.
+  const u8 (*timing9)[8];
   const u8 (*timing7)[4];
   // ARM7 precomputed data cost (mem::Timing::cost7), used by the recompiler's
   // single-access path; it reaches this from timing7 with one add.

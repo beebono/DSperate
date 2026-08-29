@@ -928,7 +928,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     jc.nds = &nds;
     jc.arm9 = c == 0;
     jc.hot.pt = ctx.page_table.raw();
-    jc.hot.timing = reinterpret_cast<const u8*>(c == 0 ? ctx.timing9 : ctx.timing7);
+    jc.hot.timing = c == 0 ? reinterpret_cast<const u8*>(ctx.timing9) : reinterpret_cast<const u8*>(ctx.timing7);
     jc.hot.arena = r.arena;
     ctx.jit = &jc;
     ctx.jit_timing_changed = &on_timing_changed;

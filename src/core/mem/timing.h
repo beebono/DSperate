@@ -54,7 +54,7 @@ public:
   void update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify = true);
   void notify_cpu9(const CpuContext& cpu);
 
-  const u8 (*cpu9() const)[4] { return reinterpret_cast<const u8 (*)[4]>(cpu9_.get()); }
+  const u8 (*cpu9() const)[8] { return reinterpret_cast<const u8 (*)[8]>(cpu9_.get()); }
   const u8 (*cpu7() const)[4] { return reinterpret_cast<const u8 (*)[4]>(bus7()); }
 
   // Base of the ARM7 cost table. It sits at +COST7_OFFSET from the raw bus

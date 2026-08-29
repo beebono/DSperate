@@ -619,13 +619,14 @@ private:
     return c == 1 || (c == 9 && a9_) || (c == 7 && !a9_);
   }
   // Data cost of one access at `waddr` into `wcost`.
-  void emit_data_cost(u32 waddr, u32 wcost, bool word, bool seq) {
-    const u32 k = a9_ ? (seq ? 3 : (word ? 2 : 1)) : (seq ? (word ? 3 : 1) : (word ? 2 : 0));
+  void emit_data_cost(u32 waddr, u32 wcost, bool word, bool seq, bool store) {
+    // ARM9 entries are 8 bytes: loads at [1..3], stores at [5..7] (see CpuContext::timing9).
+    const u32 k = a9_ ? ((store ? 4 : 0) + (seq ? 3 : (word ? 2 : 1))) : (seq ? (word ? 3 : 1) : (word ? 2 : 0));
     // DS_JIT_COSTPROBE: emit the lookup twice; the second overwrites the first,
     // so the value used is unchanged and only the cost of computing it doubles.
     for (int rep = (costprobe_on() && (rt().costprobe_part & 1)) ? 1 : 0; rep >= 0; --rep) {
       e().lsr_imm(wcost, waddr, a9_ ? 12 : 15);
-      e().add_reg(wcost, R_TIM, wcost, LSL, 2, true);
+      e().add_reg(wcost, R_TIM, wcost, LSL, a9_ ? 3 : 2, true);
       e().ldrb(wcost, wcost, k);
     }
   }
@@ -718,7 +719,7 @@ private:
     const bool word = is_word(m);
     const int slot7 = cost7_slot(cdi, word);
     auto cost = [&] {
-      if (slot7 < 0) { emit_data_cost(SCRATCH1, SCRATCH6, word, false); return; }
+      if (slot7 < 0) { emit_data_cost(SCRATCH1, SCRATCH6, word, false, !is_load(m)); return; }
       e().lsr_imm(SCRATCH6, SCRATCH1, 15);
       e().add_reg(SCRATCH6, R_TIM, SCRATCH6, LSL, 5, true);
       e().add_imm(SCRATCH6, SCRATCH6, mem::Timing::COST7_OFFSET, true);
@@ -822,9 +823,9 @@ private:
       if (writeback) e().mov(host_reg(rn), SCRATCH7);
     }
     // cost: N + (n - 1) S from the page's entry
-    emit_data_cost(SCRATCH1, SCRATCH6, true, false);
+    emit_data_cost(SCRATCH1, SCRATCH6, true, false, !load);
     if (n > 1) {
-      emit_data_cost(SCRATCH1, SCRATCH5, true, true);
+      emit_data_cost(SCRATCH1, SCRATCH5, true, true, !load);
       e().mov_imm(SCRATCH4, n - 1);
       e().madd(SCRATCH6, SCRATCH5, SCRATCH4, SCRATCH6);
     }
