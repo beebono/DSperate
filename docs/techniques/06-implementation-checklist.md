@@ -99,7 +99,16 @@ measured decision, ranked by likely payoff:
    without the packed-command walk (40 k words a frame on GSDD). Exact on all
    six hash sets; qemu non-spin GSDD 46.2 → 42.7 M (−7.7 %), dbori 23.3 →
    22.4 M (−3.9 %), `gxfifo_write` 3.57 → 1.97 M. **RG DS, paired, 4 reps:
-   GSDD 27.0 → 25.6 ms mean (−5.4 %), median 31.7 → 29.8; dbori −1.6 %.**
+   GSDD 27.0 → 25.6 ms mean (−5.4 %), median 31.7 → 29.8; dbori −1.6 %.** *Third cut (geometry, same day):* the clip
+   passes take the working vertex by reference (60-byte copies per vertex
+   per pass; GSDD's screen-sized quads clip every frame), the two GXSTAT
+   busy-bit clears in the execute loop run only when a bit is set,
+   `fifo_write` is pinned inline, and `mtx_mult_4x4` (rebuilds the clip
+   matrix 3.5 k times a frame on GSDD, 43 % of `submit_vertex`) has an
+   integer-identical NEON form. Exact on all six sets; qemu non-spin GSDD
+   −1.1 %, dbori −0.7 %; RG DS paired, 4 reps: GSDD 25.6 → 25.0 ms mean
+   (−2.6 %), median 29.9 → 29.0; dbori flat. Per-line attribution
+   (`hbline.py`: hotblocks + `objdump --dwarf=decodedline`) found these.
 5. **JIT: ITCM tag-free tables, three arenas, known-constant tracking,
    check-free second entry** (1.5, 1.12, 1.23, 1.26) — each small; the
    arena flush (1.23) is the one with a visible failure mode (full arena
