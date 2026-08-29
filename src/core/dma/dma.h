@@ -42,6 +42,7 @@ class Dma {
 public:
   explicit Dma(NDS& nds);
   void reset();
+  template <class S> void sync_state(S& s);
 
   void write_src(Cpu cpu, int ch, u32 v);
   void write_dst(Cpu cpu, int ch, u32 v);

@@ -5,6 +5,7 @@
 // GBATEK, with melonDS (GPLv3) used as the reference for the latching and
 // blending corner cases that are verified against real hardware there.
 #include "core/gpu/engine2d.h"
+#include "core/state/state.h"
 #include "core/gpu/vram_map.h"
 #include "core/gpu/kernels.h"
 #include "core/nds.h"
@@ -1267,5 +1268,29 @@ void Engine2D::colour_effects() {
   kern::active::composite_line(bldcnt_, eva_, evb_, evy_, top_.data(), second_.data(), top_id_.data(), top_kind_.data(),
                                top_alpha_.data(), second_id_.data(), win_.data(), out_.data());
 }
+
+
+template <class S> void Engine2D::sync_state(S& s) {
+  s.begin(num_ == 0 ? "ENGA" : "ENGB");
+  s.fields(g_dispcnt_, g_bgcnt_, g_wincnt_, g_bldcnt_, g_bldalpha_, g_enabled_,
+           enabled_, screen_, master_bright_, pal_, oam_,
+           dispcnt_, bgcnt_, bghofs_, bgvofs_, pa_, pb_, pc_, pd_, ref_x_, ref_y_, ref_x_int_, ref_y_int_, ref_x_reload_, ref_y_reload_,
+           win0_, win1_, wincnt_, bg_mosaic_w_, bg_mosaic_h_, obj_mosaic_w_, obj_mosaic_h_, bldcnt_, bldalpha_, eva_, evb_, evy_,
+           dispcnt_hist_, layer_enable_, obj_enable_, forced_blank_, win0_active_, win1_active_,
+           bg_mosaic_y_, bg_mosaic_ymax_, obj_mosaic_y_, bg_mosaic_latch_, obj_mosaic_latch_, bg_mosaic_line_, obj_mosaic_line_);
+  // Sprites are rendered one line ahead: at the frame boundary the planes
+  // hold line 0's, drawn during line 262.
+  s.fields(obj_v_, obj_attr_, obj_alpha_, obj_win_, obj_prio_mask_, num_sprites_);
+  s.end();
+  if constexpr (S::reading) {
+    // Every derived table revalidates against a generation it cannot match.
+    jn_.store(0, std::memory_order_relaxed); jpos_ = 0;
+    ++pal_gen_; ++oam_gen_;
+    pal18_gen_ = objpal18_gen_ = 0; extpal_checked_ = extpal_have_ = 0; objext_checked_ = objext_have_ = 0;
+    oam_lists_gen_ = 0;
+  }
+}
+template void Engine2D::sync_state<state::Writer>(state::Writer&);
+template void Engine2D::sync_state<state::Reader>(state::Reader&);
 
 } // namespace ds::gpu

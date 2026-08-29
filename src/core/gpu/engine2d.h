@@ -64,6 +64,7 @@ class Engine2D {
 public:
   Engine2D(NDS& nds, int num);
   void reset();
+  template <class S> void sync_state(S& s);   // with the journal drained (apply_pending)
 
   // Guest side (addr is the full 0x040000xx / 0x040010xx address).
   u32  read(u32 addr, u32 width);

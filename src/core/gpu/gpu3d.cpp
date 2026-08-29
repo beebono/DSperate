@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/gpu3d.h"
+#include "core/state/state.h"
 #include "core/nds.h"
 #include "core/profile.h"
 #if DSPERATE_NEON
@@ -1339,5 +1340,67 @@ void Gpu3D::write(u32 addr, u32 width, u32 value) {
   if (r >= 0x360 && r < 0x380) { const u32 i = r - 0x360; for (int k = 0; k < 4; ++k) fog_density_[i + k] = (value >> (8 * k)) & 0x7F; return; }
   if (r >= 0x380 && r < 0x3C0) { const u32 i = (r - 0x380) >> 1; toon_[i] = value & 0xFFFF; toon_[i + 1] = value >> 16; return; }
 }
+
+
+namespace {
+template <class S> void sync_vertex(S& s, Vertex& v) { s.fields(v.pos, v.col, v.tex, v.clipped, v.sx, v.sy, v.fcol); }
+template <class S> void sync_polygon(S& s, Polygon& p) {
+  s.fields(p.vtx, p.nverts, p.z, p.w, p.wbuffer, p.attr, p.texparam, p.texpal, p.degenerate, p.facing, p.translucent, p.shadow_mask, p.shadow,
+           p.vtop, p.vbot, p.ytop, p.ybot, p.xtop, p.xbot, p.sort_key);
+}
+} // namespace
+
+template <class S> void Gpu3D::sync_state(S& s) {
+  s.begin("GX3D");
+  for (Entry& e : ring_) s.fields(e.param, e.cmd);
+  s.fields(ring_rd_, ring_wr_, pipe_n_, fifo_n_, stall_n_, stalled_, num_cmds_, cur_cmd_, param_count_, total_params_, exec_params_, exec_count_,
+           timestamp_, cycle_count_, vertex_pipeline_, normal_pipeline_, polygon_pipeline_, vertex_slot_counter_, vertex_slots_free_, num_pushpop_, num_tests_,
+           gxstat_, geometry_on_, rendering_on_, dispcnt_, alpha_ref_val_, alpha_ref_, toon_, edge_, fog_color_, fog_offset_, fog_density_,
+           clear_attr1_, clear_attr2_, zero_dot_w_limit_,
+           rstate_.dispcnt, rstate_.alpha_ref, rstate_.toon, rstate_.edge, rstate_.fog_color, rstate_.fog_offset, rstate_.fog_shift, rstate_.fog_density,
+           rstate_.clear_attr1, rstate_.clear_attr2, render_xpos_,
+           matrix_mode_, proj_, pos_, vec_, tex_, clip_, clip_dirty_, proj_stack_, tex_stack_, pos_stack_, vec_stack_, proj_sp_, pos_sp_, tex_sp_, viewport_,
+           poly_mode_, cur_vertex_, vertex_color_, texcoords_, raw_texcoords_, normal_, light_dir_, spec_recip_, light_color_,
+           mat_diffuse_, mat_ambient_, mat_specular_, mat_emission_, use_shininess_, shininess_,
+           polygon_attr_, cur_polygon_attr_, texparam_, texpal_, pos_test_, vec_test_);
+  for (Vertex& v : temp_vtx_) sync_vertex(s, v);
+  s.fields(vertex_num_, vertex_in_poly_, consecutive_polys_, num_opaque_, bank_, num_vertices_, num_polygons_,
+           render_count_, render_identical_, flush_request_, flush_attr_, prev_swap_polys_, prev_swap_verts_, rendered_before_);
+  // Pointers into the polygon RAM travel as indices.
+  s32 strip = last_strip_poly_ ? static_cast<s32>(last_strip_poly_ - pram_.data()) : -1;
+  s.put(strip);
+  if constexpr (S::reading) last_strip_poly_ = strip >= 0 && strip < static_cast<s32>(pram_.size()) ? &pram_[static_cast<size_t>(strip)] : nullptr;
+  if constexpr (S::reading) { if (render_count_ > PRAM_BANK) { s.fail("render list"); return; } }
+  for (u32 i = 0; i < render_count_; ++i) {
+    u16 k = static_cast<u16>(S::reading ? 0 : render_polys_[i] - pram_.data());
+    s.put(k);
+    if constexpr (S::reading) render_polys_[i] = &pram_[k & (PRAM_BANK * 2 - 1)];
+  }
+  // Vertex/polygon RAM: the current bank up to its counts, the other bank
+  // (the one being displayed, and compared against at the next swap) up to
+  // what the last swap left there or the render list references.
+  u32 nv[2] = {0, 0}, np[2] = {0, 0};
+  if constexpr (!S::reading) {
+    nv[bank_] = num_vertices_; np[bank_] = num_polygons_;
+    const u32 rb = bank_ ^ 1;
+    nv[rb] = std::min(prev_swap_verts_, VRAM_BANK); np[rb] = std::min(prev_swap_polys_, PRAM_BANK);
+    for (u32 i = 0; i < render_count_; ++i) {
+      const u32 k = static_cast<u32>(render_polys_[i] - pram_.data());
+      np[k / PRAM_BANK] = std::max(np[k / PRAM_BANK], k % PRAM_BANK + 1);
+      const Polygon& p = *render_polys_[i];
+      for (u32 j = 0; j < p.nverts && j < 10; ++j) { const u32 vi = p.vtx[j]; if (vi < VRAM_BANK * 2) nv[vi / VRAM_BANK] = std::max(nv[vi / VRAM_BANK], vi % VRAM_BANK + 1); }
+    }
+  }
+  s.fields(nv, np);
+  for (u32 b = 0; b < 2; ++b) {
+    if constexpr (S::reading) { if (nv[b] > VRAM_BANK || np[b] > PRAM_BANK) { s.fail("polygon RAM counts"); return; } }
+    for (u32 i = 0; i < nv[b]; ++i) sync_vertex(s, vram_[b * VRAM_BANK + i]);
+    for (u32 i = 0; i < np[b]; ++i) sync_polygon(s, pram_[b * PRAM_BANK + i]);
+  }
+  s.end();
+  renderer_.sync_output(s);
+}
+template void Gpu3D::sync_state<state::Writer>(state::Writer&);
+template void Gpu3D::sync_state<state::Reader>(state::Reader&);
 
 } // namespace ds::gpu

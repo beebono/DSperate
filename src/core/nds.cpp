@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/nds.h"
+#include "core/state/state.h"
+#include "core/cpu/idle_loop.h"
+#if DSPERATE_JIT
+#include "core/cpu/jit/jit.h"
+#endif
 #include "core/cpu/interp/interp.h"
 #include "core/cpu/cp15.h"
 
@@ -190,6 +195,103 @@ void NDS::run_frame() {
   frame_ready = false;
   sched.run_until_frame();   // one entry into the slice loop per frame, not per event
   ++frame_count;
+}
+
+
+// ---- save states --------------------------------------------------------------
+
+namespace {
+u64 rom_identity(const std::vector<u8>& rom) {
+  // The header plus the size: enough to reject the wrong ROM without
+  // hashing 100 MB on every save.
+  u64 h = 1469598103934665603ull;
+  for (size_t i = 0; i < 0x160 && i < rom.size(); ++i) h = (h ^ rom[i]) * 1099511628211ull;
+  return h ^ rom.size();
+}
+constexpr u32 THUMB_W = 128, THUMB_H = 96;
+} // namespace
+
+bool NDS::save_state(state::Writer& w, std::string& err) {
+  if (!cart) { err = "no cartridge"; return false; }
+  if (!sched.at_slice_boundary() || gpu.line() != 0 || !gpu.at_line_start()) { err = "not at a frame boundary"; return false; }
+  // Quiesce: nothing here changes what the guest observes.
+  gpu.quiesce();
+  gpu3d.sync_raster();
+  spu.catch_up();
+  io.cart_catch_up();
+
+  w.blob("DSST", 4);
+  w.put(state::FORMAT_VERSION);
+  w.begin("HEAD");
+  w.put(cart->header().game_code_u32());
+  w.put(rom_identity(rom));
+  w.put(frame_count);
+#if DSPERATE_JIT
+  w.put(u32{1});
+#else
+  w.put(u32{0});
+#endif
+  // A thumbnail of the top screen, RGB565.
+  w.put(THUMB_W); w.put(THUMB_H);
+  const u32* fb = gpu.framebuffer(0);
+  for (u32 y = 0; y < THUMB_H; ++y)
+    for (u32 x = 0; x < THUMB_W; ++x) {
+      const u32 p = fb[(y * 2) * SCREEN_W + x * 2];
+      w.put(static_cast<u16>(((p >> 8) & 0xF800) | ((p >> 5) & 0x07E0) | ((p >> 3) & 0x001F)));
+    }
+  w.end();
+
+  sched.sync_state(w);
+  bus.sync_state(w);
+  io.sync_state(w);
+  arm9->sync_state(w);
+  arm7->sync_state(w);
+  dma.sync_state(w);
+  spu.sync_state(w);
+  gpu3d.sync_state(w);
+  gpu.sync_state(w);
+  cart->sync_state(w);
+  return true;
+}
+
+bool NDS::load_state(state::Reader& r, std::string& err) {
+  if (!cart) { err = "no cartridge"; return false; }
+  char magic[4]; r.blob_raw(magic, 4);
+  u32 version = 0; r.blob_raw(&version, 4);
+  if (std::memcmp(magic, "DSST", 4) != 0) { err = "not a DSperate save state"; return false; }
+  if (version != state::FORMAT_VERSION) { err = "save state format " + std::to_string(version) + ", this build reads " + std::to_string(state::FORMAT_VERSION); return false; }
+  if (!r.begin("HEAD")) { err = r.error(); return false; }
+  u32 code = 0; u64 ident = 0, frames = 0; u32 jit_built = 0;
+  r.fields(code, ident, frames, jit_built);
+  r.end();
+  if (code != cart->header().game_code_u32()) { err = "save state is for another game"; return false; }
+  if (ident != rom_identity(rom)) { err = "save state is for another ROM image"; return false; }
+
+  // From here the machine is being overwritten: a failure leaves it broken.
+  gpu.prepare_load();
+  gpu3d.sync_raster();
+  sched.sync_state(r);
+  bus.sync_state(r);
+  io.sync_state(r);
+  arm9->sync_state(r);
+  arm7->sync_state(r);
+  if (!r.ok()) { err = r.error(); return false; }
+  bus.relink();                 // page tables, VRAM map and timing from the restored registers
+  dma.sync_state(r);
+  spu.sync_state(r);
+  gpu3d.sync_state(r);
+  gpu.sync_state(r);
+  cart->sync_state(r);
+  if (!r.ok()) { err = r.error(); return false; }
+  gpu.after_load();
+#if DSPERATE_JIT
+  if (jit::has_runtime()) jit::flush_all();   // every block was translated from the old memory
+#endif
+  cpu::invalidate_idle_loops();
+  if (!sched.after_load()) { err = "save state has an event without a handler"; return false; }
+  frame_count = frames;
+  frame_ready = false;
+  return true;
 }
 
 } // namespace ds

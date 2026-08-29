@@ -17,6 +17,7 @@
 #include <vector>
 
 namespace ds {
+namespace state { class Writer; class Reader; }
 
 // Per-instruction trace callback: called with r15 already pipeline-adjusted
 // (instruction address + 8 / + 4) before the instruction executes.
@@ -32,6 +33,13 @@ struct NDS {
   void normalise_touch_calibration();   // see nds.cpp; called by load_bios
   void setup_direct_boot();          // skip the firmware: load the ROM's binaries and jump to them
   void run_frame();
+
+  // Save states (core/state/state.h): whole-machine snapshots, taken only
+  // where run_frame() returns. save_state does not disturb the run; a
+  // failed load_state leaves the machine unusable (reset it). `err` gets
+  // the reason on failure.
+  bool save_state(state::Writer& w, std::string& err);
+  bool load_state(state::Reader& r, std::string& err);
 
   CpuContext& cpu(Cpu which) { return which == Cpu::ARM9 ? *arm9 : *arm7; }
 

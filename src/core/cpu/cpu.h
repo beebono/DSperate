@@ -100,6 +100,7 @@ struct CpuContext {
   void* jit = nullptr;
 
   void reset(Cpu which, NDS* nds);
+  template <class S> void sync_state(S& s);   // registers and CP15; the page table and timing pointers are rebuilt (Bus::relink)
 
   // Mode handling. `switch_mode` banks r8-r14 and SPSR as needed.
   void switch_mode(u32 new_mode);

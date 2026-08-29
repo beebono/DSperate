@@ -36,6 +36,7 @@ class Cart {
 public:
   Cart(NDS& nds, std::vector<u8> rom);
   void reset();
+  template <class S> void sync_state(S& s);
 
   const Header& header() const { return header_; }
   const u8* rom() const { return rom_.data(); }

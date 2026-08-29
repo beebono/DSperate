@@ -7,6 +7,7 @@
 // and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py
 // and the SPU output (--dump-audio, raw s16 stereo at 32768 Hz).
 #include "core/nds.h"
+#include "core/state/state.h"
 #include "core/cpu/interp/interp.h"
 #include "core/input/input_log.h"
 #if DSPERATE_JIT
@@ -27,6 +28,39 @@
 #include <chrono>
 
 namespace {
+
+
+// DS_STATE_DEBUG=1: the per-CPU cycle-accounting state and the timing-table
+// rows under each PC, printed where a state is written and after one is
+// loaded, so a timing drift after a load can be attributed.
+void dump_cpu_timing(ds::NDS& nds, const char* when) {
+  if (!std::getenv("DS_STATE_DEBUG")) return;
+  for (ds::Cpu w : {ds::Cpu::ARM9, ds::Cpu::ARM7}) {
+    const ds::CpuContext& c = nds.cpu(w);
+    const ds::u32 pc = c.hot.regs[15];
+    std::fprintf(stderr, "[state %s] %s irq_pending %u ime %u ie %08x if %08x cpsr %08x\n", when, w == ds::Cpu::ARM9 ? "a9" : "a7", c.hot.irq_pending,
+                 nds.io.cpu_io[w == ds::Cpu::ARM9 ? 0 : 1].ime, nds.io.cpu_io[w == ds::Cpu::ARM9 ? 0 : 1].ie, nds.io.cpu_io[w == ds::Cpu::ARM9 ? 0 : 1].if_, c.hot.cpsr);
+    std::fprintf(stderr, "[state %s] %s pc %08x budget %d resid %d halted %d code_cycles %u data_cycles %u code_rgn %u data_rgn %u branch_fetch %d t9[",
+                 when, w == ds::Cpu::ARM9 ? "a9" : "a7", pc, c.hot.cycle_budget, c.preempt_residual, c.halted, c.code_cycles, c.data_cycles, c.code_region, c.data_region, c.branch_fetch);
+    for (int i = 0; i < 8; ++i) std::fprintf(stderr, "%s%u", i ? " " : "", c.timing9[pc >> 12][i]);
+    std::fprintf(stderr, "] t7[");
+    for (int i = 0; i < 4; ++i) std::fprintf(stderr, "%s%u", i ? " " : "", c.timing7[pc >> 15][i]);
+    std::fprintf(stderr, "] itcm %u dtcm %08x/%08x\n", c.itcm_size, c.dtcm_base, c.dtcm_mask);
+  }
+  { ds::u64 h = 1469598103934665603ull; const ds::u32* l = nds.gpu3d.line(0); for (int x = 0; x < 256; ++x) h = (h ^ l[x]) * 1099511628211ull;
+    std::fprintf(stderr, "[state %s] 3d line0 hash %016llx\n", when, (unsigned long long)h); }
+  std::fprintf(stderr, "[state %s] now %llu next %llu a7debt? gx stalled %d idle %d\n", when, (unsigned long long)nds.sched.now(), (unsigned long long)nds.sched.next_deadline(), nds.gpu3d.stalled(), nds.gpu3d.idle());
+}
+
+std::vector<ds::u8> slurp_file(const char* path) {
+  std::vector<ds::u8> v;
+  FILE* f = std::fopen(path, "rb");
+  if (!f) return v;
+  std::fseek(f, 0, SEEK_END); const long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+  if (n > 0) { v.resize(static_cast<size_t>(n)); if (std::fread(v.data(), 1, v.size(), f) != v.size()) v.clear(); }
+  std::fclose(f);
+  return v;
+}
 // Spin-loop collapse: a poll loop repeats its exact state every iteration until
 // the polled value changes, so a line identical to one of the last 32 emitted
 // lines is dropped. Both tracers apply the same rule, so traces stay comparable
@@ -68,6 +102,7 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
 
 int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
+  const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
   // A whole 1800-frame dump is ~708 MB, so a window can be selected: the
   // frame-budget report below names the frames worth looking at.
   int dump_from = 0, dump_count = 0;
@@ -100,6 +135,8 @@ int main(int argc, char** argv) {
     else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
+    else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
+    else if (arg("--save-state-at")) { save_state_at = std::atoi(argv[++i]); save_state_path = std::strchr(argv[i], ':'); if (save_state_path) ++save_state_path; }   // N:path -- write after N frames (0 = at once)
     else rom = argv[i];
   }
   // A replay is recorded under direct boot (the SDL frontend has no other
@@ -197,6 +234,28 @@ int main(int argc, char** argv) {
   }
   std::vector<double> frame_ms;
   frame_ms.reserve(static_cast<size_t>(frames));
+  if (load_state) {
+    std::vector<ds::u8> bytes = slurp_file(load_state);
+    ds::state::Reader r(bytes.data(), bytes.size());
+    std::string err;
+    if (bytes.empty() || !nds.load_state(r, err)) { std::fprintf(stderr, "cannot load state %s: %s\n", load_state, bytes.empty() ? "unreadable" : err.c_str()); return 1; }
+    std::fprintf(stderr, "state: loaded %s (frame %llu)\n", load_state, static_cast<unsigned long long>(nds.frame_count));
+    dump_cpu_timing(nds, "load");
+    // A replay continues from the state's frame, not from the log's start.
+    if (log.reading()) { ds::input::Frame f; for (ds::u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
+  }
+  auto write_state = [&](int after) {
+    if (!save_state_path || save_state_at != after) return true;
+    ds::state::Writer w; std::string err;
+    if (!nds.save_state(w, err)) { std::fprintf(stderr, "cannot save state: %s\n", err.c_str()); return false; }
+    dump_cpu_timing(nds, "save");
+    FILE* f = std::fopen(save_state_path, "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", save_state_path); return false; }
+    std::fwrite(w.data().data(), 1, w.data().size(), f); std::fclose(f);
+    std::fprintf(stderr, "state: wrote %s after %d frames (%zu bytes)\n", save_state_path, after, w.data().size());
+    return true;
+  };
+  if (!write_state(0)) return 1;
   for (int i = 0; i < frames; ++i) {
     const auto t0 = std::chrono::steady_clock::now();
     // The recompiler's trace emission is armed from the first frame: turning
@@ -208,6 +267,7 @@ int main(int argc, char** argv) {
     if (trace && i == trace_from) { nds.trace = trace_cb; nds.trace_user = &ts; }
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
     nds.run_frame();
+    if (!write_state(i + 1)) return 1;
     if (static const bool fh = std::getenv("DS_FRAME_HASH") != nullptr; fh) {
       auto fnv = [](const ds::u8* p, size_t n, ds::u64 h) { for (size_t k = 0; k < n; ++k) h = (h ^ p[k]) * 1099511628211ull; return h; };
       ds::u64 h = 1469598103934665603ull;

@@ -101,6 +101,7 @@ class Io {
 public:
   explicit Io(NDS& nds);
   void reset();
+  template <class S> void sync_state(S& s);
 
   u32  read (Cpu cpu, u32 addr, u32 width);
   void write(Cpu cpu, u32 addr, u32 width, u32 value);

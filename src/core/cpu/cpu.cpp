@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/cpu/cpu.h"
+#include "core/state/state.h"
 #include "core/cpu/cpu_cycles.h"
 
 #include <cstring>
@@ -149,5 +150,21 @@ void CpuContext::check_irq() {
     raise_exception(Exception::Irq);
   }
 }
+
+
+template <class S> void CpuContext::sync_state(S& s) {
+  s.begin(which == Cpu::ARM9 ? "CPU9" : "CPU7");
+  // hot.alerts is the recompiler's host-side "leave native code" word (a
+  // flush sets it); it means nothing at a slice boundary and is not restored.
+  u32 no_alerts = 0;
+  s.fields(halted, preempt_residual, yielded, jumped,
+           hot.regs, hot.cpsr, hot.spsr, hot.cycle_budget, hot.irq_pending, no_alerts,
+           bank_r8_r12, bank_r13, bank_r14, bank_spsr,
+           cp15_control, cp15_dtcm, cp15_itcm, pu_region, pu_code_cacheable, pu_data_cacheable, pu_data_bufferable, pu_code_perm, pu_data_perm,
+           code_cycles, data_cycles, code_region, data_region, branch_fetch, budget_at_halt);
+  s.end();
+}
+template void CpuContext::sync_state<state::Writer>(state::Writer&);
+template void CpuContext::sync_state<state::Reader>(state::Reader&);
 
 } // namespace ds

@@ -126,6 +126,14 @@ public:
   // code leaves. Interpreted CPUs and DMA run inside.
   SliceNext slice_next();
 
+  // Save states (core/state/state.h). The handlers are function pointers,
+  // so only the deadlines travel: each subsystem re-binds its own events
+  // with rebind() while loading, and after_load() checks none is missing.
+  template <class S> void sync_state(S& s);
+  void rebind(EventId id, EventFn fn) { const u32 i = static_cast<u32>(id); if (armed_ & (1u << i)) fn_[i] = fn; }
+  bool after_load();
+  bool at_slice_boundary() const { return running_ == nullptr && !in_dma_; }
+
 
 private:
   struct SliceState {

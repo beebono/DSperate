@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/render3d.h"
+#include "core/state/state.h"
 
 #include <type_traits>
 #include <atomic>
@@ -2607,5 +2608,16 @@ void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
   prof::add_ns(prof::R3D_SPANS, spans_ns);
   prof::add_ns(prof::R3D_FINAL, final_ns);
 }
+
+
+template <class S> void Renderer3D::sync_output(S& s) {
+  sync_all();
+  if constexpr (S::reading) { reset(); texcache_.clear(); }
+  s.begin("R3DO");
+  s.fields(rendered_once_, out_);
+  s.end();
+}
+template void Renderer3D::sync_output<state::Writer>(state::Writer&);
+template void Renderer3D::sync_output<state::Reader>(state::Reader&);
 
 } // namespace ds::gpu

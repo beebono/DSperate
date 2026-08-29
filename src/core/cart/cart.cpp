@@ -5,6 +5,7 @@
 // "DS Cartridge Secure Area", "DS Cartridge Backup"); melonDS (GPLv3) is the
 // behavioural reference.
 #include "core/cart/cart.h"
+#include "core/state/state.h"
 #include "core/nds.h"
 
 #include <cstdio>
@@ -302,5 +303,22 @@ u8 Cart::spi_flash(u8 v) {
   default: return 0xFF;
   }
 }
+
+
+template <class S> void Cart::sync_state(S& s) {
+  s.begin("CART");
+  s.fields(in_reset_, cmd_mode_, data_mode_, rom_cmd_, rom_addr_, spi_pos_, spi_cmd_, spi_addr_, spi_status_, ir_cmd_, ir_pos_);
+  u32 n = static_cast<u32>(sram_.size());
+  s.put(n);
+  if constexpr (S::reading) { if (n != sram_.size()) { s.fail("save chip size differs"); return; } }
+  s.blob(sram_.data(), sram_.size());
+  s.end();
+  if constexpr (S::reading) {
+    mark_dirty();                                             // the .sav must follow the state
+    if (cmd_mode_ == 1) key1_init(header_.game_code_u32(), 2, 2);   // the only key schedule used in KEY1 mode
+  }
+}
+template void Cart::sync_state<state::Writer>(state::Writer&);
+template void Cart::sync_state<state::Reader>(state::Reader&);
 
 } // namespace ds::cart

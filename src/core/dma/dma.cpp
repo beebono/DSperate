@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/dma/dma.h"
+#include "core/state/state.h"
 #include "core/nds.h"
 #include "core/mem/timing.h"
 
@@ -313,5 +314,27 @@ u32 Dma::run(Cpu cpu, u32 budget) {
   }
   return used;
 }
+
+
+template <class S> void Dma::sync_state(S& s) {
+  s.begin("DMA ");
+  for (Channel& c : ch_) {
+    // The burst table is one of four static tables: travel as an index.
+    u8 bt = c.burst_table == READ16.data ? 1 : c.burst_table == READ32.data ? 2 : c.burst_table == READ32_N2.data ? 3 : 0;
+    s.fields(c.src, c.dst, c.cnt, c.cur_src, c.cur_dst, c.src_inc, c.dst_inc, c.start_mode, c.rem_count, c.iter_count, c.running, c.in_progress, bt, c.burst_pos);
+    if constexpr (S::reading) {
+      c.burst_table = bt == 1 ? READ16.data : bt == 2 ? READ32.data : bt == 3 ? READ32_N2.data : MRAM_DUMMY.data;
+      c.tim_key_src = c.tim_key_dst = ~0u;   // timing cache: refilled on the next access
+    }
+  }
+  s.end();
+  if constexpr (S::reading) {
+    running_mask_[0] = running_mask_[1] = 0;
+    for (Channel& c : ch_) if (c.running) running_mask_[c.cpu == Cpu::ARM9 ? 0 : 1] |= static_cast<u8>(1u << c.num);
+    update_cart_armed();
+  }
+}
+template void Dma::sync_state<state::Writer>(state::Writer&);
+template void Dma::sync_state<state::Reader>(state::Reader&);
 
 } // namespace ds::dma

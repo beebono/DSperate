@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/gpu.h"
+#include "core/state/state.h"
 #include "core/gpu/vram_map.h"
 #include "core/gpu/kernels.h"
 #include "core/nds.h"
@@ -588,5 +589,41 @@ void Gpu::apply_master_brightness(u16 reg, u32* dst) { kern::active::master_brig
 
 // 6-bit RGB666 records -> 8-bit 0xAARRGGBB (top two bits replicated into the low two).
 void Gpu::expand_colours(u32* dst) { kern::active::expand_colours(dst); }
+
+
+void Gpu::quiesce() {
+  join_b();
+  engine[0].apply_pending(); engine[1].apply_pending();
+}
+
+void Gpu::prepare_load() {
+  join_b();
+  disarm_trap();
+  lazy_frame_ = false; per_line_ = true; render_next_ = SCREEN_H;
+  burst_ = false; burst_left_ = 0; lag_frame_ = false; b_inflight_ = false;
+}
+
+template <class S> void Gpu::sync_state(S& s) {
+  s.begin("GPU ");
+  s.fields(line_, hblank_done_, frame_begun_, screens_on_, master_bright_g_, capcnt_, capture_on_, fifo_, fifo_rd_, fifo_wr_, fifo_line_, run_fifo_);
+  s.fields(fb_);   // what the display shows until the next frame (and the thumbnail)
+  s.end();
+  engine[0].sync_state(s);
+  engine[1].sync_state(s);
+  if constexpr (S::reading) {
+    nds_.sched.rebind(EventId::HBlank, ev_hblank);
+    nds_.sched.rebind(EventId::VBlank_Scanline, ev_scanline);
+    nds_.sched.rebind(EventId::DisplayFifo, ev_fifo);
+  }
+}
+template void Gpu::sync_state<state::Writer>(state::Writer&);
+template void Gpu::sync_state<state::Reader>(state::Reader&);
+
+void Gpu::after_load() {
+  // The state was taken right after line 0's begin_frame(): its decisions
+  // depend only on registers and DMA state, all restored, so retaking them
+  // reproduces the frame's mode and re-arms the trap.
+  if (frame_begun_ && line_ == 0 && !hblank_done_) begin_frame();
+}
 
 } // namespace ds::gpu

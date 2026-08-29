@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/sched/scheduler.h"
+#include "core/state/state.h"
 #include "core/nds.h"
 #include "core/profile.h"
 #include "core/cpu/interp/interp.h"
@@ -502,6 +503,26 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
     fire_due();
   }
   return now_ - start;
+}
+
+
+template <class S> void Scheduler::sync_state(S& s) {
+  s.begin("SCHD");
+  s.fields(now_, arm7_debt_, armed_, at_, param_);
+  // The idle-skip pre-filter: whether a slice is skipped depends on the
+  // recent slice-start PCs, so the ring is part of the timing.
+  s.fields(idle_pc_ring_, idle_pc_pos_);
+  s.end();
+  if constexpr (S::reading) { fn_.fill(nullptr); in_dma_ = false; running_ = nullptr; }
+}
+template void Scheduler::sync_state<state::Writer>(state::Writer&);
+template void Scheduler::sync_state<state::Reader>(state::Reader&);
+
+bool Scheduler::after_load() {
+  rescan();
+  for (u32 i = 0; i < EVENT_COUNT; ++i)
+    if ((armed_ & (1u << i)) && !fn_[i]) { std::fprintf(stderr, "[state] event %u armed without a handler\n", i); return false; }
+  return true;
 }
 
 } // namespace ds

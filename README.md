@@ -113,7 +113,26 @@ the bottom screen.
 
 Battery saves live next to the ROM as `<rom>.sav` (or under `[paths] saves`),
 written a second after the game stops writing its save chip and again on
-pause, lid close and exit -- a launcher's SIGTERM included. `DS_FPS=1` prints
+pause, lid close and exit -- a launcher's SIGTERM included.
+
+Save states go to `<GAMECODE>.<slot>.dss` in the states directory (next to
+the ROM, or `[paths] states`), ten slots, `F5`/`F7` or Select+B/A on the
+controller. A state is the whole machine at a frame boundary (~5.5 MB,
+uncompressed: RAM, VRAM, both CPUs, every peripheral, the geometry engine's
+polygon RAM and the rasterised 3D frame) and loads only with the same ROM;
+the battery save is written alongside it so the two never disagree. The
+recompiler's translations are dropped on load and rebuilt as the game runs.
+`src/core/state/state.h` describes the chunked format; each subsystem lists
+its own fields in one `sync_state` that both writes and reads, so a state
+saved straight after a load is byte-identical to the one loaded --
+`tools/state_roundtrip.sh <dsperate-cli> <scene> <N> <M>` checks that, and
+that the frames after a load match the frames after the save, on any
+recorded scene (the CLI takes `--save-state-at N:file` and `--load-state
+file`; `DS_STATE_DEBUG=1` prints the cycle-accounting state at both points).
+Loading a state during `--record` leaves a recording that cannot replay past
+that point; `--replay` refuses to load or save states at all.
+
+`DS_FPS=1` prints
 speed, per-stage times and audio buffer depth;
 with `--frames N` the output is comparable between runs by frame index.
 `DS_FRAME_HASH=1` (CLI) prints a digest of RAM and both CPUs' registers after

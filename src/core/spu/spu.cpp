@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/spu/spu.h"
+#include "core/state/state.h"
 #include "core/nds.h"
 #include "core/profile.h"
 
@@ -380,5 +381,20 @@ void Spu::mix() {
   if (muted_) push(0, 0);
   else push(static_cast<s16>(std::clamp(out_l, -0x8000, 0x7FFF)), static_cast<s16>(std::clamp(out_r, -0x8000, 0x7FFF)));
 }
+
+
+template <class S> void Spu::sync_state(S& s) {
+  s.begin("SPU ");
+  for (Channel& c : ch_)
+    s.fields(c.cnt, c.src, c.loop, c.len, c.timer_reload, c.timer, c.pos, c.cur, c.noise, c.volume, c.vol_shift, c.pan, c.key_on,
+             c.adpcm_val, c.adpcm_idx, c.adpcm_val_loop, c.adpcm_idx_loop, c.adpcm_byte, c.fifo, c.fifo_rd, c.fifo_wr, c.fifo_off, c.fifo_level);
+  for (Capture& cp : cap_)
+    s.fields(cp.cnt, cp.dst, cp.len, cp.timer_reload, cp.timer, cp.pos, cp.fifo, cp.fifo_rd, cp.fifo_wr, cp.fifo_off, cp.fifo_level);
+  s.fields(cnt_, bias_, master_, muted_, mix_at_, batch_);
+  s.end();
+  if constexpr (S::reading) { rd_ = wr_ = 0; nds_.sched.rebind(EventId::Spu, ev_mix); }
+}
+template void Spu::sync_state<state::Writer>(state::Writer&);
+template void Spu::sync_state<state::Reader>(state::Reader&);
 
 } // namespace ds::spu

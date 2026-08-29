@@ -9,6 +9,7 @@
 #include "core/profile.h"
 #include "core/frame_report.h"
 #include "core/input/input_log.h"
+#include "core/state/state.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
@@ -116,6 +117,42 @@ void screenshot(NDS& nds, const std::string& dir, bool across) {
   if (SDL_SaveBMP(s, path.c_str()) == 0) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
   else std::fprintf(stderr, "screenshot: %s\n", SDL_GetError());
   SDL_FreeSurface(s);
+}
+
+std::string state_path(NDS& nds, const std::string& dir, int slot) {
+  const std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
+  return dir + "/" + code + "." + std::to_string(slot) + ".dss";
+}
+
+bool save_state_file(NDS& nds, const std::string& path) {
+  ds::state::Writer w; std::string err;
+  if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
+  const std::string tmp = path + ".tmp";
+  FILE* f = std::fopen(tmp.c_str(), "wb");
+  if (!f) { std::fprintf(stderr, "state: cannot write %s\n", tmp.c_str()); return false; }
+  const bool ok = std::fwrite(w.data().data(), 1, w.data().size(), f) == w.data().size();
+  std::fclose(f);
+  if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "state: cannot write %s\n", path.c_str()); return false; }
+  std::fprintf(stderr, "state: saved %s (%zu KB)\n", path.c_str(), w.data().size() >> 10);
+  return true;
+}
+
+// False when the file is unusable and the machine was left alone; the
+// caller must reset the machine if this fails after the load began (the
+// error says so).
+bool load_state_file(NDS& nds, const std::string& path) {
+  std::vector<u8> bytes;
+  if (FILE* f = std::fopen(path.c_str(), "rb")) {
+    std::fseek(f, 0, SEEK_END); const long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+    if (n > 0) { bytes.resize(static_cast<size_t>(n)); if (std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) bytes.clear(); }
+    std::fclose(f);
+  }
+  if (bytes.empty()) { std::fprintf(stderr, "state: no state in slot (%s)\n", path.c_str()); return false; }
+  ds::state::Reader r(bytes.data(), bytes.size());
+  std::string err;
+  if (!nds.load_state(r, err)) { std::fprintf(stderr, "state: cannot load %s: %s\n", path.c_str(), err.c_str()); return false; }
+  std::fprintf(stderr, "state: loaded %s (frame %llu)\n", path.c_str(), static_cast<unsigned long long>(nds.frame_count));
+  return true;
 }
 
 // A launcher's SIGTERM (or Ctrl-C) must still flush the battery save.
@@ -337,7 +374,19 @@ int main(int argc, char** argv) {
       case A::Lid: input.set_lid(!input.lid()); std::fprintf(stderr, "lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
       case A::SlotNext: state_slot = (state_slot + 1) % 10; std::fprintf(stderr, "state slot %d\n", state_slot); break;
       case A::SlotPrev: state_slot = (state_slot + 9) % 10; std::fprintf(stderr, "state slot %d\n", state_slot); break;
-      case A::SaveState: case A::LoadState: std::fprintf(stderr, "%s: not implemented yet\n", ds::sdl::action_name(a)); break;
+      case A::SaveState:
+        if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
+        if (save_state_file(nds, state_path(nds, states_dir, state_slot))) flush_save();   // the .sav and the state never diverge
+        break;
+      case A::LoadState:
+        if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
+        if (load_state_file(nds, state_path(nds, states_dir, state_slot))) {
+          if (log.writing()) std::fprintf(stderr, "state: the recording will not replay past this point\n");
+          audio.clear();
+          next_frame = SDL_GetPerformanceCounter();
+          flush_save();
+        }
+        break;
       case A::FastForwardToggle: break;   // pacing: see below
       default: break;
       }

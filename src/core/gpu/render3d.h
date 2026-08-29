@@ -42,6 +42,11 @@ public:
   explicit Renderer3D(NDS& nds);
   ~Renderer3D();
   void reset();
+  // Save states: the rendered output the display is reading this frame (the
+  // frame was rasterised from VRAM as it was at line 215, which may since
+  // have changed, so it cannot be re-rendered). Loading resets everything
+  // else, the texture cache included.
+  template <class S> void sync_output(S& s);
 
   // Rasterise the frame latched by the geometry engine.
   void render(const Gpu3D& gx);

@@ -4,6 +4,7 @@
 // I/O register file for both CPUs. Register semantics per GBATEK; melonDS is
 // the behavioural reference where GBATEK is silent.
 #include "core/io/io.h"
+#include "core/state/state.h"
 #include "core/nds.h"
 #include "core/dma/dma.h"
 
@@ -1010,5 +1011,39 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
   if (addr & 1) cur = static_cast<u16>((cur & 0x00FF) | (value << 8)); else cur = static_cast<u16>((cur & 0xFF00) | value);
   write16(cpu, base, cur);
 }
+
+
+template <class S> void Io::sync_state(S& s) {
+  s.begin("IO  ");
+  s.fields(lcd_irq_pending, dispstat, vcount, wramcnt, vramcnt, powcnt1, powcnt2, keyinput, extkeyin, keycnt, exmemcnt, spicnt, spidata, arm7_bios_prot);
+  for (CpuIo& c : cpu_io) {
+    s.fields(c.ime, c.ie, c.if_, c.ipc_sync, c.ipc_fifo_cnt, c.fifo_out.data, c.fifo_out.head, c.fifo_out.count, c.fifo_out.last, c.postflg, c.dma_fill);
+    for (Timer& t : c.timers) s.fields(t.reload, t.control, t.counter, t.start_time);
+  }
+  s.fields(spi_fw.hold, spi_fw.cmd, spi_fw.pos, spi_fw.addr, spi_fw.status, spi_fw.data);
+  s.fields(spi_tsc.hold, spi_tsc.pos, spi_tsc.cmd, spi_tsc.sample, spi_tsc.data, spi_tsc.x, spi_tsc.y);
+  s.fields(spi_pm.hold, spi_pm.pos, spi_pm.cmd, spi_pm.regs, spi_pm.data);
+  s.fields(rtc.io, rtc.input, rtc.input_bit, rtc.input_pos, rtc.output, rtc.output_bit, rtc.output_pos, rtc.cmd,
+           rtc.status1, rtc.status2, rtc.datetime, rtc.alarm1, rtc.alarm2, rtc.clock_adjust, rtc.free_reg);
+  s.fields(cart.auxspicnt, cart.auxspidata, cart.romctrl, cart.cmd, cart.transfer_pos, cart.transfer_len, cart.fifo_count, cart.fifo, cart.fifo_head,
+           cart.late, cart.next_word_at, cart.event_armed);
+  s.fields(math.divcnt, math.sqrtcnt, math.div_num, math.div_den, math.div_quot, math.div_rem, math.sqrt_val, math.sqrt_res);
+  s.fields(wifi_ram, wifi_io, wifi_bb, wifi_bb_ro, wifi_rf, wifi_rf_version, wifi_random);
+  s.end();
+  if constexpr (S::reading) {
+    mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;   // the frontend hands a new buffer every frame
+    for (int i = 0; i < 4; ++i) {
+      nds_.sched.rebind(static_cast<EventId>(static_cast<int>(EventId::Timer0) + i), timer_event);
+      nds_.sched.rebind(static_cast<EventId>(static_cast<int>(EventId::Timer7_0) + i), timer_event);
+    }
+    nds_.sched.rebind(EventId::Spi, spi_event);
+    nds_.sched.rebind(EventId::Cart, cart_ev);
+    nds_.sched.rebind(EventId::Div, ev_div);
+    nds_.sched.rebind(EventId::Sqrt, ev_sqrt);
+    nds_.sched.rebind(EventId::LcdIrq, ev_lcd_irq);
+  }
+}
+template void Io::sync_state<state::Writer>(state::Writer&);
+template void Io::sync_state<state::Reader>(state::Reader&);
 
 } // namespace ds::io

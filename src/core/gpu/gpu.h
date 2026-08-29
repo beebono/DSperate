@@ -56,6 +56,17 @@ public:
   bool probe_open_ = false;
   u64  probe_hash_ = 0, probe_vramcnt_at_l0_ = 0, probe_vramcnt_base_ = 0;         // latches POWCNT/FIFO/capture state; runs at line 0 (and once before the first frame)
   bool frame_begun() const { return frame_begun_; }
+  bool at_line_start() const { return !hblank_done_; }
+
+  // Save states, taken at the start of line 0 (where run_frame() returns).
+  // quiesce() joins the engine-B thread and drains the journals without
+  // changing what the guest sees; prepare_load() also lifts the VRAM trap
+  // so the old frame's lazy state cannot fire on the new memory; after_load()
+  // re-takes the frame's lazy/trap decision exactly as begin_frame() did.
+  void quiesce();
+  void prepare_load();
+  template <class S> void sync_state(S& s);
+  void after_load();
 
   // 2D register file (0x04000000-0x0400006F, 0x04001000-0x0400106F) minus
   // DISPSTAT/VCOUNT, which stay with the interrupt logic in Io.

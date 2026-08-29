@@ -12,7 +12,9 @@ namespace ds {
 // ARM9 timing table for the pages whose cacheability changed (a full rebuild
 // is 1 M entries; games flip the PU and the caches every few frames). Region
 // 7 has the highest priority.
-static void update_pu_map(CpuContext& cpu) {
+void cp15_update_pu_map(CpuContext& cpu);
+static void update_pu_map(CpuContext& cpu) { cp15_update_pu_map(cpu); }
+void cp15_update_pu_map(CpuContext& cpu) {
   mem::Timing& t = cpu.nds->bus.timing();
   u8* map = t.pu_map.get();
   static std::unique_ptr<u8[]> fresh(new u8[0x100000]);

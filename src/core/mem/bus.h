@@ -25,6 +25,11 @@ public:
   ~Bus();
 
   void reset();
+  // Save states: the physical memories, and the rebuild of every mapping
+  // and timing table from the restored control registers (WRAMCNT,
+  // VRAMCNT, EXMEMCNT, CP15) once those are back.
+  template <class S> void sync_state(S& s);
+  void relink();
 
   // Remaps after control-register changes.
   void update_tcm(CpuContext& cpu, bool force = false);

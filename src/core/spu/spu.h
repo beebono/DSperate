@@ -26,6 +26,7 @@ class Spu {
 public:
   explicit Spu(NDS& nds) : nds_(nds) {}
   void reset();
+  template <class S> void sync_state(S& s);   // after catch_up(); the output ring is dropped
 
   static bool owns_reg(u32 addr) { return addr >= 0x04000400 && addr < 0x04000520; }
   u32  read(u32 addr, u32 width);

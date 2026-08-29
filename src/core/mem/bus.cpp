@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/mem/bus.h"
+#include "core/cpu/cp15.h"
+#include "core/state/state.h"
 #include "core/profile.h"
 #include "core/nds.h"
 
@@ -374,5 +376,32 @@ u32 Bus::read32(Cpu cpu, u32 addr) { return io_read(cpu, addr, 32); }
 void Bus::write8 (Cpu cpu, u32 addr, u8  v) { io_write(cpu, addr, 8, v); }
 void Bus::write16(Cpu cpu, u32 addr, u16 v) { io_write(cpu, addr, 16, v); }
 void Bus::write32(Cpu cpu, u32 addr, u32 v) { io_write(cpu, addr, 32, v); }
+
+
+template <class S> void Bus::sync_state(S& s) {
+  s.begin("MEM ");
+  s.blob(main_ram.get(), MAIN_RAM_SIZE);
+  s.blob(shared_wram.get(), SHARED_WRAM_SIZE);
+  s.blob(arm7_wram.get(), ARM7_WRAM_SIZE);
+  s.blob(itcm.get(), ITCM_SIZE);
+  s.blob(dtcm.get(), DTCM_SIZE);
+  s.blob(vram.get(), VRAM_TOTAL);
+  s.blob(palette.get(), PALETTE_SIZE);
+  s.blob(oam.get(), OAM_SIZE);
+  s.end();
+}
+template void Bus::sync_state<state::Writer>(state::Writer&);
+template void Bus::sync_state<state::Reader>(state::Reader&);
+
+void Bus::relink() {
+  CpuContext& a9 = nds_.cpu(Cpu::ARM9);
+  CpuContext& a7 = nds_.cpu(Cpu::ARM7);
+  a9.timing9 = a7.timing9 = timing_.cpu9();
+  a9.timing7 = a7.timing7 = timing_.cpu7();
+  a9.cost7 = a7.cost7 = timing_.cost7();
+  cp15_update_pu_map(a9);
+  update_tcm(a9, true);          // also update_wram() and update_vram()
+  update_gba_slot_timings();
+}
 
 } // namespace ds::mem

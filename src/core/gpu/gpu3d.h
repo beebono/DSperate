@@ -76,6 +76,7 @@ class Gpu3D {
 public:
   explicit Gpu3D(NDS& nds);
   void reset();
+  template <class S> void sync_state(S& s);   // after sync_raster()
 
   // Registers: DISP3DCNT (0x60), the 0x320-0x3BF block, the FIFO/command
   // ports and status/results at 0x400-0x6A3.
