@@ -505,7 +505,7 @@ struct Key { u32 pc; u8 dma, cpu; bool operator<(const Key& o) const { return pc
 static std::map<Key, u64> writers;             // writer pc -> invalidations
 static std::map<u32, u64> victims_by_page;     // guest page of a killed block -> kills
 static std::map<u32, u64> retrans;             // guest pc -> translations
-static u64 inval = 0, killed = 0, trans = 0, frames_seen = 0, range_miss = 0;
+static u64 inval = 0, killed = 0, trans = 0, frames_seen = 0, range_miss = 0, resets = 0;
 static bool on() { static const bool e = std::getenv("DS_JIT_CHURN") != nullptr; return e; }
 static void report() {
   auto top = [](auto& m, const char* what, int n, auto print) {
@@ -517,8 +517,8 @@ static void report() {
   };
   auto pk = [](u64 n, const Key& k) { std::fprintf(stderr, "   %10llu  pc %08x %s arm%d\n", (unsigned long long)n, k.pc, k.dma ? "DMA" : "cpu", k.cpu); };
   auto pa = [](u64 n, u32 a) { std::fprintf(stderr, "   %10llu  %08x\n", (unsigned long long)n, a); };
-  std::fprintf(stderr, "[churn] frames %llu invalidations %llu blocks killed %llu translations %llu | code-page stores: silent %llu changed %llu, changed-but-no-block %llu\n",
-               (unsigned long long)frames_seen, (unsigned long long)inval, (unsigned long long)killed, (unsigned long long)trans,
+  std::fprintf(stderr, "[churn] frames %llu arena resets %llu invalidations %llu blocks killed %llu translations %llu | code-page stores: silent %llu changed %llu, changed-but-no-block %llu\n",
+               (unsigned long long)frames_seen, (unsigned long long)resets, (unsigned long long)inval, (unsigned long long)killed, (unsigned long long)trans,
                (unsigned long long)mem::code_store_stats.silent, (unsigned long long)mem::code_store_stats.changed, (unsigned long long)range_miss);
   top(writers, "writers (pc of the store / DMA start)", 15, pk);
   top(victims_by_page, "invalidated guest pages (2 KB)", 15, pa);
@@ -573,6 +573,7 @@ void remove_from_page_lists(Block* b) {
 JitCpu& jc_of(Block* b) { return g_rt.cpus[b->owner]; }
 
 void reset_arena() {
+  if (churn::on()) ++churn::resets;
   Runtime& r = g_rt;
   for (JitCpu& jc : r.cpus) {
     for (Block* b : jc.all_blocks) delete b;

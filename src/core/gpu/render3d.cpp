@@ -672,7 +672,11 @@ void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s
   const s32 xdiff = (xend + 1) - xstart;
   const s32 xv0 = xa - xstart;
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
-  const bool use_factor = xdiff != 0 && (!linear || wbuffer);
+  // The factor feeds span_attr_persp (w-buffer depth) and the perspective
+  // attribute kernels. A linear span only needs it for a varying w-buffer
+  // depth; with z constant as well nothing reads it -- GSDD's title stages
+  // 45 k such pixels a frame (census 2026-08-28).
+  const bool use_factor = xdiff != 0 && (!linear || (wbuffer && zl != zr));
   if (use_factor) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac + off);
   // A constant depth needs no reciprocal or per-pixel interpolation.  Flat
   // geometry is common in the DS scenes, and keeping this out of the span
