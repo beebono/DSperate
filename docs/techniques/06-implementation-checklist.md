@@ -13,8 +13,8 @@ already settled carry a note.
 
 ## Audit summary (2026-08-28)
 
-105 rows: 43 `same`, 24 `equiv`, 13 `partial`, 16 `no`, 5 `n/a`, none
-still marked high priority. Where DSperate departs it is usually because it chose
+105 rows: 43 `same`, 24 `equiv`, 15 `partial`, 14 `no`, 5 `n/a`, none
+still marked high priority (5.1 and 4.8 moved `no` → `partial` on 2026-08-28). Where DSperate departs it is usually because it chose
 hardware-exact, melonDS-comparable behaviour (DMA per unit, SPU per sample,
 geometry per slice) over DraStic's deferral — those are the rows worth a
 measured decision, ranked by likely payoff:
@@ -40,8 +40,8 @@ measured decision, ranked by likely payoff:
    build except through `DS_SPU_BATCH=1`. The inexact rows (5.4, 5.6, 5.9,
    5.11) stay `no`: they would change what Rhythm Heaven's just-in-time
    stream writer sees, and the remaining per-sample channel work is small.
-3. **Geometry: per-word enqueue, per-polygon constants, batched vertex
-   transform** (4.17, 4.18) — *not* frame-granular replay. The per-slice
+3. ~~**Geometry: per-word enqueue, per-polygon constants, batched vertex
+   transform** (4.17, 4.18)~~ — done in the exact form; *not* frame-granular replay. The per-slice
    `run_to` is an inline idle test and `run_to_slow` runs only 148–567×
    a frame, so dispatch count is not the cost; and the games drive the
    engine at FIFO pace (`check_fifo_irq` 23 k/frame on GSDD, FIFO-full
@@ -188,7 +188,7 @@ measured decision, ranked by likely payoff:
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
 | 4.1 | Delta-encoded fixed-slot event list; slice = head delta | 04 §1 | equiv | fixed `EventId` slots, absolute `at_[]` deadlines, armed bitmask, cached `next_` |
-| 4.2 | Both CPUs run the same slice; ARM7 at doubled cycle cost | 04 §1 | same | event-bound mode (quantum 0): ARM9 slice then ARM7 with `arm7_debt_/2`; verification harness uses 128-cycle lockstep |
+| 4.2 | Both CPUs run the same slice; ARM7 at doubled cycle cost | 04 §1 | same | event-bound mode (quantum 0): ARM9 slice then ARM7 with `arm7_debt_/2`, slices capped at `EVENT_BOUND_QUANTUM` = 2048 (the SDK's IPCSYNC boot countdown needs it; the cap was implicit in the per-sample SPU event until 2026-08-28); verification harness uses 128-cycle lockstep |
 | 4.3 | Forced task switch at next 128-cycle boundary on cross-CPU dependency | 04 §1 | equiv | `preempt()` on DMA start, `gx_fifo_full()` stall, LOCKSTEP_QUANTUM polling while stalled |
 | 4.4 | Scanline as two events (3,072 + 1,188 cycles) | 04 §1 | same | HBlank / VBlank_Scanline events |
 | 4.5 | Timer count derived on read; overflow as an event | 04 §2 | same | `timer_value` from `start_time`; overflow scheduled from the sample point |
@@ -203,8 +203,8 @@ measured decision, ranked by likely payoff:
 | 4.14 | Per-engine journal of mid-frame register/palette/OAM writes, replayed per line | 04 §5 | same | `Engine2D::queue` / `replay_to`, stamped `line*2 + phase` so writes before and after a line's scanline start (window edges) replay in order; POWCNT and MASTER_BRIGHT ride the same journal |
 | 4.15 | Copy-on-first-write shadow palette/OAM; journal only if value changed | 04 §5 | equiv | the engine keeps a render-side palette/OAM copy the journal feeds; the guest bytes stay live, so no copy-on-write; silent stores dropped in `Gpu::palette_store` / `oam_store`; palette/OAM pages are permanently slow-path for stores (~400/frame) |
 | 4.16 | VRAM bank remaps deferred to next render | 04 §5 | equiv | not deferred: `update_vram` catches the render up to the current line, remaps, re-arms the trap, and the frame stays batched |
-| 4.17 | Geometry commands logged, replayed once at VBlank | 04 §6 | no | `Gpu3D::run_to` executes queued commands after every ARM9 slice (slice-granular, not frame-granular) |
-| 4.18 | Vertex transform as a batched kernel after replay | 04 §6 | no | vertices transformed as commands execute |
+| 4.17 | Geometry commands logged, replayed once at VBlank | 04 §6 | no | `Gpu3D::run_to` executes queued commands after every ARM9 slice (slice-granular, not frame-granular); decided against — the per-slice dispatch is an inline idle test and the games pace the engine by the FIFO (summary item 3); the enqueue path is one ring instead |
+| 4.18 | Vertex transform as a batched kernel after replay | 04 §6 | no | vertices transformed as commands execute; a NEON form of the per-vertex transform measured worse than the scalar `smull`/`smaddl` chain (110 → 118 insn), so batching is the only route and it needs the replay model |
 | 4.19 | `GXSTAT` (and FIFO IRQ/DMA) computed by replaying the log on demand | 04 §6 | same | register reads call `run_to` first; `swap_pending()` feeds idle skip — see Dragon Ball GXSTAT poll note |
 | 4.20 | 3D render kicked at line 215, joined at VBlank | 04 §6 | same | `render_frame` at VCount 215, joined by `sync_line` as display reads each band |
 | 4.21 | Audio buffer occupancy as primary frame limiter | 04 §7 | same | `Audio::pace()` sleeps above the target queue depth; wall clock only with `--no-audio` |
