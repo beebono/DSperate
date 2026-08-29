@@ -218,6 +218,15 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
         const u8* ps = nds_.cpu(c.cpu).page_table.read_ptr(c.cur_src);
         bool code = false;
         u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
+        // A destination page under the lazy-2D write trap: take the trap once
+        // for the run rather than once per word through the bus. The render
+        // catches up before any byte changes, and opens a window in which the
+        // page is plain memory again -- so the run copies at full speed. (A
+        // page still trapped afterwards falls to the per-word path below.)
+        if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
+          nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
+          pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
+        }
         if (pd && !code) {
           u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 2;
           const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) >> 2;
@@ -235,7 +244,37 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
       }
       bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
     }
-    else           bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
+    else {
+      // Halfword run between two direct-mapped pages, the shape of most VRAM
+      // uploads (Golden Sun streams tiles by 16-bit DMA through the display
+      // period): same per-unit cost, stall check and budget as the generic
+      // path, one page-table walk per end per run, and the lazy-2D write trap
+      // taken once for the run rather than per halfword through the bus.
+      if (c.src_inc == 1 && c.dst_inc == 1) {
+        const u8* ps = nds_.cpu(c.cpu).page_table.read_ptr(c.cur_src);
+        bool code = false;
+        u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
+        if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
+          nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
+          pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
+        }
+        if (pd && !code) {
+          u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 1;
+          const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) >> 1;
+          if (room_d < room) room = room_d;
+          RunCost rc = run_cost(c, false);
+          for (;;) {
+            std::memcpy(pd, ps, 2);
+            c.cur_src += 2; c.cur_dst += 2; c.iter_count--; c.rem_count--;
+            if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
+            cost = rc.next(c); if (a9) cost <<= 1; used += cost;
+            ps += 2; pd += 2;
+          }
+          continue;
+        }
+      }
+      bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
+    }
     const u32 step = word ? 4 : 2;
     c.cur_src += c.src_inc * step;
     c.cur_dst += c.dst_inc * step;

@@ -137,10 +137,16 @@ private:
   // line (the frontier cannot move inside a line, so later stores in it are
   // free) and re-arms at the next scanline; past LAZY_HIT_LIMIT hit-lines the
   // frame falls back to per line as before.
+  // A trapped store catches the frame up, lifts the trap and renders the
+  // next LAZY_BURST_LINES lines per line (exact without any trap, and no
+  // slow-path stores while a DMA streams), then re-arms and batches again.
+  // Two page-table walks per burst rather than two per line, and no trapped
+  // store inside it. Past LAZY_BURST_LIMIT bursts the frame stays per line.
   bool lazy_capture_ = true;
-  bool trap_rearm_ = false;
-  u32  lazy_hits_ = 0;
-  static constexpr u32 LAZY_HIT_LIMIT = 16;
+  bool burst_ = false;            // per-line for the current burst of stores
+  u32  burst_left_ = 0;           // display lines left before re-batching
+  u32  lazy_bursts_ = 0;
+  static constexpr u32 LAZY_BURST_LIMIT = 16, LAZY_BURST_LINES = 8;
   u32  frontier() const { return hblank_done_ ? line_ + 1u : line_; }   // first line a write now can still affect
   void catch_up();                // render every line below the frontier
   void fall_back_per_line();      // catch up and render the rest of the frame per line

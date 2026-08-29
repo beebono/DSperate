@@ -57,6 +57,9 @@ public:
   }
 
   bool running() const { return thread_.joinable(); }
+  // Whether the worker is asleep on its condition variable: a dispatch now
+  // pays a wake-up (tens of microseconds on the A55) before the job starts.
+  bool parked() const { return parked_.load(std::memory_order_relaxed); }
   // Hand-off state, for a stalled-frame watchdog (DS_WATCHDOG).
   void debug_dump(FILE* f) const {
     std::fprintf(f, "  line worker: running %d req %u ack %u parked %d\n", running() ? 1 : 0,
