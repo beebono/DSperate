@@ -165,6 +165,23 @@ void Display::toggle_fullscreen() {
   margins_dirty_ = true;
 }
 
+void Display::set_layout(Layout l) {
+  if (only_screen_ >= 0 || l == layout_) return;
+  layout_ = l;
+  if (!fullscreen_) {
+    // Keep the per-screen size, swap the arrangement.
+    int w = 0, h = 0;
+    SDL_GetWindowSize(win_, &w, &h);
+    const bool across = l == Layout::Horizontal;
+    const int sw = across ? w / 1 : w / 2, sh = across ? h / 2 : h / 1;   // previous per-screen size
+    const int nw = across ? sw * 2 : sw, nh = across ? sh : sh * 2;
+    SDL_SetWindowSize(win_, nw, nh);
+  }
+  layout();
+  build_scale();
+  margins_dirty_ = true;
+}
+
 bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];

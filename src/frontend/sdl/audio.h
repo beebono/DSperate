@@ -26,6 +26,12 @@ public:
   bool active() const { return dev_ != 0; }
 
   void push(NDS& nds);      // drain the SPU ring into the queue
+  void set_volume(int percent);   // 0..100
+  int  volume() const { return volume_; }
+  void set_muted(bool m) { muted_ = m; }
+  bool muted() const { return muted_; }
+  void pause(bool p);       // stop the device and drop what is queued
+  void clear() { if (dev_) SDL_ClearQueuedAudio(dev_); }
 
   // Microphone: the default capture device at the SPU rate, mono. Opened
   // separately so --no-audio still records. capture() hands back everything
@@ -44,6 +50,8 @@ private:
   std::vector<s16> mic_;
   u32 frame_bytes_ = 0;
   bool stalled_ = false;
+  int  volume_ = 100;
+  bool muted_ = false;
 };
 
 } // namespace ds::sdl

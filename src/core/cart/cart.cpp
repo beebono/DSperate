@@ -243,7 +243,7 @@ u8 Cart::spi_eeprom_tiny(u8 v) {
   case 0x05: return spi_status_ | 0xF0;
   case 0x02: case 0x0A:
     if (spi_pos_ < 2) spi_addr_ = v;
-    else { if (spi_status_ & 2) { sram_[(spi_addr_ + (spi_cmd_ == 0x0A ? 0x100 : 0)) & 0x1FF] = v; sram_dirty_ = true; } spi_addr_++; }
+    else { if (spi_status_ & 2) { sram_[(spi_addr_ + (spi_cmd_ == 0x0A ? 0x100 : 0)) & 0x1FF] = v; mark_dirty(); } spi_addr_++; }
     return 0;
   case 0x03: case 0x0B:
     if (spi_pos_ < 2) { spi_addr_ = v; return 0; }
@@ -261,7 +261,7 @@ u8 Cart::spi_eeprom(u8 v) {
   case 0x05: return spi_status_;
   case 0x02:
     if (spi_pos_ <= addrsize) spi_addr_ = (spi_addr_ << 8) | v;
-    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] = v; sram_dirty_ = true; } spi_addr_++; }
+    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] = v; mark_dirty(); } spi_addr_++; }
     return 0;
   case 0x03:
     if (spi_pos_ <= addrsize) { spi_addr_ = (spi_addr_ << 8) | v; return 0; }
@@ -277,11 +277,11 @@ u8 Cart::spi_flash(u8 v) {
   case 0x05: return spi_status_;
   case 0x02:   // page program: can only clear bits (an erased page reads 0xFF)
     if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] &= v; sram_dirty_ = true; } spi_addr_++; }
+    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] &= v; mark_dirty(); } spi_addr_++; }
     return 0;
   case 0x0A:   // page write
     if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] = v; sram_dirty_ = true; } spi_addr_++; }
+    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] = v; mark_dirty(); } spi_addr_++; }
     return 0;
   case 0x03:
     if (spi_pos_ <= 3) { spi_addr_ = (spi_addr_ << 8) | v; return 0; }
@@ -293,11 +293,11 @@ u8 Cart::spi_flash(u8 v) {
   case 0x9F: return 0xFF;
   case 0xD8:   // sector erase
     if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x10000; ++i) sram_[(spi_addr_++) & mask] = 0xFF; sram_dirty_ = true; }
+    if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x10000; ++i) sram_[(spi_addr_++) & mask] = 0xFF; mark_dirty(); }
     return 0;
   case 0xDB:   // page erase
     if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x100; ++i) sram_[(spi_addr_++) & mask] = 0xFF; sram_dirty_ = true; }
+    if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x100; ++i) sram_[(spi_addr_++) & mask] = 0xFF; mark_dirty(); }
     return 0;
   default: return 0xFF;
   }

@@ -16,7 +16,7 @@ namespace ds::sdl {
 // the device, open() fails and the SDL path is used.
 class MicAlsa {
 public:
-  bool open(u32 rate);
+  bool open(u32 rate, const char* device = nullptr);   // device: ALSA name; null/empty = DS_MIC_DEV or plughw:0,0
   void close();
   bool active() const { return pcm_ != nullptr; }
   void capture(std::vector<s16>& out);   // everything available, non-blocking

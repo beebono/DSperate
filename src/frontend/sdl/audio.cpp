@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace ds::sdl {
 
@@ -62,8 +63,25 @@ void Audio::push(NDS& nds) {
   s16 buf[2048 * 2];
   size_t n;
   while ((n = nds.spu.take(buf, 2048)) != 0) {
-    if (dev_) SDL_QueueAudio(dev_, buf, static_cast<u32>(n * 4));
+    if (!dev_) continue;
+    if (muted_) std::memset(buf, 0, n * 4);
+    else if (volume_ != 100) {
+      // Linear in amplitude; the SPU's own master volume is the game's.
+      const int g = volume_ * 256 / 100;
+      for (size_t i = 0; i < n * 2; ++i) buf[i] = static_cast<s16>((buf[i] * g) >> 8);
+    }
+    SDL_QueueAudio(dev_, buf, static_cast<u32>(n * 4));
   }
+}
+
+void Audio::set_volume(int percent) {
+  volume_ = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+}
+
+void Audio::pause(bool p) {
+  if (!dev_) return;
+  SDL_PauseAudioDevice(dev_, p ? 1 : 0);
+  if (p) SDL_ClearQueuedAudio(dev_);
 }
 
 double Audio::queued_frames() const {

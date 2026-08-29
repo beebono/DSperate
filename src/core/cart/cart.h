@@ -54,6 +54,8 @@ public:
   u8   spi_transfer(u8 v);
   std::vector<u8>& sram() { return sram_; }
   bool sram_dirty() const { return sram_dirty_; }
+  // Bumped on every save-chip write; the frontend flushes once it stops moving.
+  u32  sram_writes() const { return sram_writes_; }
   void clear_sram_dirty() { sram_dirty_ = false; }
 
   // Secure area for direct boot: 0x800 bytes from arm9_rom_offset, decrypted.
@@ -88,6 +90,8 @@ private:
   bool ir_cart_ = false; u8 ir_cmd_ = 0; u32 ir_pos_ = 0;
   std::vector<u8> sram_;
   bool sram_dirty_ = false;
+  u32  sram_writes_ = 0;
+  void mark_dirty() { sram_dirty_ = true; ++sram_writes_; }
   u32 spi_pos_ = 0; u8 spi_cmd_ = 0; u32 spi_addr_ = 0; u8 spi_status_ = 0;
   u8 spi_eeprom_tiny(u8 v); u8 spi_eeprom(u8 v); u8 spi_flash(u8 v);
 };

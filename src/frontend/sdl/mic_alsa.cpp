@@ -10,9 +10,10 @@
 
 namespace ds::sdl {
 
-bool MicAlsa::open(u32 rate) {
+bool MicAlsa::open(u32 rate, const char* device) {
 #ifdef __linux__
   const char* dev = std::getenv("DS_MIC_DEV");
+  if (!dev && device && *device) dev = device;
   if (dev && !*dev) return false;               // DS_MIC_DEV= (empty): SDL's path
   if (!dev) dev = "plughw:0,0";
   lib_ = dlopen("libasound.so.2", RTLD_NOW);

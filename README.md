@@ -73,27 +73,53 @@ output but `--dump-audio file` writes the raw s16 stereo stream.
 `dsperate-sdl` is the SDL2 frontend: direct boot, both screens stacked, sound
 and input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
 
-    dsperate-sdl game.nds --bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin \
-                 [--scale N] [--fullscreen] [--linear] [--no-vsync] [--no-audio] [--no-mic]
-                 [--interp] [--lockstep | --quantum N] [--layout vertical|horizontal]
-                 [--frames N] [--record F | --replay F]
+    dsperate-sdl game.nds [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
+                 [--config F] [--scale N] [--fullscreen] [--linear] [--no-vsync] [--no-audio]
+                 [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N]
+                 [--layout vertical|horizontal] [--frames N] [--record F | --replay F]
 
-Keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R, Enter = Start,
-Right Shift = Select, `F` toggles fullscreen, `L` closes and opens the lid
-(the game sleeps and wakes; a handheld with a real hinge switch drives this
-itself), `M` (or a controller's right trigger) held is a fake microphone (noise at 80 % of full scale, for
-blowing/shouting prompts on devices without one; the real one is captured
-otherwise -- on Linux straight from ALSA, `DS_MIC_DEV`, default `plughw:0,0`, DC-blocked and noise-gated -- `DS_MIC_GATE` factor over the tracked floor, default 5, 0 = off -- `DS_MIC_GAIN` to scale, default 0.25 (set against the RG DS and Mario & Luigi's mic-test meter); since
-the handhelds' PipeWire only offers a speaker monitor; `--no-mic` to leave it closed), Escape quits. A game controller
-is picked up automatically (Select+Start quits, for handhelds without a
-keyboard), and the touchscreen is driven by a finger or the mouse on the
-bottom screen. Battery saves live next to the ROM as `<rom>.sav`; there are no
-savestates. `DS_FPS=1` prints speed, per-stage times and audio buffer depth;
+Settings live in `~/.config/dsperate/dsperate.ini` (`$XDG_CONFIG_HOME` is
+honoured; `--config F` names another file), written with every key commented
+out on the first run. `games/<GAMECODE>.ini` next to it overrides any of them
+for one title (the code is printed as `game: ... [XXXX]` at start), and the
+command line overrides both. `[paths]` holds the BIOS/firmware so they need not
+be passed every time, plus optional `saves` and `states` directories (default:
+next to the ROM). `[keys]` and `[pad]` remap the DS buttons to SDL key and
+controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);
+`[hotkeys]` and `[padhotkeys]` bind the frontend's actions, on the controller
+usually as `mod+button` with a modifier that is withheld from the game while
+held (Select by default -- released alone it still arrives as a tap). The left
+stick works the d-pad; `stylus_stick = true` puts the pen on the right one.
+
+Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,
+Enter = Start, Right Shift = Select; `Escape` quits, `P` pauses, `Tab` held
+fast-forwards, `F` toggles fullscreen, `F4` swaps the screen layout (and
+remembers it for the game), `F9` takes a screenshot (both screens, BMP, in the
+states directory), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
+the state in the current slot and `F2`/`F3` change the slot, `L` closes and
+opens the lid (the game sleeps and wakes; a handheld with a real hinge switch
+drives this itself), `M` (or a controller's right trigger) held is a fake
+microphone (noise at 80 % of full scale, for blowing/shouting prompts on
+devices without one; the real one is captured otherwise -- on Linux straight
+from ALSA, `mic_dev`/`DS_MIC_DEV`, default `plughw:0,0`, DC-blocked and
+noise-gated -- `mic_gate` factor over the tracked floor, default 5, 0 = off --
+`mic_gain` to scale, default 0.25 (set against the RG DS and Mario & Luigi's
+mic-test meter); the handhelds' PipeWire only offers a speaker monitor;
+`--no-mic` to leave it closed). Controller: Select+Start quits, Select+L
+pauses, Select+R held fast-forwards, Select+B/A save/load the state,
+Select+X/Y change the slot, Select+Up/Down volume, Select+Right layout,
+Select+Left screenshot. The touchscreen is driven by a finger or the mouse on
+the bottom screen.
+
+Battery saves live next to the ROM as `<rom>.sav` (or under `[paths] saves`),
+written a second after the game stops writing its save chip and again on
+pause, lid close and exit -- a launcher's SIGTERM included. `DS_FPS=1` prints
+speed, per-stage times and audio buffer depth;
 with `--frames N` the output is comparable between runs by frame index.
 `DS_FRAME_HASH=1` (CLI) prints a digest of RAM and both CPUs' registers after
 every frame, and `DS_FRAME_DUMP=<frame>:<path>` writes that frame's RAM, so
 two builds can be diffed to the first frame their *state* differs -- usually
-long before the first pixel does. `DS_IDLE_SKIP=0|1|all` sets the idle-loop
+long before the first pixel does. `DS_IDLE_SKIP=0|1|all` (or `[emu] idle_skip`) sets the idle-loop
 skip: `1` (default) skips only an ARM9 GXSTAT poll while a swap is pending;
 `all` skips every proven poll loop. `DS_JIT_CHURN=1` prints, at exit, who invalidated
 translated code and which blocks were retranslated. `DS_WATCHDOG=<seconds>` (CLI)

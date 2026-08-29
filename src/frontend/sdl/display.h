@@ -69,6 +69,10 @@ public:
   void end_frame();   // unlock and present
   void on_resize() { layout(); build_scale(); margins_dirty_ = true; }
   void toggle_fullscreen();
+  // Switches between stacked and side-by-side; a windowed window is resized
+  // to fit. Ignored on a single-screen (dual-window) display.
+  void set_layout(Layout l);
+  Layout current_layout() const { return layout_; }
 
   // Window point -> pixel in `screen`. False if the point is not on a screen.
   bool map_point(int wx, int wy, int& screen, int& sx, int& sy) const;
