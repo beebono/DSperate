@@ -153,6 +153,11 @@ void Bus::update_vram() {
   PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
   PageTable& pt7 = nds_.cpu(Cpu::ARM7).page_table;
   const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
+  // A remap mid-frame changes what the deferred 2D render reads: the lines
+  // whose HBlank has passed are rendered now, against the old views, before
+  // anything is rebuilt; the write trap (which the remap below would drop)
+  // is re-armed after it.
+  const bool trapped = nds_.gpu.vram_remap_begin();
   u8* banks[9];
   for (int i = 0; i < 9; ++i) banks[i] = vram_bank(i);
   vram_map_.rebuild(nds_.io.vramcnt, banks);
@@ -185,9 +190,6 @@ void Bus::update_vram() {
     if (!(vram_map_.lcdc_mask & (1u << i))) continue;
     for (u32 mirror = 0x06800000; mirror < 0x07000000; mirror += 0x100000) set_pages(h9, mirror + lcdc_base[i], VRAM_BANK_SIZES[i], banks[i]);
   }
-  // A remap mid-frame changes what the deferred 2D render reads: it catches
-  // up first, and the write trap (which remap would drop) is re-armed after.
-  const bool trapped = nds_.gpu.vram_remap_begin();
   pt9.remap(0x06000000, 0x01000000, h9, RW);
   pt7.remap(0x06000000, 0x01000000, h7, RW);
   nds_.gpu.vram_remap_end(trapped);
