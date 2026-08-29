@@ -129,8 +129,8 @@ saved straight after a load is byte-identical to the one loaded --
 that the frames after a load match the frames after the save, on any
 recorded scene (the CLI takes `--save-state-at N:file` and `--load-state
 file`; `DS_STATE_DEBUG=1` prints the cycle-accounting state at both points).
-Loading a state during `--record` leaves a recording that cannot replay past
-that point; `--replay` refuses to load or save states at all.
+Loading a state is refused during `--record` (the recording could not
+replay past it) and `--replay` refuses to load or save states at all.
 
 Fast forward (`Tab` held, Select+R, or the `fast_forward_toggle` hotkey)
 drops the pacing -- `[emu] ff_speed = N` caps it at N times real time -- and

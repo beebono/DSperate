@@ -389,8 +389,9 @@ int main(int argc, char** argv) {
         break;
       case A::LoadState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
+        // A recording is the inputs from boot; a load would leave it unreplayable.
+        if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
         if (load_state_file(nds, state_path(nds, states_dir, state_slot))) {
-          if (log.writing()) std::fprintf(stderr, "state: the recording will not replay past this point\n");
           audio.clear();
           next_frame = SDL_GetPerformanceCounter();
           flush_save();
