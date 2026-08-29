@@ -2463,7 +2463,7 @@ u32 Renderer3D::adaptive_workers(u32 max_workers) {
 bool Renderer3D::adapt_enabled() {
   static const bool on = [] {
     const char* e = std::getenv("DS_R3D_ADAPT");
-    return !e || std::atoi(e) != 0;
+    return e && std::atoi(e) != 0;    // off unless asked: band_count pins three workers
   }();
   return on;
 }
@@ -2487,7 +2487,11 @@ u32 Renderer3D::band_count(u32 polygons) {
   // while sm64 loses 5.6 %, mlbis 8.5 % and dbori 2.7 %, because the worker
   // comes out of a core the emulation thread wanted. Neither fixed count is
   // right for both, hence the controller.
-  return adapt_enabled() ? 3 : 2;
+  // Pinned at three since 2026-08-29 (RG DS knob sweep against the CPU cuts
+  // of 2026-08-28: mlbis -6.8 %, etody -2.6 %, sm64 -1.4 %, meteos/dbori flat;
+  // GSDD +5.8 %, whose main thread is the critical path). The 2<->3 controller
+  // stays behind DS_R3D_ADAPT=1.
+  return 3;
 }
 
 // Set up a worker to render a band of the frame the coordinator has latched.
