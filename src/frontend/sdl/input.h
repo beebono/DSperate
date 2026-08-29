@@ -5,6 +5,7 @@
 #include "core/input/input_log.h"
 
 #include <SDL2/SDL.h>
+#include <vector>
 
 namespace ds { struct NDS; }
 namespace ds::sdl {
@@ -32,6 +33,15 @@ public:
     return f;
   }
 
+  // Hinge: `L` toggles it from the keyboard; a real lid switch (lid.h) drives
+  // set_lid() directly. Closing sends the game to sleep, opening wakes it.
+  void set_lid(bool closed) { lid_ = closed; }
+  bool lid() const { return lid_; }
+  // Fake microphone for devices without one: `M` held = noise at ~80 % of
+  // full scale, otherwise silence. Fills `out` for one frame when active.
+  bool fake_mic() const { return mic_key_ || mic_trigger_; }
+  void fake_mic_frame(std::vector<s16>& out);
+
   bool quit() const { return quit_; }
   // Select+Start together quits when there is no keyboard (handhelds).
   bool combo_quit() const { return (buttons_ & (1u << io::Io::BTN_SELECT)) && (buttons_ & (1u << io::Io::BTN_START)); }
@@ -46,6 +56,8 @@ private:
   bool touching_ = false, touched_ = false;
   int  touch_x_ = 0, touch_y_ = 0;
   bool quit_ = false;
+  bool lid_ = false, mic_key_ = false, mic_trigger_ = false;
+  u32  noise_ = 0x2545F491;
   SDL_GameController* pad_ = nullptr;
 };
 

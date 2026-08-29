@@ -4,6 +4,7 @@
 #include "core/spu/spu.h"
 
 #include <SDL2/SDL.h>
+#include <vector>
 
 namespace ds { struct NDS; }
 namespace ds::sdl {
@@ -25,13 +26,22 @@ public:
   bool active() const { return dev_ != 0; }
 
   void push(NDS& nds);      // drain the SPU ring into the queue
+
+  // Microphone: the default capture device at the SPU rate, mono. Opened
+  // separately so --no-audio still records. capture() hands back everything
+  // captured since the last call (at most a few frames' worth: a backlog is
+  // dropped, the game wants what is being said now, not what was).
+  bool open_capture();
+  const std::vector<s16>& capture();
+  bool capturing() const { return cap_ != 0; }
   void pace();              // sleep while the queue is above the target depth
   double queued_frames() const;   // how much audio is buffered, in frames
 
 private:
   static constexpr int TARGET_FRAMES = 3;    // ~50 ms of slack
   static constexpr int STALLED_FRAMES = 30;  // a queue this deep means nothing is playing
-  SDL_AudioDeviceID dev_ = 0;
+  SDL_AudioDeviceID dev_ = 0, cap_ = 0;
+  std::vector<s16> mic_;
   u32 frame_bytes_ = 0;
   bool stalled_ = false;
 };

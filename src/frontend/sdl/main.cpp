@@ -15,8 +15,12 @@
 #include "audio.h"
 #include "display.h"
 #include "input.h"
+#include "lid.h"
+#include "mic_alsa.h"
 
 #include <SDL2/SDL.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +42,7 @@ const char* kUsage =
     "  --accel         GPU renderer; the default is software, which measures faster\n"
     "                  on the handhelds (the GL driver's threads cost more than the scale)\n"
     "  --no-audio      run without sound (frames are paced by the clock)\n"
+    "  --no-mic        do not open the microphone (M still fakes one)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
     "  --interp        interpreter instead of the recompiler\n"
     "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
@@ -79,7 +84,7 @@ int main(int argc, char** argv) {
   int scale = 2;
   long frame_limit = 0;
   const char *record = nullptr, *replay = nullptr, *save_arg = nullptr;
-  bool fullscreen = false, linear = false, accel = false, audio_on = true, jit = true, vsync = true;
+  bool fullscreen = false, linear = false, accel = false, audio_on = true, mic_on = true, jit = true, vsync = true;
   ds::sdl::Display::Layout layout = ds::sdl::Display::Layout::Vertical;
   bool dual_window = false;
   long quantum = 0;   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
@@ -105,6 +110,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--linear")) linear = true;
     else if (!std::strcmp(argv[i], "--accel")) accel = true;
     else if (!std::strcmp(argv[i], "--no-audio")) audio_on = false;
+    else if (!std::strcmp(argv[i], "--no-mic")) mic_on = false;
     else if (!std::strcmp(argv[i], "--no-vsync")) vsync = false;
     else if (!std::strcmp(argv[i], "--interp")) jit = false;
     else if (!std::strcmp(argv[i], "--lockstep")) quantum = ds::LOCKSTEP_QUANTUM;
@@ -147,8 +153,12 @@ int main(int argc, char** argv) {
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
 
   u32 init = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
-  if (audio_on) init |= SDL_INIT_AUDIO;
-  if (SDL_Init(init) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
+  if (audio_on || mic_on) init |= SDL_INIT_AUDIO;
+  if (SDL_Init(init) != 0) {
+    std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+    if (!(init & SDL_INIT_AUDIO) || SDL_Init(init & ~SDL_INIT_AUDIO) != 0) return 1;
+    audio_on = mic_on = false;   // no audio subsystem: run silent
+  }
 
   ds::sdl::Display display;
   ds::sdl::Display display2;   // dual-window: the bottom screen's own window
@@ -167,9 +177,29 @@ int main(int argc, char** argv) {
 
   ds::sdl::Audio audio;
   if (audio_on) audio.open();
+  // Not during a replay: the log carries the mic, and an open capture device
+  // would only add work to a measurement.
+  ds::sdl::MicAlsa mic_alsa;
+  if (mic_on && !replay && !mic_alsa.open(ds::spu::Spu::SAMPLE_RATE)) audio.open_capture();
 
   ds::sdl::Input input;
   input.open_controllers();
+  ds::sdl::Lid lid;
+  if (!replay) lid.open();
+  std::vector<s16> mic, mic_raw, mic_queue;
+  // The codec's ADC sits well off zero (the RG DS: ~4200 of DC), which at
+  // the game's x80 would read as a constant shout; one-pole DC blocker,
+  // ~25 Hz at 32768 Hz. DS_MIC_GAIN scales what is left (default 0.25: the
+  // codec is hot, and Mario & Luigi's mic-test meter sits right at 0.25 / gate 5).
+  double dc = 0.0;
+  // Noise gate: the ADC's hiss (RG DS: ~500 rms after the DC block) is
+  // still x80 louder than a DS's own floor, and games wait for quiet
+  // before they listen. The floor is the slowest-rising rms seen; a frame
+  // under DS_MIC_GATE times it (default 5, 0 = off) is sent as silence.
+  const double mic_gate = std::getenv("DS_MIC_GATE") ? std::atof(std::getenv("DS_MIC_GATE")) : 5.0;
+  double mic_floor = 1e9;
+  const double mic_gain = std::getenv("DS_MIC_GAIN") ? std::atof(std::getenv("DS_MIC_GAIN")) : 0.25;
+  const size_t mic_per_frame = ds::spu::Spu::SAMPLE_RATE * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ;   // 547
 
   // Wall-clock pacing when there is no audio queue to pace against.
   const double frame_ns = 1e9 * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ;
@@ -192,9 +222,52 @@ int main(int argc, char** argv) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
     ds::input::Frame in = input.frame();
-    if (log.reading()) { if (!log.read(in)) break; }   // the controls still quit; the log ends the run
-    else if (log.writing()) log.write(in);
-    ds::input::apply(nds, in);
+    if (log.reading()) {
+      if (!log.read(in)) break;   // the controls still quit; the log ends the run
+      ds::input::apply(nds, in);
+    } else {
+      bool closed;
+      if (lid.poll(closed)) input.set_lid(closed);
+      in.lid = input.lid();
+      if (input.fake_mic()) input.fake_mic_frame(mic);
+      else {
+        if (mic_alsa.active()) mic_alsa.capture(mic_raw);
+        else if (audio.capturing()) mic_raw = audio.capture();
+        else mic_raw.clear();
+        for (s16& v : mic_raw) {
+          dc += (v - dc) * 0.005;
+          const double y = (v - dc) * mic_gain;
+          v = static_cast<s16>(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
+        }
+        // Capture arrives in bursts; the core wants one frame's worth every
+        // frame. Queue it and hand out a frame at a time, dropping a backlog
+        // beyond a few frames so a stall does not turn into latency.
+        mic_queue.insert(mic_queue.end(), mic_raw.begin(), mic_raw.end());
+        if (mic_queue.size() > mic_per_frame * 4) mic_queue.erase(mic_queue.begin(), mic_queue.end() - mic_per_frame * 2);
+        const size_t take = mic_queue.size() < mic_per_frame ? mic_queue.size() : mic_per_frame;
+        mic.assign(mic_queue.begin(), mic_queue.begin() + take);
+        mic_queue.erase(mic_queue.begin(), mic_queue.begin() + take);
+        if (mic_gate > 0 && !mic.empty()) {
+          double sq = 0;
+          for (s16 v : mic) sq += double(v) * v;
+          const double rms = std::sqrt(sq / mic.size());
+          mic_floor = rms < mic_floor ? rms : mic_floor + (rms - mic_floor) * 0.002;   // drops at once, creeps up
+          if (rms < mic_floor * mic_gate + 16) std::fill(mic.begin(), mic.end(), 0);
+        }
+      }
+      if (static const bool mic_log = std::getenv("DS_MIC_LOG") != nullptr; mic_log) {
+        static u32 mframes = 0, mtotal = 0; static int mpeak = 0; static double msq = 0;
+        for (s16 v : mic) { msq += double(v) * v; if (std::abs(int(v)) > mpeak) mpeak = std::abs(int(v)); }
+        mtotal += static_cast<u32>(mic.size());
+        if (++mframes == 60) {
+          std::fprintf(stderr, "[mic] capture: %u samples/60 frames, peak %d, rms %.0f\n", mtotal, mpeak, mtotal ? std::sqrt(msq / mtotal) : 0.0);
+          mframes = mtotal = 0; mpeak = 0; msq = 0;
+        }
+      }
+      ds::input::decimate_mic(in, mic.data(), mic.size());
+      if (log.writing()) log.write(in);
+      ds::input::apply(nds, in, mic.data(), mic.size());
+    }
 
     // With per-scanline scaling the core writes straight into the panel-sized
     // texture, so the lock has to happen before the frame runs and the scale
@@ -272,6 +345,8 @@ int main(int argc, char** argv) {
                  static_cast<double>(pace_ticks) * ticks_to_ms, frame_ms.size());
   log.close();
   ds::prof::report();
+  lid.close();
+  mic_alsa.close();
   input.close();
   audio.close();
   display.close();

@@ -2,7 +2,9 @@
 #include "audio.h"
 #include "core/nds.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace ds::sdl {
 
@@ -23,6 +25,37 @@ bool Audio::open() {
 
 void Audio::close() {
   if (dev_) { SDL_CloseAudioDevice(dev_); dev_ = 0; }
+  if (cap_) { SDL_CloseAudioDevice(cap_); cap_ = 0; }
+}
+
+bool Audio::open_capture() {
+  if (SDL_GetNumAudioDevices(1) <= 0) { std::fprintf(stderr, "mic: no capture device\n"); return false; }
+  SDL_AudioSpec want{}, got{};
+  want.freq = static_cast<int>(spu::Spu::SAMPLE_RATE);
+  want.format = AUDIO_S16SYS;
+  want.channels = 1;
+  want.samples = 512;
+  cap_ = SDL_OpenAudioDevice(nullptr, 1, &want, &got, 0);
+  if (!cap_) { std::fprintf(stderr, "mic: %s (no microphone)\n", SDL_GetError()); return false; }
+  SDL_PauseAudioDevice(cap_, 0);
+  std::fprintf(stderr, "mic: %s\n", SDL_GetAudioDeviceName(0, 1) ? SDL_GetAudioDeviceName(0, 1) : "default");
+  return true;
+}
+
+const std::vector<s16>& Audio::capture() {
+  mic_.clear();
+  if (!cap_) return mic_;
+  const u32 per_frame = spu::Spu::SAMPLE_RATE / 60 + 1;
+  u32 avail = SDL_GetQueuedAudioSize(cap_) / 2;
+  if (avail > per_frame * 4) {                   // stale backlog (a stalled frame): keep the newest
+    std::vector<s16> junk(avail - per_frame * 2);
+    SDL_DequeueAudio(cap_, junk.data(), static_cast<u32>(junk.size() * 2));
+    avail = per_frame * 2;
+  }
+  mic_.resize(avail);
+  const u32 got = SDL_DequeueAudio(cap_, mic_.data(), avail * 2) / 2;
+  mic_.resize(got);
+  return mic_;
 }
 
 void Audio::push(NDS& nds) {

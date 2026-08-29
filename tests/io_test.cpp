@@ -100,17 +100,47 @@ static void test_gxstat_irq() {
 
 // Reads one 12-bit sample from the touchscreen controller the way a game
 // does: control byte with the channel, then two data bytes.
-static u16 tsc_read(NDS& nds, u32 channel) {
+static u16 tsc_read(NDS& nds, u32 channel, bool bits8 = false) {
   auto spi = [&](u8 v) {
     nds.io.write(Cpu::ARM7, 0x040001C0, 16, 0x8000 | 0x0800 | 0x0200);   // enable, hold, device 2
     nds.io.write(Cpu::ARM7, 0x040001C2, 8, v);
     nds.sched.run_until(nds.sched.now() + 4000);                         // transfer latency
     return static_cast<u8>(nds.io.read(Cpu::ARM7, 0x040001C2, 8));
   };
-  spi(static_cast<u8>(0x80 | (channel << 4)));
+  spi(static_cast<u8>(0x80 | (channel << 4) | (bits8 ? 0x08 : 0)));
   const u8 hi = spi(0), lo = spi(0);
   nds.io.write(Cpu::ARM7, 0x040001C0, 16, 0);                            // deselect
-  return static_cast<u16>((hi << 5) | (lo >> 3));
+  return bits8 ? static_cast<u16>((hi << 1) | (lo >> 7)) : static_cast<u16>((hi << 5) | (lo >> 3));
+}
+
+// Microphone through the PMIC amplifier and the TSC's AUX channel, and the
+// hinge bit with its wake-up interrupt.
+static void test_mic_and_lid() {
+  NDS nds;
+  static const s16 buf[4] = {0, 1024, -2048, 32767};
+  nds.io.set_mic(buf, 4);
+  CHECK_EQ(tsc_read(nds, 6), 0x800u);                       // first quarter of the frame: sample 0, gain x20
+  nds.sched.run_until(nds.sched.now() + CYCLES_PER_FRAME / 4);
+  CHECK_EQ(tsc_read(nds, 6), 0x800u + 64);                  // 1024 >> 4
+  nds.sched.run_until(nds.sched.now() + CYCLES_PER_FRAME / 4);
+  CHECK_EQ(tsc_read(nds, 6), 0x800u - 128);
+  CHECK_EQ(tsc_read(nds, 6, true), (0x800u - 128) >> 4);    // 8-bit conversion
+  nds.io.spi_pm.regs[3] = 3;                                // x160: 8x the x20 level, clipped
+  CHECK_EQ(tsc_read(nds, 6), 0x800u - 1024);
+  nds.sched.run_until(nds.sched.now() + CYCLES_PER_FRAME / 4);
+  CHECK_EQ(tsc_read(nds, 6), 0xFFFu);
+  nds.io.set_mic(nullptr, 0);                               // silence
+  CHECK_EQ(tsc_read(nds, 6), 0x800u);
+
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x80, 0u);        // open
+  nds.io.cpu_io[1].if_ = 0;
+  nds.io.set_lid(true);
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x80, 0x80u);
+  CHECK_EQ(nds.io.cpu_io[1].if_ & (1u << 22), 0u);                     // closing is not an IRQ
+  nds.io.set_lid(false);
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x80, 0u);
+  CHECK_EQ(nds.io.cpu_io[1].if_ & (1u << 22), 1u << 22);               // opening is
+  CHECK_EQ(nds.io.read(Cpu::ARM9, 0x04000136, 16), 0u);
 }
 
 static void test_input() {
@@ -163,23 +193,52 @@ static void test_input_log() {
   {
     input::Log w;
     CHECK_EQ(w.open_write(path), true);
-    for (u32 i = 0; i < 1000; ++i) w.write(input::Frame{static_cast<u16>(i * 7), static_cast<u8>(i), static_cast<u8>(255 - i), (i & 3) == 0});
+    for (u32 i = 0; i < 1000; ++i) {
+      input::Frame f{static_cast<u16>(i * 7), static_cast<u8>(i), static_cast<u8>(255 - i), (i & 3) == 0, (i & 7) == 1};
+      for (int k = 0; k < input::Frame::MIC_SAMPLES; ++k) f.mic[k] = static_cast<s8>(i + k);
+      w.write(f);
+    }
   }
   input::Log r;
   CHECK_EQ(r.open_read(path), true);
   CHECK_EQ(r.frames(), 1000u);
   input::Frame f; u32 n = 0;
   while (r.read(f)) {
-    const input::Frame want{static_cast<u16>(n * 7), static_cast<u8>(n), static_cast<u8>(255 - n), (n & 3) == 0};
+    input::Frame want{static_cast<u16>(n * 7), static_cast<u8>(n), static_cast<u8>(255 - n), (n & 3) == 0, (n & 7) == 1};
+    for (int k = 0; k < input::Frame::MIC_SAMPLES; ++k) want.mic[k] = static_cast<s8>(n + k);
     CHECK_EQ(f == want, true);
     ++n;
   }
   CHECK_EQ(n, 1000u);
   // Applying a frame drives the registers the games read.
   NDS nds;
-  input::apply(nds, input::Frame{1u << io::Io::BTN_START, 10, 20, true});
+  input::Frame fr{1u << io::Io::BTN_START, 10, 20, true, true};
+  fr.mic[2] = 16;
+  input::apply(nds, fr);
   CHECK_EQ(r16(nds, 0x04000130), 0x03FFu & ~(1u << 3));
-  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x40, 0u);
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0xC0, 0x80u);   // pen down, lid closed
+  nds.sched.run_until(nds.sched.now() + CYCLES_PER_FRAME * 5 / 16);   // slot 2 of 8
+  CHECK_EQ(tsc_read(nds, 6), 0x800u + 256);                           // 16 * 256 >> 4
+  // A version-1 log (8-byte records, no mic or lid) still reads.
+  {
+    FILE* v1 = std::fopen(path, "wb");
+    const u8 h[16] = {'D', 'S', 'I', 'N', 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0};
+    const u8 r[16] = {3, 0, 5, 6, 1, 0, 0, 0,  0, 0, 7, 8, 0, 0, 0, 0};
+    std::fwrite(h, 1, 16, v1); std::fwrite(r, 1, 16, v1); std::fclose(v1);
+  }
+  input::Log old;
+  CHECK_EQ(old.open_read(path), true);
+  CHECK_EQ(old.frames(), 2u);
+  CHECK_EQ(old.read(f), true);
+  CHECK_EQ((f == input::Frame{3, 5, 6, true}), true);
+  CHECK_EQ(old.read(f), true);
+  CHECK_EQ((f == input::Frame{0, 7, 8, false}), true);
+  CHECK_EQ(old.read(f), false);
+  // Decimation keeps the loudest sample of each span.
+  s16 cap[80] = {};
+  cap[25] = -12800; cap[27] = 3000; cap[79] = 25600;
+  input::decimate_mic(fr, cap, 80);
+  CHECK_EQ(fr.mic[0], 0); CHECK_EQ(fr.mic[2], -50); CHECK_EQ(fr.mic[7], 100);
   std::remove(path);
 }
 
@@ -189,6 +248,7 @@ int main() {
   test_vramcnt_layout();
   test_gxstat_irq();
   test_input();
+  test_mic_and_lid();
   test_input_log();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("io: ok");

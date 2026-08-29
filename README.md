@@ -74,12 +74,17 @@ output but `--dump-audio file` writes the raw s16 stereo stream.
 and input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
 
     dsperate-sdl game.nds --bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin \
-                 [--scale N] [--fullscreen] [--linear] [--no-vsync] [--no-audio]
+                 [--scale N] [--fullscreen] [--linear] [--no-vsync] [--no-audio] [--no-mic]
                  [--interp] [--lockstep | --quantum N] [--layout vertical|horizontal]
                  [--frames N] [--record F | --replay F]
 
 Keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R, Enter = Start,
-Right Shift = Select, `F` toggles fullscreen, Escape quits. A game controller
+Right Shift = Select, `F` toggles fullscreen, `L` closes and opens the lid
+(the game sleeps and wakes; a handheld with a real hinge switch drives this
+itself), `M` (or a controller's right trigger) held is a fake microphone (noise at 80 % of full scale, for
+blowing/shouting prompts on devices without one; the real one is captured
+otherwise -- on Linux straight from ALSA, `DS_MIC_DEV`, default `plughw:0,0`, DC-blocked and noise-gated -- `DS_MIC_GATE` factor over the tracked floor, default 5, 0 = off -- `DS_MIC_GAIN` to scale, default 0.25 (set against the RG DS and Mario & Luigi's mic-test meter); since
+the handhelds' PipeWire only offers a speaker monitor; `--no-mic` to leave it closed), Escape quits. A game controller
 is picked up automatically (Select+Start quits, for handhelds without a
 keyboard), and the touchscreen is driven by a finger or the mouse on the
 bottom screen. Battery saves live next to the ROM as `<rom>.sav`; there are no
@@ -96,7 +101,9 @@ aborts a run whose frame count stops advancing for that long, after printing the
 display-line and raster hand-off state -- the log then holds what a debugger on
 the stuck process would have shown.
 
-`--record scene.dsin` writes what you play, one 8-byte record per frame, and
+`--record scene.dsin` writes what you play, one 16-byte record per frame
+(buttons, pen, lid and eight microphone samples -- enough for the games that
+measure loudness; older 8-byte logs still replay), and
 `--replay scene.dsin` plays it back (in the window, or headlessly with
 `dsperate --replay scene.dsin`, which also takes `--dump-frames` and works
 under `perf`). The emulator is deterministic given its inputs, so a replay

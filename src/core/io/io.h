@@ -141,10 +141,21 @@ public:
   };
   void set_buttons(u32 pressed);
   void set_touch(int x, int y, bool down);
+  // Lid (hinge) state: EXTKEYIN bit 7 is set while closed, and opening it
+  // raises the ARM7's lid IRQ (22), which is what ends the firmware's sleep.
+  void set_lid(bool closed);
+  bool lid_closed() const { return extkeyin & 0x80; }
+  // Microphone samples for the coming frame (signed 16-bit mono at any
+  // rate): a TSC AUX read picks the one at the same fraction of the frame as
+  // the read's cycle position. Empty = silence. The pointer must stay valid
+  // until the next call or the frame's end.
+  void set_mic(const s16* samples, size_t count);
+  u16  mic_sample() const;          // 12-bit ADC value after the PMIC amplifier
   void update_key_irq();
   u16 exmemcnt = 0;
   u16 spicnt = 0; u8 spidata = 0;
   SpiFirmware spi_fw; SpiTouch spi_tsc; SpiPower spi_pm;
+  const s16* mic_ = nullptr; size_t mic_count_ = 0; u64 mic_start_ = 0;
   Rtc rtc;
   Cart cart;
   u16 arm7_bios_prot = 0;    // ARM7 BIOS reads below this from outside the BIOS return garbage

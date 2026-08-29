@@ -64,6 +64,14 @@ void Input::close() {
   if (pad_) { SDL_GameControllerClose(pad_); pad_ = nullptr; }
 }
 
+void Input::fake_mic_frame(std::vector<s16>& out) {
+  out.resize(spu::Spu::SAMPLE_RATE / 60 + 1);
+  for (s16& v : out) {                          // xorshift white noise, +/-80 % of full scale
+    noise_ ^= noise_ << 13; noise_ ^= noise_ >> 17; noise_ ^= noise_ << 5;
+    v = static_cast<s16>((static_cast<int>(noise_ & 0xFFFF) - 0x8000) * 4 / 5);
+  }
+}
+
 void Input::touch_at(int wx, int wy, Display& display) {
   int screen = 0, sx = 0, sy = 0;
   if (!display.map_point(wx, wy, screen, sx, sy) || screen != 1) return;   // bottom screen only
@@ -86,6 +94,8 @@ void Input::handle(const SDL_Event& e, Display& display, Display* second) {
     const bool down = e.type == SDL_KEYDOWN;
     if (down && e.key.keysym.sym == SDLK_ESCAPE) { quit_ = true; break; }
     if (down && e.key.keysym.sym == SDLK_f) { display.toggle_fullscreen(); if (second) second->toggle_fullscreen(); break; }
+    if (down && e.key.keysym.sym == SDLK_l) { lid_ = !lid_; std::fprintf(stderr, "lid: %s\n", lid_ ? "closed" : "open"); break; }
+    if (e.key.keysym.sym == SDLK_m) { mic_key_ = down; break; }
     if (key_button(e.key.keysym.sym, b)) set(b, down);
     break;
   }
@@ -94,6 +104,11 @@ void Input::handle(const SDL_Event& e, Display& display, Display* second) {
   case SDL_CONTROLLERBUTTONUP:
     if (pad_button(e.cbutton.button, b)) set(b, e.type == SDL_CONTROLLERBUTTONDOWN);
     if (combo_quit()) quit_ = true;
+    break;
+
+  // Right trigger (the DS has none): fake microphone on handhelds without a keyboard.
+  case SDL_CONTROLLERAXISMOTION:
+    if (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) mic_trigger_ = e.caxis.value > 16000;
     break;
 
   case SDL_CONTROLLERDEVICEADDED:

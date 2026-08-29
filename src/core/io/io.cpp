@@ -43,6 +43,7 @@ void Io::reset() {
   exmemcnt = 0;
   spicnt = 0; spidata = 0;
   spi_fw = SpiFirmware{}; spi_tsc = SpiTouch{}; spi_pm = SpiPower{};
+  mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;
   rtc = Rtc{};
   cart = Cart{};
   wifi_reset();
@@ -215,7 +216,12 @@ u8 Io::spi_transfer(u8 value) {
     if (!p.hold) { p.hold = true; p.cmd = value; p.pos = 1; p.data = 0; return 0; }
     const u32 reg = p.cmd & 0x7F;
     if (p.cmd & 0x80) p.data = (reg < 8) ? p.regs[reg] : 0;
-    else { if (reg < 8) p.regs[reg] = value; p.data = 0; }
+    else {
+      if (reg < 8) p.regs[reg] = value;
+      static const bool log = std::getenv("DS_MIC_LOG") != nullptr;
+      if (log && (reg == 2 || reg == 3)) std::fprintf(stderr, "[mic] PMIC reg %u = %02x (frame %llu)\n", reg, value, (unsigned long long)nds_.frame_count);
+      p.data = 0;
+    }
     return p.data;
   }
   case 1: {                                             // firmware flash
@@ -268,9 +274,15 @@ u8 Io::spi_transfer(u8 value) {
       switch (channel) {
       case 1: sample = t.y; break;        // Y
       case 5: sample = t.x; break;        // X
-      case 6: sample = 0x800; break;      // AUX / mic: mid
+      case 6: sample = mic_sample(); break;   // AUX: the microphone
       default: sample = 0; break;
       }
+      // Bit 3 selects an 8-bit conversion (what the mic sampling loops use:
+      // one byte less per sample). The result stream starts one clock after
+      // the control byte, so the first data byte carries the top bits 7..1
+      // of the conversion in bits 6..0 and the second byte the rest, MSB
+      // first: 12-bit = 11..5 then 4..0 << 3, 8-bit = 7..1 then bit 0 << 7.
+      if (value & 0x08) sample = static_cast<u16>((sample >> 4) << 4);
       t.sample = sample;
       t.data = static_cast<u8>(t.sample >> 5);          // first byte: bits 11:5
       t.pos = 1;
@@ -305,6 +317,45 @@ void Io::set_touch(int x, int y, bool down) {
   spi_tsc.x = static_cast<u16>(x << 4);
   spi_tsc.y = static_cast<u16>(y << 4);
   extkeyin &= ~(1u << 6);
+}
+
+void Io::set_lid(bool closed) {
+  const bool was = lid_closed();
+  if (closed) extkeyin |= 1u << 7; else extkeyin &= ~(1u << 7);
+  if (was && !closed) request_irq(Cpu::ARM7, IRQ_LID);
+}
+
+void Io::set_mic(const s16* samples, size_t count) {
+  mic_ = samples; mic_count_ = count; mic_start_ = nds_.sched.now();
+}
+
+// The TSC's AUX input sits behind the PMIC's microphone amplifier, whose
+// register 3 bits 0-1 pick the gain (x20/40/80/160). The frontend's samples
+// are taken to be at the x20 level, so the higher gains scale up from there
+// and clip the way the ADC would. Register 2 bit 0 is the amplifier enable;
+// it is not honoured (melonDS does not either): a game that reads AUX with
+// the amplifier off would get noise around the mid value on hardware, and
+// silence there serves nobody. DS_MIC_LOG=1 prints the PMIC writes and a
+// per-second count of AUX reads with their peak.
+u16 Io::mic_sample() const {
+  static const bool log = std::getenv("DS_MIC_LOG") != nullptr;
+  if (log) {
+    static u64 reads = 0, last_frame = 0; static int peak = 0;
+    ++reads;
+    if (nds_.frame_count - last_frame >= 60) {
+      std::fprintf(stderr, "[mic] %llu AUX reads in 60 frames, peak %d, buffer %zu samples, gain x%d (frame %llu)\n",
+                   (unsigned long long)reads, peak, mic_count_, 20 << (spi_pm.regs[3] & 3), (unsigned long long)nds_.frame_count);
+      reads = 0; peak = 0; last_frame = nds_.frame_count;
+    }
+    for (size_t k = 0; k < mic_count_; ++k) if (std::abs(int(mic_[k])) > peak) peak = std::abs(int(mic_[k]));
+  }
+  if (mic_count_ == 0) return 0x800;
+  const u64 elapsed = nds_.sched.now() - mic_start_;
+  size_t i = static_cast<size_t>((elapsed * mic_count_) / CYCLES_PER_FRAME);
+  if (i >= mic_count_) i = mic_count_ - 1;
+  const int gain = 1 << (spi_pm.regs[3] & 3);
+  int v = 0x800 + ((static_cast<int>(mic_[i]) * gain) >> 4);
+  return static_cast<u16>(v < 0 ? 0 : (v > 0xFFF ? 0xFFF : v));
 }
 
 // KEYCNT: bits 0-9 select keys, bit 14 enables the IRQ, bit 15 picks the
