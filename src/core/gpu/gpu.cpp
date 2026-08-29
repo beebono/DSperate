@@ -154,8 +154,10 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
   if (addr >= 0x06800000 && !trap_lcdc_) return;
   if (per_line_) {
     // Lag mode: the store may land on a line engine B is still drawing.
+    prof::add(prof::C_2D_LAG_STORES, 1);
+    if (b_inflight_) prof::add(prof::C_2D_LAG_STORE_JOINS, 1);
     join_b();
-    if (++lag_trap_hits_ >= LAG_TRAP_LIMIT) { lag_frame_ = false; disarm_trap(); }
+    if (++lag_trap_hits_ >= LAG_TRAP_LIMIT) { lag_frame_ = false; disarm_trap(); prof::add(prof::C_2D_LAG_DROPPED, 1); }
     return;
   }
   prof::add(prof::C_2D_TRAP_HITS, 1);
@@ -339,6 +341,7 @@ void Gpu::begin_frame() {
   lag_trap_hits_ = 0;
   if (lazy_frame_ || lag_frame_) arm_trap();
   if (lazy_frame_) prof::add(prof::C_2D_LAZY_FRAMES, 1);
+  if (lag_frame_ && !lazy_frame_) prof::add(prof::C_2D_LAG_FRAMES, 1);
   if (!lazy_frame_) per_line_ = true;
 }
 
@@ -391,7 +394,7 @@ void Gpu::render_lines(u32 first, u32 last) {
     for (u32 l = first; l <= last; ++l) step_engine(0, l);
     // A per-line run stays in flight until the next line (or a join point);
     // the last display line joins now, since writes after it apply directly.
-    if (lag_frame_ && per_line_ && last < SCREEN_H - 1) b_inflight_ = true;
+    if (lag_frame_ && per_line_ && last < SCREEN_H - 1) { b_inflight_ = true; prof::add(prof::C_2D_LAG_LINES, 1); }
     else eng_b_.wait();
   } else {
     for (u32 l = first; l <= last; ++l) step_engine(0, l);

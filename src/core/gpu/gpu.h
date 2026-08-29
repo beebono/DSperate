@@ -163,7 +163,7 @@ private:
   bool b_inflight_ = false;
   bool lag_frame_ = false;        // this frame's per-line lines may stay in flight
   u32  lag_trap_hits_ = 0;
-  static constexpr u32 LAG_TRAP_LIMIT = 64;
+  static constexpr u32 LAG_TRAP_LIMIT = 4096;   // GSDD traps ~55 stores a frame in capture frames; 64 dropped the lag every frame
   void join_b() { if (b_inflight_) { eng_b_.wait(); b_inflight_ = false; } }
 public:
   void journal_full() { join_b(); }   // Engine2D::queue on a full journal
