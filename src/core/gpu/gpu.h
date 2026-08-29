@@ -159,7 +159,11 @@ private:
   // the engines read (the trap stays armed in these frames for that; past
   // LAG_TRAP_LIMIT hits in a frame the lag is dropped and the trap lifted,
   // so a game streaming VRAM per line pays neither).
-  bool lag_enabled_ = true;       // DS_2D_LAG != 0
+  // Off by default: on GSDD the lag never pays -- its capture frames stream
+  // ~3,500 VRAM stores a frame, so the armed trap costs more than the core it
+  // frees (RG DS, 2026-08-29: +3.4 % with the lag, +1.3 % lag with the old
+  // spin budget, +1.7 % parking alone; replay scenes flat). DS_2D_LAG=1.
+  bool lag_enabled_ = false;      // DS_2D_LAG=1
   bool b_inflight_ = false;
   bool lag_frame_ = false;        // this frame's per-line lines may stay in flight
   u32  lag_trap_hits_ = 0;

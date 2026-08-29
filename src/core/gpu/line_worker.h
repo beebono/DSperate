@@ -127,7 +127,10 @@ private:
       // on it, so the wake-up latency is hidden and the core is free between
       // lines; DS_2D_SPIN overrides the budget (20000 was the old "spin
       // through the line gap" value).
-      static const int kSpin = [] { const char* e = std::getenv("DS_2D_SPIN"); return e ? std::atoi(e) : 500; }();
+      // 20000 (~the line gap) by default: parking between per-line dispatches
+      // costs the emulation thread a wake per line (+1.7 % on GSDD) unless the
+      // lagged hand-off (DS_2D_LAG=1) hides it; 500 is the value to pair with that.
+      static const int kSpin = [] { const char* e = std::getenv("DS_2D_SPIN"); return e ? std::atoi(e) : 20000; }();
       int spins = kSpin;
       u32 r = req_.load(std::memory_order_acquire);
       while (r == last) {

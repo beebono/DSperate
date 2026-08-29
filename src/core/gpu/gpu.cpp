@@ -28,7 +28,7 @@ Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
     eng_b_.start(&Gpu::engine_b_job, this);
     par_2d_ = eng_b_.running();
   }
-  if (const char* l = std::getenv("DS_2D_LAG")) lag_enabled_ = std::atoi(l) != 0;
+  if (const char* l = std::getenv("DS_2D_LAG")) lag_enabled_ = std::atoi(l) != 0;   // opt-in, see gpu.h
 }
 
 void Gpu::reset() {
