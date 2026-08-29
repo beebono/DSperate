@@ -116,6 +116,12 @@ measured decision, ranked by likely payoff:
 6. **3D: 8-way gather, AND/OR uniformity, constant-W ramp** (2.4, 2.11,
    2.14) — kernel-level, measured territory; see the per-span notes before
    touching.
+7. **Texture alpha map** (branch `alpha-map`, parked opt-in `DS_AMAP=1`) —
+   39 % of GSDD's depth-passing pixels sample alpha-0 texels; skipping and
+   trimming those spans is exact (all six hash sets) but a device loss
+   (`3d spans` +4 % GSDD, +8 % dbori): the per-span tests cost more than the
+   ~25-instruction resolve they save, and the vector resolve pays for masked
+   lanes anyway. Keep only if the raster becomes the critical path.
 8. ~~**Threads and per-line frames**~~ — done 2026-08-29: three raster workers
    pinned (knob sweep: mlbis −6.8 %, etody −2.6 %, sm64 −1.4 %; the 2↔3
    controller is `DS_R3D_ADAPT=1`), `DS_R3D_SKIPDUP` default, and capture
