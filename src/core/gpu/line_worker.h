@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -121,9 +122,12 @@ private:
   void loop() {
     u32 last = 0;
     for (;;) {
-      // Spin for roughly the gap between two display lines before parking, so
-      // a frame's worth of dispatches never pays a wakeup.
-      constexpr int kSpin = 20000;
+      // Spin briefly, then park. With the lagged hand-off (Gpu::render_lines)
+      // a per-line job has a whole display line of slack before anyone waits
+      // on it, so the wake-up latency is hidden and the core is free between
+      // lines; DS_2D_SPIN overrides the budget (20000 was the old "spin
+      // through the line gap" value).
+      static const int kSpin = [] { const char* e = std::getenv("DS_2D_SPIN"); return e ? std::atoi(e) : 500; }();
       int spins = kSpin;
       u32 r = req_.load(std::memory_order_acquire);
       while (r == last) {

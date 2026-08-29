@@ -64,7 +64,7 @@ Engine2D::Engine2D(NDS& nds, int num) : nds_(nds), num_(num) { reset(); }
 
 void Engine2D::reset() {
   g_dispcnt_ = 0; g_bgcnt_.fill(0); g_wincnt_.fill(0); g_bldcnt_ = g_bldalpha_ = 0; g_enabled_ = false;
-  journal_.clear(); jpos_ = 0;
+  jn_.store(0, std::memory_order_relaxed); jpos_ = 0;
   enabled_ = false; screen_ = 1 - num_; master_bright_ = 0;
   pal_.fill(0); oam_.fill(0); pal_gen_ = oam_gen_ = 1;
   dispcnt_ = 0; dispcnt_hist_.fill(0);
@@ -173,11 +173,15 @@ void Engine2D::oam_written(u32 off, u32 width, u32 value) { queue(J_OAM, off, wi
 void Engine2D::queue(u8 kind, u32 addr, u32 width, u32 value) {
   const u32 stamp = nds_.gpu.journal_stamp();
   if (stamp == Gpu::NO_STAMP) { apply(kind, addr, width, value); return; }
-  journal_.push_back(JEntry{static_cast<u16>(stamp), kind, static_cast<u8>(width), static_cast<u16>(addr), value});
+  u32 n = jn_.load(std::memory_order_relaxed);
+  if (n == JOURNAL_CAP) { nds_.gpu.journal_full(); n = jn_.load(std::memory_order_relaxed); if (n == JOURNAL_CAP) { apply_pending(); jn_.store(0, std::memory_order_relaxed); jpos_ = 0; n = 0; } }
+  journal_[n] = JEntry{static_cast<u16>(stamp), kind, static_cast<u8>(width), static_cast<u16>(addr), value};
+  jn_.store(n + 1, std::memory_order_release);
 }
 
 void Engine2D::replay_to(u32 stamp) {
-  while (jpos_ < journal_.size() && journal_[jpos_].stamp <= stamp) {
+  const u32 n = jn_.load(std::memory_order_acquire);
+  while (jpos_ < n && journal_[jpos_].stamp <= stamp) {
     const JEntry& e = journal_[jpos_++];
     apply(e.kind, e.addr, e.width, e.value);
   }
@@ -186,8 +190,8 @@ void Engine2D::apply_pending() { replay_to(0xFFFF); }
 void Engine2D::frame_done() {
   // Nothing may be left: a stamp the render never reached would be a write
   // the frame silently lost.
-  if (jpos_ != journal_.size()) { std::fprintf(stderr, "[eng%d] journal not drained: %zu of %zu\n", num_, jpos_, journal_.size()); std::abort(); }
-  journal_.clear(); jpos_ = 0;
+  if (jpos_ != jn_.load(std::memory_order_relaxed)) { std::fprintf(stderr, "[eng%d] journal not drained: %zu of %u\n", num_, jpos_, jn_.load(std::memory_order_relaxed)); std::abort(); }
+  jn_.store(0, std::memory_order_relaxed); jpos_ = 0;
 }
 
 void Engine2D::apply(u8 kind, u32 addr, u32 width, u32 value) {

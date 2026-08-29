@@ -4,6 +4,7 @@
 #include "core/types.h"
 
 #include <array>
+#include <atomic>
 #include <vector>
 
 namespace ds { struct NDS; }
@@ -114,7 +115,14 @@ private:
   // Journal of guest writes not yet seen by the render side, in stamp order.
   enum JKind : u8 { J_REG, J_PAL, J_OAM, J_POWCNT, J_MBRIGHT };
   struct JEntry { u16 stamp; u8 kind; u8 width; u16 addr; u32 value; };
-  std::vector<JEntry> journal_;
+  // Fixed storage with an atomic count: with the engine-B line in flight on
+  // the worker (Gpu::render_lines), main appends entries stamped after that
+  // line while the worker replays entries up to it. A vector's reallocation
+  // would race that; the array never moves. Overflow joins the worker first
+  // (Gpu::journal_full) and then applies directly.
+  static constexpr size_t JOURNAL_CAP = 16384;
+  std::array<JEntry, JOURNAL_CAP> journal_{};
+  std::atomic<u32> jn_{0};
   size_t jpos_ = 0;
   void queue(u8 kind, u32 addr, u32 width, u32 value);   // journal, or apply now when nothing is pending
   void apply(u8 kind, u32 addr, u32 width, u32 value);

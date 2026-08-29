@@ -28,9 +28,11 @@ Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
     eng_b_.start(&Gpu::engine_b_job, this);
     par_2d_ = eng_b_.running();
   }
+  if (const char* l = std::getenv("DS_2D_LAG")) lag_enabled_ = std::atoi(l) != 0;
 }
 
 void Gpu::reset() {
+  join_b();
   disarm_trap();
   line_ = 0; hblank_done_ = false;
   lazy_frame_ = per_line_ = false; render_next_ = SCREEN_H;
@@ -150,12 +152,19 @@ void Gpu::oam_store(Cpu cpu, u32 addr, u32 width, u32 value) {
 void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
   if (!trap_armed_ || cpu != Cpu::ARM9) return;
   if (addr >= 0x06800000 && !trap_lcdc_) return;
+  if (per_line_) {
+    // Lag mode: the store may land on a line engine B is still drawing.
+    join_b();
+    if (++lag_trap_hits_ >= LAG_TRAP_LIMIT) { lag_frame_ = false; disarm_trap(); }
+    return;
+  }
   prof::add(prof::C_2D_TRAP_HITS, 1);
   fall_back_per_line();
 }
 
 bool Gpu::vram_remap_begin() {
   catch_up();
+  join_b();
   const bool was = trap_armed_;
   if (was) disarm_trap();
   return was;
@@ -180,7 +189,8 @@ void Gpu::catch_up() {
 void Gpu::fall_back_per_line() {
   catch_up();
   per_line_ = true;
-  disarm_trap();
+  // The trap now guards the line in flight instead of the batch.
+  if (!(lag_frame_ && par_2d_)) disarm_trap();
 }
 
 // ---- timing -----------------------------------------------------------------
@@ -198,6 +208,7 @@ void Gpu::on_hblank() {
     nds_.dma.check(Cpu::ARM9, dma::MODE9_HBLANK);
   } else {
     hblank_done_ = true;
+    join_b();
     engine[0].pre_draw(line_, frame_reset);
     engine[1].pre_draw(line_, frame_reset);
     if (line_ == 215) {
@@ -271,7 +282,7 @@ void Gpu::on_scanline_start() {
   hblank_done_ = false;
   // Display lines evaluate their window edges inside step_engine; the rest
   // of the frame is applied directly (nothing is pending by then).
-  if (line_ >= SCREEN_H) { engine[0].update_windows(line_); engine[1].update_windows(line_); }
+  if (line_ >= SCREEN_H) { join_b(); engine[0].update_windows(line_); engine[1].update_windows(line_); }
   if (line_ == 0) {
     if (probe_enabled_) async_probe_check(true);
     begin_frame();
@@ -321,7 +332,14 @@ void Gpu::begin_frame() {
   render_next_ = 0;
   per_line_ = false;
   lazy_frame_ = lazy_enabled_ && !run_fifo_ && !capture_on_;
-  if (lazy_frame_) { arm_trap(); prof::add(prof::C_2D_LAZY_FRAMES, 1); }
+  // Lag mode for the per-line lines of this frame: the trap guards the line
+  // in flight (capture writes only LCDC banks, which no engine reads, so
+  // capture itself never needs a join).
+  lag_frame_ = lag_enabled_ && par_2d_;
+  lag_trap_hits_ = 0;
+  if (lazy_frame_ || lag_frame_) arm_trap();
+  if (lazy_frame_) prof::add(prof::C_2D_LAZY_FRAMES, 1);
+  if (!lazy_frame_) per_line_ = true;
 }
 
 // ---- main-memory display FIFO -----------------------------------------------
@@ -367,16 +385,21 @@ void Gpu::debug_dump(FILE* f) {
 // worker for engine B's run, engine A's run here.
 void Gpu::render_lines(u32 first, u32 last) {
   if (par_2d_) {
+    join_b();                               // the previous run, if it was left in flight
     eng_b_first_ = first; eng_b_last_ = last;
     eng_b_.dispatch();
     for (u32 l = first; l <= last; ++l) step_engine(0, l);
-    eng_b_.wait();
+    // A per-line run stays in flight until the next line (or a join point);
+    // the last display line joins now, since writes after it apply directly.
+    if (lag_frame_ && per_line_ && last < SCREEN_H - 1) b_inflight_ = true;
+    else eng_b_.wait();
   } else {
     for (u32 l = first; l <= last; ++l) step_engine(0, l);
     for (u32 l = first; l <= last; ++l) step_engine(1, l);
   }
   render_next_ = last + 1;
   if (render_next_ == SCREEN_H) {
+    join_b();
     engine[0].frame_done(); engine[1].frame_done();
     disarm_trap();
   }

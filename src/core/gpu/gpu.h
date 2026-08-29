@@ -149,6 +149,25 @@ public:
 private:
   u32 eng_b_first_ = 0, eng_b_last_ = 0;
   bool par_2d_ = false;
+  // Per-line frames (capture, the display FIFO, a VRAM trap) hand engine B
+  // one line at a time. Rather than wait for it at once -- which needs the
+  // worker hot, i.e. spinning through the whole frame on a core the raster
+  // workers want -- the line is left in flight and joined a line later
+  // (b_inflight_), so the worker can park between lines with no cost to the
+  // emulation thread. What must join earlier: the last display line (writes
+  // after it apply directly), a VRAMCNT remap, and a guest store into VRAM
+  // the engines read (the trap stays armed in these frames for that; past
+  // LAG_TRAP_LIMIT hits in a frame the lag is dropped and the trap lifted,
+  // so a game streaming VRAM per line pays neither).
+  bool lag_enabled_ = true;       // DS_2D_LAG != 0
+  bool b_inflight_ = false;
+  bool lag_frame_ = false;        // this frame's per-line lines may stay in flight
+  u32  lag_trap_hits_ = 0;
+  static constexpr u32 LAG_TRAP_LIMIT = 64;
+  void join_b() { if (b_inflight_) { eng_b_.wait(); b_inflight_ = false; } }
+public:
+  void journal_full() { join_b(); }   // Engine2D::queue on a full journal
+private:
   static void engine_b_job(void* self);
 
   void output_engine(int e, u32 line);
