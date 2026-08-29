@@ -116,6 +116,15 @@ measured decision, ranked by likely payoff:
 6. **3D: 8-way gather, AND/OR uniformity, constant-W ramp** (2.4, 2.11,
    2.14) — kernel-level, measured territory; see the per-span notes before
    touching.
+8. ~~**Threads and per-line frames**~~ — done 2026-08-29: three raster workers
+   pinned (knob sweep: mlbis −6.8 %, etody −2.6 %, sm64 −1.4 %; the 2↔3
+   controller is `DS_R3D_ADAPT=1`), `DS_R3D_SKIPDUP` default, and capture
+   frames batched (the lazy-2D addendum in 04 §5 below). Measured and parked:
+   a lagged engine-B hand-off (`DS_2D_LAG=1`) — exact, but the trap it needs
+   loses to Golden Sun's ~3.5 k VRAM stores a frame. Not adopted: RING 16,
+   bins other than 8, SPU batch 64, a main-thread-demoting controller,
+   per-subsystem threads beyond four (four cores; five threads already
+   oversubscribe it on GSDD).
 
 ## 01 — Recompiler
 
@@ -201,6 +210,8 @@ measured decision, ranked by likely payoff:
 ## 04 — Scheduler, deferral, DMA, memory
 
 > **Lazy 2D (rows 4.11–4.16) — done.** `Gpu` (`src/core/gpu/gpu.cpp`) journals every 2D register, palette, OAM, POWCNT and MASTER_BRIGHT write per engine with the display line it first affects, and renders the frame in one batch at the last display line's HBlank — engine B on the line worker, engine A on the emulation thread, one hand-off — replaying the journal in front of each line. VRAM, which the journal cannot cover, is handled by a page-table write trap on the pages the engines read: the first trapped store of a frame renders every line whose HBlank has passed *before* the bytes change, then the frame continues per line. Capture and FIFO frames run per line from the start. Verified byte-identical against the per-line renderer on all five recorded scenes (1800 frames each; lazy, `DS_2D_LAZY=0`, `DS_2D_THREAD=0`, interpreter and JIT). Census (`DS_PROFILE=1`): mlbis/meteos/sm64 batch ~1800 of 1800 frames with 13–17 trap hits per run; etody 970, dbori 814 (the rest are capture frames). Choice recorded here: DraStic ignores CPU stores into VRAM mid-frame; we detect them and fall back, so the output stays hardware-exact. Measured on the RG DS (`dsperate` CLI, 900 frames, 3 paired reps each, warm-up run discarded), mean frame ms base → lazy: meteos 6.07 → 5.34 (−12 %), sm64 7.88 → 7.01 (−11 %), mlbis 1.93 → 1.52 (−21 %), dbori 7.29 → 6.73 (−7 %), etody 10.33 → 10.24 (flat: half its frames capture, per-line by design). Medians move the same way.
+>
+> **2026-08-29 addendum — capture frames batch too.** `lazy_frame_` no longer excludes capture frames (`DS_2D_LAZY_CAPTURE=0` restores per line): capture runs inside the batch in line order, its LCDC banks are trapped, and the captured bytes land at the last display line instead of per line — the one accepted inexactness, visible only to a CPU read of the capture bank between a line and line 191 (never in the six recorded sets: still hash-identical). The picture, the register timing (POWCNT1 swap, DISPCNT, VRAMCNT — journal replay and remap catch-up) and every VRAM write stay exact, which is what rules out the deferred-capture failure modes (screen flicker, a stuck virtual swap). A trapped store now catches up, renders eight lines per line without the trap, then re-arms and re-batches; word and halfword DMA runs take the trap once per run; and a catch-up of fewer than 24 lines against a parked line worker is drawn on the emulation thread — the worker's wake-up was the whole cost of batching on Golden Sun (~14 catch-ups a frame). Also fixed on the way: `Bus::update_vram` rebuilt the VRAM views before the lazy catch-up, so a mid-frame remap with pending lines rendered them against the new mapping (latent until a lazy frame could survive a trap hit). Device (RG DS, paired vs pinned-3 main): etody −5.4 % mean / −12.4 % median (SDL frontend: over-budget frames ~60 → ~20 of 1800), GSDD −3.7 % / −2.3 %, sm64 −1.2 %, dbori median −3.7 %, meteos and mlbis flat. GSDD lazy frames 525 → 1801 of 1800.
 
 | # | Technique | Ref | DSperate | Note |
 |---|---|---|---|---|
@@ -215,7 +226,7 @@ measured decision, ranked by likely payoff:
 | 4.9 | DMA cycle cost from static seq/non-seq tables; completion as event | 04 §4 | no | per-unit burst tables (the per-16 KB block costs cached on the channel); the copy is not front-loaded |
 | 4.10 | Coarse (64 KB) / fine (2 KB) code bitmaps ORed over DMA destination | 04 §4 | equiv | DMA words take the tagged-page store path → `store_code`; no separate bitmap |
 | 4.11 | HBlank DMA into VRAM forces 2D render catch-up first | 04 §4 | equiv | any store into VRAM the engines read (DMA or CPU) hits the page-table write trap and catches the render up first (`Gpu::vram_store_trap`); DraStic only catches HBlank DMA |
-| 4.12 | 2D rendered as one batch at VBlank when nothing changed mid-frame | 04 §5 | same | one `render_lines(0, 191)` at the HBlank of line 191; writes mid-frame do not break the batch (journal), VRAM stores do (trap → per-line for the rest of the frame); capture / FIFO frames per line |
+| 4.12 | 2D rendered as one batch at VBlank when nothing changed mid-frame | 04 §5 | same | one `render_lines(0, 191)` at the HBlank of line 191; writes mid-frame do not break the batch (journal); a VRAM store catches up, runs eight lines per line, re-batches (trap); capture frames batch since 2026-08-29 (bytes land at line 191); FIFO frames per line |
 | 4.13 | Engine B rendered on a worker thread, engine A on main | 04 §5 | same | one `LineWorker` dispatch per batch (per line only in fallback frames); each engine's output stage runs on its own thread |
 | 4.14 | Per-engine journal of mid-frame register/palette/OAM writes, replayed per line | 04 §5 | same | `Engine2D::queue` / `replay_to`, stamped `line*2 + phase` so writes before and after a line's scanline start (window edges) replay in order; POWCNT and MASTER_BRIGHT ride the same journal |
 | 4.15 | Copy-on-first-write shadow palette/OAM; journal only if value changed | 04 §5 | equiv | the engine keeps a render-side palette/OAM copy the journal feeds; the guest bytes stay live, so no copy-on-write; silent stores dropped in `Gpu::palette_store` / `oam_store`; palette/OAM pages are permanently slow-path for stores (~400/frame) |

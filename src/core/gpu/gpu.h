@@ -25,10 +25,16 @@ namespace ds::gpu {
 // the journal cannot cover is VRAM: stores into the pages the engines read
 // are trapped (Bus::set_vram_trap) for the display period, and the first one
 // in a frame renders every line whose HBlank has already passed *before* the
-// bytes change, then leaves the frame in per-line mode. VRAMCNT remaps catch
-// up the same way and stay lazy. Frames that display or capture from the
-// FIFO, or capture at all, run per-line from the start: their inputs are
-// per-line by nature. DS_2D_LAZY=0 forces per-line rendering (through the
+// bytes change, renders the next eight lines per line (no trap needed while
+// every line is drawn at its own HBlank), then re-arms and batches again;
+// a frame with many such bursts stays per line. VRAMCNT remaps catch up the
+// same way and stay lazy. Capture frames batch as well: capture runs inside
+// the batch in line order and its LCDC banks are trapped, so the captured
+// bytes land at the last display line rather than per line -- the one
+// accepted departure from hardware, visible only to a CPU read of the
+// capture bank before then (DS_2D_LAZY_CAPTURE=0 restores per line). Frames
+// that display or capture from the display FIFO run per line: that input is
+// per line by nature. DS_2D_LAZY=0 forces per-line rendering (through the
 // same journal), which must produce identical frames.
 //
 // Framebuffers are 256x192 u32 per screen in 0xAARRGGBB with 8-bit channels
