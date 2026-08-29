@@ -175,6 +175,10 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
   set_running(c, 1);
   u32 used = 0;
   mem::Bus& bus = nds_.bus;
+  // Once a run attempt fails on a destination page (palette, OAM, I/O, a
+  // code-tagged or trapped page), the per-unit path is taken for the rest of
+  // that page without re-walking the page table for every unit.
+  u32 no_run_below = 0;
   while (c.iter_count > 0 && used < budget) {
     if (a9 && nds_.gpu3d.stalled()) break;      // a full GX FIFO stalls the ARM9's DMA too
     u32 cost = unit_cycles(c, burst_start, word);
@@ -214,7 +218,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
       // without a write trap): one page-table walk per end per run instead
       // of two per word. Same per-word cost, stall check and budget as the
       // generic path; a code-tagged or trapped destination stays per word.
-      if (c.src_inc == 1 && c.dst_inc == 1) {
+      if (c.src_inc == 1 && c.dst_inc == 1 && c.cur_dst >= no_run_below) {
         const u8* ps = nds_.cpu(c.cpu).page_table.read_ptr(c.cur_src);
         bool code = false;
         u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
@@ -241,6 +245,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           }
           continue;
         }
+        no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
       }
       bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
     }
@@ -250,7 +255,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
       // period): same per-unit cost, stall check and budget as the generic
       // path, one page-table walk per end per run, and the lazy-2D write trap
       // taken once for the run rather than per halfword through the bus.
-      if (c.src_inc == 1 && c.dst_inc == 1) {
+      if (c.src_inc == 1 && c.dst_inc == 1 && c.cur_dst >= no_run_below) {
         const u8* ps = nds_.cpu(c.cpu).page_table.read_ptr(c.cur_src);
         bool code = false;
         u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
@@ -272,6 +277,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           }
           continue;
         }
+        no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
       }
       bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
     }
