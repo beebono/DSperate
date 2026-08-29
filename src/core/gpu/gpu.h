@@ -129,6 +129,24 @@ private:
   bool per_line_ = false;         // ... but has fallen back to per-line rendering
   u32  render_next_ = SCREEN_H;   // display lines rendered so far this frame
   bool trap_armed_ = false, trap_lcdc_ = false;
+  // Capture frames batch too (DS_2D_LAZY_CAPTURE=0 keeps them per line): the
+  // captured bytes land at the last display line instead of per line, which
+  // only a CPU read of the capture bank mid-frame can tell apart -- the
+  // picture, the register timing and every VRAM write stay exact. A trapped
+  // store catches the frame up, then lifts the trap for the rest of that
+  // line (the frontier cannot move inside a line, so later stores in it are
+  // free) and re-arms at the next scanline; past LAZY_HIT_LIMIT hit-lines the
+  // frame falls back to per line as before.
+  // A trapped store catches the frame up, lifts the trap and renders the
+  // next LAZY_BURST_LINES lines per line (exact without any trap, and no
+  // slow-path stores while a DMA streams), then re-arms and batches again.
+  // Two page-table walks per burst rather than two per line, and no trapped
+  // store inside it. Past LAZY_BURST_LIMIT bursts the frame stays per line.
+  bool lazy_capture_ = true;
+  bool burst_ = false;            // per-line for the current burst of stores
+  u32  burst_left_ = 0;           // display lines left before re-batching
+  u32  lazy_bursts_ = 0;
+  static constexpr u32 LAZY_BURST_LIMIT = 16, LAZY_BURST_LINES = 8;
   u32  frontier() const { return hblank_done_ ? line_ + 1u : line_; }   // first line a write now can still affect
   void catch_up();                // render every line below the frontier
   void fall_back_per_line();      // catch up and render the rest of the frame per line
@@ -149,6 +167,29 @@ public:
 private:
   u32 eng_b_first_ = 0, eng_b_last_ = 0;
   bool par_2d_ = false;
+  // Per-line frames (capture, the display FIFO, a VRAM trap) hand engine B
+  // one line at a time. Rather than wait for it at once -- which needs the
+  // worker hot, i.e. spinning through the whole frame on a core the raster
+  // workers want -- the line is left in flight and joined a line later
+  // (b_inflight_), so the worker can park between lines with no cost to the
+  // emulation thread. What must join earlier: the last display line (writes
+  // after it apply directly), a VRAMCNT remap, and a guest store into VRAM
+  // the engines read (the trap stays armed in these frames for that; past
+  // LAG_TRAP_LIMIT hits in a frame the lag is dropped and the trap lifted,
+  // so a game streaming VRAM per line pays neither).
+  // Off by default: on GSDD the lag never pays -- its capture frames stream
+  // ~3,500 VRAM stores a frame, so the armed trap costs more than the core it
+  // frees (RG DS, 2026-08-29: +3.4 % with the lag, +1.3 % lag with the old
+  // spin budget, +1.7 % parking alone; replay scenes flat). DS_2D_LAG=1.
+  bool lag_enabled_ = false;      // DS_2D_LAG=1
+  bool b_inflight_ = false;
+  bool lag_frame_ = false;        // this frame's per-line lines may stay in flight
+  u32  lag_trap_hits_ = 0;
+  static constexpr u32 LAG_TRAP_LIMIT = 4096;   // GSDD traps ~55 stores a frame in capture frames; 64 dropped the lag every frame
+  void join_b() { if (b_inflight_) { eng_b_.wait(); b_inflight_ = false; } }
+public:
+  void journal_full() { join_b(); }   // Engine2D::queue on a full journal
+private:
   static void engine_b_job(void* self);
 
   void output_engine(int e, u32 line);

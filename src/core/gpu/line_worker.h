@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -56,6 +57,9 @@ public:
   }
 
   bool running() const { return thread_.joinable(); }
+  // Whether the worker is asleep on its condition variable: a dispatch now
+  // pays a wake-up (tens of microseconds on the A55) before the job starts.
+  bool parked() const { return parked_.load(std::memory_order_relaxed); }
   // Hand-off state, for a stalled-frame watchdog (DS_WATCHDOG).
   void debug_dump(FILE* f) const {
     std::fprintf(f, "  line worker: running %d req %u ack %u parked %d\n", running() ? 1 : 0,
@@ -121,9 +125,15 @@ private:
   void loop() {
     u32 last = 0;
     for (;;) {
-      // Spin for roughly the gap between two display lines before parking, so
-      // a frame's worth of dispatches never pays a wakeup.
-      constexpr int kSpin = 20000;
+      // Spin briefly, then park. With the lagged hand-off (Gpu::render_lines)
+      // a per-line job has a whole display line of slack before anyone waits
+      // on it, so the wake-up latency is hidden and the core is free between
+      // lines; DS_2D_SPIN overrides the budget (20000 was the old "spin
+      // through the line gap" value).
+      // 20000 (~the line gap) by default: parking between per-line dispatches
+      // costs the emulation thread a wake per line (+1.7 % on GSDD) unless the
+      // lagged hand-off (DS_2D_LAG=1) hides it; 500 is the value to pair with that.
+      static const int kSpin = [] { const char* e = std::getenv("DS_2D_SPIN"); return e ? std::atoi(e) : 20000; }();
       int spins = kSpin;
       u32 r = req_.load(std::memory_order_acquire);
       while (r == last) {
