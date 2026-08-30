@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #if DSPERATE_NEON
 #include <arm_neon.h>
 #endif
@@ -349,6 +350,10 @@ void Renderer3D::expand_toon() {
   for (u32 i = 0; i < 32; ++i) {
     u32 r, g, b; rgb15_to_666(rs_->toon[i], r, g, b);
     toon6_[0][i] = static_cast<u8>(r); toon6_[1][i] = static_cast<u8>(g); toon6_[2][i] = static_cast<u8>(b);
+  }
+  for (u32 i = 0; i < 8; ++i) {
+    u32 r, g, b; rgb15_to_666(rs_->edge[i], r, g, b);
+    edge6_[0][i] = static_cast<u8>(r); edge6_[1][i] = static_cast<u8>(g); edge6_[2][i] = static_cast<u8>(b);
   }
 }
 
@@ -1938,7 +1943,9 @@ u32 Renderer3D::fog_density(u32 addr) const {
   return d;
 }
 
-void Renderer3D::final_pass(s32 y) {
+// The scalar passes: the specification the NEON final_pass is checked against
+// (selftest_final_pass), and the whole of final_pass on non-NEON builds.
+void Renderer3D::final_pass_ref(s32 y) {
   const u32 dispcnt = rs_->dispcnt;
   // Edge marking and anti-aliasing act on polygon pixels (edge flags); fog
   // on the fog bit, which the clear can set too. A line nothing touched
@@ -2015,6 +2022,222 @@ void Renderer3D::final_pass(s32 y) {
     }
   }
   std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32));
+}
+
+#if DSPERATE_NEON
+void Renderer3D::final_pass(s32 y) {
+  const u32 dispcnt = rs_->dispcnt;
+  // Edge marking and anti-aliasing act on polygon pixels (edge flags); fog
+  // on the fog bit, which the clear can set too. A line nothing touched
+  // needs none of it unless the clear carries fog.
+  bool work = line_touched_[y];
+  if (!work) {
+    const bool clear_fog = (rs_->dispcnt & (1 << 14)) || (rs_->clear_attr1 & 0x8000);
+    work = (dispcnt & (1 << 7)) && clear_fog;
+  }
+  if (!work) { std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32)); return; }
+  // The three passes as 16-pixel byte-plane kernels: a record's four bytes
+  // (r g b a, and edge-flags / coverage+fog / translucent id / opaque id for
+  // an attribute) are deinterleaved by one ld4 into planes, the maths is done
+  // 16 lanes wide in bytes and shorts, and one st4 puts the records back.
+  // This is DraStic's shape for the same passes (video_3d_edge_identify_*,
+  // video_3d_fog_modulate_*, the AA resolve in video_3d_resolve_bin_*):
+  // no per-pixel branch, no lane extraction, and the 32-bit records are
+  // never shifted apart channel by channel. Each pass matches the scalar
+  // loops below it (the non-NEON build) bit for bit.
+  u8* const cb = reinterpret_cast<u8*>(color_.data());
+  u8* const ab = reinterpret_cast<u8*>(attr_.data());
+  const u32 base = row_of(y) + 1;
+  if (dispcnt & (1 << 5)) {
+    // Edge marking on the topmost pixels, against the four neighbours: a
+    // pixel with edge flags whose polygon id differs from a neighbour's and
+    // lies in front of it takes the edge colour of its id group and a
+    // broken coverage. Only ids (never written here) and depths (never
+    // written) are read from the neighbours, so the 16 lanes are
+    // independent of each other and of the pixels already marked.
+    const u32 up = row_of(y - 1) + 1, dn = row_of(y + 1) + 1;
+    const uint8x16_t er = vld1q_u8(edge6_[0]), eg = vld1q_u8(edge6_[1]), ebl = vld1q_u8(edge6_[2]);
+    for (u32 x = 0; x < 256; x += 16) {
+      const u32 addr = base + x;
+      uint8x16x4_t at = vld4q_u8(ab + addr * 4);
+      const uint8x16_t edge = vtstq_u8(at.val[0], vdupq_n_u8(0xF));
+      if (vmaxvq_u8(edge) == 0) continue;
+      const uint8x16_t id = at.val[3];
+      uint32x4_t z[4];
+      for (u32 k = 0; k < 4; ++k) z[k] = vld1q_u32(&depth_[addr + k * 4]);
+      // One neighbour: the id differs and z < neighbour z, as a byte mask.
+      auto nb = [&](u32 naddr) -> uint8x16_t {
+        const uint8x16_t nid = vld4q_u8(ab + naddr * 4).val[3];
+        uint32x4_t lt[4];
+        for (u32 k = 0; k < 4; ++k) lt[k] = vcltq_u32(z[k], vld1q_u32(&depth_[naddr + k * 4]));
+        const uint8x16_t lt8 = vcombine_u8(vmovn_u16(vcombine_u16(vmovn_u32(lt[0]), vmovn_u32(lt[1]))),
+                                           vmovn_u16(vcombine_u16(vmovn_u32(lt[2]), vmovn_u32(lt[3]))));
+        return vbicq_u8(lt8, vceqq_u8(id, nid));
+      };
+      uint8x16_t mark = vorrq_u8(vorrq_u8(nb(addr - 1), nb(addr + 1)), vorrq_u8(nb(up + x), nb(dn + x)));
+      mark = vandq_u8(mark, edge);
+      if (vmaxvq_u8(mark) == 0) continue;
+      const uint8x16_t idx = vshrq_n_u8(id, 3);
+      uint8x16x4_t c = vld4q_u8(cb + addr * 4);
+      c.val[0] = vbslq_u8(mark, vqtbl1q_u8(er, idx), c.val[0]);
+      c.val[1] = vbslq_u8(mark, vqtbl1q_u8(eg, idx), c.val[1]);
+      c.val[2] = vbslq_u8(mark, vqtbl1q_u8(ebl, idx), c.val[2]);
+      vst4q_u8(cb + addr * 4, c);
+      // attr = (attr & 0xFFFFE0FF) | 0x1000: byte 1 keeps bits 5-7, coverage 0x10.
+      at.val[1] = vbslq_u8(mark, vorrq_u8(vandq_u8(at.val[1], vdupq_n_u8(0xE0)), vdupq_n_u8(0x10)), at.val[1]);
+      vst4q_u8(ab + addr * 4, at);
+    }
+  }
+  if (dispcnt & (1 << 7)) {
+    // Fog on the top two pixels (the lower one feeds anti-aliasing).
+    const bool fogcolor = !(dispcnt & (1 << 6));
+    u32 fr, fg, fb; rgb15_to_666(static_cast<u16>(rs_->fog_color), fr, fg, fb);
+    const u32 fa = (rs_->fog_color >> 16) & 0x1F;
+    const uint8x8_t vfr = vdup_n_u8(static_cast<u8>(fr)), vfg = vdup_n_u8(static_cast<u8>(fg)), vfb = vdup_n_u8(static_cast<u8>(fb)), vfa = vdup_n_u8(static_cast<u8>(fa));
+    // The 34-entry density table in a 64-byte lookup (indices 0..33 reach it).
+    alignas(16) u8 dt[64] = {};
+    std::memcpy(dt, rs_->fog_density.data(), 34);
+    const uint8x16x4_t dens = {vld1q_u8(dt), vld1q_u8(dt + 16), vld1q_u8(dt + 32), vld1q_u8(dt + 48)};
+    const uint32x4_t voff = vdupq_n_u32(rs_->fog_offset), v32 = vdupq_n_u32(32), vfrac = vdupq_n_u32(0x1FFFF);
+    const int32x4_t vshift = vdupq_n_s32(static_cast<s32>(rs_->fog_shift));
+    // fog_density on 16 lanes: table index and 17-bit fraction from the
+    // depth, the two table entries by lookup, and the interpolation as
+    // d0 + ((d1 - d0) * frac >> 17) with an arithmetic shift, which is the
+    // scalar (d0 * (2^17 - frac) + d1 * frac) >> 17 exactly.
+    auto density16 = [&](u32 addr) -> uint8x16_t {
+      uint32x4_t id[4], frac[4];
+      for (u32 k = 0; k < 4; ++k) {
+        uint32x4_t zz = vld1q_u32(&depth_[addr + k * 4]);
+        const uint32x4_t below = vcltq_u32(zz, voff);
+        zz = vshlq_u32(vshrq_n_u32(vsubq_u32(zz, voff), 2), vshift);
+        uint32x4_t i = vshrq_n_u32(zz, 17);
+        const uint32x4_t ge32 = vcgeq_u32(i, v32);
+        id[k] = vbicq_u32(vminq_u32(i, v32), below);
+        frac[k] = vbicq_u32(vandq_u32(zz, vfrac), vorrq_u32(ge32, below));
+      }
+      const uint8x16_t i8 = vcombine_u8(vmovn_u16(vcombine_u16(vmovn_u32(id[0]), vmovn_u32(id[1]))),
+                                        vmovn_u16(vcombine_u16(vmovn_u32(id[2]), vmovn_u32(id[3]))));
+      const uint8x16_t d0 = vqtbl4q_u8(dens, i8), d1 = vqtbl4q_u8(dens, vaddq_u8(i8, vdupq_n_u8(1)));
+      const int16x8_t dlo = vreinterpretq_s16_u16(vsubl_u8(vget_low_u8(d1), vget_low_u8(d0)));
+      const int16x8_t dhi = vreinterpretq_s16_u16(vsubl_high_u8(d1, d0));
+      const int32x4_t dd[4] = {vmovl_s16(vget_low_s16(dlo)), vmovl_high_s16(dlo), vmovl_s16(vget_low_s16(dhi)), vmovl_high_s16(dhi)};
+      const uint16x8_t d0lo = vmovl_u8(vget_low_u8(d0)), d0hi = vmovl_high_u8(d0);
+      const int32x4_t b[4] = {vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(d0lo))), vreinterpretq_s32_u32(vmovl_high_u16(d0lo)),
+                              vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(d0hi))), vreinterpretq_s32_u32(vmovl_high_u16(d0hi))};
+      uint32x4_t d[4];
+      for (u32 k = 0; k < 4; ++k) {
+        int32x4_t v = vaddq_s32(b[k], vshrq_n_s32(vmulq_s32(dd[k], vreinterpretq_s32_u32(frac[k])), 17));
+        const uint32x4_t sat = vcgeq_u32(vreinterpretq_u32_s32(v), vdupq_n_u32(127));
+        d[k] = vbslq_u32(sat, vdupq_n_u32(128), vreinterpretq_u32_s32(v));
+      }
+      return vcombine_u8(vmovn_u16(vcombine_u16(vmovn_u32(d[0]), vmovn_u32(d[1]))),
+                         vmovn_u16(vcombine_u16(vmovn_u32(d[2]), vmovn_u32(d[3]))));
+    };
+    // (f * d + c * (128 - d)) >> 7 on 16 lanes; d <= 128 so 128 - d is a byte.
+    auto mix = [](uint8x16_t c, uint8x8_t f, uint8x16_t d, uint8x16_t inv) -> uint8x16_t {
+      const uint16x8_t lo = vmlal_u8(vmull_u8(f, vget_low_u8(d)), vget_low_u8(c), vget_low_u8(inv));
+      const uint16x8_t hi = vmlal_u8(vmull_u8(f, vget_high_u8(d)), vget_high_u8(c), vget_high_u8(inv));
+      return vcombine_u8(vshrn_n_u16(lo, 7), vshrn_n_u16(hi, 7));
+    };
+    auto apply16 = [&](u32 addr, uint8x16_t m) {
+      const uint8x16_t d = density16(addr), inv = vsubq_u8(vdupq_n_u8(128), d);
+      uint8x16x4_t c = vld4q_u8(cb + addr * 4);
+      if (fogcolor) {
+        c.val[0] = vbslq_u8(m, mix(c.val[0], vfr, d, inv), c.val[0]);
+        c.val[1] = vbslq_u8(m, mix(c.val[1], vfg, d, inv), c.val[1]);
+        c.val[2] = vbslq_u8(m, mix(c.val[2], vfb, d, inv), c.val[2]);
+      }
+      c.val[3] = vbslq_u8(m, mix(vandq_u8(c.val[3], vdupq_n_u8(0x1F)), vfa, d, inv), c.val[3]);
+      vst4q_u8(cb + addr * 4, c);
+    };
+    for (u32 x = 0; x < 256; x += 16) {
+      const u32 addr = base + x;
+      const uint8x16x4_t at = vld4q_u8(ab + addr * 4);
+      const uint8x16_t fog = vtstq_u8(at.val[1], vdupq_n_u8(0x80));
+      if (vmaxvq_u8(fog)) apply16(addr, fog);
+      const uint8x16_t edge = vtstq_u8(at.val[0], vdupq_n_u8(0xF));
+      if (vmaxvq_u8(edge) == 0) continue;
+      const u32 under = addr + RSIZE;
+      const uint8x16_t ufog = vandq_u8(edge, vtstq_u8(vld4q_u8(ab + under * 4).val[1], vdupq_n_u8(0x80)));
+      if (vmaxvq_u8(ufog)) apply16(under, ufog);
+    }
+  }
+  if (dispcnt & (1 << 4)) {
+    // Anti-aliasing: blend edge pixels with the pixel underneath by coverage.
+    // Coverage 31 keeps the top pixel, 0 takes the one underneath whole;
+    // otherwise (cov + 1) / 32 of the top over the rest of the bottom, the
+    // colour only when something is underneath, the alpha always.
+    const uint8x16_t v31 = vdupq_n_u8(31), v32 = vdupq_n_u8(32), v0 = vdupq_n_u8(0), a5 = vdupq_n_u8(0x1F);
+    auto blend = [](uint8x16_t t, uint8x16_t b, uint8x16_t c1, uint8x16_t c2) -> uint8x16_t {
+      const uint16x8_t lo = vmlal_u8(vmull_u8(vget_low_u8(t), vget_low_u8(c1)), vget_low_u8(b), vget_low_u8(c2));
+      const uint16x8_t hi = vmlal_u8(vmull_u8(vget_high_u8(t), vget_high_u8(c1)), vget_high_u8(b), vget_high_u8(c2));
+      return vcombine_u8(vshrn_n_u16(lo, 5), vshrn_n_u16(hi, 5));
+    };
+    for (u32 x = 0; x < 256; x += 16) {
+      const u32 addr = base + x;
+      const uint8x16x4_t at = vld4q_u8(ab + addr * 4);
+      const uint8x16_t cov = vandq_u8(at.val[1], a5);
+      const uint8x16_t m = vbicq_u8(vtstq_u8(at.val[0], vdupq_n_u8(0xF)), vceqq_u8(cov, v31));
+      if (vmaxvq_u8(m) == 0) continue;
+      const uint8x16x4_t top = vld4q_u8(cb + addr * 4), bot = vld4q_u8(cb + (addr + RSIZE) * 4);
+      const uint8x16_t c1 = vaddq_u8(cov, vdupq_n_u8(1)), c2 = vsubq_u8(v32, c1);
+      const uint8x16_t ta = vandq_u8(top.val[3], a5), ba = vandq_u8(bot.val[3], a5);
+      const uint8x16_t under = vtstq_u8(ba, ba), whole = vceqq_u8(cov, v0);
+      uint8x16x4_t o;
+      for (u32 k = 0; k < 3; ++k) o.val[k] = vbslq_u8(under, blend(top.val[k], bot.val[k], c1, c2), top.val[k]);
+      o.val[3] = blend(ta, ba, c1, c2);
+      for (u32 k = 0; k < 4; ++k) o.val[k] = vbslq_u8(m, vbslq_u8(whole, bot.val[k], o.val[k]), top.val[k]);
+      vst4q_u8(cb + addr * 4, o);
+    }
+  }
+  std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32));
+}
+#else
+void Renderer3D::final_pass(s32 y) { final_pass_ref(y); }
+#endif
+
+// Randomised buffers through final_pass and final_pass_ref with every pass
+// enabled (edge marking, fog with and without colour, anti-aliasing), the
+// three planes compared afterwards. Returns the number of differing words.
+u32 Renderer3D::selftest_final_pass(u32 seed, u32 dispcnt) {
+  RenderState rs;
+  rs.dispcnt = dispcnt;
+  u32 st = seed * 2654435761u + 1;
+  auto rnd = [&]() { st ^= st << 13; st ^= st >> 17; st ^= st << 5; return st; };
+  for (auto& e : rs.edge) e = static_cast<u16>(rnd());
+  for (auto& d : rs.fog_density) d = static_cast<u8>(rnd() & 0x7F);
+  rs.fog_color = rnd() & 0x1F7FFF;
+  rs.fog_offset = rnd() & 0x7FFF; rs.fog_shift = rnd() & 0xF;
+  const RenderState* saved = rs_;
+  rs_ = &rs;
+  expand_toon();   // the edge colour planes come from rs_
+  u32 diffs = 0;
+  for (s32 y = 0; y < 8; ++y) {
+    for (u32 i = 0; i < RSIZE * 2; ++i) {
+      const u32 r = rnd();
+      color_[i] = (r & 0x3F3F3F) | ((r >> 3) & 0x1F000000);
+      depth_[i] = (rnd() >> 8) & ((seed & 2) ? 0xFFFFFF : 0xFFFF);
+      // Edge flags on most lanes, coverage over the full range, fog bit half the time.
+      const u32 a = rnd();
+      attr_[i] = (a & 0x3F000000) | (a & 0x7F0000) | ((a >> 20) & 0x1F00) | ((a & 0x100) ? 0x8000 : 0) | (((a >> 4) & 7) ? (a & 0xF) : 0) | (a & 0x10);
+    }
+    line_touched_[y] = true;
+    std::array<u32, RSIZE * 2> c0 = color_, d0 = depth_, a0 = attr_;
+    std::vector<u32> o0(256 * 8), o1(256 * 8);   // final_pass writes out_dst_[y * 256 ..]
+    out_dst_ = o0.data(); final_pass_ref(y);
+    std::array<u32, RSIZE * 2> c1 = color_, a1 = attr_;
+    color_ = c0; depth_ = d0; attr_ = a0;
+    out_dst_ = o1.data(); final_pass(y);
+    for (u32 i = 0; i < RSIZE * 2; ++i) {
+      if (color_[i] != c1[i] && !diffs) fprintf(stderr, "final_pass y=%d colour[%u] (x=%d, %s) neon %08x ref %08x attr %08x depth %08x\n", y, i, static_cast<int>(i % W) - 1, i >= RSIZE ? "under" : "top", color_[i], c1[i], a0[i], d0[i]);
+      if (attr_[i] != a1[i] && !diffs) fprintf(stderr, "final_pass y=%d attr[%u] neon %08x ref %08x\n", y, i, attr_[i], a1[i]);
+      diffs += (color_[i] != c1[i]) + (attr_[i] != a1[i]);
+    }
+    for (u32 i = 0; i < 256; ++i) diffs += o0[y * 256 + i] != o1[y * 256 + i];
+  }
+  out_dst_ = out_.data();
+  rs_ = saved;
+  return diffs;
 }
 
 // The clear is done per line, just before the line is rendered (the final

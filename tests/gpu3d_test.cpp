@@ -110,11 +110,23 @@ static void test_flat_quad() {
   CHECK_EQ(line[192] & 0x3F, 0u);
 }
 
+static void test_final_pass() {
+  NDS nds; power_on(nds);
+  // Each pass alone (AA, edge marking, fog with and without colour), then all together.
+  static const u32 modes[] = {1u << 4, 1u << 5, 1u << 7, (1u << 7) | (1u << 6), (1u << 4) | (1u << 5) | (1u << 7)};
+  for (u32 m : modes) for (u32 seed = 0; seed < 4; ++seed) {
+    const u32 d = nds.gpu3d.renderer().selftest_final_pass(seed, m);
+    if (d) std::fprintf(stderr, "final_pass dispcnt %x seed %u: %u diffs\n", m, seed, d);
+    CHECK_EQ(d, 0u);
+  }
+}
+
 int main() {
   test_fifo_status();
   test_fifo_stall();
   test_matrix_stack();
   test_flat_quad();
+  test_final_pass();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("gpu3d: ok");
   return 0;

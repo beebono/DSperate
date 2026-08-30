@@ -137,6 +137,9 @@ public:
 private:
   NDS& nds_;
   Renderer3D renderer_;
+public:
+  Renderer3D& renderer() { return renderer_; }   // tests
+private:
 
   struct Entry { u32 param; u8 cmd; };
   // The command pipe (4), the FIFO (256) and the CPU's stalled writes (64)

@@ -221,6 +221,8 @@ private:
   // The 32-entry toon table as three 6-bit byte planes, expanded once per
   // frame from rs_->toon for the vector toon / highlight stages (flush_batch).
   alignas(16) u8 toon6_[3][32] = {};
+  // The eight edge-marking colours as three 6-bit byte planes (final_pass).
+  alignas(16) u8 edge6_[3][16] = {};
   void expand_toon();
   const VramMap* vm_ = nullptr;
   mutable TextureCache texcache_;
@@ -437,6 +439,11 @@ private:
 
   u32  fog_density(u32 addr) const;
   void final_pass(s32 y);
+  void final_pass_ref(s32 y);
+public:
+  // tests/gpu3d_test.cpp: final_pass against final_pass_ref on random buffers; 0 when identical.
+  u32  selftest_final_pass(u32 seed, u32 dispcnt);
+private:
   void clear_border(s32 y);
   void clear_line(s32 y);
 };
