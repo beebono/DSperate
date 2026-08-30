@@ -132,7 +132,7 @@ stray `.sav` next to a ROM cannot silently move a frame baseline: give it
 input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
 
     dsperate-sdl game.nds [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
-                 [--config F] [--scale N] [--fullscreen] [--layout vertical|horizontal]
+                 [--config F] [--scale N] [--fullscreen] [--layout L] [--screen top|bottom]
                  [--dual-window] [--linear] [--accel] [--no-vsync] [--no-audio]
                  [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N]
                  [--frames N] [--record F | --replay F] [--save F]
@@ -161,14 +161,15 @@ screen.
 
 Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,
 Enter = Start, Right Shift = Select; `Escape` quits, `P` pauses, `Tab` held
-fast-forwards, `F` toggles fullscreen, `F4` swaps the screen layout (and
-remembers it for the game), `F9` takes a screenshot (both screens, BMP, in the
+fast-forwards, `F` toggles fullscreen, `F4` cycles the screen layout, `F6` swaps
+which screen is alone/large/dominant and `F8` moves the PiP inset (all three
+remembered for the game), `F9` takes a screenshot (both screens, BMP, in the
 states directory), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
 the state in the current slot and `F2`/`F3` change the slot, `L` closes and
 opens the lid, `M` held is the fake microphone. Controller, with Mode held:
 Start+Select quits, Start pauses, right trigger fast-forwards, R/L save/load
-the state, Right/Left change the slot, Select swaps the layout; the left
-stick's click is the microphone.
+the state, Right/Left change the slot, Select cycles the layout, Y swaps the screens;
+the left stick's click is the microphone.
 
 ### Example configs
 
@@ -228,11 +229,15 @@ rather than falling behind.
 
 ### Display and handhelds
 
-Both screens are stacked (`--layout vertical`) or side by side
-(`horizontal`), aspect preserved, scaled to the window or panel. The default
-renderer is software: on a four-core board the GL driver's own threads cost
-more than the scale they save, measured on the RG DS as a worse p99 with
-`--accel` (which keeps the GLES renderer, and `--linear` its smooth scaling).
+Layouts (`--layout` / `[video] layout`, cycled with `F4`): `vertical`
+(stacked) and `horizontal` (side by side; `--screen` picks which comes
+first), `single` (one screen fills the window), `pip` (one fills it, the
+other is an inset of `pip_scale` in `pip_corner` = `tl|tr|bl|br`),
+`dominant_v` (stacked in DS order, one screen fitted to the width and the
+other `dominant_ratio` its size, both centred) and `dominant_h` (side by
+side in DS order, fitted to the height, bottoms aligned). Every mode keeps
+the 4:3 screen aspect. `--screen top|bottom` (`[video] screen`) is the
+screen shown alone, large or dominant; `F6` swaps it.
 
 Under Wayland the core scales each scanline straight into the window surface
 as the line is produced (`DS_SCANLINE_SCALE=0/1` overrides the per-driver

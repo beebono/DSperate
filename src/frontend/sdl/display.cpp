@@ -9,14 +9,44 @@
 
 namespace ds::sdl {
 
-bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout_mode, bool accel, int only_screen, int display_index) {
+namespace {
+const char* const kModeNames[] = {"vertical", "horizontal", "single", "pip", "dominant_v", "dominant_h"};
+const char* const kCornerNames[] = {"tl", "tr", "bl", "br"};
+}
+
+const char* Display::mode_name(Mode m) { return kModeNames[static_cast<int>(m)]; }
+const char* Display::corner_name(Corner c) { return kCornerNames[static_cast<int>(c)]; }
+bool Display::parse_mode(const std::string& s, Mode& m) {
+  for (int i = 0; i < static_cast<int>(Mode::Count); ++i) if (s == kModeNames[i]) { m = static_cast<Mode>(i); return true; }
+  return false;
+}
+bool Display::parse_corner(const std::string& s, Corner& c) {
+  for (int i = 0; i < static_cast<int>(Corner::Count); ++i) if (s == kCornerNames[i]) { c = static_cast<Corner>(i); return true; }
+  return false;
+}
+
+void Display::natural_size(const Layout& l, double scale, int& w, int& h) {
+  const double sw = SCREEN_W * scale, sh = SCREEN_H * scale;
+  double fw = sw, fh = sh;
+  switch (l.mode) {
+    case Mode::Vertical:   fh = sh * 2; break;
+    case Mode::Horizontal: fw = sw * 2; break;
+    case Mode::Single: case Mode::Pip: break;
+    case Mode::DominantV:  fh = sh * (1 + l.dominant); break;
+    case Mode::DominantH:  fw = sw * (1 + l.dominant); break;
+    case Mode::Count: break;
+  }
+  w = static_cast<int>(fw); h = static_cast<int>(fh);
+}
+
+bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout_mode, bool accel, int only_screen, int display_index) {
   layout_ = layout_mode;
   only_screen_ = only_screen;
   display_index_ = display_index;
   nviews_ = only_screen_ >= 0 ? 1 : SCREENS;
-  const bool across = only_screen_ < 0 && layout_ == Layout::Horizontal;
-  const int cols = only_screen_ >= 0 ? 1 : (across ? 2 : 1), rows = only_screen_ >= 0 ? 1 : (across ? 1 : 2);
-  const int w = static_cast<int>(SCREEN_W) * cols * scale, h = static_cast<int>(SCREEN_H) * rows * scale;
+  int w = 0, h = 0;
+  if (only_screen_ >= 0) { w = static_cast<int>(SCREEN_W) * scale; h = static_cast<int>(SCREEN_H) * scale; }
+  else natural_size(layout_, scale, w, h);
   const u32 flags = static_cast<u32>(SDL_WINDOW_RESIZABLE) | (fullscreen ? static_cast<u32>(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u);
   win_ = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED_DISPLAY(display_index), SDL_WINDOWPOS_CENTERED_DISPLAY(display_index), w, h, flags);
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
@@ -124,26 +154,73 @@ void Display::close() {
   if (win_) { SDL_DestroyWindow(win_); win_ = nullptr; }
 }
 
-// Both screens stacked or side by side, aspect preserved, centred. Integer
+// Screen rects for the current mode: aspect preserved, centred. Integer
 // scaling is not the default: a 1280x720 handheld panel fits the 256x384
 // stack 1.875 times, and rounding that down to 1 would waste most of the
 // screen.
 void Display::layout() {
   int w = 0, h = 0;
   if (!out_size(w, h)) return;
-  const int sw = static_cast<int>(SCREEN_W), sh = static_cast<int>(SCREEN_H);
+  const double sw = SCREEN_W, sh = SCREEN_H;
+  auto fit = [&](double cols, double rows) { return std::min(w / (sw * cols), h / (sh * rows)); };
+  auto rect = [&](double x, double y, double s) { return SDL_Rect{static_cast<int>(x), static_cast<int>(y), static_cast<int>(sw * s), static_cast<int>(sh * s)}; };
   if (only_screen_ >= 0) {
-    const double s = std::min(static_cast<double>(w) / sw, static_cast<double>(h) / sh);
-    const int dw = static_cast<int>(sw * s), dh = static_cast<int>(sh * s);
-    views_[0] = View{only_screen_, SDL_Rect{(w - dw) / 2, (h - dh) / 2, dw, dh}};
+    const double s = fit(1, 1);
+    views_[0] = View{only_screen_, rect((w - sw * s) / 2, (h - sh * s) / 2, s), true, true};
     return;
   }
-  const bool across = layout_ == Layout::Horizontal;
-  const int cols = across ? 2 : 1, rows = across ? 1 : 2;
-  const double s = std::min(static_cast<double>(w) / (sw * cols), static_cast<double>(h) / (sh * rows));
-  const int dw = static_cast<int>(sw * s), dh = static_cast<int>(sh * s);
-  const int x = (w - dw * cols) / 2, y = (h - dh * rows) / 2;
-  for (int i = 0; i < SCREENS; ++i) views_[i] = View{i, across ? SDL_Rect{x + dw * i, y, dw, dh} : SDL_Rect{x, y + dh * i, dw, dh}};
+  const int p = layout_.primary, q = 1 - p;
+  // Views are drawn in order, so the inset goes last; map_point() looks from
+  // the end, so the inset also wins the touch.
+  switch (layout_.mode) {
+    case Mode::Vertical: case Mode::Horizontal: {
+      const bool across = layout_.mode == Mode::Horizontal;
+      const double s = across ? fit(2, 1) : fit(1, 2);
+      const double dw = sw * s, dh = sh * s;
+      const double x = (w - dw * (across ? 2 : 1)) / 2, y = (h - dh * (across ? 1 : 2)) / 2;
+      for (int i = 0; i < SCREENS; ++i) {
+        const int screen = i == 0 ? p : q;
+        views_[i] = View{screen, across ? rect(x + dw * i, y, s) : rect(x, y + dh * i, s), true, true};
+      }
+      break;
+    }
+    case Mode::Single: case Mode::Pip: {
+      const double s = fit(1, 1);
+      const SDL_Rect big = rect((w - sw * s) / 2, (h - sh * s) / 2, s);
+      views_[0] = View{p, big, true, true};
+      if (layout_.mode == Mode::Single) {
+        views_[1] = View{q, SDL_Rect{0, 0, static_cast<int>(SCREEN_W), static_cast<int>(SCREEN_H)}, false, false};
+      } else {
+        const double s2 = s * layout_.pip;
+        const int iw = static_cast<int>(sw * s2), ih = static_cast<int>(sh * s2);
+        const bool right = layout_.corner == Corner::TopRight || layout_.corner == Corner::BottomRight;
+        const bool bottom = layout_.corner == Corner::BottomLeft || layout_.corner == Corner::BottomRight;
+        views_[1] = View{q, SDL_Rect{right ? big.x + big.w - iw : big.x, bottom ? big.y + big.h - ih : big.y, iw, ih}, false, true};
+      }
+      break;
+    }
+    case Mode::DominantV: {
+      // DS order (top above bottom), the pair centred, each centred across.
+      const double r = layout_.dominant, s = fit(1, 1 + r);
+      const double bh = sh * s, lh = sh * s * r;
+      const double y0 = (h - (bh + lh)) / 2;
+      const double sc[2] = {p == 0 ? s : s * r, p == 1 ? s : s * r};
+      double y = y0;
+      for (int i = 0; i < SCREENS; ++i) { views_[i] = View{i, rect((w - sw * sc[i]) / 2, y, sc[i]), true, true}; y += sh * sc[i]; }
+      break;
+    }
+    case Mode::DominantH: {
+      // DS order (top left of bottom), the pair centred, bottoms aligned.
+      const double r = layout_.dominant, s = fit(1 + r, 1);
+      const double bw = sw * s, lw = sw * s * r, bh = sh * s;
+      const double x0 = (w - (bw + lw)) / 2, bottom = (h - bh) / 2 + bh;
+      const double sc[2] = {p == 0 ? s : s * r, p == 1 ? s : s * r};
+      double x = x0;
+      for (int i = 0; i < SCREENS; ++i) { views_[i] = View{i, rect(x, bottom - sh * sc[i], sc[i]), true, true}; x += sw * sc[i]; }
+      break;
+    }
+    case Mode::Count: break;
+  }
 }
 
 void Display::draw(const u32* const fb[SCREENS]) {
@@ -151,6 +228,7 @@ void Display::draw(const u32* const fb[SCREENS]) {
   SDL_RenderClear(ren_);
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
+    if (!v.shown) continue;
     SDL_UpdateTexture(tex_[v.screen], nullptr, fb[v.screen], static_cast<int>(SCREEN_W) * 4);
     SDL_RenderCopy(ren_, tex_[v.screen], nullptr, &v.rect);
   }
@@ -165,16 +243,16 @@ void Display::toggle_fullscreen() {
   margins_dirty_ = true;
 }
 
-void Display::set_layout(Layout l) {
-  if (only_screen_ >= 0 || l == layout_) return;
+void Display::set_layout(const Layout& l) {
+  if (only_screen_ >= 0) return;
+  const Mode was = layout_.mode;
   layout_ = l;
-  if (!fullscreen_) {
-    // Keep the per-screen size, swap the arrangement.
-    int w = 0, h = 0;
-    SDL_GetWindowSize(win_, &w, &h);
-    const bool across = l == Layout::Horizontal;
-    const int sw = across ? w / 1 : w / 2, sh = across ? h / 2 : h / 1;   // previous per-screen size
-    const int nw = across ? sw * 2 : sw, nh = across ? sh : sh * 2;
+  if (!fullscreen_ && was != l.mode) {
+    // Keep the largest screen's size, resize the window around the new mode.
+    int pw = 0;
+    for (int i = 0; i < nviews_; ++i) if (views_[i].shown) pw = std::max(pw, views_[i].rect.w);
+    int nw = 0, nh = 0;
+    natural_size(l, std::max(1.0, static_cast<double>(pw) / SCREEN_W), nw, nh);
     SDL_SetWindowSize(win_, nw, nh);
   }
   layout();
@@ -183,8 +261,9 @@ void Display::set_layout(Layout l) {
 }
 
 bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
-  for (int i = 0; i < nviews_; ++i) {
+  for (int i = nviews_ - 1; i >= 0; --i) {
     const View& v = views_[i];
+    if (!v.shown) continue;
     if (wx < v.rect.x || wx >= v.rect.x + v.rect.w || wy < v.rect.y || wy >= v.rect.y + v.rect.h) continue;
     screen = v.screen;
     sx = (wx - v.rect.x) * static_cast<int>(SCREEN_W) / v.rect.w;
@@ -224,34 +303,67 @@ void Display::build_scale() {
 
   // Inverse of the dst_x -> src_x = dst_x * SCREEN_W / rect.w map used by
   // draw() and map_point(), so the two paths land pixels in the same places:
-  // source pixel s covers [xrun[s], xrun[s+1]). Both views are the same
-  // width, so one table serves both.
-  const int rw = views_[0].rect.w;
-  xrun_.resize(static_cast<size_t>(SCREEN_W) + 1);
-  for (u32 i = 0; i <= SCREEN_W; ++i)
-    xrun_[i] = static_cast<u16>((static_cast<u32>(i) * rw + SCREEN_W - 1) / SCREEN_W);
-}
-
-// The screen rects are overwritten in full every frame, so only the letterbox
-// around them is cleared, and only when the layout changed under it -- the
-// surface keeps its contents between frames. On a panel the screens fill
-// exactly there is nothing to clear at all.
-void Display::clear_margins(u32* px, u32 pitch) const {
-  int x0 = scaled_w_, y0 = scaled_h_, x1 = 0, y1 = 0;
+  // source pixel s covers [xrun[s], xrun[s+1]). One table per view, since
+  // the views differ in size in the inset and dominant modes.
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
-    x0 = std::min(x0, v.rect.x); y0 = std::min(y0, v.rect.y);
-    x1 = std::max(x1, v.rect.x + v.rect.w); y1 = std::max(y1, v.rect.y + v.rect.h);
+    std::vector<u16>& xr = xrun_[v.screen];
+    xr.resize(static_cast<size_t>(SCREEN_W) + 1);
+    for (u32 x = 0; x <= SCREEN_W; ++x)
+      xr[x] = static_cast<u16>((x * static_cast<u32>(v.rect.w) + SCREEN_W - 1) / SCREEN_W);
+    if (!v.direct) side_[v.screen].assign(static_cast<size_t>(v.rect.w) * v.rect.h, 0);
   }
-  auto band = [&](int by0, int by1, int bx0, int bx1) {
-    if (by1 <= by0 || bx1 <= bx0) return;
-    for (int y = by0; y < by1; ++y)
-      std::memset(px + static_cast<size_t>(y) * pitch + bx0, 0, static_cast<size_t>(bx1 - bx0) * sizeof(u32));
-  };
-  band(0, y0, 0, scaled_w_);                 // above
-  band(y1, scaled_h_, 0, scaled_w_);         // below
-  band(y0, y1, 0, x0);                       // left
-  band(y0, y1, x1, scaled_w_);               // right
+}
+
+// The screen rects are overwritten in full every frame, so the rest of the
+// surface is cleared only when the layout changed under it -- the surface
+// keeps its contents between frames. The dominant modes leave gaps beside
+// the smaller screen, so it is simplest to clear everything outside the
+// rects row by row; on a panel the screens fill exactly, nothing is written.
+void Display::clear_margins(u32* px, u32 pitch) const {
+  for (int y = 0; y < scaled_h_; ++y) {
+    u32* row = px + static_cast<size_t>(y) * pitch;
+    int x = 0;
+    // Direct views in x order on this row (at most two).
+    int xs[SCREENS], xe[SCREENS], n = 0;
+    for (int i = 0; i < nviews_; ++i) {
+      const View& v = views_[i];
+      if (!v.direct || y < v.rect.y || y >= v.rect.y + v.rect.h) continue;
+      xs[n] = v.rect.x; xe[n] = v.rect.x + v.rect.w; ++n;
+    }
+    if (n == 2 && xs[1] < xs[0]) { std::swap(xs[0], xs[1]); std::swap(xe[0], xe[1]); }
+    for (int i = 0; i < n; ++i) {
+      if (xs[i] > x) std::memset(row + x, 0, static_cast<size_t>(xs[i] - x) * sizeof(u32));
+      x = std::max(x, xe[i]);
+    }
+    if (x < scaled_w_) std::memset(row + x, 0, static_cast<size_t>(scaled_w_ - x) * sizeof(u32));
+  }
+}
+
+// Hands out one target per screen: the window buffer for direct views, the
+// side buffer for the rest.
+void Display::targets(u32* px, u32 stride, Target out[SCREENS]) {
+  frame_px_ = px; frame_pitch_ = stride;
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
+    if (v.direct)
+      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data()};
+    else
+      out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data()};
+  }
+}
+
+// Copies the shown side-buffer views (the inset) into the frame.
+void Display::blit_insets() {
+  if (!frame_px_) return;
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
+    if (v.direct || !v.shown) continue;
+    for (int y = 0; y < v.rect.h; ++y)
+      std::memcpy(frame_px_ + static_cast<size_t>(v.rect.y + y) * frame_pitch_ + v.rect.x,
+                  side_[v.screen].data() + static_cast<size_t>(y) * v.rect.w, static_cast<size_t>(v.rect.w) * sizeof(u32));
+  }
+  frame_px_ = nullptr;
 }
 
 bool Display::begin_frame(Target out[SCREENS]) {
@@ -286,11 +398,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
       // Every buffer needs its margins cleared once, not just the first.
       static_assert(DmabufOut::BUFS <= 8, "margin bookkeeping");
       if (dm_margins_ < DmabufOut::BUFS) { clear_margins(px, stride); ++dm_margins_; }
-      for (int i = 0; i < nviews_; ++i) {
-        const View& v = views_[i];
-        out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x,
-                               stride, static_cast<u32>(v.rect.h), xrun_.data()};
-      }
+      targets(px, stride, out);
       dm_frame_ = true;
       return true;
     }
@@ -317,15 +425,12 @@ bool Display::begin_frame(Target out[SCREENS]) {
   u32* base = static_cast<u32*>(s->pixels);
   const u32 stride = static_cast<u32>(s->pitch) / sizeof(u32);
   if (margins_dirty_) { clear_margins(base, stride); margins_dirty_ = false; }
-  for (int i = 0; i < nviews_; ++i) {
-    const View& v = views_[i];
-    out[v.screen] = Target{base + static_cast<size_t>(v.rect.y) * stride + v.rect.x,
-                           stride, static_cast<u32>(v.rect.h), xrun_.data()};
-  }
+  targets(base, stride, out);
   return true;
 }
 
 void Display::end_frame() {
+  blit_insets();
   if (dm_frame_) { dm_frame_ = false; dm_->end_frame(); return; }
   if (SDL_MUSTLOCK(surf_)) SDL_UnlockSurface(surf_);
   SDL_UpdateWindowSurface(win_);

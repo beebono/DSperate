@@ -7,6 +7,7 @@
 #include <SDL2/SDL.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace ds::sdl {
@@ -23,16 +24,35 @@ class Display {
 public:
   static constexpr int SCREENS = 2;
 
-  // Screens stacked (top over bottom) or side by side (top left, bottom
-  // right): the latter matches handhelds whose two panels sit horizontally
-  // in the compositor's canvas, so touch coordinates line up.
-  enum class Layout { Vertical, Horizontal };
-  // `only_screen` >= 0 shows just that DS screen, filling the window: the
-  // dual-window mode opens one Display per screen, each fullscreen on its
-  // own video display (`display_index`). One window per output is also what
-  // direct scanout requires -- a surface spanning two outputs can be lifted
-  // onto neither output's plane.
-  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, Layout layout = Layout::Vertical, bool accel = false, int only_screen = -1, int display_index = 0);
+  // How the two screens share the window. Every mode keeps the 4:3 screen
+  // aspect; `primary` is the screen shown alone (Single), large (Pip) or
+  // dominant (DominantV/H), and the first one in the stack/row otherwise.
+  //   Vertical    stacked, top over bottom (top=primary first)
+  //   Horizontal  side by side: matches handhelds whose two panels sit
+  //               horizontally in the compositor's canvas, so touch lines up
+  //   Single      one screen fills the window; the other is not drawn
+  //   Pip         one fills the window, the other is an inset in a corner
+  //   DominantV   stacked in DS order, the primary fitted to the width and
+  //               the other `dominant` times its size, both centred
+  //   DominantH   side by side in DS order, the primary fitted to the
+  //               height, the other `dominant` times its size, bottoms aligned
+  enum class Mode : u8 { Vertical, Horizontal, Single, Pip, DominantV, DominantH, Count };
+  enum class Corner : u8 { TopLeft, TopRight, BottomLeft, BottomRight, Count };
+  struct Layout {
+    Mode   mode = Mode::Vertical;
+    int    primary = 0;
+    Corner corner = Corner::BottomRight;
+    double pip = 1.0 / 3.0;      // inset size relative to the large screen
+    double dominant = 0.5;       // secondary size relative to the dominant screen
+  };
+  static const char* mode_name(Mode m);      // "vertical" ... "dominant_h"
+  static bool parse_mode(const std::string& s, Mode& m);
+  static const char* corner_name(Corner c);  // "tl" "tr" "bl" "br"
+  static bool parse_corner(const std::string& s, Corner& c);
+  // The window size that shows the layout at `scale` window pixels per DS pixel.
+  static void natural_size(const Layout& l, double scale, int& w, int& h);
+
+  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout, bool accel = false, int only_screen = -1, int display_index = 0);
   void close();
 
   void draw(const u32* const fb[SCREENS]);
@@ -69,10 +89,12 @@ public:
   void end_frame();   // unlock and present
   void on_resize() { layout(); build_scale(); margins_dirty_ = true; }
   void toggle_fullscreen();
-  // Switches between stacked and side-by-side; a windowed window is resized
-  // to fit. Ignored on a single-screen (dual-window) display.
-  void set_layout(Layout l);
-  Layout current_layout() const { return layout_; }
+  // Switches layout; a windowed window is resized to the new mode's natural
+  // size at the current scale. Ignored on a single-screen (dual-window)
+  // display.
+  void set_layout(const Layout& l);
+  const Layout& current_layout() const { return layout_; }
+  bool across() const { return layout_.mode == Mode::Horizontal || layout_.mode == Mode::DominantH; }
 
   // Window point -> pixel in `screen`. False if the point is not on a screen.
   bool map_point(int wx, int wy, int& screen, int& sx, int& sy) const;
@@ -84,12 +106,18 @@ public:
   u32 window_id() const { return win_ ? SDL_GetWindowID(win_) : 0; }
 
 private:
-  struct View { int screen; SDL_Rect rect; };
+  // `direct`: the core scales straight into the window at `rect`. Otherwise
+  // it scales into side_[screen] (an inset that would be overwritten by the
+  // screen under it, or a hidden screen -- the core needs a target for
+  // both), which end_frame() copies into place if `shown`.
+  struct View { int screen; SDL_Rect rect; bool direct; bool shown; };
 
   void layout();
   void build_scale();          // pick up the window surface and rebuild the x-map
   bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode
   void clear_margins(u32* px, u32 pitch) const;
+  void targets(u32* px, u32 stride, Target out[SCREENS]);
+  void blit_insets();
 
   SDL_Window*   win_ = nullptr;
   SDL_Renderer* ren_ = nullptr;
@@ -99,7 +127,7 @@ private:
   int           only_screen_ = -1;
   int           display_index_ = 0;
   bool          fullscreen_ = false;
-  Layout        layout_ = Layout::Vertical;
+  Layout        layout_;
 
   bool              scaled_ = false;
   std::unique_ptr<DmabufOut> dm_;  // tier 1; null on the surface tier
@@ -108,7 +136,10 @@ private:
   int               dm_margins_ = 0;      // dmabuf buffers whose letterbox is cleared
   bool              dm_frame_ = false;    // current begin_frame targeted the dmabuf
   int               scaled_w_ = 0, scaled_h_ = 0;
-  std::vector<u16>  xrun_;     // 257 entries; see kern::scale_row
+  std::vector<u16>  xrun_[SCREENS];   // per screen, 257 entries; see kern::scale_row
+  std::vector<u32>  side_[SCREENS];   // scaled pixels of a non-direct view
+  u32*              frame_px_ = nullptr;   // the buffer begin_frame handed out, for end_frame's insets
+  u32               frame_pitch_ = 0;
 };
 
 } // namespace ds::sdl

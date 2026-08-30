@@ -43,7 +43,8 @@ const char* kUsage =
     "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
-    "  --layout L      vertical (default) or horizontal: screens stacked or side by side\n"
+    "  --layout L      vertical (default) | horizontal | single | pip | dominant_v | dominant_h\n"
+    "  --screen S      top (default) or bottom: the screen shown alone, large or dominant\n"
     "  --dual-window   one window per video display, one DS screen each (dual-panel\n"
     "                  handhelds; also what direct scanout needs on them)\n"
     "  --linear        smooth scaling instead of nearest\n"
@@ -225,6 +226,7 @@ int main(int argc, char** argv) {
     else if (arg("--scale")) cli.set("video.scale", argv[++i]);
     else if (flag("--dual-window")) cli.set("video.dual_window", "true");
     else if (arg("--layout")) cli.set("video.layout", argv[++i]);
+    else if (arg("--screen")) cli.set("video.screen", argv[++i]);
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
@@ -249,7 +251,7 @@ int main(int argc, char** argv) {
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
-  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout",
+  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
                                               "video.fullscreen", "video.linear", "video.accel", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
@@ -281,11 +283,16 @@ int main(int argc, char** argv) {
   bool audio_on = cfg.flag("audio.enabled", true), mic_on = cfg.flag("audio.mic", true);
   const bool jit = cfg.flag("emu.jit", true), vsync = cfg.flag("video.vsync", true), dual_window = cfg.flag("video.dual_window", false);
   const long quantum = cfg.num("emu.quantum", 0);   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
-  ds::sdl::Display::Layout layout = ds::sdl::Display::Layout::Vertical;
+  using Disp = ds::sdl::Display;
+  Disp::Layout layout;
   {
-    const std::string l = cfg.str("video.layout", "vertical");
-    if (l == "horizontal") layout = ds::sdl::Display::Layout::Horizontal;
-    else if (l != "vertical") { std::fprintf(stderr, "unknown layout %s\n", l.c_str()); return 2; }
+    const std::string l = cfg.str("video.layout", "vertical"), sc = cfg.str("video.screen", "top"), co = cfg.str("video.pip_corner", "br");
+    if (!Disp::parse_mode(l, layout.mode)) { std::fprintf(stderr, "unknown layout %s\n", l.c_str()); return 2; }
+    if (sc == "top") layout.primary = 0; else if (sc == "bottom") layout.primary = 1;
+    else { std::fprintf(stderr, "unknown screen %s (top | bottom)\n", sc.c_str()); return 2; }
+    if (!Disp::parse_corner(co, layout.corner)) { std::fprintf(stderr, "unknown pip_corner %s (tl | tr | bl | br)\n", co.c_str()); return 2; }
+    layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
+    layout.dominant = std::clamp(cfg.real("video.dominant_ratio", 0.5), 0.1, 0.99);
   }
   const std::string saves_dir = cfg.str("paths.saves");
   const std::string rom_dir = std::string(rom).find_last_of('/') == std::string::npos ? "." : std::string(rom).substr(0, std::string(rom).find_last_of('/'));
@@ -427,12 +434,30 @@ int main(int argc, char** argv) {
       case A::Fullscreen: display.toggle_fullscreen(); if (dual_window) display2.toggle_fullscreen(); break;
       case A::LayoutNext: {
         if (dual_window) break;
-        const bool across = display.current_layout() != ds::sdl::Display::Layout::Horizontal;
-        display.set_layout(across ? ds::sdl::Display::Layout::Horizontal : ds::sdl::Display::Layout::Vertical);
-        if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.layout", across ? "horizontal" : "vertical");
+        Disp::Layout l = display.current_layout();
+        l.mode = static_cast<Disp::Mode>((static_cast<int>(l.mode) + 1) % static_cast<int>(Disp::Mode::Count));
+        display.set_layout(l);
+        std::fprintf(stderr, "layout: %s\n", Disp::mode_name(l.mode));
+        if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.layout", Disp::mode_name(l.mode));
         break;
       }
-      case A::Screenshot: screenshot(nds, states_dir, display.current_layout() == ds::sdl::Display::Layout::Horizontal); break;
+      case A::ScreenSwap: {
+        if (dual_window) break;
+        Disp::Layout l = display.current_layout();
+        l.primary = 1 - l.primary;
+        display.set_layout(l);
+        if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.screen", l.primary ? "bottom" : "top");
+        break;
+      }
+      case A::PipCornerNext: {
+        if (dual_window) break;
+        Disp::Layout l = display.current_layout();
+        l.corner = static_cast<Disp::Corner>((static_cast<int>(l.corner) + 1) % static_cast<int>(Disp::Corner::Count));
+        display.set_layout(l);
+        if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.pip_corner", Disp::corner_name(l.corner));
+        break;
+      }
+      case A::Screenshot: screenshot(nds, states_dir, display.across()); break;
       case A::Lid: input.set_lid(!input.lid()); std::fprintf(stderr, "lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
       case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; std::fprintf(stderr, "state slot %d\n", state_slot); break;
       case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; std::fprintf(stderr, "state slot %d\n", state_slot); break;
@@ -511,7 +536,7 @@ int main(int argc, char** argv) {
     const bool fast = ff_toggle || input.fast_forward_held();
     if (fast != was_fast) { was_fast = fast; next_frame = SDL_GetPerformanceCounter(); }
     const bool present = !fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0;
-    ds::sdl::Display::Target target[2];
+    ds::sdl::Display::Target target[2] = {};
     bool scaled = false;
     if (present) {
       scaled = display.begin_frame(target);
