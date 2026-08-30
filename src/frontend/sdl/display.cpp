@@ -320,8 +320,10 @@ void Display::build_scale() {
 // keeps its contents between frames. The dominant modes leave gaps beside
 // the smaller screen, so it is simplest to clear everything outside the
 // rects row by row; on a panel the screens fill exactly, nothing is written.
-void Display::clear_margins(u32* px, u32 pitch) const {
-  for (int y = 0; y < scaled_h_; ++y) {
+// `w`/`h` are the buffer's own size: on the dmabuf tier the shm surface (and
+// so scaled_w_/h_) can lag a configure, and the dmabuf is the smaller one.
+void Display::clear_margins(u32* px, u32 pitch, int w, int h) const {
+  for (int y = 0; y < h; ++y) {
     u32* row = px + static_cast<size_t>(y) * pitch;
     int x = 0;
     // Direct views in x order on this row (at most two).
@@ -329,14 +331,14 @@ void Display::clear_margins(u32* px, u32 pitch) const {
     for (int i = 0; i < nviews_; ++i) {
       const View& v = views_[i];
       if (!v.direct || y < v.rect.y || y >= v.rect.y + v.rect.h) continue;
-      xs[n] = v.rect.x; xe[n] = v.rect.x + v.rect.w; ++n;
+      xs[n] = std::min(v.rect.x, w); xe[n] = std::min(v.rect.x + v.rect.w, w); ++n;
     }
     if (n == 2 && xs[1] < xs[0]) { std::swap(xs[0], xs[1]); std::swap(xe[0], xe[1]); }
     for (int i = 0; i < n; ++i) {
       if (xs[i] > x) std::memset(row + x, 0, static_cast<size_t>(xs[i] - x) * sizeof(u32));
       x = std::max(x, xe[i]);
     }
-    if (x < scaled_w_) std::memset(row + x, 0, static_cast<size_t>(scaled_w_ - x) * sizeof(u32));
+    if (x < w) std::memset(row + x, 0, static_cast<size_t>(w - x) * sizeof(u32));
   }
 }
 
@@ -394,10 +396,10 @@ bool Display::begin_frame(Target out[SCREENS]) {
   if (dm_) {
     if (u32* px = dm_->begin_frame()) {
       const u32 stride = static_cast<u32>(dm_->width());
-      if (margins_dirty_) { clear_margins(px, stride); margins_dirty_ = false; }
+      if (margins_dirty_) { clear_margins(px, stride, dm_->width(), dm_->height()); margins_dirty_ = false; }
       // Every buffer needs its margins cleared once, not just the first.
       static_assert(DmabufOut::BUFS <= 8, "margin bookkeeping");
-      if (dm_margins_ < DmabufOut::BUFS) { clear_margins(px, stride); ++dm_margins_; }
+      if (dm_margins_ < DmabufOut::BUFS) { clear_margins(px, stride, dm_->width(), dm_->height()); ++dm_margins_; }
       targets(px, stride, out);
       dm_frame_ = true;
       return true;
@@ -424,7 +426,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
   }
   u32* base = static_cast<u32*>(s->pixels);
   const u32 stride = static_cast<u32>(s->pitch) / sizeof(u32);
-  if (margins_dirty_) { clear_margins(base, stride); margins_dirty_ = false; }
+  if (margins_dirty_) { clear_margins(base, stride, s->w, s->h); margins_dirty_ = false; }
   targets(base, stride, out);
   return true;
 }

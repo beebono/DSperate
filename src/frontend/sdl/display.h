@@ -115,7 +115,7 @@ private:
   void layout();
   void build_scale();          // pick up the window surface and rebuild the x-map
   bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode
-  void clear_margins(u32* px, u32 pitch) const;
+  void clear_margins(u32* px, u32 pitch, int w, int h) const;
   void targets(u32* px, u32 stride, Target out[SCREENS]);
   void blit_insets();
 
