@@ -89,8 +89,9 @@ controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);
 `[hotkeys]` and `[padhotkeys]` bind the frontend's actions, on the controller
 usually as `mod+button` (or a chord, `mod+start+back` -- SDL calls Select "back") with the pad's
 mode/home button as the modifier. The left stick works the d-pad; the right
-stick moves the pen over the bottom screen and clicking it touches
-(`stylus_stick`, `stylus_button`).
+stick moves a crosshair over the bottom screen and clicking it touches
+(`stylus_stick`, `stylus_button`, `stylus_speed` pixels per frame at full
+tilt, `stylus_size`; it hides after `stylus_hide` idle frames).
 
 Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,
 Enter = Start, Right Shift = Select; `Escape` quits, `P` pauses, `Tab` held

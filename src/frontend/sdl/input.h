@@ -56,6 +56,15 @@ public:
   bool fake_mic() const { return mic_key_ || mic_pad_; }
   void fake_mic_frame(std::vector<s16>& out);
 
+  // Stick-driven pen: moved once a frame by the right stick's deflection
+  // (pad.stylus_speed pixels per frame at full tilt); the frontend draws a
+  // crosshair there while a controller is open.
+  void update_stylus();
+  bool stylus_visible() const { return stylus_stick_ && pad_ != nullptr && stylus_idle_ < stylus_hide_; }   // hidden after stylus_hide idle frames
+  int  stylus_x() const { return static_cast<int>(stylus_fx_); }
+  int  stylus_y() const { return static_cast<int>(stylus_fy_); }
+  int  stylus_size() const { return stylus_size_; }
+
   bool quit() const { return quit_; }
   void request_quit() { quit_ = true; }
 
@@ -97,7 +106,11 @@ private:
   Bind stylus_button_;         // pressing it touches at the stick's position
   u32  held_ = 0;              // SDL pad buttons currently down (bit per button)
   int  deadzone_ = 12000;
-  int  stylus_x_ = 0, stylus_y_ = 0;
+  int  stylus_x_ = 0, stylus_y_ = 0;          // raw stick
+  double stylus_fx_ = 128, stylus_fy_ = 96;    // pen position, DS pixels
+  double stylus_speed_ = 4.0;
+  int  stylus_size_ = 2;
+  int  stylus_hide_ = 90, stylus_idle_ = 1 << 30;   // frames without movement or a touch; starts hidden
   std::vector<Action> actions_;
 };
 

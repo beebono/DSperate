@@ -213,6 +213,9 @@ R"(# DSperate settings. Command-line flags override this file; a file named
 # stick_deadzone = 12000
 # stylus_stick = true           # right stick moves the pen over the bottom screen...
 # stylus_button = rightstick    # ...and this button touches it
+# stylus_speed = 4.0            # pen pixels per frame at full tilt
+# stylus_size = 2               # crosshair scale: arm width and centre dot, pixels
+# stylus_hide = 90              # frames idle before the crosshair hides (0 = never shown)
 
 # Hotkeys: quit pause fast_forward (held) fast_forward_toggle save_state
 # load_state slot_next slot_prev volume_up volume_down mute layout_next

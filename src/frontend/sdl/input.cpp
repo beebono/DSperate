@@ -4,6 +4,7 @@
 #include "display.h"
 #include "core/nds.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -85,6 +86,9 @@ void Input::configure(const Config& cfg) {
   key_mod_ = parse_key(cfg.str("hotkeys.modifier", "none"));
   pad_mod_ = parse_pad(cfg.str("padhotkeys.modifier", "guide"));   // BTN_MODE
   stylus_button_ = parse_pad(cfg.str("pad.stylus_button", "rightstick"));
+  stylus_speed_ = cfg.real("pad.stylus_speed", 4.0);
+  stylus_size_ = cfg.num("pad.stylus_size", 2);
+  stylus_hide_ = cfg.num("pad.stylus_hide", 90);
   // Which DS button the pad modifier doubles as, so it can be delivered as a
   // tap when released alone.
   pad_mod_button_ = -1;
@@ -206,12 +210,20 @@ void Input::axis(Uint8 which, Sint16 value) {
     else if (value > deadzone_) stick_ |= 1u << pos;
   }
   if (stylus_stick_ && (which == SDL_CONTROLLER_AXIS_RIGHTX || which == SDL_CONTROLLER_AXIS_RIGHTY)) {
-    // Absolute: the stick's deflection is a point on the bottom screen;
-    // the stick's click (pad.stylus_button) is the pen touching it.
-    if (which == SDL_CONTROLLER_AXIS_RIGHTX) stylus_x_ = value; else stylus_y_ = value;
-    touch_x_ = 128 + stylus_x_ * 127 / 32767;
-    touch_y_ = 96 + stylus_y_ * 95 / 32767;
+    if (which == SDL_CONTROLLER_AXIS_RIGHTX) stylus_x_ = value; else stylus_y_ = value;   // integrated by update_stylus()
   }
+}
+
+void Input::update_stylus() {
+  if (!stylus_stick_) return;
+  auto axis = [&](int v) { return (v > deadzone_ || v < -deadzone_) ? static_cast<double>(v) / 32767.0 : 0.0; };
+  const double dx = axis(stylus_x_) * stylus_speed_, dy = axis(stylus_y_) * stylus_speed_;
+  if (dx != 0 || dy != 0 || stylus_down_) stylus_idle_ = 0; else if (stylus_idle_ < (1 << 30)) ++stylus_idle_;
+  stylus_fx_ += dx;
+  stylus_fy_ += dy;
+  stylus_fx_ = std::clamp(stylus_fx_, 0.0, 255.0);
+  stylus_fy_ = std::clamp(stylus_fy_, 0.0, 191.0);
+  if (stylus_down_) { touch_x_ = stylus_x(); touch_y_ = stylus_y(); }
 }
 
 void Input::handle(const SDL_Event& e, Display& display, Display* second) {

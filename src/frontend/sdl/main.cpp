@@ -155,6 +155,31 @@ bool load_state_file(NDS& nds, const std::string& path) {
   return true;
 }
 
+// The stick-driven pen: an outlined crosshair with a red centre, drawn over
+// the bottom screen in DS pixel space and mapped onto the destination (the
+// frontend's scaled buffer, or a copy of the framebuffer).
+struct CursorDst { u32* px; u32 pitch; u32 h; const u16* xrun; };   // xrun null: 1:1
+void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
+  auto fill = [&](int x, int y, u32 colour) {
+    if (x < 0 || x > 255 || y < 0 || y > 191) return;
+    const u32 x0 = d.xrun ? d.xrun[x] : static_cast<u32>(x), x1 = d.xrun ? d.xrun[x + 1] : static_cast<u32>(x + 1);
+    const u32 y0 = d.h * static_cast<u32>(y) / 192, y1 = d.h * static_cast<u32>(y + 1) / 192;
+    for (u32 yy = y0; yy < y1; ++yy) for (u32 xx = x0; xx < x1; ++xx) d.px[yy * d.pitch + xx] = colour;
+  };
+  // `size` scales the whole shape: arms `size` wide and 3*size long, a
+  // size x size red centre where they meet, a one-pixel black outline.
+  auto box = [&](int x0, int y0, int w, int h, u32 colour) { for (int y = y0; y < y0 + h; ++y) for (int x = x0; x < x0 + w; ++x) fill(x, y, colour); };
+  const u32 outline = 0xFF000000, line = 0xFFFFFFFF, centre = 0xFFFF2020;
+  if (size < 1) size = 1;
+  const int arm = 3 * size, half = size / 2;          // the centre box spans [cx-half, cx-half+size)
+  const int c0 = -half, c1 = -half + size;            // centre extent relative to cx/cy
+  box(cx + c0 - arm - 1, cy + c0 - 1, 2 * arm + size + 2, size + 2, outline);   // horizontal bar outline
+  box(cx + c0 - 1, cy + c0 - arm - 1, size + 2, 2 * arm + size + 2, outline);   // vertical bar outline
+  box(cx + c0 - arm, cy + c0, 2 * arm + size, size, line);
+  box(cx + c0, cy + c0 - arm, size, 2 * arm + size, line);
+  box(cx + c0, cy + c0, c1 - c0, c1 - c0, centre);
+}
+
 // A launcher's SIGTERM (or Ctrl-C) must still flush the battery save.
 volatile std::sig_atomic_t g_signalled = 0;
 void on_signal(int) { g_signalled = 1; }
@@ -349,6 +374,7 @@ int main(int argc, char** argv) {
   bool ff_toggle = cfg.flag("emu.fast_forward", false);
   const int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
   bool was_fast = false;
+  std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
   // Battery save flush: once the chip has been quiet for a second, and at
   // every point a session could end (pause, lid, quit).
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
@@ -402,6 +428,7 @@ int main(int argc, char** argv) {
       }
     }
     if (paused) { SDL_Delay(10); continue; }
+    input.update_stylus();
     ds::input::Frame in = input.frame();
     if (log.reading()) {
       if (!log.read(in)) break;   // the controls still quit; the log ends the run
@@ -472,11 +499,18 @@ int main(int argc, char** argv) {
 
     const Uint64 t1 = SDL_GetPerformanceCounter();
     if (present) {
+      const bool cursor = input.stylus_visible() && !log.reading();
       if (scaled) {
+        if (cursor) draw_cursor(CursorDst{target[1].px, target[1].pitch, target[1].h, target[1].xrun}, input.stylus_x(), input.stylus_y(), input.stylus_size());
         display.end_frame();
         if (dual_window) display2.end_frame();
       } else {
         const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
+        if (cursor) {
+          std::memcpy(cursor_fb.data(), fb[1], cursor_fb.size() * 4);
+          draw_cursor(CursorDst{cursor_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, input.stylus_x(), input.stylus_y(), input.stylus_size());
+          fb[1] = cursor_fb.data();
+        }
         display.draw(fb);
         if (dual_window) display2.draw(fb);
       }
