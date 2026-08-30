@@ -84,10 +84,10 @@ void emit_load_flags(Emitter& e, u32 t0) {
 
 // Prefetch cost of one ARM9 fetch at address in `wa`, result in `wc`, using
 // cmp/csel (the stubs save and restore the guest flags around this).
-// c = tbl[a>>12][0]; c == 0xFF ? ((branch || !(a & 0x1F)) ? 3 : 1) : c
+// c = tbl[a>>12][0] (8-byte ARM9 entries); c == 0xFF ? ((branch || !(a & 0x1F)) ? 3 : 1) : c
 void emit_fetch_cost9(Emitter& e, u32 wa, u32 wc, u32 t, bool branch) {
   e.lsr_imm(t, wa, 12);
-  e.add_reg(t, R_TIM, t, LSL, 2, true);
+  e.add_reg(t, R_TIM, t, LSL, 3, true);
   e.ldrb(wc, t, 0);
   e.cmp_imm(wc, 0xFF);
   if (branch) {
