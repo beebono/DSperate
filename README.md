@@ -154,9 +154,10 @@ controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);
 usually as `mod+button` (or a chord, `mod+start+back` -- SDL calls Select
 "back") with the pad's mode/home button as the modifier. The left stick works
 the d-pad; the right stick moves a crosshair over the bottom screen and
-clicking it touches (`stylus_stick`, `stylus_button`, `stylus_speed` pixels
-per frame at full tilt, `stylus_size`; it hides after `stylus_hide` idle
-frames). The touchscreen is driven by a finger or the mouse on the bottom
+clicking it touches (`stylus_axis` = `right|left|none` picks the stick,
+`stylus_dpad` names a button that, held, turns the d-pad into the pen;
+`stylus_button`, `stylus_speed` pixels per frame at full tilt, `stylus_size`;
+it hides after `stylus_hide` idle frames). The touchscreen is driven by a finger or the mouse on the bottom
 screen.
 
 Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,

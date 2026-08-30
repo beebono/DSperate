@@ -96,7 +96,15 @@ void Input::configure(const Config& cfg) {
     for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
       if (pad_map_[i].kind == Bind::PadButton && pad_map_[i].code == pad_mod_.code) pad_mod_button_ = i;
   stick_dpad_ = cfg.flag("pad.stick_dpad", true);
-  stylus_stick_ = cfg.flag("pad.stylus_stick", true);
+  {
+    // stylus_axis: right (default) | left | none; stylus_stick = false is the old spelling of none.
+    const std::string ax = cfg.str("pad.stylus_axis", cfg.flag("pad.stylus_stick", true) ? "right" : "none");
+    if (ax == "right") stylus_axis_ = StylusAxis::Right;
+    else if (ax == "left") stylus_axis_ = StylusAxis::Left;
+    else if (ax == "none") stylus_axis_ = StylusAxis::None;
+    else { std::fprintf(stderr, "config: stylus_axis \"%s\" is not right | left | none\n", ax.c_str()); stylus_axis_ = StylusAxis::Right; }
+  }
+  stylus_chord_ = parse_pad(cfg.str("pad.stylus_dpad", "none"));
   deadzone_ = cfg.num("pad.stick_deadzone", 12000);
 }
 
@@ -153,7 +161,22 @@ bool Input::key_down(SDL_Keycode k, bool down) {
 bool Input::pad_down(const Bind& b, bool down) {
   auto same = [&](const Bind& x) { return x.kind == b.kind && x.code == b.code && (x.kind != Bind::PadAxis || x.neg == b.neg); };
   if (b.kind == Bind::PadButton) { if (down) held_ |= 1u << b.code; else held_ &= ~(1u << b.code); }
-  if (stylus_stick_ && same(stylus_button_)) { stylus_down_ = down; if (down) touched_ = true; return true; }
+  if (stylus_visible_binding() && same(stylus_button_)) { stylus_down_ = down; if (down) touched_ = true; return true; }
+  // The d-pad chord: the chord button itself is withheld from the game, and
+  // while it is held the four directions move the pen instead.
+  if (same(stylus_chord_)) {
+    stylus_chord_down_ = down;
+    if (!down) stylus_dpad_ = 0;
+    return true;
+  }
+  if (stylus_chord_down_) {
+    for (const B d : {B::BTN_UP, B::BTN_DOWN, B::BTN_LEFT, B::BTN_RIGHT})
+      if (same(pad_map_[d])) {
+        if (down) stylus_dpad_ |= 1u << d; else stylus_dpad_ &= ~(1u << d);
+        buttons_ &= ~(1u << d);   // in case it was down before the chord
+        return true;
+      }
+  }
   if (same(pad_mod_)) {
     if (down) { pad_mod_down_ = true; pad_mod_used_ = false; }
     else {
@@ -202,22 +225,28 @@ void Input::axis(Uint8 which, Sint16 value) {
       pad_down(b, past);
     }
   }
-  if (stick_dpad_ && (which == SDL_CONTROLLER_AXIS_LEFTX || which == SDL_CONTROLLER_AXIS_LEFTY)) {
+  const bool pen_left = stylus_axis_ == StylusAxis::Left;
+  if (stick_dpad_ && !pen_left && (which == SDL_CONTROLLER_AXIS_LEFTX || which == SDL_CONTROLLER_AXIS_LEFTY)) {
     const B neg = which == SDL_CONTROLLER_AXIS_LEFTX ? B::BTN_LEFT : B::BTN_UP;
     const B pos = which == SDL_CONTROLLER_AXIS_LEFTX ? B::BTN_RIGHT : B::BTN_DOWN;
     stick_ &= ~((1u << neg) | (1u << pos));
     if (value < -deadzone_) stick_ |= 1u << neg;
     else if (value > deadzone_) stick_ |= 1u << pos;
   }
-  if (stylus_stick_ && (which == SDL_CONTROLLER_AXIS_RIGHTX || which == SDL_CONTROLLER_AXIS_RIGHTY)) {
-    if (which == SDL_CONTROLLER_AXIS_RIGHTX) stylus_x_ = value; else stylus_y_ = value;   // integrated by update_stylus()
+  const Uint8 px = pen_left ? SDL_CONTROLLER_AXIS_LEFTX : SDL_CONTROLLER_AXIS_RIGHTX, py = pen_left ? SDL_CONTROLLER_AXIS_LEFTY : SDL_CONTROLLER_AXIS_RIGHTY;
+  if (stylus_axis_ != StylusAxis::None && (which == px || which == py)) {
+    if (which == px) stylus_x_ = value; else stylus_y_ = value;   // integrated by update_stylus()
   }
 }
 
+bool Input::stylus_visible_binding() const { return stylus_axis_ != StylusAxis::None || stylus_chord_.kind != Bind::None; }
+
 void Input::update_stylus() {
-  if (!stylus_stick_) return;
+  if (!stylus_visible_binding()) return;
   auto axis = [&](int v) { return (v > deadzone_ || v < -deadzone_) ? static_cast<double>(v) / 32767.0 : 0.0; };
-  const double dx = axis(stylus_x_) * stylus_speed_, dy = axis(stylus_y_) * stylus_speed_;
+  const double ddx = ((stylus_dpad_ >> B::BTN_RIGHT) & 1) - static_cast<double>((stylus_dpad_ >> B::BTN_LEFT) & 1);
+  const double ddy = ((stylus_dpad_ >> B::BTN_DOWN) & 1) - static_cast<double>((stylus_dpad_ >> B::BTN_UP) & 1);
+  const double dx = (axis(stylus_x_) + ddx) * stylus_speed_, dy = (axis(stylus_y_) + ddy) * stylus_speed_;
   if (dx != 0 || dy != 0 || stylus_down_) stylus_idle_ = 0; else if (stylus_idle_ < (1 << 30)) ++stylus_idle_;
   stylus_fx_ += dx;
   stylus_fy_ += dy;

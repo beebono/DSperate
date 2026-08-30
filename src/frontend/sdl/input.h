@@ -56,11 +56,13 @@ public:
   bool fake_mic() const { return mic_key_ || mic_pad_; }
   void fake_mic_frame(std::vector<s16>& out);
 
-  // Stick-driven pen: moved once a frame by the right stick's deflection
-  // (pad.stylus_speed pixels per frame at full tilt); the frontend draws a
-  // crosshair there while a controller is open.
+  // Pad-driven pen: moved once a frame by a stick's deflection (pad.stylus_axis,
+  // pad.stylus_speed pixels per frame at full tilt) and by the d-pad while the
+  // pad.stylus_dpad chord button is held; the frontend draws a crosshair
+  // there while a controller is open.
   void update_stylus();
-  bool stylus_visible() const { return stylus_stick_ && pad_ != nullptr && stylus_idle_ < stylus_hide_; }   // hidden after stylus_hide idle frames
+  bool stylus_visible_binding() const;   // some pad control drives the pen
+  bool stylus_visible() const { return (stylus_axis_ != StylusAxis::None || stylus_chord_.kind != Bind::None) && pad_ != nullptr && stylus_idle_ < stylus_hide_; }   // hidden after stylus_hide idle frames
   int  stylus_x() const { return static_cast<int>(stylus_fx_); }
   int  stylus_y() const { return static_cast<int>(stylus_fy_); }
   int  stylus_size() const { return stylus_size_; }
@@ -102,8 +104,13 @@ private:
   bool key_mod_down_ = false, pad_mod_down_ = false, pad_mod_used_ = false;
   int  pad_mod_button_ = -1;   // the DS button the pad modifier would otherwise be
   bool axis_state_[SDL_CONTROLLER_AXIS_MAX][2] = {};   // per axis: - and + past the threshold
-  bool stick_dpad_ = true, stylus_stick_ = true, stylus_down_ = false;
-  Bind stylus_button_;         // pressing it touches at the stick's position
+  enum class StylusAxis : u8 { None, Right, Left };
+  bool stick_dpad_ = true, stylus_down_ = false;
+  StylusAxis stylus_axis_ = StylusAxis::Right;
+  Bind stylus_button_;         // pressing it touches at the pen's position
+  Bind stylus_chord_;          // while held, the d-pad moves the pen instead of the game
+  bool stylus_chord_down_ = false;
+  u32  stylus_dpad_ = 0;       // d-pad directions held under the chord (bit per DS button)
   u32  held_ = 0;              // SDL pad buttons currently down (bit per button)
   int  deadzone_ = 12000;
   int  stylus_x_ = 0, stylus_y_ = 0;          // raw stick
