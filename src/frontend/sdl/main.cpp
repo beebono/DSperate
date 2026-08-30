@@ -180,6 +180,24 @@ void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
   box(cx + c0, cy + c0, c1 - c0, c1 - c0, centre);
 }
 
+// The state slot, shown briefly after a slot hotkey: a white digit (3x5
+// font, doubled) on a black box in the top-left corner of the top screen.
+void draw_slot(const CursorDst& d, int digit) {
+  static const u8 font[10][5] = {
+    {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
+    {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7}};
+  auto fill = [&](int x, int y, u32 colour) {
+    const u32 x0 = d.xrun ? d.xrun[x] : static_cast<u32>(x), x1 = d.xrun ? d.xrun[x + 1] : static_cast<u32>(x + 1);
+    const u32 y0 = d.h * static_cast<u32>(y) / 192, y1 = d.h * static_cast<u32>(y + 1) / 192;
+    for (u32 yy = y0; yy < y1; ++yy) for (u32 xx = x0; xx < x1; ++xx) d.px[yy * d.pitch + xx] = colour;
+  };
+  const int S = 2, X = 4, Y = 4;                     // glyph scale and box origin
+  for (int y = 0; y < 5 * S + 4; ++y) for (int x = 0; x < 3 * S + 4; ++x) fill(X + x, Y + y, 0xFF000000);
+  for (int r = 0; r < 5; ++r) for (int c = 0; c < 3; ++c)
+    if ((font[digit][r] >> (2 - c)) & 1)
+      for (int y = 0; y < S; ++y) for (int x = 0; x < S; ++x) fill(X + 2 + c * S + x, Y + 2 + r * S + y, 0xFFFFFFFF);
+}
+
 // A launcher's SIGTERM (or Ctrl-C) must still flush the battery save.
 volatile std::sig_atomic_t g_signalled = 0;
 void on_signal(int) { g_signalled = 1; }
@@ -375,6 +393,8 @@ int main(int argc, char** argv) {
   const int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
   bool was_fast = false;
   std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
+  std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // top screen with the slot digit
+  int slot_shown = 0;                                        // frames left to show the slot digit
   // Battery save flush: once the chip has been quiet for a second, and at
   // every point a session could end (pause, lid, quit).
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
@@ -407,8 +427,8 @@ int main(int argc, char** argv) {
       }
       case A::Screenshot: screenshot(nds, states_dir, display.current_layout() == ds::sdl::Display::Layout::Horizontal); break;
       case A::Lid: input.set_lid(!input.lid()); std::fprintf(stderr, "lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
-      case A::SlotNext: state_slot = (state_slot + 1) % 10; std::fprintf(stderr, "state slot %d\n", state_slot); break;
-      case A::SlotPrev: state_slot = (state_slot + 9) % 10; std::fprintf(stderr, "state slot %d\n", state_slot); break;
+      case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; std::fprintf(stderr, "state slot %d\n", state_slot); break;
+      case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; std::fprintf(stderr, "state slot %d\n", state_slot); break;
       case A::SaveState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (save_state_file(nds, state_path(nds, states_dir, state_slot))) flush_save();   // the .sav and the state never diverge
@@ -500,8 +520,11 @@ int main(int argc, char** argv) {
     const Uint64 t1 = SDL_GetPerformanceCounter();
     if (present) {
       const bool cursor = input.stylus_visible() && !log.reading();
+      const bool slot_osd = slot_shown > 0;
+      if (slot_shown > 0) --slot_shown;
       if (scaled) {
         if (cursor) draw_cursor(CursorDst{target[1].px, target[1].pitch, target[1].h, target[1].xrun}, input.stylus_x(), input.stylus_y(), input.stylus_size());
+        if (slot_osd) draw_slot(CursorDst{target[0].px, target[0].pitch, target[0].h, target[0].xrun}, state_slot);
         display.end_frame();
         if (dual_window) display2.end_frame();
       } else {
@@ -510,6 +533,11 @@ int main(int argc, char** argv) {
           std::memcpy(cursor_fb.data(), fb[1], cursor_fb.size() * 4);
           draw_cursor(CursorDst{cursor_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, input.stylus_x(), input.stylus_y(), input.stylus_size());
           fb[1] = cursor_fb.data();
+        }
+        if (slot_osd) {
+          std::memcpy(osd_fb.data(), fb[0], osd_fb.size() * 4);
+          draw_slot(CursorDst{osd_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, state_slot);
+          fb[0] = osd_fb.data();
         }
         display.draw(fb);
         if (dual_window) display2.draw(fb);
