@@ -27,8 +27,8 @@ const char* const kActionNames[static_cast<int>(Action::Count)] = {
 const char* const kKeyHotDefaults[static_cast<int>(Action::Count)] = {
   "Escape", "p", "Tab", "none", "F5", "F7", "F3", "F2", "=", "-", "0", "F4", "f", "F9", "l", "m"};
 const char* const kPadHotDefaults[static_cast<int>(Action::Count)] = {
-  "mod+start", "mod+leftshoulder", "mod+rightshoulder", "none", "mod+b", "mod+a", "mod+x", "mod+y",
-  "mod+dpup", "mod+dpdown", "none", "mod+dpright", "none", "mod+dpleft", "none", "+righttrigger"};
+  "mod+start+select", "mod+start", "mod++righttrigger", "none", "mod+rightshoulder", "mod+leftshoulder", "mod+dpright", "mod+dpleft",
+  "none", "none", "none", "mod+select", "none", "none", "none", "leftstick"};
 
 // Held actions: an edge on both press and release.
 bool is_hold(Action a) { return a == Action::FastForward || a == Action::Mic; }
@@ -52,7 +52,15 @@ Input::Bind Input::parse_pad(const std::string& s0) {
   Bind b;
   std::string s = s0;
   if (s.compare(0, 4, "mod+") == 0) { b.mod = true; s = s.substr(4); }
-  if (s.empty() || s == "none") return b;
+  if (s.empty() || s == "none" || s == "null") return b;
+  // A chord: "start+select" is start with select held (either order works
+  // for the player; the last pressed completes it).
+  if (const size_t plus = s.find('+', 1); plus != std::string::npos && s[0] != '+' && s[0] != '-') {
+    const SDL_GameControllerButton w = SDL_GameControllerGetButtonFromString(s.substr(plus + 1).c_str());
+    if (w == SDL_CONTROLLER_BUTTON_INVALID) { std::fprintf(stderr, "config: unknown controller button in \"%s\"\n", s0.c_str()); return b; }
+    b.with = w;
+    s = s.substr(0, plus);
+  }
   if (s[0] == '+' || s[0] == '-') {
     const SDL_GameControllerAxis a = SDL_GameControllerGetAxisFromString(s.c_str() + 1);
     if (a == SDL_CONTROLLER_AXIS_INVALID) { std::fprintf(stderr, "config: unknown axis \"%s\"\n", s0.c_str()); return b; }
@@ -75,7 +83,8 @@ void Input::configure(const Config& cfg) {
     pad_hot_[i] = parse_pad(cfg.str(std::string("padhotkeys.") + kActionNames[i], kPadHotDefaults[i]));
   }
   key_mod_ = parse_key(cfg.str("hotkeys.modifier", "none"));
-  pad_mod_ = parse_pad(cfg.str("padhotkeys.modifier", "back"));
+  pad_mod_ = parse_pad(cfg.str("padhotkeys.modifier", "guide"));   // BTN_MODE
+  stylus_button_ = parse_pad(cfg.str("pad.stylus_button", "rightstick"));
   // Which DS button the pad modifier doubles as, so it can be delivered as a
   // tap when released alone.
   pad_mod_button_ = -1;
@@ -83,7 +92,7 @@ void Input::configure(const Config& cfg) {
     for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
       if (pad_map_[i].kind == Bind::PadButton && pad_map_[i].code == pad_mod_.code) pad_mod_button_ = i;
   stick_dpad_ = cfg.flag("pad.stick_dpad", true);
-  stylus_stick_ = cfg.flag("pad.stylus_stick", false);
+  stylus_stick_ = cfg.flag("pad.stylus_stick", true);
   deadzone_ = cfg.num("pad.stick_deadzone", 12000);
 }
 
@@ -139,6 +148,8 @@ bool Input::key_down(SDL_Keycode k, bool down) {
 // Controller: `b` is the button or axis edge that just changed.
 bool Input::pad_down(const Bind& b, bool down) {
   auto same = [&](const Bind& x) { return x.kind == b.kind && x.code == b.code && (x.kind != Bind::PadAxis || x.neg == b.neg); };
+  if (b.kind == Bind::PadButton) { if (down) held_ |= 1u << b.code; else held_ &= ~(1u << b.code); }
+  if (stylus_stick_ && same(stylus_button_)) { stylus_down_ = down; if (down) touched_ = true; return true; }
   if (same(pad_mod_)) {
     if (down) { pad_mod_down_ = true; pad_mod_used_ = false; }
     else {
@@ -148,16 +159,30 @@ bool Input::pad_down(const Bind& b, bool down) {
     }
     return true;
   }
+  // Hotkeys: a chord's partner may be pressed in either order, so a button
+  // matches both as the binding's own button (partner held) and as the
+  // partner (own button held). The most specific binding wins.
+  int best = -1, best_score = -1;
   for (int i = 0; i < static_cast<int>(Action::Count); ++i) {
     const Bind& h = pad_hot_[i];
-    if (!same(h) || (h.mod && !pad_mod_down_)) continue;
+    if (h.kind == Bind::None || (h.mod && !pad_mod_down_)) continue;
+    const bool own = same(h) && (h.with < 0 || (held_ >> h.with) & 1);
+    const bool partner = h.with >= 0 && b.kind == Bind::PadButton && b.code == h.with && h.kind == Bind::PadButton && ((held_ >> h.code) & 1);
+    if (!own && !partner) continue;
+    const int score = (h.mod ? 1 : 0) + (h.with >= 0 ? 1 : 0);
+    if (score > best_score) { best = i; best_score = score; }
+  }
+  if (best >= 0) {
+    const Bind& h = pad_hot_[best];
     if (h.mod && down) pad_mod_used_ = true;
-    const Action a = static_cast<Action>(i);
+    const Action a = static_cast<Action>(best);
     if (a == Action::FastForward) ff_pad_ = down;
     else if (a == Action::Mic) mic_pad_ = down;
     else fire(a, down);
     return true;
   }
+  // A release that completes no binding still ends a held action.
+  if (!down) { if (same(pad_hot_[static_cast<int>(Action::FastForward)])) ff_pad_ = false; if (same(pad_hot_[static_cast<int>(Action::Mic)])) mic_pad_ = false; }
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     if (same(pad_map_[i])) { set(static_cast<B>(i), down); return true; }
   return false;
@@ -181,14 +206,11 @@ void Input::axis(Uint8 which, Sint16 value) {
     else if (value > deadzone_) stick_ |= 1u << pos;
   }
   if (stylus_stick_ && (which == SDL_CONTROLLER_AXIS_RIGHTX || which == SDL_CONTROLLER_AXIS_RIGHTY)) {
-    // Absolute: the stick's deflection is a point on the bottom screen.
+    // Absolute: the stick's deflection is a point on the bottom screen;
+    // the stick's click (pad.stylus_button) is the pen touching it.
     if (which == SDL_CONTROLLER_AXIS_RIGHTX) stylus_x_ = value; else stylus_y_ = value;
-    const long r2 = static_cast<long>(stylus_x_) * stylus_x_ + static_cast<long>(stylus_y_) * stylus_y_;
-    stylus_down_ = r2 > static_cast<long>(deadzone_) * deadzone_;
-    if (stylus_down_) {
-      touch_x_ = 128 + stylus_x_ * 127 / 32767;
-      touch_y_ = 96 + stylus_y_ * 95 / 32767;
-    }
+    touch_x_ = 128 + stylus_x_ * 127 / 32767;
+    touch_y_ = 96 + stylus_y_ * 95 / 32767;
   }
 }
 

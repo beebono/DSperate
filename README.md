@@ -87,9 +87,10 @@ be passed every time, plus optional `saves` and `states` directories (default:
 next to the ROM). `[keys]` and `[pad]` remap the DS buttons to SDL key and
 controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);
 `[hotkeys]` and `[padhotkeys]` bind the frontend's actions, on the controller
-usually as `mod+button` with a modifier that is withheld from the game while
-held (Select by default -- released alone it still arrives as a tap). The left
-stick works the d-pad; `stylus_stick = true` puts the pen on the right one.
+usually as `mod+button` (or a chord, `mod+start+select`) with the pad's
+mode/home button as the modifier. The left stick works the d-pad; the right
+stick moves the pen over the bottom screen and clicking it touches
+(`stylus_stick`, `stylus_button`).
 
 Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,
 Enter = Start, Right Shift = Select; `Escape` quits, `P` pauses, `Tab` held
@@ -105,18 +106,18 @@ from ALSA, `mic_dev`/`DS_MIC_DEV`, default `plughw:0,0`, DC-blocked and
 noise-gated -- `mic_gate` factor over the tracked floor, default 5, 0 = off --
 `mic_gain` to scale, default 0.25 (set against the RG DS and Mario & Luigi's
 mic-test meter); the handhelds' PipeWire only offers a speaker monitor;
-`--no-mic` to leave it closed). Controller: Select+Start quits, Select+L
-pauses, Select+R held fast-forwards, Select+B/A save/load the state,
-Select+X/Y change the slot, Select+Up/Down volume, Select+Right layout,
-Select+Left screenshot. The touchscreen is driven by a finger or the mouse on
-the bottom screen.
+`--no-mic` to leave it closed). Controller, with Mode held: Start+Select
+quits, Start pauses, right trigger fast-forwards, R/L save/load the state,
+Right/Left change the slot, Select swaps the layout; the left stick's click
+is the microphone. The touchscreen is driven by a finger or the mouse on the
+bottom screen.
 
 Battery saves live next to the ROM as `<rom>.sav` (or under `[paths] saves`),
 written a second after the game stops writing its save chip and again on
 pause, lid close and exit -- a launcher's SIGTERM included.
 
 Save states go to `<GAMECODE>.<slot>.dss` in the states directory (next to
-the ROM, or `[paths] states`), ten slots, `F5`/`F7` or Select+B/A on the
+the ROM, or `[paths] states`), ten slots, `F5`/`F7` or Mode+R/L on the
 controller. A state is the whole machine at a frame boundary (~5.5 MB,
 uncompressed: RAM, VRAM, both CPUs, every peripheral, the geometry engine's
 polygon RAM and the rasterised 3D frame) and loads only with the same ROM;
@@ -132,7 +133,7 @@ file`; `DS_STATE_DEBUG=1` prints the cycle-accounting state at both points).
 Loading a state is refused during `--record` (the recording could not
 replay past it) and `--replay` refuses to load or save states at all.
 
-Fast forward (`Tab` held, Select+R, or the `fast_forward_toggle` hotkey)
+Fast forward (`Tab` held, Mode+right trigger, or the `fast_forward_toggle` hotkey)
 drops the pacing -- `[emu] ff_speed = N` caps it at N times real time -- and
 presents one frame in `ff_skip + 1` (default 3); every frame is still
 emulated, so the run stays exact, and the audio queue keeps the newest

@@ -62,7 +62,9 @@ public:
 private:
   // One binding: a keyboard key, a pad button or a pad axis direction, with
   // or without the modifier.
-  struct Bind { enum Kind : u8 { None, Key, PadButton, PadAxis } kind = None; int code = 0; bool neg = false; bool mod = false; };
+  // `with` is a second pad button that must be held (a chord such as
+  // mod+start+select); the most specific matching binding wins.
+  struct Bind { enum Kind : u8 { None, Key, PadButton, PadAxis } kind = None; int code = 0; bool neg = false; bool mod = false; int with = -1; };
   static Bind parse_key(const std::string& s);
   static Bind parse_pad(const std::string& s);
 
@@ -91,7 +93,9 @@ private:
   bool key_mod_down_ = false, pad_mod_down_ = false, pad_mod_used_ = false;
   int  pad_mod_button_ = -1;   // the DS button the pad modifier would otherwise be
   bool axis_state_[SDL_CONTROLLER_AXIS_MAX][2] = {};   // per axis: - and + past the threshold
-  bool stick_dpad_ = true, stylus_stick_ = false, stylus_down_ = false;
+  bool stick_dpad_ = true, stylus_stick_ = true, stylus_down_ = false;
+  Bind stylus_button_;         // pressing it touches at the stick's position
+  u32  held_ = 0;              // SDL pad buttons currently down (bit per button)
   int  deadzone_ = 12000;
   int  stylus_x_ = 0, stylus_y_ = 0;
   std::vector<Action> actions_;

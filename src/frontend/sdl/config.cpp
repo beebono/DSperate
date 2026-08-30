@@ -211,12 +211,13 @@ R"(# DSperate settings. Command-line flags override this file; a file named
 # right = dpright
 # stick_dpad = true             # left stick also works the d-pad
 # stick_deadzone = 12000
-# stylus_stick = false          # right stick moves the pen; pressing it beyond the deadzone touches
+# stylus_stick = true           # right stick moves the pen over the bottom screen...
+# stylus_button = rightstick    # ...and this button touches it
 
 # Hotkeys: quit pause fast_forward (held) fast_forward_toggle save_state
 # load_state slot_next slot_prev volume_up volume_down mute layout_next
 # fullscreen screenshot lid mic (held). A value is a key name, or
-# "mod+name" meaning the modifier must be held with it.
+# "mod+name" meaning the modifier must be held with it; "none" unbinds.
 [hotkeys]
 # modifier = none               # keyboard modifier, e.g. "Left Ctrl"
 # quit = Escape
@@ -236,22 +237,24 @@ R"(# DSperate settings. Command-line flags override this file; a file named
 # lid = l
 # mic = m
 
-# The same on the controller. While the modifier is held it is withheld
-# from the game; released alone it is delivered as a tap.
+# The same on the controller. The modifier is the pad's mode/home button
+# ("guide"); if it doubles as a DS button it is withheld from the game
+# while held and delivered as a tap when released alone. A chord
+# "mod+start+select" needs both buttons.
 [padhotkeys]
-# modifier = back
-# quit = mod+start
-# pause = mod+leftshoulder
-# fast_forward = mod+rightshoulder
-# save_state = mod+b
-# load_state = mod+a
-# slot_next = mod+x
-# slot_prev = mod+y
-# volume_up = mod+dpup
-# volume_down = mod+dpdown
-# layout_next = mod+dpright
-# screenshot = mod+dpleft
-# mic = +righttrigger
+# modifier = guide
+# quit = mod+start+select
+# pause = mod+start
+# fast_forward = mod++righttrigger
+# save_state = mod+rightshoulder
+# load_state = mod+leftshoulder
+# slot_next = mod+dpright
+# slot_prev = mod+dpleft
+# volume_up = none
+# volume_down = none
+# layout_next = mod+select
+# screenshot = none
+# mic = leftstick
 )";
 }
 
