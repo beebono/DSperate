@@ -87,7 +87,7 @@ be passed every time, plus optional `saves` and `states` directories (default:
 next to the ROM). `[keys]` and `[pad]` remap the DS buttons to SDL key and
 controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);
 `[hotkeys]` and `[padhotkeys]` bind the frontend's actions, on the controller
-usually as `mod+button` (or a chord, `mod+start+select`) with the pad's
+usually as `mod+button` (or a chord, `mod+start+back` -- SDL calls Select "back") with the pad's
 mode/home button as the modifier. The left stick works the d-pad; the right
 stick moves the pen over the bottom screen and clicking it touches
 (`stylus_stick`, `stylus_button`).

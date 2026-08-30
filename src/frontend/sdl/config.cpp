@@ -240,10 +240,10 @@ R"(# DSperate settings. Command-line flags override this file; a file named
 # The same on the controller. The modifier is the pad's mode/home button
 # ("guide"); if it doubles as a DS button it is withheld from the game
 # while held and delivered as a tap when released alone. A chord
-# "mod+start+select" needs both buttons.
+# "mod+start+back" needs both buttons (SDL calls the DS Select "back").
 [padhotkeys]
 # modifier = guide
-# quit = mod+start+select
+# quit = mod+start+back
 # pause = mod+start
 # fast_forward = mod++righttrigger
 # save_state = mod+rightshoulder
@@ -252,7 +252,7 @@ R"(# DSperate settings. Command-line flags override this file; a file named
 # slot_prev = mod+dpleft
 # volume_up = none
 # volume_down = none
-# layout_next = mod+select
+# layout_next = mod+back
 # screenshot = none
 # mic = leftstick
 )";

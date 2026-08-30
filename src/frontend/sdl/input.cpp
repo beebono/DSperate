@@ -27,8 +27,8 @@ const char* const kActionNames[static_cast<int>(Action::Count)] = {
 const char* const kKeyHotDefaults[static_cast<int>(Action::Count)] = {
   "Escape", "p", "Tab", "none", "F5", "F7", "F3", "F2", "=", "-", "0", "F4", "f", "F9", "l", "m"};
 const char* const kPadHotDefaults[static_cast<int>(Action::Count)] = {
-  "mod+start+select", "mod+start", "mod++righttrigger", "none", "mod+rightshoulder", "mod+leftshoulder", "mod+dpright", "mod+dpleft",
-  "none", "none", "none", "mod+select", "none", "none", "none", "leftstick"};
+  "mod+start+back", "mod+start", "mod++righttrigger", "none", "mod+rightshoulder", "mod+leftshoulder", "mod+dpright", "mod+dpleft",
+  "none", "none", "none", "mod+back", "none", "none", "none", "leftstick"};
 
 // Held actions: an edge on both press and release.
 bool is_hold(Action a) { return a == Action::FastForward || a == Action::Mic; }
