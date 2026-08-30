@@ -678,13 +678,14 @@ void reset_arena() {
   if (churn::on()) ++churn::resets;
   Runtime& r = g_rt;
   for (JitCpu& jc : r.cpus) {
-    for (Block* b : jc.all_blocks) delete b;
+    for (Block* b : jc.all_blocks) if (!b->pooled) delete b;   // pooled ones go with block_pool below
     jc.all_blocks.clear();
     jc.blocks.clear();
     if (jc.lut) for (u32 i = 0; i < LUT_SIZE; ++i) jc.lut[i] = LUT_EMPTY_KEY;
   }
   for (auto& kv : r.code_pages) set_code_tag(kv.first, false);
   r.code_pages.clear();
+  r.block_pool.clear();
   r.pos = r.stubs_end;
   r.need_reset = false;
   r.stats.flushes++;
@@ -814,11 +815,12 @@ Block* translate(JitCpu& jc, u32 key) {
   {
     pretx::ArenaLock lk;
     if (r.pos + BLOCK_MARGIN > r.cap) return nullptr;
-    b = new Block{};
+    b = &r.block_pool.emplace_back(Block{});
     b->key = key;
     b->owner = jc.arm9 ? 0 : 1;
+    b->pooled = true;
     Emitter e(r.arena + r.pos, BLOCK_MARGIN);
-    if (!translate_block(jc, key, e, *b)) { delete b; return nullptr; }
+    if (!translate_block(jc, key, e, *b)) { r.block_pool.pop_back(); return nullptr; }
     b->entry = r.arena + r.pos;
     b->size = static_cast<u32>(e.size());
     r.pos += (b->size + 15) & ~size_t{15};
@@ -1240,6 +1242,11 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     jc.hot.pt = ctx.page_table.raw();
     jc.hot.timing = c == 0 ? reinterpret_cast<const u8*>(ctx.timing9) : reinterpret_cast<const u8*>(ctx.timing7);
     jc.hot.arena = r.arena;
+    // An overlay-heavy scene translates ~20 k blocks; growing these through a
+    // burst rehashes/reallocates on the critical path of the burst frame.
+    jc.blocks.reserve(1u << 15);
+    jc.all_blocks.reserve(1u << 15);
+    r.code_pages.reserve(1u << 13);
     ctx.jit = &jc;
     ctx.jit_timing_changed = &on_timing_changed;
     (c == 0 ? nds.run_arm9 : nds.run_arm7) = &run;

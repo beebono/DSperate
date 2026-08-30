@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace ds::jit {
@@ -210,9 +211,19 @@ inline u32 rotr(u32 v, u32 n) { n &= 31; return n ? (v >> n) | (v << (32 - n)) :
 
 class Translator {
 public:
+  // The cold-section scratch is reused across translations: a fresh
+  // std::vector<u8>(COLD_CAP) here was a 32 KB allocation AND memset per
+  // block -- ~600 MB of memset across an overlay-heavy scene, a third of a
+  // burst frame's translate stall. The Emitter tracks its own size, so stale
+  // bytes past it are never read. thread_local for the pre-translation worker.
+  static u8* cold_scratch() {
+    static thread_local std::unique_ptr<u8[]> buf;
+    if (!buf) buf.reset(new u8[COLD_CAP]);
+    return buf.get();
+  }
   Translator(JitCpu& jc, u32 key, Emitter& e, Block& b)
       : jc_(jc), cpu_(*jc.ctx), hot_(e), blk_(b), key_(key), thumb_(key_thumb(key)), a9_(jc.arm9),
-        cold_buf_(COLD_CAP), cold_(cold_buf_.data(), cold_buf_.size()), cur_(&hot_) {}
+        cold_buf_(cold_scratch()), cold_(cold_buf_, COLD_CAP), cur_(&hot_) {}
 
   bool run();
 
@@ -237,7 +248,7 @@ private:
   u32  bl_prefix_lr_ = 0;
 
   // ---- hot / cold sections ------------------------------------------------------------
-  std::vector<u8> cold_buf_;
+  u8* cold_buf_;               // thread-reused scratch (cold_scratch), COLD_CAP bytes
   Emitter cold_;
   Emitter* cur_;
   struct Fix { size_t at; bool at_cold; size_t target; bool target_cold; const void* abs; };
@@ -274,7 +285,7 @@ private:
     const size_t cold_base = hot_.size();
     blk_.hot_size = static_cast<u32>(cold_base);
     if (hot_.remaining() < cold_.size() + 64) return false;
-    std::memcpy(hot_.cur(), cold_buf_.data(), cold_.size());
+    std::memcpy(hot_.cur(), cold_buf_, cold_.size());
     hot_.set_pos(cold_base + cold_.size());
     u8* base = hot_.base();
     for (const Fix& f : fixes_) {

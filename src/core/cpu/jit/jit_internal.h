@@ -9,6 +9,7 @@
 #include "core/cpu/cpu.h"
 
 #include <cstddef>
+#include <deque>
 #include <unordered_map>
 #include <vector>
 
@@ -85,6 +86,7 @@ struct Block {
   const u8* host_hi;         // touches neither page's part of [lo, hi] leaves the block alone
   u8   owner;        // index into Runtime::cpus
   bool dead;
+  bool pooled;       // lives in Runtime::block_pool (freed by the arena reset), not the heap
   // Static branch targets (emit_branch_static keys): what the pre-translation
   // worker chases ahead of execution. Best-effort -- targets past `nsucc` 4
   // are simply not chased.
@@ -166,6 +168,10 @@ struct Runtime {
   u8* merge_set_c = nullptr;   // w0 = result, w1 = carry: N,Z from it, C from w1, V kept
 
   JitCpu cpus[2];
+  // Blocks translated on the emulation thread; same lifetime as the arena
+  // (deque: stable addresses). One malloc per block was a measurable slice
+  // of an overlay burst's translate stall.
+  std::deque<Block> block_pool;
   std::unordered_map<const u8*, std::vector<Block*>> code_pages;   // host page -> blocks
   bool trace = false;
   bool strict = false;    // check the budget after every instruction (exact lockstep with the interpreter)
