@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # x86 host build: interpreter + portable kernels, plus the aarch64 cross
+  # build whose tests (JIT, NEON kernels) run under qemu-user.
+  host-and-cross:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libsdl2-dev g++-aarch64-linux-gnu qemu-user-static
+      - name: Host build and test
+        run: |
+          cmake --preset host
+          cmake --build --preset host
+          ctest --preset host --output-on-failure
+      - name: Cross build and test (qemu-aarch64)
+        run: |
+          cmake --preset aarch64-cross -DDSPERATE_SDL=OFF
+          cmake --build --preset aarch64-cross
+          cd build/aarch64 && ctest --output-on-failure
+
+  # Native arm64: the JIT and NEON paths on real silicon, and the binaries a
+  # handheld runs. libstdc++/libgcc are linked statically so the artefact does
+  # not depend on the runner's Ubuntu being no newer than the device's.
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libsdl2-dev
+      - name: Build and test
+        run: |
+          cmake --preset host -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --build --preset host
+          ctest --preset host --output-on-failure
+      - name: Package
+        run: |
+          mkdir -p dist/dsperate-${GITHUB_REF_NAME}-linux-aarch64
+          cp build/host/src/frontend/cli/dsperate build/host/src/frontend/sdl/dsperate-sdl \
+             LICENSE README.md dist/dsperate-${GITHUB_REF_NAME}-linux-aarch64/
+          tar -C dist -czf dsperate-${GITHUB_REF_NAME}-linux-aarch64.tar.gz dsperate-${GITHUB_REF_NAME}-linux-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsperate-linux-aarch64
+          path: dsperate-*-linux-aarch64.tar.gz
+
+  # Tag v* to publish. The notes are a stand-in (name, tag, changelog link)
+  # meant to be edited on GitHub afterwards.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [host-and-cross, arm64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: dsperate-linux-aarch64
+      - name: Write release notes
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then
+            changes="https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+          else
+            changes="https://github.com/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}"
+          fi
+          {
+            echo "# DSperate ${GITHUB_REF_NAME}"
+            echo
+            echo "Full changelog: ${changes}"
+            echo
+            echo "Requires a BIOS/firmware set dumped from your own DS; none is included."
+          } > notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dsperate-*-linux-aarch64.tar.gz --title "DSperate ${GITHUB_REF_NAME}" --notes-file notes.md
