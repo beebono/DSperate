@@ -381,9 +381,6 @@ private:
   void render_band(s32 y0, s32 y1, u32* dst);
   void prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels);
   static u32 band_count(u32 polygons);
-  // Where to cut the screen into bands. Equal thirds of Y left band 2 with
-  // 1.85x band 0's polygon lines on SM64DS, and the frame waits for the
-  // slowest band, so the cut follows the work instead.
   // Bin cut points. The frame is split into more bins than there are workers
   // and each worker takes the next unclaimed one, so a bin that turns out
   // heavy is absorbed by the others finishing theirs early. A static split

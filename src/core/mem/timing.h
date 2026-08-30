@@ -47,8 +47,7 @@ public:
   void set_region9(u32 start, u32 end, Region r, int bus_width, int nonseq, int seq);
   void set_region7(u32 start, u32 end, Region r, int bus_width, int nonseq, int seq);
 
-  // Rebuild the ARM9 per-4 KB CPU table from the PU map for [start, end).
-  // Rebuild [start, end) of the ARM9 table; `notify` reports the change to
+  // Rebuild [start, end) of the ARM9 per-4 KB CPU table from the PU map; `notify` reports the change to
   // the recompiler (pass false while rebuilding several ranges, then call
   // notify_cpu9 once).
   void update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify = true);

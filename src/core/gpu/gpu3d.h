@@ -248,7 +248,6 @@ private:
   __attribute__((always_inline)) void exec_single(u8 cmd, u32 param);   // one call site: execute()
   void exec_multi(u8 cmd);
 
-  // Timing helpers.
   // Per-command timing helpers: called once per command from the execute
   // loop, so they are forced inline (LTO left them as calls: ~15 insn of
   // call overhead each at 15 k+ calls a frame).

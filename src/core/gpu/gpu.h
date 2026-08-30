@@ -146,15 +146,8 @@ private:
   bool per_line_ = false;         // ... but has fallen back to per-line rendering
   u32  render_next_ = SCREEN_H;   // display lines rendered so far this frame
   bool trap_armed_ = false, trap_lcdc_ = false;
-  // Capture frames batch too (DS_2D_LAZY_CAPTURE=0 keeps them per line): the
-  // captured bytes land at the last display line instead of per line, which
-  // only a CPU read of the capture bank mid-frame can tell apart -- the
-  // picture, the register timing and every VRAM write stay exact. A trapped
-  // store catches the frame up, then lifts the trap for the rest of that
-  // line (the frontier cannot move inside a line, so later stores in it are
-  // free) and re-arms at the next scanline; past LAZY_HIT_LIMIT hit-lines the
-  // frame falls back to per line as before.
-  // A trapped store catches the frame up, lifts the trap and renders the
+  // Capture frames batch too (DS_2D_LAZY_CAPTURE=0 keeps them per line; see
+  // the class comment). A trapped store catches the frame up, lifts the trap and renders the
   // next LAZY_BURST_LINES lines per line (exact without any trap, and no
   // slow-path stores while a DMA streams), then re-arms and batches again.
   // Two page-table walks per burst rather than two per line, and no trapped

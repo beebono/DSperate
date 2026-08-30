@@ -33,7 +33,7 @@ void detach(NDS& nds);
 // RunFn entry: runs `cpu` until its budget is exhausted or it halts.
 void run(CpuContext& cpu);
 
-// Native slice loop:the scheduler's slice state machine
+// Native slice loop: the scheduler's slice state machine
 // (Scheduler::slice_next) is driven from a loop in the code arena
 // that saves the callee-saved registers once and enters translated code
 // without the per-entry frame. `lookup` is the block lookup that

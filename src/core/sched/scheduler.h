@@ -183,14 +183,13 @@ private:
   // loop is treated as halted for the slice. Sets which CPUs to skip and
   // returns whether the whole machine is idle. See cpu/idle_loop.h.
   bool machine_idle(bool& skip9, bool& skip7) const;
-  // Pre-filter: a ring of each CPU's recent slice-start PCs. A slice ends at
-  // an arbitrary point inside a loop, so the test is membership in the last
-  // few, not equality with the last one.
+  // Rings of each CPU's recent slice-start PCs. A slice ends at an arbitrary
+  // point inside a loop, so "still in the loop" is membership in the last
+  // few, not equality with the last one. The first ring is the idle-skip
+  // pre-filter; the second is the DS_PROFILE spin proxy (a CPU re-entering
+  // the same few addresses while awake is polling -- what both_idle() cannot see).
   mutable u32 idle_pc_ring_[2][8] = {};
   mutable u32 idle_pc_pos_[2] = {};
-  // Measurement-only spin proxy (DS_PROFILE): a ring of each CPU's recent
-  // slice-start PCs. A CPU that keeps re-entering the same few addresses while
-  // awake is polling, not working -- the idle case both_idle() cannot see.
   mutable u32 spin_ring_[2][8] = {};
   mutable u32 spin_pos_[2] = {};
   mutable bool spin_now_[2] = {};

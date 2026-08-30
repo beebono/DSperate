@@ -2202,25 +2202,7 @@ u32 Renderer3D::bin_count(u32 workers) {
   return n;
 }
 
-// Cut points for `nbins` bins.
-//
-// The cost model is the number of polygons covering each line: measured per
-// band on the device, time tracked polygon-lines (1.38M / 1.55M / 2.55M for
-// 5.35 / 8.11 / 6.42 s) and not span pixels, which were nearly equal across
-// the bands. Every line also costs a clear and a final pass whatever covers
-// it, hence the +1: a bin of empty lines is not free.
-//
-// Shares follow the deadlines rather than being equal. The raster is
-// dispatched at line 215 and bin b's output is first read at display line
-// bin_y_[b] of the next frame, so bin b has (263 - 215) + bin_y_[b] lines to
-// finish in -- 48 for the first one. Sized equally, the first bin cannot make
-// that and the emulation thread waits at line 0 having gained nothing: with
-// equal cuts and three bins the workers evened out but the wait *rose*, 304
-// ms to 760. The deadlines depend on the split, so it is solved once from the
-// equal-work split and then refined.
-//
-// The polygons' line ranges are already known -- build_edges has just walked
-// them -- so this is a difference array and a prefix sum over 192 entries.
+// DS_R3D_SPLIT=stair|even|desc|taper: how the bins are sized (see compute_bins).
 Renderer3D::Split Renderer3D::split_mode() {
   static const Split mode = [] {
     const char* e = std::getenv("DS_R3D_SPLIT");
@@ -2240,6 +2222,25 @@ Renderer3D::Split Renderer3D::split_mode() {
   return mode;
 }
 
+// Cut points for `nbins` bins.
+//
+// The cost model is the number of polygons covering each line: measured per
+// band on the device, time tracked polygon-lines (1.38M / 1.55M / 2.55M for
+// 5.35 / 8.11 / 6.42 s) and not span pixels, which were nearly equal across
+// the bands. Every line also costs a clear and a final pass whatever covers
+// it, hence the +1: a bin of empty lines is not free.
+//
+// Shares follow the deadlines rather than being equal. The raster is
+// dispatched at line 215 and bin b's output is first read at display line
+// bin_y_[b] of the next frame, so bin b has (263 - 215) + bin_y_[b] lines to
+// finish in -- 48 for the first one. Sized equally, the first bin cannot make
+// that and the emulation thread waits at line 0 having gained nothing: with
+// equal cuts and three bins the workers evened out but the wait *rose*, 304
+// ms to 760. The deadlines depend on the split, so it is solved once from the
+// equal-work split and then refined.
+//
+// The polygons' line ranges are already known -- build_edges has just walked
+// them -- so this is a difference array and a prefix sum over 192 entries.
 void Renderer3D::compute_bins(u32 nbins, u32 workers) {
   std::array<s32, 194> delta{};
   for (u32 i = 0; i < edge_count_; ++i) {
@@ -2302,17 +2303,14 @@ void Renderer3D::compute_bins(u32 nbins, u32 workers) {
   }
 }
 
-// Wait for the band that owns display line `y`, and no other: the bands are
-// independent and each writes only its own output lines, so the compositor
-// can read the top of the frame while the bottom is still being drawn.
-// Wait for the band that owns display line `y`, and no other: the bands are
-// independent and each writes only its own output lines, so the compositor
-// can read the top of the frame while the bottom is still being drawn.
 void Renderer3D::debug_dump(FILE* f) {
   std::fprintf(f, "  raster: async %d pending_bands %u waited_bits %016llx nbins %u\n", async_ ? 1 : 0, pending_bands_, (unsigned long long)waited_bits_, nbins_);
   if (pool_) pool_->debug_dump(f);
 }
 
+// Wait for the band that owns display line `y`, and no other: the bands are
+// independent and each writes only its own output lines, so the compositor
+// can read the top of the frame while the bottom is still being drawn.
 void Renderer3D::sync_line(s32 y) {
   if (!pending_bands_) return;
   u32 b = 0;
@@ -2338,42 +2336,6 @@ void Renderer3D::sync_all() {
   waited_bits_ = 0;
 }
 
-// How many bands to split the frame into. DS_R3D_THREADS overrides the count
-// (0 or 1 disables banding entirely).
-//
-// The cutoff is deliberately tiny. An earlier version skipped banding below 24
-// polygons, on the theory that a short list is cheaper to draw on one thread;
-// that cost 12% of the whole win on SM64DS, because polygon *count* says
-// nothing about raster cost -- a handful of large polygons (a skybox, a
-// full-screen quad) is a full frame of spans. Area would be the right measure
-// and is not worth computing, so the only frames kept on one thread are the
-// ones with almost nothing in them, where the thread wake-up (a broadcast and
-// a barrier, tens of microseconds) could plausibly exceed the work.
-// How many bins to cut the frame into for `workers` threads.
-//
-// More bins than workers is what lets a heavy strip be absorbed by threads
-// that finish theirs early, and it does work: at twelve bins the three
-// workers came out even (2400 / 2367 / 2357 ms against 1148 / 1863 / 2972)
-// and the emulation thread's wait fell from 304 ms to 71 ms over 900 frames
-// of sm64.
-//
-// It still loses. Every boundary duplicates two scanlines -- a bin rasterises
-// from y0-1, because final_pass(y0) reads the line above, and through y1,
-// because final_pass(y1-1) reads the line below -- and re-runs seed_active.
-// At twelve bins that is 22 of 192 lines drawn twice, and the total raster
-// work rose 19 % (5983 -> 7124 ms) to save 233 ms of waiting. Device totals
-// over 1800 frames of sm64: 18801 ms at three bins, 18934 at six, 19655 at
-// twelve, 20394 at twenty-four; meteos is flat to slightly worse.
-//
-// The reason the trade is bad here is that the raster is already
-// asynchronous: the emulation thread waits for a band for 2.4 % of the frame,
-// so balancing the workers has almost nothing to win, while the duplicated
-// lines are paid in full and compete with the emulation thread for cores.
-// DraStic bins into twelve fixed 16-line strips (video_3d_bin_polygons_1x,
-// twelve polygon-index lists of stride 0x1004), but its bins are lists of
-// polygons handed to a rasteriser that does not re-walk edges per bin, so it
-// does not pay this. So the default is one bin per worker -- the machinery is
-// here, and DS_R3D_BINS turns it up, if the boundary cost is ever removed.
 // How many workers to run this frame, from how long the emulation thread
 // spent blocked on the raster in the frames before it.
 //
@@ -2474,6 +2436,11 @@ bool Renderer3D::threads_forced() {
   return on;
 }
 
+// How many bands to split the frame into. DS_R3D_THREADS overrides the count
+// (0 or 1 disables banding). Only near-empty frames stay on one thread:
+// polygon *count* says nothing about raster cost (a skybox or a full-screen
+// quad is a full frame of spans), and skipping banding below 24 polygons
+// cost 12 % of the whole win on SM64DS.
 u32 Renderer3D::band_count(u32 polygons) {
   static const int forced = [] {
     const char* e = std::getenv("DS_R3D_THREADS");
@@ -2481,17 +2448,12 @@ u32 Renderer3D::band_count(u32 polygons) {
   }();
   if (forced >= 0) return forced < 1 ? 1u : static_cast<u32>(forced);
   if (polygons < 2) return 1;
-  // Two is the floor and three the ceiling; adaptive_workers picks between
-  // them per frame. A third worker only pays where the emulation thread is
-  // actually blocked on the raster, which over 1800 frames is one scene in
-  // five: etody (15.5 % of the frame blocked) gains 4.3 % pinned at three,
-  // while sm64 loses 5.6 %, mlbis 8.5 % and dbori 2.7 %, because the worker
-  // comes out of a core the emulation thread wanted. Neither fixed count is
-  // right for both, hence the controller.
   // Pinned at three since 2026-08-29 (RG DS knob sweep against the CPU cuts
   // of 2026-08-28: mlbis -6.8 %, etody -2.6 %, sm64 -1.4 %, meteos/dbori flat;
-  // GSDD +5.8 %, whose main thread is the critical path). The 2<->3 controller
-  // stays behind DS_R3D_ADAPT=1.
+  // GSDD +5.8 %, whose main thread is the critical path). Before the pin a
+  // third worker only paid where the emulation thread was blocked on the
+  // raster (etody +4.3 %; sm64, mlbis, dbori lost 3-9 %), hence the 2<->3
+  // controller, which stays behind DS_R3D_ADAPT=1.
   return 3;
 }
 

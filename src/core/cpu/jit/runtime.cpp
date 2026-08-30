@@ -840,9 +840,9 @@ extern "C" void jit_h_trace(CpuContext* cpu, u32 instr, u32 key) {
 // space, read-only and code pages. Nearly all of them are MMIO (measured:
 // 99 % across SM64DS, Mario & Luigi and Meteos, four in five of them loads),
 // so those go straight to Io rather than through Bus, whose two frames only
-// re-test the region this path has already established. The same paths the interpreter's
-// mem_read*/mem_write* take (cpu_mem.h), minus the cost, which the block
-// charges from the timing table like every other access.
+// re-test the region this path has already established. Otherwise the same
+// paths the interpreter's mem_read*/mem_write* take (cpu_mem.h), minus the
+// cost, which the block charges from the timing table like every other access.
 extern "C" u32 jit_h_ld8(CpuContext* cpu, u32 addr) {
   g_rt.stats.slow_accesses++;
   if (u8* p = cpu->page_table.read_ptr(addr)) return *p;

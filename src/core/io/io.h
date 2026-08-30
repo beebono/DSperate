@@ -75,9 +75,9 @@ struct Rtc {
   u8  clock_adjust = 0, free_reg = 0;
 };
 
-// Cart bus (Slot-1). No cartridge is emulated yet; the transfer timing and
-// the DRQ/FIFO state machine are modelled so the BIOS sees a plausible empty
-// slot (all data words read as zero).
+// Cart bus (Slot-1): ROMCTRL, the transfer timing and the DRQ/FIFO state
+// machine. The cartridge itself is cart::Cart (cart.h); an empty slot reads
+// every data word as zero.
 struct Cart {
   u16 auxspicnt = 0; u8 auxspidata = 0;
   u32 romctrl = 0;

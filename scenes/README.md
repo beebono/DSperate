@@ -1,6 +1,7 @@
 # The recorded benchmark scenes
 
-Five input replays (`--replay`, one 8-byte record per frame) recorded on the
+Input replays (`--replay`, one 16-byte record per frame; the older 8-byte
+logs still play) recorded on the
 Anbernic RG DS, with the battery saves they were recorded against. The
 emulator is deterministic given its inputs, so a replay reproduces the session
 frame for frame — as long as the ROM, the BIOS and **the save** are the same

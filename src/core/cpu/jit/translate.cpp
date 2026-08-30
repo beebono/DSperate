@@ -1103,9 +1103,6 @@ void Translator::arm_msr(u32 instr, AOp op) {
   cold_end_jump(join);
 }
 
-// Instructions whose whole cost is the static fetch cost (plus static
-// extras): a conditional one charges numC before the condition test, so the
-// skipped path needs no code of its own.
 // Conditional instructions that can be predicated with a select rather than a
 // branch: data processing with a register destination and no flag write, whose
 // body is a pure computation into that register. Register-shifted operands are
@@ -1118,6 +1115,9 @@ bool use_csel_op(AOp op, u32 instr) {
   return ((instr >> 12) & 0xF) != 15;                    // PC destination falls back
 }
 
+// Instructions whose whole cost is the static fetch cost (plus static
+// extras): a conditional one charges numC before the condition test, so the
+// skipped path needs no code of its own.
 bool arm_simple_cost(AOp op) {
   switch (op) {
   case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift: case AOp::Mrs: case AOp::Clz: case AOp::Pld: case AOp::Mcr:

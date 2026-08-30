@@ -1169,6 +1169,9 @@ void Engine2D::setup_tables() {
   }
 }
 
+// Top and second records for the composite: colours through the tables,
+// layer ids as BLDCNT masks, the kind and alpha of the winning pixel. The
+// per-pixel derivations are kernels; the two palette gathers stay scalar.
 void Engine2D::select_layers() {
   setup_tables();
   top16_.fill(LV_OPAQUE); top_tid_.fill(T_BACKDROP);
@@ -1194,9 +1197,6 @@ void Engine2D::select_layers() {
   resolve_full();
 }
 
-// Top and second records for the composite: colours through the tables,
-// layer ids as BLDCNT masks, the kind and alpha of the winning pixel. The
-// per-pixel derivations are kernels; the two palette gathers stay scalar.
 // Whether the composite can read the second target at all on this line. Only
 // the three blending paths do: a blend effect, the 3D layer over something,
 // and semi-transparent or bitmap sprites. A fade (brighten/darken) over plain

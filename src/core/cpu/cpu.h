@@ -16,10 +16,7 @@ struct NDS;
 // immediate range of a single base register.
 //
 // The page table is a *separate* 16 MiB allocation pointed to by `page_table`;
-// the JIT keeps that pointer in a register and places the register spill area
-// at a fixed negative offset from it via `spill_anchor` (a pointer into this
-// struct), so one base register serves both. Whether to inline the table is an
-// open item - see ARCHITECTURE.md.
+// the JIT keeps that pointer pinned in a register (jit_internal.h).
 
 enum class Mode : u8 {
   USR = 0x10, FIQ = 0x11, IRQ = 0x12, SVC = 0x13, ABT = 0x17, UND = 0x1B, SYS = 0x1F

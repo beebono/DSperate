@@ -72,16 +72,6 @@ u64 census_list_hash(const Polygon* const* polys, u32 n, const Vertex* vram) {
   return h;
 }
 
-// Would a straight comparison against the previous frame beat hashing? The
-// polygon and vertex RAM are already double-buffered, so last frame's list is
-// still resident in the other bank -- a compare needs no copy and no saved
-// state, and unlike a hash it can stop at the first difference. This models
-// that: bytes scanned before the first mismatch against bytes if scanned in
-// full. Measurement only; it does the naive byte walk on purpose.
-//
-// Polygon::vtx (bytes 0-19) holds ABSOLUTE vertex indices, so the two banks
-// differ there by vram_base() on every polygon -- compare it bias-corrected
-// and the rest of the struct flat.
 // DS_R3D_SKIPDUP=1: keep the previous rendered frame when a SWAP_BUFFERS
 // submits the same geometry as the last one. The polygon and vertex RAM are
 // double-buffered, so the previous list is still in the other bank -- this is
@@ -91,6 +81,7 @@ u64 census_list_hash(const Polygon* const* polys, u32 n, const Vertex* vram) {
 // It must walk fields rather than memcmp the arrays: vtx/z/w are fixed
 // 10-element slots of which only `nverts` are written, so the tails hold stale
 // data, and vtx holds bank-biased absolute indices.
+//
 // On by default since 2026-08-28: RG DS knob sweep, paired 3 reps, -0.7 % (mlbis)
 // to -2.0 % (meteos) on the five replay scenes, flat on GSDD, 1/17 reps slower.
 // DS_R3D_SKIPDUP=0 turns it off for A/B.
@@ -123,12 +114,12 @@ bool lists_equal(const Polygon* a, const Polygon* b, u32 npoly, u32 abase, u32 b
 
 struct CmpModel { u64 early, full; };
 
-// NOTE: the polygon array is NOT flat-comparable. `vtx`, `z` and `w` are
-// fixed 10-element slots of which only `nverts` are ever written (see
-// submit_polygon), so the tails hold stale data from whatever polygon last
-// occupied the slot. A straight memcmp over pram_ mismatches on that garbage
-// immediately. Compare the live fields only -- the same set the hash covers,
-// in the same order.
+// DS_CENSUS_GX: would a straight comparison against the previous frame beat
+// hashing? The previous list is still resident in the other bank, so a
+// compare needs no copy and can stop at the first difference. This models
+// that: bytes scanned before the first mismatch against bytes if scanned in
+// full. Measurement only. Same live-field walk as lists_equal (the arrays are
+// not flat-comparable), in the order the hash covers them.
 CmpModel census_compare(const Polygon* a, const Polygon* b, u32 npoly, u32 abase, u32 bbase,
                         const Vertex* va, const Vertex* vb) {
   CmpModel m{0, 0};
