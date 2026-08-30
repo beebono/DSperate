@@ -68,6 +68,36 @@ inline uint32x4_t darken4(uint32x4_t v, u32 factor, u32 bias) {
   return vorrq_u32(vorrq_u32(vsubq_u32(rb, drb), vsubq_u32(g, dg)), vdupq_n_u32(0xFF000000));
 }
 
+// The same maths on byte planes, 16 pixels a call: a record's r g b bytes
+// are deinterleaved by ld4 into planes, the products live in 16-bit lanes and
+// come back through a narrowing shift. Per-lane weights are bytes, so the
+// bitmap-sprite and 3D blends (whose weights vary per pixel) cost the same as
+// the fixed EVA/EVB blend. Inputs are the 6-bit fields (the caller masks).
+//
+// blend: (a*ea + b*eb + 2^(shift-1)) >> shift, clamped to 63. After the shift
+// a field is at most 126, so it fits the byte and the clamp is one min.
+template <int shift>
+inline uint8x16_t blend16(uint8x16_t a, uint8x16_t b, uint8x16_t ea, uint8x16_t eb) {
+  const uint16x8_t rnd = vdupq_n_u16(1u << (shift - 1));
+  const uint16x8_t lo = vmlal_u8(vmlal_u8(rnd, vget_low_u8(a), vget_low_u8(ea)), vget_low_u8(b), vget_low_u8(eb));
+  const uint16x8_t hi = vmlal_high_u8(vmlal_high_u8(rnd, a, ea), b, eb);
+  return vminq_u8(vcombine_u8(vshrn_n_u16(lo, shift), vshrn_n_u16(hi, shift)), vdupq_n_u8(63));
+}
+// c + (((63 - c) * factor + bias) >> 4): the scalar's & 0x3F after the shift
+// is a no-op there (the shifted term is at most 63), and so is dropped.
+inline uint8x16_t brighten16(uint8x16_t c, uint8x8_t factor, u16 bias) {
+  const uint8x16_t inv = vsubq_u8(vdupq_n_u8(63), c);
+  const uint16x8_t lo = vmlal_u8(vdupq_n_u16(bias), vget_low_u8(inv), factor);
+  const uint16x8_t hi = vmlal_u8(vdupq_n_u16(bias), vget_high_u8(inv), factor);
+  return vaddq_u8(c, vcombine_u8(vshrn_n_u16(lo, 4), vshrn_n_u16(hi, 4)));
+}
+// c - ((c * factor + bias) >> 4), likewise.
+inline uint8x16_t darken16(uint8x16_t c, uint8x8_t factor, u16 bias) {
+  const uint16x8_t lo = vmlal_u8(vdupq_n_u16(bias), vget_low_u8(c), factor);
+  const uint16x8_t hi = vmlal_u8(vdupq_n_u16(bias), vget_high_u8(c), factor);
+  return vsubq_u8(c, vcombine_u8(vshrn_n_u16(lo, 4), vshrn_n_u16(hi, 4)));
+}
+
 } // namespace
 
 
@@ -89,7 +119,9 @@ void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, con
                     const u8* win, Pixel* out) {
   const u32 effect = (bldcnt >> 6) & 3;
   const uint8x16_t v_t1 = vdupq_n_u8(effect ? static_cast<u8>(bldcnt) : 0), v_t2 = vdupq_n_u8(static_cast<u8>(bldcnt >> 8));
-  const uint32x4_t veva = vdupq_n_u32(eva), vevb = vdupq_n_u32(evb), colour_mask = vdupq_n_u32(0x00FFFFFF), opaque = vdupq_n_u32(0xFF000000);
+  const uint8x16_t veva = vdupq_n_u8(static_cast<u8>(eva)), vevb = vdupq_n_u8(static_cast<u8>(evb));
+  const uint8x8_t vevy = vdup_n_u8(static_cast<u8>(evy));
+  const uint8x16_t v63 = vdupq_n_u8(63), vff = vdupq_n_u8(0xFF), v16 = vdupq_n_u8(16), v32 = vdupq_n_u8(32);
   for (u32 i = 0; i < 256; i += 16) {
     const uint8x16_t kind = vld1q_u8(top_kind + i);
     const uint8x16_t t2hit = vtstq_u8(vld1q_u8(second_id + i), v_t2);
@@ -100,39 +132,42 @@ void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, con
     const uint8x16_t objblend = vandq_u8(vorrq_u8(vceqq_u8(kind, vdupq_n_u8(K_OBJ_SEMI)), is_bitmap), t2hit);
     const uint8x16_t blend3d = vandq_u8(vceqq_u8(kind, vdupq_n_u8(K_3D)), t2hit);
     const uint8x16_t fx = vbicq_u8(vbicq_u8(t1hit, objblend), blend3d);
+    // The records as byte planes; lanes no effect touches pass through as
+    // they are (bytes 0-2 whole, alpha 0xFF).
+    uint8x16x4_t a = vld4q_u8(reinterpret_cast<const u8*>(top + i));
     // Most blocks of most lines blend nothing: copy through.
     if (vmaxvq_u8(vorrq_u8(vorrq_u8(objblend, blend3d), fx)) == 0) {
-      for (u32 k = 0; k < 4; ++k) vst1q_u32(out + i + k * 4, vorrq_u32(vandq_u32(vld1q_u32(top + i + k * 4), colour_mask), opaque));
+      a.val[3] = vff;
+      vst4q_u8(reinterpret_cast<u8*>(out + i), a);
       continue;
     }
     const bool has_obj = vmaxvq_u8(objblend) != 0, has_3d = vmaxvq_u8(blend3d) != 0, has_fx = vmaxvq_u8(fx) != 0;
-    const Mask4 m_obj = widen(objblend), m_3d = widen(blend3d), m_fx = widen(fx), m_bitmap = widen(is_bitmap), m_t2 = widen(t2hit);
-    const Mask4 alpha = widen(vld1q_u8(top_alpha + i));
-    for (u32 k = 0; k < 4; ++k) {
-      const uint32x4_t a = vld1q_u32(top + i + k * 4), b = vld1q_u32(second + i + k * 4);
-      uint32x4_t o = a;
-      if (has_fx) {
-        uint32x4_t o_fx = a;
-        if (effect == 1) o_fx = vbslq_u32(m_t2.m[k], blend4(a, b, veva, vevb, 8, 4), a);
-        else if (effect == 2) o_fx = brighten4(a, evy, 0x8);
-        else if (effect == 3) o_fx = darken4(a, evy, 0x7);
-        o = vbslq_u32(m_fx.m[k], o_fx, a);
+    const uint8x16x4_t b = vld4q_u8(reinterpret_cast<const u8*>(second + i));
+    uint8x16_t a6[3], b6[3], o[3];
+    for (u32 c = 0; c < 3; ++c) { a6[c] = vandq_u8(a.val[c], v63); b6[c] = vandq_u8(b.val[c], v63); o[c] = a.val[c]; }
+    if (has_fx) {
+      for (u32 c = 0; c < 3; ++c) {
+        uint8x16_t o_fx = a.val[c];
+        if (effect == 1) o_fx = vbslq_u8(t2hit, blend16<4>(a6[c], b6[c], veva, vevb), a.val[c]);
+        else if (effect == 2) o_fx = brighten16(a6[c], vevy, 8);
+        else if (effect == 3) o_fx = darken16(a6[c], vevy, 7);
+        o[c] = vbslq_u8(fx, o_fx, a.val[c]);
       }
-      if (has_3d) {
-        // 3D blend with (alpha + 1) of 32; alpha 31 passes the top record through.
-        const uint32x4_t a3 = vaddq_u32(vandq_u32(vshrq_n_u32(a, 24), vdupq_n_u32(0x1F)), vdupq_n_u32(1));
-        uint32x4_t o_3d = blend4(a, b, a3, vsubq_u32(vdupq_n_u32(32), a3), 16, 5);
-        o_3d = vbslq_u32(vceqq_u32(a3, vdupq_n_u32(32)), a, o_3d);
-        o = vbslq_u32(m_3d.m[k], o_3d, o);
-      }
-      if (has_obj) {
-        // OBJ blend: bitmap sprites use their own alpha as EVA, 16 - EVA as EVB.
-        const uint32x4_t ea = vbslq_u32(m_bitmap.m[k], alpha.m[k], veva);
-        const uint32x4_t eb = vbslq_u32(m_bitmap.m[k], vsubq_u32(vdupq_n_u32(16), ea), vevb);
-        o = vbslq_u32(m_obj.m[k], blend4(a, b, ea, eb, 8, 4), o);
-      }
-      vst1q_u32(out + i + k * 4, vorrq_u32(vandq_u32(o, colour_mask), opaque));
     }
+    if (has_3d) {
+      // 3D blend with (alpha + 1) of 32; alpha 31 passes the top record through.
+      const uint8x16_t a3 = vaddq_u8(vandq_u8(a.val[3], vdupq_n_u8(0x1F)), vdupq_n_u8(1));
+      const uint8x16_t eb3 = vsubq_u8(v32, a3), keep = vceqq_u8(a3, v32);
+      for (u32 c = 0; c < 3; ++c) o[c] = vbslq_u8(blend3d, vbslq_u8(keep, a.val[c], blend16<5>(a6[c], b6[c], a3, eb3)), o[c]);
+    }
+    if (has_obj) {
+      // OBJ blend: bitmap sprites use their own alpha as EVA, 16 - EVA as EVB.
+      const uint8x16_t ea = vbslq_u8(is_bitmap, vld1q_u8(top_alpha + i), veva);
+      const uint8x16_t eb = vbslq_u8(is_bitmap, vsubq_u8(v16, ea), vevb);
+      for (u32 c = 0; c < 3; ++c) o[c] = vbslq_u8(objblend, blend16<4>(a6[c], b6[c], ea, eb), o[c]);
+    }
+    const uint8x16x4_t rec = {o[0], o[1], o[2], vff};
+    vst4q_u8(reinterpret_cast<u8*>(out + i), rec);
   }
 }
 
@@ -221,15 +256,17 @@ void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables
 void composite_line_fade(u32 bldcnt, u32 evy, const Pixel* top, const u8* top_id, const u8* win, Pixel* out) {
   const u32 effect = (bldcnt >> 6) & 3;
   const uint8x16_t v_t1 = vdupq_n_u8(static_cast<u8>(bldcnt));
-  const uint32x4_t colour_mask = vdupq_n_u32(0x00FFFFFF), opaque = vdupq_n_u32(0xFF000000);
+  const uint8x16_t v63 = vdupq_n_u8(63), vff = vdupq_n_u8(0xFF);
+  const uint8x8_t vevy = vdup_n_u8(static_cast<u8>(evy));
   for (u32 i = 0; i < 256; i += 16) {
     const uint8x16_t hit = vandq_u8(vtstq_u8(vld1q_u8(top_id + i), v_t1), vtstq_u8(vld1q_u8(win + i), vdupq_n_u8(0x20)));
-    const Mask4 m = widen(hit);
-    for (u32 k = 0; k < 4; ++k) {
-      const uint32x4_t a = vld1q_u32(top + i + k * 4);
-      const uint32x4_t fx = effect == 2 ? brighten4(a, evy, 0x8) : darken4(a, evy, 0x7);
-      vst1q_u32(out + i + k * 4, vorrq_u32(vandq_u32(vbslq_u32(m.m[k], fx, a), colour_mask), opaque));
+    uint8x16x4_t a = vld4q_u8(reinterpret_cast<const u8*>(top + i));
+    for (u32 c = 0; c < 3; ++c) {
+      const uint8x16_t a6 = vandq_u8(a.val[c], v63);
+      a.val[c] = vbslq_u8(hit, effect == 2 ? brighten16(a6, vevy, 8) : darken16(a6, vevy, 7), a.val[c]);
     }
+    a.val[3] = vff;
+    vst4q_u8(reinterpret_cast<u8*>(out + i), a);
   }
 }
 
@@ -520,26 +557,28 @@ void expand_colours(u32* dst) {
   for (u32 i = 0; i < 256; i += 4) vst1q_u32(dst + i, expand4(vld1q_u32(dst + i)));
 }
 
+// Byte planes: the 6-bit fields, the master brightness in 16-bit lanes, the
+// 6 -> 8 expansion as (c << 2) | (c >> 4) per plane, and the planes stored in
+// 0xAARRGGBB order (b g r 0xFF) by one st4 -- no channel is shifted through
+// a 32-bit word.
 void output_line(const Pixel* src, u16 reg, u32* dst) {
   const u32 mode = reg >> 14;
   u32 factor = reg & 0x1F;
   if (factor > 16) factor = 16;
-  if (mode != 1 && mode != 2) { for (u32 i = 0; i < 256; i += 4) vst1q_u32(dst + i, expand4(vld1q_u32(src + i))); return; }
-  const uint32x4_t mrb = vdupq_n_u32(0x3F003F), mg = vdupq_n_u32(0x003F00), vf = vdupq_n_u32(factor);
-  for (u32 i = 0; i < 256; i += 4) {
-    const uint32x4_t v = vld1q_u32(src + i);
-    const uint32x4_t rb = vandq_u32(v, mrb), g = vandq_u32(v, mg);
-    uint32x4_t o;
-    if (mode == 1) {
-      const uint32x4_t drb = vandq_u32(vshrq_n_u32(vmulq_u32(vsubq_u32(mrb, rb), vf), 4), mrb);
-      const uint32x4_t dg = vandq_u32(vshrq_n_u32(vmulq_u32(vsubq_u32(mg, g), vf), 4), mg);
-      o = vorrq_u32(vaddq_u32(rb, drb), vaddq_u32(g, dg));
-    } else {
-      const uint32x4_t drb = vandq_u32(vshrq_n_u32(vmlaq_u32(vdupq_n_u32(0xF * 0x010001), rb, vf), 4), mrb);
-      const uint32x4_t dg = vandq_u32(vshrq_n_u32(vmlaq_u32(vdupq_n_u32(0xF * 0x000100), g, vf), 4), mg);
-      o = vorrq_u32(vsubq_u32(rb, drb), vsubq_u32(g, dg));
+  const uint8x8_t vf = vdup_n_u8(static_cast<u8>(factor));
+  const uint8x16_t v63 = vdupq_n_u8(63), vff = vdupq_n_u8(0xFF);
+  const bool bright = mode == 1, dark = mode == 2;
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16x4_t p = vld4q_u8(reinterpret_cast<const u8*>(src + i));
+    uint8x16_t c[3];
+    for (u32 k = 0; k < 3; ++k) {
+      c[k] = vandq_u8(p.val[k], v63);
+      if (bright) c[k] = brighten16(c[k], vf, 0);
+      else if (dark) c[k] = darken16(c[k], vf, 15);
+      c[k] = vorrq_u8(vshlq_n_u8(c[k], 2), vshrq_n_u8(c[k], 4));
     }
-    vst1q_u32(dst + i, expand4(o));
+    const uint8x16x4_t rec = {c[2], c[1], c[0], vff};
+    vst4q_u8(reinterpret_cast<u8*>(dst + i), rec);
   }
 }
 
