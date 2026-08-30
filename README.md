@@ -161,14 +161,14 @@ screen.
 
 Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,
 Enter = Start, Right Shift = Select; `Escape` quits, `P` pauses, `Tab` held
-fast-forwards, `F` toggles fullscreen, `F4` cycles the screen layout, `F6` swaps
+fast-forwards, `F` toggles fullscreen, `F4`/`F10` cycle the screen layout forward/back, `F6` swaps
 which screen is alone/large/dominant and `F8` moves the PiP inset (all three
 remembered for the game), `F9` takes a screenshot (both screens, BMP, in the
 states directory), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
 the state in the current slot and `F2`/`F3` change the slot, `L` closes and
 opens the lid, `M` held is the fake microphone. Controller, with Mode held:
 Start+Select quits, Start pauses, right trigger fast-forwards, R/L save/load
-the state, Right/Left change the slot, Select cycles the layout, Y swaps the screens;
+the state, Right/Left change the slot, Select/X cycle the layout forward/back, Y swaps the screens;
 the left stick's click is the microphone.
 
 ### Example configs
@@ -229,7 +229,8 @@ rather than falling behind.
 
 ### Display and handhelds
 
-Layouts (`--layout` / `[video] layout`, cycled with `F4`): `vertical`
+Layouts (`--layout` / `[video] layout`; `F4`/`F10` step through
+`[video] layout_cycle`, by default all of them): `vertical`
 (stacked) and `horizontal` (side by side; `--screen` picks which comes
 first), `single` (one screen fills the window), `pip` (one fills it, the
 other is an inset of `pip_scale` in `pip_corner` = `tl|tr|bl|br`),

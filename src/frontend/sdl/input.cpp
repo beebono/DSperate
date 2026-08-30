@@ -24,12 +24,12 @@ const char* const kPadDefaults[B::BTN_COUNT] = {"b", "a", "back", "start", "dpri
 
 const char* const kActionNames[static_cast<int>(Action::Count)] = {
   "quit", "pause", "fast_forward", "fast_forward_toggle", "save_state", "load_state", "slot_next", "slot_prev",
-  "volume_up", "volume_down", "mute", "layout_next", "screen_swap", "pip_corner_next", "fullscreen", "screenshot", "lid", "mic"};
+  "volume_up", "volume_down", "mute", "layout_next", "layout_prev", "screen_swap", "pip_corner_next", "fullscreen", "screenshot", "lid", "mic"};
 const char* const kKeyHotDefaults[static_cast<int>(Action::Count)] = {
-  "Escape", "p", "Tab", "none", "F5", "F7", "F3", "F2", "=", "-", "0", "F4", "F6", "F8", "f", "F9", "l", "m"};
+  "Escape", "p", "Tab", "none", "F5", "F7", "F3", "F2", "=", "-", "0", "F4", "F10", "F6", "F8", "f", "F9", "l", "m"};
 const char* const kPadHotDefaults[static_cast<int>(Action::Count)] = {
   "mod+start+back", "mod+start", "mod++righttrigger", "none", "mod+rightshoulder", "mod+leftshoulder", "mod+dpright", "mod+dpleft",
-  "none", "none", "none", "mod+back", "mod+y", "none", "none", "none", "none", "leftstick"};
+  "none", "none", "none", "mod+back", "mod+x", "mod+y", "none", "none", "none", "none", "leftstick"};
 
 // Held actions: an edge on both press and release.
 bool is_hold(Action a) { return a == Action::FastForward || a == Action::Mic; }

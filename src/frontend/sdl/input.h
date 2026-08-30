@@ -16,7 +16,7 @@ class Config;
 // Things a hotkey can do. The frontend drains them once a frame.
 enum class Action : u8 {
   Quit, Pause, FastForward, FastForwardToggle, SaveState, LoadState, SlotNext, SlotPrev,
-  VolumeUp, VolumeDown, Mute, LayoutNext, ScreenSwap, PipCornerNext, Fullscreen, Screenshot, Lid, Mic, Count
+  VolumeUp, VolumeDown, Mute, LayoutNext, LayoutPrev, ScreenSwap, PipCornerNext, Fullscreen, Screenshot, Lid, Mic, Count
 };
 const char* action_name(Action a);
 

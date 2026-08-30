@@ -285,12 +285,25 @@ int main(int argc, char** argv) {
   const long quantum = cfg.num("emu.quantum", 0);   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
   using Disp = ds::sdl::Display;
   Disp::Layout layout;
+  std::vector<Disp::Mode> layout_cycle;
   {
     const std::string l = cfg.str("video.layout", "vertical"), sc = cfg.str("video.screen", "top"), co = cfg.str("video.pip_corner", "br");
     if (!Disp::parse_mode(l, layout.mode)) { std::fprintf(stderr, "unknown layout %s\n", l.c_str()); return 2; }
     if (sc == "top") layout.primary = 0; else if (sc == "bottom") layout.primary = 1;
     else { std::fprintf(stderr, "unknown screen %s (top | bottom)\n", sc.c_str()); return 2; }
     if (!Disp::parse_corner(co, layout.corner)) { std::fprintf(stderr, "unknown pip_corner %s (tl | tr | bl | br)\n", co.c_str()); return 2; }
+    // The ring layout_next/prev step through; a mode outside it joins at its start.
+    std::string cyc = cfg.str("video.layout_cycle", "vertical,horizontal,single,pip,dominant_v,dominant_h");
+    for (size_t at = 0; at <= cyc.size();) {
+      size_t end = cyc.find(',', at); if (end == std::string::npos) end = cyc.size();
+      std::string name = cyc.substr(at, end - at);
+      name.erase(0, name.find_first_not_of(' ')); name.erase(name.find_last_not_of(' ') + 1);
+      Disp::Mode m;
+      if (!name.empty() && !Disp::parse_mode(name, m)) { std::fprintf(stderr, "unknown layout %s in layout_cycle\n", name.c_str()); return 2; }
+      if (!name.empty()) layout_cycle.push_back(m);
+      at = end + 1;
+    }
+    if (layout_cycle.empty()) layout_cycle.push_back(layout.mode);
     layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
     layout.dominant = std::clamp(cfg.real("video.dominant_ratio", 0.5), 0.1, 0.99);
   }
@@ -432,10 +445,13 @@ int main(int argc, char** argv) {
       case A::VolumeDown: audio.set_volume(audio.volume() - 10); std::fprintf(stderr, "volume %d%%\n", audio.volume()); break;
       case A::Mute: audio.set_muted(!audio.muted()); std::fprintf(stderr, "%s\n", audio.muted() ? "muted" : "unmuted"); break;
       case A::Fullscreen: display.toggle_fullscreen(); if (dual_window) display2.toggle_fullscreen(); break;
-      case A::LayoutNext: {
+      case A::LayoutNext: case A::LayoutPrev: {
         if (dual_window) break;
         Disp::Layout l = display.current_layout();
-        l.mode = static_cast<Disp::Mode>((static_cast<int>(l.mode) + 1) % static_cast<int>(Disp::Mode::Count));
+        const int n = static_cast<int>(layout_cycle.size());
+        int at = 0;
+        for (int i = 0; i < n; ++i) if (layout_cycle[static_cast<size_t>(i)] == l.mode) { at = a == A::LayoutNext ? (i + 1) % n : (i + n - 1) % n; break; }
+        l.mode = layout_cycle[static_cast<size_t>(at)];
         display.set_layout(l);
         std::fprintf(stderr, "layout: %s\n", Disp::mode_name(l.mode));
         if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.layout", Disp::mode_name(l.mode));
