@@ -39,6 +39,7 @@ const char* kUsage =
     "usage: dsperate-sdl <rom.nds> [--bios9 F --bios7 F --firmware F] [options]\n"
     "  --config F      settings file (default ~/.config/dsperate/dsperate.ini; every\n"
     "                  option below has a key there, and games/<CODE>.ini overrides per title)\n"
+    "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) or horizontal: screens stacked or side by side\n"
@@ -219,6 +220,7 @@ int main(int argc, char** argv) {
     else if (arg("--bios7")) cli.set("paths.bios7", argv[++i]);
     else if (arg("--firmware")) cli.set("paths.firmware", argv[++i]);
     else if (arg("--config")) config_arg = argv[++i];
+    else if (arg("--write-config")) { ds::sdl::Config::write_default(argv[++i], true); return 0; }
     else if (arg("--scale")) cli.set("video.scale", argv[++i]);
     else if (flag("--dual-window")) cli.set("video.dual_window", "true");
     else if (arg("--layout")) cli.set("video.layout", argv[++i]);

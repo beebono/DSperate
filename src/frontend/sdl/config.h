@@ -34,7 +34,7 @@ public:
   // needed; used to remember a layout picked with a hotkey.
   static bool store(const std::string& path, const std::string& key, const std::string& value);
   // Writes the commented default file if there is none.
-  static void write_default(const std::string& path);
+  static void write_default(const std::string& path, bool force = false);
 
 private:
   std::map<std::string, std::string> kv_;

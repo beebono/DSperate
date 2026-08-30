@@ -134,8 +134,8 @@ bool Config::store(const std::string& path, const std::string& key, const std::s
   return true;
 }
 
-void Config::write_default(const std::string& path) {
-  if (std::ifstream(path)) return;
+void Config::write_default(const std::string& path, bool force) {
+  if (!force && std::ifstream(path)) return;
   std::ofstream f(path);
   if (!f) return;
   f <<

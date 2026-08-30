@@ -23,6 +23,8 @@ jobs:
           cmake --preset host
           cmake --build --preset host
           ctest --preset host --output-on-failure
+      - name: configs/default.ini matches the built-in defaults
+        run: tools/gen_example_configs.sh && git diff --exit-code configs/default.ini
       - name: Cross build and test (qemu-aarch64)
         run: |
           cmake --preset aarch64-cross -DDSPERATE_SDL=OFF
