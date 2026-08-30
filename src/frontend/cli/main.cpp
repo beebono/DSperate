@@ -298,6 +298,7 @@ int main(int argc, char** argv) {
       while ((n = nds.spu.take(buf, 2048)) != 0) std::fwrite(buf, 4, n, audio_out);
     } else nds.spu.drain();
     frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    ds::prof::frame_mark();
     if (per_frame && trace) { std::fprintf(stderr, "frame %d arm9 %llu arm7 %llu\n", i, ts.executed[0] - last9, ts.executed[1] - last7); last9 = ts.executed[0]; last7 = ts.executed[1]; }
   }
   wd_stop.store(true); if (wd.joinable()) wd.join();
@@ -331,6 +332,7 @@ int main(int argc, char** argv) {
     }
   }
   ds::frame_report(frame_ms);
+  ds::prof::frame_breakdown(frame_ms);
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));

@@ -641,6 +641,7 @@ int main(int argc, char** argv) {
     draw_ticks_total += t2 - t1;
     frame_ms.push_back(static_cast<double>(t1 - t0) * ticks_to_ms);
     work_ms.push_back(static_cast<double>(t2 - t0) * ticks_to_ms);
+    ds::prof::frame_mark();   // marks the emu slice: the present is not in a stage, it lands in "untimed" of work_ms
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
     if (fast && ff_speed <= 0) {
@@ -687,6 +688,7 @@ int main(int argc, char** argv) {
   // display frame actually is. Only worth reading with --no-vsync: with
   // vsync on the present blocks and the tail pins to the refresh.
   ds::frame_report(work_ms, "work");
+  ds::prof::frame_breakdown(frame_ms);
   if (!frame_ms.empty())
     std::fprintf(stderr, "  (emulation only; excluded: present %.1f ms, pacing %.1f ms total over %zu frames)\n",
                  static_cast<double>(draw_ticks_total) * ticks_to_ms,

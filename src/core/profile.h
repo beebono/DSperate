@@ -4,6 +4,7 @@
 #include "core/types.h"
 
 #include <chrono>
+#include <vector>
 
 namespace ds::prof {
 
@@ -13,6 +14,9 @@ enum Stage : u32 {
   CPU9, CPU7, DMA, GX_RUN,
   BG_DRAW, OBJ_DRAW, WINDOW, SELECT, EFFECTS, OUTPUT, CAPTURE,
   R3D_CLEAR, R3D_SPANS, R3D_FINAL, R3D_WAIT, SPU,
+  // Nested inside CPU9/CPU7 (translation runs mid-slice), so it is an
+  // "of which" column: never add it to the others against wall time.
+  JIT_TX,
   COUNT
 };
 extern bool enabled;
@@ -90,6 +94,15 @@ inline void add(Counter c, u64 n) { if (enabled) detail::get()->count[c] += n; }
 inline u64 count(Counter c) { return enabled ? detail::get()->count[c] : 0; }
 inline void add_ns(Stage s, u64 n) { if (enabled) detail::get()->ns[s] += n; }
 void report();
+
+// Per-frame stage series: frame_mark() snapshots the stage accumulators at a
+// frame boundary (call it where the frontend closes its frame_ms sample), and
+// frame_breakdown() then answers the question the whole-run report cannot:
+// what do the p99 frames spend their time on that the typical frame does not?
+// A stage that is 2% of the run but 100% of the spikes is invisible in
+// report() and is exactly what the tail is made of.
+void frame_mark();
+void frame_breakdown(const std::vector<double>& frame_ms);
 
 struct Scope {
   Stage s; std::chrono::steady_clock::time_point t0;

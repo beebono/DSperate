@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/profile.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -18,6 +19,7 @@ const char* const names[COUNT] = {
   "cpu arm9", "cpu arm7", "dma", "gx geometry",
   "2d bg draw", "2d obj draw", "2d window", "2d select", "2d effects", "output", "capture",
   "3d clear", "3d spans", "3d final pass", "3d band wait", "spu",
+  "jit translate",
 };
 
 const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d resolved pixels",
@@ -67,6 +69,97 @@ Accum* make_acc() {
   return a;
 }
 } // namespace detail
+
+// Per-frame stage series. Only the emulation thread's stages are kept per
+// frame: it waits for the slowest band (R3D_WAIT), so its stages sum to the
+// frame's critical path and can be compared against the frontend's wall-clock
+// frame_ms. The band workers' time is folded into one "band workers" column
+// for context -- it overlaps the wait, it does not add to the wall time.
+// Reading the workers' counters here is a census, not a synchronisation:
+// a torn read costs one misattributed nanosecond slice, not a wrong answer.
+namespace {
+struct FrameNs { u64 ns[COUNT]; u64 workers; };
+std::vector<FrameNs> frame_series;
+u64 frame_last_ns[COUNT];
+u64 frame_last_workers;
+} // namespace
+
+void frame_mark() {
+  if (!enabled) return;
+  u64 now[COUNT] = {}; u64 workers = 0;
+  {
+    std::lock_guard<std::mutex> lk(detail::accs_mutex());
+    for (const Accum* a : detail::accs()) {
+      if (a->tid == 0) for (u32 i = 0; i < COUNT; ++i) now[i] = a->ns[i];
+      else             for (u32 i = 0; i < COUNT; ++i) workers += a->ns[i];
+    }
+  }
+  FrameNs d{};
+  for (u32 i = 0; i < COUNT; ++i) { d.ns[i] = now[i] - frame_last_ns[i]; frame_last_ns[i] = now[i]; }
+  d.workers = workers - frame_last_workers;
+  frame_last_workers = workers;
+  frame_series.push_back(d);
+}
+
+void frame_breakdown(const std::vector<double>& frame_ms) {
+  if (!enabled || frame_series.empty() || frame_series.size() != frame_ms.size()) return;
+  const size_t n = frame_ms.size();
+  std::vector<size_t> order(n);
+  for (size_t i = 0; i < n; ++i) order[i] = i;
+  std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return frame_ms[a] < frame_ms[b]; });
+  // p99 group: the slowest 1% (at least one frame). typical group: the middle
+  // fifth, so both boot transients and the spikes themselves stay out of the
+  // baseline.
+  const size_t n99 = std::max<size_t>(1, n / 100);
+  const std::vector<size_t> tail(order.end() - static_cast<long>(n99), order.end());
+  const std::vector<size_t> mid(order.begin() + static_cast<long>(n * 2 / 5),
+                                order.begin() + static_cast<long>(n * 3 / 5));
+  struct Group { double ms = 0, stage[COUNT] = {}, workers = 0, untimed = 0; };
+  auto mean = [&](const std::vector<size_t>& idx) {
+    Group g;
+    for (size_t i : idx) {
+      double timed = 0;
+      for (u32 s = 0; s < COUNT; ++s) { const double v = frame_series[i].ns[s] / 1e6; g.stage[s] += v; timed += v; }
+      g.workers += frame_series[i].workers / 1e6;
+      g.ms += frame_ms[i];
+      g.untimed += frame_ms[i] - timed;
+    }
+    const double k = 1.0 / static_cast<double>(idx.size());
+    g.ms *= k; g.workers *= k; g.untimed *= k;
+    for (u32 s = 0; s < COUNT; ++s) g.stage[s] *= k;
+    return g;
+  };
+  const Group m = mean(mid), t = mean(tail);
+  std::fprintf(stderr, "[frames] stage breakdown, mean of typical (middle 20%%, %zu frames) vs p99 tail (%zu frames), sorted by what the tail adds:\n",
+               mid.size(), tail.size());
+  std::fprintf(stderr, "[frames] %-16s %9s %9s %9s\n", "stage", "typ ms", "p99 ms", "delta");
+  std::vector<u32> rows(COUNT);
+  for (u32 s = 0; s < COUNT; ++s) rows[s] = s;
+  std::sort(rows.begin(), rows.end(), [&](u32 a, u32 b) { return t.stage[a] - m.stage[a] > t.stage[b] - m.stage[b]; });
+  for (u32 s : rows)
+    if (m.stage[s] >= 0.0005 || t.stage[s] >= 0.0005)
+      std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %+9.3f\n", names[s], m.stage[s], t.stage[s], t.stage[s] - m.stage[s]);
+  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %+9.3f   (frame_ms minus timed stages: JIT translate, event/bus work between scopes, sched)\n",
+               "untimed", m.untimed, t.untimed, t.untimed - m.untimed);
+  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %+9.3f   (overlaps the band wait; not part of the wall time)\n",
+               "band workers", m.workers, t.workers, t.workers - m.workers);
+  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %+9.3f\n", "frame total", m.ms, t.ms, t.ms - m.ms);
+  // The worst individual frames, each with its heaviest stages: clusters with
+  // one cause look alike here, mixed causes do not.
+  const size_t worst_n = std::min<size_t>(6, n);
+  std::fprintf(stderr, "[frames] worst %zu frames:\n", worst_n);
+  for (size_t k = 0; k < worst_n; ++k) {
+    const size_t i = order[n - 1 - k];
+    double timed = 0;
+    std::vector<u32> top(COUNT);
+    for (u32 s = 0; s < COUNT; ++s) { top[s] = s; timed += frame_series[i].ns[s] / 1e6; }
+    std::sort(top.begin(), top.end(), [&](u32 a, u32 b) { return frame_series[i].ns[a] > frame_series[i].ns[b]; });
+    std::fprintf(stderr, "[frames]   #%-5zu %7.3f ms:", i, frame_ms[i]);
+    for (size_t s = 0; s < 3 && frame_series[i].ns[top[s]]; ++s)
+      std::fprintf(stderr, " %s %.3f", names[top[s]], frame_series[i].ns[top[s]] / 1e6);
+    std::fprintf(stderr, " untimed %.3f\n", frame_ms[i] - timed);
+  }
+}
 
 // Sum every thread's accumulator. Called from the emulation thread after the
 // band workers are idle, so a plain lock is enough.
