@@ -38,7 +38,8 @@ using namespace ds;
 const char* kUsage =
     "usage: dsperate-sdl <rom.nds> [--bios9 F --bios7 F --firmware F] [options]\n"
     "  --config F      settings file (default ~/.config/dsperate/dsperate.ini; every\n"
-    "                  option below has a key there, and games/<CODE>.ini overrides per title)\n"
+    "                  option below has a key there; games/<rom name>.ini and games/<CODE>.ini\n"
+    "                  override it per game, the filename one winning)\n"
     "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
@@ -260,10 +261,14 @@ int main(int argc, char** argv) {
   nds.reset();
   if (!nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   // The per-game file goes on top of the global one, the command line on top of both.
+  // Title ID first, then the ROM's filename, so the file named like the ROM
+  // wins; that is also where hotkey-picked settings are remembered.
   std::string game_ini;
   if (nds.cart) {
-    game_ini = ds::sdl::Config::game_path(nds.cart->header().game_code);
-    if (cfg.load(game_ini)) std::fprintf(stderr, "config: %s\n", game_ini.c_str());
+    for (const std::string& p : {ds::sdl::Config::game_path_code(nds.cart->header().game_code), ds::sdl::Config::game_path_rom(rom)})
+      if (!p.empty() && cfg.load(p)) std::fprintf(stderr, "config: %s\n", p.c_str());
+    game_ini = ds::sdl::Config::game_path_rom(rom);
+    if (game_ini.empty()) game_ini = ds::sdl::Config::game_path_code(nds.cart->header().game_code);
     apply_cli();
     std::fprintf(stderr, "game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
   }

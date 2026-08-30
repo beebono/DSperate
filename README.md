@@ -141,9 +141,12 @@ input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
 
 Settings live in `~/.config/dsperate/dsperate.ini` (`$XDG_CONFIG_HOME` is
 honoured; `--config F` names another file), written with every key commented
-out on the first run. `games/<GAMECODE>.ini` next to it overrides any of them
-for one title (the code is printed as `game: ... [XXXX]` at start), and the
-command line overrides both. `[paths]` holds the BIOS/firmware so they need not
+out on the first run. Two files next to it override any of its keys for one
+game: `games/<rom name>.ini` (the ROM's filename without `.nds`, the natural
+one to write by hand) and `games/<GAMECODE>.ini` (the four-letter code printed
+as `game: ... [XXXX]` at start, shared by every dump of that title); the
+filename one wins, and is where a layout picked with the hotkey is
+remembered. The command line overrides all of them. `[paths]` holds the BIOS/firmware so they need not
 be passed every time, plus optional `saves` and `states` directories (default:
 next to the ROM). `[keys]` and `[pad]` remap the DS buttons to SDL key and
 controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);

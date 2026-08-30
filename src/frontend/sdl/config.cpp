@@ -40,10 +40,17 @@ std::string Config::dir() {
   return d;
 }
 
-std::string Config::game_path(const char code[4]) {
+std::string Config::game_path_code(const char code[4]) {
   std::string c;
   for (int i = 0; i < 4; ++i) c += (code[i] >= 0x20 && code[i] < 0x7f && code[i] != '/') ? code[i] : '_';
   return dir() + "/games/" + c + ".ini";
+}
+
+std::string Config::game_path_rom(const std::string& rom) {
+  std::string base = rom.substr(rom.find_last_of('/') + 1);
+  if (const size_t dot = base.find_last_of('.'); dot != std::string::npos && dot > 0) base.resize(dot);
+  if (base.empty()) return "";
+  return dir() + "/games/" + base + ".ini";
 }
 
 bool Config::load(const std::string& path) {
@@ -139,9 +146,11 @@ void Config::write_default(const std::string& path, bool force) {
   std::ofstream f(path);
   if (!f) return;
   f <<
-R"(# DSperate settings. Command-line flags override this file; a file named
-# games/<GAMECODE>.ini next to it overrides both for one title (the game
-# code is the four letters printed as "game: ... [XXXX]" at start).
+R"(# DSperate settings. Command-line flags override this file, and two files
+# next to it override it for one game: games/<rom name>.ini (the ROM's
+# filename without .nds) and games/<GAMECODE>.ini (the four letters printed
+# as "game: ... [XXXX]" at start), the filename one winning. A layout picked
+# with the hotkey is remembered in the filename one.
 # Lines starting with # are comments; delete the # to activate a setting.
 
 [paths]

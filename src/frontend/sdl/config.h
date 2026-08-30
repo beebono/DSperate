@@ -12,14 +12,19 @@ namespace ds::sdl {
 // (later loads win, in that order).
 //
 //   ~/.config/dsperate/dsperate.ini          (or $XDG_CONFIG_HOME/dsperate/)
-//   ~/.config/dsperate/games/<GAMECODE>.ini  overrides for one title
+//   ~/.config/dsperate/games/<rom name>.ini  overrides for one ROM file
+//   ~/.config/dsperate/games/<GAMECODE>.ini  overrides for one title (any file)
 //
 // Keys are addressed as "section.key".
 class Config {
 public:
   static std::string dir();                        // the config directory, created on demand
   static std::string global_path() { return dir() + "/dsperate.ini"; }
-  static std::string game_path(const char code[4]);
+  // The per-game files, in load order: the title-ID one first, then the one
+  // named after the ROM file (its basename without the extension), so the
+  // filename wins. Both live in games/; `rom` may be a full path.
+  static std::string game_path_code(const char code[4]);
+  static std::string game_path_rom(const std::string& rom);
 
   bool load(const std::string& path);              // merge a file; false if it does not exist
   void set(const std::string& key, const std::string& value) { kv_[key] = value; }
