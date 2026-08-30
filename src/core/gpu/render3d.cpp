@@ -1407,7 +1407,7 @@ template <int mode, bool textured, bool aa>
   const uint8x8_t pa2id = vand_u8(pa2, vdup_n_u8(0x7F));
   const uint8x8_t v7f8 = vdup_n_u8(0x7F), v0f8 = vdup_n_u8(0x0F), v1f8 = vdup_n_u8(0x1F), v3f8 = vdup_n_u8(0x3F);
   const uint8x8_t one8 = vdup_n_u8(1), v32_8 = vdup_n_u8(32), zero8 = vdup_n_u8(0);
-  auto plot8 = [&](u32 base, const uint32x4_t* m, const uint8x8x4_t& src, const int32x4_t* z) {
+  auto plot8 = [&](u32 base, const uint32x4_t* m, const uint8x8x4_t& src, const int32x4_t* z) __attribute__((always_inline)) {
     const uint8x8x4_t da = vld4_u8(ab + base * 4), dc = vld4_u8(cb + base * 4);
     uint8x8_t m8 = vmovn_u16(vcombine_u16(vmovn_u32(m[0]), vmovn_u32(m[1])));
     m8 = vbic_u8(m8, vceq_u8(vand_u8(da.val[2], v7f8), pa2id));   // equal translucent ids don't blend
@@ -1446,18 +1446,22 @@ template <int mode, bool textured, bool aa>
   // the byte-plane stages take (vld4_u8 over eight records). Lane masks are
   // tested through one 64-bit transfer of the narrowed lanes -- a cross-lane
   // reduction per test is what the in-order core stalls on.
-  auto lanes8 = [](uint32x4_t a, uint32x4_t b) -> u64 {
+  auto lanes8 = [](uint32x4_t a, uint32x4_t b) __attribute__((always_inline)) -> u64 {
     return vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(vcombine_u16(vmovn_u32(a), vmovn_u32(b)))), 0);
   };
   constexpr u64 HALF[2] = {0x00000000FFFFFFFFull, 0xFFFFFFFF00000000ull};
   const bool untextured_passes = !textured && sh.polyalpha > sh.alpha_ref;
   if (!textured && !untextured_passes) return;   // alpha test fails for every pixel
-  for (s32 x = xa; x < xb; x += 8) {
+  // A range of four pixels or fewer takes a single half: the three-part walk
+  // hands the resolve the edge runs of a span separately, and those are one
+  // to three pixels wide -- an eight-lane group there is twice the lane work
+  // for nothing (etody's tail, device A/B 2026-08-30).
+  auto step = [&](auto nh_c, s32 x, s32 rem) __attribute__((always_inline)) {
+    constexpr u32 NH = decltype(nh_c)::value;
     const u32 i = static_cast<u32>(x - sb.x0);
     u64 p8; std::memcpy(&p8, sb.pass + i, 8);
-    const s32 rem = xb - x;
     if (rem < 8) p8 &= (1ull << (8 * rem)) - 1;    // lanes past the end
-    if (!(p8 & 0x0303030303030303ull)) continue;
+    if (!(p8 & 0x0303030303030303ull)) return;
     // The pass bytes as lane vectors straight from memory: no general-register
     // to vector transfer, no per-lane shift to spread a word.
     const uint16x8_t p16 = vmovl_u8(vld1_u8(sb.pass + i));
@@ -1468,8 +1472,8 @@ template <int mode, bool textured, bool aa>
       pv[1] = vandq_u32(pv[1], vcltq_u32(vaddq_u32(lane, vdupq_n_u32(4)), vr));
     }
     const u32 addr = row0 + static_cast<u32>(x), under = addr + RSIZE;
-    uint32x4_t m1[2]; int32x4_t z[2];
-    for (u32 k = 0; k < 2; ++k) { m1[k] = vtstq_u32(pv[k], vdupq_n_u32(1)); z[k] = vld1q_s32(sb.z + i + k * 4); }
+    uint32x4_t m1[2] = {v0, v0}; int32x4_t z[2] = {vdupq_n_s32(0), vdupq_n_s32(0)};
+    for (u32 k = 0; k < NH; ++k) { m1[k] = vtstq_u32(pv[k], vdupq_n_u32(1)); z[k] = vld1q_s32(sb.z + i + k * 4); }
     // Pre-pass bit 1: the top pixel fails the depth test but carries edge
     // flags, so the pixel underneath is a candidate. Its test is done here
     // (the pre-pass only looks at the top layer), and such lanes then take
@@ -1481,11 +1485,11 @@ template <int mode, bool textured, bool aa>
     // pays every extra lane operation on the common path (a single body
     // measured 5 % slower on the span stage for 6 % fewer instructions), so
     // the no-under group must compile to exactly what it was.
-    auto group = [&](auto two_c, const uint32x4_t* m2) {
+    auto group = [&](auto two_c, const uint32x4_t* m2) __attribute__((always_inline)) {
       constexpr bool two = decltype(two_c)::value;
-      uint32x4_t colour[2], a[2], mo[2], mo1[2], mt1[2], mo2[2], mt2[2], dstattr[2], mb[2], kv[2];
-      prof::add(prof::C_RESOLVED_PIXELS, 8);
-      for (u32 k = 0; k < 2; ++k) {
+      uint32x4_t colour[2], a[2], mo[2] = {v0, v0}, mo1[2] = {v0, v0}, mt1[2] = {v0, v0}, mo2[2] = {v0, v0}, mt2[2] = {v0, v0}, dstattr[2], mb[2] = {v0, v0}, kv[2] = {v0, v0};
+      prof::add(prof::C_RESOLVED_PIXELS, NH * 4);
+      for (u32 k = 0; k < NH; ++k) {
         colour[k] = vld1q_u32(sb.col + i + k * 4);
         a[k] = vshrq_n_u32(colour[k], 24);
         uint32x4_t m = m1[k];
@@ -1509,10 +1513,11 @@ template <int mode, bool textured, bool aa>
         // over every opaque pixel of the span, whichever layer it lands on.
         uint32x4_t attr[2] = {vdupq_n_u32(attr_base), vdupq_n_u32(attr_base)};
         if (aa && cov_accum) {
-          u32 t0, t1;
-          const uint32x4_t pre[2] = {prefix_exclusive(vandq_u32(mo[0], vdupq_n_u32(1)), &t0),
-                                     vaddq_u32(prefix_exclusive(vandq_u32(mo[1], vdupq_n_u32(1)), &t1), vdupq_n_u32(t0))};
-          for (u32 k = 0; k < 2; ++k) {
+          u32 t0, t1 = 0;
+          uint32x4_t pre[2];
+          pre[0] = prefix_exclusive(vandq_u32(mo[0], vdupq_n_u32(1)), &t0);
+          if constexpr (NH == 2) pre[1] = vaddq_u32(prefix_exclusive(vandq_u32(mo[1], vdupq_n_u32(1)), &t1), vdupq_n_u32(t0));
+          for (u32 k = 0; k < NH; ++k) {
             const uint32x4_t xc = vshrq_n_u32(vmlaq_u32(vdupq_n_u32(static_cast<u32>(xcov)), pre[k], vdupq_n_u32(static_cast<u32>(cov_step))), 5);
             uint32x4_t cov;
             if (part == 0) cov = vminq_u32(xc, v31);
@@ -1521,7 +1526,7 @@ template <int mode, bool textured, bool aa>
           }
           xcov += cov_step * static_cast<s32>(t0 + t1);
         }
-        for (u32 k = 0; k < 2; ++k) {
+        for (u32 k = 0; k < NH; ++k) {
           const u32 ak = addr + k * 4, uk = under + k * 4;
           if (kinds & (0x0101010101010101ull & HALF[k])) {
             const uint32x4_t dstcol = vld1q_u32(&color_[ak]);
@@ -1554,8 +1559,8 @@ template <int mode, bool textured, bool aa>
       }
     };
     if (p8 & 0x0202020202020202ull) {
-      uint32x4_t m2[2];
-      for (u32 k = 0; k < 2; ++k) {
+      uint32x4_t m2[2] = {v0, v0};
+      for (u32 k = 0; k < NH; ++k) {
         const int32x4_t dz = vld1q_s32(reinterpret_cast<const s32*>(&depth_[under + k * 4]));
         uint32x4_t ok;
         if constexpr (mode == 0) ok = vcltq_s32(z[k], dz);
@@ -1568,9 +1573,14 @@ template <int mode, bool textured, bool aa>
       }
       group(std::true_type{}, m2);
     } else {
-      if (!(p8 & 0x0101010101010101ull)) continue;
+      if (!(p8 & 0x0101010101010101ull)) return;
       group(std::false_type{}, nullptr);
     }
+  };
+  for (s32 x = xa; x < xb;) {
+    const s32 rem = xb - x;
+    if (rem <= 4) { step(std::integral_constant<u32, 1>{}, x, rem); x += 4; }
+    else { step(std::integral_constant<u32, 2>{}, x, rem); x += 8; }
   }
 }
 #endif
