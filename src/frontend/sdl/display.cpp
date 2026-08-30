@@ -396,8 +396,10 @@ bool Display::begin_frame(Target out[SCREENS]) {
   if (dm_) {
     if (u32* px = dm_->begin_frame()) {
       const u32 stride = static_cast<u32>(dm_->width());
-      if (margins_dirty_) { clear_margins(px, stride, dm_->width(), dm_->height()); margins_dirty_ = false; }
-      // Every buffer needs its margins cleared once, not just the first.
+      // Every buffer needs its margins cleared once, not just the one in
+      // hand: a layout change restarts the count, or the other buffers keep
+      // the old layout and flicker it back as they come round.
+      if (margins_dirty_) { dm_margins_ = 0; margins_dirty_ = false; }
       static_assert(DmabufOut::BUFS <= 8, "margin bookkeeping");
       if (dm_margins_ < DmabufOut::BUFS) { clear_margins(px, stride, dm_->width(), dm_->height()); ++dm_margins_; }
       targets(px, stride, out);
