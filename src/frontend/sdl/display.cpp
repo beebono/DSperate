@@ -311,6 +311,43 @@ void Display::build_scale() {
     xr.resize(static_cast<size_t>(SCREEN_W) + 1);
     for (u32 x = 0; x <= SCREEN_W; ++x)
       xr[x] = static_cast<u16>((x * static_cast<u32>(v.rect.w) + SCREEN_W - 1) / SCREEN_W);
+    // Chunky: the even pixel's run is widened over the odd one's, which is
+    // left empty (a zero-length run, which scale_row skips). The destination
+    // coverage is unchanged, so map_point still agrees.
+    cells_[v.screen] = {};
+    bool pair = chunky_;
+    if (chunky_) {
+      // A cell of P panel pixels needs P to divide both dimensions and no
+      // more than 256 cells across; auto takes the smallest P >= 4.
+      const u32 w = static_cast<u32>(v.rect.w), h = static_cast<u32>(v.rect.h);
+      u32 P = 0;
+      auto fits = [&](u32 p) { return p >= 2 && w % p == 0 && h % p == 0 && w / p <= SCREEN_W; };
+      if (chunky_cell_ > 0) { if (fits(static_cast<u32>(chunky_cell_))) P = static_cast<u32>(chunky_cell_); }
+      else if (chunky_cell_ < 0) for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p;
+      ds::gpu::Gpu::CellMap m;
+      if (P && ds::gpu::Gpu::build_cell_axis(SCREEN_W, w / P, P, m.x) && ds::gpu::Gpu::build_cell_axis(SCREEN_H, h / P, P, m.y)) {
+        cells_[v.screen] = std::move(m);
+        pair = false;
+        // The cells' xrun: cell i covers [i*P, (i+1)*P); entries past the
+        // last cell are empty runs.
+        for (u32 x = 0; x <= SCREEN_W; ++x) xr[x] = static_cast<u16>(std::min(x, w / P) * P);
+        std::fprintf(stderr, "video: chunky cells %ux%u of %u px\n", w / P, h / P, P);
+      } else if (chunky_cell_) std::fprintf(stderr, "video: no %s cell divides %ux%u; 2x2 pairs\n", chunky_cell_ > 0 ? "such" : "auto", w, h);
+    }
+    if (pair)
+      for (u32 x = 1; x < SCREEN_W; x += 2) xr[x] = xr[x + 1];
+    // Box-filter weights: the boundary between source pixels s and s+1 lies
+    // at (s+1) * w / 256; when that is fractional the panel pixel it falls in
+    // (the last of run s) covers pixel s+1 by the fractional part. Chunky
+    // pairs share a boundary at s+2's, so the odd boundaries are not seams.
+    std::vector<u8>& sw = seam_w_[v.screen];
+    sw.assign(SCREEN_W, 0);
+    for (u32 s = 0; s + 1 < SCREEN_W; ++s) {
+      if (pair && !(s & 1)) continue;
+      const u32 b = (s + 1) * static_cast<u32>(v.rect.w);
+      const u32 frac = b % SCREEN_W;
+      if (frac && xr[s + 1] > xr[s]) sw[s] = static_cast<u8>((frac * 256) / SCREEN_W);
+    }
     if (!v.direct) side_[v.screen].assign(static_cast<size_t>(v.rect.w) * v.rect.h, 0);
   }
 }
@@ -349,9 +386,9 @@ void Display::targets(u32* px, u32 stride, Target out[SCREENS]) {
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (v.direct)
-      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data()};
+      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data()};
     else
-      out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data()};
+      out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data()};
   }
 }
 

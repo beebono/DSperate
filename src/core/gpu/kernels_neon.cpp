@@ -557,6 +557,109 @@ void scale_row(const u32* src, const u16* xrun, u32* dst) {
   }
 }
 
+void scale_row_straddle(const u32* src, const u32* seam, const u8* w, const u16* xrun, u32* dst) {
+  for (u32 s = 0; s < 256; ++s) {
+    const u32 c = src[s];
+    u32 x = xrun[s];
+    const u32 end = xrun[s + 1];
+    const u32 n = end - x;
+    if (!w[s] || n == 0) {
+      const uint32x4_t v = vdupq_n_u32(c);
+      for (; x + 4 <= end; x += 4) vst1q_u32(dst + x, v);
+      for (; x < end; ++x) dst[x] = c;
+      continue;
+    }
+    const u32 cs = seam[s];
+    switch (n) {
+    case 1: dst[x] = cs; break;
+    case 2: vst1_u32(dst + x, uint32x2_t{c, cs}); break;
+    case 3: vst1_u32(dst + x, vdup_n_u32(c)); dst[x + 2] = cs; break;
+    default: {
+      const u32 last = end - 1;
+      const uint32x4_t v = vdupq_n_u32(c);
+      for (; x + 4 <= last; x += 4) vst1q_u32(dst + x, v);
+      for (; x < last; ++x) dst[x] = c;
+      dst[last] = cs;
+    }
+    }
+  }
+}
+
+// (a * 256 + b * w - a * w + 128) >> 8 per byte, in 16-bit lanes: the
+// intermediate wraps but the true value is at most 255 * 256 + 128, so the
+// wrapped sum is exact. Each pixel's weight is spread over its four bytes.
+void blend_line_w(const u32* a, const u32* b, const u8* w, u32* out) {
+  const uint8x8_t k128 = vdup_n_u8(128);
+  for (u32 i = 0; i < 256; i += 4) {
+    const uint8x16_t va = vreinterpretq_u8_u32(vld1q_u32(a + i)), vb = vreinterpretq_u8_u32(vld1q_u32(b + i));
+    const uint8x8_t w4 = vreinterpret_u8_u32(vdup_n_u32(*reinterpret_cast<const u32*>(w + i)));
+    const uint8x8x2_t z1 = vzip_u8(w4, w4);              // w0 w0 w1 w1 w2 w2 w3 w3 ...
+    const uint8x8x2_t z2 = vzip_u8(z1.val[0], z1.val[0]); // w0 w0 w0 w0 w1 w1 w1 w1 | w2 w2 w2 w2 w3 w3 w3 w3
+    const uint8x8_t wlo = z2.val[0], whi = z2.val[1];
+    uint16x8_t tlo = vshll_n_u8(vget_low_u8(va), 8), thi = vshll_n_u8(vget_high_u8(va), 8);
+    tlo = vmlal_u8(tlo, vget_low_u8(vb), wlo);  thi = vmlal_u8(thi, vget_high_u8(vb), whi);
+    tlo = vmlsl_u8(tlo, vget_low_u8(va), wlo);  thi = vmlsl_u8(thi, vget_high_u8(va), whi);
+    tlo = vaddw_u8(tlo, k128);                  thi = vaddw_u8(thi, k128);
+    vst1q_u32(out + i, vreinterpretq_u32_u8(vcombine_u8(vshrn_n_u16(tlo, 8), vshrn_n_u16(thi, 8))));
+  }
+}
+
+// The dimmed copies of the 256 source pixels are made first, four at a time
+// (bytes widened to 16 bits, multiplied by f with alpha's lane at 256, and
+// narrowed back), then the runs are filled as scale_row does. Every
+// destination pixel is stored exactly once: the destination is usually a
+// write-combined dmabuf, where a scalar store landing on top of a vector
+// store's last lane costs a second bus write. Runs of two and three (every
+// scale the handhelds use) are one or two stores each.
+void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool seam_row, u32* dst) {
+  if (min_run < 2) min_run = 2;
+  alignas(16) u32 dimmed[256];
+  // f == 0 (black seams: the "integer scale, leave the spare pixels dark"
+  // look) needs no dimmed copies at all: every seam is the one constant.
+  if (f == 0) {
+    if (seam_row) {
+      const u32 w = xrun[256];
+      const uint32x4_t k = vdupq_n_u32(0xFF000000u);
+      u32 x = 0;
+      for (; x + 4 <= w; x += 4) vst1q_u32(dst + x, k);
+      for (; x < w; ++x) dst[x] = 0xFF000000u;
+      return;
+    }
+    for (u32& d : dimmed) d = 0xFF000000u;
+  } else {
+    const uint16x8_t fv = {static_cast<u16>(f), static_cast<u16>(f), static_cast<u16>(f), 256,
+                           static_cast<u16>(f), static_cast<u16>(f), static_cast<u16>(f), 256};
+    for (u32 s = 0; s < 256; s += 4) {
+      const uint8x16_t c = vreinterpretq_u8_u32(vld1q_u32(src + s));
+      const uint16x8_t lo = vmulq_u16(vmovl_u8(vget_low_u8(c)), fv), hi = vmulq_u16(vmovl_u8(vget_high_u8(c)), fv);
+      vst1q_u32(dimmed + s, vreinterpretq_u32_u8(vcombine_u8(vshrn_n_u16(lo, 8), vshrn_n_u16(hi, 8))));
+    }
+    if (seam_row) { scale_row(dimmed, xrun, dst); return; }
+  }
+  for (u32 s = 0; s < 256; ++s) {
+    const u32 c = src[s], cd = dimmed[s];
+    u32 x = xrun[s];
+    const u32 end = xrun[s + 1];
+    const u32 n = end - x;
+    if (n < min_run) {                                   // plain run, as scale_row
+      const uint32x4_t v = vdupq_n_u32(c);
+      for (; x + 4 <= end; x += 4) vst1q_u32(dst + x, v);
+      for (; x < end; ++x) dst[x] = c;
+      continue;
+    }
+    switch (n) {
+    case 2: vst1_u32(dst + x, uint32x2_t{cd, c}); break;
+    case 3: dst[x] = cd; vst1_u32(dst + x + 1, vdup_n_u32(c)); break;
+    default: {
+      dst[x++] = cd;
+      const uint32x4_t v = vdupq_n_u32(c);
+      for (; x + 4 <= end; x += 4) vst1q_u32(dst + x, v);
+      for (; x < end; ++x) dst[x] = c;
+    }
+    }
+  }
+}
+
 
 // ---- 3D span stages ------------------------------------------------------------
 // Four pixels per step (the buffers are 256 wide, so rounding `n` up is safe).

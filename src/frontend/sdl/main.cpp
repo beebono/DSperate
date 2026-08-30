@@ -48,6 +48,17 @@ const char* kUsage =
     "  --dual-window   one window per video display, one DS screen each (dual-panel\n"
     "                  handhelds; also what direct scanout needs on them)\n"
     "  --linear        smooth scaling instead of nearest\n"
+    "  --lcd-grid S    LCD pixel grid strength, 0 (off, default) .. 1 (software scaling only)\n"
+    "  --seam S        dark (default): the LCD grid, dimmed by --lcd-grid | blend: box-filter seams\n"
+    "                  (sharp-shimmerless): the one panel pixel/row that straddles two DS pixels is their\n"
+    "                  area-weighted blend, all others crisp | blend_linear: the same in linear light\n"
+    "  --chunky [M]    draw each 2x2 block of DS pixels as one cell (with the grid, one seam per\n"
+    "                  block); lower resolution, for panels at fractional scales. M: mean (default;\n"
+    "                  the area-weighted box) | extreme (the mean, unless the darkest or brightest\n"
+    "                  pixel stands more than --chunky-threshold N (0..255, default 180) from it) |\n"
+    "                  mode (dominant colour, mean when all differ) | tl (top-left pixel) | min | max\n"
+    "  --chunky-cell C panel pixels per chunky cell: auto (default; the smallest of 4..16 that divides the\n"
+    "                  screen, 4 on a 640x480 panel = 160x120 cells) | pair (2x2 DS pixels) | N\n"
     "  --accel         GPU renderer; the default is software, which measures faster\n"
     "                  on the handhelds (the GL driver's threads cost more than the scale)\n"
     "  --no-audio      run without sound (frames are paced by the clock)\n"
@@ -233,6 +244,11 @@ int main(int argc, char** argv) {
     else if (arg("--save")) save_arg = argv[++i];
     else if (flag("--fullscreen")) cli.set("video.fullscreen", "true");
     else if (flag("--linear")) cli.set("video.linear", "true");
+    else if (arg("--lcd-grid")) cli.set("video.lcd_grid", argv[++i]);
+    else if (flag("--chunky")) cli.set("video.chunky", i + 1 < argc && argv[i + 1][0] != '-' ? argv[++i] : "mean");
+    else if (arg("--chunky-threshold")) cli.set("video.chunky_threshold", argv[++i]);
+    else if (arg("--chunky-cell")) cli.set("video.chunky_cell", argv[++i]);
+    else if (arg("--seam")) cli.set("video.seam", argv[++i]);
     else if (flag("--accel")) cli.set("video.accel", "true");
     else if (flag("--no-audio")) cli.set("audio.enabled", "false");
     else if (arg("--volume")) cli.set("audio.volume", argv[++i]);
@@ -252,7 +268,7 @@ int main(int argc, char** argv) {
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
-                                              "video.fullscreen", "video.linear", "video.accel", "video.vsync", "audio.enabled", "audio.volume",
+                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
@@ -280,6 +296,30 @@ int main(int argc, char** argv) {
   int scale = cfg.num("video.scale", 2);
   if (scale < 1) scale = 1;
   const bool fullscreen = cfg.flag("video.fullscreen", false), linear = cfg.flag("video.linear", false), accel = cfg.flag("video.accel", false);
+  // Grid strength -> brightness kept on the seams, 0..256 (256 = off).
+  const double grid_s = std::min(1.0, std::max(0.0, cfg.real("video.lcd_grid", 0.0)));
+  const u32 grid = static_cast<u32>(std::lround((1.0 - grid_s) * 256.0));
+  u8 seam_blend = 0;
+  {
+    const std::string sm = cfg.str("video.seam", "dark");
+    if (sm == "blend") seam_blend = 1; else if (sm == "blend_linear") seam_blend = 2;
+    else if (sm != "dark") { std::fprintf(stderr, "unknown seam %s (dark | blend | blend_linear)\n", sm.c_str()); return 2; }
+  }
+  u8 chunky = 0;
+  int chunky_cell = -1;
+  {
+    const std::string c = cfg.str("video.chunky_cell", "auto");
+    if (c == "auto") chunky_cell = -1; else if (c == "pair" || c == "2x") chunky_cell = 0;
+    else { chunky_cell = std::atoi(c.c_str()); if (chunky_cell < 2 || chunky_cell > 64) { std::fprintf(stderr, "chunky_cell %s: auto | pair | 2..64\n", c.c_str()); return 2; } }
+  }
+  const u32 chunky_thresh = static_cast<u32>(std::min(255, std::max(0, cfg.num("video.chunky_threshold", 180)))) * 256;
+  {
+    const std::string c = cfg.str("video.chunky", "false");
+    if (c == "tl") chunky = 1; else if (c == "mean" || c == "true" || c == "1" || c == "yes" || c == "on") chunky = 2;
+    else if (c == "min") chunky = 4; else if (c == "max") chunky = 5; else if (c == "mode") chunky = 3;
+    else if (c == "extreme") chunky = 6;
+    else if (!(c == "false" || c == "0" || c == "no" || c == "off" || c.empty())) { std::fprintf(stderr, "unknown chunky %s (mean | extreme | mode | tl | min | max | false)\n", c.c_str()); return 2; }
+  }
   bool audio_on = cfg.flag("audio.enabled", true), mic_on = cfg.flag("audio.mic", true);
   const bool jit = cfg.flag("emu.jit", true), vsync = cfg.flag("video.vsync", true), dual_window = cfg.flag("video.dual_window", false);
   const long quantum = cfg.num("emu.quantum", 0);   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
@@ -350,6 +390,7 @@ int main(int argc, char** argv) {
 
   ds::sdl::Display display;
   ds::sdl::Display display2;   // dual-window: the bottom screen's own window
+  int bottom_display = 1;
   if (dual_window) {
     if (SDL_GetNumVideoDisplays() < 2) { std::fprintf(stderr, "--dual-window needs two video displays\n"); SDL_Quit(); return 1; }
     // Which display is the physical bottom panel depends on the driver, both
@@ -357,11 +398,12 @@ int main(int argc, char** argv) {
     // which is -- unintuitively -- the lower panel, while sway's canvas
     // arranges the outputs the other way around.
     const char* vd = SDL_GetCurrentVideoDriver();
-    const int bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
+    bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
+    display.set_chunky(chunky != 0, chunky_cell); display2.set_chunky(chunky != 0, chunky_cell);
     if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel, 0, 1 - bottom_display) ||
         !display2.open("DSperate (bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
-  } else if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; }
+  } else { display.set_chunky(chunky != 0, chunky_cell); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; } }
 
   ds::sdl::Audio audio;
   if (audio_on) audio.open();
@@ -559,7 +601,8 @@ int main(int argc, char** argv) {
       if (dual_window) scaled = display2.begin_frame(target) && scaled;
     }
     for (int i = 0; i < 2; ++i)
-      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun}
+      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, grid, chunky, chunky_thresh, seam_blend, target[i].seam_w,
+                                                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i))}
                                          : ds::gpu::Gpu::ScaleTarget{});
 
     const Uint64 t0 = SDL_GetPerformanceCounter();

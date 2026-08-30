@@ -1,3 +1,4 @@
+#include <vector>
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
@@ -107,11 +108,36 @@ public:
   // finished framebuffer re-reads it cold, and that read is what makes the
   // separate pass slow. fb_ is left untouched while a target is set; nothing
   // else reads it (display capture works off the engine's own output).
+  // Chunky with a cell of P panel pixels: cells_x * cells_y cells, each an
+  // area-weighted box of the DS pixels it covers (k = 256 / cells_x of them
+  // per axis, not necessarily an integer). Per axis, cell i takes taps
+  // first[i] .. first[i] + n[i] - 1 with weights w[i][..] summing to 256.
+  static constexpr u32 CELL_TAPS = 8;
+  struct CellAxis {
+    u32 cells = 0, cell_px = 0;      // count, and panel pixels per cell
+    std::vector<u16> first;          // per cell
+    std::vector<u8>  n;
+    std::vector<u16> w;              // cells * CELL_TAPS
+  };
+  struct CellMap { CellAxis x, y; };
+  // Fills `a` for `cells` cells over `src_n` source pixels, `cell_px` panel
+  // pixels each. False if a cell would need more than CELL_TAPS taps.
+  static bool build_cell_axis(u32 src_n, u32 cells, u32 cell_px, CellAxis& a);
+
   struct ScaleTarget {
     u32* px = nullptr;          // top-left of this screen's rect in the frontend's buffer
     u32 pitch = 0;              // destination pitch, in u32
     u32 h = 0;                  // destination rect height, in pixels
     const u16* xrun = nullptr;  // 257 entries; see kern::scale_row
+    u32 grid = 256;             // LCD grid: brightness kept on the grid lines, 0..256 (256 = no grid)
+    u8 chunky = 0;              // 0 off; else each 2x2 block of DS pixels is one cell (xrun merges pixel pairs):
+                                // 1 top-left pixel, 2 mean of the four, 3 dominant colour (mean when all differ),
+                                // 4 darkest, 5 brightest, 6 the one whose luma is farthest from the mean, if by more
+                                // than chunky_thresh (else the mean)
+    u32 chunky_thresh = 180 * 256;  // luma units (0..255 * 256); mode 6 only
+    u8 blend = 0;               // box-filter seams (sharp-shimmerless): 1 blend in sRGB, 2 in linear light
+    const u8* seam_w = nullptr; // 256 entries: weight (0..255 = 0..1) of pixel s+1 in run s's last pixel; 0 = no straddle
+    const CellMap* cells = nullptr; // chunky with a panel-sized cell (see CellMap); null = the 2x2 pair path
   };
   // Both screens or neither: pass a null `px` to go back to fb_.
   void set_scale_target(int screen, const ScaleTarget& t) { scale_[screen] = t; }
@@ -135,6 +161,16 @@ private:
   bool run_fifo_ = false;
   std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb_{};
   ScaleTarget scale_[2];
+  alignas(16) u32 chunk_even_[2][SCREEN_W];   // chunky: the even line, held until the odd one completes the block
+  alignas(16) u32 seam_prev_[2][SCREEN_W];    // blend: the previous source row, for the straddling row
+  u32 seam_prev_line_[2] = {~0u, ~0u};
+  // Cell chunky: the last CELL_TAPS source lines, a ring by line number
+  // (adjacent cell rows share a line, so a row's taps are read from it).
+  alignas(16) u32 cell_lines_[2][CELL_TAPS][SCREEN_W];
+  u32 cell_row_[2] = {0, 0};        // the cell row being gathered
+  void emit_cells(int screen, u32 line, const u32* src);
+  void emit_row_straddle(const ScaleTarget& t, const u32* src, u32* dst);
+  void blend_rows(const ScaleTarget& t, const u32* a, const u32* b, u32 w, u32* out);
   // The output stage's line buffer when scaling: output_line writes here
   // instead of into fb_, at the same cost, and scale_row reads it back hot.
   alignas(16) std::array<std::array<u32, SCREEN_W>, 2> line_out_{};

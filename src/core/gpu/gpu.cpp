@@ -8,6 +8,7 @@
 #include "core/profile.h"
 
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 
@@ -484,16 +485,293 @@ void Gpu::output_engine(int e, u32 line) {
 // [ceil(line*h/192), ceil((line+1)*h/192)) -- usually two or three of them.
 // The first is scaled and the rest copied from it: at that point it is the
 // hottest line in the machine, and a copy beats redoing the run fill.
+// Mean of four 0xAARRGGBB pixels, per channel, alpha forced opaque.
+static inline u32 mean4(u32 a, u32 b, u32 c, u32 d) {
+  const u32 rb = (((a & 0xFF00FFu) + (b & 0xFF00FFu) + (c & 0xFF00FFu) + (d & 0xFF00FFu) + 0x020002u) >> 2) & 0xFF00FFu;
+  const u32 g  = (((a & 0xFF00u) + (b & 0xFF00u) + (c & 0xFF00u) + (d & 0xFF00u) + 0x0200u) >> 2) & 0xFF00u;
+  return 0xFF000000u | rb | g;
+}
+// The colour at least two of the four share (ties to the earlier pixel), or their mean when all differ.
+static inline u32 mode4(u32 a, u32 b, u32 c, u32 d) {
+  if (a == b || a == c || a == d) return a;
+  if (b == c || b == d) return b;
+  if (c == d) return c;
+  return mean4(a, b, c, d);
+}
+
+// Rec.601-ish luma, 0..255*256.
+static inline u32 luma(u32 c) { return ((c >> 16) & 255) * 77 + ((c >> 8) & 255) * 150 + (c & 255) * 29; }
+static inline u32 min4(u32 a, u32 b, u32 c, u32 d) {
+  u32 best = a, bl = luma(a);
+  for (u32 p : {b, c, d}) { const u32 l = luma(p); if (l < bl) { best = p; bl = l; } }
+  return best;
+}
+static inline u32 max4(u32 a, u32 b, u32 c, u32 d) {
+  u32 best = a, bl = luma(a);
+  for (u32 p : {b, c, d}) { const u32 l = luma(p); if (l > bl) { best = p; bl = l; } }
+  return best;
+}
+// The darkest or brightest of the four, whichever stands farther from the
+// block's mean luma, when that is by more than `thr` -- keeps a thin stroke
+// whatever its polarity while dithers and gradients (small deviations)
+// average; the mean otherwise, and when both are equally far.
+static inline u32 extreme4(u32 a, u32 b, u32 c, u32 d, u32 thr) {
+  const u32 lo = min4(a, b, c, d), hi = max4(a, b, c, d);
+  const u32 m = (luma(a) + luma(b) + luma(c) + luma(d)) / 4;
+  const u32 dlo = m - luma(lo), dhi = luma(hi) - m;
+  if (dlo <= thr && dhi <= thr) return mean4(a, b, c, d);
+  return dlo > dhi ? lo : dhi > dlo ? hi : mean4(a, b, c, d);
+}
+
+// sRGB <-> linear for the linear-light blend: 8-bit sRGB to 12-bit linear
+// and back, built once.
+namespace {
+struct GammaLut {
+  u16 to_lin[256];
+  u8 from_lin[4096];
+  GammaLut() {
+    for (u32 i = 0; i < 256; ++i) {
+      const double c = i / 255.0;
+      const double l = c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+      to_lin[i] = static_cast<u16>(std::lround(l * 4095.0));
+    }
+    for (u32 i = 0; i < 4096; ++i) {
+      const double l = i / 4095.0;
+      const double c = l <= 0.0031308 ? l * 12.92 : 1.055 * std::pow(l, 1.0 / 2.4) - 0.055;
+      from_lin[i] = static_cast<u8>(std::lround(c * 255.0));
+    }
+  }
+};
+const GammaLut& gamma_lut() { static const GammaLut lut; return lut; }
+
+// Per-pixel weighted blend in linear light; w per pixel as blend_line_w.
+void blend_line_linear(const u32* a, const u32* b, const u8* w, u32* out) {
+  const GammaLut& g = gamma_lut();
+  for (u32 i = 0; i < 256; ++i) {
+    const u32 f = w[i];
+    if (!f) { out[i] = a[i]; continue; }
+    u32 r = 0xFF000000u;
+    for (u32 sh = 0; sh < 24; sh += 8) {
+      const u32 la = g.to_lin[(a[i] >> sh) & 255], lb = g.to_lin[(b[i] >> sh) & 255];
+      r |= static_cast<u32>(g.from_lin[(la * (256 - f) + lb * f + 128) >> 8]) << sh;
+    }
+    out[i] = r;
+  }
+}
+} // namespace
+
+void Gpu::blend_rows(const ScaleTarget& t, const u32* a, const u32* b, u32 w, u32* out) {
+  alignas(16) u8 wt[SCREEN_W];
+  std::memset(wt, static_cast<int>(w), sizeof wt);
+  if (t.blend == 2) blend_line_linear(a, b, wt, out); else kern::active::blend_line_w(a, b, wt, out);
+}
+
+// One row with box-filter seams: the last pixel of a run that straddles two
+// source pixels is their area-weighted blend (the previous block in chunky
+// mode is never straddled: its boundaries are integer).
+void Gpu::emit_row_straddle(const ScaleTarget& t, const u32* src, u32* dst) {
+  alignas(16) u32 next[SCREEN_W], seam[SCREEN_W];
+  std::memcpy(next, src + 1, (SCREEN_W - 1) * sizeof(u32));
+  next[SCREEN_W - 1] = src[SCREEN_W - 1];
+  if (t.blend == 2) blend_line_linear(src, next, t.seam_w, seam); else kern::active::blend_line_w(src, next, t.seam_w, seam);
+  kern::active::scale_row_straddle(src, seam, t.seam_w, t.xrun, dst);
+}
+
+bool Gpu::build_cell_axis(u32 src_n, u32 cells, u32 cell_px, CellAxis& a) {
+  a.cells = cells; a.cell_px = cell_px;
+  a.first.assign(cells, 0); a.n.assign(cells, 0); a.w.assign(static_cast<size_t>(cells) * CELL_TAPS, 0);
+  for (u32 i = 0; i < cells; ++i) {
+    // Cell i covers source [i*src_n/cells, (i+1)*src_n/cells); tap weights
+    // are the overlap over the cell's width, in 1/256, the last one fixed
+    // so that they sum to 256 exactly.
+    const u32 lo = i * src_n, hi = (i + 1) * src_n;         // in 1/cells units
+    const u32 s0 = lo / cells, s1 = (hi + cells - 1) / cells; // taps [s0, s1)
+    if (s1 - s0 > CELL_TAPS) return false;
+    a.first[i] = static_cast<u16>(s0); a.n[i] = static_cast<u8>(s1 - s0);
+    u32 sum = 0;
+    for (u32 s = s0; s < s1; ++s) {
+      const u32 olo = std::max(lo, s * cells), ohi = std::min(hi, (s + 1) * cells);
+      u32 w = ((ohi - olo) * 256 + src_n / 2) / src_n;
+      if (s + 1 == s1) w = 256 - sum;
+      sum += w;
+      a.w[static_cast<size_t>(i) * CELL_TAPS + (s - s0)] = static_cast<u16>(w);
+    }
+  }
+  return true;
+}
+
+// One cell row: every cell's colour from its taps in the held lines, then
+// the row of cells drawn as `cell_px` panel rows (the first the seam row
+// when the grid is on) through the grid kernel with the cells' xrun.
+void Gpu::emit_cells(int screen, u32 line, const u32* src) {
+  const ScaleTarget& t = scale_[screen];
+  const CellMap& m = *t.cells;
+  const u32 j = cell_row_[screen];
+  if (j >= m.y.cells) return;
+  const u32 l0 = m.y.first[j], ln = m.y.n[j];
+  std::memcpy(cell_lines_[screen][line % CELL_TAPS], src, SCREEN_W * sizeof(u32));
+  if (line + 1 < l0 + ln) return;
+  auto held = [&](u32 v) { return cell_lines_[screen][(l0 + v) % CELL_TAPS]; };
+  // The row is complete.
+  alignas(16) u32 cells[SCREEN_W];
+  const bool linear = t.blend == 2;
+  const GammaLut& g = gamma_lut();
+  const u16* wy = &m.y.w[static_cast<size_t>(j) * CELL_TAPS];
+  for (u32 i = 0; i < m.x.cells; ++i) {
+    const u32 s0 = m.x.first[i], sn = m.x.n[i];
+    const u16* wx = &m.x.w[static_cast<size_t>(i) * CELL_TAPS];
+    // Mean: the 2D box (weights in 1/65536), in sRGB or linear light.
+    u32 acc[3] = {0, 0, 0};
+    for (u32 v = 0; v < ln; ++v) for (u32 u = 0; u < sn; ++u) {
+      const u32 c = held(v)[s0 + u], wt = wx[u] * wy[v];
+      for (u32 ch = 0; ch < 3; ++ch) { const u32 b = (c >> (8 * ch)) & 255; acc[ch] += (linear ? g.to_lin[b] : b) * wt; }
+    }
+    u32 mean = 0xFF000000u;
+    for (u32 ch = 0; ch < 3; ++ch) {
+      const u32 v = (acc[ch] + 32768) >> 16;
+      mean |= static_cast<u32>(linear ? g.from_lin[std::min<u32>(v, 4095)] : v) << (8 * ch);
+    }
+    u32 out = mean;
+    if (t.chunky != 2) {
+      // The other modes work on the pixels that are mostly inside the cell
+      // (at least half covered on both axes); the largest-coverage pixel
+      // stands in for "top-left".
+      u32 cand[CELL_TAPS * CELL_TAPS]; u32 nc = 0;
+      u32 best = 0, bestw = 0;
+      for (u32 v = 0; v < ln; ++v) for (u32 u = 0; u < sn; ++u) {
+        const u32 wt = wx[u] * wy[v];
+        if (wt > bestw) { bestw = wt; best = held(v)[s0 + u]; }
+        if (wx[u] >= 128 && wy[v] >= 128) cand[nc++] = held(v)[s0 + u];
+      }
+      if (nc == 0) cand[nc++] = best;
+      switch (t.chunky) {
+      case 1: out = best; break;
+      case 3: {   // dominant: the most repeated candidate, ties to the earlier; the mean when all differ
+        u32 bc = 0; out = mean;
+        for (u32 a = 0; a < nc; ++a) { u32 cnt = 0; for (u32 b = 0; b < nc; ++b) cnt += cand[b] == cand[a]; if (cnt > bc && cnt >= 2) { bc = cnt; out = cand[a]; } }
+        break;
+      }
+      case 4: { out = cand[0]; for (u32 a = 1; a < nc; ++a) if (luma(cand[a]) < luma(out)) out = cand[a]; break; }
+      case 5: { out = cand[0]; for (u32 a = 1; a < nc; ++a) if (luma(cand[a]) > luma(out)) out = cand[a]; break; }
+      default: {  // extreme: the darkest or brightest candidate, if farther than the threshold from the mean
+        u32 lo = cand[0], hi = cand[0];
+        for (u32 a = 1; a < nc; ++a) { if (luma(cand[a]) < luma(lo)) lo = cand[a]; if (luma(cand[a]) > luma(hi)) hi = cand[a]; }
+        const u32 lm = luma(mean), dlo = lm > luma(lo) ? lm - luma(lo) : 0, dhi = luma(hi) > lm ? luma(hi) - lm : 0;
+        out = (dlo <= t.chunky_thresh && dhi <= t.chunky_thresh) ? mean : dlo > dhi ? lo : dhi > dlo ? hi : mean;
+      }
+      }
+    }
+    cells[i] = out;
+  }
+  for (u32 i = m.x.cells; i < SCREEN_W; ++i) cells[i] = 0;
+  // Draw: rows [j*P, (j+1)*P), the first the seam row.
+  const u32 P = m.y.cell_px;
+  const u32 y0 = j * P;
+  const size_t bytes = static_cast<size_t>(t.xrun[SCREEN_W]) * sizeof(u32);
+  const bool grid = t.grid < 256;
+  u32* row = t.px + static_cast<size_t>(y0 + (grid ? 1 : 0)) * t.pitch;
+  if (grid) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, false, row);
+  else      kern::active::scale_row(cells, t.xrun, row);
+  for (u32 y = y0 + (grid ? 2 : 1); y < y0 + P; ++y)
+    std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
+  if (grid) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, true, t.px + static_cast<size_t>(y0) * t.pitch);
+  cell_row_[screen] = j + 1;
+}
+
 void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   const ScaleTarget& t = scale_[screen];
-  const u32 y0 = (line * t.h + SCREEN_H - 1) / SCREEN_H;
-  const u32 y1 = ((line + 1) * t.h + SCREEN_H - 1) / SCREEN_H;
+  if (t.chunky && t.cells) {
+    if (line == 0) cell_row_[screen] = 0;
+    emit_cells(screen, line, src);
+    return;
+  }
+  u32 first = line, last = line;
+  alignas(16) u32 block[SCREEN_W];
+  if (t.chunky) {
+    // Each 2x2 block of DS pixels is one cell (the frontend's xrun merges
+    // the pixel pairs; the line pair is merged here). Top-left draws from
+    // the even line as it arrives; mean and mode hold the even line and
+    // resolve the block when the odd one completes it. Only the even
+    // pixels' entries are read (the odd runs are empty).
+    if (t.chunky == 1) { if (line & 1) return; last = line + 1; }
+    else {
+      if (!(line & 1)) { std::memcpy(chunk_even_[screen], src, sizeof block); return; }
+      first = line - 1;
+      const u32* up = chunk_even_[screen];
+      switch (t.chunky) {
+      case 2:  for (u32 s = 0; s < SCREEN_W; s += 2) block[s] = mean4(up[s], up[s + 1], src[s], src[s + 1]); break;
+      case 3:  for (u32 s = 0; s < SCREEN_W; s += 2) block[s] = mode4(up[s], up[s + 1], src[s], src[s + 1]); break;
+      case 4:  for (u32 s = 0; s < SCREEN_W; s += 2) block[s] = min4(up[s], up[s + 1], src[s], src[s + 1]); break;
+      case 5:  for (u32 s = 0; s < SCREEN_W; s += 2) block[s] = max4(up[s], up[s + 1], src[s], src[s + 1]); break;
+      default: for (u32 s = 0; s < SCREEN_W; s += 2) block[s] = extreme4(up[s], up[s + 1], src[s], src[s + 1], t.chunky_thresh); break;
+      }
+      src = block;
+    }
+  }
+  const u32 y0 = (first * t.h + SCREEN_H - 1) / SCREEN_H;
+  const u32 y1 = ((last + 1) * t.h + SCREEN_H - 1) / SCREEN_H;
   if (y0 >= y1) return;                      // downscale: this line is dropped
   u32* row = t.px + static_cast<size_t>(y0) * t.pitch;
-  kern::active::scale_row(src, t.xrun, row);
   const size_t bytes = static_cast<size_t>(t.xrun[SCREEN_W]) * sizeof(u32);
-  for (u32 y = y0 + 1; y < y1; ++y)
+  if (t.blend && t.seam_w) {
+    // Box-filter seams (sharp-shimmerless): a panel pixel or row that
+    // straddles two source pixels or lines is their area-weighted blend,
+    // every other one is nearest. The straddling row of this span is its
+    // last, and needs the next line, so it is written when that arrives;
+    // the crisp rows go out now.
+    const u32 hb = (last + 1) * t.h;                 // this span's lower boundary, in 1/192 rows
+    const bool straddle_below = (hb % SCREEN_H) != 0 && last + 1 < SCREEN_H;
+    const u32 ycrisp_end = straddle_below ? y1 - 1 : y1;
+    if (ycrisp_end > y0) {
+      emit_row_straddle(t, src, row);
+      for (u32 y = y0 + 1; y < ycrisp_end; ++y)
+        std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
+    }
+    // The row above this span straddles the previous line and this one.
+    if (first > 0 && seam_prev_line_[screen] + 1 == first) {
+      const u32 tb = first * t.h;                    // this span's upper boundary
+      const u32 frac = tb % SCREEN_H;
+      if (frac) {
+        alignas(16) u32 mid[SCREEN_W];
+        blend_rows(t, seam_prev_[screen], src, (frac * 256) / SCREEN_H, mid);   // weight of this line
+        emit_row_straddle(t, mid, t.px + static_cast<size_t>(y0 - 1) * t.pitch);
+      }
+    }
+    std::memcpy(seam_prev_[screen], src, sizeof seam_prev_[screen]);
+    seam_prev_line_[screen] = last;
+    return;
+  }
+  if (t.grid >= 256) {
+    kern::active::scale_row(src, t.xrun, row);
+    for (u32 y = y0 + 1; y < y1; ++y)
+      std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
+    return;
+  }
+  // LCD grid: the last output column of every source pixel's run and the last
+  // output row of every source line's span are dimmed, so each DS pixel shows
+  // as a lit cell with a dark seam right and below. Runs are whatever the
+  // fractional scale hands out (2 and 3 wide at 2.5x), so the seams are not
+  // evenly spaced there -- a one-pixel seam per DS pixel is what a panel
+  // that size can honestly show. A run of one pixel is left alone: dimming
+  // it would erase the pixel, not outline it. The seam row is scaled from
+  // the source too, so the corner where the two seams meet is dimmed once.
+  //
+  // Only runs the fractional part of the scale widened carry a seam
+  // (min_run = ceil(scale)): the lit cell keeps the integer size everywhere,
+  // and at 2.5x the seams fall on every other DS pixel rather than every
+  // other DS pixel being half-width. The seam leads its run (see
+  // scale_row_grid), so the seam row is the span's first row and the plain
+  // row is built below it. At an integer scale every run qualifies. Rows
+  // follow the same rule as columns.
+  const u32 w = t.xrun[SCREEN_W];
+  const u32 min_run = (w + SCREEN_W - 1) / SCREEN_W, min_rows = (t.h + SCREEN_H - 1) / SCREEN_H;
+  const bool seam = y1 - y0 >= std::max<u32>(2, min_rows);
+  const u32 yfirst = seam ? y0 + 1 : y0;
+  row = t.px + static_cast<size_t>(yfirst) * t.pitch;
+  kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, false, row);
+  for (u32 y = yfirst + 1; y < y1; ++y)
     std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
+  if (seam) kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, true, t.px + static_cast<size_t>(y0) * t.pitch);
 }
 
 static inline u32 rgb15_to_18_plain(u16 c) {

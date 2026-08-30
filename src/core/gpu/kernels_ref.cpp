@@ -301,6 +301,44 @@ void scale_row(const u32* src, const u16* xrun, u32* dst) {
   }
 }
 
+static inline u32 dim_px(u32 c, u32 f) {
+  const u32 rb = ((c & 0x00FF00FFu) * f >> 8) & 0x00FF00FFu;
+  const u32 g  = ((c & 0x0000FF00u) * f >> 8) & 0x0000FF00u;
+  return (c & 0xFF000000u) | rb | g;
+}
+
+void scale_row_straddle(const u32* src, const u32* seam, const u8* w, const u16* xrun, u32* dst) {
+  for (u32 s = 0; s < 256; ++s) {
+    const u32 c = src[s];
+    const u32 x0 = xrun[s], x1 = xrun[s + 1];
+    for (u32 x = x0; x < x1; ++x) dst[x] = c;
+    if (w[s] && x1 > x0) dst[x1 - 1] = seam[s];
+  }
+}
+
+void blend_line_w(const u32* a, const u32* b, const u8* w, u32* out) {
+  for (u32 i = 0; i < 256; ++i) {
+    const u32 x = a[i], y = b[i], f = w[i];
+    u32 r = 0;
+    for (u32 sh = 0; sh < 32; sh += 8) {
+      const u32 xa = (x >> sh) & 255, ya = (y >> sh) & 255;
+      r |= ((xa * (256 - f) + ya * f + 128) >> 8) << sh;
+    }
+    out[i] = r;
+  }
+}
+
+void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool seam_row, u32* dst) {
+  if (min_run < 2) min_run = 2;
+  for (u32 s = 0; s < 256; ++s) {
+    const u32 c = src[s], cd = f ? dim_px(c, f) : 0xFF000000u;   // f == 0: opaque black, whatever the source alpha
+    const u32 x0 = xrun[s], x1 = xrun[s + 1];
+    if (seam_row) { for (u32 x = x0; x < x1; ++x) dst[x] = cd; continue; }
+    for (u32 x = x0; x < x1; ++x) dst[x] = c;
+    if (x1 - x0 >= min_run) dst[x0] = cd;
+  }
+}
+
 
 // ---- 3D span stages ------------------------------------------------------------
 // These are Renderer3D::Interp<0> (render3d.cpp) applied to every pixel of a

@@ -236,6 +236,62 @@ static void test_scale_row() {
   }
 }
 
+// scale_row_grid against the reference at the same widths, both row kinds and
+// the factors that matter (0 = black seams, 128 = the default, 255 ~ off).
+static void test_scale_row_grid() {
+  static const u32 widths[] = {1, 100, 255, 256, 257, 320, 512, 640, 720, 721, 1280, 1440};
+  alignas(16) u32 src[256];
+  for (u32 w : widths) for (u32 f : {0u, 128u, 255u}) for (bool seam : {false, true}) for (u32 mr : {2u, (w + 255) / 256}) {
+    const u32 it = w * 8 + f / 64 * 2 + seam;
+    std::vector<u16> xrun(257);
+    for (u32 i = 0; i <= 256; ++i) xrun[i] = static_cast<u16>((i * w + 255) / 256);
+    std::vector<u32> da(w, 0xDEADBEEF), db(w, 0xDEADBEEF), plain(w);
+    for (u32& v : src) v = rng();
+    kern::ref::scale_row_grid(src, xrun.data(), f, mr, seam, da.data());
+    N::scale_row_grid(src, xrun.data(), f, mr, seam, db.data());
+    CHECK_SAME("scale_row_grid", da.data(), db.data(), w * sizeof(u32));
+    kern::ref::scale_row(src, xrun.data(), plain.data());
+    for (u32 x = 0; x < w; ++x) {                       // alpha kept; non-seam pixels untouched
+      const u32 s_ = x * 256 / w;
+      const bool dimmed = seam || (xrun[s_ + 1] - xrun[s_] >= std::max(2u, mr) && x == xrun[s_]);
+      if ((!dimmed && da[x] != plain[x]) || (dimmed && f == 0 && da[x] != 0xFF000000u) || (dimmed && f && (da[x] >> 24) != (plain[x] >> 24))) {
+        std::printf("scale_row_grid w=%u f=%u mr=%u seam=%d x=%u: %08x vs %08x\n", w, f, mr, seam, x, da[x], plain[x]); ++failures; break;
+      }
+    }
+    (void)it;
+  }
+}
+
+// scale_row_straddle / blend_line_w against the reference, and blend_line_w
+// against its definition.
+static void test_scale_row_straddle() {
+  static const u32 widths[] = {1, 255, 256, 257, 640, 721, 1440};
+  alignas(16) u32 src[256], seam[256];
+  alignas(16) u8 w[256];
+  for (u32 wd : widths) {
+    const u32 it = wd;
+    std::vector<u16> xrun(257);
+    for (u32 i = 0; i <= 256; ++i) xrun[i] = static_cast<u16>((i * wd + 255) / 256);
+    for (u32 s = 0; s < 256; ++s) { const u32 b = (s + 1) * wd, f = b % 256; w[s] = (s + 1 < 256 && f && xrun[s + 1] > xrun[s]) ? static_cast<u8>(f * 256 / 256) : 0; }
+    std::vector<u32> da(wd, 0xDEADBEEF), db(wd, 0xDEADBEEF);
+    for (u32& v : src) v = rng();
+    for (u32& v : seam) v = rng();
+    kern::ref::scale_row_straddle(src, seam, w, xrun.data(), da.data());
+    N::scale_row_straddle(src, seam, w, xrun.data(), db.data());
+    CHECK_SAME("scale_row_straddle", da.data(), db.data(), wd * sizeof(u32));
+    for (u32 s = 0; s < 256; ++s) if (w[s] && xrun[s + 1] > xrun[s] && da[xrun[s + 1] - 1] != seam[s]) { std::printf("straddle w=%u s=%u\n", wd, s); ++failures; break; }
+    alignas(16) u32 ba[256], bb[256];
+    for (u8& v : w) v = static_cast<u8>(rng());
+    kern::ref::blend_line_w(src, seam, w, ba);
+    N::blend_line_w(src, seam, w, bb);
+    CHECK_SAME("blend_line_w", ba, bb, sizeof ba);
+    for (u32 i = 0; i < 256; ++i) for (u32 sh : {0u, 8u, 16u, 24u}) {
+      const u32 xa = (src[i] >> sh) & 255, ya = (seam[i] >> sh) & 255, f = w[i];
+      if (((ba[i] >> sh) & 255) != ((xa * (256 - f) + ya * f + 128) >> 8)) { std::printf("blend_line_w i=%u\n", i); ++failures; i = 256; break; }
+    }
+  }
+}
+
 // The vertical half of the same map, which lives in Gpu::emit_scaled: source
 // line L owns destination rows [ceil(L*h/192), ceil((L+1)*h/192)). Every row
 // of the destination must be claimed by exactly one source line, or the
@@ -401,6 +457,8 @@ int main() {
   test_composite();
   test_output();
   test_scale_row();
+  test_scale_row_grid();
+  test_scale_row_straddle();
   test_scale_rows_cover();
   test_span();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }

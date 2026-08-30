@@ -80,6 +80,21 @@ namespace ds::gpu::kern {
      gather is needed. Monotonic and non-decreasing; a zero-length run (destination narrower than 256) is    \
      skipped. */                                                                                             \
   void NS##scale_row(const u32* src, const u16* xrun, u32* dst);                                             \
+  /* scale_row with the LCD grid: a run of at least `min_run` pixels has its FIRST written with its RGB   \
+     scaled by f/256 (alpha kept); shorter runs are written plain. With min_run = ceil(width/256) only the \
+     runs the fractional part of the scale widened carry a seam, so every lit cell keeps the integer      \
+     width; the seam leads its run so that at 2.5x (runs 3,2,3,2,...) the cells between seams are always  \
+     a pair of DS pixels (a trailing seam would leave a lone pixel at each edge). At an integer scale      \
+     every run qualifies. `seam_row` writes every pixel dimmed instead (the row a source line's first     \
+     destination row becomes). f in 0..255; 0 writes opaque black (0xFF000000) rather than scaling. */   \
+  void NS##scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool seam_row, u32* dst);    \
+  /* Box-filter seams for a fractional scale: the last pixel of run s straddles source pixels s and s+1  \
+     when w[s] != 0, and is written as seam[s] instead of src[s]; the other pixels are src[s] as in       \
+     scale_row. (w is the same table blend_line_w takes; only its zero/non-zero pattern matters here.) */   \
+  void NS##scale_row_straddle(const u32* src, const u32* seam, const u8* w, const u16* xrun, u32* dst);     \
+  /* out[i] = a[i] + (b[i] - a[i]) * w[i] / 256 per byte, rounded: the area-weighted blend of two pixels,  \
+     256 of them. w[i] = 128 is the midpoint. */                                                            \
+  void NS##blend_line_w(const u32* a, const u32* b, const u8* w, u32* out);                                 \
   /* 3D span stages (render3d.cpp), `n` pixels from span offset `xv0`. Perspective factor with 8 fractional   \
      bits: num = (xv*w0n) << 8 (32-bit wrap), den = xv*w0d + (xdiff-xv)*w1d, 0 when den is 0. */             \
   void NS##span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac);                      \

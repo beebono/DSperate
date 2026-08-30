@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include "core/gpu/gpu.h"
 #include "core/types.h"
 #include "display_wl.h"   // complete type for the unique_ptr
 
@@ -80,9 +81,18 @@ public:
   //     compositor samples them zero-copy, or scans them out directly when
   //     the surface qualifies. DS_DMABUF=0 disables, =1 requires (fail loud).
   //  2. window surface: SDL's shm path. Always available under a compositor.
-  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; };
+  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; };
 
   bool scaling() const { return scaled_; }
+  // Chunky: each 2x2 block of DS pixels is drawn as one cell from its top-left
+  // pixel (with the LCD grid, one seam per block). Set before open().
+  // cell: 0 = the 2x2 pair path; N = N panel pixels per cell when N divides
+  // both screen dimensions (else the pair path); -1 = auto: the smallest
+  // N >= 4 that does, up to 16.
+  void set_chunky(bool on, int cell = 0) { chunky_ = on; chunky_cell_ = cell; }
+  bool chunky() const { return chunky_; }
+  // The cell map in use for `screen` (null when the pair path is), for the core.
+  const void* cell_map(int screen) const { return cells_[screen].x.cells ? &cells_[screen] : nullptr; }
   // Locks the panel-sized texture and fills in one target per screen. False
   // if the lock failed, in which case the caller must fall back to draw().
   bool begin_frame(Target out[SCREENS]);
@@ -130,6 +140,8 @@ private:
   Layout        layout_;
 
   bool              scaled_ = false;
+  bool              chunky_ = false;
+  int               chunky_cell_ = 0;
   std::unique_ptr<DmabufOut> dm_;  // tier 1; null on the surface tier
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL
   bool              margins_dirty_ = true;
@@ -137,6 +149,8 @@ private:
   bool              dm_frame_ = false;    // current begin_frame targeted the dmabuf
   int               scaled_w_ = 0, scaled_h_ = 0;
   std::vector<u16>  xrun_[SCREENS];   // per screen, 257 entries; see kern::scale_row
+  std::vector<u8>   seam_w_[SCREENS]; // per screen, 256 entries: box-filter weight of pixel s+1 in run s's last pixel
+  ds::gpu::Gpu::CellMap cells_[SCREENS];   // chunky cell tables; x.cells == 0 when the pair path is in use
   std::vector<u32>  side_[SCREENS];   // scaled pixels of a non-direct view
   u32*              frame_px_ = nullptr;   // the buffer begin_frame handed out, for end_frame's insets
   u32               frame_pitch_ = 0;

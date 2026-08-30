@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 using namespace ds;
 
@@ -202,12 +203,152 @@ static void test_lazy_journal() {
   CHECK_EQ(px(lazy, 161, 2), black);                                          // remap in HBlank 160
 }
 
+// The LCD grid on the scanline-scaled path at the RG DS's 2.5x (256x192 ->
+// 640x480): every DS pixel's run is 2 or 3 wide/tall; the 3-runs (the ones
+// the fractional part widened) have their first column/row dimmed by the
+// factor, the 2-runs stay plain, so every lit cell is 2x2 and the seams pair
+// DS pixels (0,1), (2,3), ... with no lone pixel at the edges. The scaled
+// buffer is checked against a plain-framebuffer run of the same frame.
+static u32 dim(u32 c, u32 f) { return (c & 0xFF000000u) | (((c & 0xFF00FFu) * f >> 8) & 0xFF00FFu) | (((c & 0xFF00u) * f >> 8) & 0xFF00u); }
+static void test_lcd_grid() {
+  const u32 W = 640, H = 480, F = 128;
+  NDS ref; lazy_setup(ref); run_display_frame(ref, lazy_mid);
+  std::vector<u16> xrun(257);
+  for (u32 x = 0; x <= 256; ++x) xrun[x] = static_cast<u16>((x * W + 255) / 256);
+  for (u32 grid : {256u, F}) {
+    NDS n; lazy_setup(n);
+    std::vector<u32> out[2] = {std::vector<u32>(W * H, 0xDEADBEEF), std::vector<u32>(W * H, 0xDEADBEEF)};
+    for (int i = 0; i < 2; ++i) n.gpu.set_scale_target(i, gpu::Gpu::ScaleTarget{out[i].data(), W, H, xrun.data(), grid});
+    run_display_frame(n, lazy_mid);
+    int bad = 0;
+    for (u32 line = 0; line < 192 && bad < 8; ++line) {
+      const u32 y0 = (line * H + 191) / 192, y1 = ((line + 1) * H + 191) / 192;
+      for (u32 sx = 0; sx < 256; ++sx) {
+        const u32 want = ref.gpu.framebuffer(0)[line * 256 + sx];
+        for (u32 y = y0; y < y1; ++y)
+          for (u32 x = xrun[sx]; x < xrun[sx + 1]; ++x) {
+            const bool seam = grid < 256 && ((xrun[sx + 1] - xrun[sx] == 3 && x == xrun[sx]) || (y1 - y0 == 3 && y == y0));
+            const u32 exp = seam ? dim(want, grid) : want;
+            if (out[0][y * W + x] != exp) { if (bad < 8) std::fprintf(stderr, "grid %u: (%u,%u) = %08x, expected %08x\n", grid, x, y, out[0][y * W + x], exp); ++bad; }
+          }
+      }
+    }
+    CHECK_EQ(bad, 0);
+  }
+  // Box-filter seams at 2.5x: the last column of a 3-run straddles the pixel
+  // and its right neighbour half and half; the last row of a 3-row span the
+  // line and the next; the corner both. Line 191 has no next line (its
+  // boundary is integer anyway) and pixel 255 no right neighbour.
+  {
+    auto avg = [](u32 a, u32 b) { u32 r = 0; for (u32 sh : {0u, 8u, 16u, 24u}) r |= (((((a >> sh) & 255) * 128 + ((b >> sh) & 255) * 128) + 128) >> 8) << sh; return r; };
+    std::vector<u8> sw(256, 0);
+    for (u32 s = 0; s + 1 < 256; ++s) { const u32 f = ((s + 1) * W) % 256; if (f) sw[s] = static_cast<u8>(f * 256 / 256); }
+    NDS n; lazy_setup(n);
+    std::vector<u32> out(W * H, 0xDEADBEEF), other(W * H);
+    n.gpu.set_scale_target(0, gpu::Gpu::ScaleTarget{out.data(), W, H, xrun.data(), 256, 0, 0, 1, sw.data()});
+    n.gpu.set_scale_target(1, gpu::Gpu::ScaleTarget{other.data(), W, H, xrun.data(), 256, 0, 0, 1, sw.data()});
+    run_display_frame(n, lazy_mid);
+    const u32* fb = ref.gpu.framebuffer(0);
+    int bad = 0;
+    for (u32 line = 0; line < 192 && bad < 8; ++line) {
+      const u32 y0 = (line * H + 191) / 192, y1 = ((line + 1) * H + 191) / 192;
+      const bool srow = (((line + 1) * H) % 192) != 0 && line + 1 < 192;
+      for (u32 sx = 0; sx < 256; ++sx) {
+        const u32 c = fb[line * 256 + sx], r = fb[line * 256 + (sx + 1 < 256 ? sx + 1 : sx)];
+        const bool scol = sw[sx] != 0;
+        for (u32 y = y0; y < y1; ++y) for (u32 x = xrun[sx]; x < xrun[sx + 1]; ++x) {
+          u32 exp;
+          if (srow && y == y1 - 1) {
+            const u32 dn = fb[(line + 1) * 256 + sx], dnr = fb[(line + 1) * 256 + (sx + 1 < 256 ? sx + 1 : sx)];
+            const u32 m = avg(c, dn), mr = avg(r, dnr);
+            exp = (scol && x == xrun[sx + 1] - 1) ? avg(m, mr) : m;
+          } else exp = (scol && x == xrun[sx + 1] - 1) ? avg(c, r) : c;
+          if (out[y * W + x] != exp) { if (bad < 8) std::fprintf(stderr, "blend (%u,%u) = %08x, expected %08x\n", x, y, out[y * W + x], exp); ++bad; }
+        }
+      }
+    }
+    CHECK_EQ(bad, 0);
+  }
+  // Cell chunky at 2.5x with 4-px cells (160x120): each cell the 2D box of
+  // the DS pixels it covers (1.6 per axis), weights from build_cell_axis;
+  // drawn as a seam row/column and 3x3 of the colour.
+  {
+    gpu::Gpu::CellMap m;
+    CHECK(gpu::Gpu::build_cell_axis(256, 160, 4, m.x)); CHECK(gpu::Gpu::build_cell_axis(192, 120, 4, m.y));
+    std::vector<u16> xc(257);
+    for (u32 x = 0; x <= 256; ++x) xc[x] = static_cast<u16>(std::min<u32>(x, 160) * 4);
+    NDS n; lazy_setup(n);
+    std::vector<u32> out(W * H, 0xDEADBEEF), other(W * H);
+    n.gpu.set_scale_target(0, gpu::Gpu::ScaleTarget{out.data(), W, H, xc.data(), F, 2, 0, 0, nullptr, &m});
+    n.gpu.set_scale_target(1, gpu::Gpu::ScaleTarget{other.data(), W, H, xc.data(), F, 2, 0, 0, nullptr, &m});
+    run_display_frame(n, lazy_mid);
+    const u32* fb = ref.gpu.framebuffer(0);
+    int bad = 0;
+    for (u32 j = 0; j < 120 && bad < 8; ++j) for (u32 i = 0; i < 160; ++i) {
+      u32 acc[3] = {0, 0, 0};
+      for (u32 v = 0; v < m.y.n[j]; ++v) for (u32 u = 0; u < m.x.n[i]; ++u) {
+        const u32 c = fb[(m.y.first[j] + v) * 256 + m.x.first[i] + u], wt = m.x.w[i * gpu::Gpu::CELL_TAPS + u] * m.y.w[j * gpu::Gpu::CELL_TAPS + v];
+        for (u32 ch = 0; ch < 3; ++ch) acc[ch] += ((c >> (8 * ch)) & 255) * wt;
+      }
+      u32 want = 0xFF000000u;
+      for (u32 ch = 0; ch < 3; ++ch) want |= ((acc[ch] + 32768) >> 16) << (8 * ch);
+      for (u32 y = j * 4; y < j * 4 + 4; ++y) for (u32 x = i * 4; x < i * 4 + 4; ++x) {
+        const u32 exp = (x == i * 4 || y == j * 4) ? dim(want, F) : want;
+        if (out[y * W + x] != exp) { if (bad < 8) std::fprintf(stderr, "cells (%u,%u) = %08x, expected %08x\n", x, y, out[y * W + x], exp); ++bad; }
+      }
+    }
+    CHECK_EQ(bad, 0);
+    // Weights: every cell's taps sum to 256; a 4-px cell on 640 covers 1.6 pixels, so 2 or 3 taps.
+    for (u32 i = 0; i < 160; ++i) { u32 sum = 0; for (u32 u = 0; u < m.x.n[i]; ++u) sum += m.x.w[i * gpu::Gpu::CELL_TAPS + u]; CHECK_EQ(sum, 256u); CHECK(m.x.n[i] == 2 || m.x.n[i] == 3); }
+  }
+  // Chunky at 2.5x: pair-merged xrun, line pairs; every 5x5 cell is a leading
+  // seam column/row and 4x4 of the block's colour: top-left pixel, mean, or
+  // dominant (mean when all four differ).
+  auto mean4 = [](u32 a, u32 b, u32 c, u32 d) {
+    u32 r = 0;
+    for (u32 sh : {0u, 8u, 16u}) r |= ((((a >> sh) & 255) + ((b >> sh) & 255) + ((c >> sh) & 255) + ((d >> sh) & 255) + 2) >> 2) << sh;
+    return 0xFF000000u | r;
+  };
+  auto luma = [](u32 c) { return ((c >> 16) & 255) * 77 + ((c >> 8) & 255) * 150 + (c & 255) * 29; };
+  for (u8 ck : {u8(1), u8(2), u8(3), u8(4), u8(5), u8(6)}) {
+    std::vector<u16> xc = xrun;
+    for (u32 x = 1; x < 256; x += 2) xc[x] = xc[x + 1];
+    NDS n; lazy_setup(n);
+    std::vector<u32> out(W * H, 0xDEADBEEF);
+    const u32 thr = 40 * 256;
+    n.gpu.set_scale_target(0, gpu::Gpu::ScaleTarget{out.data(), W, H, xc.data(), F, ck, thr});
+    std::vector<u32> other(W * H); n.gpu.set_scale_target(1, gpu::Gpu::ScaleTarget{other.data(), W, H, xc.data(), F, ck, thr});
+    run_display_frame(n, lazy_mid);
+    int bad = 0;
+    for (u32 by = 0; by < 96 && bad < 8; ++by) for (u32 bx = 0; bx < 128; ++bx) {
+      const u32* fb = ref.gpu.framebuffer(0);
+      const u32 a = fb[(2 * by) * 256 + 2 * bx], b = fb[(2 * by) * 256 + 2 * bx + 1], c = fb[(2 * by + 1) * 256 + 2 * bx], d = fb[(2 * by + 1) * 256 + 2 * bx + 1];
+      u32 want = a;
+      if (ck == 2) want = mean4(a, b, c, d);
+      if (ck == 3) want = (a == b || a == c || a == d) ? a : (b == c || b == d) ? b : (c == d) ? c : mean4(a, b, c, d);
+      u32 lo = a, hi = a;
+      for (u32 p : {b, c, d}) { if (luma(p) < luma(lo)) lo = p; if (luma(p) > luma(hi)) hi = p; }
+      if (ck == 4) want = lo;
+      if (ck == 5) want = hi;
+      if (ck == 6) { const u32 m = (luma(a) + luma(b) + luma(c) + luma(d)) / 4, dl = m - luma(lo), dh = luma(hi) - m; want = (dl <= thr && dh <= thr) ? mean4(a, b, c, d) : dl > dh ? lo : dh > dl ? hi : mean4(a, b, c, d); }
+      for (u32 y = by * 5; y < by * 5 + 5; ++y) for (u32 x = bx * 5; x < bx * 5 + 5; ++x) {
+        const u32 exp = (x == bx * 5 || y == by * 5) ? dim(want, F) : want;
+        if (out[y * W + x] != exp) { if (bad < 8) std::fprintf(stderr, "chunky %u (%u,%u) = %08x, expected %08x\n", ck, x, y, out[y * W + x], exp); ++bad; }
+      }
+    }
+    CHECK_EQ(bad, 0);
+  }
+  // Seam geometry at 2.5x: runs of 2 and 3 alternate, never 1 (which would be left undimmed).
+  CHECK_EQ(xrun[1] - xrun[0], 3u); CHECK_EQ(xrun[2] - xrun[1], 2u); CHECK_EQ(xrun[256], W);
+}
+
 int main() {
   test_vram_views();
   test_text_bg_and_backdrop();
   test_sprites_and_window();
   test_register_access();
   test_lazy_journal();
+  test_lcd_grid();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("gpu: ok");
   return 0;
