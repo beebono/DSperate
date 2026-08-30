@@ -126,6 +126,7 @@ void Timing::set_region9(u32 start, u32 end, Region r, int bus_width, int nonseq
     t[4] = static_cast<u8>(n16); t[5] = static_cast<u8>(s16); t[6] = static_cast<u8>(n32); t[7] = static_cast<u8>(s32);
     regions9_[i] = r;
   }
+  stamp.fetch_add(1, std::memory_order_release);
 }
 
 void Timing::set_region7(u32 start, u32 end, Region r, int bus_width, int nonseq, int seq) {
@@ -142,6 +143,7 @@ void Timing::set_region7(u32 start, u32 end, Region r, int bus_width, int nonseq
   // A code-fetch cost this introduces that is not in the nc slots simply
   // falls back to the inline model (nc7_index returns -1).
   if (cost7_ready_) build_cost7_range(first, last);
+  stamp.fetch_add(1, std::memory_order_release);
 }
 
 // The TCM windows are baked into the table (4 KB pages; both windows are

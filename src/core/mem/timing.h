@@ -3,6 +3,7 @@
 #pragma once
 #include "core/types.h"
 
+#include <atomic>
 #include <memory>
 
 namespace ds { struct CpuContext; }
@@ -23,6 +24,15 @@ enum Region : u8 {
 //   [1] data N16, [2] data N32, [3] data S32, in ARM9 cycles.
 class Timing {
 public:
+  // Bumped at the END of every retime (set_region9/7): translation bakes
+  // values from these tables, so a block built under one stamp is not the
+  // block that would be built under another. The JIT pre-translation worker
+  // records the stamp (acquire) before it reads the tables and its output is
+  // discarded at adoption when the stamp has moved -- bumping after the
+  // writes (release) makes that a seqlock: a build overlapping a retime can
+  // never be adopted, whichever halves of the tables it saw.
+  std::atomic<u64> stamp{0};
+
   // ARM7 precomputed data-cost table. The ARM7 rule --
   // costs add when code and data share a region, overlap into a max when they
   // do not -- has exactly one dynamic input, the data page; `nc`, `cdi`,

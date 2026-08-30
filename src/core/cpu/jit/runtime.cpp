@@ -13,14 +13,21 @@
 // registers at the site, and a linked `bl link; .word key` becomes a bare
 // `b` whose literal is never executed.
 #include "core/cpu/jit/jit_internal.h"
+#include "core/profile.h"
 #include "core/sched/scheduler.h"
 #include "core/cpu/cpu_cycles.h"
 #include "core/cpu/interp/interp.h"
 #include "core/cpu/interp/interp_internal.h"
 #include "core/nds.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <map>
+#include <mutex>
+#include <thread>
+#include <unordered_set>
 #include <vector>
 #include <algorithm>
 #include <type_traits>
@@ -505,7 +512,16 @@ struct Key { u32 pc; u8 dma, cpu; bool operator<(const Key& o) const { return pc
 static std::map<Key, u64> writers;             // writer pc -> invalidations
 static std::map<u32, u64> victims_by_page;     // guest page of a killed block -> kills
 static std::map<u32, u64> retrans;             // guest pc -> translations
+static std::map<u64, u64> trans_by_frame;      // frame -> translations (first-time + re)
+static std::map<u64, u64> retrans_by_frame;    // frame -> retranslations only
 static u64 inval = 0, killed = 0, trans = 0, frames_seen = 0, range_miss = 0, resets = 0;
+// Lead-time census: for each retranslation, guest time between the page's
+// last invalidating write and the translate -- the window a pre-translator
+// seeded at write time would have had. Buckets in ARM9 cycles
+// (~1.12 M / frame): <0.1 ms, 0.1-1, 1-4, 4-16 (about a frame), 16-64, >64.
+static std::map<u32, u64> page_last_write;   // guest 2 KB page -> sched.now() of last invalidation
+static u64 lead_hist[6];
+static u64 lead_n = 0, lead_sum = 0;
 static bool on() { static const bool e = std::getenv("DS_JIT_CHURN") != nullptr; return e; }
 static void report() {
   auto top = [](auto& m, const char* what, int n, auto print) {
@@ -523,8 +539,93 @@ static void report() {
   top(writers, "writers (pc of the store / DMA start)", 15, pk);
   top(victims_by_page, "invalidated guest pages (2 KB)", 15, pa);
   top(retrans, "retranslated block pcs", 20, pa);
+  // Which frames the translation work lands in: a flat row is warm-up, a
+  // spike is an overlay reload -- the frames to hold against the p99 table.
+  auto pf = [](u64 n, u64 f) { std::fprintf(stderr, "   %10llu  frame %llu (%llu re)\n",
+      (unsigned long long)n, (unsigned long long)f, (unsigned long long)retrans_by_frame[f]); };
+  top(trans_by_frame, "translation frames", 20, pf);
+  if (lead_n) {
+    static const char* const lb[6] = {"<0.1ms", "0.1-1ms", "1-4ms", "4-16ms", "16-64ms", ">64ms"};
+    std::fprintf(stderr, "[churn] retranslate lead time (page's last kill -> translate, upper bound), %llu samples, mean %.1f ms:\n",
+                 (unsigned long long)lead_n, static_cast<double>(lead_sum) / static_cast<double>(lead_n) / 1120380.0 * 16.7);
+    for (int i = 0; i < 6; ++i) std::fprintf(stderr, "   %-8s %10llu\n", lb[i], (unsigned long long)lead_hist[i]);
+  }
 }
 }  // namespace churn
+
+// ---- pre-translation worker (DS_JIT_PRETX=1) ---------------------------------------------
+//
+// Overlay loads hand the JIT ~1000 never-seen blocks in one frame (the mlbis
+// p99 tail); translating them on the emulation thread is a 6-10 ms stall. The
+// worker translates *statically reachable* code ahead of execution: every
+// translated block's direct branch targets (Block::succ) are queued, the
+// worker compiles them into the shared arena, and the emulation thread adopts
+// the finished blocks on its next lookup miss. No guest state is speculated,
+// so the guest cannot observe when a block was translated: exact by
+// construction (gate: DS_FRAME_HASH).
+//
+// Concurrency model: ONE mutex (mu) covers the arena frontier (r.pos), the
+// queues and the generation counter; the worker holds it for a whole
+// translation (~10 us), the emulation thread only takes it on a lookup miss,
+// to seed successors, or in reset/invalidate. The hot dispatch paths never
+// touch it. Guest memory is written by the emulation thread only, so a block
+// the worker built from bytes that then changed is caught at adoption by
+// comparing the code bytes it read against what the guest holds now; timing-
+// table rebuilds and arena resets bump `gen`, which orphans everything the
+// worker built before them.
+namespace pretx {
+static bool on() { static const bool e = std::getenv("DS_JIT_PRETX") != nullptr; return e; }
+struct Job  { JitCpu* jc; u32 key; };
+struct Done { JitCpu* jc; Block* b; u64 gen; u64 stamp; std::vector<u8> guest; };
+// Deliberately leaked: the worker is detached and may be blocked on cv/mu when
+// the process exits; running these destructors then hangs pthread_cond_destroy
+// (measured: both threads futex-waiting inside pretx::cv after "ran N frames").
+static std::mutex& mu = *new std::mutex;
+static std::condition_variable& cv = *new std::condition_variable;
+static std::deque<Job>& jobs = *new std::deque<Job>;
+static std::vector<Done>& done = *new std::vector<Done>;
+// Finished blocks wait here, INVISIBLE to the runtime, until the emulation
+// thread actually misses on their key. Publishing them any earlier would tag
+// their guest pages as code pages ahead of the baseline schedule, and the
+// invalidation alerts from stores into those pages end slices at points the
+// baseline would have run through -- a guest-visible interleave change
+// (measured: mlbis frame 889 r12/r15 wobble, invalidations 6453 -> 6946).
+// Installing exactly at the miss reproduces the baseline timeline.
+static std::map<u64, Done>& staged = *new std::map<u64, Done>;         // (cpu << 32) | key -> finished block
+static std::unordered_set<u64>& seen = *new std::unordered_set<u64>;   // (cpu << 32) | key: ever queued or translated by the main thread
+static u64 gen = 0;
+// True while the worker is emitting into its chunk without mu held. purge()
+// waits it out after bumping gen: an arena reset reclaims the chunk's space,
+// and the frontier must not be reused while the worker still writes there.
+static std::atomic<bool> in_flight{false};
+static u64 st_built = 0, st_adopted = 0, st_dropped = 0, st_skipped = 0;   // worker built / main adopted / stale-or-changed / not attempted
+static void start();
+static void seed(JitCpu& jc, const Block& b);
+static Block* adopt(JitCpu& jc, u32 key);
+// Takes mu when the worker exists, so the arena frontier and emitted-but-
+// unpublished code cannot race it. A no-op (and no atomics) when off.
+struct ArenaLock {
+  bool locked;
+  ArenaLock() : locked(on()) { if (locked) mu.lock(); }
+  ~ArenaLock() { if (locked) mu.unlock(); }
+};
+// Everything the worker built or was about to build is orphaned. Call with
+// mu NOT held (takes it). Used by arena resets and whole-CPU invalidations;
+// per-block invalidations don't need it -- the byte compare at adoption
+// rejects those.
+static void purge() {
+  if (!on()) return;
+  std::lock_guard<std::mutex> lk(mu);
+  ++gen;
+  jobs.clear();
+  for (Done& d : done) { delete d.b; ++st_dropped; }
+  done.clear();
+  for (auto& kv : staged) { delete kv.second.b; ++st_dropped; }
+  staged.clear();
+  seen.clear();
+  while (in_flight.load(std::memory_order_acquire)) std::this_thread::yield();
+}
+} // namespace pretx
 
 // ---- code page tracking ----------------------------------------------------------------
 
@@ -573,6 +674,7 @@ void remove_from_page_lists(Block* b) {
 JitCpu& jc_of(Block* b) { return g_rt.cpus[b->owner]; }
 
 void reset_arena() {
+  pretx::purge();   // the worker is idle and empty after this; the frontier below is ours
   if (churn::on()) ++churn::resets;
   Runtime& r = g_rt;
   for (JitCpu& jc : r.cpus) {
@@ -656,28 +758,20 @@ static void perf_map_stubs(const Runtime& r) {
   }
 }
 
-Block* translate(JitCpu& jc, u32 key) {
+// Publish a finished block: page registration, maps, LUT, stats. Emulation
+// thread only -- these structures are unsynchronised, which is why the
+// pre-translation worker hands its blocks here instead of doing this itself.
+static void install(JitCpu& jc, Block* b) {
   Runtime& r = g_rt;
-  if (churn::on()) { churn::trans++; churn::retrans[key_pc(key)]++; }
-  if (r.pos + BLOCK_MARGIN > r.cap) return nullptr;
-  Block* b = new Block{};
-  b->key = key;
-  b->owner = jc.arm9 ? 0 : 1;
-  Emitter e(r.arena + r.pos, BLOCK_MARGIN);
-  if (!translate_block(jc, key, e, *b)) { delete b; return nullptr; }
-  b->entry = r.arena + r.pos;
-  b->size = static_cast<u32>(e.size());
   if (r.debug) {   // DS_JIT_DEBUG: dump the block for `objdump -D -b binary -m aarch64`
-    std::fprintf(stderr, "[jit] block %08x (%u bytes):", key, b->size);
+    std::fprintf(stderr, "[jit] block %08x (%u bytes):", b->key, b->size);
     for (u32 i = 0; i < b->size; i += 4) { u32 w; std::memcpy(&w, b->entry + i, 4); std::fprintf(stderr, " %08x", w); }
     std::fputc('\n', stderr);
   }
-  r.pos += (b->size + 15) & ~size_t{15};
-  sync_icache(b->entry, b->size);
   perf_map_add(b, jc.arm9);
 
   // Register the host pages the guest code lives in.
-  const u32 pc = key_pc(key);
+  const u32 pc = key_pc(b->key);
   const u8* p0 = jc.ctx->page_table.read_ptr(pc);
   const u8* p1 = jc.ctx->page_table.read_ptr(pc + b->guest_len - 1);
   b->npages = 0;
@@ -689,21 +783,233 @@ Block* translate(JitCpu& jc, u32 key) {
     if (v.empty()) set_code_tag(b->host_pages[i], true);
     v.push_back(b);
   }
-  jc.blocks[key] = b;
+  jc.blocks[b->key] = b;
   jc.all_blocks.push_back(b);
   lut_insert(jc, b);
   r.stats.blocks_translated++;
   r.stats.code_bytes += b->size;
   r.stats.hot_bytes += b->hot_size;
+}
+
+Block* translate(JitCpu& jc, u32 key) {
+  DS_PROF(JIT_TX);   // nested inside the CPU9/CPU7 slice: an "of which" column
+  Runtime& r = g_rt;
+  if (churn::on()) {
+    churn::trans++;
+    const u64 f = jc.ctx->nds->frame_count;
+    churn::trans_by_frame[f]++;
+    if (churn::retrans[key_pc(key)]++ > 0) churn::retrans_by_frame[f]++;
+    // Upper bound on pre-translation lead time: writes after the page's last
+    // block died are invisible, so the true window is at most this.
+    const auto pw = churn::page_last_write.find(key_pc(key) & ~(mem::PAGE_SIZE - 1));
+    if (pw != churn::page_last_write.end()) {
+      const u64 dt = jc.ctx->nds->sched.now() - pw->second;
+      const u64 ms01 = 112038;    // ~0.1 ms of ARM9 cycles
+      const int bucket = dt < ms01 ? 0 : dt < ms01 * 10 ? 1 : dt < ms01 * 40 ? 2 : dt < ms01 * 160 ? 3 : dt < ms01 * 640 ? 4 : 5;
+      churn::lead_hist[bucket]++;
+      churn::lead_n++; churn::lead_sum += dt;
+    }
+  }
+  Block* b;
+  {
+    pretx::ArenaLock lk;
+    if (r.pos + BLOCK_MARGIN > r.cap) return nullptr;
+    b = new Block{};
+    b->key = key;
+    b->owner = jc.arm9 ? 0 : 1;
+    Emitter e(r.arena + r.pos, BLOCK_MARGIN);
+    if (!translate_block(jc, key, e, *b)) { delete b; return nullptr; }
+    b->entry = r.arena + r.pos;
+    b->size = static_cast<u32>(e.size());
+    r.pos += (b->size + 15) & ~size_t{15};
+  }
+  sync_icache(b->entry, b->size);
+  install(jc, b);
+  pretx::seed(jc, *b);
   return b;
 }
 
 const u8* find_native(JitCpu& jc, u32 key) {
   auto it = jc.blocks.find(key);
   if (it != jc.blocks.end()) { lut_insert(jc, it->second); return it->second->entry; }
+  if (Block* b = pretx::adopt(jc, key)) return b->entry;
   Block* b = translate(jc, key);
   return b ? b->entry : nullptr;
 }
+
+// ---- pre-translation worker body (state and contract above, by churn) ------------------------
+namespace {
+namespace pretx {
+
+static void seed(JitCpu& jc, const Block& b) {
+  if (!on() || !b.nsucc) return;
+  std::lock_guard<std::mutex> lk(mu);
+  bool queued = false;
+  for (u8 i = 0; i < b.nsucc; ++i) {
+    const u32 k = b.succ[i];
+    if (jc.blocks.count(k)) continue;                       // emulation thread owns this map
+    const u64 tag = (static_cast<u64>(jc.arm9 ? 0 : 1) << 32) | k;
+    if (!seen.insert(tag).second) continue;
+    jobs.push_back(Job{&jc, k});
+    queued = true;
+  }
+  if (queued) cv.notify_one();
+}
+
+static void worker() {
+  Runtime& r = g_rt;
+  // The worker emits into its own arena chunk, reserved in one bump of r.pos,
+  // so translate_block runs without mu held: the emulation thread's own
+  // translations only ever contend with the (rare, microsecond) chunk
+  // reserve, not with every worker block. A purge orphans the chunk; the
+  // space comes back with the next arena reset.
+  constexpr size_t CHUNK = 1u << 20;
+  u8* chunk = nullptr;
+  size_t used = 0, cap = 0;
+  u64 chunk_gen = ~u64{0};
+  for (;;) {
+    Job j;
+    u64 g, ts;
+    {
+      std::unique_lock<std::mutex> lk(mu);
+      cv.wait(lk, [] { return !jobs.empty(); });
+      j = jobs.front();
+      jobs.pop_front();
+      g = gen;
+      ts = j.jc->nds->bus.timing().stamp.load(std::memory_order_acquire);   // before the table reads; see Timing::stamp
+      if (g != chunk_gen || cap - used < BLOCK_MARGIN) {
+        if (r.pos + CHUNK > r.cap) { ++st_skipped; continue; }   // full: the main thread will reset
+        chunk = r.arena + r.pos;
+        r.pos += CHUNK;
+        used = 0; cap = CHUNK; chunk_gen = g;
+      }
+      in_flight.store(true, std::memory_order_release);
+    }
+    JitCpu& jc = *j.jc;
+    // Copy the guest bytes BEFORE translating: the emulation thread may write
+    // them at any point, and adoption compares the guest against this copy --
+    // a block whose source moved under it never gets adopted. The copy stops
+    // at the 2 KB page edge (one read_ptr mapping); a block that would cross
+    // it is not pre-translated (rare -- blocks average a few instructions).
+    const u32 pc = key_pc(j.key);
+    const u8* src = jc.ctx->page_table.read_ptr(pc);
+    if (!src) { in_flight.store(false, std::memory_order_release); ++st_skipped; continue; }
+    u8 copy[1024];
+    const u32 avail = std::min<u32>(sizeof copy, mem::PAGE_SIZE - (pc & (mem::PAGE_SIZE - 1)));
+    std::memcpy(copy, src, avail);
+    Block* b = new Block{};
+    b->key = j.key;
+    b->owner = jc.arm9 ? 0 : 1;
+    Emitter e(chunk + used, BLOCK_MARGIN);
+    if (!translate_block(jc, j.key, e, *b) || b->guest_len > avail) {
+      in_flight.store(false, std::memory_order_release);
+      delete b; ++st_skipped; continue;
+    }
+    b->entry = chunk + used;
+    b->size = static_cast<u32>(e.size());
+    used += (b->size + 15) & ~size_t{15};
+    sync_icache(b->entry, b->size);     // dc cvau + ic ivau + dsb ish; the adopter issues the isb
+    in_flight.store(false, std::memory_order_release);   // chunk writes done; cleared before mu (purge spins on it holding mu)
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      if (gen == g) {
+        done.push_back(Done{&jc, b, g, ts, std::vector<u8>(copy, copy + b->guest_len)});
+        ++st_built;
+        // Chase this block's own successors so the frontier can run ahead of
+        // execution instead of waiting for an adoption to seed it. `seen`
+        // bounds the waste; a purge clears both.
+        for (u8 i = 0; i < b->nsucc; ++i) {
+          const u64 tag = (static_cast<u64>(jc.arm9 ? 0 : 1) << 32) | b->succ[i];
+          if (seen.insert(tag).second) jobs.push_back(Job{&jc, b->succ[i]});
+        }
+      } else { delete b; ++st_dropped; }
+    }
+  }
+}
+
+// Emulation thread, on a lookup miss: hand over the worker's finished block
+// for exactly this key, if it has one and it is still current. Everything
+// else stays staged and invisible -- see the note at `staged`.
+static Block* adopt(JitCpu& jc, u32 key) {
+  if (!on()) return nullptr;
+  Done d{};
+  u64 cur;
+  {
+    std::lock_guard<std::mutex> lk(mu);
+    for (Done& x : done) staged.emplace((static_cast<u64>(x.jc->arm9 ? 0 : 1) << 32) | x.b->key, std::move(x));
+    done.clear();
+    const auto it = staged.find((static_cast<u64>(jc.arm9 ? 0 : 1) << 32) | key);
+    if (it == staged.end()) return nullptr;
+    d = std::move(it->second);
+    staged.erase(it);
+    cur = gen;
+  }
+  const u8* src = jc.ctx->page_table.read_ptr(key_pc(key));
+  if (d.gen != cur || d.stamp != jc.nds->bus.timing().stamp.load(std::memory_order_acquire) ||
+      !src || std::memcmp(src, d.guest.data(), d.guest.size()) != 0) {
+    delete d.b; ++st_dropped;
+    return nullptr;
+  }
+  // DS_JIT_PRETX_VERIFY=1: re-translate the key fresh right now and diff it
+  // against the staged block. Any mismatch means translation read state that
+  // changed between build and adoption without failing the byte compare --
+  // the exactness bug hunter.
+  static const bool verify = std::getenv("DS_JIT_PRETX_VERIFY") != nullptr;
+  if (verify) {
+    Runtime& r = g_rt;
+    std::lock_guard<std::mutex> lk(mu);
+    if (r.pos + BLOCK_MARGIN <= r.cap) {
+      Block tmp{};
+      tmp.key = key; tmp.owner = jc.arm9 ? 0 : 1;
+      Emitter e(r.arena + r.pos, BLOCK_MARGIN);       // frontier scratch; pos not advanced
+      if (translate_block(jc, key, e, tmp)) {
+        if (tmp.guest_len != d.b->guest_len || e.size() != d.b->size || tmp.hot_size != d.b->hot_size)
+          std::fprintf(stderr, "[pretx] VERIFY shape mismatch key %08x: staged len/size/hot %u/%u/%u fresh %u/%zu/%u frame %llu\n",
+                       key, d.b->guest_len, d.b->size, d.b->hot_size, tmp.guest_len, e.size(), tmp.hot_size,
+                       (unsigned long long)jc.ctx->nds->frame_count);
+        else {
+          const u8* fresh = r.arena + r.pos;
+          u32 diffs = 0;
+          for (u32 i = 0; i < d.b->size; i += 4) {
+            u32 a, f;
+            std::memcpy(&a, d.b->entry + i, 4);
+            std::memcpy(&f, fresh + i, 4);
+            if (a == f) continue;
+            // Relative branches to the fixed stubs legitimately differ with
+            // the emission base; anything else is baked state that drifted.
+            const bool rel = (a & 0x7C000000u) == (0x14000000u & 0x7C000000u) ||   // B/BL
+                             (a & 0xFF000010u) == 0x54000000u;                     // B.cond
+            if (rel && (f & 0x7C000000u) == (a & 0x7C000000u)) continue;
+            if (++diffs <= 4)
+              std::fprintf(stderr, "[pretx] VERIFY word mismatch key %08x +%u: staged %08x fresh %08x frame %llu\n",
+                           key, i, a, f, (unsigned long long)jc.ctx->nds->frame_count);
+          }
+          if (diffs) {   // both blocks, for objdump -D -b binary -m aarch64
+            std::fprintf(stderr, "[pretx] staged:");
+            for (u32 i = 0; i < d.b->size && i < 256; i += 4) { u32 w; std::memcpy(&w, d.b->entry + i, 4); std::fprintf(stderr, " %08x", w); }
+            std::fprintf(stderr, "\n[pretx] fresh: ");
+            for (u32 i = 0; i < d.b->size && i < 256; i += 4) { u32 w; std::memcpy(&w, fresh + i, 4); std::fprintf(stderr, " %08x", w); }
+            std::fputc('\n', stderr);
+          }
+        }
+      }
+    }
+  }
+  install(jc, d.b);
+  asm volatile("isb" ::: "memory");   // this PE may fetch the adopted code next
+  ++st_adopted;
+  seed(jc, *d.b);
+  return d.b;
+}
+
+static void start() {
+  if (!on()) return;
+  static const bool started = [] { std::thread(worker).detach(); return true; }();
+  (void)started;
+}
+
+} // namespace pretx
+} // namespace
 
 
 // Does the block's code on `page` overlap the written bytes [lo, hi]? A block
@@ -757,7 +1063,10 @@ static void invalidate_blocks(const u8* host_page, std::vector<Block*> victims) 
     const u32 pc = run ? run->hot.regs[15] : 0;
     churn::writers[churn::Key{pc, dma, cpu}]++;
     churn::inval++; churn::killed += victims.size(); churn::frames_seen = ctx->nds->frame_count;
-    for (Block* b : victims) churn::victims_by_page[key_pc(b->key) & ~(mem::PAGE_SIZE - 1)]++;
+    for (Block* b : victims) {
+      churn::victims_by_page[key_pc(b->key) & ~(mem::PAGE_SIZE - 1)]++;
+      churn::page_last_write[key_pc(b->key) & ~(mem::PAGE_SIZE - 1)] = ctx->nds->sched.now();
+    }
   }
   for (Block* b : victims) {
     JitCpu& jc = jc_of(b);
@@ -775,6 +1084,7 @@ static void invalidate_blocks(const u8* host_page, std::vector<Block*> victims) 
 }
 
 void invalidate_cpu(JitCpu& jc) {
+  pretx::purge();   // timing/config changed: the worker's pending output is built on the old tables
   for (Block* b : jc.all_blocks) if (!b->dead) { remove_from_page_lists(b); kill_block(jc, b); }
   jc.blocks.clear();
   if (jc.ctx) jc.ctx->hot.alerts |= ALERT_INVALIDATED;
@@ -934,6 +1244,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     ctx.jit_timing_changed = &on_timing_changed;
     (c == 0 ? nds.run_arm9 : nds.run_arm7) = &run;
   }
+  pretx::start();
   return true;
 }
 
@@ -959,6 +1270,10 @@ void report(std::FILE* out) {
   std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, slow accesses %llu, entries %llu, invalidated %llu, flushes %llu\n",
                (unsigned long long)s.blocks_translated, (unsigned long long)s.instrs_translated, (unsigned long long)s.instrs_fallback,
                (unsigned long long)s.slow_accesses, (unsigned long long)s.entries, (unsigned long long)s.blocks_invalidated, (unsigned long long)s.flushes);
+  if (pretx::on())
+    std::fprintf(out, "[jit] pretx: built %llu adopted %llu dropped %llu skipped %llu\n",
+                 (unsigned long long)pretx::st_built, (unsigned long long)pretx::st_adopted,
+                 (unsigned long long)pretx::st_dropped, (unsigned long long)pretx::st_skipped);
   std::fprintf(out, "[jit] code %llu KB (hot %llu KB): %.1f bytes per guest instruction, %.1f hot\n", (unsigned long long)(s.code_bytes >> 10), (unsigned long long)(s.hot_bytes >> 10),
                s.instrs_translated ? static_cast<double>(s.code_bytes) / static_cast<double>(s.instrs_translated) : 0.0,
                s.instrs_translated ? static_cast<double>(s.hot_bytes) / static_cast<double>(s.instrs_translated) : 0.0);

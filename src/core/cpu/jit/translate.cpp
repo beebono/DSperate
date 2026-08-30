@@ -544,6 +544,7 @@ private:
     }
     call_stub(jc_.link);
     e().word(make_key(target, to_thumb));
+    if (blk_.nsucc < 4) blk_.succ[blk_.nsucc++] = make_key(target, to_thumb);
     ended_ = true;
   }
   // Indirect branch; `wtarget` holds the address. With `interwork` bit 0

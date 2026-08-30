@@ -85,6 +85,11 @@ struct Block {
   const u8* host_hi;         // touches neither page's part of [lo, hi] leaves the block alone
   u8   owner;        // index into Runtime::cpus
   bool dead;
+  // Static branch targets (emit_branch_static keys): what the pre-translation
+  // worker chases ahead of execution. Best-effort -- targets past `nsucc` 4
+  // are simply not chased.
+  u32  succ[4];
+  u8   nsucc;
 };
 
 // Direct-mapped branch-target cache, one per CPU, indexed by `(key >> 1)`.
