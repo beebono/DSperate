@@ -1384,33 +1384,60 @@ template <int mode, bool textured, bool aa>
     else { push = true; cov_accum = cov_sel & static_cast<s32>(0x80000000u); if (!cov_accum) attr_base |= (cov_sel << 8); }
   }
   const s32 cov_step = cov_sel & 0x3FF;
-  // Translucent attribute pieces.
-  const uint32x4_t t_attr_fixed = vdupq_n_u32((polyattr & 0xE0F0) | ((polyattr >> 8) & 0xFF0000) | (1u << 22));
-  const uint32x4_t t_keep = vdupq_n_u32(0xFF001F0F), t_id = vdupq_n_u32(0x007F0000), fogbit = vdupq_n_u32(1u << 15);
   const bool blend_on = sh.dispcnt & (1 << 3);
   const u32 row0 = row_of(y) + 1;
+  u8* const cb = reinterpret_cast<u8*>(color_.data());
+  u8* const ab = reinterpret_cast<u8*>(attr_.data());
 
-  // Alpha-blend `src` over the destination at base+x for the lanes `m`;
-  // plot_translucent on four lanes.
-  auto plot4 = [&](u32 base, uint32x4_t m, uint32x4_t src, uint32x4_t alpha, int32x4_t z) {
-    const uint32x4_t da = vld1q_u32(&attr_[base]), dc = vld1q_u32(&color_[base]);
-    uint32x4_t attr = vorrq_u32(t_attr_fixed, vandq_u32(da, t_keep));
-    m = vbicq_u32(m, vceqq_u32(vandq_u32(da, t_id), vandq_u32(attr, t_id)));   // equal translucent ids don't blend
-    attr = vandq_u32(attr, vorrq_u32(da, vmvnq_u32(fogbit)));                   // fog bit only if the destination has it
-    uint32x4_t dsta = vshrq_n_u32(dc, 24);
-    uint32x4_t out = src;
+  // plot_translucent on eight lanes, in byte planes: one vld4 each for the
+  // source and destination records and for the destination attributes, the
+  // blend as multiply-long / multiply-accumulate-long in 16-bit lanes with a
+  // narrowing shift, the attribute bytes rebuilt plane by plane, and one
+  // vst4 back for each. DraStic's render_polygon_alpha_blend_c is this
+  // shape; the 32-bit-lane form shifted every channel out of the word and
+  // back for each of the two halves.
+  //
+  // Attribute of the translucent pixel: byte 0 = polygon bits 4-7 | dest
+  // bits 0-3 (edge flags), byte 1 = polygon bits 13-15 (fog only where the
+  // destination has it) | dest coverage bits 0-4, byte 2 = polygon id | the
+  // translucent bit, byte 3 = the destination's.
+  const uint8x8_t pa0 = vdup_n_u8(static_cast<u8>(polyattr & 0xF0));
+  const uint8x8_t pa1 = vdup_n_u8(static_cast<u8>((polyattr >> 8) & 0xE0));
+  const uint8x8_t pa2 = vdup_n_u8(static_cast<u8>((polyattr >> 24) | 0x40));
+  const uint8x8_t pa2id = vand_u8(pa2, vdup_n_u8(0x7F));
+  const uint8x8_t v7f8 = vdup_n_u8(0x7F), v0f8 = vdup_n_u8(0x0F), v1f8 = vdup_n_u8(0x1F), v3f8 = vdup_n_u8(0x3F);
+  const uint8x8_t one8 = vdup_n_u8(1), v32_8 = vdup_n_u8(32), zero8 = vdup_n_u8(0);
+  auto plot8 = [&](u32 base, const uint32x4_t* m, const uint8x8x4_t& src, const int32x4_t* z) {
+    const uint8x8x4_t da = vld4_u8(ab + base * 4), dc = vld4_u8(cb + base * 4);
+    uint8x8_t m8 = vmovn_u16(vcombine_u16(vmovn_u32(m[0]), vmovn_u32(m[1])));
+    m8 = vbic_u8(m8, vceq_u8(vand_u8(da.val[2], v7f8), pa2id));   // equal translucent ids don't blend
+    const uint8x8_t sa = src.val[3], dsta = dc.val[3];
+    uint8x8_t r = src.val[0], g = src.val[1], b = src.val[2];
     if (blend_on) {
-      const uint32x4_t a1 = vaddq_u32(alpha, vdupq_n_u32(1)), a2 = vsubq_u32(vdupq_n_u32(32), a1), m3f = vdupq_n_u32(0x3F);
-      const uint32x4_t r = vshrq_n_u32(vmlaq_u32(vmulq_u32(vandq_u32(src, m3f), a1), vandq_u32(dc, m3f), a2), 5);
-      const uint32x4_t g = vshrq_n_u32(vmlaq_u32(vmulq_u32(vandq_u32(vshrq_n_u32(src, 8), m3f), a1), vandq_u32(vshrq_n_u32(dc, 8), m3f), a2), 5);
-      const uint32x4_t b = vshrq_n_u32(vmlaq_u32(vmulq_u32(vandq_u32(vshrq_n_u32(src, 16), m3f), a1), vandq_u32(vshrq_n_u32(dc, 16), m3f), a2), 5);
-      out = vorrq_u32(vorrq_u32(r, vshlq_n_u32(g, 8)), vshlq_n_u32(b, 16));
-    } else out = vandq_u32(src, vdupq_n_u32(0x00FFFFFF));
-    out = vorrq_u32(out, vshlq_n_u32(vmaxq_u32(alpha, dsta), 24));
-    out = vbslq_u32(vceqq_u32(dsta, v0), src, out);                            // nothing underneath: source as is
-    vst1q_u32(&color_[base], vbslq_u32(m, out, dc));
-    vst1q_u32(&attr_[base], vbslq_u32(m, attr, da));
-    if (sh.polyattr_z) vst1q_s32(reinterpret_cast<s32*>(&depth_[base]), vbslq_s32(m, z, vld1q_s32(reinterpret_cast<const s32*>(&depth_[base]))));
+      const uint8x8_t a1 = vadd_u8(sa, one8), a2 = vsub_u8(v32_8, a1);
+      r = vshrn_n_u16(vmlal_u8(vmull_u8(vand_u8(r, v3f8), a1), vand_u8(dc.val[0], v3f8), a2), 5);
+      g = vshrn_n_u16(vmlal_u8(vmull_u8(vand_u8(g, v3f8), a1), vand_u8(dc.val[1], v3f8), a2), 5);
+      b = vshrn_n_u16(vmlal_u8(vmull_u8(vand_u8(b, v3f8), a1), vand_u8(dc.val[2], v3f8), a2), 5);
+    }
+    const uint8x8_t none = vceq_u8(dsta, zero8);                  // nothing underneath: source as is
+    uint8x8x4_t oc;
+    oc.val[0] = vbsl_u8(m8, vbsl_u8(none, src.val[0], r), dc.val[0]);
+    oc.val[1] = vbsl_u8(m8, vbsl_u8(none, src.val[1], g), dc.val[1]);
+    oc.val[2] = vbsl_u8(m8, vbsl_u8(none, src.val[2], b), dc.val[2]);
+    oc.val[3] = vbsl_u8(m8, vbsl_u8(none, sa, vmax_u8(sa, dsta)), dc.val[3]);
+    vst4_u8(cb + base * 4, oc);
+    uint8x8x4_t oa;
+    oa.val[0] = vbsl_u8(m8, vorr_u8(pa0, vand_u8(da.val[0], v0f8)), da.val[0]);
+    oa.val[1] = vbsl_u8(m8, vorr_u8(vand_u8(pa1, vorr_u8(da.val[1], v7f8)), vand_u8(da.val[1], v1f8)), da.val[1]);
+    oa.val[2] = vbsl_u8(m8, pa2, da.val[2]);
+    oa.val[3] = da.val[3];
+    vst4_u8(ab + base * 4, oa);
+    if (sh.polyattr_z) {
+      const int16x8_t mw = vmovl_s8(vreinterpret_s8_u8(m8));
+      const uint32x4_t mz[2] = {vreinterpretq_u32_s32(vmovl_s16(vget_low_s16(mw))), vreinterpretq_u32_s32(vmovl_high_s16(mw))};
+      for (u32 k = 0; k < 2; ++k)
+        vst1q_s32(reinterpret_cast<s32*>(&depth_[base + k * 4]), vbslq_s32(mz[k], z[k], vld1q_s32(reinterpret_cast<const s32*>(&depth_[base + k * 4]))));
+    }
   };
 
   // Eight pixels a step, as two four-lane halves: the per-group scalar work
@@ -1517,16 +1544,13 @@ template <int mode, bool textured, bool aa>
           }
         }
       }
-      if (kinds & 0x0202020202020202ull) {
-        for (u32 k = 0; k < 2; ++k) {
-          if (!(kinds & (0x0202020202020202ull & HALF[k]))) continue;
-          plot4(addr + k * 4, mt1[k], colour[k], a[k], z[k]);
-          if (kinds & (0x0404040404040404ull & HALF[k])) plot4(under + k * 4, mb[k], colour[k], a[k], z[k]);
+      if (kinds & 0x1212121212121212ull) {
+        const uint8x8x4_t src = vld4_u8(reinterpret_cast<const u8*>(sb.col + i));
+        if (kinds & 0x0202020202020202ull) {
+          plot8(addr, mt1, src, z);
+          if (kinds & 0x0404040404040404ull) plot8(under, mb, src, z);
         }
-      }
-      if constexpr (two) {
-        if (kinds & 0x1010101010101010ull)
-          for (u32 k = 0; k < 2; ++k) if (kinds & (0x1010101010101010ull & HALF[k])) plot4(under + k * 4, mt2[k], colour[k], a[k], z[k]);
+        if constexpr (two) { if (kinds & 0x1010101010101010ull) plot8(under, mt2, src, z); }
       }
     };
     if (p8 & 0x0202020202020202ull) {
