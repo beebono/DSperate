@@ -1413,20 +1413,36 @@ template <int mode, bool textured, bool aa>
     if (sh.polyattr_z) vst1q_s32(reinterpret_cast<s32*>(&depth_[base]), vbslq_s32(m, z, vld1q_s32(reinterpret_cast<const s32*>(&depth_[base]))));
   };
 
-  // Lane masks are tested through one 64-bit transfer of the narrowed lanes
-  // (a cross-lane reduction per test is what the in-order core stalls on).
-  auto lanes = [](uint32x4_t m) -> u64 { return vget_lane_u64(vreinterpret_u64_u16(vmovn_u32(m)), 0); };
+  // Eight pixels a step, as two four-lane halves: the per-group scalar work
+  // (the pass-byte test, the address arithmetic, the lane-kind reduction and
+  // its branches) is paid once per eight pixels, and the group is the width
+  // the byte-plane stages take (vld4_u8 over eight records). Lane masks are
+  // tested through one 64-bit transfer of the narrowed lanes -- a cross-lane
+  // reduction per test is what the in-order core stalls on.
+  auto lanes8 = [](uint32x4_t a, uint32x4_t b) -> u64 {
+    return vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(vcombine_u16(vmovn_u32(a), vmovn_u32(b)))), 0);
+  };
+  constexpr u64 HALF[2] = {0x00000000FFFFFFFFull, 0xFFFFFFFF00000000ull};
   const bool untextured_passes = !textured && sh.polyalpha > sh.alpha_ref;
   if (!textured && !untextured_passes) return;   // alpha test fails for every pixel
-  for (s32 x = xa; x < xb; x += 4) {
+  for (s32 x = xa; x < xb; x += 8) {
     const u32 i = static_cast<u32>(x - sb.x0);
-    u32 p4; std::memcpy(&p4, sb.pass + i, 4);
-    if (x + 4 > xb) p4 &= (1u << (8 * (xb - x))) - 1;    // lanes past the end
-    if (!(p4 & 0x03030303u)) continue;
-    const uint32x4_t pl = vshlq_u32(vdupq_n_u32(p4), vreinterpretq_s32_u32(vmulq_u32(lane, vdupq_n_u32(static_cast<u32>(-8)))));
-    const uint32x4_t m1 = vtstq_u32(pl, vdupq_n_u32(1));
+    u64 p8; std::memcpy(&p8, sb.pass + i, 8);
+    const s32 rem = xb - x;
+    if (rem < 8) p8 &= (1ull << (8 * rem)) - 1;    // lanes past the end
+    if (!(p8 & 0x0303030303030303ull)) continue;
+    // The pass bytes as lane vectors straight from memory: no general-register
+    // to vector transfer, no per-lane shift to spread a word.
+    const uint16x8_t p16 = vmovl_u8(vld1_u8(sb.pass + i));
+    uint32x4_t pv[2] = {vmovl_u16(vget_low_u16(p16)), vmovl_high_u16(p16)};
+    if (rem < 8) {
+      const uint32x4_t vr = vdupq_n_u32(static_cast<u32>(rem));
+      pv[0] = vandq_u32(pv[0], vcltq_u32(lane, vr));
+      pv[1] = vandq_u32(pv[1], vcltq_u32(vaddq_u32(lane, vdupq_n_u32(4)), vr));
+    }
     const u32 addr = row0 + static_cast<u32>(x), under = addr + RSIZE;
-    const int32x4_t z = vld1q_s32(sb.z + i);
+    uint32x4_t m1[2]; int32x4_t z[2];
+    for (u32 k = 0; k < 2; ++k) { m1[k] = vtstq_u32(pv[k], vdupq_n_u32(1)); z[k] = vld1q_s32(sb.z + i + k * 4); }
     // Pre-pass bit 1: the top pixel fails the depth test but carries edge
     // flags, so the pixel underneath is a candidate. Its test is done here
     // (the pre-pass only looks at the top layer), and such lanes then take
@@ -1438,78 +1454,98 @@ template <int mode, bool textured, bool aa>
     // pays every extra lane operation on the common path (a single body
     // measured 5 % slower on the span stage for 6 % fewer instructions), so
     // the no-under group must compile to exactly what it was.
-    auto group = [&](auto two_c, uint32x4_t m2) {
+    auto group = [&](auto two_c, const uint32x4_t* m2) {
       constexpr bool two = decltype(two_c)::value;
-      const uint32x4_t colour = vld1q_u32(sb.col + i);
-      const uint32x4_t a = vshrq_n_u32(colour, 24);
-      prof::add(prof::C_RESOLVED_PIXELS, 4);
-      uint32x4_t m = m1;
-      if constexpr (two) m = vorrq_u32(m1, m2);
-      if constexpr (textured) m = vandq_u32(m, vcgtq_u32(a, v_alpha_ref));
-      const uint32x4_t mo = vandq_u32(m, vceqq_u32(a, v31)), mt = vbicq_u32(m, mo);
-      uint32x4_t mo1 = mo, mt1 = mt, mo2 = v0, mt2 = v0;
-      if constexpr (two) { mo1 = vandq_u32(mo, m1); mt1 = vandq_u32(mt, m1); mo2 = vandq_u32(mo, m2); mt2 = vandq_u32(mt, m2); }
-      const uint32x4_t dstattr = vld1q_u32(&attr_[addr]);
-      // bit 0 per lane: opaque, bit 1: translucent, bit 2: translucent with a pixel underneath;
-      // bits 3 and 4: the same opaque / translucent, landing on the pixel underneath.
-      const uint32x4_t mb = vandq_u32(mt1, vtstq_u32(dstattr, vdupq_n_u32(0xF)));
-      uint32x4_t kv = vorrq_u32(vorrq_u32(vandq_u32(mo1, vdupq_n_u32(1)), vandq_u32(mt1, vdupq_n_u32(2))), vandq_u32(mb, vdupq_n_u32(4)));
-      if constexpr (two) kv = vorrq_u32(kv, vorrq_u32(vandq_u32(mo2, vdupq_n_u32(8)), vandq_u32(mt2, vdupq_n_u32(16))));
-      const u64 kinds = lanes(kv);
+      uint32x4_t colour[2], a[2], mo[2], mo1[2], mt1[2], mo2[2], mt2[2], dstattr[2], mb[2], kv[2];
+      prof::add(prof::C_RESOLVED_PIXELS, 8);
+      for (u32 k = 0; k < 2; ++k) {
+        colour[k] = vld1q_u32(sb.col + i + k * 4);
+        a[k] = vshrq_n_u32(colour[k], 24);
+        uint32x4_t m = m1[k];
+        if constexpr (two) m = vorrq_u32(m1[k], m2[k]);
+        if constexpr (textured) m = vandq_u32(m, vcgtq_u32(a[k], v_alpha_ref));
+        mo[k] = vandq_u32(m, vceqq_u32(a[k], v31));
+        const uint32x4_t mt = vbicq_u32(m, mo[k]);
+        mo1[k] = mo[k]; mt1[k] = mt; mo2[k] = v0; mt2[k] = v0;
+        if constexpr (two) { mo1[k] = vandq_u32(mo[k], m1[k]); mt1[k] = vandq_u32(mt, m1[k]); mo2[k] = vandq_u32(mo[k], m2[k]); mt2[k] = vandq_u32(mt, m2[k]); }
+        dstattr[k] = vld1q_u32(&attr_[addr + k * 4]);
+        // bit 0 per lane: opaque, bit 1: translucent, bit 2: translucent with a pixel underneath;
+        // bits 3 and 4: the same opaque / translucent, landing on the pixel underneath.
+        mb[k] = vandq_u32(mt1[k], vtstq_u32(dstattr[k], vdupq_n_u32(0xF)));
+        kv[k] = vorrq_u32(vorrq_u32(vandq_u32(mo1[k], vdupq_n_u32(1)), vandq_u32(mt1[k], vdupq_n_u32(2))), vandq_u32(mb[k], vdupq_n_u32(4)));
+        if constexpr (two) kv[k] = vorrq_u32(kv[k], vorrq_u32(vandq_u32(mo2[k], vdupq_n_u32(8)), vandq_u32(mt2[k], vdupq_n_u32(16))));
+      }
+      const u64 kinds = lanes8(kv[0], kv[1]);
       if (!kinds) return;
-      if (kinds & 0x0009000900090009ull) {
+      if (kinds & 0x0909090909090909ull) {
         // One attribute word for both layers: coverage accumulates in x order
         // over every opaque pixel of the span, whichever layer it lands on.
-        uint32x4_t attr = vdupq_n_u32(attr_base);
+        uint32x4_t attr[2] = {vdupq_n_u32(attr_base), vdupq_n_u32(attr_base)};
         if (aa && cov_accum) {
-          u32 total;
-          const uint32x4_t pre = prefix_exclusive(vandq_u32(mo, vdupq_n_u32(1)), &total);
-          const uint32x4_t xc = vshrq_n_u32(vmlaq_u32(vdupq_n_u32(static_cast<u32>(xcov)), pre, vdupq_n_u32(static_cast<u32>(cov_step))), 5);
-          uint32x4_t cov;
-          if (part == 0) cov = vminq_u32(xc, v31);
-          else cov = vreinterpretq_u32_s32(vmaxq_s32(vsubq_s32(vdupq_n_s32(0x1F), vreinterpretq_s32_u32(xc)), vdupq_n_s32(0)));
-          attr = vorrq_u32(attr, vshlq_n_u32(cov, 8));
-          xcov += cov_step * static_cast<s32>(total);
-        }
-        if (!two || (kinds & 0x0001000100010001ull)) {
-          const uint32x4_t dstcol = vld1q_u32(&color_[addr]);
-          const int32x4_t dstz = vld1q_s32(reinterpret_cast<const s32*>(&depth_[addr]));
-          if (push) {
-            vst1q_u32(&color_[under], vbslq_u32(mo1, dstcol, vld1q_u32(&color_[under])));
-            vst1q_s32(reinterpret_cast<s32*>(&depth_[under]), vbslq_s32(mo1, dstz, vld1q_s32(reinterpret_cast<const s32*>(&depth_[under]))));
-            vst1q_u32(&attr_[under], vbslq_u32(mo1, dstattr, vld1q_u32(&attr_[under])));
+          u32 t0, t1;
+          const uint32x4_t pre[2] = {prefix_exclusive(vandq_u32(mo[0], vdupq_n_u32(1)), &t0),
+                                     vaddq_u32(prefix_exclusive(vandq_u32(mo[1], vdupq_n_u32(1)), &t1), vdupq_n_u32(t0))};
+          for (u32 k = 0; k < 2; ++k) {
+            const uint32x4_t xc = vshrq_n_u32(vmlaq_u32(vdupq_n_u32(static_cast<u32>(xcov)), pre[k], vdupq_n_u32(static_cast<u32>(cov_step))), 5);
+            uint32x4_t cov;
+            if (part == 0) cov = vminq_u32(xc, v31);
+            else cov = vreinterpretq_u32_s32(vmaxq_s32(vsubq_s32(vdupq_n_s32(0x1F), vreinterpretq_s32_u32(xc)), vdupq_n_s32(0)));
+            attr[k] = vorrq_u32(attr[k], vshlq_n_u32(cov, 8));
           }
-          vst1q_s32(reinterpret_cast<s32*>(&depth_[addr]), vbslq_s32(mo1, z, dstz));
-          vst1q_u32(&color_[addr], vbslq_u32(mo1, colour, dstcol));
-          vst1q_u32(&attr_[addr], vbslq_u32(mo1, attr, dstattr));
+          xcov += cov_step * static_cast<s32>(t0 + t1);
         }
-        if constexpr (two) {
-          if (kinds & 0x0008000800080008ull) {
-            vst1q_s32(reinterpret_cast<s32*>(&depth_[under]), vbslq_s32(mo2, z, vld1q_s32(reinterpret_cast<const s32*>(&depth_[under]))));
-            vst1q_u32(&color_[under], vbslq_u32(mo2, colour, vld1q_u32(&color_[under])));
-            vst1q_u32(&attr_[under], vbslq_u32(mo2, attr, vld1q_u32(&attr_[under])));
+        for (u32 k = 0; k < 2; ++k) {
+          const u32 ak = addr + k * 4, uk = under + k * 4;
+          if (kinds & (0x0101010101010101ull & HALF[k])) {
+            const uint32x4_t dstcol = vld1q_u32(&color_[ak]);
+            const int32x4_t dstz = vld1q_s32(reinterpret_cast<const s32*>(&depth_[ak]));
+            if (push) {
+              vst1q_u32(&color_[uk], vbslq_u32(mo1[k], dstcol, vld1q_u32(&color_[uk])));
+              vst1q_s32(reinterpret_cast<s32*>(&depth_[uk]), vbslq_s32(mo1[k], dstz, vld1q_s32(reinterpret_cast<const s32*>(&depth_[uk]))));
+              vst1q_u32(&attr_[uk], vbslq_u32(mo1[k], dstattr[k], vld1q_u32(&attr_[uk])));
+            }
+            vst1q_s32(reinterpret_cast<s32*>(&depth_[ak]), vbslq_s32(mo1[k], z[k], dstz));
+            vst1q_u32(&color_[ak], vbslq_u32(mo1[k], colour[k], dstcol));
+            vst1q_u32(&attr_[ak], vbslq_u32(mo1[k], attr[k], dstattr[k]));
+          }
+          if constexpr (two) {
+            if (kinds & (0x0808080808080808ull & HALF[k])) {
+              vst1q_s32(reinterpret_cast<s32*>(&depth_[uk]), vbslq_s32(mo2[k], z[k], vld1q_s32(reinterpret_cast<const s32*>(&depth_[uk]))));
+              vst1q_u32(&color_[uk], vbslq_u32(mo2[k], colour[k], vld1q_u32(&color_[uk])));
+              vst1q_u32(&attr_[uk], vbslq_u32(mo2[k], attr[k], vld1q_u32(&attr_[uk])));
+            }
           }
         }
       }
-      if (kinds & 0x0002000200020002ull) {
-        plot4(addr, mt1, colour, a, z);
-        if (kinds & 0x0004000400040004ull) plot4(under, mb, colour, a, z);
+      if (kinds & 0x0202020202020202ull) {
+        for (u32 k = 0; k < 2; ++k) {
+          if (!(kinds & (0x0202020202020202ull & HALF[k]))) continue;
+          plot4(addr + k * 4, mt1[k], colour[k], a[k], z[k]);
+          if (kinds & (0x0404040404040404ull & HALF[k])) plot4(under + k * 4, mb[k], colour[k], a[k], z[k]);
+        }
       }
-      if constexpr (two) { if (kinds & 0x0010001000100010ull) plot4(under, mt2, colour, a, z); }
+      if constexpr (two) {
+        if (kinds & 0x1010101010101010ull)
+          for (u32 k = 0; k < 2; ++k) if (kinds & (0x1010101010101010ull & HALF[k])) plot4(under + k * 4, mt2[k], colour[k], a[k], z[k]);
+      }
     };
-    if (p4 & 0x02020202u) {
-      const int32x4_t dz = vld1q_s32(reinterpret_cast<const s32*>(&depth_[under]));
-      uint32x4_t ok;
-      if constexpr (mode == 0) ok = vcltq_s32(z, dz);
-      else if constexpr (mode == 1) {
-        const uint32x4_t back = vceqq_u32(vandq_u32(vld1q_u32(&attr_[under]), vdupq_n_u32(0x00400010)), vdupq_n_u32(0x10));
-        ok = vbslq_u32(back, vcleq_s32(z, dz), vcltq_s32(z, dz));
-      } else if constexpr (mode == 2) ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(dz, z), vdupq_n_s32(0x200))), vdupq_n_u32(0x400));
-      else ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(dz, z), vdupq_n_s32(0xFF))), vdupq_n_u32(0x1FE));
-      group(std::true_type{}, vandq_u32(vtstq_u32(pl, vdupq_n_u32(2)), ok));
+    if (p8 & 0x0202020202020202ull) {
+      uint32x4_t m2[2];
+      for (u32 k = 0; k < 2; ++k) {
+        const int32x4_t dz = vld1q_s32(reinterpret_cast<const s32*>(&depth_[under + k * 4]));
+        uint32x4_t ok;
+        if constexpr (mode == 0) ok = vcltq_s32(z[k], dz);
+        else if constexpr (mode == 1) {
+          const uint32x4_t back = vceqq_u32(vandq_u32(vld1q_u32(&attr_[under + k * 4]), vdupq_n_u32(0x00400010)), vdupq_n_u32(0x10));
+          ok = vbslq_u32(back, vcleq_s32(z[k], dz), vcltq_s32(z[k], dz));
+        } else if constexpr (mode == 2) ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(dz, z[k]), vdupq_n_s32(0x200))), vdupq_n_u32(0x400));
+        else ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(dz, z[k]), vdupq_n_s32(0xFF))), vdupq_n_u32(0x1FE));
+        m2[k] = vandq_u32(vtstq_u32(pv[k], vdupq_n_u32(2)), ok);
+      }
+      group(std::true_type{}, m2);
     } else {
-      if (!(p4 & 0x01010101u)) continue;
-      group(std::false_type{}, v0);
+      if (!(p8 & 0x0101010101010101ull)) continue;
+      group(std::false_type{}, nullptr);
     }
   }
 }
@@ -2222,10 +2258,10 @@ u32 Renderer3D::selftest_final_pass(u32 seed, u32 dispcnt) {
       attr_[i] = (a & 0x3F000000) | (a & 0x7F0000) | ((a >> 20) & 0x1F00) | ((a & 0x100) ? 0x8000 : 0) | (((a >> 4) & 7) ? (a & 0xF) : 0) | (a & 0x10);
     }
     line_touched_[y] = true;
-    std::array<u32, RSIZE * 2> c0 = color_, d0 = depth_, a0 = attr_;
+    auto c0 = color_, d0 = depth_, a0 = attr_;
     std::vector<u32> o0(256 * 8), o1(256 * 8);   // final_pass writes out_dst_[y * 256 ..]
     out_dst_ = o0.data(); final_pass_ref(y);
-    std::array<u32, RSIZE * 2> c1 = color_, a1 = attr_;
+    auto c1 = color_, a1 = attr_;
     color_ = c0; depth_ = d0; attr_ = a0;
     out_dst_ = o1.data(); final_pass(y);
     for (u32 i = 0; i < RSIZE * 2; ++i) {

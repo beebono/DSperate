@@ -89,7 +89,10 @@ private:
   // coverage, bit 15 fog, bits 16-21 translucent polygon id, bit 22
   // translucent, bits 24-29 opaque polygon id.
   // The second half of each buffer holds the pixel underneath (for AA).
-  std::array<u32, RSIZE * 2> color_{}, depth_{}, attr_{};
+  // Eight words of slack: the resolve works eight lanes at a time from any
+  // span start, and a group that begins near x = 255 of the last ring row
+  // loads and writes back (unchanged) lanes past the under plane's end.
+  std::array<u32, RSIZE * 2 + 8> color_{}, depth_{}, attr_{};
   std::array<u32, 256 * 192> out_{};   // finished lines
   std::array<u8, 256 * RING> stencil_{};   // one row per ring line: see render_chunk
   // "the polygon drawn immediately before this one on THIS line was a shadow

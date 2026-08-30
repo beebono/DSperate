@@ -980,18 +980,21 @@ void span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* o
   }
 }
 
-u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass) {
+// One instantiation per depth mode: the test is decided once per span, not
+// once per four pixels inside the loop.
+template <int mode>
+static u32 depth_candidates_m(const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass) {
   const uint32x4_t one = vdupq_n_u32(1), two = vdupq_n_u32(2);
   uint32x4_t any = vdupq_n_u32(0);
   for (u32 i = 0; i < n; i += 4) {
     const int32x4_t zv = vld1q_s32(z + i), d = vreinterpretq_s32_u32(vld1q_u32(dstz + i));
     const uint32x4_t a = vld1q_u32(dstattr + i);
     uint32x4_t ok;
-    if (mode == 0) ok = vcltq_s32(zv, d);
-    else if (mode == 1) {
+    if constexpr (mode == 0) ok = vcltq_s32(zv, d);
+    else if constexpr (mode == 1) {
       const uint32x4_t back = vceqq_u32(vandq_u32(a, vdupq_n_u32(0x00400010)), vdupq_n_u32(0x10));
       ok = vbslq_u32(back, vcleq_s32(zv, d), vcltq_s32(zv, d));
-    } else if (mode == 2) ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(d, zv), vdupq_n_s32(0x200))), vdupq_n_u32(0x400));
+    } else if constexpr (mode == 2) ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(d, zv), vdupq_n_s32(0x200))), vdupq_n_u32(0x400));
     else ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(d, zv), vdupq_n_s32(0xFF))), vdupq_n_u32(0x1FE));
     const uint32x4_t edge = vtstq_u32(a, vdupq_n_u32(0xF));
     const uint32x4_t v = vbslq_u32(ok, one, vandq_u32(edge, two));
@@ -1005,6 +1008,15 @@ u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr
   u32 last = n; while (last && !pass[last - 1]) --last;
   if (!last) return 0;   // the only hits were in the rounded-up tail
   return (first << 16) | last;
+}
+
+u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass) {
+  switch (mode) {
+  case 0:  return depth_candidates_m<0>(z, dstz, dstattr, n, pass);
+  case 1:  return depth_candidates_m<1>(z, dstz, dstattr, n, pass);
+  case 2:  return depth_candidates_m<2>(z, dstz, dstattr, n, pass);
+  default: return depth_candidates_m<3>(z, dstz, dstattr, n, pass);
+  }
 }
 
 } // namespace ds::gpu::kern::neon
