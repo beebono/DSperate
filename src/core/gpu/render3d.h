@@ -158,6 +158,10 @@ public:
     ResolveFn resolve;
     int mode;      // pick_depth_mode
     bool vec;      // the NEON resolve applies (no shadow / wireframe / blend 2)
+    // Every record alpha the shading pass can emit for this polygon is 0 or
+    // 31, and the 0-alpha lanes never reach the resolve (span_shade clears
+    // their pass bits), so the resolve's translucent machinery compiles out.
+    bool opaque;
     // Edges all fill when AA, edge marking, blended translucency or wireframe
     // is on. Built from dispcnt, polyalpha and wireframe -- all fixed for the
     // polygon -- and so decided here rather than on every scanline.
@@ -325,8 +329,8 @@ private:
 #if DSPERATE_NEON
   // Four pixels per step; same results as resolve_span (the specification),
   // for polygons without shadow / wireframe / toon shading.
-  template <int mode, bool textured, bool aa> [[gnu::always_inline]] inline void resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
-  template <int mode, bool textured, bool aa> void resolve_batch_vec(const Shade& sh, const SpanJob* jobs, u32 n);
+  template <int mode, bool textured, bool aa, bool opq> [[gnu::always_inline]] inline void resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
+  template <int mode, bool textured, bool aa, bool opq> void resolve_batch_vec(const Shade& sh, const SpanJob* jobs, u32 n);
   // Census only (DS_PROFILE): how uniform the resolve's kind decision is, per
   // eight-pixel group and per batch. `kinds` is one kind-code byte per lane,
   // zero where the lane draws nothing; a group is uniform when every drawing

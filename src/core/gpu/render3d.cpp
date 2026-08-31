@@ -1025,6 +1025,12 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
   sh.vec = false;
 #endif
   sh.always_fill = (sh.dispcnt & ((1 << 4) | (1 << 5))) || (sh.polyalpha < 31 && (sh.dispcnt & (1 << 3))) || sh.wireframe;
+  // Provably all-opaque batch: with the polygon's alpha at 31, decal writes
+  // exactly that alpha for every pixel, and every texture format except
+  // A3I5 / A5I3 carries only 0-or-31 texel alpha, which modulate preserves.
+  // The alpha-0 lanes never reach the resolve -- span_shade narrows the pass
+  // plane by the alpha test -- so the opaque resolve needs no alpha logic.
+  sh.opaque = sh.polyalpha == 31 && (!sh.textured || (sh.blendmode & 1) || (sh.fmt != 1 && sh.fmt != 6));
   sh.mode = pick_depth_mode(p);
   sh.resolve = select_resolve(sh);
 }
@@ -1435,7 +1441,7 @@ void Renderer3D::rk_census(u64 kinds, u64 p8) {
   ++rk_groups_;
 }
 
-template <int mode, bool textured, bool aa>
+template <int mode, bool textured, bool aa, bool opq>
 [[gnu::always_inline]] inline void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
   const u32 polyattr = sh.polyattr;
   const uint32x4_t lane = {0, 1, 2, 3};
@@ -1554,29 +1560,41 @@ template <int mode, bool textured, bool aa>
     // the no-under group must compile to exactly what it was.
     auto group = [&](auto two_c, const uint32x4_t* m2) __attribute__((always_inline)) {
       constexpr bool two = decltype(two_c)::value;
-      uint32x4_t colour[2], a[2], mo[2] = {v0, v0}, mo1[2] = {v0, v0}, mt1[2] = {v0, v0}, mo2[2] = {v0, v0}, mt2[2] = {v0, v0}, dstattr[2], mb[2] = {v0, v0}, kv[2] = {v0, v0};
+      uint32x4_t colour[2], mo[2] = {v0, v0}, mo1[2] = {v0, v0}, mt1[2] = {v0, v0}, mo2[2] = {v0, v0}, mt2[2] = {v0, v0}, dstattr[2], mb[2] = {v0, v0}, kv[2] = {v0, v0};
       prof::add(prof::C_RESOLVED_PIXELS, NH * 4);
       for (u32 k = 0; k < NH; ++k) {
         colour[k] = vld1q_u32(sb.col + i + k * 4);
-        a[k] = vshrq_n_u32(colour[k], 24);
-        uint32x4_t m = m1[k];
-        if constexpr (two) m = vorrq_u32(m1[k], m2[k]);
-        if constexpr (textured) m = vandq_u32(m, vcgtq_u32(a[k], v_alpha_ref));
-        mo[k] = vandq_u32(m, vceqq_u32(a[k], v31));
-        const uint32x4_t mt = vbicq_u32(m, mo[k]);
-        mo1[k] = mo[k]; mt1[k] = mt; mo2[k] = v0; mt2[k] = v0;
-        if constexpr (two) { mo1[k] = vandq_u32(mo[k], m1[k]); mt1[k] = vandq_u32(mt, m1[k]); mo2[k] = vandq_u32(mo[k], m2[k]); mt2[k] = vandq_u32(mt, m2[k]); }
         dstattr[k] = vld1q_u32(&attr_[addr + k * 4]);
-        // bit 0 per lane: opaque, bit 1: translucent, bit 2: translucent with a pixel underneath;
-        // bits 3 and 4: the same opaque / translucent, landing on the pixel underneath.
-        mb[k] = vandq_u32(mt1[k], vtstq_u32(dstattr[k], vdupq_n_u32(0xF)));
-        kv[k] = vorrq_u32(vorrq_u32(vandq_u32(mo1[k], vdupq_n_u32(1)), vandq_u32(mt1[k], vdupq_n_u32(2))), vandq_u32(mb[k], vdupq_n_u32(4)));
-        if constexpr (two) kv[k] = vorrq_u32(kv[k], vorrq_u32(vandq_u32(mo2[k], vdupq_n_u32(8)), vandq_u32(mt2[k], vdupq_n_u32(16))));
+        if constexpr (opq) {
+          // Every drawing lane is opaque by construction (Shade::opaque), so
+          // the alpha test, the opaque/translucent split, the underneath
+          // probe and the translucent plot below all compile out.
+          mo1[k] = m1[k]; mo[k] = m1[k];
+          kv[k] = vandq_u32(m1[k], vdupq_n_u32(1));
+          if constexpr (two) {
+            mo[k] = vorrq_u32(m1[k], m2[k]); mo2[k] = m2[k];
+            kv[k] = vorrq_u32(kv[k], vandq_u32(m2[k], vdupq_n_u32(8)));
+          }
+        } else {
+          const uint32x4_t a = vshrq_n_u32(colour[k], 24);
+          uint32x4_t m = m1[k];
+          if constexpr (two) m = vorrq_u32(m1[k], m2[k]);
+          if constexpr (textured) m = vandq_u32(m, vcgtq_u32(a, v_alpha_ref));
+          mo[k] = vandq_u32(m, vceqq_u32(a, v31));
+          const uint32x4_t mt = vbicq_u32(m, mo[k]);
+          mo1[k] = mo[k]; mt1[k] = mt; mo2[k] = v0; mt2[k] = v0;
+          if constexpr (two) { mo1[k] = vandq_u32(mo[k], m1[k]); mt1[k] = vandq_u32(mt, m1[k]); mo2[k] = vandq_u32(mo[k], m2[k]); mt2[k] = vandq_u32(mt, m2[k]); }
+          // bit 0 per lane: opaque, bit 1: translucent, bit 2: translucent with a pixel underneath;
+          // bits 3 and 4: the same opaque / translucent, landing on the pixel underneath.
+          mb[k] = vandq_u32(mt1[k], vtstq_u32(dstattr[k], vdupq_n_u32(0xF)));
+          kv[k] = vorrq_u32(vorrq_u32(vandq_u32(mo1[k], vdupq_n_u32(1)), vandq_u32(mt1[k], vdupq_n_u32(2))), vandq_u32(mb[k], vdupq_n_u32(4)));
+          if constexpr (two) kv[k] = vorrq_u32(kv[k], vorrq_u32(vandq_u32(mo2[k], vdupq_n_u32(8)), vandq_u32(mt2[k], vdupq_n_u32(16))));
+        }
       }
       const u64 kinds = lanes8(kv[0], kv[1]);
       if (prof::enabled) rk_census(kinds, p8);
       if (!kinds) return;
-      if (kinds & 0x0909090909090909ull) {
+      if (opq || (kinds & 0x0909090909090909ull)) {
         // One attribute word for both layers: coverage accumulates in x order
         // over every opaque pixel of the span, whichever layer it lands on.
         uint32x4_t attr[2] = {vdupq_n_u32(attr_base), vdupq_n_u32(attr_base)};
@@ -1617,13 +1635,15 @@ template <int mode, bool textured, bool aa>
           }
         }
       }
-      if (kinds & 0x1212121212121212ull) {
-        const uint8x8x4_t src = vld4_u8(reinterpret_cast<const u8*>(sb.col + i));
-        if (kinds & 0x0202020202020202ull) {
-          plot8(addr, mt1, src, z);
-          if (kinds & 0x0404040404040404ull) plot8(under, mb, src, z);
+      if constexpr (!opq) {
+        if (kinds & 0x1212121212121212ull) {
+          const uint8x8x4_t src = vld4_u8(reinterpret_cast<const u8*>(sb.col + i));
+          if (kinds & 0x0202020202020202ull) {
+            plot8(addr, mt1, src, z);
+            if (kinds & 0x0404040404040404ull) plot8(under, mb, src, z);
+          }
+          if constexpr (two) { if (kinds & 0x1010101010101010ull) plot8(under, mt2, src, z); }
         }
-        if constexpr (two) { if (kinds & 0x1010101010101010ull) plot8(under, mt2, src, z); }
       }
     };
     if (p8 & 0x0202020202020202ull) {
@@ -1836,13 +1856,15 @@ Renderer3D::ResolveFn Renderer3D::select_resolve(const Shade& sh) {
 #undef DS_R
   };
 #if DSPERATE_NEON
-  static constexpr ResolveFn kResolveVec[4][2][2] = {
-#define DS_V(m) {{&Renderer3D::resolve_batch_vec<m, false, false>, &Renderer3D::resolve_batch_vec<m, false, true>},   \
-                 {&Renderer3D::resolve_batch_vec<m, true, false>,  &Renderer3D::resolve_batch_vec<m, true, true>}}
+  static constexpr ResolveFn kResolveVec[4][2][2][2] = {
+#define DS_V(m) {{{&Renderer3D::resolve_batch_vec<m, false, false, false>, &Renderer3D::resolve_batch_vec<m, false, false, true>},  \
+                  {&Renderer3D::resolve_batch_vec<m, false, true, false>,  &Renderer3D::resolve_batch_vec<m, false, true, true>}},  \
+                 {{&Renderer3D::resolve_batch_vec<m, true, false, false>,  &Renderer3D::resolve_batch_vec<m, true, false, true>},   \
+                  {&Renderer3D::resolve_batch_vec<m, true, true, false>,   &Renderer3D::resolve_batch_vec<m, true, true, true>}}}
     DS_V(0), DS_V(1), DS_V(2), DS_V(3)
 #undef DS_V
   };
-  if (sh.vec) return kResolveVec[sh.mode][sh.textured][(sh.dispcnt >> 4) & 1];
+  if (sh.vec) return kResolveVec[sh.mode][sh.textured][(sh.dispcnt >> 4) & 1][sh.opaque];
 #endif
   return kResolve[sh.mode][sh.textured][(sh.dispcnt >> 4) & 1][sh.shadow];
 }
@@ -1883,13 +1905,13 @@ void Renderer3D::resolve_batch(const Shade& sh, const SpanJob* jobs, u32 n) {
 }
 
 #if DSPERATE_NEON
-template <int mode, bool textured, bool aa>
+template <int mode, bool textured, bool aa, bool opq>
 void Renderer3D::resolve_batch_vec(const Shade& sh, const SpanJob* jobs, u32 n) {
   const SpanBuf& sb = spanbuf_;
   rk_or_ = 0; rk_mixed_ = false; rk_groups_ = 0;
   for (u32 k = 0; k < n; ++k)
     walk_span(jobs[k], [&](s32 y, s32 lo, s32 hi, int part, int edge, s32 lc, s32 rc, s32& xc) {
-      resolve_span_vec<mode, textured, aa>(sh, sb, y, lo, hi, part, edge, lc, rc, xc);
+      resolve_span_vec<mode, textured, aa, opq>(sh, sb, y, lo, hi, part, edge, lc, rc, xc);
     });
   if (prof::enabled) {
     prof::add(prof::C_RK_BATCHES, 1);
