@@ -113,9 +113,17 @@ measured decision, ranked by likely payoff:
    check-free second entry** (1.5, 1.12, 1.23, 1.26) — each small; the
    arena flush (1.23) is the one with a visible failure mode (full arena
    throws away every translation).
-6. **3D: 8-way gather, AND/OR uniformity, constant-W ramp** (2.4, 2.11,
-   2.14) — kernel-level, measured territory; see the per-span notes before
-   touching.
+6. ~~**3D: 8-way gather, AND/OR uniformity, constant-W ramp** (2.4, 2.11,
+   2.14)~~ — settled 2026-08-31. Constant-W and flat-rgb uniformity measured
+   empty (dbori 0.02 % constant-W pixels; GSDD's already take `_lin`); the
+   axis with signal was constant *alpha*: `Shade::opaque` proves a polygon
+   all-opaque at setup (alpha 31, decal or a 0/31-alpha texture format,
+   riding span_shade's alpha-narrowed pass plane) and selects an opaque
+   resolve instantiation with the translucent machinery compiled out.
+   With the 3.15 capture kernels, device (paired, 3 reps after warm-up,
+   1800 frames): etody −3.8 % mean / −7.4 % p99 (over-budget 16 → 10),
+   mlbis −2.0 % / −2.8 %, dbori p99 −2.1 %, GSDD/sm64/meteos flat, no
+   regressions. 2.14 (8-way gather) remains the one unmeasured kernel row.
 7. **Texture alpha map** (branch `alpha-map`, parked opt-in `DS_AMAP=1`) —
    39 % of GSDD's depth-passing pixels sample alpha-0 texels; skipping and
    trimming those spans is exact (all six hash sets) but a device loss
@@ -173,8 +181,8 @@ measured decision, ranked by likely payoff:
 | 2.1 | 12 bins × 16 scanlines; ~32 KB live tile footprint | 02 §1 | equiv | ring of RING=8 lines (~50 KB) per worker, chunked rasterisation; bins are horizontal bands — measured: pays with 2 workers / 8 even bins — see binning note |
 | 2.2 | Branch-free 12-bit bin mask from ymin/ymax | 02 §1 | equiv | difference array + prefix sum over polygon line ranges (`compute_bins`) |
 | 2.3 | Bins ÷ thread count for even split on 1/2/3/4/6/12 cores | 02 §1 | equiv | 8 even bins claimed dynamically by an adaptive worker count — adaptive worker controller instead — see note |
-| 2.4 | AND/OR uniformity test per polygon selects `_constant` kernels | 02 §2 | partial | `attrs_constant` / `rgb_constant` on the Shade and per-span endpoint equality (`span_attrs2n`); no per-polygon AND/OR pass |
-| 2.5 | Specialisation matrix: 9 wrap × 8 combine × 10 resolve × 4 depth | 02 §2 | partial | resolve is a `[mode][textured][aa][shadow]` template matrix; wrap modes templated in the gather (`gatherN_wraps`); no constant-attribute kernel family |
+| 2.4 | AND/OR uniformity test per polygon selects `_constant` kernels | 02 §2 | equiv | `attrs_constant` / `rgb_constant` on the Shade, per-span endpoint equality (`span_attrs2n`), and `Shade::opaque` (2026-08-31): a polygon provably all-opaque (alpha 31, no A3I5/A5I3) takes an opaque resolve instantiation with the translucent machinery compiled out — decided at setup from the polygon, no per-pixel AND/OR pass needed (constant-W/flat-rgb uniformity measured empty; constant-alpha was the axis with signal). Device: etody −3.8 % mean / −7.4 % p99 (with the capture kernels), mlbis −2 %, dbori p99 −2 % |
+| 2.5 | Specialisation matrix: 9 wrap × 8 combine × 10 resolve × 4 depth | 02 §2 | equiv | resolve is a `[mode][textured][aa][opaque]` vector matrix (+`[shadow]` scalar); wrap modes templated in the gather (`gatherN_wraps`) |
 | 2.6 | Fused resolve (edge mark + fog + convert + store) chosen once per bin | 02 §2 | equiv | `final_pass` per line does edge mark + fog + AA in one pass |
 | 2.7 | Spans batched to 256 px across scanlines before the pipeline runs | 02 §3 | no | measured flat — see per-span-cost note |
 | 2.8 | Per-256-px kernel selection; flush has 39 direct calls, no indirect | 02 §3 | same | `ResolveFn` picked once per polygon in `setup_shade`; batch loops jobs internally |
@@ -210,7 +218,7 @@ measured decision, ranked by likely payoff:
 | 3.12 | Mosaic applied to pixels and mask before priority | 03 §7 | same | BG/OBJ mosaic applied on the layer lines before select |
 | 3.13 | Blank-layer elimination before the encoder | 03 §7 | same | `Layer::any` + `select_layers` |
 | 3.14 | 3D output presented as an ordinary layer (visibility + alpha gather) | 03 §7 | same | `layer16_3d`, `line_has_translucent_3d` |
-| 3.15 | Fused display-capture variants | 03 §7 | partial | one `capture(line)` path with blend branches inside |
+| 3.15 | Fused display-capture variants | 03 §7 | same | `capture_a15` / `capture_blend` ref+NEON kernel pairs (byte planes off one vld4, blend as multiply-long in halfword lanes); B-only mode is a memcpy; mode picked once per line (2026-08-31) |
 | 3.16 | Assembly conversion only where profiling justified it (`obj_c` stays C) | 03 §8 | same | sprite rows have NEON kernels (`obj_row_*`); affine/large BGs stay C++ |
 
 ## 04 — Scheduler, deferral, DMA, memory
