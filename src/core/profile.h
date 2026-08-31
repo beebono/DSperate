@@ -75,6 +75,21 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   // Census: the per-scanline change-detection compares in engine2d.
   C_2D_CMP_BGPAL, C_2D_CMP_BGEXT, C_2D_CMP_OBJPAL, C_2D_CMP_OBJEXT, C_2D_CMP_OAM,
   C_2D_CMPD_BGPAL, C_2D_CMPD_BGEXT, C_2D_CMPD_OBJPAL, C_2D_CMPD_OBJEXT, C_2D_CMPD_OAM,
+  // Census: DMA. `run` units moved through a direct-mapped page-to-page run
+  // (one page-table walk per end per run); `slow` units through the bus, one
+  // dispatch each -- the split says whether a title's DMA cost is memory or
+  // dispatch. Starts are counted per ARM9 start mode, with the ARM7's lumped.
+  C_DMA_STARTS, C_DMA_LOOP,   // C_DMA_LOOP: outer-loop entries; a run counts once, a per-unit step counts one each
+  C_DMA_GXF_WORDS, C_DMA_GXF_SLOW,
+  C_DMA_RUN_SEGS, C_DMA_RUN_W, C_DMA_RUN_H, C_DMA_SLOW_W, C_DMA_SLOW_H,
+  C_DMA_VRAM_TRAP,
+  // Units by destination zone, and the VRAM traps a run took, by the same
+  // zone: what the DMA is actually feeding, and which surface the lazy-2D
+  // trap keeps firing on.
+  C_DMA_D_MAIN, C_DMA_D_WRAM, C_DMA_D_PAL, C_DMA_D_OAM, C_DMA_D_IO, C_DMA_D_OTHER,
+  C_DMA_D_BGA, C_DMA_D_BGB, C_DMA_D_OBJA, C_DMA_D_OBJB, C_DMA_D_LCDC,
+  C_DMA_T_BGA, C_DMA_T_BGB, C_DMA_T_OBJA, C_DMA_T_OBJB, C_DMA_T_LCDC,
+  C_DMA_M_IMM, C_DMA_M_VBLANK, C_DMA_M_HBLANK, C_DMA_M_DISPSTART, C_DMA_M_DISPFIFO, C_DMA_M_CART, C_DMA_M_GBA, C_DMA_M_GXFIFO, C_DMA_M_ARM7,
   C_COUNT };
 // Unbounded on purpose: profile.cpp defines it with a deduced size and
 // static_asserts that size against C_COUNT. Declared as [C_COUNT] instead, a

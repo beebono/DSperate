@@ -48,7 +48,15 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "gx reg reads", "gx reads of GXSTAT", "gx GXSTAT reads while busy (bit27)", "gx GXSTAT reads with pipe non-empty", "gx GXSTAT reads with fifo non-empty", "gx run_to_slow calls", "gx run_to_slow calls that executed",
   "3d drawn spans: plain", "3d drawn pixels: plain", "3d drawn spans: toon/highlight", "3d drawn pixels: toon/highlight", "3d drawn spans: shadow (scalar)", "3d drawn pixels: shadow (scalar)", "3d drawn spans: wireframe (scalar)", "3d drawn pixels: wireframe (scalar)",
   "2d compares: bg palette (512B)", "2d compares: bg ext palette (512B)", "2d compares: obj palette (512B)", "2d compares: obj ext palette (512B)", "2d compares: oam (1024B)",
-  "2d compares that differed: bg palette", "2d compares that differed: bg ext palette", "2d compares that differed: obj palette", "2d compares that differed: obj ext palette", "2d compares that differed: oam"};
+  "2d compares that differed: bg palette", "2d compares that differed: bg ext palette", "2d compares that differed: obj palette", "2d compares that differed: obj ext palette", "2d compares that differed: oam",
+  "dma transfers started", "dma dispatch loop entries (a run or one unit)",
+  "dma gxfifo words (run)", "dma gxfifo words (per word)",
+  "dma page-to-page runs", "dma units in word runs", "dma units in halfword runs", "dma words through the bus", "dma halfwords through the bus",
+  "dma vram traps taken for a run",
+  "dma units -> main ram", "dma units -> wram", "dma units -> palette", "dma units -> oam", "dma units -> i/o", "dma units -> elsewhere",
+  "dma units -> vram engine A bg", "dma units -> vram engine B bg", "dma units -> vram engine A obj", "dma units -> vram engine B obj", "dma units -> vram lcdc",
+  "dma vram traps: engine A bg", "dma vram traps: engine B bg", "dma vram traps: engine A obj", "dma vram traps: engine B obj", "dma vram traps: lcdc",
+  "dma starts: immediate", "dma starts: vblank", "dma starts: hblank", "dma starts: display start", "dma starts: display fifo", "dma starts: cart", "dma starts: gba", "dma starts: gxfifo", "dma starts: arm7"};
 
 static_assert(sizeof(count_names) / sizeof(*count_names) == C_COUNT,
               "count_names must have exactly one entry per Counter enumerator");

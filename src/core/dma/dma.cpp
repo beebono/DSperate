@@ -3,6 +3,7 @@
 #include "core/dma/dma.h"
 #include "core/state/state.h"
 #include "core/nds.h"
+#include "core/profile.h"
 #include "core/mem/timing.h"
 
 #include <cstdio>
@@ -70,6 +71,11 @@ void Dma::start(Channel& c) {
     const u32 mask = (c.cpu == Cpu::ARM9) ? 0x001FFFFF : (c.num == 3 ? 0x0000FFFF : 0x00003FFF);
     c.rem_count = c.cnt & mask;
     if (!c.rem_count) c.rem_count = mask + 1;
+  }
+  if (prof::enabled) {
+    prof::add(prof::C_DMA_STARTS, 1);
+    prof::add(c.cpu == Cpu::ARM9 && c.start_mode <= MODE9_GXFIFO
+                ? static_cast<prof::Counter>(prof::C_DMA_M_IMM + c.start_mode) : prof::C_DMA_M_ARM7, 1);
   }
   c.iter_count = (c.start_mode == MODE9_GXFIFO && c.rem_count > 112) ? 112 : c.rem_count;
   if ((c.cnt & 0x01800000) == 0x01800000) c.cur_src = c.src;
@@ -169,6 +175,33 @@ Dma::RunCost Dma::run_cost(Channel& c, bool word) {
   return RunCost{nullptr, unit_cycles(c, false, word)};
 }
 
+
+// Destination zone of a DMA run, for the census. VRAM is split the way the
+// hardware maps it, because which surface a run feeds is what decides whether
+// the lazy-2D trap has to fire for it.
+static prof::Counter dma_zone(u32 addr, bool trap) {
+  const u32 top = addr >> 24;
+  if (top == 0x06) {
+    const u32 v = addr & 0x00FFFFFF;
+    prof::Counter c;
+    if      (v < 0x200000) c = trap ? prof::C_DMA_T_BGA  : prof::C_DMA_D_BGA;
+    else if (v < 0x400000) c = trap ? prof::C_DMA_T_BGB  : prof::C_DMA_D_BGB;
+    else if (v < 0x600000) c = trap ? prof::C_DMA_T_OBJA : prof::C_DMA_D_OBJA;
+    else if (v < 0x800000) c = trap ? prof::C_DMA_T_OBJB : prof::C_DMA_D_OBJB;
+    else                   c = trap ? prof::C_DMA_T_LCDC : prof::C_DMA_D_LCDC;
+    return c;
+  }
+  if (trap) return prof::C_DMA_D_OTHER;   // unreachable: the trap is VRAM-only
+  switch (top) {
+  case 0x02: return prof::C_DMA_D_MAIN;
+  case 0x03: return prof::C_DMA_D_WRAM;
+  case 0x04: return prof::C_DMA_D_IO;
+  case 0x05: return prof::C_DMA_D_PAL;
+  case 0x07: return prof::C_DMA_D_OAM;
+  default:   return prof::C_DMA_D_OTHER;
+  }
+}
+
 u32 Dma::run_channel(Channel& c, u32 budget) {
   const bool a9 = c.cpu == Cpu::ARM9;
   const bool word = c.cnt & (1u << 26);
@@ -182,6 +215,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
   u32 no_run_below = 0;
   while (c.iter_count > 0 && used < budget) {
     if (a9 && nds_.gpu3d.stalled()) break;      // a full GX FIFO stalls the ARM9's DMA too
+    prof::add(prof::C_DMA_LOOP, 1);
     u32 cost = unit_cycles(c, burst_start, word);
     if (a9) cost <<= 1;
     used += cost;
@@ -204,6 +238,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           for (;;) {
             u32 v; std::memcpy(&v, p, 4);
             nds_.gpu3d.gxfifo_dma_write(v);
+            prof::add(prof::C_DMA_GXF_WORDS, 1); prof::add(prof::C_DMA_D_IO, 1);
             c.cur_src += 4; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || nds_.gpu3d.stalled()) break;
             used += rc.next(c) << 1;
@@ -212,6 +247,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           continue;
         }
       }
+      prof::add(prof::C_DMA_GXF_SLOW, 1);
       nds_.gpu3d.gxfifo_dma_write(bus.dma_read32(c.cpu, c.cur_src));
     }
     else if (word) {
@@ -229,6 +265,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
         // page is plain memory again -- so the run copies at full speed. (A
         // page still trapped afterwards falls to the per-word path below.)
         if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
+          prof::add(prof::C_DMA_VRAM_TRAP, 1); prof::add(dma_zone(c.cur_dst, true), 1);
           nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
           pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
         }
@@ -237,17 +274,22 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) >> 2;
           if (room_d < room) room = room_d;
           RunCost rc = run_cost(c, true);
+          prof::add(prof::C_DMA_RUN_SEGS, 1);
+          const u32 zdst = c.cur_dst; const u32 z0 = c.iter_count;
           for (;;) {
             std::memcpy(pd, ps, 4);
+            prof::add(prof::C_DMA_RUN_W, 1);
             c.cur_src += 4; c.cur_dst += 4; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
             cost = rc.next(c); if (a9) cost <<= 1; used += cost;
             ps += 4; pd += 4;
           }
+          prof::add(dma_zone(zdst, false), z0 - c.iter_count);
           continue;
         }
         no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
       }
+      prof::add(prof::C_DMA_SLOW_W, 1); prof::add(dma_zone(c.cur_dst, false), 1);
       bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
     }
     else {
@@ -261,6 +303,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
         bool code = false;
         u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
         if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
+          prof::add(prof::C_DMA_VRAM_TRAP, 1); prof::add(dma_zone(c.cur_dst, true), 1);
           nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
           pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
         }
@@ -269,17 +312,22 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) >> 1;
           if (room_d < room) room = room_d;
           RunCost rc = run_cost(c, false);
+          prof::add(prof::C_DMA_RUN_SEGS, 1);
+          const u32 zdst = c.cur_dst; const u32 z0 = c.iter_count;
           for (;;) {
             std::memcpy(pd, ps, 2);
+            prof::add(prof::C_DMA_RUN_H, 1);
             c.cur_src += 2; c.cur_dst += 2; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
             cost = rc.next(c); if (a9) cost <<= 1; used += cost;
             ps += 2; pd += 2;
           }
+          prof::add(dma_zone(zdst, false), z0 - c.iter_count);
           continue;
         }
         no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
       }
+      prof::add(prof::C_DMA_SLOW_H, 1); prof::add(dma_zone(c.cur_dst, false), 1);
       bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
     }
     const u32 step = word ? 4 : 2;
