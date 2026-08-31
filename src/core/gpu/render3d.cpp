@@ -1335,7 +1335,13 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
   const u32 n = (static_cast<u32>(cb - ca) + 15) & ~15u;
   const u8* ra = sb.vr + off; const u8* ga = sb.vg + off; const u8* ba = sb.vb + off;
   u32* out = sb.col + off;
+  u8* pa = sb.pass + off;
   const uint8x16_t vpa = vdupq_n_u8(static_cast<u8>(sh.polyalpha));
+  const uint8x16_t vref = vdupq_n_u8(static_cast<u8>(sh.alpha_ref));
+  // Keep the alpha lanes and the pass byte together: one compare, one and.
+  auto narrow = [&](u32 i, uint8x16_t a) __attribute__((always_inline)) {
+    vst1q_u8(pa + i, vandq_u8(vld1q_u8(pa + i), vcgtq_u8(a, vref)));
+  };
   // A pixel record is r | g << 8 | b << 16 | a << 24, so four byte planes
   // stored interleaved (st4) are the records themselves.
   if constexpr (!textured) {
@@ -1365,11 +1371,16 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
       }
       const uint8x16x4_t rec = {ch[0], ch[1], ch[2], ch[3]};
       vst4q_u8(reinterpret_cast<u8*>(out + i), rec);
+      narrow(i, ch[3]);
     }
     return;
   }
   // Decal: (t * ta + v * (31 - ta)) >> 5, with the two ends taken whole.
-
+  //
+  // The record's alpha is the polygon's here, not the texel's, so the alpha
+  // test is one decision for the whole batch: either every pixel survives it
+  // and the pass plane is already right, or none does and the batch is dead.
+  if (sh.polyalpha <= sh.alpha_ref) { std::memset(pa, 0, n); return; }
   const uint8x16_t v31 = vdupq_n_u8(31), v0 = vdupq_n_u8(0);
   for (u32 i = 0; i < n; i += 16) {
     uint8x16_t tx[4];

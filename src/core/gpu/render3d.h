@@ -253,7 +253,12 @@ private:
     // eight pixels a vector instead of four).
     alignas(16) u8  vr[BATCH_CAP], vg[BATCH_CAP], vb[BATCH_CAP];
     alignas(16) s16 sc[BATCH_CAP], tc[BATCH_CAP];
-    alignas(16) u8 pass[BATCH_CAP];      // depth pre-pass result (kern depth_candidates)
+    // Which pixels can still draw: bit 0 the top layer, bit 1 the pixel
+    // underneath. depth_candidates sets it from the depth test alone; on the
+    // vector path span_shade then clears the lanes the alpha test kills, so
+    // by the time the resolve reads it the plane means "will draw", not
+    // "passed depth", and a group of eight zeroes is skipped whole.
+    alignas(16) u8 pass[BATCH_CAP];
     alignas(16) u32 tcol[BATCH_CAP];     // texels for the span (textured polygons), colour15 and
     alignas(16) u32 talp[BATCH_CAP];     // 5-bit alpha, gathered once per span
     alignas(16) u32 col[BATCH_CAP];      // shaded pixel records (18-bit colour, alpha 24-28)
