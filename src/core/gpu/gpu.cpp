@@ -163,9 +163,23 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
   if ((per_line_[0] || !(mask & 1)) && (per_line_[1] || !(mask & 2))) {
     // Lag mode: the store may land on a line engine B is still drawing.
     prof::add(prof::C_2D_LAG_STORES, 1);
-    if (b_inflight_) prof::add(prof::C_2D_LAG_STORE_JOINS, 1);
+    const bool b_joined = b_inflight_;
+    if (b_joined) prof::add(prof::C_2D_LAG_STORE_JOINS, 1);
     join_b();
-    if (++lag_trap_hits_ >= LAG_TRAP_LIMIT) { lag_frame_ = false; disarm_trap(); prof::add(prof::C_2D_LAG_DROPPED, 1); }
+    // Past the limit the lag is dropped and the trap lifted -- but the trap is
+    // still the other engine's guard if it is batching, and lifting it there
+    // would let a store into ITS vram land unseen before its batch renders.
+    // Reachable now that this branch only needs the addressed engine to be
+    // per-line; before the split it needed the whole frame to be.
+    // Count the stores that actually cost something -- the ones that joined a
+    // line in flight -- not every store that reached the trap. The limit is
+    // there to drop the lag when joining gets expensive, and on Golden Sun it
+    // was firing every frame on 4096 stores of which NOT ONE joined anything.
+    if (b_joined && ++lag_trap_hits_ >= LAG_TRAP_LIMIT) {
+      lag_frame_ = false;
+      if (per_line_[0] && per_line_[1]) disarm_trap();
+      prof::add(prof::C_2D_LAG_DROPPED, 1);
+    }
     return;
   }
   prof::add(prof::C_2D_TRAP_HITS, 1);
@@ -181,7 +195,8 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
     for (int e = 0; e < 2; ++e)
       if (burst_mask & (1u << e)) { per_line_[e] = true; burst_[e] = true; burst_left_[e] = LAZY_BURST_LINES; }
     // The trap stays armed while an engine is still batching: it is that
-    // engine's guard, and the bursting one re-arms when its window ends.
+    // engine's guard, and lifting it would let a store into its vram land
+    // unseen before its batch renders.
     if (per_line_[0] && per_line_[1]) disarm_trap();
     return;
   }
@@ -202,6 +217,13 @@ void Gpu::arm_trap() {
   // writes one, since the batched capture reads its source B and writes its
   // destination there in line order.
   trap_lcdc_ = ((engine[0].dispcnt() >> 16) & 3) == 2 || capture_on_;
+  // Armed for the whole VRAM window, not per engine. Arming only the batching
+  // engine's windows looks obvious -- Golden Sun then skips the trap for its
+  // ~24.7k engine-B stores a frame -- and measured +0.9 % instead of -5.1 %:
+  // a page is 2 KB, so each toggle rewrites 8192 page-table entries, and the
+  // 8-line bursts toggle ~31 times a frame. A quarter of a million page writes
+  // to save early-returns that cost nothing (the DMA census shows the runs
+  // stay on the fast path either way).
   nds_.bus.set_vram_trap(true, trap_lcdc_);
   trap_armed_ = true;
 }
@@ -238,7 +260,7 @@ void Gpu::fall_back_per_line(u32 mask) {
   catch_up(mask);
   for (int e = 0; e < 2; ++e) if (mask & (1u << e)) { per_line_[e] = true; burst_[e] = false; }
   // The trap now guards the line in flight instead of the batch -- but only
-  // once no engine is still batching, or the other engine loses its guard.
+  // once no engine is still batching, or the other one loses its guard.
   if (!(lag_frame_ && par_2d_) && per_line_[0] && per_line_[1]) disarm_trap();
 }
 
