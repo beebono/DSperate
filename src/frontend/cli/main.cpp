@@ -103,6 +103,7 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
 int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
+  int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
   // A whole 1800-frame dump is ~708 MB, so a window can be selected: the
   // frame-budget report below names the frames worth looking at.
   int dump_from = 0, dump_count = 0;
@@ -136,6 +137,13 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
+    // Frames before N are run but left out of the statistics. A --load-state
+    // starts cold: every translated block was dropped with the old run, the
+    // texture cache is empty and the host caches hold the loader's data, so
+    // the first frames are slow in a way the scene never is. Warm up, then
+    // measure. Applies to the frame_ms/work_ms series, not to DS_PROFILE
+    // counters, which accumulate from frame 0 either way.
+    else if (arg("--stats-from")) stats_from = std::atoi(argv[++i]);
     else if (arg("--save-state-at")) { save_state_at = std::atoi(argv[++i]); save_state_path = std::strchr(argv[i], ':'); if (save_state_path) ++save_state_path; }   // N:path -- write after N frames (0 = at once)
     else rom = argv[i];
   }
@@ -297,7 +305,8 @@ int main(int argc, char** argv) {
       ds::s16 buf[2048 * 2]; size_t n;
       while ((n = nds.spu.take(buf, 2048)) != 0) std::fwrite(buf, 4, n, audio_out);
     } else nds.spu.drain();
-    frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    if (i >= stats_from)
+      frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     ds::prof::frame_mark();
     if (per_frame && trace) { std::fprintf(stderr, "frame %d arm9 %llu arm7 %llu\n", i, ts.executed[0] - last9, ts.executed[1] - last7); last9 = ts.executed[0]; last7 = ts.executed[1]; }
   }

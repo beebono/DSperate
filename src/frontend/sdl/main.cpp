@@ -70,6 +70,7 @@ const char* kUsage =
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
     "  --replay F      play the inputs in F instead of the controls; quits at its end\n"
+    "  --load-state F  start from a save state instead of booting the game\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n";
 
@@ -222,7 +223,8 @@ int main(int argc, char** argv) {
   const char* rom = nullptr;
   const char* config_arg = nullptr;
   long frame_limit = 0;
-  const char *record = nullptr, *replay = nullptr, *save_arg = nullptr;
+  const char *record = nullptr, *replay = nullptr, *save_arg = nullptr, *load_state = nullptr;
+  long stats_from = 0;   // frames run but left out of the timing statistics
 
   // The command line is one more settings layer, applied after the files.
   ds::sdl::Config cli;
@@ -242,6 +244,12 @@ int main(int argc, char** argv) {
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
     else if (arg("--save")) save_arg = argv[++i];
+    else if (arg("--load-state")) load_state = argv[++i];
+    // A state load starts cold -- every translated block went with the old
+    // run and the caches hold the loader's data -- so the first frames are
+    // slow in a way the scene never is. Measured on the RG DS: ~13 ms on max
+    // and ~2 ms on p99 over the first 15 frames, with the mean unmoved.
+    else if (arg("--stats-from")) stats_from = std::atol(argv[++i]);
     else if (flag("--fullscreen")) cli.set("video.fullscreen", "true");
     else if (flag("--linear")) cli.set("video.linear", "true");
     else if (arg("--lcd-grid")) cli.set("video.lcd_grid", argv[++i]);
@@ -375,6 +383,13 @@ int main(int argc, char** argv) {
   if (replay) {
     if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return 1; }
     std::fprintf(stderr, "replay: %u frames from %s\n", log.frames(), replay);
+  }
+  // After the battery save, so a state's SRAM wins over <rom>.sav, and after
+  // the replay log is open so it can be wound forward to the state's frame.
+  if (load_state) {
+    if (!load_state_file(nds, load_state)) return 1;
+    // A replay continues from the state's frame, not from the log's start.
+    if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
   }
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
   std::signal(SIGINT, on_signal);
@@ -639,8 +654,10 @@ int main(int argc, char** argv) {
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;
     draw_ticks_total += t2 - t1;
-    frame_ms.push_back(static_cast<double>(t1 - t0) * ticks_to_ms);
-    work_ms.push_back(static_cast<double>(t2 - t0) * ticks_to_ms);
+    if (static_cast<long>(frames) >= stats_from) {
+      frame_ms.push_back(static_cast<double>(t1 - t0) * ticks_to_ms);
+      work_ms.push_back(static_cast<double>(t2 - t0) * ticks_to_ms);
+    }
     ds::prof::frame_mark();   // marks the emu slice: the present is not in a stage, it lands in "untimed" of work_ms
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
