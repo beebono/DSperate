@@ -2607,12 +2607,16 @@ Renderer3D::Split Renderer3D::split_mode() {
       if (!std::strcmp(e, "taper")) return Split::Taper;
       if (!std::strcmp(e, "stair")) return Split::Ascending;
     }
-    // Even is the default. Ascending is the deadline shape and is right only
-    // while every bin starts at once, which stopped being true when the frame
-    // was cut into more bins than workers; measured at eight bins it costs
-    // etody two thirds of its over-budget frames (188 against 64) and sm64
-    // 2 % of its total.
-    return Split::Even;
+    // Taper is the default since the 3-worker pin: head bins keep the
+    // deadline ramp while they can still all start at once, the tail stays
+    // flat so no bin strands a worker. Re-measured 2026-08-31 (6 reps,
+    // paired): GSDD phase 2 −2.6 % mean / −4.3 % p99 against Even, with
+    // etody, sm64 and dbori flat. Descending is better still on etody
+    // (−3 % mean) but costs GSDD +3 % mean / +9 % p99, and Ascending is the
+    // deadline shape, right only while every bin starts at once — measured
+    // at eight bins it cost etody two thirds of its over-budget frames
+    // (188 against 64) and sm64 2 % of its total.
+    return Split::Taper;
   }();
   return mode;
 }
