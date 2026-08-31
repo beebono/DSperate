@@ -1312,6 +1312,23 @@ void Renderer3D::span_texels(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const
 // The span's shaded colours. Decal vs modulate is a property of the polygon,
 // so it is decided here once rather than re-tested for every four pixels, and
 // the resolve loop reads finished records.
+//
+// This pass also *narrows the pass plane by the alpha test*. The pre-pass can
+// only mark depth candidates -- a pixel's alpha does not exist until the shade
+// below computes it -- so the resolve used to load and mask every lane of a
+// group before discovering that the alpha test killed all eight. Measured over
+// 900 frames, that was 21 % of every group on etody, 18 % on sm64 and 41 % on
+// meteos: groups where a lane passed depth and nothing drew. The alpha is
+// already in a register here at the moment the record is stored, so folding
+// the test in costs one compare and a read-modify-write of the pass byte per
+// sixteen pixels, and the resolve's existing `pass` pre-test then skips those
+// groups whole.
+//
+// It masks *both* pass bits, which is what the resolve does: alpha gates
+// `m1 | m2`, so it kills the under-layer candidate exactly as it kills the top
+// one. Only the vector path runs this (flush_batch calls it under sh.vec), so
+// the shadow, wireframe and non-NEON resolves keep testing alpha themselves
+// and stay byte-comparable.
 template <bool textured>
 void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const {
   const u32 off = static_cast<u32>(ca - sb.x0);
@@ -1352,6 +1369,7 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
     return;
   }
   // Decal: (t * ta + v * (31 - ta)) >> 5, with the two ends taken whole.
+
   const uint8x16_t v31 = vdupq_n_u8(31), v0 = vdupq_n_u8(0);
   for (u32 i = 0; i < n; i += 16) {
     uint8x16_t tx[4];
@@ -1373,6 +1391,37 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
     const uint8x16x4_t rec = {ch[0], ch[1], ch[2], vpa};
     vst4q_u8(reinterpret_cast<u8*>(out + i), rec);
   }
+}
+
+// Census (DS_PROFILE only): classify one eight-pixel group's kind codes and
+// fold the result into the batch-level accumulators. Deliberately scalar and
+// out of line -- it never runs in a measured build.
+void Renderer3D::rk_census(u64 kinds, u64 p8) {
+  prof::add(prof::C_RK_GROUPS, 1);
+  if (!kinds) {
+    prof::add(prof::C_RK_EMPTY, 1);
+    prof::add((p8 & 0x0101010101010101ull) ? prof::C_RK_EMPTY_TOP : prof::C_RK_EMPTY_UNDER, 1);
+    return;
+  }
+  u32 seen = 0, first = 0;
+  bool mixed = false;
+  for (u32 l = 0; l < 8; ++l) {
+    const u32 k = static_cast<u32>((kinds >> (8 * l)) & 0xFF);
+    if (!k) continue;
+    seen |= k;
+    if (!first) first = k; else if (k != first) mixed = true;
+  }
+  prof::add(mixed ? prof::C_RK_MIXED : prof::C_RK_UNIFORM, 1);
+  // Every lane drawing and opaque: the store-only case. Counted for both
+  // widths, so a four-lane group needs only its own four bytes set.
+  if (kinds == 0x0101010101010101ull) { prof::add(prof::C_RK_FULL_OPAQUE, 1); prof::add(prof::C_RK_FULL_OPAQUE_PX, 8); }
+  else if (kinds == 0x0000000001010101ull) { prof::add(prof::C_RK_FULL_OPAQUE, 1); prof::add(prof::C_RK_FULL_OPAQUE_PX, 4); }
+  if (seen == 1) prof::add(prof::C_RK_OPAQUE, 1);
+  else if (!(seen & 0x09)) prof::add(prof::C_RK_TRANS, 1);
+  if (seen & 0x18) prof::add(prof::C_RK_UNDER, 1);
+  rk_or_ |= seen;
+  rk_mixed_ = rk_mixed_ || mixed;
+  ++rk_groups_;
 }
 
 template <int mode, bool textured, bool aa>
@@ -1514,6 +1563,7 @@ template <int mode, bool textured, bool aa>
         if constexpr (two) kv[k] = vorrq_u32(kv[k], vorrq_u32(vandq_u32(mo2[k], vdupq_n_u32(8)), vandq_u32(mt2[k], vdupq_n_u32(16))));
       }
       const u64 kinds = lanes8(kv[0], kv[1]);
+      if (prof::enabled) rk_census(kinds, p8);
       if (!kinds) return;
       if (kinds & 0x0909090909090909ull) {
         // One attribute word for both layers: coverage accumulates in x order
@@ -1825,10 +1875,22 @@ void Renderer3D::resolve_batch(const Shade& sh, const SpanJob* jobs, u32 n) {
 template <int mode, bool textured, bool aa>
 void Renderer3D::resolve_batch_vec(const Shade& sh, const SpanJob* jobs, u32 n) {
   const SpanBuf& sb = spanbuf_;
+  rk_or_ = 0; rk_mixed_ = false; rk_groups_ = 0;
   for (u32 k = 0; k < n; ++k)
     walk_span(jobs[k], [&](s32 y, s32 lo, s32 hi, int part, int edge, s32 lc, s32 rc, s32& xc) {
       resolve_span_vec<mode, textured, aa>(sh, sb, y, lo, hi, part, edge, lc, rc, xc);
     });
+  if (prof::enabled) {
+    prof::add(prof::C_RK_BATCHES, 1);
+    if (!rk_or_) prof::add(prof::C_RK_BATCH_EMPTY, 1);
+    else {
+      const bool one = !rk_mixed_ && (rk_or_ & (rk_or_ - 1)) == 0;
+      prof::add(one ? prof::C_RK_BATCH_UNIFORM : prof::C_RK_BATCH_MIXED, 1);
+      prof::add(prof::C_RK_BATCH_GRP, rk_groups_);
+      prof::add(one ? prof::C_RK_BATCH_UNIFORM_GRP : prof::C_RK_BATCH_MIXED_GRP, rk_groups_);
+      if (rk_or_ == 1) prof::add(prof::C_RK_BATCH_OPAQUE, 1);
+    }
+  }
 }
 #endif
 

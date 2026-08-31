@@ -322,6 +322,13 @@ private:
   // for polygons without shadow / wireframe / toon shading.
   template <int mode, bool textured, bool aa> [[gnu::always_inline]] inline void resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov);
   template <int mode, bool textured, bool aa> void resolve_batch_vec(const Shade& sh, const SpanJob* jobs, u32 n);
+  // Census only (DS_PROFILE): how uniform the resolve's kind decision is, per
+  // eight-pixel group and per batch. `kinds` is one kind-code byte per lane,
+  // zero where the lane draws nothing; a group is uniform when every drawing
+  // lane carries the same code. rk_or_ / rk_mixed_ carry that up to the batch.
+  void rk_census(u64 kinds, u64 p8);
+  u32 rk_or_ = 0, rk_groups_ = 0;
+  bool rk_mixed_ = false;
   void texture_gather4(const Shade& sh, const s16* sa, const s16* ta, u32* colour, u32* alpha) const;
   // A textured span's texels, gathered once into the span buffer before the
   // resolve loop reads them (removes an indirect call per four pixels).

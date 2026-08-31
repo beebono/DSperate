@@ -57,7 +57,12 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "dma units -> vram engine A bg", "dma units -> vram engine B bg", "dma units -> vram engine A obj", "dma units -> vram engine B obj", "dma units -> vram lcdc",
   "dma vram traps: engine A bg", "dma vram traps: engine B bg", "dma vram traps: engine A obj", "dma vram traps: engine B obj", "dma vram traps: lcdc",
   "2d render ranges: engine A", "2d render ranges: engine B",
-  "dma starts: immediate", "dma starts: vblank", "dma starts: hblank", "dma starts: display start", "dma starts: display fifo", "dma starts: cart", "dma starts: gba", "dma starts: gxfifo", "dma starts: arm7"};
+  "dma starts: immediate", "dma starts: vblank", "dma starts: hblank", "dma starts: display start", "dma starts: display fifo", "dma starts: cart", "dma starts: gba", "dma starts: gxfifo", "dma starts: arm7",
+  "3d resolve groups (8px)", "3d resolve groups: nothing drawn", "3d resolve groups: one kind", "3d resolve groups: mixed kinds", "3d resolve groups: opaque only", "3d resolve groups: translucent only", "3d resolve groups: touching the under layer",
+  "3d resolve batches", "3d resolve batches: nothing drawn", "3d resolve batches: one kind", "3d resolve batches: mixed kinds", "3d resolve batches: opaque only",
+  "3d resolve: drawing groups in batches", "3d resolve: drawing groups in one-kind batches", "3d resolve: drawing groups in mixed batches",
+  "3d resolve empty groups: under-layer candidates only", "3d resolve empty groups: a top lane passed depth",
+  "3d resolve groups: every lane opaque and drawing", "3d resolve pixels in every-lane-opaque groups"};
 
 static_assert(sizeof(count_names) / sizeof(*count_names) == C_COUNT,
               "count_names must have exactly one entry per Counter enumerator");

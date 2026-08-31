@@ -92,6 +92,30 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   // Render ranges issued per engine: batching means one a frame, per-line means one per line.
   C_2D_RANGE_A, C_2D_RANGE_B,
   C_DMA_M_IMM, C_DMA_M_VBLANK, C_DMA_M_HBLANK, C_DMA_M_DISPSTART, C_DMA_M_DISPFIFO, C_DMA_M_CART, C_DMA_M_GBA, C_DMA_M_GXFIFO, C_DMA_M_ARM7,
+  // Census: how uniform the resolve's per-pixel kind decision actually is.
+  // Every eight-pixel group builds a per-lane kind code (opaque / translucent
+  // / translucent-over-a-pixel / the same two on the under layer) and branches
+  // on the reduction. If groups and batches are overwhelmingly a single kind,
+  // the reduction and its branches are pure overhead and the resolve wants
+  // DraStic's answer -- a kernel chosen per polygon, not a test per group
+  // (docs/techniques/02, the AND/OR uniformity test and the _constant family).
+  // A group is UNIFORM when every drawing lane in it carries the same kind.
+  C_RK_GROUPS, C_RK_EMPTY, C_RK_UNIFORM, C_RK_MIXED, C_RK_OPAQUE, C_RK_TRANS, C_RK_UNDER,
+  C_RK_BATCHES, C_RK_BATCH_EMPTY, C_RK_BATCH_UNIFORM, C_RK_BATCH_MIXED, C_RK_BATCH_OPAQUE,
+  // The same batch split weighted by drawing groups, because a big batch has
+  // more chances to be mixed: counting batches alone flatters the uniform share.
+  C_RK_BATCH_GRP, C_RK_BATCH_UNIFORM_GRP, C_RK_BATCH_MIXED_GRP,
+  // Why a group drew nothing, split by what the pre-pass had said. UNDER: no
+  // lane had pass bit 0, so the group only ever held under-layer candidates --
+  // reachable from the pre-pass, which today defers that depth test. TOP: some
+  // lane passed depth on the top layer and was then killed by the alpha test,
+  // which cannot move into the pre-pass (colour does not exist until span_shade).
+  C_RK_EMPTY_UNDER, C_RK_EMPTY_TOP,
+  // Groups where EVERY lane draws and every lane is opaque -- the interior of
+  // a fullscreen quad. Their destination loads and bsl selects are dead work:
+  // the stores could be unconditional. FULL8 is a whole 8-lane group; FULLPX
+  // counts its pixels so the share can be read against resolved pixels.
+  C_RK_FULL_OPAQUE, C_RK_FULL_OPAQUE_PX,
   C_COUNT };
 // Unbounded on purpose: profile.cpp defines it with a deduced size and
 // static_asserts that size against C_COUNT. Declared as [C_COUNT] instead, a
