@@ -213,6 +213,25 @@ static void test_output() {
   }
 }
 
+static void test_capture() {
+  alignas(16) Pixel srca[256]; alignas(16) u16 srcb[256], da[256], db[256];
+  for (u32 it = 0; it < 300; ++it) {
+    // Records as the engines emit them (6-bit channels, alpha 0/0xFF or the
+    // 3D line's 5-bit alpha), and every third round fully random bytes.
+    for (auto& v : srca) {
+      if (it % 3 == 2) v = rng();
+      else v = (rng() & 0x3F3F3F) | ((it % 3 ? (rng() % 32) : (rng() & 1 ? 0xFFu : 0u)) << 24);
+    }
+    for (auto& v : srcb) v = static_cast<u16>(rng());
+    const u32 n = rng() & 1 ? 256 : 128;
+    kern::ref::capture_a15(srca, n, da); N::capture_a15(srca, n, db);
+    CHECK_SAME("capture_a15", da, db, n * sizeof(u16));
+    const u32 eva = rng() % 17, evb = rng() % 17;
+    kern::ref::capture_blend(srca, srcb, n, eva, evb, da); N::capture_blend(srca, srcb, n, eva, evb, db);
+    CHECK_SAME("capture_blend", da, db, n * sizeof(u16));
+  }
+}
+
 // scale_row at the destination widths that matter (the two boards' panels and
 // the window sizes), plus the degenerate ones: 1:1, downscale, and a width
 // that is not a multiple of the vector step.
@@ -456,6 +475,7 @@ int main() {
   test_translucent_3d();
   test_composite();
   test_output();
+  test_capture();
   test_scale_row();
   test_scale_row_grid();
   test_scale_row_straddle();

@@ -585,6 +585,71 @@ void output_line(const Pixel* src, u16 reg, u32* dst) {
 // Runs are short (2-3 pixels at the scales the handhelds use, more on a wide
 // panel), so this stores a quad when one fits and falls back to scalar for the
 // tail rather than setting up a vector loop that rarely runs.
+// Sixteen pixels a step in byte planes: one vld4 gives the record's four
+// channels, the 5-bit channels are a shift and a mask, and the alpha bit
+// lands in bit 15 by widening the 0/0xFF byte mask and shifting it 15 (only
+// bit 0 survives the halfword).
+void capture_a15(const Pixel* src, u32 n, u16* dst) {
+  const uint8x16_t v1f = vdupq_n_u8(0x1F);
+  for (u32 i = 0; i < n; i += 16) {
+    const uint8x16x4_t p = vld4q_u8(reinterpret_cast<const u8*>(src + i));
+    const uint8x16_t r = vandq_u8(vshrq_n_u8(p.val[0], 1), v1f);
+    const uint8x16_t g = vandq_u8(vshrq_n_u8(p.val[1], 1), v1f);
+    const uint8x16_t b = vandq_u8(vshrq_n_u8(p.val[2], 1), v1f);
+    const uint8x16_t a = vtstq_u8(p.val[3], p.val[3]);
+    auto half = [&](u32 o, uint8x8_t r8, uint8x8_t g8, uint8x8_t b8, uint8x8_t a8) {
+      uint16x8_t w = vmovl_u8(r8);
+      w = vorrq_u16(w, vshlq_n_u16(vmovl_u8(g8), 5));
+      w = vorrq_u16(w, vshlq_n_u16(vmovl_u8(b8), 10));
+      w = vorrq_u16(w, vshlq_n_u16(vmovl_u8(a8), 15));
+      vst1q_u16(dst + i + o, w);
+    };
+    half(0, vget_low_u8(r), vget_low_u8(g), vget_low_u8(b), vget_low_u8(a));
+    half(8, vget_high_u8(r), vget_high_u8(g), vget_high_u8(b), vget_high_u8(a));
+  }
+}
+
+// The blend in 16-bit lanes off 8-bit sources: each product is at most
+// 31 * 16, both terms plus the rounding bias fit a halfword, so one
+// multiply-long and one multiply-accumulate-long per channel per eight
+// pixels do the arithmetic. The per-source alpha becomes a byte mask
+// applied to the channels before the multiply (aa and ab are 0 or 1).
+void capture_blend(const Pixel* srca, const u16* srcb, u32 n, u32 eva, u32 evb, u16* dst) {
+  const uint8x16_t v1f = vdupq_n_u8(0x1F);
+  const uint8x8_t va8 = vdup_n_u8(static_cast<u8>(eva)), vb8 = vdup_n_u8(static_cast<u8>(evb));
+  const uint8x16_t ea = vdupq_n_u8(eva ? 0xFF : 0), eb = vdupq_n_u8(evb ? 0xFF : 0);
+  const uint16x8_t bias = vdupq_n_u16(8), v31 = vdupq_n_u16(31), topbit = vdupq_n_u16(0x8000);
+  for (u32 i = 0; i < n; i += 16) {
+    const uint8x16x4_t p = vld4q_u8(reinterpret_cast<const u8*>(srca + i));
+    const uint8x16_t aam = vtstq_u8(p.val[3], p.val[3]);
+    const uint8x16_t ra = vandq_u8(vandq_u8(vshrq_n_u8(p.val[0], 1), v1f), aam);
+    const uint8x16_t ga = vandq_u8(vandq_u8(vshrq_n_u8(p.val[1], 1), v1f), aam);
+    const uint8x16_t ba = vandq_u8(vandq_u8(vshrq_n_u8(p.val[2], 1), v1f), aam);
+    const uint16x8_t w0 = vld1q_u16(srcb + i), w1 = vld1q_u16(srcb + i + 8);
+    const uint8x16_t abm = vcombine_u8(vmovn_u16(vtstq_u16(w0, topbit)), vmovn_u16(vtstq_u16(w1, topbit)));
+    auto bnarrow = [&](uint16x8_t c0, uint16x8_t c1) {
+      return vandq_u8(vandq_u8(vcombine_u8(vmovn_u16(c0), vmovn_u16(c1)), v1f), abm);
+    };
+    const uint8x16_t rb = bnarrow(w0, w1);
+    const uint8x16_t gb = bnarrow(vshrq_n_u16(w0, 5), vshrq_n_u16(w1, 5));
+    const uint8x16_t bb = bnarrow(vshrq_n_u16(w0, 10), vshrq_n_u16(w1, 10));
+    const uint8x16_t ad = vorrq_u8(vandq_u8(aam, ea), vandq_u8(abm, eb));
+    auto half = [&](u32 o, auto lane) {
+      auto blend1 = [&](uint8x16_t ca, uint8x16_t cb) {
+        uint16x8_t s = vmlal_u8(vmull_u8(lane(ca), va8), lane(cb), vb8);
+        return vminq_u16(vshrq_n_u16(vaddq_u16(s, bias), 4), v31);
+      };
+      uint16x8_t w = blend1(ra, rb);
+      w = vorrq_u16(w, vshlq_n_u16(blend1(ga, gb), 5));
+      w = vorrq_u16(w, vshlq_n_u16(blend1(ba, bb), 10));
+      w = vorrq_u16(w, vshlq_n_u16(vmovl_u8(lane(ad)), 15));
+      vst1q_u16(dst + i + o, w);
+    };
+    half(0, [](uint8x16_t v) { return vget_low_u8(v); });
+    half(8, [](uint8x16_t v) { return vget_high_u8(v); });
+  }
+}
+
 void scale_row(const u32* src, const u16* xrun, u32* dst) {
   for (u32 s = 0; s < 256; ++s) {
     const u32 c = src[s];

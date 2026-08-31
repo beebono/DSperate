@@ -903,35 +903,21 @@ void Gpu::capture(u32 line) {
     }
   }
 
-  auto a15 = [&](u32 i, u32& r, u32& g, u32& b, u32& a) {
-    const u32 v = src_a[i];
-    r = (v >> 1) & 0x1F; g = (v >> 9) & 0x1F; b = (v >> 17) & 0x1F; a = (v >> 24) ? 1 : 0;
-  };
   switch ((cnt >> 29) & 3) {
   case 0:
-    for (u32 i = 0; i < width; ++i) { u32 r, g, b, a; a15(i, r, g, b, a); dst[i] = static_cast<u16>(r | (g << 5) | (b << 10) | (a << 15)); }
+    kern::active::capture_a15(src_a, width, dst);
     break;
   case 1:
-    if (src_b) for (u32 i = 0; i < width; ++i) dst[i] = src_b[i];
-    else for (u32 i = 0; i < width; ++i) dst[i] = 0;
+    if (src_b) std::memcpy(dst, src_b, width * sizeof(u16));
+    else std::memset(dst, 0, width * sizeof(u16));
     break;
   default: {
     u32 eva = cnt & 0x1F, evb = (cnt >> 8) & 0x1F;
     if (eva > 16) eva = 16;
     if (evb > 16) evb = 16;
-    for (u32 i = 0; i < width; ++i) {
-      u32 ra, ga, ba, aa; a15(i, ra, ga, ba, aa);
-      u32 rb = 0, gb = 0, bb = 0, ab = 0;
-      if (src_b) { const u16 v = src_b[i]; rb = v & 0x1F; gb = (v >> 5) & 0x1F; bb = (v >> 10) & 0x1F; ab = v >> 15; }
-      u32 rd = ((ra * aa * eva) + (rb * ab * evb) + 8) >> 4;
-      u32 gd = ((ga * aa * eva) + (gb * ab * evb) + 8) >> 4;
-      u32 bd = ((ba * aa * eva) + (bb * ab * evb) + 8) >> 4;
-      const u32 ad = (eva > 0 ? aa : 0) | (evb > 0 ? ab : 0);
-      if (rd > 0x1F) rd = 0x1F;
-      if (gd > 0x1F) gd = 0x1F;
-      if (bd > 0x1F) bd = 0x1F;
-      dst[i] = static_cast<u16>(rd | (gd << 5) | (bd << 10) | (ad << 15));
-    }
+    // A missing B source (unmapped LCDC bank) reads as zero either way.
+    static constexpr u16 kZeroLine[256] = {};
+    kern::active::capture_blend(src_a, src_b ? src_b : kZeroLine, width, eva, evb, dst);
     break;
   }
   }

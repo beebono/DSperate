@@ -73,6 +73,13 @@ namespace ds::gpu::kern {
   void NS##expand_colours(u32* dst);                                                                         \
   /* Both in one pass from the engine's composite line. */                                                   \
   void NS##output_line(const Pixel* src, u16 reg, u32* dst);                                                 \
+  /* Display capture, source A only: 18-bit records (alpha in bits 24-31, non-zero = opaque) packed to      \
+     BGR555 with bit 15 = the alpha bit; n is the capture width, a multiple of 16. */                        \
+  void NS##capture_a15(const Pixel* src, u32 n, u16* dst);                                                   \
+  /* Capture blend: A as above, B a BGR555 line with its alpha in bit 15. Per pixel and channel             \
+     ((ca*aa*eva) + (cb*ab*evb) + 8) >> 4 clamped to 31; the alpha bit is (eva ? aa : 0) | (evb ? ab : 0).  \
+     eva and evb are 0..16. A missing B source is a zeroed line. */                                          \
+  void NS##capture_blend(const Pixel* srca, const u16* srcb, u32 n, u32 eva, u32 evb, u16* dst);             \
   /* Nearest-neighbour scale of one output line to `xrun[256]` destination pixels, for frontends that own a  \
      panel-sized buffer and scale as the line is produced rather than rescaling the framebuffer afterwards.  \
      `xrun` has 257 entries: source pixel s covers destination [xrun[s], xrun[s+1]), which is the inverse of \

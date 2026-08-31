@@ -294,6 +294,31 @@ void output_line(const Pixel* src, u16 reg, u32* dst) {
   expand_colours(dst);
 }
 
+void capture_a15(const Pixel* src, u32 n, u16* dst) {
+  for (u32 i = 0; i < n; ++i) {
+    const u32 v = src[i];
+    const u32 r = (v >> 1) & 0x1F, g = (v >> 9) & 0x1F, b = (v >> 17) & 0x1F, a = (v >> 24) ? 1u : 0u;
+    dst[i] = static_cast<u16>(r | (g << 5) | (b << 10) | (a << 15));
+  }
+}
+
+void capture_blend(const Pixel* srca, const u16* srcb, u32 n, u32 eva, u32 evb, u16* dst) {
+  for (u32 i = 0; i < n; ++i) {
+    const u32 v = srca[i];
+    const u32 ra = (v >> 1) & 0x1F, ga = (v >> 9) & 0x1F, ba = (v >> 17) & 0x1F, aa = (v >> 24) ? 1u : 0u;
+    const u32 w = srcb[i];
+    const u32 rb = w & 0x1F, gb = (w >> 5) & 0x1F, bb = (w >> 10) & 0x1F, ab = w >> 15;
+    u32 rd = ((ra * aa * eva) + (rb * ab * evb) + 8) >> 4;
+    u32 gd = ((ga * aa * eva) + (gb * ab * evb) + 8) >> 4;
+    u32 bd = ((ba * aa * eva) + (bb * ab * evb) + 8) >> 4;
+    const u32 ad = (eva > 0 ? aa : 0) | (evb > 0 ? ab : 0);
+    if (rd > 0x1F) rd = 0x1F;
+    if (gd > 0x1F) gd = 0x1F;
+    if (bd > 0x1F) bd = 0x1F;
+    dst[i] = static_cast<u16>(rd | (gd << 5) | (bd << 10) | (ad << 15));
+  }
+}
+
 void scale_row(const u32* src, const u16* xrun, u32* dst) {
   for (u32 s = 0; s < 256; ++s) {
     const u32 c = src[s];
