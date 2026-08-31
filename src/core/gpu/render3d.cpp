@@ -191,9 +191,16 @@ void Renderer3D::Slope<side>::edge_params(s32* length, s32* coverage) const {
 
 // ---- pixel pipeline ---------------------------------------------------------------
 
-// Fixed set of band workers. The caller renders band 0 itself and waits for
-// the rest, so a frame costs one broadcast and one barrier -- the threads are
-// created once and parked on a condition variable in between, never per frame.
+// Fixed set of band workers. dispatch() only publishes the job and notifies, so
+// every band runs on a pool thread and the emulation thread renders none of them
+// -- it goes on emulating and pays only what it later blocks for in sync_line.
+// A frame costs one broadcast and one barrier; the threads are created once and
+// parked on a condition variable in between, never per frame.
+//
+// So Pool(n) is n threads *in addition to* the emulation thread, and
+// DS_R3D_THREADS=N asks for N of them. N of 0 or 1 is a different shape
+// entirely: band_count returns 1, render() takes the `maxb <= 1`
+// path, and the raster runs inline on the emulation thread with no pool.
 struct Renderer3D::Pool {
   explicit Pool(u32 n) {
     threads_.reserve(n);
@@ -2700,7 +2707,21 @@ u32 Renderer3D::adaptive_workers(u32 max_workers) {
   return workers_now_;
 }
 
-// DS_R3D_ADAPT=0 turns the controller off.
+// DS_R3D_ADAPT=1 turns the controller on; it is off otherwise.
+//
+// SUPERSEDED, and left here only because the reasoning below is still the right
+// reasoning about a 2<->3 ramp. band_count has pinned three workers since
+// 2026-08-29, and the controller ramps between two and three -- so against the
+// current default it can only ever take a worker away. Measured on .20, 1800
+// frames, three interleaved reps against that default: etody mean -0.13 % but
+// p99 +9.33 % and over-budget frames 16 -> 31; sm64 mean +2.57 %, p99 +4.23 %,
+// over-budget 14 -> 24. etody at two workers is where that comes from -- 243
+// over-budget frames against 16, p99 19.5 against 16.4.
+//
+// The measurement in the next paragraph was taken against a TWO-worker baseline
+// and does not describe what enabling this knob does today. Do not re-test the
+// controller without first un-pinning band_count: the two are not independent,
+// and a sweep that varies one while the other is pinned measures the pin.
 //
 // It costs about half a percent of throughput on the scenes that do not need
 // it -- small, but real rather than noise: mlbis, sm64 and dbori are slower
