@@ -89,6 +89,8 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   C_DMA_D_MAIN, C_DMA_D_WRAM, C_DMA_D_PAL, C_DMA_D_OAM, C_DMA_D_IO, C_DMA_D_OTHER,
   C_DMA_D_BGA, C_DMA_D_BGB, C_DMA_D_OBJA, C_DMA_D_OBJB, C_DMA_D_LCDC,
   C_DMA_T_BGA, C_DMA_T_BGB, C_DMA_T_OBJA, C_DMA_T_OBJB, C_DMA_T_LCDC,
+  // Render ranges issued per engine: batching means one a frame, per-line means one per line.
+  C_2D_RANGE_A, C_2D_RANGE_B,
   C_DMA_M_IMM, C_DMA_M_VBLANK, C_DMA_M_HBLANK, C_DMA_M_DISPSTART, C_DMA_M_DISPFIFO, C_DMA_M_CART, C_DMA_M_GBA, C_DMA_M_GXFIFO, C_DMA_M_ARM7,
   C_COUNT };
 // Unbounded on purpose: profile.cpp defines it with a deduced size and

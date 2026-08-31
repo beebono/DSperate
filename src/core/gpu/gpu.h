@@ -179,8 +179,16 @@ private:
   // Lazy-2D state for the frame in progress.
   bool lazy_enabled_ = true;      // DS_2D_LAZY != 0
   bool lazy_frame_ = false;       // this frame may batch
-  bool per_line_ = false;         // ... but has fallen back to per-line rendering
-  u32  render_next_ = SCREEN_H;   // display lines rendered so far this frame
+  // Per engine. A store into one engine's BG/OBJ VRAM cannot change what the
+  // other engine fetches, so only that engine has to leave the batch: Golden
+  // Sun streams ~96 KB a frame into engine B's BG and took engine A -- the
+  // screen carrying the 3D composite and the capture -- out of batched mode
+  // with it, 16 times a frame. DS_2D_SPLIT=1 enables the split; without it the
+  // two entries are kept in lockstep and the behaviour is the old one.
+  bool per_line_[2] = {false, false};
+  u32  render_next_[2] = {SCREEN_H, SCREEN_H};
+  bool split_ = false;            // DS_2D_SPLIT=1
+  bool frame_finished_ = false;   // frame_done() called for both engines
   bool trap_armed_ = false, trap_lcdc_ = false;
   // Capture frames batch too (DS_2D_LAZY_CAPTURE=0 keeps them per line; see
   // the class comment). A trapped store catches the frame up, lifts the trap and renders the
@@ -189,16 +197,23 @@ private:
   // Two page-table walks per burst rather than two per line, and no trapped
   // store inside it. Past LAZY_BURST_LIMIT bursts the frame stays per line.
   bool lazy_capture_ = true;
-  bool burst_ = false;            // per-line for the current burst of stores
-  u32  burst_left_ = 0;           // display lines left before re-batching
-  u32  lazy_bursts_ = 0;
+  bool burst_[2] = {false, false};   // per-line for the current burst of stores
+  u32  burst_left_[2] = {0, 0};      // display lines left before re-batching
+  u32  lazy_bursts_[2] = {0, 0};
   static constexpr u32 LAZY_BURST_LIMIT = 16, LAZY_BURST_LINES = 8;
   u32  frontier() const { return hblank_done_ ? line_ + 1u : line_; }   // first line a write now can still affect
-  void catch_up();                // render every line below the frontier
-  void fall_back_per_line();      // catch up and render the rest of the frame per line
+  void catch_up(u32 mask);             // render the masked engines' lines below the frontier
+  void fall_back_per_line(u32 mask);   // catch up and render the rest of the frame per line
   void arm_trap();
   void disarm_trap();
-  void render_lines(u32 first, u32 last);   // both engines, [first, last]
+  // Per-engine ranges; first > last means "nothing pending for that engine".
+  // Engine B's range goes to the worker and overlaps engine A's here.
+  void render_ranges(u32 af, u32 al, u32 bf, u32 bl);
+  // Which engines a VRAM store can change: bit 0 engine A, bit 1 engine B.
+  // Only the fixed BG/OBJ address ranges are attributed; anything else (LCDC,
+  // an unmapped alias) is charged to both, so the split can only ever be more
+  // conservative than the address map.
+  u32 store_engines(u32 addr) const;
   void step_engine(int e, u32 line);        // one engine's display line: replay, latches, render, output
 
   // Engine B's lines run on the worker while engine A's run here. The two

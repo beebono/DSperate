@@ -56,6 +56,7 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "dma units -> main ram", "dma units -> wram", "dma units -> palette", "dma units -> oam", "dma units -> i/o", "dma units -> elsewhere",
   "dma units -> vram engine A bg", "dma units -> vram engine B bg", "dma units -> vram engine A obj", "dma units -> vram engine B obj", "dma units -> vram lcdc",
   "dma vram traps: engine A bg", "dma vram traps: engine B bg", "dma vram traps: engine A obj", "dma vram traps: engine B obj", "dma vram traps: lcdc",
+  "2d render ranges: engine A", "2d render ranges: engine B",
   "dma starts: immediate", "dma starts: vblank", "dma starts: hblank", "dma starts: display start", "dma starts: display fifo", "dma starts: cart", "dma starts: gba", "dma starts: gxfifo", "dma starts: arm7"};
 
 static_assert(sizeof(count_names) / sizeof(*count_names) == C_COUNT,
