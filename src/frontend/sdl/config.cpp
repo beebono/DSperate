@@ -196,6 +196,7 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 [emu]
 # jit = true                    # false = interpreter
 # quantum = 0                   # 0 = event-bound; 128 = melonDS lockstep
+# no_fifo = false               # no GX FIFO model: faster, less accurate (see README)
 # idle_skip = 1                 # 0 | 1 | all, see README
 # fast_forward = false          # start fast-forwarding (the hotkeys toggle it)
 # ff_speed = 0                  # fast-forward cap as a multiple of real time; 0 = unlimited

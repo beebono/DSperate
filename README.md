@@ -134,7 +134,7 @@ input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
     dsperate-sdl game.nds [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
                  [--config F] [--scale N] [--fullscreen] [--layout L] [--screen top|bottom]
                  [--dual-window] [--linear] [--lcd-grid S] [--chunky] [--accel] [--no-vsync] [--no-audio]
-                 [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N]
+                 [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N] [--no-fifo]
                  [--frames N] [--record F | --replay F] [--save F]
 
 ### Settings and controls

@@ -66,6 +66,8 @@ const char* kUsage =
     "  --no-mic        do not open the microphone (M still fakes one)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
     "  --interp        interpreter instead of the recompiler\n"
+    "  --no-fifo       no GX FIFO model: commands execute in batches on observation, never stall (faster,\n"
+    "                  less accurate; DraStic's model). emu.no_fifo in the config\n"
     "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
@@ -263,6 +265,7 @@ int main(int argc, char** argv) {
     else if (flag("--no-mic")) cli.set("audio.mic", "false");
     else if (flag("--no-vsync")) cli.set("video.vsync", "false");
     else if (flag("--interp")) cli.set("emu.jit", "false");
+    else if (flag("--no-fifo")) cli.set("emu.no_fifo", "true");
     else if (flag("--lockstep")) cli.set("emu.quantum", std::to_string(ds::LOCKSTEP_QUANTUM));
     else if (arg("--quantum")) cli.set("emu.quantum", argv[++i]);
     else if (flag("--help")) { std::fputs(kUsage, stderr); return 0; }
@@ -277,7 +280,7 @@ int main(int argc, char** argv) {
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.no_fifo"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
   if (bios9.empty() || bios7.empty() || fw.empty()) { std::fprintf(stderr, "BIOS and firmware paths are needed (--bios9/--bios7/--firmware or [paths] in %s)\n", global_ini.c_str()); return 2; }
@@ -360,6 +363,7 @@ int main(int argc, char** argv) {
   const std::string states_dir = cfg.str("paths.states", rom_dir);   // states and screenshots
 
   nds.sched.set_quantum(quantum);
+  nds.gpu3d.set_no_fifo(cfg.flag("emu.no_fifo", false));
   nds.setup_direct_boot();
 #if DSPERATE_JIT
   if (jit && !ds::jit::attach(nds, true, true)) return 1;

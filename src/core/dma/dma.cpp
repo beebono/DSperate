@@ -98,7 +98,7 @@ void Dma::start(Channel& c) {
     prof::add(c.cpu == Cpu::ARM9 && c.start_mode <= MODE9_GXFIFO
                 ? static_cast<prof::Counter>(prof::C_DMA_M_IMM + c.start_mode) : prof::C_DMA_M_ARM7, 1);
   }
-  c.iter_count = (c.start_mode == MODE9_GXFIFO && c.rem_count > 112) ? 112 : c.rem_count;
+  c.iter_count = (c.start_mode == MODE9_GXFIFO && c.rem_count > 112 && !nds_.gpu3d.no_fifo()) ? 112 : c.rem_count;
   if ((c.cnt & 0x01800000) == 0x01800000) c.cur_src = c.src;
   if ((c.cnt & 0x00600000) == 0x00600000) c.cur_dst = c.dst;
   set_running(c, 2);

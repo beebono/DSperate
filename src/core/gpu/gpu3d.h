@@ -94,7 +94,24 @@ public:
   void gxfifo_dma_burst(const u8* src, u32 n);
   // Words a burst may feed without any chance of filling the FIFO: a word
   // carries at most four commands, so this many can never reach FIFO_DEPTH.
-  u32 fifo_burst_room() const { return (FIFO_DEPTH - fifo_n_) >> 2; }
+  u32 fifo_burst_room() const {
+    if (no_fifo_) { const u32 q = pipe_n_ + fifo_n_; return q < RING - 8 ? (RING - 8 - q) >> 2 : 0; }
+    return (FIFO_DEPTH - fifo_n_) >> 2;
+  }
+  // The no-FIFO model (emu.no_fifo / --no-fifo): a performance-accuracy
+  // trade the user opts into. The command FIFO has no level and never stalls
+  // anything; commands queue in the ring and execute in batches -- when the
+  // ring fills, when the game observes the engine (any 3D register read),
+  // and at VBlank -- instead of against emulated time at every slice. A
+  // SWAP_BUFFERS takes effect at once (the finished list is finalised and the
+  // bank flips there, the render still happens at VBlank), so the engine is
+  // never parked. GXSTAT reports the FIFO as empty and less-than-half-full,
+  // a GXFIFO-mode DMA starts whenever it is armed, and the FIFO IRQ
+  // conditions read as met. This is DraStic's model; games that pace
+  // themselves on the FIFO level, the stall, or the swap wait see different
+  // timing. Emulated cycle costs of DMA units are unchanged.
+  void set_no_fifo(bool on) { no_fifo_ = on; }
+  bool no_fifo() const { return no_fifo_; }
 
   // POWCNT1 bit 3 (geometry) and bit 2 (rendering).
   void set_powcnt(u16 value);
@@ -102,7 +119,7 @@ public:
   // Advance the engine to `arm9_time` (scheduler time, ARM9 cycles). The
   // idle check is inline: the scheduler calls this after every ARM9 slice.
   void run_to(u64 arm9_time) {
-    if (!geometry_on_ || flush_request_ || (pipe_n_ == 0 && !(gxstat_ & (1u << 27)))) { timestamp_ = arm9_time >> 1; return; }
+    if (no_fifo_ || !geometry_on_ || flush_request_ || (pipe_n_ == 0 && !(gxstat_ & (1u << 27)))) { timestamp_ = arm9_time >> 1; return; }
     run_to_slow(arm9_time);
   }
   bool stalled() const { return stalled_; }
@@ -159,6 +176,9 @@ private:
   u32 pipe_n_ = 0, fifo_n_ = 0, stall_n_ = 0;
   bool drain_settle_ = false;    // a pop deferred its DMA re-arm and IRQ check to run_to_slow
   bool stalled_ = false;
+  bool no_fifo_ = false;         // see set_no_fifo
+  bool swapped_ = false;         // no-FIFO: a SWAP_BUFFERS finalised a list since the last VBlank
+  bool list_same_ = false;       // finalise_list: the finished list equals the previous one
   bool pipe_empty() const { return pipe_n_ == 0; }
   u32  fifo_level() const { return fifo_n_; }
   void ring_push(const Entry& e) { ring_[ring_wr_] = e; ring_wr_ = (ring_wr_ + 1) & (RING - 1); }
@@ -268,6 +288,12 @@ private:
   // The stall queue drains into the FIFO after a pop made room. Out of line:
   // it only runs when the CPU has been stalled by a full FIFO.
   void promote_stalled();
+  // no-FIFO: execute everything queued, now.
+  void drain_all();
+  // The finished polygon list: sort it for the renderer, decide whether it
+  // repeats the previous one. At VBlank in the exact model, at the SWAP
+  // command in the no-FIFO model.
+  void finalise_list();
   // Put temp_vtx_ back in position order and reset vslot_ to the identity.
   void normalise_temp_vtx();
   void gxfifo_write(u32 value);

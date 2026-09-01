@@ -372,7 +372,7 @@ void Gpu3D::reset() {
   vertex_num_ = vertex_in_poly_ = consecutive_polys_ = 0;
   last_strip_poly_ = nullptr; num_opaque_ = 0;
   bank_ = 0; num_vertices_ = num_polygons_ = 0;
-  flush_request_ = flush_attr_ = 0; render_identical_ = false;
+  flush_request_ = flush_attr_ = 0; render_identical_ = false; swapped_ = false; list_same_ = false;
   renderer_.reset();
 }
 
@@ -519,9 +519,10 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
 void Gpu3D::fifo_write(const Entry& e) {
   // Order of tests follows frequency: a frame is tens of thousands of words
   // into a FIFO that is neither empty nor full.
+  if (no_fifo_ && pipe_n_ + fifo_n_ >= RING - 8) drain_all();   // no level: the ring is the only bound
   if (fifo_n_ - 1 < FIFO_DEPTH - 1) { ring_push(e); ++fifo_n_; }              // 1 <= fifo_n_ < 256
   else if (fifo_n_ == 0 && pipe_n_ < PIPE_DEPTH) { ring_push(e); ++pipe_n_; }
-  else if (fifo_n_ == FIFO_DEPTH) {
+  else if (fifo_n_ == FIFO_DEPTH && !no_fifo_) {
     // The CPU stalls until the FIFO drains; writes already in flight (an
     // STM's remaining registers) queue up behind it.
     if (stall_n_ == STALL_DEPTH) { static int n = 0; if (n++ < 8) std::fprintf(stderr, "[gx] stall queue overflow: fifo %u running %d dma %d stalled %d now %llu\n", fifo_n_, nds_.sched.running() ? (nds_.sched.running()->which == Cpu::ARM9 ? 9 : 7) : 0, nds_.sched.in_dma(), stalled_, (unsigned long long)nds_.sched.now()); return; }
@@ -546,18 +547,44 @@ void Gpu3D::promote_stalled() {
   if (stall_n_ == 0) stalled_ = false;
 }
 
+void Gpu3D::drain_all() {
+  if (!geometry_on_) return;
+  const u64 now = nds_.sched.now();
+  // run_to_slow drains while its cycle deficit is non-positive; give it one
+  // it cannot exhaust and it runs the ring dry. A SWAP_BUFFERS ends a pass
+  // (it sets the count positive) after flipping the bank itself, so the loop
+  // simply goes round again for what follows it. Each pass retires at least
+  // one command, so it terminates.
+  while (pipe_n_ && !flush_request_) {
+    timestamp_ = now >> 1;
+    cycle_count_ = -(1 << 29);
+    run_to_slow(now);
+  }
+  // Everything queued has run and no time passes in this model, so the
+  // engine is idle: the busy bits clear as run_to_slow's tail would clear
+  // them once the last command's cycles had elapsed. (A pass that ended on
+  // a SWAP leaves the deficit positive, so that tail did not run.)
+  if (pipe_n_ == 0) {
+    if (gxstat_ & (1u << 27)) finish_work(1 << 29);
+    if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
+    if (num_tests_ == 0) gxstat_ &= ~(1u << 0);
+  }
+  cycle_count_ = 0;
+  timestamp_ = now >> 1;
+}
+
 void Gpu3D::check_fifo_irq() {
   bool irq = false;
   switch (gxstat_ >> 30) {
-  case 1: irq = fifo_n_ < 128; break;
-  case 2: irq = fifo_n_ == 0; break;
+  case 1: irq = no_fifo_ || fifo_n_ < 128; break;
+  case 2: irq = no_fifo_ || fifo_n_ == 0; break;
   default: break;
   }
   nds_.io.set_irq_line(Cpu::ARM9, io::IRQ_GX_FIFO, irq);
 }
 
 void Gpu3D::check_fifo_dma() {
-  if (fifo_n_ < 128 && nds_.dma.gx_armed()) nds_.dma.check(Cpu::ARM9, dma::MODE9_GXFIFO);
+  if ((no_fifo_ || fifo_n_ < 128) && nds_.dma.gx_armed()) nds_.dma.check(Cpu::ARM9, dma::MODE9_GXFIFO);
 }
 
 // Packed command port: up to four command bytes followed by their parameters.
@@ -821,6 +848,17 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
     cycle_count_ = 325;
     vertex_pipeline_ = normal_pipeline_ = polygon_pipeline_ = 0;
     vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
+    if (no_fifo_) {
+      // Take effect now rather than parking the engine until VBlank: the
+      // list is finalised and the bank flips, the render happens at VBlank
+      // from the finalised list, and the commands that follow build the next
+      // list in the freed bank.
+      if (rendering_on_) finalise_list();
+      swapped_ = true;
+      bank_ ^= 1;
+      num_vertices_ = num_polygons_ = num_opaque_ = 0;
+      flush_request_ = 0;
+    }
     break;
   case 0x60:   // viewport (Y is upside down)
     vtx_cmd_delayed8();
@@ -1199,12 +1237,71 @@ void Gpu3D::vec_test(u32 param) {
 
 // ---- frame --------------------------------------------------------------------
 
+void Gpu3D::finalise_list() {
+    if (num_polygons_) {
+      // Opaque polygons first, then translucent; each group sorted by
+      // bottom Y then top Y (stable), unless the flush asked for manual
+      // translucent ordering.
+      u32 io = 0, it = num_opaque_;
+      const Polygon* pr = cur_pram();
+      for (u32 i = 0; i < num_polygons_; ++i) { const Polygon* p = &pr[i]; if (p->translucent) render_polys_[it++] = p; else render_polys_[io++] = p; }
+      std::stable_sort(render_polys_.begin(), render_polys_.begin() + ((flush_attr_ & 1) ? num_opaque_ : num_polygons_),
+                       [](const Polygon* a, const Polygon* b) { return a->sort_key < b->sort_key; });
+    }
+    render_count_ = num_polygons_;
+    // A swap that resubmits the same geometry with the same render state
+    // produces the same picture: keep the previous output (the rasteriser
+    // still checks its textures itself).
+    list_same_ = rendered_before_
+      && num_polygons_ == prev_swap_polys_ && num_vertices_ == prev_swap_verts_
+      && lists_equal(&pram_[bank_ * PRAM_BANK], &pram_[(bank_ ^ 1) * PRAM_BANK], num_polygons_,
+                     bank_ * VRAM_BANK, (bank_ ^ 1) * VRAM_BANK, vram_.data());
+    prev_swap_polys_ = num_polygons_; prev_swap_verts_ = num_vertices_; rendered_before_ = true;
+    if (prof::enabled) {
+      prof::add(prof::C_GX_SWAP, 1);
+      // Sums, plus a running max kept by adding the shortfall (vblank is
+      // always the emulation thread, so this accumulator is the only one).
+      prof::add(prof::C_GX_SWAP_POLYS, num_polygons_);
+      prof::add(prof::C_GX_SWAP_VERTS, num_vertices_);
+      if (num_polygons_ > prof::count(prof::C_GX_SWAP_MAXPOLYS))
+        prof::add(prof::C_GX_SWAP_MAXPOLYS, num_polygons_ - prof::count(prof::C_GX_SWAP_MAXPOLYS));
+      if (num_vertices_ > prof::count(prof::C_GX_SWAP_MAXVERTS))
+        prof::add(prof::C_GX_SWAP_MAXVERTS, num_vertices_ - prof::count(prof::C_GX_SWAP_MAXVERTS));
+      if (census_gx()) {
+        const u64 h = census_list_hash(render_polys_.data(), render_count_, vram_.data());
+        prof::census_same_list = census_have_prev_ && h == census_prev_hash_;
+        if (prof::census_same_list) {
+          prof::add(prof::C_GX_SWAP_SAME_CONTENT, 1);
+          // How much geometry is actually in the frames we could skip?
+          prof::add(prof::C_GX_SAME_POLYS, num_polygons_);
+          prof::add(prof::C_GX_SAME_VERTS, num_vertices_);
+        }
+        census_prev_hash_ = h; census_have_prev_ = true;
+        // The compare alternative, on the same frames.
+        if (census_have_prev_counts_ && num_polygons_ == census_prev_polys_ && num_vertices_ == census_prev_verts_) {
+          const u32 other = bank_ ^ 1;
+          const CmpModel m = census_compare(&pram_[bank_ * PRAM_BANK], &pram_[other * PRAM_BANK], num_polygons_,
+                                            bank_ * VRAM_BANK, other * VRAM_BANK, vram_.data(), vram_.data());
+          prof::add(prof::C_GX_CMP_RUNS, 1);
+          prof::add(prof::C_GX_CMP_FULL, m.full);
+          prof::add(prof::C_GX_CMP_EARLY, m.early);
+          // Split by outcome: an identical list must be scanned in full, a
+          // differing one stops early -- averaging the two hides both.
+          if (m.early == m.full) { prof::add(prof::C_GX_CMP_RUNS_SAME, 1); prof::add(prof::C_GX_CMP_FULL_SAME, m.full); }
+          else { prof::add(prof::C_GX_CMP_RUNS_DIFF, 1); prof::add(prof::C_GX_CMP_FULL_DIFF, m.full); prof::add(prof::C_GX_CMP_EARLY_DIFF, m.early); }
+        }
+        census_prev_polys_ = num_polygons_; census_prev_verts_ = num_vertices_; census_have_prev_counts_ = true;
+      }
+    }
+}
+
 void Gpu3D::vblank() {
   if (std::getenv("DS_DEBUG_GX"))
     std::fprintf(stderr, "[gx] frame %llu geom %d rend %d flush %u attr %u polys %u verts %u disp3dcnt %04x alpharef %u clear %08x/%08x fifo %u gxstat %08x ie %08x if %08x\n",
                  static_cast<unsigned long long>(nds_.frame_count), geometry_on_, rendering_on_, flush_request_, flush_attr_, num_polygons_, num_vertices_,
                  dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_n_, gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
   if (!geometry_on_) return;
+  if (no_fifo_) drain_all();
   if (rendering_on_) {
     // The render registers this frame against the ones the last render used.
     // Both the no-swap path and the duplicate-list skip need this answer.
@@ -1214,62 +1311,10 @@ void Gpu3D::vblank() {
       && std::equal(fog_density_.begin(), fog_density_.end(), rstate_.fog_density.begin() + 1);
     const bool same_et    = rstate_.edge == edge_ && rstate_.toon == toon_;
     const bool same_regs  = same_disp && same_clear && same_fog && same_et;
-    if (flush_request_) {
-      if (num_polygons_) {
-        // Opaque polygons first, then translucent; each group sorted by
-        // bottom Y then top Y (stable), unless the flush asked for manual
-        // translucent ordering.
-        u32 io = 0, it = num_opaque_;
-        const Polygon* pr = cur_pram();
-        for (u32 i = 0; i < num_polygons_; ++i) { const Polygon* p = &pr[i]; if (p->translucent) render_polys_[it++] = p; else render_polys_[io++] = p; }
-        std::stable_sort(render_polys_.begin(), render_polys_.begin() + ((flush_attr_ & 1) ? num_opaque_ : num_polygons_),
-                         [](const Polygon* a, const Polygon* b) { return a->sort_key < b->sort_key; });
-      }
-      render_count_ = num_polygons_;
-      // A swap that resubmits the same geometry with the same render state
-      // produces the same picture: keep the previous output (the rasteriser
-      // still checks its textures itself).
-      render_identical_ = skip_dup() && same_regs && rendered_before_
-        && num_polygons_ == prev_swap_polys_ && num_vertices_ == prev_swap_verts_
-        && lists_equal(&pram_[bank_ * PRAM_BANK], &pram_[(bank_ ^ 1) * PRAM_BANK], num_polygons_,
-                       bank_ * VRAM_BANK, (bank_ ^ 1) * VRAM_BANK, vram_.data());
-      prev_swap_polys_ = num_polygons_; prev_swap_verts_ = num_vertices_; rendered_before_ = true;
-      if (prof::enabled) {
-        prof::add(prof::C_GX_SWAP, 1);
-        // Sums, plus a running max kept by adding the shortfall (vblank is
-        // always the emulation thread, so this accumulator is the only one).
-        prof::add(prof::C_GX_SWAP_POLYS, num_polygons_);
-        prof::add(prof::C_GX_SWAP_VERTS, num_vertices_);
-        if (num_polygons_ > prof::count(prof::C_GX_SWAP_MAXPOLYS))
-          prof::add(prof::C_GX_SWAP_MAXPOLYS, num_polygons_ - prof::count(prof::C_GX_SWAP_MAXPOLYS));
-        if (num_vertices_ > prof::count(prof::C_GX_SWAP_MAXVERTS))
-          prof::add(prof::C_GX_SWAP_MAXVERTS, num_vertices_ - prof::count(prof::C_GX_SWAP_MAXVERTS));
-        if (census_gx()) {
-          const u64 h = census_list_hash(render_polys_.data(), render_count_, vram_.data());
-          prof::census_same_list = census_have_prev_ && h == census_prev_hash_;
-          if (prof::census_same_list) {
-            prof::add(prof::C_GX_SWAP_SAME_CONTENT, 1);
-            // How much geometry is actually in the frames we could skip?
-            prof::add(prof::C_GX_SAME_POLYS, num_polygons_);
-            prof::add(prof::C_GX_SAME_VERTS, num_vertices_);
-          }
-          census_prev_hash_ = h; census_have_prev_ = true;
-          // The compare alternative, on the same frames.
-          if (census_have_prev_counts_ && num_polygons_ == census_prev_polys_ && num_vertices_ == census_prev_verts_) {
-            const u32 other = bank_ ^ 1;
-            const CmpModel m = census_compare(&pram_[bank_ * PRAM_BANK], &pram_[other * PRAM_BANK], num_polygons_,
-                                              bank_ * VRAM_BANK, other * VRAM_BANK, vram_.data(), vram_.data());
-            prof::add(prof::C_GX_CMP_RUNS, 1);
-            prof::add(prof::C_GX_CMP_FULL, m.full);
-            prof::add(prof::C_GX_CMP_EARLY, m.early);
-            // Split by outcome: an identical list must be scanned in full, a
-            // differing one stops early -- averaging the two hides both.
-            if (m.early == m.full) { prof::add(prof::C_GX_CMP_RUNS_SAME, 1); prof::add(prof::C_GX_CMP_FULL_SAME, m.full); }
-            else { prof::add(prof::C_GX_CMP_RUNS_DIFF, 1); prof::add(prof::C_GX_CMP_FULL_DIFF, m.full); prof::add(prof::C_GX_CMP_EARLY_DIFF, m.early); }
-          }
-          census_prev_polys_ = num_polygons_; census_prev_verts_ = num_vertices_; census_have_prev_counts_ = true;
-        }
-      }
+    const bool swap = no_fifo_ ? swapped_ : flush_request_ != 0;
+    if (swap) {
+      if (!no_fifo_) finalise_list();   // no-FIFO: done at the SWAP command
+      render_identical_ = skip_dup() && same_regs && list_same_;
     } else {
       // Same polygon list as last time; identical output if the render
       // registers match what that render used (melonDS's RenderFrameIdentical).
@@ -1303,6 +1348,7 @@ void Gpu3D::vblank() {
     num_vertices_ = num_polygons_ = num_opaque_ = 0;
     flush_request_ = 0;
   }
+  swapped_ = false;
 }
 
 void Gpu3D::render_frame() { renderer_.render(*this); }
@@ -1336,6 +1382,7 @@ const u32* Gpu3D::line(u32 y) {
 
 u32 Gpu3D::read(u32 addr, u32 width) {
   const u32 r = addr - 0x04000000;
+  if (no_fifo_) drain_all();   // sync on observation: whatever is read reflects everything queued
   if ((r & ~3u) == 0x600) {
     // GXSTAT first, ahead of the width split and the switch: a game waiting
     // for a swap polls it tens of thousands of times a frame (Dragon Ball
@@ -1351,7 +1398,7 @@ u32 Gpu3D::read(u32 addr, u32 width) {
       if (fifo_n_) prof::add(prof::C_GX_READ_GXSTAT_FIFO, 1);
     }
     run_to(nds_.sched.now());
-    const u32 level = fifo_n_;
+    const u32 level = no_fifo_ ? 0 : fifo_n_;
     const u32 v = gxstat_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13) | (level << 16) |
                   (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
     return width == 32 ? v : width == 16 ? (v >> ((addr & 2) * 8)) & 0xFFFF : (v >> ((addr & 3) * 8)) & 0xFF;

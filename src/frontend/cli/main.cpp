@@ -110,9 +110,11 @@ int main(int argc, char** argv) {
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit9 = true, jit7 = true;
+  bool no_fifo = false;
   long quantum = ds::LOCKSTEP_QUANTUM;   // the harness compares against melonDS: lockstep unless asked otherwise
 #else
   bool jit9 = false, jit7 = false;
+  bool no_fifo = false;
   long quantum = ds::LOCKSTEP_QUANTUM;
 #endif
   TraceState ts;
@@ -133,6 +135,7 @@ int main(int argc, char** argv) {
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
+    else if (!std::strcmp(argv[i], "--no-fifo")) no_fifo = true;             // no GX FIFO model (see Gpu3D::set_no_fifo)
     else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
@@ -175,6 +178,7 @@ int main(int argc, char** argv) {
   }
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.sched.set_quantum(quantum);
+  nds.gpu3d.set_no_fifo(no_fifo);
   if (rom && direct) nds.setup_direct_boot();
   // A recording made with a save present only replays if the save is there:
   // the game otherwise stops to create one. Loaded in the same place the SDL
