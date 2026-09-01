@@ -613,10 +613,25 @@ private:
     }
   }
 
+  // DS_JIT_MEMPROBE: see the field's comment in jit_internal.h. The duplicate
+  // writes only SCRATCH2/SCRATCH3, both of which the real walk overwrites
+  // before anything reads them.
+  bool memprobe_on() const {
+    const int c = rt().memprobe;
+    return c == 1 || (c == 9 && a9_) || (c == 7 && !a9_);
+  }
+  void emit_walk_probe(u32 waddr) {
+    if (!memprobe_on()) return;
+    e().lsr_imm(SCRATCH2, waddr, mem::PAGE_SHIFT);
+    e().ldr_x_reg(SCRATCH2, R_PT, SCRATCH2, true, true);
+    e().lsl_imm(SCRATCH3, SCRATCH2, 2, true);
+  }
+
   // Page-table lookup for `waddr` (hot). On success x3 = pre-biased host
   // base. Failure branches are collected in `fail`. Clobbers x2, x3.
   void emit_page_lookup(u32 waddr, bool store, std::vector<size_t>& fail) {
     assert(!in_cold());
+    emit_walk_probe(waddr);
     e().lsr_imm(SCRATCH2, waddr, mem::PAGE_SHIFT);
     e().ldr_x_reg(SCRATCH2, R_PT, SCRATCH2, true, true);
     if (store) {
@@ -774,6 +789,7 @@ private:
       e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH6);
     };
     std::vector<size_t> fail;
+    emit_walk_probe(SCRATCH1);
     e().lsr_imm(SCRATCH2, SCRATCH1, mem::PAGE_SHIFT);
     e().ldr_x_reg(SCRATCH2, R_PT, SCRATCH2, true, true);
     cost();

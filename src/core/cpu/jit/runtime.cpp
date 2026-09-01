@@ -1228,6 +1228,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     r.nocost7 = std::getenv("DS_JIT_NOCOST7") != nullptr;
     if (const char* cp = std::getenv("DS_JIT_COSTPROBE")) r.costprobe = std::atoi(cp);
     if (const char* pp = std::getenv("DS_JIT_COSTPROBE_PART")) r.costprobe_part = std::atoi(pp);
+    if (const char* mp = std::getenv("DS_JIT_MEMPROBE")) r.memprobe = std::atoi(mp);
     mem::PageTable::code_query = &code_query;
     mem::code_write_hook = &code_write_hook;
   }

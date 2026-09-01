@@ -207,6 +207,14 @@ struct Runtime {
   bool nocost7 = false;   // DS_JIT_NOCOST7: keep the inline ARM7 cost model, so the
                           // precomputed table can be A/B'd inside one binary.
   int  costprobe = 0;     // DS_JIT_COSTPROBE: 1 = both CPUs, 9 or 7 = that CPU only.
+  // DS_JIT_MEMPROBE: emit the page-table walk (lsr / ldr / lsl) a second time
+  // ahead of the real one, into the same scratch registers, so the real
+  // sequence overwrites it and emulation is unchanged. The frame-time delta is
+  // what the inline walk costs in instructions -- an upper bound on what
+  // mapping guest memory into host address space could remove. It does NOT
+  // price cache misses: the duplicate load always hits the line the real one
+  // is about to touch, so a miss-dominated walk reads as cheaper than it is.
+  int  memprobe = 0;      // 1 = both CPUs, 9 or 7 = that CPU only.
                           // Emit the data-cost sequence twice, the first copy's
                           // result discarded into a dead scratch. Semantics and frame output are
                           // unchanged (the budget is still charged exactly once), so the A/B runs
