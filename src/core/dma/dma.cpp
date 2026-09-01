@@ -16,11 +16,16 @@ namespace {
 // Main-RAM burst patterns (unit costs in system cycles; 0 ends the pattern).
 // Generated from the run-length description of the hardware behaviour as
 // measured by the melonDS project (GPLv3).
-struct Burst { u8 data[256]; };
+// `len` is the pattern's period and `prefix` its running sum, so the cost of
+// a run of units can be closed-form instead of walked one at a time.
+struct Burst { u8 data[256]; u32 len; u32 prefix[257]; };
 Burst make(std::initializer_list<std::pair<u8, u16>> rle) {
   Burst b{}; u32 i = 0;
   for (auto [v, n] : rle) for (u32 k = 0; k < n && i < 255; ++k) b.data[i++] = v;
-  b.data[i] = 0; return b;
+  b.data[i] = 0; b.len = i;
+  b.prefix[0] = 0;
+  for (u32 k = 0; k < i; ++k) b.prefix[k + 1] = b.prefix[k] + b.data[k];
+  return b;
 }
 const Burst MRAM_DUMMY   = make({});
 const Burst READ16       = make({{7,1},{3,1},{2,117},{7,1},{3,1},{2,117},{7,1},{3,1}});
@@ -29,6 +34,22 @@ const Burst READ32       = make({{9,1},{3,1},{2,116}});
 const Burst WRITE16      = make({{8,1},{2,119}});
 const Burst WRITE32_N2   = make({{10,1},{5,47}});
 const Burst WRITE32      = make({{9,1},{7,34}});
+
+// Shorter runs than this are left to the per-unit loop: the closed-form set-up
+// costs more than it saves on them, and scenes whose DMA is mostly short runs
+// (sm64) measured ~0.4 % worse without the floor while Golden Sun, whose
+// per-scanline stream runs 128 units, is unaffected by it.
+constexpr u32 kBulkMin = 16;
+
+const Burst* burst_meta(const u8* t) {
+  if (t == READ32.data)     return &READ32;
+  if (t == READ32_N2.data)  return &READ32_N2;
+  if (t == READ16.data)     return &READ16;
+  if (t == WRITE32.data)    return &WRITE32;
+  if (t == WRITE32_N2.data) return &WRITE32_N2;
+  if (t == WRITE16.data)    return &WRITE16;
+  return nullptr;
+}
 
 } // namespace
 
@@ -154,13 +175,27 @@ u32 Dma::unit_cycles(Channel& c, bool burst_start, bool word) {
 // here exactly as unit_cycles() walks it (the table is re-selected to the
 // same table when it wraps). Everything else is one constant per run.
 struct Dma::RunCost {
-  const u8* table; u32 constant;
+  const u8* table; u32 constant; const Burst* meta;
   [[gnu::always_inline]] u32 next(Channel& c) {
     if (!table) return constant;
     u32 v = c.burst_table[c.burst_pos];
     if (v == 0) { c.burst_pos = 0; v = c.burst_table[0]; }
     ++c.burst_pos;
     return v;
+  }
+  bool closed_form() const { return !table || (meta && meta->len); }
+  // The cost of the next `n` units, and the burst position they leave behind:
+  // the same cyclic walk next() performs, summed by prefix instead of stepped.
+  // next() consumes table[pos], table[pos+1], ... and restarts at 0 on the
+  // terminator, leaving pos one past the last entry it took.
+  u32 bulk(u32 pos, u32 n, u32& end_pos) const {
+    if (!table) { end_pos = pos; return constant * n; }
+    const u32 P = meta->len, S = meta->prefix[P];
+    const u32 head = P > pos ? P - pos : 0;          // entries before the wrap
+    if (n <= head) { end_pos = pos + n; return meta->prefix[pos + n] - meta->prefix[pos]; }
+    const u32 m = n - head;                          // entries taken after it
+    end_pos = ((m - 1) % P) + 1;
+    return (S - meta->prefix[pos]) + (m / P) * S + meta->prefix[m % P];
   }
 };
 static_assert(mem::PAGE_SIZE <= (1u << 14), "a run must stay inside one DMA timing block");
@@ -169,10 +204,10 @@ Dma::RunCost Dma::run_cost(Channel& c, bool word) {
   const u32 MAIN = mem::REGION_MAIN_RAM;
   const bool burst = (c.src_rgn == MAIN && c.dst_rgn != MAIN && c.src_inc > 0) ||
                      (c.dst_rgn == MAIN && c.src_rgn != MAIN && c.dst_inc > 0);
-  if (burst) return RunCost{c.burst_table, 0};
+  if (burst) return RunCost{c.burst_table, 0, burst_meta(c.burst_table)};
   // Not a burst: unit_cycles(c, false, word) is a pure function of the cached
   // regions/costs for src_inc == dst_inc == 1 (the runs' only shape).
-  return RunCost{nullptr, unit_cycles(c, false, word)};
+  return RunCost{nullptr, unit_cycles(c, false, word), nullptr};
 }
 
 
@@ -276,6 +311,47 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           RunCost rc = run_cost(c, true);
           prof::add(prof::C_DMA_RUN_SEGS, 1);
           const u32 zdst = c.cur_dst; const u32 z0 = c.iter_count;
+          // The whole run in one copy. The per-unit loop below stops on the unit
+          // whose cost reaches the budget, so this is the same transfer only
+          // while the budget cannot cut the run short; the unit costs are a
+          // cyclic pattern, so both the total and that test are closed-form.
+          // gpu3d.stalled() is loop-invariant here: the CPU is stopped for the
+          // duration of a DMA and only a FIFO feed can set it, which is the
+          // branch above and not this one.
+          if (const u32 n = room < c.iter_count ? room : c.iter_count;
+              n >= kBulkMin && rc.closed_form() && !(a9 && nds_.gpu3d.stalled())) {
+            // The most units the budget can take: the loop breaks on the one
+            // that reaches it, so every unit up to the last with used < budget
+            // is copied for certain. Costs rise monotonically, so binary search
+            // it -- and the doubling is the one the per-unit path applies, the
+            // tables being in ARM7 system cycles. Anything left over goes round
+            // the outer loop, which charges it through the same table walk.
+            const int dbl = a9 ? 1 : 0;
+            u32 lo, tmp;
+            // The budget usually covers the run: test that before searching,
+            // so the common case costs one bulk() rather than log2(n) of them.
+            if (used + (rc.bulk(c.burst_pos, n - 1, tmp) << dbl) < budget) {
+              lo = n;
+            } else {
+              lo = 1;
+              u32 hi = n;
+              while (lo < hi) {
+                const u32 mid = lo + (hi - lo + 1) / 2;
+                if (used + (rc.bulk(c.burst_pos, mid - 1, tmp) << dbl) < budget) lo = mid; else hi = mid - 1;
+              }
+            }
+            if (lo >= 2) {
+              u32 pos_end;
+              used += rc.bulk(c.burst_pos, lo - 1, pos_end) << dbl;
+              c.burst_pos = pos_end;
+              std::memcpy(pd, ps, static_cast<size_t>(lo) * 4);
+              c.cur_src += 4 * lo; c.cur_dst += 4 * lo;
+              c.iter_count -= lo; c.rem_count -= lo;
+              prof::add(prof::C_DMA_RUN_W, lo);
+              prof::add(dma_zone(zdst, false), z0 - c.iter_count);
+              continue;
+            }
+          }
           for (;;) {
             std::memcpy(pd, ps, 4);
             prof::add(prof::C_DMA_RUN_W, 1);
@@ -314,6 +390,47 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
           RunCost rc = run_cost(c, false);
           prof::add(prof::C_DMA_RUN_SEGS, 1);
           const u32 zdst = c.cur_dst; const u32 z0 = c.iter_count;
+          // The whole run in one copy. The per-unit loop below stops on the unit
+          // whose cost reaches the budget, so this is the same transfer only
+          // while the budget cannot cut the run short; the unit costs are a
+          // cyclic pattern, so both the total and that test are closed-form.
+          // gpu3d.stalled() is loop-invariant here: the CPU is stopped for the
+          // duration of a DMA and only a FIFO feed can set it, which is the
+          // branch above and not this one.
+          if (const u32 n = room < c.iter_count ? room : c.iter_count;
+              n >= kBulkMin && rc.closed_form() && !(a9 && nds_.gpu3d.stalled())) {
+            // The most units the budget can take: the loop breaks on the one
+            // that reaches it, so every unit up to the last with used < budget
+            // is copied for certain. Costs rise monotonically, so binary search
+            // it -- and the doubling is the one the per-unit path applies, the
+            // tables being in ARM7 system cycles. Anything left over goes round
+            // the outer loop, which charges it through the same table walk.
+            const int dbl = a9 ? 1 : 0;
+            u32 lo, tmp;
+            // The budget usually covers the run: test that before searching,
+            // so the common case costs one bulk() rather than log2(n) of them.
+            if (used + (rc.bulk(c.burst_pos, n - 1, tmp) << dbl) < budget) {
+              lo = n;
+            } else {
+              lo = 1;
+              u32 hi = n;
+              while (lo < hi) {
+                const u32 mid = lo + (hi - lo + 1) / 2;
+                if (used + (rc.bulk(c.burst_pos, mid - 1, tmp) << dbl) < budget) lo = mid; else hi = mid - 1;
+              }
+            }
+            if (lo >= 2) {
+              u32 pos_end;
+              used += rc.bulk(c.burst_pos, lo - 1, pos_end) << dbl;
+              c.burst_pos = pos_end;
+              std::memcpy(pd, ps, static_cast<size_t>(lo) * 2);
+              c.cur_src += 2 * lo; c.cur_dst += 2 * lo;
+              c.iter_count -= lo; c.rem_count -= lo;
+              prof::add(prof::C_DMA_RUN_H, lo);
+              prof::add(dma_zone(zdst, false), z0 - c.iter_count);
+              continue;
+            }
+          }
           for (;;) {
             std::memcpy(pd, ps, 2);
             prof::add(prof::C_DMA_RUN_H, 1);
