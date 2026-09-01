@@ -537,16 +537,19 @@ void Gpu3D::check_fifo_dma() {
 }
 
 // Packed command port: up to four command bytes followed by their parameters.
-void Gpu3D::gxfifo_write(u32 value) {
+// The walk is a template on its sink so the single-word port and the DMA
+// burst below cannot drift apart; `push` receives every entry the word makes.
+template <class Push>
+[[gnu::always_inline]] void Gpu3D::gxfifo_word(u32 value, Push push) {
   if (num_cmds_ != 0) {
     // A parameter that does not complete its command: the common word (a
     // 16-parameter matrix load, a vertex pair). Everything else takes the
     // packed-command walk below.
-    if (++param_count_ < total_params_) { fifo_write(Entry{value, static_cast<u8>(cur_cmd_)}); return; }
+    if (++param_count_ < total_params_) { push(Entry{value, static_cast<u8>(cur_cmd_)}); return; }
     // The parameter completes its command. When no packed command follows
     // (the usual case: one command per word, 40 k a frame on Golden Sun),
     // the walk below would only shift zero bytes out; finish here.
-    fifo_write(Entry{value, static_cast<u8>(cur_cmd_)});
+    push(Entry{value, static_cast<u8>(cur_cmd_)});
     cur_cmd_ >>= 8; --num_cmds_;
     if (cur_cmd_ == 0) { num_cmds_ = 0; return; }
     param_count_ = 0;
@@ -560,7 +563,7 @@ void Gpu3D::gxfifo_write(u32 value) {
   }
   for (;;) {
     if ((cur_cmd_ & 0xFF) || (num_cmds_ == 4 && cur_cmd_ == 0))
-      fifo_write(Entry{value, static_cast<u8>(cur_cmd_ & 0xFF)});
+      push(Entry{value, static_cast<u8>(cur_cmd_ & 0xFF)});
     if (param_count_ >= total_params_) {
       cur_cmd_ >>= 8;
       if (--num_cmds_ == 0) break;
@@ -569,6 +572,52 @@ void Gpu3D::gxfifo_write(u32 value) {
     }
     if (param_count_ < total_params_) break;
   }
+}
+
+void Gpu3D::gxfifo_write(u32 value) {
+  gxfifo_word(value, [this](const Entry& e) { fifo_write(e); });
+}
+
+// A GXFIFO DMA burst: `n` words from one direct-mapped source page.
+//
+// Nothing can observe the FIFO while the burst runs, which is what pays for
+// it. The CPU is stopped for the duration of a DMA, and the geometry engine
+// only drains from run_to() at a slice boundary, so the level rises
+// monotonically here. Both FIFO IRQ conditions (level < 128, level == 0) can
+// therefore only go *false*, and a falling line neither sets IF nor wakes a
+// halted core -- so the state at the end of the burst is the state every
+// intermediate check would have left. check_fifo_dma() is dead for the same
+// reason: it only ever fires on a falling level.
+//
+// The caller keeps `n` under fifo_burst_room(), so no entry can stall and the
+// stall queue is unreachable; what is left per entry is the ring write and the
+// two status classifications, with the assembly state and the ring cursor held
+// in registers across the whole run instead of reloaded per word.
+void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
+  if (!geometry_on_) return;
+  u32 wr = ring_wr_, pushed = 0, pushpop = 0, tests = 0;
+  const auto sink = [&](const Entry& e) {
+    ring_[wr] = e; wr = (wr + 1) & (RING - 1); ++pushed;
+    pushpop += static_cast<u8>(e.cmd - 0x11) <= 1;      // 0x11, 0x12
+    tests   += static_cast<u8>(e.cmd - 0x70) <= 2;      // 0x70-0x72
+  };
+  for (u32 i = 0; i < n; ++i) {
+    u32 v;
+    std::memcpy(&v, src + i * 4, 4);
+    gxfifo_word(v, sink);
+  }
+  ring_wr_ = wr;
+  if (!pushed) return;
+  // Entries land in the pipe only while the FIFO is empty and the pipe has
+  // room; once either stops holding, every later entry goes to the FIFO. That
+  // is fifo_write()'s rule with the loop lifted out of it.
+  const u32 room = (fifo_n_ == 0 && pipe_n_ < PIPE_DEPTH) ? PIPE_DEPTH - pipe_n_ : 0;
+  const u32 to_pipe = pushed < room ? pushed : room;
+  pipe_n_ += to_pipe;
+  fifo_n_ += pushed - to_pipe;
+  gxstat_ |= (1u << 27);
+  if (pushpop) { gxstat_ |= (1u << 14); num_pushpop_ += pushpop; }
+  if (tests)   { gxstat_ |= (1u << 0);  num_tests_ += tests; }
 }
 
 // ---- command execution --------------------------------------------------------

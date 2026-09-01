@@ -50,7 +50,7 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "2d compares: bg palette (512B)", "2d compares: bg ext palette (512B)", "2d compares: obj palette (512B)", "2d compares: obj ext palette (512B)", "2d compares: oam (1024B)",
   "2d compares that differed: bg palette", "2d compares that differed: bg ext palette", "2d compares that differed: obj palette", "2d compares that differed: obj ext palette", "2d compares that differed: oam",
   "dma transfers started", "dma dispatch loop entries (a run or one unit)",
-  "dma gxfifo words (run)", "dma gxfifo words (per word)",
+  "dma gxfifo words (run)", "dma gxfifo words (per word)", "dma gxfifo bulk runs",
   "dma page-to-page runs", "dma units in word runs", "dma units in halfword runs", "dma words through the bus", "dma halfwords through the bus",
   "dma vram traps taken for a run",
   "dma units -> main ram", "dma units -> wram", "dma units -> palette", "dma units -> oam", "dma units -> i/o", "dma units -> elsewhere",

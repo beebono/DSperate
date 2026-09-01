@@ -80,7 +80,7 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   // dispatch each -- the split says whether a title's DMA cost is memory or
   // dispatch. Starts are counted per ARM9 start mode, with the ARM7's lumped.
   C_DMA_STARTS, C_DMA_LOOP,   // C_DMA_LOOP: outer-loop entries; a run counts once, a per-unit step counts one each
-  C_DMA_GXF_WORDS, C_DMA_GXF_SLOW,
+  C_DMA_GXF_WORDS, C_DMA_GXF_SLOW, C_DMA_GXF_RUNS,
   C_DMA_RUN_SEGS, C_DMA_RUN_W, C_DMA_RUN_H, C_DMA_SLOW_W, C_DMA_SLOW_H,
   C_DMA_VRAM_TRAP,
   // Units by destination zone, and the VRAM traps a run took, by the same

@@ -270,6 +270,38 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
         if (p) {
           u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 2;
           RunCost rc = run_cost(c, true);
+          // The whole run in one call. gxfifo_dma_burst() is n x the per-word
+          // feed with the FIFO cursors held in registers; it is only that while
+          // no entry can stall, so the run is cut to the words that provably
+          // cannot fill the FIFO (a word carries at most four commands), and
+          // to what the budget covers -- the same closed-form test the
+          // page-to-page run makes, since the per-word loop stops on the unit
+          // that reaches the budget. stalled() is loop-invariant: only a feed
+          // can set it, and a run this short cannot.
+          if (const u32 cap = nds_.gpu3d.fifo_burst_room(),
+                        lim = room < c.iter_count ? room : c.iter_count,
+                        n0 = lim < cap ? lim : cap;
+              n0 >= kBulkMin && rc.closed_form()) {
+            u32 tmp, n = n0;
+            if (used + (rc.bulk(c.burst_pos, n0 - 1, tmp) << 1) >= budget) {
+              u32 lo = 1, hi = n0;
+              while (lo < hi) {
+                const u32 mid = lo + (hi - lo + 1) / 2;
+                if (used + (rc.bulk(c.burst_pos, mid - 1, tmp) << 1) < budget) lo = mid; else hi = mid - 1;
+              }
+              n = lo;
+            }
+            if (n >= 2) {
+              u32 pos_end;
+              used += rc.bulk(c.burst_pos, n - 1, pos_end) << 1;
+              c.burst_pos = pos_end;
+              nds_.gpu3d.gxfifo_dma_burst(p, n);
+              c.cur_src += 4 * n; c.iter_count -= n; c.rem_count -= n;
+              prof::add(prof::C_DMA_GXF_WORDS, n); prof::add(prof::C_DMA_D_IO, n);
+              prof::add(prof::C_DMA_GXF_RUNS, 1);
+              continue;
+            }
+          }
           for (;;) {
             u32 v; std::memcpy(&v, p, 4);
             nds_.gpu3d.gxfifo_dma_write(v);

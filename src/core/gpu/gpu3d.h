@@ -89,6 +89,12 @@ public:
   // A DMA word landing on GXFIFO, without the bus and I/O dispatch a
   // register write goes through (the same semantics as write(0x04000400, 32)).
   void gxfifo_dma_write(u32 value) { if (geometry_on_) gxfifo_write(value); }
+  // A run of `n` DMA words fed straight from a direct-mapped source page.
+  // See the definition for why the burst is unobservable and what that buys.
+  void gxfifo_dma_burst(const u8* src, u32 n);
+  // Words a burst may feed without any chance of filling the FIFO: a word
+  // carries at most four commands, so this many can never reach FIFO_DEPTH.
+  u32 fifo_burst_room() const { return (FIFO_DEPTH - fifo_n_) >> 2; }
 
   // POWCNT1 bit 3 (geometry) and bit 2 (rendering).
   void set_powcnt(u16 value);
@@ -244,6 +250,10 @@ private:
 
   // FIFO.
   [[gnu::always_inline]] void fifo_write(const Entry& e);   // LTO outlined it out of gxfifo_write: 30 insn + a call per word
+  // The packed-command walk, shared by the single-word port and the burst.
+  // The two differ only in their sink, so the assembly state machine has one
+  // copy: a divergence between them would be a silent accuracy bug.
+  template <class Push> [[gnu::always_inline]] void gxfifo_word(u32 value, Push push);
   Entry fifo_read();
   void gxfifo_write(u32 value);
   void run_to_slow(u64 arm9_time);
