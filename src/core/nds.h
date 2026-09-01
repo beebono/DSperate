@@ -52,7 +52,10 @@ struct NDS {
   std::unique_ptr<CpuContext> arm9, arm7;
 
   // Loaded images (declared before the subsystems, which read them in reset()).
-  std::vector<u8> rom;
+  // The ROM image itself lives only in the Cart -- a 256 MB dump held twice is
+  // half a gigabyte of resident memory on a handheld -- so what survives here
+  // is the identity a save state checks against.
+  u64 rom_id = 0;
   std::vector<u8> firmware;
 
   mem::Bus   bus;

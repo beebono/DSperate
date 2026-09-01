@@ -110,10 +110,20 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
   return true;
 }
 
+namespace { u64 rom_identity(const std::vector<u8>& rom) {
+  // The header plus the size: enough to reject the wrong ROM without
+  // hashing 100 MB on every save.
+  u64 h = 1469598103934665603ull;
+  for (size_t i = 0; i < 0x160 && i < rom.size(); ++i) h = (h ^ rom[i]) * 1099511628211ull;
+  return h ^ rom.size();
+}
+} // namespace
+
 bool NDS::load_rom(const std::string& path) {
-  rom = slurp(path);
-  if (rom.size() < 0x1000) return false;
-  cart = std::make_unique<cart::Cart>(*this, rom);
+  std::vector<u8> image = slurp(path);
+  if (image.size() < 0x1000) return false;
+  rom_id = rom_identity(image);   // before the move; Cart pads to a power of two
+  cart = std::make_unique<cart::Cart>(*this, std::move(image));
   return true;
 }
 
@@ -201,13 +211,6 @@ void NDS::run_frame() {
 // ---- save states --------------------------------------------------------------
 
 namespace {
-u64 rom_identity(const std::vector<u8>& rom) {
-  // The header plus the size: enough to reject the wrong ROM without
-  // hashing 100 MB on every save.
-  u64 h = 1469598103934665603ull;
-  for (size_t i = 0; i < 0x160 && i < rom.size(); ++i) h = (h ^ rom[i]) * 1099511628211ull;
-  return h ^ rom.size();
-}
 constexpr u32 THUMB_W = 128, THUMB_H = 96;
 } // namespace
 
@@ -224,7 +227,7 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   w.put(state::FORMAT_VERSION);
   w.begin("HEAD");
   w.put(cart->header().game_code_u32());
-  w.put(rom_identity(rom));
+  w.put(rom_id);
   w.put(frame_count);
 #if DSPERATE_JIT
   w.put(u32{1});
@@ -265,7 +268,7 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   r.fields(code, ident, frames, jit_built);
   r.end();
   if (code != cart->header().game_code_u32()) { err = "save state is for another game"; return false; }
-  if (ident != rom_identity(rom)) { err = "save state is for another ROM image"; return false; }
+  if (ident != rom_id) { err = "save state is for another ROM image"; return false; }
 
   // From here the machine is being overwritten: a failure leaves it broken.
   gpu.prepare_load();
