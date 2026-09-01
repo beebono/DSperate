@@ -157,6 +157,7 @@ private:
   std::array<Entry, RING> ring_{};
   u32 ring_rd_ = 0, ring_wr_ = 0;
   u32 pipe_n_ = 0, fifo_n_ = 0, stall_n_ = 0;
+  bool drain_settle_ = false;    // a pop deferred its DMA re-arm and IRQ check to run_to_slow
   bool stalled_ = false;
   bool pipe_empty() const { return pipe_n_ == 0; }
   u32  fifo_level() const { return fifo_n_; }

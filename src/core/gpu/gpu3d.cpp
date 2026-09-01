@@ -475,6 +475,7 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
     if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
     if (num_tests_ == 0) gxstat_ &= ~(1u << 0);
   }
+  if (drain_settle_) { drain_settle_ = false; check_fifo_dma(); check_fifo_irq_fast(); }
 }
 
 // ---- FIFO ---------------------------------------------------------------------
@@ -516,8 +517,14 @@ Gpu3D::Entry Gpu3D::fifo_read() {
       }
       if (stall_n_ == 0) stalled_ = false;
     }
-    check_fifo_dma();
-    check_fifo_irq_fast();
+    // The DMA re-arm and the IRQ line are settled once, by the drain loop that
+    // called this, rather than on every pop. Nothing runs between the pops:
+    // run_to() is called with the CPU stopped, and a DMA armed here does not
+    // execute inline, it is only marked runnable. The level falls
+    // monotonically across a drain, so both IRQ conditions (level < 128,
+    // level == 0) can only turn *on* -- one check at the end lands on the same
+    // IF and the same armed DMA that a check per pop would have.
+    drain_settle_ = true;
   }
   return e;
 }
