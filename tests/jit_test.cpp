@@ -280,6 +280,30 @@ void directed() {
     // MSR CPSR_cxsf with the full mask, same mode, and an IRQ-enable (I cleared) with no IRQ pending.
     {Cpu::ARM9, false, {0xE12FF001, 0xE2800001}, {0, 0x600000DFu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM9, false, {0xE129F001, 0xE2800001}, {0, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // v5TE DSP multiplies (ARM9 only). Operands are chosen so the halves are
+    // distinguishable and the accumulate overflows, which is the only way the
+    // sticky Q flag is exercised. r6/r9/r13 are reserved by the harness.
+    // SMULBB / SMULTT / SMULBT r0, r1, r2
+    {Cpu::ARM9, false, {0xE1600281, 0xE2800001}, {0, 0x7FFF8000u, 0x00028001u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE16002E1, 0xE2800001}, {0, 0x7FFF8000u, 0x00028001u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE16002C1, 0xE2800001}, {0, 0x7FFF8000u, 0x00028001u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // SMLABB r0, r1, r2, r3 -- no overflow, then with r3 forcing Q
+    {Cpu::ARM9, false, {0xE1003281, 0xE2800001}, {0, 0x00001234u, 0x00005678u, 0x100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE1003281, 0xE2800001}, {0, 0x7FFF7FFFu, 0x7FFF7FFFu, 0x7FFFFFFFu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // SMLAWB / SMLAWT r0, r1, r2, r3, the GSDD shape, with and without overflow
+    {Cpu::ARM9, false, {0xE1203281, 0xE2800001}, {0, 0x12345678u, 0x00007FFFu, 0x100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE12032C1, 0xE2800001}, {0, 0x80000000u, 0x8000FFFFu, 0x7FFFFFFFu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // SMULWB / SMULWT r0, r1, r2
+    {Cpu::ARM9, false, {0xE12002A1, 0xE2800001}, {0, 0x12345678u, 0x00007FFFu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE12002E1, 0xE2800001}, {0, 0x80000000u, 0x8000FFFFu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // Destination aliasing a source, and a conditional form (the smlabblo GSDD executes)
+    {Cpu::ARM9, false, {0xE1013281, 0xE2800001}, {0, 0x00001234u, 0x00005678u, 0x100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0x31013281, 0xE2800001}, {0, 0x00001234u, 0x00005678u, 0x100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // The exact GSDD encodings: smlawb lr,fp,r2,lr and smlabblo r1,ip,r1,r2
+    {Cpu::ARM9, false, {0xE12EE28B, 0xE2800001}, {0, 0, 0x00001234u, 0, 0, 0, 0, 0, 0, 0, 0, 0x00098765u, 0, 0, 0x00000042u}},
+    {Cpu::ARM9, false, {0x3101218C, 0xE2800001}, {0, 0x00004321u, 0x00000100u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00001234u, 0, 0}},
+    // On the ARM7 these encodings are undefined and must still fall back.
+    {Cpu::ARM7, false, {0xE1003281, 0xE2800001}, {0, 0x00001234u, 0x00005678u, 0x100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     // Thumb: movs then ldr [r6 + r0] far away.
     {Cpu::ARM9, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM7, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},

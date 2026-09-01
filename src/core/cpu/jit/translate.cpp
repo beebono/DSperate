@@ -102,6 +102,12 @@ bool arm_needs_fallback(u32 instr, bool a9) {
     return rd == 15 || ((instr >> 8) & 0xF) == 15 || (instr & 0xF) == 15 || rn == 15;
   case AOp::Umull: case AOp::Umlal: case AOp::Smull: case AOp::Smlal:
     return rd == 15 || rn == 15 || ((instr >> 8) & 0xF) == 15 || (instr & 0xF) == 15;
+  // v5TE DSP multiplies: ARM9 only (undefined on the ARM7). Destination is
+  // bits 19:16 and the accumulate operand bits 15:12 -- the opposite of the
+  // data-processing layout `rd`/`rn` above.
+  case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY:
+    return !a9 || rn == 15 || ((instr >> 8) & 0xF) == 15 || (instr & 0xF) == 15 ||
+           ((op == AOp::SmlaXY || op == AOp::SmlawY) && rd == 15);
   case AOp::LdrStrImm: case AOp::LdrStrReg: {
     const bool l = instr & (1u << 20), p = instr & (1u << 24), w = instr & (1u << 21);
     return (l && rd == 15) || (rn == 15 && (!p || w)) || (op == AOp::LdrStrReg && (instr & 0xF) == 15);
@@ -163,6 +169,7 @@ FlagUse arm_flag_use(u32 instr, bool a9) {
   case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::BlxReg: case AOp::Clz: case AOp::Pld:
   case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg:
   case AOp::Ldm: case AOp::Stm:
+  case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY:
     break;
   case AOp::Mrs: u.reads = F_ALL; break;
   case AOp::Mcr: break;
@@ -875,6 +882,7 @@ private:
   void translate_thumb(u16 instr);
   void arm_data_processing(u32 instr, AOp op);
   void arm_multiply(u32 instr, AOp op);
+  void arm_dsp_multiply(u32 instr, AOp op);
   void arm_ldr_str(u32 instr, AOp op);
   void arm_ldr_str_h(u32 instr, AOp op);
   void arm_ldm_stm(u32 instr, bool load);
@@ -1012,6 +1020,43 @@ void Translator::arm_multiply(u32 instr, AOp op) {
   if (s) set_flags_logical(SCRATCH0, mul_carry(), true);
 }
 
+// v5TE DSP multiplies (SMULxy / SMLAxy / SMULWy / SMLAWy), ARM9 only.
+//
+// The accumulating forms set the sticky Q flag on signed overflow of the
+// accumulate and leave NZCV alone. The guest NZCV live in the host NZCV, so
+// the overflow cannot be taken from an `adds` -- it is computed the usual
+// arithmetic way, ((a^sum) & (b^sum)) >> 31, and OR'd into the CPSR image in
+// memory, which is exactly what the interpreter does.
+//
+// Cost is charge_C -- numC and no internal cycles -- which is why these are in
+// arm_simple_cost and a conditional form precharges before the skip branch.
+void Translator::arm_dsp_multiply(u32 instr, AOp op) {
+  const u32 rd = (instr >> 16) & 0xF, rn = (instr >> 12) & 0xF,
+            rs = (instr >> 8) & 0xF, rm = instr & 0xF;
+  const bool acc = op == AOp::SmlaXY || op == AOp::SmlawY;
+  const bool wide = op == AOp::SmlawY || op == AOp::SmulwY;
+  add_pending(numC(pc_));
+  e().sbfx(SCRATCH1, host_reg(rs), (instr & (1u << 6)) ? 16 : 0, 16);
+  if (wide) {
+    // ((s64)(s32)Rm * half(Rs, y)) >> 16, then truncated to 32 bits.
+    e().smull(SCRATCH0, host_reg(rm), SCRATCH1);
+    e().asr_imm(SCRATCH0, SCRATCH0, 16, true);
+  } else {
+    e().sbfx(SCRATCH0, host_reg(rm), (instr & (1u << 5)) ? 16 : 0, 16);
+    e().mul(SCRATCH0, SCRATCH0, SCRATCH1);
+  }
+  if (!acc) { e().mov(host_reg(rd), SCRATCH0); return; }
+  e().add_reg(SCRATCH2, SCRATCH0, host_reg(rn));
+  e().eor_reg(SCRATCH3, SCRATCH0, SCRATCH2);
+  e().eor_reg(SCRATCH4, host_reg(rn), SCRATCH2);
+  e().and_reg(SCRATCH3, SCRATCH3, SCRATCH4);
+  e().lsr_imm(SCRATCH3, SCRATCH3, 31);
+  e().ldr_w(SCRATCH4, R_CTX, OFF_CPSR);
+  e().orr_reg(SCRATCH4, SCRATCH4, SCRATCH3, LSL, 27);
+  e().str_w(SCRATCH4, R_CTX, OFF_CPSR);
+  e().mov(host_reg(rd), SCRATCH2);   // last: rd may alias rm/rs/rn
+}
+
 void Translator::arm_ldr_str(u32 instr, AOp op) {
   const bool l = instr & (1u << 20), b = instr & (1u << 22);
   const bool p = instr & (1u << 24), u = instr & (1u << 23), w = instr & (1u << 21);
@@ -1134,6 +1179,7 @@ bool arm_simple_cost(AOp op) {
   switch (op) {
   case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift: case AOp::Mrs: case AOp::Clz: case AOp::Pld: case AOp::Mcr:
   case AOp::Mul: case AOp::Mla: case AOp::Umull: case AOp::Umlal: case AOp::Smull: case AOp::Smlal:
+  case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY:
     return true;
   default: return false;
   }
@@ -1236,6 +1282,9 @@ void Translator::translate_arm(u32 instr) {
   case AOp::Pld: add_pending(numC(pc_)); break;
   case AOp::Mcr: add_pending(numC(pc_) + 2); break;      // ignored cache operation: charge_CI(2)
   case AOp::MsrReg: case AOp::MsrImm: arm_msr(instr, op); break;
+  case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY:
+    arm_dsp_multiply(instr, op);
+    break;
   case AOp::Mul: case AOp::Mla: case AOp::Umull: case AOp::Umlal: case AOp::Smull: case AOp::Smlal:
     arm_multiply(instr, op);
     break;
