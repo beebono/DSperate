@@ -2469,6 +2469,10 @@ void Renderer3D::render(const Gpu3D& gx) {
   // even when it renders nothing.
   sync_all();
   gx_ = &gx;
+  // DS_ABLATE bit 0: no rasterisation and no texture work at all. See the
+  // comment on ablate() in gpu.cpp -- the picture is stale from here on.
+  static const bool no_raster = [] { const char* e = std::getenv("DS_ABLATE"); return e && (std::atoi(e) & 1); }();
+  if (no_raster) return;
   rs_ = &gx.render_state();
   expand_toon();
   vm_ = &nds_.bus.vram_map();

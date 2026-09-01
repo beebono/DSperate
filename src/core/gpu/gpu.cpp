@@ -14,6 +14,18 @@
 
 namespace ds::gpu {
 
+// Render ablation (DS_ABLATE, bit mask) -- a measurement instrument, not a
+// feature. It removes rendering work while leaving the emulated machine's
+// timing untouched, so the frame time that survives is CPU emulation, DMA,
+// the GX front end, the scheduler and the SPU. Frames are garbage while it is
+// set; never quote a hash or a picture from an ablated run.
+//   1  3D rasterisation (and the texture cache it drives)
+//   2  2D line drawing, output and sprites -- the journal replay, window
+//      latches and lazy-2D bookkeeping still run, so what is removed is the
+//      drawing and not the machinery that decides when to draw
+//   4  display capture
+unsigned ablate() { static const unsigned m = [] { const char* e = std::getenv("DS_ABLATE"); return e ? static_cast<unsigned>(std::atoi(e)) : 0u; }(); return m; }
+
 static void ev_scanline(NDS& nds, u32) { nds.gpu.on_scanline_start(); }
 static void ev_hblank(NDS& nds, u32)   { nds.gpu.on_hblank(); }
 static void ev_fifo(NDS& nds, u32 x)   { nds.gpu.on_display_fifo(x); }
@@ -525,11 +537,11 @@ void Gpu::step_engine(int e, u32 line) {
   en.replay_to(line * 2 + 1);
   en.pre_draw(line, false);
   if (e == 0) { line3d_ = nds_.gpu3d.line(line); en.set_3d_line(line3d_); }
-  en.render_line(line);
-  output_engine(e, line);
-  if (e == 0 && capture_on_) { DS_PROF(CAPTURE); capture(line); }
+  const unsigned abl = ablate();
+  if (!(abl & 2)) { en.render_line(line); output_engine(e, line); }
+  if (e == 0 && capture_on_ && !(abl & 4)) { DS_PROF(CAPTURE); capture(line); }
   // Sprites are rendered one line ahead of the backgrounds.
-  if (line < SCREEN_H - 1) {
+  if (!(abl & 2) && line < SCREEN_H - 1) {
     prof::Scope* sc = (e == 0 && prof::enabled) ? new prof::Scope(prof::OBJ_DRAW) : nullptr;
     en.render_sprites(line + 1);
     delete sc;
