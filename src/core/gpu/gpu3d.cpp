@@ -284,12 +284,34 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
   // truncation the passes apply (it is idempotent, so once is the same as
   // three times). Vertices before clipstart are reused unclipped ones and
   // are not tested by the passes either.
+  // Trivial reject, from the same six tests: every vertex outside the *same*
+  // plane means the polygon is wholly outside the frustum and the three
+  // passes below spend their whole cost proving it. Golden Sun's title
+  // resubmits its world list once per screen and lets the clipper discard the
+  // off-camera one, so this is 5 k polygons a frame there. Sound because a
+  // vertex interpolated between two vertices outside a plane is outside it
+  // too (position and W are lerped with the same parameter, so the sign of
+  // pos[c] - W is preserved), and the plane's own pass then emits nothing.
+  // Only without reused strip vertices: those are copied through the passes
+  // untested, so a polygon carrying them always keeps them.
+  unsigned oc_all = clipstart == 0 ? 0x3Fu : 0u;
   bool inside = true;
   for (int i = clipstart; i < nverts; ++i) {
     const Vertex& t = v[i];
     const s32 w = t.pos[3];
-    if (t.pos[0] > w || t.pos[0] < -w || t.pos[1] > w || t.pos[1] < -w || t.pos[2] > w || t.pos[2] < -w) { inside = false; break; }
+    unsigned oc = 0;
+    if (t.pos[0] >  w) oc |= 1u << 0;
+    if (t.pos[0] < -w) oc |= 1u << 1;
+    if (t.pos[1] >  w) oc |= 1u << 2;
+    if (t.pos[1] < -w) oc |= 1u << 3;
+    if (t.pos[2] >  w) oc |= 1u << 4;
+    if (t.pos[2] < -w) oc |= 1u << 5;
+    oc_all &= oc;
+    // Nothing left to learn once the polygon is neither wholly inside nor
+    // rejectable: this is the original loop's early exit.
+    if (oc) { inside = false; if (!oc_all) break; }
   }
+  if (oc_all) return 0;
   if (inside) {
     for (int i = 0; i < nverts; ++i)
       for (int k = 0; k < 3; ++k) { v[i].col[k] &= ~0xFFF; v[i].col[k] += 0xFFF; }
