@@ -170,7 +170,11 @@ private:
   }
 
   // Command assembly for packed GXFIFO writes.
-  u32 num_cmds_ = 0, cur_cmd_ = 0, param_count_ = 0, total_params_ = 0;
+  // Packed-command parser state. A struct so a DMA burst can walk a whole run
+  // with a local copy in registers and write it back once; the single-word
+  // port passes the member itself.
+  struct GxParse { u32 num_cmds = 0, cur_cmd = 0, param_count = 0, total_params = 0; };
+  GxParse parse_;
   std::array<u32, 32> exec_params_{};
   u32 exec_count_ = 0;
 
@@ -260,7 +264,7 @@ private:
   // The packed-command walk, shared by the single-word port and the burst.
   // The two differ only in their sink, so the assembly state machine has one
   // copy: a divergence between them would be a silent accuracy bug.
-  template <class Push> [[gnu::always_inline]] void gxfifo_word(u32 value, Push push);
+  template <class Push> [[gnu::always_inline]] static void gxfifo_word(u32 value, GxParse& p, Push push);
   // The stall queue drains into the FIFO after a pop made room. Out of line:
   // it only runs when the CPU has been stalled by a full FIFO.
   void promote_stalled();

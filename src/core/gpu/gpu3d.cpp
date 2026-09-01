@@ -334,7 +334,7 @@ void Gpu3D::reset_render_state() {
 
 void Gpu3D::reset() {
   ring_rd_ = ring_wr_ = pipe_n_ = fifo_n_ = stall_n_ = 0; stalled_ = false;
-  num_cmds_ = cur_cmd_ = param_count_ = total_params_ = 0;
+  parse_ = GxParse{};
   exec_params_.fill(0); exec_count_ = 0;
   timestamp_ = 0; cycle_count_ = 0;
   vertex_pipeline_ = normal_pipeline_ = polygon_pipeline_ = 0;
@@ -564,42 +564,42 @@ void Gpu3D::check_fifo_dma() {
 // The walk is a template on its sink so the single-word port and the DMA
 // burst below cannot drift apart; `push` receives every entry the word makes.
 template <class Push>
-[[gnu::always_inline]] void Gpu3D::gxfifo_word(u32 value, Push push) {
-  if (num_cmds_ != 0) {
+[[gnu::always_inline]] void Gpu3D::gxfifo_word(u32 value, GxParse& p, Push push) {
+  if (p.num_cmds != 0) {
     // A parameter that does not complete its command: the common word (a
     // 16-parameter matrix load, a vertex pair). Everything else takes the
     // packed-command walk below.
-    if (++param_count_ < total_params_) { push(Entry{value, static_cast<u8>(cur_cmd_)}); return; }
+    if (++p.param_count < p.total_params) { push(Entry{value, static_cast<u8>(p.cur_cmd)}); return; }
     // The parameter completes its command. When no packed command follows
     // (the usual case: one command per word, 40 k a frame on Golden Sun),
     // the walk below would only shift zero bytes out; finish here.
-    push(Entry{value, static_cast<u8>(cur_cmd_)});
-    cur_cmd_ >>= 8; --num_cmds_;
-    if (cur_cmd_ == 0) { num_cmds_ = 0; return; }
-    param_count_ = 0;
-    total_params_ = CMD_PARAMS[cur_cmd_ & 0xFF];
-    if (total_params_ > 0) return;
+    push(Entry{value, static_cast<u8>(p.cur_cmd)});
+    p.cur_cmd >>= 8; --p.num_cmds;
+    if (p.cur_cmd == 0) { p.num_cmds = 0; return; }
+    p.param_count = 0;
+    p.total_params = CMD_PARAMS[p.cur_cmd & 0xFF];
+    if (p.total_params > 0) return;
     // Zero-parameter commands packed behind it: the walk enqueues them.
   } else {
-    num_cmds_ = 4; cur_cmd_ = value; param_count_ = 0;
-    total_params_ = CMD_PARAMS[cur_cmd_ & 0xFF];
-    if (total_params_ > 0) return;
+    p.num_cmds = 4; p.cur_cmd = value; p.param_count = 0;
+    p.total_params = CMD_PARAMS[p.cur_cmd & 0xFF];
+    if (p.total_params > 0) return;
   }
   for (;;) {
-    if ((cur_cmd_ & 0xFF) || (num_cmds_ == 4 && cur_cmd_ == 0))
-      push(Entry{value, static_cast<u8>(cur_cmd_ & 0xFF)});
-    if (param_count_ >= total_params_) {
-      cur_cmd_ >>= 8;
-      if (--num_cmds_ == 0) break;
-      param_count_ = 0;
-      total_params_ = CMD_PARAMS[cur_cmd_ & 0xFF];
+    if ((p.cur_cmd & 0xFF) || (p.num_cmds == 4 && p.cur_cmd == 0))
+      push(Entry{value, static_cast<u8>(p.cur_cmd & 0xFF)});
+    if (p.param_count >= p.total_params) {
+      p.cur_cmd >>= 8;
+      if (--p.num_cmds == 0) break;
+      p.param_count = 0;
+      p.total_params = CMD_PARAMS[p.cur_cmd & 0xFF];
     }
-    if (param_count_ < total_params_) break;
+    if (p.param_count < p.total_params) break;
   }
 }
 
 void Gpu3D::gxfifo_write(u32 value) {
-  gxfifo_word(value, [this](const Entry& e) { fifo_write(e); });
+  gxfifo_word(value, parse_, [this](const Entry& e) { fifo_write(e); });
 }
 
 // A GXFIFO DMA burst: `n` words from one direct-mapped source page.
@@ -620,16 +620,23 @@ void Gpu3D::gxfifo_write(u32 value) {
 void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
   if (!geometry_on_) return;
   u32 wr = ring_wr_, pushed = 0, pushpop = 0, tests = 0;
+  Entry* const ring = ring_.data();
   const auto sink = [&](const Entry& e) {
-    ring_[wr] = e; wr = (wr + 1) & (RING - 1); ++pushed;
+    ring[wr] = e; wr = (wr + 1) & (RING - 1); ++pushed;
     pushpop += static_cast<u8>(e.cmd - 0x11) <= 1;      // 0x11, 0x12
     tests   += static_cast<u8>(e.cmd - 0x70) <= 2;      // 0x70-0x72
   };
+  // The parser state rides in registers for the whole run: the walk is a
+  // static function of a local copy, written back once. Per word that is
+  // the difference between ~10 loads and stores and none (the burst was
+  // 45 % of run_channel's cycles on the GSDD title).
+  GxParse p = parse_;
   for (u32 i = 0; i < n; ++i) {
     u32 v;
     std::memcpy(&v, src + i * 4, 4);
-    gxfifo_word(v, sink);
+    gxfifo_word(v, p, sink);
   }
+  parse_ = p;
   ring_wr_ = wr;
   if (!pushed) return;
   // Entries land in the pipe only while the FIFO is empty and the pipe has
@@ -1481,7 +1488,7 @@ template <class S> void sync_polygon(S& s, Polygon& p) {
 template <class S> void Gpu3D::sync_state(S& s) {
   s.begin("GX3D");
   for (Entry& e : ring_) s.fields(e.param, e.cmd);
-  s.fields(ring_rd_, ring_wr_, pipe_n_, fifo_n_, stall_n_, stalled_, num_cmds_, cur_cmd_, param_count_, total_params_, exec_params_, exec_count_,
+  s.fields(ring_rd_, ring_wr_, pipe_n_, fifo_n_, stall_n_, stalled_, parse_.num_cmds, parse_.cur_cmd, parse_.param_count, parse_.total_params, exec_params_, exec_count_,
            timestamp_, cycle_count_, vertex_pipeline_, normal_pipeline_, polygon_pipeline_, vertex_slot_counter_, vertex_slots_free_, num_pushpop_, num_tests_,
            gxstat_, geometry_on_, rendering_on_, dispcnt_, alpha_ref_val_, alpha_ref_, toon_, edge_, fog_color_, fog_offset_, fog_density_,
            clear_attr1_, clear_attr2_, zero_dot_w_limit_,
