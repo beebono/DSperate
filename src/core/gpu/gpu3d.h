@@ -123,6 +123,16 @@ public:
     run_to_slow(arm9_time);
   }
   bool stalled() const { return stalled_; }
+  // "Timing OC" (emu.timing_oc): commands cost no cycles and the FIFO is
+  // drained as it fills, so the ARM9 never stalls on it. DraStic's shipping
+  // geometry timing multiplier is 0 (docs/techniques/07 s1).
+  void set_untimed(bool v) { untimed_ = v; }
+  // The bundled --timing-oc of ef61339 also drained the FIFO at half full so
+  // the ARM9 never stalled on it. That is not one of DraStic's multipliers but
+  // a behavioural change, it went in unattributed alongside the two cycle
+  // models, and it no longer ports: it called execute(), which 670ad22
+  // dissolved into run_to_slow's inlined drain (pipe refill, stall promotion,
+  // deferred settle). Left out rather than reimplemented blind.
   // Nothing to execute and nothing to raise: run_to would only stamp the time.
   bool idle() const { return !geometry_on_ || flush_request_ || (pipe_n_ == 0 && !(gxstat_ & (1u << 27))); }
   // A swap has been issued and waits for VBlank: the engine accepts nothing
@@ -179,6 +189,7 @@ private:
   bool no_fifo_ = false;         // see set_no_fifo
   bool swapped_ = false;         // no-FIFO: a SWAP_BUFFERS finalised a list since the last VBlank
   bool list_same_ = false;       // finalise_list: the finished list equals the previous one
+  bool untimed_ = false;
   bool pipe_empty() const { return pipe_n_ == 0; }
   u32  fifo_level() const { return fifo_n_; }
   void ring_push(const Entry& e) { ring_[ring_wr_] = e; ring_wr_ = (ring_wr_ + 1) & (RING - 1); }

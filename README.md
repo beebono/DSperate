@@ -301,6 +301,15 @@ for A/B runs, not for play.
 - `DS_WATCHDOG=<seconds>` (CLI) -- aborts a run whose frame count stops
   advancing for that long, after printing the display-line and raster
   hand-off state.
+- `--timing-oc` (or `[emu] timing_oc = true`), `--oc-dma`, `--oc-gx` -- "Timing
+  OC": DMA transfers (`--oc-dma`) and geometry commands (`--oc-gx`) cost no time,
+  which is how DraStic ships its multipliers (docs/techniques/07). **Measured and
+  rejected -- kept only so the result stays reproducible.** `--oc-dma` is 19 %
+  *slower* on Golden Sun: it removes no emulator work, it hands the emulated ARM9
+  the cycles the DMA was charging, and a saturated ARM9 spends them. `--oc-gx`
+  buys 2 % there and desynchronises Dragon Ball permanently. The pair is worse
+  than either half -- Etrian Odyssey and Meteos diverge only when both are set --
+  and on device it tears the display badly. Do not turn these on.
 - `DS_IDLE_SKIP=0|1|all` (or `[emu] idle_skip`) -- the idle-loop skip: `1`
   (default) skips only an ARM9 GXSTAT poll while a swap is pending; `all`
   skips every proven poll loop.

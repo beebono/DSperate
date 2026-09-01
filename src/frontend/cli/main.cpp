@@ -118,9 +118,11 @@ int main(int argc, char** argv) {
   long quantum = ds::LOCKSTEP_QUANTUM;
 #endif
   TraceState ts;
+  bool timing_oc = false, oc_dma = false, oc_gx = false;
   bool frames_given = false;
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
+    auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };
     if (arg("--frames")) { frames = std::atoi(argv[++i]); frames_given = true; }
     else if (arg("--bios9")) bios9 = argv[++i];
     else if (arg("--bios7")) bios7 = argv[++i];
@@ -137,6 +139,11 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
     else if (!std::strcmp(argv[i], "--no-fifo")) no_fifo = true;             // no GX FIFO model (see Gpu3D::set_no_fifo)
     else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
+    else if (flag("--timing-oc")) timing_oc = true;                          // untimed DMA / geometry (DraStic's defaults); accuracy much worse
+    // Split A/B knobs: the bundled flag above is three separate changes.
+    else if (flag("--oc-dma")) oc_dma = true;      // DMA units cost no cycles
+    else if (flag("--oc-gx")) oc_gx = true;        // geometry commands cost no cycles
+
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
@@ -179,6 +186,9 @@ int main(int argc, char** argv) {
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_no_fifo(no_fifo);
+  nds.dma.set_untimed(timing_oc || oc_dma);
+  nds.gpu3d.set_untimed(timing_oc || oc_gx);
+
   if (rom && direct) nds.setup_direct_boot();
   // A recording made with a save present only replays if the save is there:
   // the game otherwise stops to create one. Loaded in the same place the SDL

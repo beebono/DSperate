@@ -385,6 +385,7 @@ void Gpu3D::set_powcnt(u16 value) {
 // ---- timing -------------------------------------------------------------------
 
 void Gpu3D::add_cycles(s32 n) {
+  if (untimed_) n = 0;
   cycle_count_ += n;
   if (vertex_pipeline_ > 0) vertex_pipeline_ = vertex_pipeline_ > n ? vertex_pipeline_ - n : 0;
   if (polygon_pipeline_ > 0) {
@@ -422,7 +423,7 @@ void Gpu3D::next_vertex_slot() {
 
 void Gpu3D::stall_polygon_pipeline(s32 delay, s32 nonstall_delay) {
   if (polygon_pipeline_ > 0) {
-    cycle_count_ += polygon_pipeline_ + delay;
+    if (!untimed_) cycle_count_ += polygon_pipeline_ + delay;
     vertex_pipeline_ = 0; normal_pipeline_ = 0;
     polygon_pipeline_ = 0; vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
   } else if (vertex_pipeline_ > nonstall_delay) add_cycles((vertex_pipeline_ - nonstall_delay) + 1);
@@ -845,7 +846,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
   case 0x50:   // swap buffers
     vtx_cmd_delayed4();
     flush_request_ = 1; flush_attr_ = param & 3;
-    cycle_count_ = 325;
+    cycle_count_ = untimed_ ? 0 : 325;
     vertex_pipeline_ = normal_pipeline_ = polygon_pipeline_ = 0;
     vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
     if (no_fifo_) {
