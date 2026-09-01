@@ -368,6 +368,7 @@ void Gpu3D::reset() {
   polygon_attr_ = cur_polygon_attr_ = 0; texparam_ = texpal_ = 0;
   std::memset(pos_test_, 0, sizeof pos_test_); std::memset(vec_test_, 0, sizeof vec_test_);
   std::memset(temp_vtx_, 0, sizeof temp_vtx_);
+  reset_vptr();
   vertex_num_ = vertex_in_poly_ = consecutive_polys_ = 0;
   last_strip_poly_ = nullptr; num_opaque_ = 0;
   bank_ = 0; num_vertices_ = num_polygons_ = 0;
@@ -887,9 +888,18 @@ void Gpu3D::update_clip_matrix() {
   mtx_mult_4x4(clip_.data(), pos_.data());
 }
 
+// Reorder temp_vtx_ so that position i is slot i again. Only the state writer
+// needs this; it is an equivalent representation, so nothing else changes.
+void Gpu3D::normalise_temp_vtx() {
+  Vertex tmp[4];
+  for (int i = 0; i < 4; ++i) tmp[i] = *vptr_[i];
+  for (int i = 0; i < 4; ++i) temp_vtx_[i] = tmp[i];
+  reset_vptr();
+}
+
 void Gpu3D::submit_vertex() {
   const s64 v[4] = {cur_vertex_[0], cur_vertex_[1], cur_vertex_[2], 0x1000};
-  Vertex& vt = temp_vtx_[vertex_in_poly_];
+  Vertex& vt = *vptr_[vertex_in_poly_];
   update_clip_matrix();
 #if DSPERATE_NEON
   // The four clip-space coordinates are four dot products against the same
@@ -926,19 +936,26 @@ void Gpu3D::submit_vertex() {
   case 1: if (vertex_in_poly_ == 4) { vertex_in_poly_ = 0; submit_polygon(); ++consecutive_polys_; } break;
   case 2:   // triangle strip
     if (consecutive_polys_ & 1) {
-      std::swap(temp_vtx_[0], temp_vtx_[1]);
+      // swap(temp_vtx_[0], temp_vtx_[1]) ...
+      { Vertex* t = vptr_[0]; vptr_[0] = vptr_[1]; vptr_[1] = t; }
       vertex_in_poly_ = 2; submit_polygon(); ++consecutive_polys_;
-      temp_vtx_[1] = temp_vtx_[2];
+      // ... then temp_vtx_[1] = temp_vtx_[2]: position 1 takes position 2's
+      // slot, and the slot it held is the free one the next vertex writes.
+      { Vertex* t = vptr_[1]; vptr_[1] = vptr_[2]; vptr_[2] = t; }
     } else if (vertex_in_poly_ == 3) {
       vertex_in_poly_ = 2; submit_polygon(); ++consecutive_polys_;
-      temp_vtx_[0] = temp_vtx_[1]; temp_vtx_[1] = temp_vtx_[2];
+      // temp_vtx_[0] = temp_vtx_[1]; temp_vtx_[1] = temp_vtx_[2];
+      { Vertex* t = vptr_[0]; vptr_[0] = vptr_[1]; vptr_[1] = vptr_[2]; vptr_[2] = t; }
     }
     break;
   case 3:   // quad strip
     if (vertex_in_poly_ == 4) {
-      std::swap(temp_vtx_[2], temp_vtx_[3]);
+      // swap(temp_vtx_[2], temp_vtx_[3]) ...
+      { Vertex* t = vptr_[2]; vptr_[2] = vptr_[3]; vptr_[3] = t; }
       vertex_in_poly_ = 2; submit_polygon(); ++consecutive_polys_;
-      temp_vtx_[0] = temp_vtx_[3]; temp_vtx_[1] = temp_vtx_[2];
+      // ... then temp_vtx_[0] = temp_vtx_[3]; temp_vtx_[1] = temp_vtx_[2].
+      { Vertex* x = vptr_[0]; Vertex* y = vptr_[1];
+        vptr_[0] = vptr_[3]; vptr_[1] = vptr_[2]; vptr_[2] = x; vptr_[3] = y; }
     }
     break;
   }
@@ -958,7 +975,7 @@ void Gpu3D::submit_polygon() {
   polygon_pipeline_ = 8; vertex_slot_counter_ = 1; vertex_slots_free_ = 0b11110;
 
   // Culling from the first three vertices' clip-space positions.
-  const Vertex &v0 = temp_vtx_[0], &v1 = temp_vtx_[1], &v2 = temp_vtx_[2];
+  const Vertex &v0 = *vptr_[0], &v1 = *vptr_[1], &v2 = *vptr_[2];
   s64 nx = static_cast<s64>(v0.pos[1] - v1.pos[1]) * (v2.pos[3] - v1.pos[3]) - static_cast<s64>(v0.pos[3] - v1.pos[3]) * (v2.pos[1] - v1.pos[1]);
   s64 ny = static_cast<s64>(v0.pos[3] - v1.pos[3]) * (v2.pos[0] - v1.pos[0]) - static_cast<s64>(v0.pos[0] - v1.pos[0]) * (v2.pos[3] - v1.pos[3]);
   s64 nz = static_cast<s64>(v0.pos[0] - v1.pos[0]) * (v2.pos[1] - v1.pos[1]) - static_cast<s64>(v0.pos[1] - v1.pos[1]) * (v2.pos[0] - v1.pos[0]);
@@ -983,7 +1000,7 @@ void Gpu3D::submit_polygon() {
       clipstart = 2;
     }
   }
-  for (int i = clipstart; i < nverts; ++i) clipped[i] = temp_vtx_[i];
+  for (int i = clipstart; i < nverts; ++i) clipped[i] = *vptr_[i];
 
   nverts = clip_polygon<true>(clipped, nverts, clipstart, cur_polygon_attr_ & (1 << 12));
   if (nverts == 0) { last_strip_poly_ = nullptr; return; }
@@ -1474,6 +1491,10 @@ template <class S> void Gpu3D::sync_state(S& s) {
            poly_mode_, cur_vertex_, vertex_color_, texcoords_, raw_texcoords_, normal_, light_dir_, spec_recip_, light_color_,
            mat_diffuse_, mat_ambient_, mat_specular_, mat_emission_, use_shininess_, shininess_,
            polygon_attr_, cur_polygon_attr_, texparam_, texpal_, pos_test_, vec_test_);
+  // temp_vtx_ travels in position order, so the slot permutation never reaches
+  // the file and states written before it existed still load.
+  if constexpr (S::reading) reset_vptr();
+  else normalise_temp_vtx();
   for (Vertex& v : temp_vtx_) sync_vertex(s, v);
   s.fields(vertex_num_, vertex_in_poly_, consecutive_polys_, num_opaque_, bank_, num_vertices_, num_polygons_,
            render_count_, render_identical_, flush_request_, flush_attr_, prev_swap_polys_, prev_swap_verts_, rendered_before_);

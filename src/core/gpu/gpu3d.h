@@ -222,8 +222,14 @@ private:
   s32 pos_test_[4] = {};
   s16 vec_test_[3] = {};
 
-  // Polygon assembly.
+  // Polygon assembly. A strip carries two vertices over into the next polygon;
+  // rather than copy 56-byte structs between the slots, vslot_ maps a position
+  // in the polygon being assembled to the slot holding it, and the carry-over
+  // is a permutation of four bytes. It is always a permutation of 0..3, so
+  // every position has a slot of its own to be written into.
   Vertex temp_vtx_[4] = {};
+  Vertex* vptr_[4] = {&temp_vtx_[0], &temp_vtx_[1], &temp_vtx_[2], &temp_vtx_[3]};
+  void reset_vptr() { for (int i = 0; i < 4; ++i) vptr_[i] = &temp_vtx_[i]; }
   u32 vertex_num_ = 0, vertex_in_poly_ = 0, consecutive_polys_ = 0;
   Polygon* last_strip_poly_ = nullptr;
   u32 num_opaque_ = 0;
@@ -258,6 +264,8 @@ private:
   // The stall queue drains into the FIFO after a pop made room. Out of line:
   // it only runs when the CPU has been stalled by a full FIFO.
   void promote_stalled();
+  // Put temp_vtx_ back in position order and reset vslot_ to the identity.
+  void normalise_temp_vtx();
   void gxfifo_write(u32 value);
   void run_to_slow(u64 arm9_time);
   // One call site: the run_to_slow drain loop. Every command goes through this
