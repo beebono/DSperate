@@ -255,11 +255,15 @@ private:
   // The two differ only in their sink, so the assembly state machine has one
   // copy: a divergence between them would be a silent accuracy bug.
   template <class Push> [[gnu::always_inline]] void gxfifo_word(u32 value, Push push);
-  Entry fifo_read();
+  // The stall queue drains into the FIFO after a pop made room. Out of line:
+  // it only runs when the CPU has been stalled by a full FIFO.
+  void promote_stalled();
   void gxfifo_write(u32 value);
   void run_to_slow(u64 arm9_time);
-  __attribute__((always_inline)) void execute();       // one call site: the run_to_slow loop
-  __attribute__((always_inline)) void exec_single(u8 cmd, u32 param);   // one call site: execute()
+  // One call site: the run_to_slow drain loop. Every command goes through this
+  // one switch; the multi-parameter ones tail into exec_accum.
+  __attribute__((always_inline)) void exec_single(u8 cmd, u32 param);
+  void exec_accum(u8 cmd, u32 param);
   void exec_multi(u8 cmd);
 
   // Per-command timing helpers: called once per command from the execute

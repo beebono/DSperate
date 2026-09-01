@@ -458,17 +458,52 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
   const u64 now = arm9_time >> 1;
   cycle_count_ -= static_cast<s32>(now - timestamp_);
   timestamp_ = now;
-  if (cycle_count_ <= 0) {
-    if (prof::enabled && pipe_n_) prof::add(prof::C_GX_RUN_SLOW_EXEC, 1);
-    while (cycle_count_ <= 0 && pipe_n_) {
-      // Both clears are no-ops unless a busy bit is set, which is rare
-      // between matrix-stack and test commands: one test covers them.
-      if (gxstat_ & ((1u << 14) | (1u << 0))) {
-        if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
-        if (num_tests_ == 0) gxstat_ &= ~(1u << 0);
+  if (cycle_count_ <= 0 && pipe_n_) {
+    if (prof::enabled) prof::add(prof::C_GX_RUN_SLOW_EXEC, 1);
+    // The ring cursor and the three stage counts live in registers for the
+    // whole drain -- 78 commands a call on Golden Sun. Nothing a command can
+    // reach touches them: exec_single and exec_multi never push and never
+    // call into the rest of the machine, and no DMA runs here (run_to is
+    // called with the CPU stopped, and the re-arm deferred to the settle
+    // below only marks a channel runnable). The stall queue is the one path
+    // that moves them, and it writes them back first.
+    u32 rd = ring_rd_, pipe = pipe_n_, fifo = fifo_n_;
+    bool settle = drain_settle_;
+    // Both busy bits are clear far more often than not, and while they are
+    // clear nothing in the drain can set them -- only an enqueue does, and
+    // there are none here. So the state of the two bits is carried in a
+    // register instead of re-read from gxstat_ once per command.
+    bool busy = (gxstat_ & ((1u << 14) | (1u << 0))) != 0;
+    do {
+      // A bit clears one command *later* than the command that emptied its
+      // counter: a GXSTAT read landing between the two must still see it set.
+      if (busy) {
+        u32 g = gxstat_;
+        if (num_pushpop_ == 0) g &= ~(1u << 14);
+        if (num_tests_ == 0) g &= ~(1u << 0);
+        gxstat_ = g;
+        busy = (g & ((1u << 14) | (1u << 0))) != 0;
       }
-      execute();
-    }
+      const Entry e = ring_[rd];
+      rd = (rd + 1) & (RING - 1);
+      --pipe;
+      if (pipe <= 2) {
+        // Refill the pipe with up to two FIFO entries: a count move, the
+        // entries are already in order behind it.
+        const u32 k = fifo < 2 ? fifo : 2;
+        pipe += k; fifo -= k;
+        if (stall_n_) { ring_rd_ = rd; pipe_n_ = pipe; fifo_n_ = fifo; promote_stalled(); rd = ring_rd_; pipe = pipe_n_; fifo = fifo_n_; }
+        // The DMA re-arm and the IRQ line are settled once, at the end of the
+        // drain, rather than on every pop. Nothing runs between the pops, and
+        // the level falls monotonically across a drain, so both IRQ
+        // conditions (level < 128, level == 0) can only turn *on* -- one check
+        // at the end lands on the same IF and the same armed DMA that a check
+        // per pop would have.
+        settle = true;
+      }
+      exec_single(e.cmd, e.param);
+    } while (cycle_count_ <= 0 && pipe);
+    ring_rd_ = rd; pipe_n_ = pipe; fifo_n_ = fifo; drain_settle_ = settle;
   }
   if (cycle_count_ <= 0 && pipe_n_ == 0) {
     if (gxstat_ & (1u << 27)) finish_work(-cycle_count_); else cycle_count_ = 0;
@@ -496,37 +531,18 @@ void Gpu3D::fifo_write(const Entry& e) {
   note_enqueued(e.cmd);
 }
 
-Gpu3D::Entry Gpu3D::fifo_read() {
-  const Entry e = ring_[ring_rd_];
-  ring_rd_ = (ring_rd_ + 1) & (RING - 1);
-  --pipe_n_;
-  if (pipe_n_ <= 2) {
-    // Refill the pipe with up to two FIFO entries: a count move, the entries
-    // are already in order behind it.
-    const u32 k = fifo_n_ < 2 ? fifo_n_ : 2;
-    pipe_n_ += k; fifo_n_ -= k;
-    if (stall_n_) {
-      // Stalled writes enter the FIFO (or the pipe, if it has room) now, with
-      // the status side effects they were denied when they arrived.
-      u32 idx = (ring_rd_ + pipe_n_ + fifo_n_) & (RING - 1);
-      while (stall_n_ && fifo_n_ < FIFO_DEPTH) {
-        if (fifo_n_ == 0 && pipe_n_ < PIPE_DEPTH) ++pipe_n_; else ++fifo_n_;
-        --stall_n_;
-        note_enqueued(ring_[idx].cmd);
-        idx = (idx + 1) & (RING - 1);
-      }
-      if (stall_n_ == 0) stalled_ = false;
-    }
-    // The DMA re-arm and the IRQ line are settled once, by the drain loop that
-    // called this, rather than on every pop. Nothing runs between the pops:
-    // run_to() is called with the CPU stopped, and a DMA armed here does not
-    // execute inline, it is only marked runnable. The level falls
-    // monotonically across a drain, so both IRQ conditions (level < 128,
-    // level == 0) can only turn *on* -- one check at the end lands on the same
-    // IF and the same armed DMA that a check per pop would have.
-    drain_settle_ = true;
+// Stalled writes enter the FIFO (or the pipe, if it has room) now that a pop
+// has made room, with the status side effects they were denied when they
+// arrived. Only reachable after the CPU has been stalled by a full FIFO.
+void Gpu3D::promote_stalled() {
+  u32 idx = (ring_rd_ + pipe_n_ + fifo_n_) & (RING - 1);
+  while (stall_n_ && fifo_n_ < FIFO_DEPTH) {
+    if (fifo_n_ == 0 && pipe_n_ < PIPE_DEPTH) ++pipe_n_; else ++fifo_n_;
+    --stall_n_;
+    note_enqueued(ring_[idx].cmd);
+    idx = (idx + 1) & (RING - 1);
   }
-  return e;
+  if (stall_n_ == 0) stalled_ = false;
 }
 
 void Gpu3D::check_fifo_irq() {
@@ -629,13 +645,14 @@ void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
 
 // ---- command execution --------------------------------------------------------
 
-void Gpu3D::execute() {
-  const Entry e = fifo_read();
-  const u32 needed = CMD_PARAMS[e.cmd];
-  if (needed <= 1) { exec_single(e.cmd, e.param); return; }
-  exec_params_[exec_count_++] = e.param;
+// The eleven multi-parameter commands: their entries only accumulate into
+// exec_params_ until the last one, which runs the command. Out of line -- 7 %
+// of the entries on a geometry-heavy frame -- so the dispatch below stays one
+// jump table over the command byte with no parameter-count lookup in front.
+void Gpu3D::exec_accum(u8 cmd, u32 param) {
+  exec_params_[exec_count_++] = param;
   if (exec_count_ == 1) {
-    switch (e.cmd) {
+    switch (cmd) {
     case 0x23: vtx_cmd_submit(); break;
     case 0x34: case 0x71: vtx_cmd_delayed8(); break;
     case 0x70: stall_polygon_pipeline(10 + 1, 0); break;
@@ -643,7 +660,7 @@ void Gpu3D::execute() {
     }
   } else {
     add_cycles(1);
-    if (exec_count_ >= needed) { exec_count_ = 0; exec_multi(e.cmd); }
+    if (exec_count_ >= CMD_PARAMS[cmd]) { exec_count_ = 0; exec_multi(cmd); }
   }
 }
 
@@ -807,6 +824,11 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
     viewport_[5] = (viewport_[1] - viewport_[3] + 1) & 0xFF;
     break;
   case 0x72: vtx_cmd_delayed6(); --num_tests_; vec_test(param); break;
+  // The commands that take more than one parameter. They sit in the same
+  // switch so that a popped entry needs no CMD_PARAMS lookup to be dispatched.
+  case 0x16: case 0x17: case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C:
+  case 0x23: case 0x34: case 0x70: case 0x71:
+    exec_accum(cmd, param); break;
   default: vtx_cmd_delayed4(); break;
   }
 }
