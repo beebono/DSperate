@@ -134,7 +134,7 @@ input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
     dsperate-sdl game.nds [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
                  [--config F] [--scale N] [--fullscreen] [--layout L] [--screen top|bottom]
                  [--dual-window] [--linear] [--lcd-grid S] [--chunky] [--accel] [--no-vsync] [--no-audio]
-                 [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N] [--no-fifo]
+                 [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N] [--timing-oc]
                  [--frames N] [--record F | --replay F] [--save F]
 
 ### Settings and controls
@@ -301,15 +301,17 @@ for A/B runs, not for play.
 - `DS_WATCHDOG=<seconds>` (CLI) -- aborts a run whose frame count stops
   advancing for that long, after printing the display-line and raster
   hand-off state.
-- `--timing-oc` (or `[emu] timing_oc = true`), `--oc-dma`, `--oc-gx` -- "Timing
-  OC": DMA transfers (`--oc-dma`) and geometry commands (`--oc-gx`) cost no time,
-  which is how DraStic ships its multipliers (docs/techniques/07). **Measured and
-  rejected -- kept only so the result stays reproducible.** `--oc-dma` is 19 %
-  *slower* on Golden Sun: it removes no emulator work, it hands the emulated ARM9
-  the cycles the DMA was charging, and a saturated ARM9 spends them. `--oc-gx`
-  buys 2 % there and desynchronises Dragon Ball permanently. The pair is worse
-  than either half -- Etrian Odyssey and Meteos diverge only when both are set --
-  and on device it tears the display badly. Do not turn these on.
+- `--timing-oc` (or `[emu] timing_oc = true`) -- "Timing OC": DraStic's geometry
+  model, opted into as a performance-accuracy trade. The GX FIFO has no level
+  and never stalls the ARM9 or its DMA; commands execute in batches when the
+  game observes the engine, when the ring fills and at VBlank; a swap takes
+  effect at once; geometry commands cost no cycles and the per-command
+  pipeline model is skipped. Golden Sun: Dark Dawn's title runs ~4 % faster
+  with its frames bit-identical; Dragon Ball Origins' intro desynchronises.
+  The untimed-DMA half of the old flag is gone: it measured worse in every
+  combination (it hands the emulated ARM9 the cycles the DMA charged, and a
+  saturated ARM9 spends them), and neither half was worth anything while the
+  FIFO was still modelled.
 - `DS_IDLE_SKIP=0|1|all` (or `[emu] idle_skip`) -- the idle-loop skip: `1`
   (default) skips only an ARM9 GXSTAT poll while a swap is pending; `all`
   skips every proven poll loop.

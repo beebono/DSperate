@@ -98,19 +98,22 @@ public:
     if (no_fifo_) { const u32 q = pipe_n_ + fifo_n_; return q < RING - 8 ? (RING - 8 - q) >> 2 : 0; }
     return (FIFO_DEPTH - fifo_n_) >> 2;
   }
-  // The no-FIFO model (emu.no_fifo / --no-fifo): a performance-accuracy
-  // trade the user opts into. The command FIFO has no level and never stalls
-  // anything; commands queue in the ring and execute in batches -- when the
-  // ring fills, when the game observes the engine (any 3D register read),
-  // and at VBlank -- instead of against emulated time at every slice. A
-  // SWAP_BUFFERS takes effect at once (the finished list is finalised and the
-  // bank flips there, the render still happens at VBlank), so the engine is
-  // never parked. GXSTAT reports the FIFO as empty and less-than-half-full,
-  // a GXFIFO-mode DMA starts whenever it is armed, and the FIFO IRQ
-  // conditions read as met. This is DraStic's model; games that pace
-  // themselves on the FIFO level, the stall, or the swap wait see different
-  // timing. Emulated cycle costs of DMA units are unchanged.
-  void set_no_fifo(bool on) { no_fifo_ = on; }
+  // "Timing OC" (emu.timing_oc / --timing-oc): the performance-accuracy trade
+  // the user opts into, DraStic's geometry model. Two things at once, which
+  // only pay together: (1) no FIFO -- the command FIFO has no level and never
+  // stalls anything; commands queue in the ring and execute in batches (when
+  // the ring fills, when the game observes the engine through any 3D
+  // register read, and at VBlank) instead of against emulated time at every
+  // slice; SWAP_BUFFERS takes effect at once (the finished list is finalised
+  // and the bank flips there, the render still happens at VBlank); GXSTAT
+  // reports the FIFO empty and less-than-half-full, a GXFIFO-mode DMA starts
+  // whenever armed, the FIFO IRQ conditions read as met. (2) untimed
+  // geometry -- commands cost no cycles and the per-command pipeline model
+  // is skipped, since with no FIFO nothing can observe it. DMA unit costs
+  // stay exact (an untimed DMA measured worse everywhere: it overclocks the
+  // guest). Games that pace themselves on the FIFO level, the stall or the
+  // swap wait see different timing; Dragon Ball Origins' intro desyncs.
+  void set_timing_oc(bool on) { no_fifo_ = on; untimed_ = on; }
   bool no_fifo() const { return no_fifo_; }
 
   // POWCNT1 bit 3 (geometry) and bit 2 (rendering).
@@ -123,10 +126,6 @@ public:
     run_to_slow(arm9_time);
   }
   bool stalled() const { return stalled_; }
-  // "Timing OC" (emu.timing_oc): commands cost no cycles and the FIFO is
-  // drained as it fills, so the ARM9 never stalls on it. DraStic's shipping
-  // geometry timing multiplier is 0 (docs/techniques/07 s1).
-  void set_untimed(bool v) { untimed_ = v; }
   // The bundled --timing-oc of ef61339 also drained the FIFO at half full so
   // the ARM9 never stalled on it. That is not one of DraStic's multipliers but
   // a behavioural change, it went in unattributed alongside the two cycle
@@ -186,7 +185,7 @@ private:
   u32 pipe_n_ = 0, fifo_n_ = 0, stall_n_ = 0;
   bool drain_settle_ = false;    // a pop deferred its DMA re-arm and IRQ check to run_to_slow
   bool stalled_ = false;
-  bool no_fifo_ = false;         // see set_no_fifo
+  bool no_fifo_ = false;         // see set_timing_oc
   bool swapped_ = false;         // no-FIFO: a SWAP_BUFFERS finalised a list since the last VBlank
   bool list_same_ = false;       // finalise_list: the finished list equals the previous one
   bool untimed_ = false;

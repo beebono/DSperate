@@ -110,15 +110,13 @@ int main(int argc, char** argv) {
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit9 = true, jit7 = true;
-  bool no_fifo = false;
   long quantum = ds::LOCKSTEP_QUANTUM;   // the harness compares against melonDS: lockstep unless asked otherwise
 #else
   bool jit9 = false, jit7 = false;
-  bool no_fifo = false;
   long quantum = ds::LOCKSTEP_QUANTUM;
 #endif
   TraceState ts;
-  bool timing_oc = false, oc_dma = false, oc_gx = false;
+  bool timing_oc = false;
   bool frames_given = false;
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
@@ -137,12 +135,9 @@ int main(int argc, char** argv) {
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
-    else if (!std::strcmp(argv[i], "--no-fifo")) no_fifo = true;             // no GX FIFO model (see Gpu3D::set_no_fifo)
     else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
-    else if (flag("--timing-oc")) timing_oc = true;                          // untimed DMA / geometry (DraStic's defaults); accuracy much worse
+    else if (flag("--timing-oc")) timing_oc = true;                          // no FIFO + untimed geometry (DraStic's model); see Gpu3D::set_timing_oc
     // Split A/B knobs: the bundled flag above is three separate changes.
-    else if (flag("--oc-dma")) oc_dma = true;      // DMA units cost no cycles
-    else if (flag("--oc-gx")) oc_gx = true;        // geometry commands cost no cycles
 
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
@@ -185,9 +180,7 @@ int main(int argc, char** argv) {
   }
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.sched.set_quantum(quantum);
-  nds.gpu3d.set_no_fifo(no_fifo);
-  nds.dma.set_untimed(timing_oc || oc_dma);
-  nds.gpu3d.set_untimed(timing_oc || oc_gx);
+  nds.gpu3d.set_timing_oc(timing_oc);
 
   if (rom && direct) nds.setup_direct_boot();
   // A recording made with a save present only replays if the save is there:

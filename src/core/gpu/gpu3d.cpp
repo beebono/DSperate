@@ -385,7 +385,7 @@ void Gpu3D::set_powcnt(u16 value) {
 // ---- timing -------------------------------------------------------------------
 
 void Gpu3D::add_cycles(s32 n) {
-  if (untimed_) n = 0;
+  if (untimed_) return;   // Timing OC: nothing observes the engine's time or its pipelines
   cycle_count_ += n;
   if (vertex_pipeline_ > 0) vertex_pipeline_ = vertex_pipeline_ > n ? vertex_pipeline_ - n : 0;
   if (polygon_pipeline_ > 0) {
@@ -422,8 +422,9 @@ void Gpu3D::next_vertex_slot() {
 }
 
 void Gpu3D::stall_polygon_pipeline(s32 delay, s32 nonstall_delay) {
+  if (untimed_) return;
   if (polygon_pipeline_ > 0) {
-    if (!untimed_) cycle_count_ += polygon_pipeline_ + delay;
+    cycle_count_ += polygon_pipeline_ + delay;
     vertex_pipeline_ = 0; normal_pipeline_ = 0;
     polygon_pipeline_ = 0; vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
   } else if (vertex_pipeline_ > nonstall_delay) add_cycles((vertex_pipeline_ - nonstall_delay) + 1);
@@ -431,23 +432,34 @@ void Gpu3D::stall_polygon_pipeline(s32 delay, s32 nonstall_delay) {
 }
 
 void Gpu3D::vtx_cmd_submit() {          // vertex commands
+  if (untimed_) return;
   if (!(vertex_slots_free_ & 1)) next_vertex_slot(); else add_cycles(1);
   normal_pipeline_ = 0;
 }
 void Gpu3D::vtx_cmd_delayed6() {        // may run 6 cycles after a vertex
+  if (untimed_) return;
   if (vertex_pipeline_ > 2) add_cycles((vertex_pipeline_ - 2) + 1); else add_cycles(normal_pipeline_ + 1);
   normal_pipeline_ = 0;
 }
 void Gpu3D::vtx_cmd_delayed8() {        // may run 8 cycles after a vertex
+  if (untimed_) return;
   if (vertex_pipeline_ > 0) add_cycles(vertex_pipeline_ + 1); else add_cycles(normal_pipeline_ + 1);
   normal_pipeline_ = 0;
 }
 void Gpu3D::vtx_cmd_delayed4() {        // everything else: 4 cycles after a vertex
+  if (untimed_) return;
   add_cycles(normal_pipeline_ + 1);
   normal_pipeline_ = 0;
 }
 
 void Gpu3D::finish_work(s32 cycles) {
+  if (untimed_) {   // Timing OC: the pipelines the setters still write are never consumed; the engine is simply done
+    cycle_count_ = 0;
+    vertex_pipeline_ = normal_pipeline_ = polygon_pipeline_ = 0;
+    vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
+    gxstat_ &= ~(1u << 27);
+    return;
+  }
   add_cycles(cycles);
   if (normal_pipeline_) normal_pipeline_ -= std::min(normal_pipeline_, cycles);
   cycle_count_ = 0;

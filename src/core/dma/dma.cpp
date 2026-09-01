@@ -243,7 +243,6 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
   bool burst_start = (c.running == 2);
   set_running(c, 1);
   u32 used = 0;
-  const u32 tm = untimed_ ? 0 : 1;   // Timing OC: every unit is free
   mem::Bus& bus = nds_.bus;
   // Once a run attempt fails on a destination page (palette, OAM, I/O, a
   // code-tagged or trapped page), the per-unit path is taken for the rest of
@@ -254,7 +253,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
     prof::add(prof::C_DMA_LOOP, 1);
     u32 cost = unit_cycles(c, burst_start, word);
     if (a9) cost <<= 1;
-    used += cost * tm;
+    used += cost;
     burst_start = false;
     // GXFIFO feed (fixed destination 0x04000400): the word goes straight to
     // the geometry engine. Through the bus it would be dma_write32 ->
@@ -309,7 +308,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
             prof::add(prof::C_DMA_GXF_WORDS, 1); prof::add(prof::C_DMA_D_IO, 1);
             c.cur_src += 4; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || nds_.gpu3d.stalled()) break;
-            used += (rc.next(c) << 1) * tm;
+            used += rc.next(c) << 1;
             p += 4;
           }
           continue;
@@ -390,7 +389,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
             prof::add(prof::C_DMA_RUN_W, 1);
             c.cur_src += 4; c.cur_dst += 4; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
-            cost = rc.next(c); if (a9) cost <<= 1; used += cost * tm;
+            cost = rc.next(c); if (a9) cost <<= 1; used += cost;
             ps += 4; pd += 4;
           }
           prof::add(dma_zone(zdst, false), z0 - c.iter_count);
@@ -469,7 +468,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
             prof::add(prof::C_DMA_RUN_H, 1);
             c.cur_src += 2; c.cur_dst += 2; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
-            cost = rc.next(c); if (a9) cost <<= 1; used += cost * tm;
+            cost = rc.next(c); if (a9) cost <<= 1; used += cost;
             ps += 2; pd += 2;
           }
           prof::add(dma_zone(zdst, false), z0 - c.iter_count);
