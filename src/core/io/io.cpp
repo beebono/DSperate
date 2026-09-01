@@ -12,6 +12,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
 
 namespace ds::io {
 
@@ -765,7 +768,36 @@ void Io::set_irq_line(Cpu cpu, u32 bit, bool on) {
 // 0x04100010). One range test then replaces three probes for all of them.
 static inline bool io_unowned(u32 r) { return (r - 0x70 < 0x2B0) || r >= 0x1070; }
 
+// DS_IO_CENSUS=1: histogram of I/O accesses by address and CPU, printed at
+// exit. Finds registers a game polls -- the cost of a poll loop is in the
+// reads, which no write log sees.
+namespace {
+struct IoCensus {
+  bool on = std::getenv("DS_IO_CENSUS") != nullptr;
+  std::unordered_map<u32, u64> rd[2], wr[2];
+  ~IoCensus() {
+    if (!on) return;
+    for (int c = 0; c < 2; ++c) {
+      std::vector<std::pair<u64, u32>> v;
+      for (auto& kv : rd[c]) v.push_back({kv.second, kv.first});
+      std::sort(v.rbegin(), v.rend());
+      std::fprintf(stderr, "[io] arm%d hottest READS:\n", c ? 7 : 9);
+      for (size_t i = 0; i < v.size() && i < 12; ++i)
+        std::fprintf(stderr, "[io]   %08x %12llu\n", v[i].second, (unsigned long long)v[i].first);
+      v.clear();
+      for (auto& kv : wr[c]) v.push_back({kv.second, kv.first});
+      std::sort(v.rbegin(), v.rend());
+      std::fprintf(stderr, "[io] arm%d hottest WRITES:\n", c ? 7 : 9);
+      for (size_t i = 0; i < v.size() && i < 12; ++i)
+        std::fprintf(stderr, "[io]   %08x %12llu\n", v[i].second, (unsigned long long)v[i].first);
+    }
+  }
+};
+IoCensus g_ioc;
+}
+
 u32 Io::read(Cpu cpu, u32 addr, u32 width) {
+  if (g_ioc.on) g_ioc.rd[cpu == Cpu::ARM9 ? 0 : 1][addr]++;
   if (!io_unowned(addr - 0x04000000)) {
     if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) return nds_.gpu3d.read(addr, width);
     if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) return nds_.gpu.reg_read(addr, width);
@@ -777,6 +809,7 @@ u32 Io::read(Cpu cpu, u32 addr, u32 width) {
 }
 
 void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
+  if (g_ioc.on) g_ioc.wr[cpu == Cpu::ARM9 ? 0 : 1][addr]++;
   if (!io_unowned(addr - 0x04000000)) {
     if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) { nds_.gpu3d.write(addr, width, value); return; }
     if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) {

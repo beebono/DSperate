@@ -289,6 +289,10 @@ for A/B runs, not for play.
   every frame, and `DS_FRAME_DUMP=<frame>:<path>` writes that frame's RAM, so
   two builds can be diffed to the first frame their *state* differs --
   usually long before the first pixel does.
+- `DS_IO_CENSUS=1` -- the hottest I/O registers by address and CPU, reads and
+  writes listed separately, at exit. Reads are the point: a game polling a
+  status bit costs a slow-path access per read and leaves no trace in any
+  write log.
 - `DS_WATCHDOG=<seconds>` (CLI) -- aborts a run whose frame count stops
   advancing for that long, after printing the display-line and raster
   hand-off state.
