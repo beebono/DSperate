@@ -186,6 +186,7 @@ private:
   // with it, 16 times a frame. DS_2D_SPLIT=1 enables the split; without it the
   // two entries are kept in lockstep and the behaviour is the old one.
   bool per_line_[2] = {false, false};
+  bool per_line_prev_[2] = {false, false};
   u32  render_next_[2] = {SCREEN_H, SCREEN_H};
   bool split_ = false;            // DS_2D_SPLIT=1
   bool frame_finished_ = false;   // frame_done() called for both engines
@@ -201,6 +202,16 @@ private:
   u32  burst_left_[2] = {0, 0};      // display lines left before re-batching
   u32  lazy_bursts_[2] = {0, 0};
   static constexpr u32 LAZY_BURST_LIMIT = 16, LAZY_BURST_LINES = 8;
+  // A frame in which both engines ended up per line paid for the trap and got
+  // nothing: the batch never reached line 191. After LAZY_FUTILE_LIMIT of
+  // those in a row the trap stops being armed at all, and one frame in
+  // LAZY_PROBE_PERIOD re-arms it so a scene that starts batching again is
+  // picked back up. Golden Sun's title is the case: an HBlank DMA rewrites
+  // engine B's BG VRAM every scanline, so it is per line by nature, and the
+  // trap cost 5.8 % of its frame to discover that 192 times a frame.
+  static constexpr u32 LAZY_FUTILE_LIMIT = 4, LAZY_PROBE_PERIOD = 64;
+  u32  lazy_futile_ = 0;
+  bool lazy_tried_ = false;
   u32  frontier() const { return hblank_done_ ? line_ + 1u : line_; }   // first line a write now can still affect
   void catch_up(u32 mask);             // render the masked engines' lines below the frontier
   void fall_back_per_line(u32 mask);   // catch up and render the rest of the frame per line

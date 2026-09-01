@@ -58,7 +58,7 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   C_W_PALETTE, C_W_OAM,
   // Lazy 2D: frames that started batched, and VRAM-trap hits (each one
   // drops a frame to per-line rendering).
-  C_2D_LAZY_FRAMES, C_2D_TRAP_HITS,
+  C_2D_LAZY_FRAMES, C_2D_LAZY_SKIPPED, C_2D_TRAP_HITS,
   C_2D_LAG_FRAMES, C_2D_LAG_STORES, C_2D_LAG_STORE_JOINS, C_2D_LAG_DROPPED, C_2D_LAG_LINES,
   C_RESOLVE_CALLS, C_RESOLVE_PARTS,
   C_CHUNK_ENTRIES,

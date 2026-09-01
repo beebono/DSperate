@@ -417,8 +417,15 @@ void Gpu::begin_frame() {
   // The frame's rendering mode. The FIFO is sampled per line and capture
   // writes VRAM the guest may read back per line: both stay per-line.
   render_next_[0] = render_next_[1] = 0;
+  per_line_prev_[0] = per_line_[0]; per_line_prev_[1] = per_line_[1];
   per_line_[0] = per_line_[1] = false; frame_finished_ = false;
-  lazy_frame_ = lazy_enabled_ && !run_fifo_ && (!capture_on_ || lazy_capture_);
+  // Was last frame's trap worth arming? Both engines per line at the end means
+  // no batch survived, so nothing it guarded was ever batched.
+  if (lazy_tried_) { if (per_line_prev_[0] && per_line_prev_[1]) ++lazy_futile_; else lazy_futile_ = 0; }
+  const bool futile = lazy_futile_ >= LAZY_FUTILE_LIMIT && (nds_.frame_count % LAZY_PROBE_PERIOD) != 0;
+  lazy_frame_ = lazy_enabled_ && !run_fifo_ && (!capture_on_ || lazy_capture_) && !futile;
+  lazy_tried_ = lazy_frame_;
+  if (futile) prof::add(prof::C_2D_LAZY_SKIPPED, 1);
   lazy_bursts_[0] = lazy_bursts_[1] = 0; burst_[0] = burst_[1] = false; burst_left_[0] = burst_left_[1] = 0;
   // Lag mode for the per-line lines of this frame: the trap guards the line
   // in flight (capture writes only LCDC banks, which no engine reads, so
