@@ -645,11 +645,20 @@ void code_write_hook(u8* host, u32 len) {
   if (last != first) invalidate_host_range(last, host, host + len - 1);
 }
 
+constexpr size_t PARKED_PER_KEY = 4;
+
 void kill_block(JitCpu& jc, Block* b) {
   if (b->dead) return;
   b->dead = true;
   // Redirect the entry: anything linked to it lands in the dispatcher, which
-  // misses (the LUT/map entries go below) and retranslates.
+  // misses (the LUT/map entries go below) and either revives a parked
+  // translation whose guest bytes still match or retranslates.
+  std::memcpy(b->entry_words, b->entry, 12);
+  {
+    std::vector<Block*>& v = jc.parked[b->key];
+    if (v.size() >= PARKED_PER_KEY) v.erase(v.begin());   // oldest out; it stays dead in the arena until the reset
+    v.push_back(b);
+  }
   Emitter e(b->entry, 12);
   e.movz(0, b->key & 0xFFFF);
   e.movk(0, b->key >> 16, 16);
@@ -681,6 +690,7 @@ void reset_arena() {
     for (Block* b : jc.all_blocks) if (!b->pooled) delete b;   // pooled ones go with block_pool below
     jc.all_blocks.clear();
     jc.blocks.clear();
+    jc.parked.clear();
     if (jc.lut) for (u32 i = 0; i < LUT_SIZE; ++i) jc.lut[i] = LUT_EMPTY_KEY;
   }
   for (auto& kv : r.code_pages) set_code_tag(kv.first, false);
@@ -762,16 +772,28 @@ static void perf_map_stubs(const Runtime& r) {
 // Publish a finished block: page registration, maps, LUT, stats. Emulation
 // thread only -- these structures are unsynchronised, which is why the
 // pre-translation worker hands its blocks here instead of doing this itself.
-static void install(JitCpu& jc, Block* b) {
-  Runtime& r = g_rt;
-  if (r.debug) {   // DS_JIT_DEBUG: dump the block for `objdump -D -b binary -m aarch64`
-    std::fprintf(stderr, "[jit] block %08x (%u bytes):", b->key, b->size);
-    for (u32 i = 0; i < b->size; i += 4) { u32 w; std::memcpy(&w, b->entry + i, 4); std::fprintf(stderr, " %08x", w); }
-    std::fputc('\n', stderr);
+// Guest bytes [pc, pc + len) through the current mapping; an unmapped word
+// reads as zero (a block never spans unmapped space: translation stops there).
+static void copy_guest_bytes(JitCpu& jc, u32 pc, u8* dst, u32 len) {
+  u32 done = 0;
+  while (done < len) {
+    const u32 a = pc + done;
+    const u32 room = std::min<u32>(len - done, mem::PAGE_SIZE - (a & (mem::PAGE_SIZE - 1)));
+    if (const u8* src = jc.ctx->page_table.read_ptr(a)) std::memcpy(dst + done, src, room);
+    else std::memset(dst + done, 0, room);
+    done += room;
   }
-  perf_map_add(b, jc.arm9);
+}
+static bool guest_bytes_match(JitCpu& jc, const Block* b) {
+  u8 cur[GUEST_COPY_MAX];
+  copy_guest_bytes(jc, key_pc(b->key), cur, b->guest_copy_len);
+  return std::memcmp(cur, b->guest_copy, b->guest_copy_len) == 0;
+}
 
-  // Register the host pages the guest code lives in.
+// Make `b` live: register the host pages its guest code sits on (through the
+// current mapping), and enter it in the map and the LUT.
+static void register_block(JitCpu& jc, Block* b) {
+  Runtime& r = g_rt;
   const u32 pc = key_pc(b->key);
   const u8* p0 = jc.ctx->page_table.read_ptr(pc);
   const u8* p1 = jc.ctx->page_table.read_ptr(pc + b->guest_len - 1);
@@ -785,8 +807,52 @@ static void install(JitCpu& jc, Block* b) {
     v.push_back(b);
   }
   jc.blocks[b->key] = b;
-  jc.all_blocks.push_back(b);
   lut_insert(jc, b);
+}
+
+// A killed translation of `key` whose guest bytes match again (a game that
+// toggles a word between two values, the usual "patch the first instruction
+// to enable a routine" idiom) is brought back: entry words restored, pages,
+// map and LUT re-registered. Nothing about the translation itself changes,
+// and nobody can be inside it -- a kill redirects its entry and raises the
+// alert that leaves every running block at its next poll, and lookups happen
+// between blocks. Only a same-stamp block may come back: translation bakes
+// the timing tables in.
+static Block* revive(JitCpu& jc, u32 key) {
+  auto it = jc.parked.find(key);
+  if (it == jc.parked.end()) return nullptr;
+  std::vector<Block*>& v = it->second;
+  const u64 stamp = jc.nds->bus.timing().stamp.load(std::memory_order_acquire);
+  for (size_t k = v.size(); k-- > 0;) {
+    Block* b = v[k];
+    if (b->stamp != stamp || b->guest_len != b->guest_copy_len || !guest_bytes_match(jc, b)) continue;
+    v.erase(v.begin() + static_cast<std::ptrdiff_t>(k));
+    if (v.empty()) jc.parked.erase(it);
+    std::memcpy(b->entry, b->entry_words, 12);
+    sync_icache(b->entry, 12);
+    b->dead = false;
+    register_block(jc, b);
+    g_rt.stats.blocks_revived++;
+    return b;
+  }
+  return nullptr;
+}
+
+static void install(JitCpu& jc, Block* b) {
+  Runtime& r = g_rt;
+  if (r.debug) {   // DS_JIT_DEBUG: dump the block for `objdump -D -b binary -m aarch64`
+    std::fprintf(stderr, "[jit] block %08x (%u bytes):", b->key, b->size);
+    for (u32 i = 0; i < b->size; i += 4) { u32 w; std::memcpy(&w, b->entry + i, 4); std::fprintf(stderr, " %08x", w); }
+    std::fputc('\n', stderr);
+  }
+  perf_map_add(b, jc.arm9);
+  // What a revival will be checked against: the guest bytes as they are now
+  // (page-aware, the block may straddle two host pages) and the timing stamp.
+  b->stamp = jc.nds->bus.timing().stamp.load(std::memory_order_acquire);
+  b->guest_copy_len = std::min<u32>(b->guest_len, GUEST_COPY_MAX);
+  copy_guest_bytes(jc, key_pc(b->key), b->guest_copy, b->guest_copy_len);
+  register_block(jc, b);
+  jc.all_blocks.push_back(b);
   r.stats.blocks_translated++;
   r.stats.code_bytes += b->size;
   r.stats.hot_bytes += b->hot_size;
@@ -834,6 +900,7 @@ Block* translate(JitCpu& jc, u32 key) {
 const u8* find_native(JitCpu& jc, u32 key) {
   auto it = jc.blocks.find(key);
   if (it != jc.blocks.end()) { lut_insert(jc, it->second); return it->second->entry; }
+  if (Block* b = revive(jc, key)) return b->entry;
   if (Block* b = pretx::adopt(jc, key)) return b->entry;
   Block* b = translate(jc, key);
   return b ? b->entry : nullptr;
@@ -1089,6 +1156,7 @@ void invalidate_cpu(JitCpu& jc) {
   pretx::purge();   // timing/config changed: the worker's pending output is built on the old tables
   for (Block* b : jc.all_blocks) if (!b->dead) { remove_from_page_lists(b); kill_block(jc, b); }
   jc.blocks.clear();
+  jc.parked.clear();   // built under the old tables: never revivable (the stamp check would refuse them anyway)
   if (jc.ctx) jc.ctx->hot.alerts |= ALERT_INVALIDATED;
 }
 
@@ -1289,9 +1357,9 @@ DensitySlot* density_new_slot() {
 
 void report(std::FILE* out) {
   const Stats& s = g_rt.stats;
-  std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, slow accesses %llu, entries %llu, invalidated %llu, flushes %llu\n",
+  std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, slow accesses %llu, entries %llu, invalidated %llu, revived %llu, flushes %llu\n",
                (unsigned long long)s.blocks_translated, (unsigned long long)s.instrs_translated, (unsigned long long)s.instrs_fallback,
-               (unsigned long long)s.slow_accesses, (unsigned long long)s.entries, (unsigned long long)s.blocks_invalidated, (unsigned long long)s.flushes);
+               (unsigned long long)s.slow_accesses, (unsigned long long)s.entries, (unsigned long long)s.blocks_invalidated, (unsigned long long)s.blocks_revived, (unsigned long long)s.flushes);
   if (pretx::on())
     std::fprintf(out, "[jit] pretx: built %llu adopted %llu dropped %llu skipped %llu\n",
                  (unsigned long long)pretx::st_built, (unsigned long long)pretx::st_adopted,

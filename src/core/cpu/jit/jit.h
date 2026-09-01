@@ -22,6 +22,7 @@ struct Stats {
   u64 code_bytes = 0;          // native bytes emitted for blocks (cold sections included)
   u64 hot_bytes = 0;           // of which the hot sections (what runs on the fast paths)
   u64 slow_accesses = 0;       // loads/stores that left the inline page-table path
+  u64 blocks_revived = 0;      // killed blocks brought back because the guest bytes matched again
 };
 
 // Create the runtime (code arena, stubs) and route the selected CPUs through

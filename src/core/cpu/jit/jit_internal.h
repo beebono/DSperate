@@ -87,6 +87,8 @@ struct DensitySlot {
   u32 guest_instrs = 0;   // guest instructions translated inline into this block
 };
 
+constexpr u32 GUEST_COPY_MAX = 64 * 4;   // a block is at most 64 ARM instructions
+
 struct Block {
   u32  key;
   u8*  entry;
@@ -105,6 +107,17 @@ struct Block {
   // are simply not chased.
   u32  succ[4];
   u8   nsucc;
+  // Park-and-revive (see kill_block / revive in runtime.cpp): a block killed
+  // by a store into its range keeps its translation, the guest bytes it was
+  // built from, the three entry words the kill overwrites, and the timing
+  // stamp it was built under. When the same key is looked up again and the
+  // guest bytes match one parked version, that version comes back instead of
+  // a retranslation. Exact: the translation is a pure function of (key, guest
+  // bytes, timing stamp, CPU), and everything the kill undid is redone.
+  u32  entry_words[3];
+  u64  stamp;
+  u32  guest_copy_len;
+  u8   guest_copy[GUEST_COPY_MAX];
 };
 
 // Direct-mapped branch-target cache, one per CPU, indexed by `(key >> 1)`.
@@ -146,6 +159,7 @@ struct JitCpu {
   u64*  lut = nullptr;                       // into the arena: LUT_SIZE entries, (native offset << 32) | key
   std::unordered_map<u32, Block*> blocks;
   std::vector<Block*> all_blocks;            // for flushes
+  std::unordered_map<u32, std::vector<Block*>> parked;   // key -> killed translations kept for revival (newest last)
   u8*   dispatch = nullptr;                  // w0 = key -> jumps to the block
   u8*   link = nullptr;                      // `bl link; .word key`: patches the bl into `b block`
   u8*   fallback = nullptr;                  // `bl fallback; .word instr; .word key`: interpreter for one instruction, poll, dispatch if it jumped
