@@ -869,8 +869,28 @@ void Gpu3D::submit_vertex() {
   const s64 v[4] = {cur_vertex_[0], cur_vertex_[1], cur_vertex_[2], 0x1000};
   Vertex& vt = temp_vtx_[vertex_in_poly_];
   update_clip_matrix();
+#if DSPERATE_NEON
+  // The four clip-space coordinates are four dot products against the same
+  // vertex, so they are one 4-lane pass: smull/smlal widen exactly the way the
+  // s64 expression below does, the shift and the narrow are the >> 12 and the
+  // s32 cast, and integer addition does not care about the order. Bit-exact
+  // with the scalar arm, which the non-NEON builds still take.
+  {
+    const int32x4_t r0 = vld1q_s32(clip_.data() + 0), r1 = vld1q_s32(clip_.data() + 4);
+    const int32x4_t r2 = vld1q_s32(clip_.data() + 8), r3 = vld1q_s32(clip_.data() + 12);
+    const int32x4_t q0 = vdupq_n_s32(cur_vertex_[0]), q1 = vdupq_n_s32(cur_vertex_[1]);
+    const int32x4_t q2 = vdupq_n_s32(cur_vertex_[2]), q3 = vdupq_n_s32(0x1000);
+    int64x2_t lo = vmull_s32(vget_low_s32(r0), vget_low_s32(q0));
+    int64x2_t hi = vmull_high_s32(r0, q0);
+    lo = vmlal_s32(lo, vget_low_s32(r1), vget_low_s32(q1)); hi = vmlal_high_s32(hi, r1, q1);
+    lo = vmlal_s32(lo, vget_low_s32(r2), vget_low_s32(q2)); hi = vmlal_high_s32(hi, r2, q2);
+    lo = vmlal_s32(lo, vget_low_s32(r3), vget_low_s32(q3)); hi = vmlal_high_s32(hi, r3, q3);
+    vst1q_s32(vt.pos, vcombine_s32(vmovn_s64(vshrq_n_s64(lo, 12)), vmovn_s64(vshrq_n_s64(hi, 12))));
+  }
+#else
   for (int c = 0; c < 4; ++c)
     vt.pos[c] = static_cast<s32>((v[0] * clip_[c] + v[1] * clip_[4 + c] + v[2] * clip_[8 + c] + v[3] * clip_[12 + c]) >> 12);
+#endif
   for (int c = 0; c < 3; ++c) vt.col[c] = (vertex_color_[c] << 12) + 0xFFF;
   if ((texparam_ >> 30) == 3) {
     vt.tex[0] = static_cast<s16>(((v[0] * tex_[0] + v[1] * tex_[4] + v[2] * tex_[8]) >> 24) + raw_texcoords_[0]);
