@@ -574,7 +574,7 @@ static void report() {
 // table rebuilds and arena resets bump `gen`, which orphans everything the
 // worker built before them.
 namespace pretx {
-static bool on() { static const bool e = std::getenv("DS_JIT_PRETX") != nullptr; return e; }
+static bool on() { static const bool e = std::getenv("DS_JIT_PRETX") != nullptr && std::getenv("DS_JIT_DENSITY") == nullptr; return e; }
 struct Job  { JitCpu* jc; u32 key; };
 struct Done { JitCpu* jc; Block* b; u64 gen; u64 stamp; std::vector<u8> guest; };
 // Deliberately leaked: the worker is detached and may be blocked on cv/mu when
@@ -1222,6 +1222,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     r.debug = std::getenv("DS_JIT_DEBUG") != nullptr;
     r.cyclog = std::getenv("DS_DEBUG_CYCLES") != nullptr;
     r.hist = std::getenv("DS_JIT_HIST") != nullptr;
+    r.density = std::getenv("DS_JIT_DENSITY") != nullptr;
     r.fastcost = std::getenv("DS_JIT_FASTCOST") != nullptr;
     r.nocsel  = std::getenv("DS_JIT_NOCSEL") != nullptr;
     r.nocost7 = std::getenv("DS_JIT_NOCOST7") != nullptr;
@@ -1272,6 +1273,19 @@ void flush_all() { reset_arena(); }
 void set_trace(bool on) { if (g_rt.trace != on) { g_rt.trace = on; for (JitCpu& jc : g_rt.cpus) if (jc.ctx) invalidate_cpu(jc); } }
 const Stats& stats() { return g_rt.stats; }
 
+static double ex_total_pct(unsigned long long v, unsigned long long tot) {
+  return tot ? 100.0 * static_cast<double>(v) / static_cast<double>(tot) : 0.0;
+}
+
+void density_reset() { for (DensitySlot& d : g_rt.density_slots) d.execs = 0; }
+
+DensitySlot* density_new_slot() {
+  Runtime& r = g_rt;
+  if (!r.density) return nullptr;
+  r.density_slots.emplace_back();
+  return &r.density_slots.back();
+}
+
 void report(std::FILE* out) {
   const Stats& s = g_rt.stats;
   std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, slow accesses %llu, entries %llu, invalidated %llu, flushes %llu\n",
@@ -1284,6 +1298,47 @@ void report(std::FILE* out) {
   std::fprintf(out, "[jit] code %llu KB (hot %llu KB): %.1f bytes per guest instruction, %.1f hot\n", (unsigned long long)(s.code_bytes >> 10), (unsigned long long)(s.hot_bytes >> 10),
                s.instrs_translated ? static_cast<double>(s.code_bytes) / static_cast<double>(s.instrs_translated) : 0.0,
                s.instrs_translated ? static_cast<double>(s.hot_bytes) / static_cast<double>(s.instrs_translated) : 0.0);
+  if (g_rt.density) {
+    u64 ex = 0;
+    long double hb = 0.0L, gi = 0.0L;
+    for (const DensitySlot& d : g_rt.density_slots) {
+      ex += d.execs;
+      hb += static_cast<long double>(d.execs) * d.hot_bytes;
+      gi += static_cast<long double>(d.execs) * d.guest_instrs;
+    }
+    std::fprintf(out, "[jit] density: %zu translations, %llu block entries, %.0Lf guest instrs executed, %.0Lf hot bytes fetched\n",
+                 g_rt.density_slots.size(), (unsigned long long)ex, gi, hb);
+    // The static figure has to be recomputed from the slots, not read from
+    // Stats: stats.hot_bytes counts the counter code itself, which is ~24 bytes
+    // on every block and would inflate the very baseline being compared against.
+    // Same population, same fields -- the only difference is the weighting.
+    long double shb = 0.0L, sgi = 0.0L;
+    for (const DensitySlot& d : g_rt.density_slots) { shb += d.hot_bytes; sgi += d.guest_instrs; }
+    std::fprintf(out, "[jit] density: %.2Lf hot bytes per guest instruction executed, against %.2Lf translated (static)\n",
+                 gi > 0.0L ? hb / gi : 0.0L, sgi > 0.0L ? shb / sgi : 0.0L);
+    // Block length, by translation and weighted by execution. The averages hide
+    // the shape: what matters for dispatch cost is how many *executed* blocks
+    // are short, not how many translated ones are.
+    static const int lo[9] = {1, 2, 3, 4, 5, 9, 17, 33, 65};
+    u64 tx[8] = {}, bex[8] = {};
+    long double gx[8] = {};
+    for (const DensitySlot& d : g_rt.density_slots) {
+      int k = 0;
+      while (k < 7 && static_cast<int>(d.guest_instrs) >= lo[k + 1]) ++k;
+      tx[k]++; bex[k] += d.execs;
+      gx[k] += static_cast<long double>(d.execs) * d.guest_instrs;
+    }
+    std::fprintf(out, "[jit] density: block length    translations        entries   %% entries   %% guest instrs\n");
+    for (int k = 0; k < 8; ++k) {
+      if (!tx[k] && !bex[k]) continue;
+      char lab[16];
+      if (lo[k + 1] - lo[k] == 1) std::snprintf(lab, sizeof lab, "%d", lo[k]);
+      else std::snprintf(lab, sizeof lab, "%d-%d", lo[k], lo[k + 1] - 1);
+      std::fprintf(out, "[jit]         %12s %14llu %14llu %10.2f %%     %10.2Lf %%\n", lab,
+                   (unsigned long long)tx[k], (unsigned long long)bex[k],
+                   ex_total_pct(bex[k], ex), gi > 0.0L ? 100.0L * gx[k] / gi : 0.0L);
+    }
+  }
   if (!g_rt.hist) return;
   std::vector<std::pair<u64, u64>> v(g_rt.fallback_hist.begin(), g_rt.fallback_hist.end());
   std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });

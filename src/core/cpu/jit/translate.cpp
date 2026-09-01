@@ -255,6 +255,11 @@ private:
   u32  bl_prefix_lr_ = 0;
 
   // ---- hot / cold sections ------------------------------------------------------------
+  // DS_JIT_DENSITY
+  DensitySlot* dslot_ = nullptr;
+  u32 dinstrs_ = 0;            // guest instructions translated inline into this block
+  u32 dbytes_ = 0;             // bytes the counter code itself added to the hot section
+
   u8* cold_buf_;               // thread-reused scratch (cold_scratch), COLD_CAP bytes
   Emitter cold_;
   Emitter* cur_;
@@ -286,11 +291,29 @@ private:
     fixes_.push_back({cold_.b_fwd(), true, hot_target, false, nullptr});
     cur_ = &hot_;
   }
+  // Bump this translation's execution counter. Emitted at the block entry,
+  // ahead of the budget check, so it counts entries however the block was
+  // reached -- dispatcher, LUT probe or a linked branch. x0/x1 are scratch at
+  // a block boundary (enter_light has already reloaded the guest registers and
+  // flags and left through `br x1`), and none of these forms writes NZCV, so a
+  // block entered by a linked branch keeps the guest flags the branch left.
+  void emit_density_bump() {
+    dslot_ = density_new_slot();
+    if (!dslot_) return;
+    const size_t before = hot_.size();
+    hot_.mov_imm64(SCRATCH0, reinterpret_cast<u64>(&dslot_->execs));
+    hot_.ldr_x(SCRATCH1, SCRATCH0, 0);
+    hot_.add_imm(SCRATCH1, SCRATCH1, 1, true, false);
+    hot_.str_x(SCRATCH1, SCRATCH0, 0);
+    dbytes_ = static_cast<u32>(hot_.size() - before);
+  }
+
   // Splice the cold section after the hot code and resolve every fixup.
   bool finish() {
     assert(!in_cold());
     const size_t cold_base = hot_.size();
     blk_.hot_size = static_cast<u32>(cold_base);
+    if (dslot_) { dslot_->hot_bytes = blk_.hot_size - dbytes_; dslot_->guest_instrs = dinstrs_; }
     if (hot_.remaining() < cold_.size() + 64) return false;
     std::memcpy(hot_.cur(), cold_buf_, cold_.size());
     hot_.set_pos(cold_base + cold_.size());
@@ -1619,6 +1642,7 @@ bool Translator::run() {
 
   // Prologue: leave when the budget is exhausted (the exit is cold; the
   // block is always long enough for kill_block's 12-byte redirect).
+  if (rt().density) emit_density_bump();
   emit_budget_check(key_);
 
   u32 end_addr = addr;
@@ -1632,6 +1656,7 @@ bool Translator::run() {
     if (rt().cyclog) { flush_pending(); emit_call2(reinterpret_cast<const void*>(&jit_h_cyclog), in.raw, make_key(in.addr, thumb_)); }
     if (thumb_) translate_thumb(static_cast<u16>(in.raw)); else translate_arm(in.raw);
     rt().stats.instrs_translated++;
+    ++dinstrs_;
     if (ended_) break;
     if (rt().strict) {
       // The interpreter tests the budget before every instruction; reproduce

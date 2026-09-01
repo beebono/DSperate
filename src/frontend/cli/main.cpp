@@ -305,6 +305,9 @@ int main(int argc, char** argv) {
       ds::s16 buf[2048 * 2]; size_t n;
       while ((n = nds.spu.take(buf, 2048)) != 0) std::fwrite(buf, 4, n, audio_out);
     } else nds.spu.drain();
+#if DSPERATE_JIT
+    if (i == stats_from && (jit9 || jit7)) ds::jit::density_reset();
+#endif
     if (i >= stats_from)
       frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     ds::prof::frame_mark();

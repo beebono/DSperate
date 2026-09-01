@@ -52,6 +52,10 @@ void flush_all();
 // NDS::trace before executing, exactly as the interpreter does.
 void set_trace(bool on);
 
+// DS_JIT_DENSITY: zero the executed-density counters (not the translations
+// themselves), so a run can exclude the frames that only warm the code cache.
+void density_reset();
+
 const Stats& stats();
 // Print the counters (and, with DS_JIT_HIST=1, the hottest fallback sites).
 void report(std::FILE* out);

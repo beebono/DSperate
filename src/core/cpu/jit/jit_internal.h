@@ -74,6 +74,19 @@ inline constexpr bool key_thumb(u32 key) { return key & 1; }
 inline constexpr u32 key_r15(u32 key) { return key_pc(key) + (key_thumb(key) ? 4 : 8); }
 inline constexpr u32 key_next(u32 key) { return key + (key_thumb(key) ? 2 : 4); }
 
+// DS_JIT_DENSITY: one slot per *translation*, so a block that is retranslated
+// after an invalidation is a fresh slot and its executions are not merged with
+// the old one's. `execs` is bumped by the block's own entry code; the other two
+// are static properties of that translation. Weighting them by `execs` turns
+// the emitted-bytes-per-guest-instruction figure into an executed one -- the
+// static figure counts a block translated once and run a million times exactly
+// as it counts one translated once and run once.
+struct DensitySlot {
+  u64 execs = 0;          // block entries (bumped from translated code)
+  u32 hot_bytes = 0;      // hot section, the instrumentation itself excluded
+  u32 guest_instrs = 0;   // guest instructions translated inline into this block
+};
+
 struct Block {
   u32  key;
   u8*  entry;
@@ -177,6 +190,12 @@ struct Runtime {
   bool strict = false;    // check the budget after every instruction (exact lockstep with the interpreter)
   bool debug = false;     // DS_JIT_DEBUG: log fallbacks
   bool cyclog = false;    // DS_DEBUG_CYCLES: log the budget after every instruction (needs strict)
+  bool density = false;   // DS_JIT_DENSITY: count block entries so bytes-per-guest-instruction
+                          // can be weighted by execution instead of by translation.
+  // deque: the entry code holds the absolute address of a slot's `execs`, so
+  // slots must never move. Only the emulation thread appends (DS_JIT_PRETX is
+  // refused in density mode).
+  std::deque<DensitySlot> density_slots;
   bool hist = false;      // DS_JIT_HIST: histogram of fallback executions by pc
   bool fastcost = false;  // DS_JIT_FASTCOST: measurement knob (inexact data-cost arithmetic)
   // DS_JIT_COSTPROBE_PART: which half of the per-access cost model the probe
@@ -203,6 +222,7 @@ void   invalidate_host_page(const u8* host_page);
 void   invalidate_host_range(const u8* host_page, const u8* lo, const u8* hi);
 void   invalidate_cpu(JitCpu& jc);
 void   lut_insert(JitCpu& jc, Block* b);
+DensitySlot* density_new_slot();                 // null unless DS_JIT_DENSITY
 Block* translate(JitCpu& jc, u32 key);          // null when the arena is full
 const u8* find_native(JitCpu& jc, u32 key);      // translates on miss; null when arena is full
 // translate.cpp: emit one block for `key` at the emitter's position. Returns

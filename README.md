@@ -289,6 +289,11 @@ for A/B runs, not for play.
   every frame, and `DS_FRAME_DUMP=<frame>:<path>` writes that frame's RAM, so
   two builds can be diffed to the first frame their *state* differs --
   usually long before the first pixel does.
+- `DS_JIT_DENSITY=1` (with `DS_PROFILE=1`) -- host bytes of translated code per
+  guest instruction weighted by *execution* rather than by translation, plus the
+  distribution of block length by entries. The `[jit] code ... bytes per guest
+  instruction` line counts a block translated once and run a million times the
+  same as one run once; this does not. Refused alongside `DS_JIT_PRETX`.
 - `DS_IO_CENSUS=1` -- the hottest I/O registers by address and CPU, reads and
   writes listed separately, at exit. Reads are the point: a game polling a
   status bit costs a slow-path access per read and leaves no trace in any
