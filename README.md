@@ -53,7 +53,9 @@ melonDS (frame dumps, instruction traces) and measured on the Anbernic RG DS
   controller remapping, hotkeys, fast forward, screenshots, per-scanline
   scaling straight into the window surface, zero-copy dmabuf presentation
   under Wayland with direct scanout when the compositor allows it, and a
-  dual-window mode for dual-panel handhelds. No menus yet.
+  dual-window mode for dual-panel handhelds, and a blitted pause menu --
+  save states, the slot list and Action Replay cheats as well as the 
+  usual Resume and Quit functions.
 
 [docs/techniques](docs/techniques) documents the DraStic techniques being
 reimplemented, the measurements behind them, and a checklist of which are
@@ -117,6 +119,7 @@ runs through.
              [--interp | --jit9 | --jit7] [--quantum N] [--save F] [--replay F]
              [--trace F [--max N]] [--dump-frames F [--dump-from N] [--dump-count N]]
              [--dump-audio F] [--save-state-at N:file] [--load-state F]
+             [--cheats usrcheat.dat] [--list-cheats] [--cheat <name|#N>]
 
 `--trace` writes per-CPU instruction traces (`<pc> <instr> <cpsr> r0..r14`,
 one line per instruction, spin loops collapsed) for `tools/compare_traces.py`;
@@ -148,7 +151,7 @@ as `game: ... [XXXX]` at start, shared by every dump of that title); the
 filename one wins, and is where a layout picked with the hotkey is
 remembered. The command line overrides all of them. `[paths]` holds the BIOS/firmware so they need not
 be passed every time, plus optional `saves` and `states` directories (default:
-next to the ROM). `[keys]` and `[pad]` remap the DS buttons to SDL key and
+next to the ROM) and `cheats`, a `usrcheat.dat` database. `[keys]` and `[pad]` remap the DS buttons to SDL key and
 controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);
 `[hotkeys]` and `[padhotkeys]` bind the frontend's actions, on the controller
 usually as `mod+button` (or a chord, `mod+start+back` -- SDL calls Select
@@ -208,12 +211,30 @@ pause, lid close and exit -- a launcher's SIGTERM included.
 Save states go to `<GAMECODE>.<slot>.dss` in the states directory (next to
 the ROM, or `[paths] states`), ten slots. `F5`/`F7` and `F2`/`F3` reach them
 without leaving the game; the **pause menu** (the `pause` hotkey -- `P`, or
-Mode+Start on a controller) stops the machine and puts save, load and the
-slot list on screen, which is what a handheld with no keyboard needs. It
-draws over the held frame on the top screen, dims both to show the machine
-is stopped, and is driven by the DS buttons: up/down to move, left/right to
-change the slot in place, A to choose, B to go back or resume. Slots that
-already hold a state are marked, so a save says what it would overwrite.
+Mode+Start on a controller) stops the machine and puts save, load, the slot
+list, cheats, resume and quit on screen, which is what a handheld with no
+keyboard needs. It draws over the held frame on the top screen, dims both to
+show the machine is stopped, and is driven by the DS buttons themselves --
+the guest cannot see them while it is up: up/down to move, left/right to
+change the slot in place, A to choose, B to go back or resume; a held
+direction repeats. Slots that already hold a state are marked, so a save says
+what it would overwrite. Nothing runs behind it -- it is modal, not an
+overlay -- and it redraws only when the picture would change.
+
+A state is the whole machine at a frame boundary (~5.5 MB, uncompressed: RAM, VRAM, both CPUs, every
+peripheral, the geometry engine's polygon RAM and the rasterised 3D frame)
+and loads only with the same ROM; the battery save is written alongside it so
+the two never disagree. The recompiler's translations are dropped on load and
+rebuilt as the game runs. `src/core/state/state.h` describes the chunked
+format; each subsystem lists its own fields in one `sync_state` that both
+writes and reads, so a state saved straight after a load is byte-identical to
+the one loaded -- `tools/state_roundtrip.sh <dsperate-cli> <scene> <N> <M>`
+checks that, and that the frames after a load match the frames after the
+save, on any recorded scene (the CLI takes `--save-state-at N:file` and
+`--load-state file`; `DS_STATE_DEBUG=1` prints the cycle-accounting state at
+both points). Loading a state is refused during `--record` (the recording
+could not replay past it) and `--replay` refuses to load or save states at
+all.
 
 ### Cheats
 
@@ -231,21 +252,8 @@ turn on is remembered per game, next to the save states.
 
 Codes run once a frame from the ARM7's VBlank IRQ, which is where the real
 cartridge hooks itself. `dsperate` (the CLI) has `--cheats <file>`,
-`--list-cheats` and `--cheat <name|#N>` for the same thing without a UI. A state is the whole machine at a
-frame boundary (~5.5 MB, uncompressed: RAM, VRAM, both CPUs, every
-peripheral, the geometry engine's polygon RAM and the rasterised 3D frame)
-and loads only with the same ROM; the battery save is written alongside it so
-the two never disagree. The recompiler's translations are dropped on load and
-rebuilt as the game runs. `src/core/state/state.h` describes the chunked
-format; each subsystem lists its own fields in one `sync_state` that both
-writes and reads, so a state saved straight after a load is byte-identical to
-the one loaded -- `tools/state_roundtrip.sh <dsperate-cli> <scene> <N> <M>`
-checks that, and that the frames after a load match the frames after the
-save, on any recorded scene (the CLI takes `--save-state-at N:file` and
-`--load-state file`; `DS_STATE_DEBUG=1` prints the cycle-accounting state at
-both points). Loading a state is refused during `--record` (the recording
-could not replay past it) and `--replay` refuses to load or save states at
-all.
+`--list-cheats` and `--cheat <name|#N>` for the same thing without a UI.
+
 
 Fast forward (`Tab` held, Mode+right trigger, or the `fast_forward_toggle`
 hotkey) drops the pacing -- `[emu] ff_speed = N` caps it at N times real time
