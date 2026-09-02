@@ -52,27 +52,58 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
 
-  // Per-scanline scaling renders into the window surface, which cannot
-  // coexist with an SDL_Renderer on the same window, so it is decided here
-  // and the renderer is skipped entirely.
+  // Per-scanline scaling renders into the presented buffer directly, which
+  // cannot coexist with an SDL_Renderer on the same window, so it is decided
+  // here and the renderer is skipped entirely.
   //
-  // Default on under Wayland only: there the window surface is a cheap shm
-  // attach and the mode removes SDL's texture upload, scaled blit and
-  // surface copy in favour of one write (etody, both boards: ~15 % less
-  // emu+present work per frame, and the shoulders of the over-budget
-  // clusters with it) -- and it is the write path the dmabuf tier builds
-  // on. On KMSDRM the window surface is a shadow-buffer blit, not the
-  // flipping renderer path, and defaulting to it measured 16 % *slower*
-  // (etody 1800 frames: 13985 ms against 12269 through the renderer), so
-  // the renderer stays the default there. --accel keeps the GLES renderer
-  // and --linear the renderer's smooth scaling, both of which need draw();
-  // DS_SCANLINE_SCALE=0/1 overrides either way.
+  // Default on wherever a zero-copy destination exists for it:
+  //
+  //  - Wayland: the window surface is a cheap shm attach and the mode removes
+  //    SDL's texture upload, scaled blit and surface copy in favour of one
+  //    write (etody, both boards: ~15 % less emu+present work per frame, and
+  //    the shoulders of the over-budget clusters with it) -- and it is the
+  //    write path the dmabuf tier builds on.
+  //  - KMSDRM: the DrmOut tier below page-flips our own CMA buffers, which
+  //    takes the present from 13.4 ms to ~0.05 ms (etody, 900 frames, both
+  //    panels). Even when that tier is unavailable and this falls back to
+  //    SDL's window surface, the scanline path still wins there now: 14.8 ms
+  //    of emu+present work against the renderer's 17.9. (An older comment
+  //    here said the opposite. It was measured before the dual-window default
+  //    and before SDL's KMSDRM window surface was understood to be a hidden
+  //    GLES renderer rather than a shadow blit -- see display_drm.h.)
+  //
+  // --accel keeps the GLES renderer and --linear the renderer's smooth
+  // scaling, both of which need draw(); DS_SCANLINE_SCALE=0/1 overrides
+  // either way.
   const char* vd = SDL_GetCurrentVideoDriver();
+  const bool wayland = vd && !std::strcmp(vd, "wayland");
+  const bool kms = vd && !std::strcmp(vd, "KMSDRM");
   const char* sl = std::getenv("DS_SCANLINE_SCALE");
   scaled_ = sl && *sl ? std::strcmp(sl, "0") != 0
-                      : !accel && !linear && vd && !std::strcmp(vd, "wayland");
+                      : !accel && !linear && (wayland || kms);
   if (scaled_) {
     if (accel) std::fprintf(stderr, "DS_SCANLINE_SCALE renders on the CPU; --accel ignored\n");
+    const char* dmenv = std::getenv("DS_DMABUF");
+    const bool dm_forbidden = dmenv && !std::strcmp(dmenv, "0");
+    const bool dm_required = dmenv && !std::strcmp(dmenv, "1");
+
+    // KMSDRM first, and before anything asks for a window surface: on that
+    // driver SDL_GetWindowSurface *succeeds* by quietly building a GLES
+    // renderer for the window, which is the cost this tier exists to avoid.
+    if (kms && !dm_forbidden) {
+      int ow = 0, oh = 0;
+      SDL_GetWindowSize(win_, &ow, &oh);
+      auto dr = std::make_unique<DrmOut>();
+      if (dr->open(win_, ow, oh, display_index_)) {
+        out_ = std::move(dr);
+        layout();
+        build_scale();
+        std::fprintf(stderr, "video: kms scanout, %s driver, scanline scaling\n", vd);
+        return true;
+      }
+      if (dm_required) { std::fprintf(stderr, "DS_DMABUF=1 but the kms scanout path failed\n"); return false; }
+    }
+
     if (!SDL_GetWindowSurface(win_)) {
       std::fprintf(stderr, "window surface unavailable (%s); using the framebuffer path\n", SDL_GetError());
       scaled_ = false;
@@ -81,18 +112,15 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
       build_scale();
       // Tier 1 on top of the same scanline path: same targets, but the
       // pixels land in a CMA dmabuf instead of the shm surface.
-      const char* dmenv = std::getenv("DS_DMABUF");
-      const bool dm_forbidden = dmenv && !std::strcmp(dmenv, "0");
-      const bool dm_required = dmenv && !std::strcmp(dmenv, "1");
-      if (scaled_ && !dm_forbidden) {
-        int w = 0, h = 0;
-        out_size(w, h);
+      if (scaled_ && wayland && !dm_forbidden) {
+        int ow = 0, oh = 0;
+        out_size(ow, oh);
         auto dm = std::make_unique<DmabufOut>();
-        if (dm->open(win_, w, h, only_screen_ >= 0 ? display_index_ : -1)) dm_ = std::move(dm);
+        if (dm->open(win_, ow, oh, only_screen_ >= 0 ? display_index_ : -1)) out_ = std::move(dm);
         else if (dm_required) { std::fprintf(stderr, "DS_DMABUF=1 but the dmabuf path failed\n"); return false; }
       }
       std::fprintf(stderr, "video: %s, %s driver, scanline scaling\n",
-                   dm_ ? "dmabuf" : "window surface", SDL_GetCurrentVideoDriver());
+                   out_ ? "dmabuf" : "window surface", SDL_GetCurrentVideoDriver());
       return true;
     }
   }
@@ -147,7 +175,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
 }
 
 void Display::close() {
-  if (dm_) { dm_->close(); dm_.reset(); }
+  if (out_) { out_->close(); out_.reset(); }
   surf_ = nullptr;   // owned by SDL, freed with the window
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
@@ -280,9 +308,10 @@ bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
 bool Display::out_size(int& w, int& h) const {
   if (ren_) return SDL_GetRendererOutputSize(ren_, &w, &h) == 0;
   if (!win_) return false;
-  // On the dmabuf tier the window size is the truth: the shm surface can lag
-  // a configure by a frame, and the two must not disagree mid-rebuild.
-  if (dm_) { SDL_GetWindowSize(win_, &w, &h); return w > 0 && h > 0; }
+  // On a scanout tier the window size is the truth: the shm surface can lag a
+  // configure by a frame, and the two must not disagree mid-rebuild. On
+  // KMSDRM there is no window surface to ask at all.
+  if (out_) { SDL_GetWindowSize(win_, &w, &h); return w > 0 && h > 0; }
   SDL_Surface* s = SDL_GetWindowSurface(win_);
   if (!s) return false;
   w = s->w; h = s->h;
@@ -291,15 +320,22 @@ bool Display::out_size(int& w, int& h) const {
 
 void Display::build_scale() {
   if (!scaled_ || !win_) return;
-  surf_ = SDL_GetWindowSurface(win_);        // recreated by SDL on resize
-  if (!surf_) { scaled_ = false; return; }
-  if (surf_->format->BytesPerPixel != 4) {
-    std::fprintf(stderr, "window surface is %d bpp, not 32; using the framebuffer path\n",
-                 surf_->format->BytesPerPixel);
-    scaled_ = false;
-    return;
+  if (out_) {
+    // The scanout buffer is the destination; there may be no window surface
+    // to fetch (KMSDRM), and asking for one there would build a renderer.
+    surf_ = nullptr;
+    scaled_w_ = out_->width(); scaled_h_ = out_->height();
+  } else {
+    surf_ = SDL_GetWindowSurface(win_);      // recreated by SDL on resize
+    if (!surf_) { scaled_ = false; return; }
+    if (surf_->format->BytesPerPixel != 4) {
+      std::fprintf(stderr, "window surface is %d bpp, not 32; using the framebuffer path\n",
+                   surf_->format->BytesPerPixel);
+      scaled_ = false;
+      return;
+    }
+    scaled_w_ = surf_->w; scaled_h_ = surf_->h;
   }
-  scaled_w_ = surf_->w; scaled_h_ = surf_->h;
 
   // Inverse of the dst_x -> src_x = dst_x * SCREEN_W / rect.w map used by
   // draw() and map_point(), so the two paths land pixels in the same places:
@@ -407,18 +443,16 @@ void Display::blit_insets() {
 
 bool Display::begin_frame(Target out[SCREENS]) {
   if (!scaled_) return false;
-  if (dm_) {
+  if (out_) {
     // A configure (fullscreen granted, output reconfigured) resizes the
     // window under us; the buffers must follow before anything writes at the
     // new geometry. The shm path below re-checks its surface the same way.
     int w = 0, h = 0;
     SDL_GetWindowSize(win_, &w, &h);
-    if (w != dm_->width() || h != dm_->height()) {
-      SDL_Window* win = win_;
-      dm_->close();
-      if (!dm_->open(win, w, h, only_screen_ >= 0 ? display_index_ : -1)) {
-        std::fprintf(stderr, "video: dmabuf resize failed; window surface from here\n");
-        dm_.reset();
+    if (w != out_->width() || h != out_->height()) {
+      if (!out_->reopen(win_, w, h)) {
+        std::fprintf(stderr, "video: scanout resize failed; window surface from here\n");
+        out_.reset();
         margins_dirty_ = true;
         layout();
         build_scale();
@@ -426,28 +460,29 @@ bool Display::begin_frame(Target out[SCREENS]) {
       } else {
         layout();
         build_scale();
-        dm_margins_ = 0;
+        out_margins_ = 0;
       }
     }
   }
-  if (dm_) {
-    if (u32* px = dm_->begin_frame()) {
-      const u32 stride = static_cast<u32>(dm_->width());
+  if (out_) {
+    if (u32* px = out_->begin_frame()) {
+      const u32 stride = static_cast<u32>(out_->width());
       // Every buffer needs its margins cleared once, not just the one in
       // hand: a layout change restarts the count, or the other buffers keep
       // the old layout and flicker it back as they come round.
-      if (margins_dirty_) { dm_margins_ = 0; margins_dirty_ = false; }
-      static_assert(DmabufOut::BUFS <= 8, "margin bookkeeping");
-      if (dm_margins_ < DmabufOut::BUFS) { clear_margins(px, stride, dm_->width(), dm_->height()); ++dm_margins_; }
+      if (margins_dirty_) { out_margins_ = 0; margins_dirty_ = false; }
+      if (out_margins_ < out_->bufs()) { clear_margins(px, stride, out_->width(), out_->height()); ++out_margins_; }
       targets(px, stride, out);
-      dm_frame_ = true;
+      out_frame_ = true;
       return true;
     }
-    // Protocol death mid-run: drop the tier, keep playing on shm.
-    std::fprintf(stderr, "video: dmabuf path lost; window surface from here\n");
-    dm_->close();
-    dm_.reset();
+    // Protocol/driver death mid-run: drop the tier, keep playing on shm.
+    std::fprintf(stderr, "video: scanout path lost; window surface from here\n");
+    out_->close();
+    out_.reset();
     margins_dirty_ = true;
+    build_scale();
+    if (!scaled_) return false;
   }
   // SDL hands back a new surface after a resize; the pointer is only valid
   // until then, so it is fetched every frame rather than cached across one.
@@ -472,7 +507,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
 
 void Display::end_frame() {
   blit_insets();
-  if (dm_frame_) { dm_frame_ = false; dm_->end_frame(); return; }
+  if (out_frame_) { out_frame_ = false; out_->end_frame(); return; }
   if (SDL_MUSTLOCK(surf_)) SDL_UnlockSurface(surf_);
   SDL_UpdateWindowSurface(win_);
 }

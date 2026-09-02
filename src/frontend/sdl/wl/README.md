@@ -3,8 +3,8 @@
 Generated and copied so the dmabuf presentation path builds with **no
 build- or link-time Wayland dependency**: `libwayland-client.so.0` is
 dlopen'd at runtime (`wl_dyn.h`), and a device without it (or without a
-compositor) falls back to SDL's own paths, where KMSDRM is the better
-choice anyway.
+compositor) falls back to the KMSDRM scanout tier (`display_drm.h`) and
+then to SDL's own paths.
 
 - `wayland-client-protocol.h` / `wayland-protocol.c`: core protocol,
   `wayland-scanner {client-header,private-code} /usr/share/wayland/wayland.xml`.

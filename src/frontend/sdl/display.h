@@ -3,7 +3,8 @@
 #pragma once
 #include "core/gpu/gpu.h"
 #include "core/types.h"
-#include "display_wl.h"   // complete type for the unique_ptr
+#include "display_drm.h"  // complete types for the unique_ptr
+#include "display_wl.h"
 
 #include <SDL2/SDL.h>
 
@@ -77,10 +78,14 @@ public:
   // Renderer-based drawing (draw(), --accel) is unavailable while this is on.
   //
   // Destination tiers, tried in order at open():
-  //  1. dmabuf (display_wl.h): CMA buffers on SDL's Wayland surface. The
-  //     compositor samples them zero-copy, or scans them out directly when
-  //     the surface qualifies. DS_DMABUF=0 disables, =1 requires (fail loud).
-  //  2. window surface: SDL's shm path. Always available under a compositor.
+  //  1. a scanout tier (scanout.h): CMA dma-heap buffers the display samples
+  //     or scans out without a copy. Under Wayland that is DmabufOut, on
+  //     SDL's Wayland surface; under KMSDRM it is DrmOut, page-flipped onto
+  //     the panel's CRTC. DS_DMABUF=0 disables either, =1 requires it
+  //     (fail loud).
+  //  2. window surface: SDL's shm path under a compositor. On KMSDRM this is
+  //     not a software path at all -- SDL has no window framebuffer there, so
+  //     it is a hidden GLES renderer; see display_drm.h.
   struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; };
 
   bool scaling() const { return scaled_; }
@@ -142,11 +147,11 @@ private:
   bool              scaled_ = false;
   bool              chunky_ = false;
   int               chunky_cell_ = 0;
-  std::unique_ptr<DmabufOut> dm_;  // tier 1; null on the surface tier
+  std::unique_ptr<ScanoutOut> out_;     // tier 1; null on the surface tier
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL
   bool              margins_dirty_ = true;
-  int               dm_margins_ = 0;      // dmabuf buffers whose letterbox is cleared
-  bool              dm_frame_ = false;    // current begin_frame targeted the dmabuf
+  int               out_margins_ = 0;     // scanout buffers whose letterbox is cleared
+  bool              out_frame_ = false;   // current begin_frame targeted the scanout tier
   int               scaled_w_ = 0, scaled_h_ = 0;
   std::vector<u16>  xrun_[SCREENS];   // per screen, 257 entries; see kern::scale_row
   std::vector<u8>   seam_w_[SCREENS]; // per screen, 256 entries: box-filter weight of pixel s+1 in run s's last pixel

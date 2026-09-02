@@ -292,14 +292,24 @@ side in DS order, fitted to the height, bottoms aligned). Every mode keeps
 the 4:3 screen aspect. `--screen top|bottom` (`[video] screen`) is the
 screen shown alone, large or dominant; `F6` swaps it.
 
-Under Wayland the core scales each scanline straight into the window surface
-as the line is produced (`DS_SCANLINE_SCALE=0/1` overrides the per-driver
-default), and when the compositor offers `zwp_linux_dmabuf` the frames are
-rendered into CMA dma-heap buffers it composites zero-copy -- or, for a
-fullscreen opaque window on an untransformed output, scans out directly on a
-hardware plane (`DS_DMABUF=0` disables, `=1` requires). `--dual-window` opens
-one fullscreen window per video display with one DS screen each, which is
-what a dual-panel handheld wants and what direct scanout needs there.
+The core scales each scanline straight into the buffer that is presented, as
+the line is produced (`DS_SCANLINE_SCALE=0/1` overrides the per-driver
+default), and that buffer is a CMA dma-heap allocation the display hardware
+can read directly (`DS_DMABUF=0` disables, `=1` requires):
+
+- Under **Wayland**, submitted through `zwp_linux_dmabuf`. The compositor
+  composites it zero-copy, or -- for a fullscreen opaque window on an
+  untransformed output -- scans it out directly on a hardware plane.
+- Under **KMSDRM**, page-flipped onto the panel's CRTC ourselves, borrowing
+  SDL's DRM fd. SDL2 has no window framebuffer on that driver, so its
+  "software" renderer is really a hidden GLES one: a scalar stretch blit, a
+  full-screen upload into a streaming texture, a textured quad, and a
+  blocking swap, 13.4 ms per frame on the RG DS. Flipping our own buffer is
+  0.15 ms, and takes emulation + present from 17.9 ms a frame to 6.4.
+
+`--dual-window` opens one fullscreen window per video display with one DS
+screen each, which is what a dual-panel handheld wants and what direct
+scanout needs there; both panels are driven from the one process.
 
 On a handheld with no desktop session, SDL uses its KMSDRM backend directly;
 point `XDG_RUNTIME_DIR` at the PipeWire runtime directory or SDL's PulseAudio

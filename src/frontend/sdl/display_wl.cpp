@@ -136,6 +136,7 @@ bool DmabufOut::open(SDL_Window* win, int w, int h, int output_index) {
     std::fprintf(stderr, "dmabuf: not a wayland window\n");
     return false;
   }
+  output_index_ = output_index;
   dpy_ = static_cast<wl_display*>(wm.info.wl.display);
   surf_ = static_cast<wl_surface*>(wm.info.wl.surface);
   w_ = w; h_ = h;

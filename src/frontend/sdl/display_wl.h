@@ -24,6 +24,7 @@
 #pragma once
 
 #include "core/types.h"
+#include "scanout.h"
 
 #include <cstddef>
 
@@ -40,7 +41,7 @@ struct xdg_toplevel;
 
 namespace ds::sdl {
 
-class DmabufOut {
+class DmabufOut : public ScanoutOut {
 public:
   static constexpr int BUFS = 3;   // one on screen, one queued, one being drawn
 
@@ -55,16 +56,19 @@ public:
   // xdg_toplevel. Without it a dual-window layout lands wherever the
   // compositor pleases -- and a mis-placed surface can never scan out.
   bool open(SDL_Window* win, int w, int h, int output_index = -1);
-  void close();
 
-  int width() const { return w_; }
-  int height() const { return h_; }
+  bool reopen(SDL_Window* win, int w, int h) override { const int o = output_index_; close(); return open(win, w, h, o); }
+  void close() override;
+
+  int width() const override { return w_; }
+  int height() const override { return h_; }
+  int bufs() const override { return BUFS; }
 
   // Pixels of a free buffer to render the next frame into (blocks on the
   // compositor if all are pending, which is the vsync). Null on protocol
   // error; the caller falls back.
-  u32* begin_frame();
-  void end_frame();                // attach + damage + commit + flush
+  u32* begin_frame() override;
+  void end_frame() override;       // attach + damage + commit + flush
 
   // Public for the C listener table; not part of the interface.
   static void on_release(void* data, struct wl_buffer* wb);
@@ -86,6 +90,7 @@ private:
   Buf bufs_[BUFS];
   int cur_ = -1;
   int w_ = 0, h_ = 0;
+  int output_index_ = -1;                 // the open() argument, for reopen()
   bool dead_ = false;                     // protocol error; stop submitting
 };
 
