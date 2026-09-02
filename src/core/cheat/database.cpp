@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
+#include "core/cheat/database.h"
+
+#include <cstdio>
+#include <cstring>
+
+namespace ds::cheat {
+namespace {
+
+constexpr size_t ENTRY_LIST = 0x100;     // where the entry list starts
+constexpr size_t NAME_LEN   = 0x3C;      // the database description, after the 16-byte magic
+constexpr u32 MAX_CODE_WORDS = 0x100000; // melonDS's sanity bound, and far above any real code
+constexpr u32 MAX_CATEGORY   = 0x10000;
+
+// A bounds-checked cursor over the file. Every read either succeeds or sets
+// `bad`, so the parsers can run to their end and be checked once rather than
+// testing each field -- the file is untrusted, and a truncated one must not
+// walk off the buffer.
+struct Reader {
+  const u8* p;
+  size_t n, at = 0;
+  bool bad = false;
+
+  bool seek(size_t to) { if (to > n) { bad = true; return false; } at = to; return true; }
+  size_t left() const { return at <= n ? n - at : 0; }
+  u32 u32le() {
+    if (left() < 4) { bad = true; return 0; }
+    const u32 v = static_cast<u32>(p[at]) | (static_cast<u32>(p[at + 1]) << 8) |
+                  (static_cast<u32>(p[at + 2]) << 16) | (static_cast<u32>(p[at + 3]) << 24);
+    at += 4;
+    return v;
+  }
+  // A NUL-terminated string. A missing terminator means the file is
+  // truncated, not that the string runs to the end.
+  std::string ntstring() {
+    const size_t start = at;
+    while (at < n && p[at]) ++at;
+    if (at >= n) { bad = true; return {}; }
+    std::string s(reinterpret_cast<const char*>(p + start), at - start);
+    ++at;   // the terminator
+    return s;
+  }
+  void align4() { if (at & 3) seek((at + 3) & ~size_t{3}); }
+};
+
+u32 crc32(const u8* data, size_t n) {
+  static u32 table[256];
+  static bool built = false;
+  if (!built) {
+    for (u32 i = 0; i < 256; ++i) {
+      u32 c = i;
+      for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+      table[i] = c;
+    }
+    built = true;
+  }
+  u32 c = 0xFFFFFFFFu;
+  for (size_t i = 0; i < n; ++i) c = table[(c ^ data[i]) & 0xFF] ^ (c >> 8);
+  return c ^ 0xFFFFFFFFu;
+}
+
+} // namespace
+
+u32 header_checksum(const u8* header, size_t n) { return ~crc32(header, n); }
+
+bool Database::open(const std::string& path, std::string& err) {
+  file_.clear();
+  index_.clear();
+  name_.clear();
+
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) { err = "cannot open " + path; return false; }
+  std::fseek(f, 0, SEEK_END);
+  const long len = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  if (len <= 0) { std::fclose(f); err = path + " is empty"; return false; }
+  file_.resize(static_cast<size_t>(len));
+  const bool read_ok = std::fread(file_.data(), 1, file_.size(), f) == file_.size();
+  std::fclose(f);
+  if (!read_ok) { file_.clear(); err = "cannot read " + path; return false; }
+
+  if (file_.size() < ENTRY_LIST) { err = path + " is too short to be a cheat database"; return false; }
+  static const u8 magic[16] = {'R','4',' ','C','h','e','a','t','C','o','d','e', 0, 1, 0, 0};
+  if (std::memcmp(file_.data(), magic, sizeof magic) != 0) {
+    err = path + " is not a usrcheat database (bad magic)";
+    return false;
+  }
+  const char* desc = reinterpret_cast<const char*>(file_.data() + 16);
+  name_.assign(desc, strnlen(desc, NAME_LEN));
+
+  // The entry list: 16 bytes each, ended by a zero game code or the file.
+  Reader r{file_.data(), file_.size()};
+  r.seek(ENTRY_LIST);
+  while (r.left() >= 16) {
+    const u32 code = r.u32le(), checksum = r.u32le(), offset = r.u32le();
+    r.u32le();                       // reserved, always zero
+    if (code == 0) break;
+    // An offset inside the header, or past the end, means a corrupt file
+    // rather than a corrupt entry: skip it and keep the rest.
+    if (offset < ENTRY_LIST || offset >= file_.size()) continue;
+    index_.push_back({code, checksum, offset});
+  }
+  if (index_.empty()) { err = path + " has no usable entries"; return false; }
+  return true;
+}
+
+bool Database::has(u32 game_code) const {
+  for (const Entry& e : index_) if (e.game_code == game_code) return true;
+  return false;
+}
+
+std::vector<u32> Database::game_codes() const {
+  std::vector<u32> out;
+  out.reserve(index_.size());
+  for (const Entry& e : index_) out.push_back(e.game_code);
+  return out;
+}
+
+std::vector<GameCheats> Database::entries_for(u32 game_code, std::string& err) const {
+  std::vector<GameCheats> out;
+  for (const Entry& e : index_) {
+    if (e.game_code != game_code) continue;
+    GameCheats g;
+    std::string one;
+    if (parse_entry(e, g, one)) out.push_back(std::move(g));
+    else if (err.empty()) err = one;
+  }
+  return out;
+}
+
+bool Database::best_entry(u32 game_code, u32 checksum, GameCheats& out, std::string& err) const {
+  std::vector<GameCheats> all = entries_for(game_code, err);
+  if (all.empty()) return false;
+  for (GameCheats& g : all) {
+    if (g.checksum == checksum) { out = std::move(g); return true; }
+  }
+  // No revision matched. The database files generic entries under checksum 0
+  // or 1, and a mismatch usually means a different dump of the same game
+  // rather than a different game, so the first entry is the useful answer.
+  out = std::move(all.front());
+  return true;
+}
+
+bool Database::parse_entry(const Entry& e, GameCheats& out, std::string& err) const {
+  Reader r{file_.data(), file_.size()};
+  if (!r.seek(e.offset)) { err = "entry offset past the end of the file"; return false; }
+
+  out.game_code = e.game_code;
+  out.checksum = e.checksum;
+  out.name = r.ntstring();
+  r.align4();
+
+  const u32 flags = r.u32le();
+  for (int i = 0; i < 8; ++i) r.u32le();   // master codes; their use is not documented
+  if (r.bad) { err = "entry header runs past the end of the file"; return false; }
+  const u32 items = flags & 0xFFFFFF;
+
+  // Codes belong to the most recent category until its count is used up,
+  // then fall back outside any category.
+  int group = -1;
+  u32 group_left = 0;
+  for (u32 i = 0; i < items; ++i) {
+    const u32 item = r.u32le();
+    const u32 total = item & 0xFFFFFF;
+    const std::string item_name = r.ntstring();
+    const std::string item_desc = r.ntstring();
+    r.align4();
+    if (r.bad) { err = "item " + std::to_string(i) + " runs past the end of the file"; return false; }
+
+    if (item & (1u << 28)) {
+      // A category of zero items is a heading the database uses for a note
+      // or a credit line; melonDS rejects the whole game over one.
+      if (total >= MAX_CATEGORY) { err = "category \"" + item_name + "\" has an unreasonable length"; return false; }
+      out.groups.push_back({item_name, item_desc, (item & (1u << 24)) != 0});
+      group = static_cast<int>(out.groups.size()) - 1;
+      group_left = total;
+      continue;
+    }
+
+    const u32 words = r.u32le();
+    if (r.bad) { err = "code \"" + item_name + "\" has no length"; return false; }
+    // The item's own length must account for its strings, the word count and
+    // the code; a mismatch means the file is being read at the wrong offset,
+    // so stop rather than carry on misaligned.
+    const u32 expect = ((static_cast<u32>(item_name.size()) + 1 + static_cast<u32>(item_desc.size()) + 1 + 3) >> 2) + 1 + words;
+    if (expect != total) { err = "code \"" + item_name + "\" has a length of " + std::to_string(total) + ", expected " + std::to_string(expect); return false; }
+    // A code of zero words is not a cheat but a note: the database is full of
+    // "(M)", "NOTE: read the description" and credit lines, carried as items
+    // with a name and no code. They are kept, so the menu can show them where
+    // their author put them, and are inert if enabled. Rejecting them costs
+    // the whole game's cheat list, which is what melonDS does here.
+    if (words >= MAX_CODE_WORDS) { err = "code \"" + item_name + "\" has an unreasonable word count (" + std::to_string(words) + ")"; return false; }
+    // An odd word count is a truncated last instruction, not a misparse --
+    // the length check above has already confirmed where this item ends -- so
+    // the code is kept and the interpreter ignores the dangling word. Eight
+    // games in the published database are like this, and melonDS drops all
+    // of their cheats over it.
+    if (r.left() < static_cast<size_t>(words) * 4) { err = "code \"" + item_name + "\" runs past the end of the file"; return false; }
+
+    Code c;
+    c.name = item_name;
+    c.description = item_desc;
+    c.enabled = (item & (1u << 24)) != 0;
+    c.group = group_left > 0 ? group : -1;
+    c.words.reserve(words);
+    for (u32 w = 0; w < words; ++w) c.words.push_back(r.u32le());
+    out.codes.push_back(std::move(c));
+    if (group_left > 0 && --group_left == 0) group = -1;
+  }
+
+  // A category that allows only one of its codes may still arrive with
+  // several marked enabled; the first wins.
+  for (size_t g = 0; g < out.groups.size(); ++g) {
+    if (!out.groups[g].exclusive) continue;
+    bool seen = false;
+    for (Code& c : out.codes) {
+      if (c.group != static_cast<int>(g) || !c.enabled) continue;
+      if (seen) c.enabled = false;
+      seen = true;
+    }
+  }
+  return true;
+}
+
+} // namespace ds::cheat

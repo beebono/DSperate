@@ -8,6 +8,7 @@ add_library(dsperate_core STATIC
   dma/dma.cpp
   cart/cart.cpp
   cheat/ar_engine.cpp
+  cheat/database.cpp
   sched/scheduler.cpp
   cpu/cpu.cpp
   cpu/cp15.cpp

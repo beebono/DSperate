@@ -51,3 +51,7 @@ add_test(NAME menu COMMAND test_menu)
 add_executable(test_cheat cheat_test.cpp)
 target_link_libraries(test_cheat PRIVATE dsperate_core)
 add_test(NAME cheat COMMAND test_cheat)
+
+add_executable(test_cheat_db cheat_db_test.cpp)
+target_link_libraries(test_cheat_db PRIVATE dsperate_core)
+add_test(NAME cheat_db COMMAND test_cheat_db)

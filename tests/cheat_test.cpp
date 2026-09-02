@@ -301,8 +301,12 @@ void test_engine_enable() {
   w32(nds, RAM + 0x1C0, 0);
   w32(nds, RAM + 0x1C4, 0);
   cheat::Engine e;
-  e.codes.push_back({"on",  true,  {at(0x00, 0x20001C0), 1}});
-  e.codes.push_back({"off", false, {at(0x00, 0x20001C4), 1}});
+  // Named fields: Code gained a description and a group when the database
+  // loader landed, and a positional list would silently follow it.
+  cheat::Code on;  on.name = "on";   on.enabled = true;  on.words = {at(0x00, 0x20001C0), 1};
+  cheat::Code off; off.name = "off"; off.enabled = false; off.words = {at(0x00, 0x20001C4), 1};
+  e.codes.push_back(on);
+  e.codes.push_back(off);
   e.run(nds);
   CHECK(r32(nds, RAM + 0x1C0) == 1);
   CHECK(r32(nds, RAM + 0x1C4) == 0);

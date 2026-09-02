@@ -103,6 +103,14 @@ Stop Engine::run_code(NDS& nds, const Code& code) {
         loopcond = cond;
         loopcondstack = condstack;
         break;
+      // C2 is a flashcard extension, not part of the AR set: the words that
+      // follow are ARM/Thumb machine code to be copied somewhere and called.
+      // Two codes in the published database use it, both marked "for
+      // flashcard users". Running injected native code is a different feature
+      // from interpreting an AR code, so it is refused here as melonDS
+      // refuses it -- but named, because it is a known extension and not
+      // corruption.
+      case 0xC2: return Stop::Unsupported;
       // C4 stores a pointer to itself so a code can rewrite its own body.
       // Nothing is known to use it, and supporting it would mean giving the
       // interpreter a writable copy of the code; refuse rather than guess.

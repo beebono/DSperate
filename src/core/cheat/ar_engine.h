@@ -21,8 +21,15 @@ namespace ds::cheat {
 // go through the page table and so invalidate JIT blocks like any other store.
 struct Code {
   std::string name;
+  std::string description;   // the database carries one; often empty
+  int group = -1;            // index into GameCheats::groups, -1 for none
   bool enabled = false;
-  std::vector<u32> words;   // an even number; an odd tail is ignored
+  std::vector<u32> words;    // an even number; an odd tail is ignored
+
+  // The database carries notes, credits and headings as items with a name and
+  // no code at all. They are not cheats and doing anything to them does
+  // nothing; a menu should show them rather than offer them as a toggle.
+  bool is_note() const { return words.empty(); }
 };
 
 // Why a code stopped, for the log and the tests. A code that simply ran off
@@ -31,7 +38,7 @@ enum class Stop : u8 {
   Ok,          // ran to the end of the words
   BadOpcode,   // an opcode outside the set
   Truncated,   // an operand or a block ran past the end of the words
-  Unsupported, // C4: the self-modifying opcode, which nothing is known to use
+  Unsupported, // C2 (native code injection) or C4 (self-modifying code)
   RunawayLoop, // the iteration budget was exhausted (a code that never ends)
 };
 const char* stop_name(Stop s);
