@@ -424,7 +424,12 @@ static int from_bcd(u8 v) { return (v >> 4) * 10 + (v & 0x0F); }
 static void rtc_ev(NDS& nds, u32) { nds.io.rtc_event(); }
 
 void Io::rtc_seed() {
-  const std::time_t t = std::time(nullptr);
+  // DS_RTC_EPOCH pins the seed to a fixed Unix time: the clock still runs (so
+  // the power-lost bit is clear and the firmware skips its setup wizard), but
+  // two runs start from the same date and second and stay comparable.
+  const char* pinned = std::getenv("DS_RTC_EPOCH");
+  const std::time_t t = pinned ? static_cast<std::time_t>(std::strtoll(pinned, nullptr, 0))
+                               : std::time(nullptr);
   std::tm lt{};
 #if defined(_WIN32)
   localtime_s(&lt, &t);

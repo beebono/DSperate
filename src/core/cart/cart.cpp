@@ -171,7 +171,14 @@ u32 Cart::rom_read32() {
   return v;
 }
 
+// DS_CART_LOG=1: one line per Slot-1 command, with the mode it was issued in.
+static const bool g_cart_log = std::getenv("DS_CART_LOG") != nullptr;
+
 void Cart::command_start(const u8 cmd[8]) {
+  if (g_cart_log)
+    std::fprintf(stderr, "[cart] mode %u reset %u cmd %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                 cmd_mode_, in_reset_ ? 1u : 0u,
+                 cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5], cmd[6], cmd[7]);
   if (in_reset_) return;
   if (cmd_mode_ == 0) {
     std::memcpy(rom_cmd_, cmd, 8);
@@ -191,6 +198,9 @@ void Cart::command_start(const u8 cmd[8]) {
     t0 = bswap(t0); t1 = bswap(t1);
     std::memcpy(&dec[0], &t1, 4); std::memcpy(&dec[4], &t0, 4);
     std::memcpy(rom_cmd_, dec, 8);
+    if (g_cart_log)
+      std::fprintf(stderr, "[cart]   key1 decrypted %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                   dec[0], dec[1], dec[2], dec[3], dec[4], dec[5], dec[6], dec[7]);
     switch (rom_cmd_[0] & 0xF0) {
     case 0x40: data_mode_ = 2; return;                          // enable KEY2 data
     case 0x20: rom_addr_ = (rom_cmd_[2] & 0xF0) << 8; return;   // secure area block

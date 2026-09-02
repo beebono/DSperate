@@ -341,7 +341,17 @@ int main(int argc, char** argv) {
     return true;
   };
   if (!write_state(0)) return 1;
+  const char* reboot_at = std::getenv("DS_REBOOT_AT");
+  const int reboot_frame = reboot_at ? std::atoi(reboot_at) : -1;
+  const char* reboot_rom = reboot_at ? std::strchr(reboot_at, ':') : nullptr;
+  if (reboot_rom) ++reboot_rom;
+
   for (int i = 0; i < frames; ++i) {
+    if (reboot_rom && i == reboot_frame) {
+      nds.reset();
+      if (!nds.load_rom(reboot_rom)) std::fprintf(stderr, "reboot: could not read %s\n", reboot_rom);
+      else { nds.setup_direct_boot(); std::fprintf(stderr, "reboot: direct boot at frame %d\n", i); }
+    }
     const auto t0 = std::chrono::steady_clock::now();
     // The recompiler's trace emission is armed from the first frame: turning
     // it on later drops every translated block at that frame, which changes

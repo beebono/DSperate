@@ -357,6 +357,11 @@ int main(int argc, char** argv) {
   // path is settled on here rather than threaded through as "no ROM": every
   // per-game path below (config, saves, states, screenshots, cheats) is
   // derived from this string, and they all want somewhere to live.
+  //
+  // If BootMenu.nds *does* exist it is put in the slot as well, still under a
+  // firmware boot. That is how the loader cart (tools/mkcart.py) is meant to
+  // be paired with a real firmware dump: the DS menu draws its banner, and
+  // tapping it plays the console's own launch animation.
   const bool boot_firmware = !rom || rom_stem(base_name(rom)) == "BootMenu";
   const std::string rom_path = rom ? std::string(rom) : ds::sdl::Config::dir() + "/BootMenu.nds";
   if (boot_firmware) VLOG("no game: booting the firmware\n");
@@ -365,6 +370,9 @@ int main(int argc, char** argv) {
   if (!nds.load_bios(bios9.c_str(), bios7.c_str(), fw.c_str())) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
   nds.reset();
   if (!boot_firmware && !nds.load_rom(rom_path.c_str())) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); return 1; }
+  // A missing or unreadable BootMenu.nds is not an error: it is the name a
+  // launcher passes to mean "just the firmware", and the slot stays empty.
+  if (boot_firmware && nds.load_rom(rom_path.c_str())) VLOG("loader cart: %s\n", rom_path.c_str());
   // The firmware writes its settings pages to flash over SPI. Those go to a
   // sidecar beside the firmware rather than into the dump itself, so a rename
   // in the DS menu survives a restart without the emulator ever writing to a
