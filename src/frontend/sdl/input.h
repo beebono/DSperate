@@ -39,12 +39,20 @@ public:
   // the next one, so the game sees every tap.
   input::Frame frame() {
     const input::Frame f{static_cast<u16>(buttons_ | pressed_ | stick_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_ || touched_ || stylus_down_};
-    pressed_ = 0; touched_ = false;
+    pressed_ = 0; stick_pressed_ = 0; touched_ = false;
     return f;
   }
 
   // Hotkey actions since the last call, in order.
   std::vector<Action> take_actions() { std::vector<Action> a; a.swap(actions_); return a; }
+
+  // Pause menu: the presses since the last call, as a DS button mask, for a
+  // frontend that is driving a menu instead of the game. The player's own
+  // bindings navigate it -- up/down/A/B are whatever they mapped -- and the
+  // guest never sees them, because the menu is only up while paused and
+  // frame() is not being called. Edge-triggered: a held direction moves one
+  // row, the same as the taps frame() is built to catch.
+  u32 take_menu_presses() { const u32 p = pressed_ | stick_pressed_; pressed_ = 0; stick_pressed_ = 0; return p; }
   bool fast_forward_held() const { return ff_key_ || ff_pad_; }
 
   // Hinge: a real lid switch (lid.h) drives set_lid() directly; the `lid`
@@ -89,6 +97,7 @@ private:
   void axis(Uint8 which, Sint16 value);
 
   u32  buttons_ = 0, pressed_ = 0, stick_ = 0;   // held now; pressed since the last frame; stick as d-pad
+  u32  stick_prev_ = 0, stick_pressed_ = 0;      // stick-as-d-pad edges, for the pause menu
   bool touching_ = false, touched_ = false;
   int  touch_x_ = 0, touch_y_ = 0;
   bool quit_ = false;

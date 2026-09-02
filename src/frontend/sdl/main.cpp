@@ -4,7 +4,8 @@
 // SDL2 frontend: direct boot, both screens stacked, sound, and input from a
 // keyboard, a game controller or a touchscreen. Settings come from an INI
 // file (config.h) with the command line on top; hotkeys cover what a
-// handheld needs (pause, volume, layout, screenshots, save states). No menus.
+// handheld needs (volume, layout, screenshots, save states), and the pause
+// key opens a blitted menu over the held frame (menu.h).
 #include "core/nds.h"
 #include "core/profile.h"
 #include "core/frame_report.h"
@@ -18,6 +19,7 @@
 #include "display.h"
 #include "input.h"
 #include "lid.h"
+#include "menu.h"
 #include "mic_alsa.h"
 
 #include <SDL2/SDL.h>
@@ -186,7 +188,7 @@ bool load_state_file(NDS& nds, const std::string& path) {
 // The stick-driven pen: an outlined crosshair with a red centre, drawn over
 // the bottom screen in DS pixel space and mapped onto the destination (the
 // frontend's scaled buffer, or a copy of the framebuffer).
-struct CursorDst { u32* px; u32 pitch; u32 h; const u16* xrun; };   // xrun null: 1:1
+using CursorDst = ds::sdl::Blit;   // px/pitch/h and the DS-column map; xrun null: 1:1
 void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
   auto fill = [&](int x, int y, u32 colour) {
     if (x < 0 || x > 255 || y < 0 || y > 191) return;
@@ -355,6 +357,7 @@ int main(int argc, char** argv) {
   const bool jit = cfg.flag("emu.jit", true), vsync = cfg.flag("video.vsync", true), dual_window = cfg.flag("video.dual_window", false);
   const long quantum = cfg.num("emu.quantum", 0);   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
   using Disp = ds::sdl::Display;
+  using Menu = ds::sdl::Menu;
   Disp::Layout layout;
   std::vector<Disp::Mode> layout_cycle;
   {
@@ -547,11 +550,32 @@ int main(int argc, char** argv) {
   std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
   std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // top screen with the slot digit
   int slot_shown = 0;                                        // frames left to show the slot digit
+  // The pause menu (menu.h) and the two screen copies it is composited into.
+  ds::sdl::Menu menu;
+  std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
+  bool menu_dirty = false;      // the menu screens need compositing and presenting again
+  // Pausing waits for one more presented, *unscaled* frame. The fast scaling
+  // path has the GPU write its lines straight into the window surface and
+  // never fills fb_ (Gpu::output_engine), so stopping the moment the hotkey
+  // arrives would leave the menu with nothing current to draw over. Deferring
+  // costs a frame nobody can see and guarantees a real picture underneath.
+  bool pause_pending = false;
+  auto refresh_slots = [&] { for (int i = 0; i < 10; ++i) {
+    FILE* f = std::fopen(state_path(nds, states_dir, i).c_str(), "rb");
+    menu.set_slot_used(i, f != nullptr);
+    if (f) std::fclose(f);
+  } };
   // Battery save flush: once the chip has been quiet for a second, and at
   // every point a session could end (pause, lid, quit).
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
   u64 sram_quiet_since = 0;
   auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, sav); };
+  auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled) {
+    for (int i = 0; i < 2; ++i)
+      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, grid, chunky, chunky_thresh, seam_blend, target[i].seam_w,
+                                                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i))}
+                                         : ds::gpu::Gpu::ScaleTarget{});
+  };
   auto set_paused = [&](bool p) {
     if (p == paused) return;
     paused = p;
@@ -565,7 +589,10 @@ int main(int argc, char** argv) {
     for (ds::sdl::Action a : input.take_actions()) {
       using A = ds::sdl::Action;
       switch (a) {
-      case A::Pause: set_paused(!paused); break;
+      case A::Pause:
+        if (paused) { state_slot = menu.slot(); menu.set_open(false); set_paused(false); }
+        else pause_pending = true;
+        break;
       case A::VolumeUp: audio.set_volume(audio.volume() + 10); audio.set_muted(false); std::fprintf(stderr, "volume %d%%\n", audio.volume()); break;
       case A::VolumeDown: audio.set_volume(audio.volume() - 10); std::fprintf(stderr, "volume %d%%\n", audio.volume()); break;
       case A::Mute: audio.set_muted(!audio.muted()); std::fprintf(stderr, "%s\n", audio.muted() ? "muted" : "unmuted"); break;
@@ -623,7 +650,83 @@ int main(int argc, char** argv) {
       default: break;
       }
     }
-    if (paused) { SDL_Delay(10); continue; }
+    if (paused) {
+      // Nothing runs behind the menu, so it is composited only when something
+      // about it changed -- otherwise this is a plain idle tick.
+      if (const u32 presses = menu.open() ? input.take_menu_presses() : 0u; presses) {
+        switch (menu.input(presses)) {
+        case Menu::Result::None: break;
+        case Menu::Result::Resume: state_slot = menu.slot(); menu.set_open(false); set_paused(false); break;
+        // Both carry the same guards as the save-state hotkeys: a replay must
+        // stay the run it recorded, and a recording is the inputs from boot,
+        // which a load would leave unreplayable.
+        case Menu::Result::Save:
+          if (save_readonly) std::fprintf(stderr, "state: not during a replay\n");
+          else if (save_state_file(nds, state_path(nds, states_dir, menu.slot()))) flush_save();
+          refresh_slots();
+          break;
+        case Menu::Result::Load:
+          if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
+          if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
+          // A load replaces the picture the menu is drawn over, so it also
+          // leaves the menu: the player wants to see where they landed.
+          if (load_state_file(nds, state_path(nds, states_dir, menu.slot()))) {
+            state_slot = menu.slot();
+            menu.set_open(false);
+            set_paused(false);
+            audio.clear();
+            next_frame = SDL_GetPerformanceCounter();
+            fs_debt_ms = 0;
+            flush_save();
+          } else refresh_slots();
+          break;
+        case Menu::Result::Quit: input.request_quit(); break;
+        }
+        menu_dirty = true;
+      }
+      if (menu_dirty && menu.open()) {
+        menu_dirty = false;
+        // The menu goes on the DS top screen in dual-window mode (`display`
+        // is opened with only_screen 0, so it is the top one whichever
+        // physical output it landed on), and on the layout's primary screen
+        // otherwise -- in a Single layout that is the only screen drawn, and
+        // the other engine is switched off, so its framebuffer is stale.
+        const int menu_screen = dual_window ? 0 : display.current_layout().primary;
+        const u32* src[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
+        const u32* fb[2];
+        for (int i = 0; i < 2; ++i) {
+          std::memcpy(menu_fb[i].data(), src[i], menu_fb[i].size() * 4);
+          // Both screens dim: the one the menu is not on is how a glance says
+          // the machine is stopped, and the one it is on gives the panel its
+          // contrast.
+          ds::sdl::dim_framebuffer(menu_fb[i].data(), static_cast<u32>(menu_fb[i].size()));
+          fb[i] = menu_fb[i].data();
+        }
+        menu.draw(ds::sdl::Blit{menu_fb[menu_screen].data(), ds::SCREEN_W, ds::SCREEN_H, nullptr});
+        // The menu has to reach the screen the same way a frame does. On the
+        // scanline tiers (window surface, dmabuf, scanout) Display has no
+        // renderer at all -- open() returns before creating one -- so draw()
+        // would present nothing, which is what a paused screen looked like.
+        // There are no display lines to scale here, so the whole image goes
+        // through the scaler in one go.
+        ds::sdl::Display::Target target[2] = {};
+        bool scaled = display.begin_frame(target);
+        if (dual_window) scaled = display2.begin_frame(target) && scaled;
+        if (scaled) {
+          set_scale_targets(target, true);
+          for (int i = 0; i < 2; ++i) nds.gpu.scale_image(i, menu_fb[i].data());
+          display.end_frame();
+          if (dual_window) display2.end_frame();
+          // Nothing may keep pointing into a buffer the display just released.
+          set_scale_targets(target, false);
+        } else {
+          display.draw(fb);
+          if (dual_window) display2.draw(fb);
+        }
+      }
+      SDL_Delay(10);
+      continue;
+    }
     input.update_stylus();
     ds::input::Frame in = input.frame();
     if (log.reading()) {
@@ -722,17 +825,15 @@ int main(int argc, char** argv) {
     if (!skipped && fs_in_skip && ++fs_refused == 120 && !fs_capture)
       std::fprintf(stderr, "frameskip: this game display-captures its frames, which cannot be skipped exactly;\n"
                            "           --frameskip-capture (or [emu] frameskip_capture) skips them anyway\n");
-    const bool present = !skipped && !fs_partial && (!fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0);
+    const bool present = pause_pending ? !skipped
+                                       : (!skipped && !fs_partial && (!fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0));
     ds::sdl::Display::Target target[2] = {};
     bool scaled = false;
-    if (present) {
+    if (present && !pause_pending) {
       scaled = display.begin_frame(target);
       if (dual_window) scaled = display2.begin_frame(target) && scaled;
     }
-    for (int i = 0; i < 2; ++i)
-      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, grid, chunky, chunky_thresh, seam_blend, target[i].seam_w,
-                                                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i))}
-                                         : ds::gpu::Gpu::ScaleTarget{});
+    set_scale_targets(target, scaled);
 
     const Uint64 t0 = SDL_GetPerformanceCounter();
     nds.run_frame();
@@ -764,6 +865,16 @@ int main(int argc, char** argv) {
       }
     }
     audio.push(nds, fast);
+    // The frame the menu will sit on is presented and, because it went down
+    // the unscaled path, is in fb_ as well. Now it is safe to stop.
+    if (pause_pending && present) {
+      pause_pending = false;
+      menu.set_slot(state_slot);
+      refresh_slots();
+      menu.set_open(true);
+      menu_dirty = true;
+      set_paused(true);
+    }
     const Uint64 t2 = SDL_GetPerformanceCounter();
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;

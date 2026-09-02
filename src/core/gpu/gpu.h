@@ -186,6 +186,13 @@ public:
   };
   // Both screens or neither: pass a null `px` to go back to fb_.
   void set_scale_target(int screen, const ScaleTarget& t) { scale_[screen] = t; }
+  // Run a whole DS-resolution image through the scanline scaler, for a
+  // picture the emulator did not produce: the frontend's pause menu, which is
+  // composited while nothing is running and so has no display lines of its
+  // own. The grid, chunky and seam treatment are the ones the game gets, so
+  // the menu sits in the same picture rather than beside it. No-op when this
+  // screen has no scale target (the renderer tier, or a hidden screen).
+  void scale_image(int screen, const u32* src);
   bool scaling() const { return scale_[0].px && scale_[1].px; }
   u16 line() const { return line_; }
 

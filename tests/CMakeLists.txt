@@ -40,3 +40,10 @@ add_test(NAME spu COMMAND test_spu)
 add_executable(test_texcache texcache_test.cpp)
 target_link_libraries(test_texcache PRIVATE dsperate_core)
 add_test(NAME texcache COMMAND test_texcache)
+
+# The pause menu is frontend code; the test links the one translation unit it
+# needs rather than the SDL frontend (which is an executable, and needs a
+# display to do anything).
+add_executable(test_menu menu_test.cpp ../src/frontend/sdl/menu.cpp)
+target_link_libraries(test_menu PRIVATE dsperate_core)
+add_test(NAME menu COMMAND test_menu)

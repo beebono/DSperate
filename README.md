@@ -161,14 +161,14 @@ it hides after `stylus_hide` idle frames). The touchscreen is driven by a finger
 screen.
 
 Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,
-Enter = Start, Right Shift = Select; `Escape` quits, `P` pauses, `Tab` held
+Enter = Start, Right Shift = Select; `Escape` quits, `P` opens the pause menu, `Tab` held
 fast-forwards, `F` toggles fullscreen, `F4`/`F10` cycle the screen layout forward/back, `F6` swaps
 which screen is alone/large/dominant and `F8` moves the PiP inset (all three
 remembered for the game), `F9` takes a screenshot (both screens, BMP, in the
 states directory), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
 the state in the current slot and `F2`/`F3` change the slot, `L` closes and
 opens the lid, `M` held is the fake microphone. Controller, with Mode held:
-Start+Select quits, Start pauses, right trigger fast-forwards, R/L save/load
+Start+Select quits, Start opens the pause menu, right trigger fast-forwards, R/L save/load
 the state, Right/Left change the slot, Select/X cycle the layout forward/back, Y swaps the screens;
 the left stick's click is the microphone.
 
@@ -206,7 +206,14 @@ written a second after the game stops writing its save chip and again on
 pause, lid close and exit -- a launcher's SIGTERM included.
 
 Save states go to `<GAMECODE>.<slot>.dss` in the states directory (next to
-the ROM, or `[paths] states`), ten slots. A state is the whole machine at a
+the ROM, or `[paths] states`), ten slots. `F5`/`F7` and `F2`/`F3` reach them
+without leaving the game; the **pause menu** (the `pause` hotkey -- `P`, or
+Mode+Start on a controller) stops the machine and puts save, load and the
+slot list on screen, which is what a handheld with no keyboard needs. It
+draws over the held frame on the top screen, dims both to show the machine
+is stopped, and is driven by the DS buttons: up/down to move, left/right to
+change the slot in place, A to choose, B to go back or resume. Slots that
+already hold a state are marked, so a save says what it would overwrite. A state is the whole machine at a
 frame boundary (~5.5 MB, uncompressed: RAM, VRAM, both CPUs, every
 peripheral, the geometry engine's polygon RAM and the rasterised 3D frame)
 and loads only with the same ROM; the battery save is written alongside it so

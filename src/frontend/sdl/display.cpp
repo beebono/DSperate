@@ -252,6 +252,9 @@ void Display::layout() {
 }
 
 void Display::draw(const u32* const fb[SCREENS]) {
+  // The renderer tier only: open() returns before creating a renderer on the
+  // scanline tiers, where begin_frame/end_frame is the way to the screen.
+  if (!ren_) return;
   SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
   SDL_RenderClear(ren_);
   for (int i = 0; i < nviews_; ++i) {

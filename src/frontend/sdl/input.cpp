@@ -232,6 +232,8 @@ void Input::axis(Uint8 which, Sint16 value) {
     stick_ &= ~((1u << neg) | (1u << pos));
     if (value < -deadzone_) stick_ |= 1u << neg;
     else if (value > deadzone_) stick_ |= 1u << pos;
+    stick_pressed_ |= stick_ & ~stick_prev_;   // edges, for the pause menu
+    stick_prev_ = stick_;
   }
   const Uint8 px = pen_left ? SDL_CONTROLLER_AXIS_LEFTX : SDL_CONTROLLER_AXIS_RIGHTX, py = pen_left ? SDL_CONTROLLER_AXIS_LEFTY : SDL_CONTROLLER_AXIS_RIGHTY;
   if (stylus_axis_ != StylusAxis::None && (which == px || which == py)) {

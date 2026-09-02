@@ -836,6 +836,11 @@ void Gpu::emit_cells(int screen, u32 line, const u32* src) {
   cell_row_[screen] = j + 1;
 }
 
+void Gpu::scale_image(int screen, const u32* src) {
+  if (!scale_[screen].px) return;
+  for (u32 line = 0; line < SCREEN_H; ++line) emit_scaled(screen, line, src + line * SCREEN_W);
+}
+
 void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   const ScaleTarget& t = scale_[screen];
   if (t.chunky && t.cells) {
