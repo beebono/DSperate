@@ -33,6 +33,24 @@ struct NDS {
   bool load_rom(const std::string& path);
   void normalise_touch_calibration();   // see nds.cpp; called by load_bios
   void setup_direct_boot();          // skip the firmware: load the ROM's binaries and jump to them
+
+  // Firmware settings persistence.
+  //
+  // Booting the firmware lets the console be set up from inside it -- the
+  // nickname, birthday, favourite colour, message, language -- and the
+  // firmware saves those by writing its own flash over SPI. Rather than write
+  // those bytes back into the user's firmware.bin, which is a dump they
+  // cannot regenerate, the changed 256-byte pages are kept in a sidecar file
+  // and re-applied over the pristine image at load. Deleting the sidecar
+  // restores the console to whatever the dump says.
+  //
+  // Both take the sidecar's path and report the reason on failure. save_
+  // returns true and writes nothing when no page has changed.
+  static constexpr u32 FW_PAGE = 256;   // the flash's page, and the sidecar's granularity
+  bool load_firmware_override(const std::string& path, std::string& err);
+  bool save_firmware_override(const std::string& path, std::string& err);
+  bool firmware_override_dirty() const { return fw_dirty_pages > 0; }
+  void firmware_written(u32 offset);   // called from the SPI page-write path
   void run_frame();
 
   // Save states (core/state/state.h): whole-machine snapshots, taken only
@@ -58,6 +76,12 @@ struct NDS {
   // is the identity a save state checks against.
   u64 rom_id = 0;
   std::vector<u8> firmware;
+  // Which 256-byte pages of `firmware` differ from the dump on disk: one flag
+  // per page, set by the SPI write path and by a loaded override (so a page
+  // written in an earlier session is still written out by this one).
+  std::vector<u8> fw_page_dirty;
+  u32 fw_dirty_pages = 0;
+  u64 firmware_id = 0;           // identity of the pristine dump; an override names it
 
   mem::Bus   bus;
   Scheduler  sched;
@@ -75,6 +99,12 @@ struct NDS {
 
   u64  frame_count = 0;
   bool frame_ready = false;
+  // The ARM7 has pulled the power line down (PMIC register 0 bit 6): the
+  // console has switched itself off. The firmware does it on the way out of
+  // its settings pages, which is the point at which the settings it just
+  // wrote are complete. Cleared by reset(); what a power-off means is the
+  // frontend's decision -- SDL saves the settings sidecar and reboots.
+  bool power_off = false;
 
   TraceFn trace = nullptr;
   void*   trace_user = nullptr;

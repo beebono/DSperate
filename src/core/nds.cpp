@@ -59,6 +59,7 @@ void NDS::reset() {
   spu.reset();
   frame_count = 0;
   frame_ready = false;
+  power_off = false;
 }
 
 // DS firmware CRC16 (GBATEK "Firmware Header"; the polynomial table and the
@@ -106,7 +107,76 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
   std::memcpy(bus.bios9.get(), b9.data(), b9.size());
   std::memcpy(bus.bios7.get(), b7.data(), b7.size());
   firmware = std::move(fw);
+  firmware_id = 1469598103934665603ull;
+  for (u8 b : firmware) firmware_id = (firmware_id ^ b) * 1099511628211ull;
+  fw_page_dirty.assign((firmware.size() + FW_PAGE - 1) / FW_PAGE, 0);
+  fw_dirty_pages = 0;
   normalise_touch_calibration();
+  return true;
+}
+
+void NDS::firmware_written(u32 offset) {
+  const u32 page = offset / FW_PAGE;
+  if (page >= fw_page_dirty.size() || fw_page_dirty[page]) return;
+  fw_page_dirty[page] = 1;
+  fw_dirty_pages++;
+}
+
+// Sidecar format: "DSFWOVR1", the size of the firmware it was made from, the
+// identity of that dump, the page size, the page count, then that many
+// (u32 page index, page bytes) records.
+namespace {
+constexpr char kFwOvrMagic[8] = {'D', 'S', 'F', 'W', 'O', 'V', 'R', '1'};
+} // namespace
+
+bool NDS::load_firmware_override(const std::string& path, std::string& err) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) { err = "cannot open"; return false; }
+  char magic[8]; u32 head[4];
+  if (!f.read(magic, 8) || std::memcmp(magic, kFwOvrMagic, 8) != 0) { err = "not a firmware override"; return false; }
+  if (!f.read(reinterpret_cast<char*>(head), sizeof head)) { err = "truncated header"; return false; }
+  if (head[0] != firmware.size()) { err = "made from a firmware of a different size"; return false; }
+  // A dump mismatch is not fatal: the settings pages are the same shape in
+  // every retail firmware, and refusing to boot because someone re-dumped
+  // their console would be worse than the warning the frontend prints.
+  if (head[1] != static_cast<u32>(firmware_id)) err = "made from a different firmware dump";
+  if (head[2] != FW_PAGE) { err = "unknown page size"; return false; }
+  for (u32 i = 0; i < head[3]; ++i) {
+    u32 page;
+    if (!f.read(reinterpret_cast<char*>(&page), 4)) { err = "truncated"; return false; }
+    if (page >= fw_page_dirty.size()) { err = "page out of range"; return false; }
+    if (!f.read(reinterpret_cast<char*>(firmware.data() + page * FW_PAGE), FW_PAGE)) { err = "truncated"; return false; }
+    firmware_written(page * FW_PAGE);
+  }
+  // The user settings pages carry the touchscreen calibration, and the
+  // frontend reports plain pixel coordinates on the strength of that being
+  // normalised. Someone who ran the calibration wizard inside the firmware
+  // has a real calibration in their override, which would put every touch in
+  // the wrong place; normalise again over the top. The console keeps the
+  // calibration screen, it just cannot mis-aim the pen with it.
+  normalise_touch_calibration();
+  return true;
+}
+
+bool NDS::save_firmware_override(const std::string& path, std::string& err) {
+  if (!fw_dirty_pages) return true;
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) { err = "cannot write"; return false; }
+    const u32 head[4] = {static_cast<u32>(firmware.size()), static_cast<u32>(firmware_id), FW_PAGE, fw_dirty_pages};
+    f.write(kFwOvrMagic, 8);
+    f.write(reinterpret_cast<const char*>(head), sizeof head);
+    for (u32 page = 0; page < fw_page_dirty.size(); ++page) {
+      if (!fw_page_dirty[page]) continue;
+      f.write(reinterpret_cast<const char*>(&page), 4);
+      f.write(reinterpret_cast<const char*>(firmware.data() + page * FW_PAGE), FW_PAGE);
+    }
+    if (!f) { err = "write failed"; return false; }
+  }
+  // Rename over the old one, so an interrupted write cannot leave a truncated
+  // override that would boot the console with half of someone's settings.
+  if (std::rename(tmp.c_str(), path.c_str()) != 0) { err = "cannot replace"; std::remove(tmp.c_str()); return false; }
   return true;
 }
 
@@ -226,7 +296,7 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   w.blob("DSST", 4);
   w.put(state::FORMAT_VERSION);
   w.begin("HEAD");
-  w.put(cart->header().game_code_u32());
+  w.put(cart ? cart->header().game_code_u32() : 0u);   // 0: a firmware boot, no card in the slot
   w.put(rom_id);
   w.put(frame_count);
 #if DSPERATE_JIT
@@ -253,12 +323,11 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   spu.sync_state(w);
   gpu3d.sync_state(w);
   gpu.sync_state(w);
-  cart->sync_state(w);
+  if (cart) cart->sync_state(w);   // a firmware boot has no card to snapshot
   return true;
 }
 
 bool NDS::load_state(state::Reader& r, std::string& err) {
-  if (!cart) { err = "no cartridge"; return false; }
   char magic[4]; r.blob_raw(magic, 4);
   u32 version = 0; r.blob_raw(&version, 4);
   if (std::memcmp(magic, "DSST", 4) != 0) { err = "not a DSperate save state"; return false; }
@@ -267,7 +336,10 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   u32 code = 0; u64 ident = 0, frames = 0; u32 jit_built = 0;
   r.fields(code, ident, frames, jit_built);
   r.end();
-  if (code != cart->header().game_code_u32()) { err = "save state is for another game"; return false; }
+  // A state taken on a firmware boot records a zero game code and identity;
+  // it only loads back into another firmware boot, and vice versa.
+  const u32 want_code = cart ? cart->header().game_code_u32() : 0u;
+  if (code != want_code) { err = cart ? "save state is for another game" : "save state is for a game, not the firmware"; return false; }
   if (ident != rom_id) { err = "save state is for another ROM image"; return false; }
 
   // From here the machine is being overwritten: a failure leaves it broken.
@@ -284,7 +356,7 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   spu.sync_state(r);
   gpu3d.sync_state(r);
   gpu.sync_state(r);
-  cart->sync_state(r);
+  if (cart) cart->sync_state(r);
   if (!r.ok()) { err = r.error(); return false; }
   gpu.after_load();
 #if DSPERATE_JIT

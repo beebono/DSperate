@@ -8,6 +8,8 @@
 #include "core/input/input_log.h"
 
 #include <cstdio>
+#include <cstring>
+#include <memory>
 
 using namespace ds;
 
@@ -242,6 +244,236 @@ static void test_input_log() {
   std::remove(path);
 }
 
+// ---- RTC free-running clock ------------------------------------------------
+// The clock only runs when a frontend asks for it; what is tested here is the
+// carry, because a game may have written its own date into the chip and
+// whatever it wrote has to advance correctly from there.
+// Fire the one-second event directly rather than running a whole second of
+// emulation for each tick: what is under test is the carry, not the schedule.
+static void advance_seconds(NDS& nds, u32 n) {
+  for (u32 i = 0; i < n; ++i) { nds.io.rtc.next_tick = nds.sched.now(); nds.io.rtc_event(); }
+}
+
+static void set_date(NDS& nds, u8 yy, u8 mm, u8 dd, u8 dow, u8 hh, u8 mi, u8 ss) {
+  const u8 d[7] = {yy, mm, dd, dow, hh, mi, ss};
+  std::memcpy(nds.io.rtc.datetime, d, 7);
+}
+
+static void check_date(NDS& nds, u8 yy, u8 mm, u8 dd, u8 hh, u8 mi, u8 ss, int line) {
+  const u8* d = nds.io.rtc.datetime;
+  const u8 want[7] = {yy, mm, dd, d[3], hh, mi, ss};
+  for (int i = 0; i < 7; ++i)
+    if (d[i] != want[i]) {
+      std::fprintf(stderr, "FAIL %s:%d: rtc %02x-%02x-%02x %02x:%02x:%02x, expected %02x-%02x-%02x %02x:%02x:%02x\n",
+                   __FILE__, line, d[0], d[1], d[2], d[4], d[5], d[6], yy, mm, dd, hh, mi, ss);
+      ++failures;
+      return;
+    }
+}
+#define CHECK_DATE(nds, ...) check_date(nds, __VA_ARGS__, __LINE__)
+
+static void test_rtc_clock() {
+  NDS nds;
+  // Off by default: the harness compares runs against each other and against
+  // melonDS, so time must not move on its own.
+  CHECK_EQ(nds.io.rtc.ticking, false);
+  advance_seconds(nds, 5);
+  CHECK_DATE(nds, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00);
+  CHECK_EQ(nds.io.rtc.status1 & 0x80, 0x80u);       // power lost, as melonDS resets it
+
+  nds.io.start_rtc_clock();
+  // Seeded from the wall, so the value is not fixed -- but the power-lost bit
+  // has to be gone, because that bit is what sends the firmware into its
+  // first-boot setup wizard instead of the menu.
+  CHECK_EQ(nds.io.rtc.status1 & 0x80, 0u);
+  CHECK_EQ(nds.io.rtc.ticking, true);
+
+  // Second, minute and hour carry.
+  set_date(nds, 0x26, 0x09, 0x02, 3, 0x11, 0x59, 0x59);
+  advance_seconds(nds, 1);
+  CHECK_DATE(nds, 0x26, 0x09, 0x02, 0x12, 0x00, 0x00);
+  set_date(nds, 0x26, 0x09, 0x02, 3, 0x23, 0x59, 0x59);
+  advance_seconds(nds, 1);
+  CHECK_DATE(nds, 0x26, 0x09, 0x03, 0x00, 0x00, 0x00);
+  CHECK_EQ(nds.io.rtc.datetime[3], 4u);             // and the day of the week with it
+
+  // Month end, year end, and the leap day. Years are two digits from 2000, so
+  // every year divisible by four in range is a leap year -- 2024 has a 29th
+  // of February and 2026 does not.
+  set_date(nds, 0x26, 0x09, 0x30, 3, 0x23, 0x59, 0x59);
+  advance_seconds(nds, 1);
+  CHECK_DATE(nds, 0x26, 0x10, 0x01, 0x00, 0x00, 0x00);
+  set_date(nds, 0x26, 0x12, 0x31, 4, 0x23, 0x59, 0x59);
+  advance_seconds(nds, 1);
+  CHECK_DATE(nds, 0x27, 0x01, 0x01, 0x00, 0x00, 0x00);
+  set_date(nds, 0x26, 0x02, 0x28, 6, 0x23, 0x59, 0x59);
+  advance_seconds(nds, 1);
+  CHECK_DATE(nds, 0x26, 0x03, 0x01, 0x00, 0x00, 0x00);
+  set_date(nds, 0x24, 0x02, 0x28, 3, 0x23, 0x59, 0x59);
+  advance_seconds(nds, 1);
+  CHECK_DATE(nds, 0x24, 0x02, 0x29, 0x00, 0x00, 0x00);
+  set_date(nds, 0x24, 0x02, 0x29, 4, 0x23, 0x59, 0x59);
+  advance_seconds(nds, 1);
+  CHECK_DATE(nds, 0x24, 0x03, 0x01, 0x00, 0x00, 0x00);
+
+  // A slice that overruns the due time still lands on the right second: the
+  // event catches up whole seconds rather than dropping them. Ten seconds
+  // late here, so ten carries out of one event.
+  // Ten seconds of scheduler time have to have passed for the mark to be able
+  // to sit that far back, so this is the one place that runs real cycles.
+  nds.sched.run_until(10 * static_cast<u64>(ARM9_CLOCK_HZ));
+  set_date(nds, 0x26, 0x09, 0x02, 3, 0x00, 0x00, 0x00);
+  nds.io.rtc.next_tick = nds.sched.now() - 9 * static_cast<u64>(ARM9_CLOCK_HZ);
+  nds.io.rtc_event();
+  CHECK_DATE(nds, 0x26, 0x09, 0x02, 0x00, 0x00, 0x10);
+}
+
+// ---- firmware settings sidecar --------------------------------------------
+// The firmware saves the console's name, birthday and so on by writing its own
+// flash. Those pages go to a file beside the firmware, never into the dump.
+// SPICNT and SPIDATA are the ARM7's; device 1 (bits 8-9) is the firmware
+// flash, bit 11 holds the chip select for the next byte. The transfer takes
+// time and a byte written while the bus is busy is dropped, exactly as on
+// hardware, so each byte is given its cycles.
+static void fw_spi(NDS& nds, u8 byte, bool hold) {
+  nds.bus.dma_write16(Cpu::ARM7, 0x040001C0, static_cast<u16>(0x8000 | (hold ? 0x0800 : 0) | 0x0100));
+  nds.bus.dma_write8(Cpu::ARM7, 0x040001C2, byte);
+  settle(nds);
+}
+
+static void test_firmware_override() {
+  // Each NDS carries the console's memory, so they go on the heap and one at
+  // a time -- five of them at once overflows the stack.
+  auto fresh = [] {
+    auto p = std::make_unique<NDS>();
+    p->firmware.assign(0x40000, 0xFF);
+    p->firmware_id = 0x1234;
+    p->fw_page_dirty.assign(p->firmware.size() / NDS::FW_PAGE, 0);
+    p->fw_dirty_pages = 0;
+    return p;
+  };
+  const char* path = "test_fw_override.ovr";
+  std::string err;
+
+  {
+    auto nds = fresh();
+    // Write "Hi" at 0x3FE06 the way the firmware does: WREN, then a page
+    // write with a three-byte address.
+    fw_spi(*nds, 0x06, false);                      // WREN
+    const u8 seq[] = {0x0A, 0x03, 0xFE, 0x06, 'H', 'i'};
+    for (size_t i = 0; i < sizeof seq; ++i) fw_spi(*nds, seq[i], i + 1 < sizeof seq);
+    CHECK_EQ(nds->firmware[0x3FE06], 'H');
+    CHECK_EQ(nds->firmware[0x3FE07], 'i');
+    CHECK_EQ(nds->firmware_override_dirty(), true);
+    CHECK_EQ(nds->save_firmware_override(path, err), true);
+  }
+  {
+    // Without WREN nothing is written and no page is marked.
+    auto nds = fresh();
+    const u8 seq[] = {0x0A, 0x03, 0xFE, 0x06, 'X'};
+    for (size_t i = 0; i < sizeof seq; ++i) fw_spi(*nds, seq[i], i + 1 < sizeof seq);
+    CHECK_EQ(nds->firmware[0x3FE06], 0xFFu);
+    CHECK_EQ(nds->firmware_override_dirty(), false);
+  }
+  {
+    // Round trip: the sidecar carries the changed page and nothing else.
+    auto nds = fresh();
+    CHECK_EQ(nds->load_firmware_override(path, err), true);
+    CHECK_EQ(err.empty(), true);                    // same dump, so no warning
+    CHECK_EQ(nds->firmware[0x3FE06], 'H');
+    CHECK_EQ(nds->firmware[0x3FE07], 'i');
+    CHECK_EQ(nds->firmware[0x3FD00], 0xFFu);        // a page it never touched
+    // A loaded page stays dirty, so a session that changes nothing still
+    // writes the settings from the session before it back out.
+    CHECK_EQ(nds->firmware_override_dirty(), true);
+  }
+  {
+    // A sidecar made from a different dump warns but still applies: retail
+    // firmwares put the settings in the same place, and refusing to boot
+    // because someone re-dumped their console would be the worse failure.
+    auto nds = fresh();
+    nds->firmware_id = 0x9999;
+    CHECK_EQ(nds->load_firmware_override(path, err), true);
+    CHECK_EQ(err.empty(), false);
+    CHECK_EQ(nds->firmware[0x3FE06], 'H');
+  }
+  {
+    // A firmware of another size is refused outright.
+    auto nds = fresh();
+    nds->firmware.assign(0x20000, 0xFF);
+    nds->fw_page_dirty.assign(nds->firmware.size() / NDS::FW_PAGE, 0);
+    CHECK_EQ(nds->load_firmware_override(path, err), false);
+  }
+  std::remove(path);
+}
+
+// ---- power off, and the power-lost bit across a reboot ---------------------
+// The ARM7 shuts the console down by setting bit 6 of power-management
+// register 0. The firmware does it on the way out of its settings pages,
+// which is how a frontend knows the settings it just wrote are complete.
+static void pmic_write(NDS& nds, u8 reg, u8 value) {
+  nds.bus.dma_write16(Cpu::ARM7, 0x040001C0, 0x8800);        // enabled, device 0, hold
+  nds.bus.dma_write8(Cpu::ARM7, 0x040001C2, reg);            // command: write this register
+  settle(nds);
+  nds.bus.dma_write16(Cpu::ARM7, 0x040001C0, 0x8000);        // last byte, drop the select
+  nds.bus.dma_write8(Cpu::ARM7, 0x040001C2, value);
+  settle(nds);
+}
+
+// The RTC is bit-banged a bit at a time on 0x04000138: CS high to start,
+// then a value per clock edge, the host driving SIO for a write.
+static void rtc_send(NDS& nds, u8 v) {
+  for (int i = 0; i < 8; ++i) {
+    const u16 base = static_cast<u16>(0x0004 | 0x0010 | ((v >> i) & 1));
+    nds.bus.dma_write16(Cpu::ARM7, 0x04000138, static_cast<u16>(base | 0x0002));   // clock high
+    nds.bus.dma_write16(Cpu::ARM7, 0x04000138, base);                              // clock low: shift
+  }
+}
+
+static u8 rtc_recv(NDS& nds) {
+  u8 v = 0;
+  for (int i = 0; i < 8; ++i) {
+    nds.bus.dma_write16(Cpu::ARM7, 0x04000138, 0x0006);
+    nds.bus.dma_write16(Cpu::ARM7, 0x04000138, 0x0004);
+    if (nds.bus.dma_read16(Cpu::ARM7, 0x04000138) & 1) v |= static_cast<u8>(1u << i);
+  }
+  return v;
+}
+
+// Command 0x86: read (bit 7), register 0 (bits 6-4) = status1, 6 in the low
+// nibble as the chip requires.
+static u8 read_status1(NDS& nds) {
+  nds.bus.dma_write16(Cpu::ARM7, 0x04000138, 0x0000);
+  nds.bus.dma_write16(Cpu::ARM7, 0x04000138, 0x0004);   // CS rising: start
+  rtc_send(nds, 0x86);
+  return rtc_recv(nds);
+}
+
+static void test_power_off() {
+  auto nds = std::make_unique<NDS>();
+  CHECK_EQ(nds->power_off, false);
+  pmic_write(*nds, 0x00, 0x0D);                  // backlights and the amplifier: not a shutdown
+  CHECK_EQ(nds->power_off, false);
+  pmic_write(*nds, 0x00, 0x4D);                  // bit 6: the power line drops
+  CHECK_EQ(nds->power_off, true);
+  nds->reset();
+  CHECK_EQ(nds->power_off, false);               // a reboot starts with the line up
+
+  // status1 bit 7 says the clock lost power, and it is what sends the
+  // firmware into its first-boot setup wizard. The chip clears it when the
+  // console reads it, and only a flat battery sets it again -- so a reboot
+  // (which is what reset() is) must not bring it back, or every power-off
+  // would land in the wizard again.
+  CHECK_EQ(read_status1(*nds) & 0x80, 0x80u);    // first boot: reported once
+  CHECK_EQ(read_status1(*nds) & 0x80, 0u);       // and cleared by that read
+  nds->reset();
+  CHECK_EQ(read_status1(*nds) & 0x80, 0u);       // still clear after the reboot
+
+  // A fresh console is a fresh battery.
+  auto cold = std::make_unique<NDS>();
+  CHECK_EQ(read_status1(*cold) & 0x80, 0x80u);
+}
+
 int main() {
   test_div();
   test_sqrt();
@@ -250,6 +482,9 @@ int main() {
   test_input();
   test_mic_and_lid();
   test_input_log();
+  test_rtc_clock();
+  test_firmware_override();
+  test_power_off();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("io: ok");
   return 0;

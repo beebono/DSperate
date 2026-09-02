@@ -73,6 +73,14 @@ struct Rtc {
   u8  datetime[7] = {0, 1, 1, 0, 0, 0, 0};   // yy mm dd dow hh mm ss (BCD)
   u8  alarm1[3] = {}, alarm2[3] = {};
   u8  clock_adjust = 0, free_reg = 0;
+  // Free-running clock. Off by default: the verification harness compares
+  // frame hashes and traces against melonDS, and a clock seeded from the wall
+  // would make every run differ from the last. A frontend that wants a real
+  // console turns it on (Io::start_rtc_clock), which also clears the
+  // power-lost bit -- a clock holding valid time has not lost power, and that
+  // bit is exactly what sends the firmware into its first-boot setup wizard.
+  bool ticking = false;
+  u64  next_tick = 0;           // scheduler time of the next one-second carry
 };
 
 // Cart bus (Slot-1): ROMCTRL, the transfer timing and the DRQ/FIFO state
@@ -246,6 +254,23 @@ private:
   void rtc_byte_in(u8 value);
   void rtc_cmd_read();
   void rtc_cmd_write(u8 value);
+  void rtc_tick();              // one second of carry through datetime[]
+  void rtc_seed();              // datetime[] <- host local time, clock armed
+  bool rtc_host_clock_ = false; // survives reset(), which clears Rtc itself
+  // The chip clears status1 bit 7 (power was lost) when the guest reads it,
+  // and only real loss of battery power sets it again. reset() is the power
+  // button, not the battery coming out, so once the console has been told
+  // about it the bit must not come back -- otherwise a reboot sends the
+  // firmware into its first-boot setup wizard every time. Survives reset()
+  // for that reason; a fresh NDS starts over.
+  bool rtc_power_lost_seen_ = false;
+public:
+  // Seed the clock from the host's local time and start it running. The
+  // setting survives reset(); the frontend calls it once at startup.
+  void start_rtc_clock();
+  bool rtc_host_clock() const { return rtc_host_clock_; }
+  void rtc_event();
+private:
 
   void cart_write_romctrl(u32 value);
   bool cart_bulk_ = false;   // DS_CART_BULK=1 or the frontend's fast_load, see cart_receive_word

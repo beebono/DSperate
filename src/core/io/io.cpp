@@ -8,7 +8,9 @@
 #include "core/nds.h"
 #include "core/dma/dma.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -50,6 +52,8 @@ void Io::reset() {
   spi_fw = SpiFirmware{}; spi_tsc = SpiTouch{}; spi_pm = SpiPower{};
   mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;
   rtc = Rtc{};
+  if (rtc_host_clock_) rtc_seed();
+  else if (rtc_power_lost_seen_) rtc.status1 = 0x02;   // a reboot, not a flat battery
   cart = Cart{};
   wifi_reset();
 }
@@ -234,6 +238,12 @@ u8 Io::spi_transfer(u8 value) {
     if (p.cmd & 0x80) p.data = (reg < 8) ? p.regs[reg] : 0;
     else {
       if (reg < 8) p.regs[reg] = value;
+      // Register 0 bit 6 is the system power line: the ARM7 drops it to shut
+      // the console down. The firmware does this when it leaves its settings
+      // pages, after the flash write that saves them -- so it is also the
+      // moment the settings are complete on disk. Recorded rather than acted
+      // on; the frontend decides what a power-off means (NDS::power_off).
+      if (reg == 0 && (value & 0x40)) nds_.power_off = true;
       static const bool log = std::getenv("DS_MIC_LOG") != nullptr;
       if (log && (reg == 2 || reg == 3)) std::fprintf(stderr, "[mic] PMIC reg %u = %02x (frame %llu)\n", reg, value, (unsigned long long)nds_.frame_count);
       p.data = 0;
@@ -270,7 +280,10 @@ u8 Io::spi_transfer(u8 value) {
       auto& fw = nds_.firmware;
       if (f.pos < 4) { f.addr = (f.addr << 8) | value; f.data = 0; }
       else {
-        if ((f.status & 2) && !fw.empty()) fw[f.addr % fw.size()] = value;
+        if ((f.status & 2) && !fw.empty()) {
+          const u32 off = f.addr % fw.size();
+          if (fw[off] != value) { fw[off] = value; nds_.firmware_written(off); }
+        }
         f.data = value;
         f.addr++;
       }
@@ -402,12 +415,90 @@ void Io::spi_write_data(u8 value) {
 }
 
 // ---- RTC (ARM7, bit-banged on 0x04000138) ----------------------------------
+// The clock only free-runs when a frontend asks for it (start_rtc_clock); the
+// harness leaves it at melonDS's frozen 2000-01-01 so runs stay comparable.
+static u8 to_bcd(int v) { return static_cast<u8>(((v / 10) % 10) << 4 | (v % 10)); }
+static int from_bcd(u8 v) { return (v >> 4) * 10 + (v & 0x0F); }
+
+static void rtc_ev(NDS& nds, u32) { nds.io.rtc_event(); }
+
+void Io::rtc_seed() {
+  const std::time_t t = std::time(nullptr);
+  std::tm lt{};
+#if defined(_WIN32)
+  localtime_s(&lt, &t);
+#else
+  localtime_r(&t, &lt);
+#endif
+  Rtc& r = rtc;
+  r.datetime[0] = to_bcd(lt.tm_year % 100);     // the DS keeps two digits; 2000-2099
+  r.datetime[1] = to_bcd(lt.tm_mon + 1);
+  r.datetime[2] = to_bcd(lt.tm_mday);
+  r.datetime[3] = static_cast<u8>(lt.tm_wday);  // 0 = Sunday, as the firmware reads it
+  // Bit 1 of status1 is 24-hour mode; in 12-hour mode bit 6 of the hour byte
+  // is the PM flag. We always run 24-hour, matching the melonDS default.
+  r.datetime[4] = to_bcd(lt.tm_hour);
+  r.datetime[5] = to_bcd(lt.tm_min);
+  r.datetime[6] = to_bcd(std::min(lt.tm_sec, 59));   // no leap seconds on this chip
+  r.status1 = 0x02;      // 24-hour mode, and *not* power-lost: see Rtc::ticking
+  r.ticking = true;
+  r.next_tick = nds_.sched.now() + ARM9_CLOCK_HZ;
+  nds_.sched.schedule(EventId::Rtc, r.next_tick, rtc_ev, 0);
+}
+
+void Io::start_rtc_clock() {
+  rtc_host_clock_ = true;
+  rtc_seed();
+}
+
+// One second of carry. Written out rather than converting to a time_t and
+// back because a game may have written its own date into the chip, and
+// whatever it wrote is what has to advance -- including values no calendar
+// would produce.
+void Io::rtc_tick() {
+  Rtc& r = rtc;
+  int sec = from_bcd(r.datetime[6]) + 1;
+  if (sec < 60) { r.datetime[6] = to_bcd(sec); return; }
+  r.datetime[6] = 0;
+  int min = from_bcd(r.datetime[5]) + 1;
+  if (min < 60) { r.datetime[5] = to_bcd(min); return; }
+  r.datetime[5] = 0;
+  const u8 pm = r.datetime[4] & 0x40;
+  int hour = from_bcd(static_cast<u8>(r.datetime[4] & 0x3F)) + 1;
+  if (hour < 24) { r.datetime[4] = static_cast<u8>(to_bcd(hour) | pm); return; }
+  r.datetime[4] = pm;
+  r.datetime[3] = static_cast<u8>((r.datetime[3] + 1) % 7);
+  const int year = from_bcd(r.datetime[0]), month = from_bcd(r.datetime[1]);
+  // Years are two digits from 2000, so the century rule never bites: every
+  // year divisible by 4 in 2000-2099 is a leap year.
+  static const int len[13] = {31, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  const int days = (month == 2 && (year % 4) == 0) ? 29 : len[month >= 1 && month <= 12 ? month : 1];
+  int day = from_bcd(r.datetime[2]) + 1;
+  if (day <= days) { r.datetime[2] = to_bcd(day); return; }
+  r.datetime[2] = to_bcd(1);
+  if (month < 12) { r.datetime[1] = to_bcd(month + 1); return; }
+  r.datetime[1] = to_bcd(1);
+  r.datetime[0] = to_bcd((year + 1) % 100);
+}
+
+void Io::rtc_event() {
+  Rtc& r = rtc;
+  if (!r.ticking) return;
+  // Catch up whole seconds: a slice can overrun the due time, and a save
+  // state reloaded into a fresh run can leave the mark far behind.
+  do {
+    rtc_tick();
+    r.next_tick += ARM9_CLOCK_HZ;
+  } while (r.next_tick <= nds_.sched.now());
+  nds_.sched.schedule(EventId::Rtc, r.next_tick, rtc_ev, 0);
+}
+
 // Protocol per GBATEK; state and edge sampling mirror melonDS so traces match.
 void Io::rtc_cmd_read() {
   Rtc& r = rtc;
   if ((r.cmd & 0x0F) != 0x06) return;
   switch (r.cmd & 0x70) {
-  case 0x00: r.output[0] = r.status1; r.status1 &= 0x0F; break;
+  case 0x00: r.output[0] = r.status1; if (r.status1 & 0x80) rtc_power_lost_seen_ = true; r.status1 &= 0x0F; break;
   case 0x40: r.output[0] = r.status2; break;
   case 0x20: std::memcpy(r.output, &r.datetime[0], 7); break;
   case 0x60: std::memcpy(r.output, &r.datetime[4], 3); break;
@@ -1117,6 +1208,11 @@ template <class S> void Io::sync_state(S& s) {
     nds_.sched.rebind(EventId::Div, ev_div);
     nds_.sched.rebind(EventId::Sqrt, ev_sqrt);
     nds_.sched.rebind(EventId::LcdIrq, ev_lcd_irq);
+    // The clock is a property of the session, not of the state: a state saved
+    // on a console with a running clock must not stop it on a harness run, or
+    // start one there. Whatever this run was set up with keeps going, rebased
+    // onto the restored timeline.
+    if (rtc.ticking) { rtc.next_tick = nds_.sched.now() + ARM9_CLOCK_HZ; nds_.sched.schedule(EventId::Rtc, rtc.next_tick, rtc_ev, 0); }
   }
 }
 template void Io::sync_state<state::Writer>(state::Writer&);
