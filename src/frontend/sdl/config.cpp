@@ -164,7 +164,7 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 #                               # dump itself is never written to; delete this file to put the
 #                               # console back to whatever the dump says. Default: <firmware>.ovr
 # games = /path/to/games        # the library the loader cart's game picker lists (.nds and .zip,
-#                               # one level, sorted by the ROM header's own title where it has one).
+#                               # one level, listed by filename and sorted by it).
 #                               # Only used on a firmware boot with a BootMenu.nds in the slot:
 #                               # tapping the card in the DS menu raises this list, and picking a
 #                               # game boots it. Unset, the picker says so rather than showing

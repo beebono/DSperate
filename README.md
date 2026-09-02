@@ -297,10 +297,17 @@ from a commercial dump.
 
 **Picking a game from the DS menu.** Point `[paths] games` at a directory and
 tapping that card raises a list of what is in it, over the white the launch
-animation fades to; choosing one boots it. The list shows each ROM's own
-header title where it has one (the filename otherwise, which is what a `.zip`
-gets), and it is the pause menu's cheats page underneath, so it scrolls,
-pages with the shoulder buttons and scrolls a name too long to fit.
+animation fades to; choosing one boots it. The list shows each file's
+name without its extension -- the ROM header's own title reads
+`ARTACADEMYRT` where the file reads `Art Academy` -- and it is the pause
+menu's cheats page underneath, so it scrolls, pages with the shoulder buttons
+and scrolls a name too long to fit.
+
+The tap is what arms it: the list goes up on the first frame where both
+screens are pure white, which is where the console's launch animation
+settles. Whiteness alone would not do, since the firmware boot has a white
+stretch of its own, and a tap that goes somewhere else in the DS menu drops
+the arm again after three seconds.
 
 The chosen game is direct-booted rather than firmware-booted a second time,
 which is both faster and better looking -- the loader's fade covers the

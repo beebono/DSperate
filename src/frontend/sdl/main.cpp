@@ -213,12 +213,12 @@ bool load_state_file(NDS& nds, const std::string& path) {
 
 // The game library, for the picker the loader cart raises.
 //
-// A ROM's own header title is what the player recognises, so the first 0x200
-// bytes of each file are read for it -- cheap even for a big library, since
-// it is one short read per file and no image is loaded. The title is only
-// trusted when the header looks like one (printable title and game code);
-// anything else, a zip included, falls back to the filename, because getting
-// a title out of an archive would mean inflating the ROM.
+// The row is the filename without its extension, not the ROM header's own
+// 12-byte title. The header title was the plan, on the theory that a filename
+// is cryptic; a look at three real ROMs says otherwise -- "ARTACADEMYRT",
+// "FF3" and "LEGENDOFKAY" against "Art Academy", "Final Fantasy III" and
+// "Legend of Kay". The filename is what the player named the file, and it is
+// the one thing about a library they control.
 std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
   std::vector<ds::sdl::Menu::GameEntry> games;
   if (dir.empty()) return games;
@@ -232,27 +232,7 @@ std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
     std::string ext = name.substr(dot + 1);
     for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (ext != "nds" && ext != "zip") continue;
-    const std::string path = dir + "/" + name;
-
-    std::string title = rom_stem(name);
-    if (ext == "nds") {
-      if (FILE* f = std::fopen(path.c_str(), "rb")) {
-        u8 head[0x200];
-        const size_t got = std::fread(head, 1, sizeof head, f);
-        std::fclose(f);
-        if (got == sizeof head) {
-          // Printable-or-padding title, printable game code: enough to tell a
-          // header from a file that merely ends in .nds.
-          bool ok = true;
-          for (int i = 0; i < 12 && ok; ++i) if (head[i] && (head[i] < 0x20 || head[i] > 0x7E)) ok = false;
-          for (int i = 12; i < 16 && ok; ++i) if (head[i] < 0x20 || head[i] > 0x7E) ok = false;
-          std::string t(reinterpret_cast<char*>(head), 12);
-          while (!t.empty() && (t.back() == ' ' || t.back() == '\0')) t.pop_back();
-          if (ok && !t.empty()) title = t;
-        }
-      }
-    }
-    games.push_back({title, path});
+    games.push_back({rom_stem(name), dir + "/" + name});
   }
   closedir(d);
   // By what the list shows, so the order on screen is the order it is read in.
@@ -836,11 +816,11 @@ int main(int argc, char** argv) {
   bool launcher = boot_firmware && nds.cart != nullptr;
   if (launcher) VLOG("launcher: %zu games in %s\n", games.size(), cfg.str("paths.games").c_str());
   int launch_wait = -1;         // frames since the card was tapped; -1 = not armed
-  // How long to wait for the fade before showing the list anyway. The fade
-  // measured ~20 frames; this is loose enough to absorb a slower one and
-  // short enough that a firmware quirk cannot strand the player on a white
-  // screen with no way forward.
-  constexpr int kLaunchWaitFrames = 120;
+  bool pen_was_down = false;    // for the release edge that ends a tap
+  // How long a tap gets to turn into the launch's white. Measured at ~60
+  // frames from the release; past this the tap was for something else in the
+  // DS menu -- the settings, the calendar -- and the arm is simply dropped.
+  constexpr int kLaunchWaitFrames = 180;
   std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
   bool menu_dirty = false;      // the menu screens need compositing and presenting again
   Uint32 menu_ms = 0;           // SDL_GetTicks at the menu's last tick
@@ -1276,13 +1256,18 @@ int main(int argc, char** argv) {
       // what either page is drawn over.
       bool raise = true;
       if (launch_wait >= 0) {
-        // The fade has settled when both screens are pure white. If it never
-        // does, the list still goes up: a player left looking at a spinning
-        // stub has no way forward, and a list they did not expect at least has
-        // one.
+        // The launch has faded when both screens are pure white, and the
+        // loader's stub then spins on that white for as long as we like, so
+        // there is no hurry and no frame to miss.
         const bool white = screen_is_white(nds, 0) && screen_is_white(nds, 1);
-        if (!white && launch_wait < kLaunchWaitFrames) raise = false;
-        else if (!white) std::fprintf(stderr, "launcher: the launch never faded to white; raising the list anyway\n");
+        raise = white;
+        if (!white && launch_wait >= kLaunchWaitFrames) {
+          // The tap went somewhere else in the DS menu. Drop the arm rather
+          // than raise a list the player did not ask for; the next tap arms
+          // again.
+          launch_wait = -1;
+          VLOG("launcher: no launch after that tap\n");
+        }
       }
       if (raise) {
         if (launch_wait >= 0) { launch_wait = -1; menu.open_games(); }
@@ -1292,16 +1277,33 @@ int main(int argc, char** argv) {
         set_paused(true);
       }
     }
-    // The loader cart's picker. The cart read arms it (Cart::launch_read);
-    // the list goes up on the first white frame after that, because the read
-    // lands mid-frame while the console's own launch animation is still
-    // fading, and the white it settles into is what the menu should sit on.
-    // Whiteness alone would not do: the firmware boot has a white stretch of
-    // its own, long before any of this.
-    if (launcher && launch_wait < 0 && nds.cart->launch_read()) {
-      nds.cart->clear_launch_read();
-      launch_wait = 0;
-      VLOG("launcher: the card was tapped\n");
+    // The loader cart's picker: arm on a tap, raise the list on the white the
+    // launch animation fades to.
+    //
+    // The arm is the player's own tap -- the pen leaving the screen -- rather
+    // than the cart read at the loader's arm9_rom_offset that would say "the
+    // firmware is launching this card". That read is the better signal in
+    // principle and Cart::launch_read() still offers it, but this firmware
+    // never issues it: tapping the card fades to white and then stops
+    // touching the cart bus at all (measured: the Slot-1 log is byte
+    // identical either side of the tap). Waiting for it would wait for ever.
+    //
+    // A tap is enough because it is only ever half the test. Whiteness alone
+    // would not do -- the firmware boot has a white stretch of its own, at
+    // frames 62..136, long before any of this -- but that stretch has no tap
+    // in front of it. A tap that leads somewhere else in the DS menu simply
+    // times out below.
+    if (launcher) {
+      const bool pen_down = !(nds.io.extkeyin & (1u << 6));
+      if (launch_wait < 0 && (pen_was_down && !pen_down)) {
+        launch_wait = 0;
+        VLOG("launcher: tapped; waiting for the launch to fade\n");
+      } else if (launch_wait < 0 && nds.cart->launch_read()) {
+        nds.cart->clear_launch_read();
+        launch_wait = 0;
+        VLOG("launcher: the card was launched; waiting for the fade\n");
+      }
+      pen_was_down = pen_down;
     }
     // Waiting for the fade means presenting unscaled frames, which is the
     // only path that leaves a picture in fb_ for the menu to sit on.
