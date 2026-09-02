@@ -68,11 +68,18 @@ namespace ds::gpu::kern {
   bool NS##text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v);                                      \
   /* Text BG row, 256-colour tiles: n tiles of 8 indices; values 0x8000 | (ext ? pal << 8 : 0) | idx. */     \
   bool NS##text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v);                             \
+  /* A bitmap BG row read left to right (a rotscale layer whose matrix is the identity within the line):   \
+     n texels, any n, nothing written past n. 8-bit: 0x8000 | idx (0 for index 0); direct colour: the        \
+     BGR555 word where bit 15 is set, else 0. Returns whether any is opaque. */                              \
+  bool NS##bmp_row_8(const u8* idx, u32 n, u16* v);                                                          \
+  bool NS##bmp_row_16(const u16* col, u32 n, u16* v);                                                        \
   /* Output stage: master brightness on 18-bit records, then 6->8 bit expansion to 0xAARRGGBB. */            \
   void NS##master_brightness(u16 reg, u32* dst);                                                             \
   void NS##expand_colours(u32* dst);                                                                         \
   /* Both in one pass from the engine's composite line. */                                                   \
   void NS##output_line(const Pixel* src, u16 reg, u32* dst);                                                 \
+  /* The same from a BGR555 line (VRAM or FIFO display: bit 15 ignored, no low green bit). */                 \
+  void NS##output_vram_line(const u16* src, u16 reg, u32* dst);                                               \
   /* Display capture, source A only: 18-bit records (alpha in bits 24-31, non-zero = opaque) packed to      \
      BGR555 with bit 15 = the alpha bit; n is the capture width, a multiple of 16. */                        \
   void NS##capture_a15(const Pixel* src, u32 n, u16* dst);                                                   \
@@ -129,12 +136,20 @@ namespace ds::gpu::kern {
   void NS##span_attrs2n_lin(const s32* y0, const s32* y1, s32 xv0, u32 n, s32 xdiff, s16* sc, s16* tc);      \
   /* Z-buffer depth: base + ((disp>>9) * factor * xrecip >> 13) with base/disp/factor chosen by z0 < z1. */    \
   void NS##span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* out);                    \
+  /* Constant depth over n pixels (rounded up to 4; the span buffers are padded). */                          \
+  void NS##span_z_const(s32 z, u32 n, s32* out);                                                              \
+  /* Clear image (DISP3DCNT bit 14): n pixels of one scanline from the colour row (texture slot 2) and the   \
+     depth row (slot 3), both BGR555. colour -> 18-bit record (5-bit channel c to c*2+1, 0 stays 0) with     \
+     alpha 31 where bit 15 is set; depth -> (d & 0x7FFF) * 0x200 + 0x1FF; attr -> polyid | (d & 0x8000).    \
+     Exactly n entries are written (the ring's border pixel follows the line). */                           \
+  void NS##clear_image_run(const u16* col, const u16* dep, u32 n, u32 polyid, u32* color, u32* depth, u32* attr); \
   /* Depth pre-pass over n pixels: pass[i] = 1 where z passes the test of `mode` against the top pixel        \
      (0: z < dst; 1: z <= dst when the destination is an opaque back-facing pixel, else z < dst; 2: within    \
      0x200 either way; 3: within 0xFF), 2 where it fails but the top pixel carries edge flags (the pixel      \
-     underneath is then a candidate), else 0. Returns (first << 16) | (last + 1) of the non-zero entries,     \
-     0 when there are none. `n` may be rounded up to a multiple of 4 (the arrays are padded). */              \
-  u32  NS##depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass);
+     underneath is then a candidate, and only when `under` -- without AA the lower layer is never read),   \
+     else 0. Returns (first << 16) | (last + 1) of the non-zero entries, 0 when there are none. `n` may be   \
+     rounded up to a multiple of 4 (the arrays are padded). */                                               \
+  u32  NS##depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass, bool under);
 
 namespace ref { DS_KERNEL_LIST() }
 #if DSPERATE_NEON

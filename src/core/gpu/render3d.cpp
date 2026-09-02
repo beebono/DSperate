@@ -165,21 +165,24 @@ s32 Renderer3D::Slope<side>::xval() const {
 // (flagged by bit 31); Y-major edges a single 5-bit coverage.
 template <int side>
 template <bool swapped>
-void Renderer3D::Slope<side>::edge_params(s32* length, s32* coverage) const {
+void Renderer3D::Slope<side>::edge_params(bool aa, s32* length, s32* coverage) const {
   if (xmajor) {
     if (!swapped || side) {
       if (side ^ static_cast<int>(negative)) *length = (dx >> 18) - ((dx - increment) >> 18);
       else *length = ((dx + increment) >> 18) - (dx >> 18);
     }
-    s32 startx = dx >> 18;
-    if (negative) startx = xlen - startx;
-    if (side) startx = startx - *length + 1;
-    const s32 startcov = (((startx << 10) + 0x1FF) * ylen) / xlen;
-    *coverage = static_cast<s32>(0x80000000u) | ((startcov & 0x3FF) << 12) | (xcov_incr & 0x3FF);
+    if (aa) {
+      s32 startx = dx >> 18;
+      if (negative) startx = xlen - startx;
+      if (side) startx = startx - *length + 1;
+      const s32 startcov = (((startx << 10) + 0x1FF) * ylen) / xlen;
+      *coverage = static_cast<s32>(0x80000000u) | ((startcov & 0x3FF) << 12) | (xcov_incr & 0x3FF);
+    } else *coverage = 0;
     if (swapped) *length = 1;
     return;
   }
   *length = 1;
+  if (!aa) { *coverage = 0; return; }
   if (increment == 0) { *coverage = swapped ? 0 : 31; return; }
   s32 cov = ((dx >> 9) + (increment >> 10)) >> 4;
   if ((cov >> 5) != (dx >> 18)) cov = 31;
@@ -548,7 +551,7 @@ template <bool textured>
     else if ((dstattr & 0x3F000000) == (polyattr & 0x3F000000)) return;
   } else if ((dstattr & 0x007F0000) == (attr & 0x007F0000)) return;   // equal translucent ids don't blend
   if (!(dstattr & (1u << 15))) attr &= ~(1u << 15);
-  color = alpha_blend(rs_->dispcnt, color, color_[addr], color >> 24);
+  color = alpha_blend(dispcnt_, color, color_[addr], color >> 24);
   if (z != 0xFFFFFFFFu) depth_[addr] = z;
   color_[addr] = color;
   attr_[addr] = attr;
@@ -694,7 +697,7 @@ void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s
   // A constant depth needs no reciprocal or per-pixel interpolation.  Flat
   // geometry is common in the DS scenes, and keeping this out of the span
   // kernel also makes the depth pre-pass a straight fill.
-  if (xdiff == 0 || zl == zr) { for (u32 i = 0; i < n; ++i) sb.z[off + i] = zl; }
+  if (xdiff == 0 || zl == zr) kern::active::span_z_const(zl, n, sb.z + off);
   else if (wbuffer) kern::active::span_attr_persp(zl, zr, sb.fac + off, n, sb.z + off);
   else kern::active::span_z_linear(zl, zr, xv0, n, xdiff, (1 << 22) / xdiff, sb.z + off);
   if (with_attrs) span_attrs(sb, xstart, xend, xa, xb, wl, wr, al, ar, false, false);
@@ -812,11 +815,12 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   if (e.right.increment == 0 && (e.left.increment != 0 || xstart != xend) && xend != 0) --xend;
 
   bool l_fill, r_fill; s32 l_len, r_len, l_cov, r_cov;
-  const bool always_fill = (rs_->dispcnt & ((1 << 4) | (1 << 5))) || (polyalpha < 31 && (rs_->dispcnt & (1 << 3))) || wireframe;
+  const bool always_fill = (dispcnt_ & ((1 << 4) | (1 << 5))) || (polyalpha < 31 && (dispcnt_ & (1 << 3))) || wireframe;
+  // The stencil pass needs the edge lengths only, never the coverage.
   if (xstart > xend) {
     const Vertex &vlnext = gx_->vertex(p.vtx[e.next_vr]), &vrnext = gx_->vertex(p.vtx[e.next_vl]);
-    e.right.edge_params<true>(&l_len, &l_cov);
-    e.left.edge_params<true>(&r_len, &r_cov);
+    e.right.edge_params<true>(false, &l_len, &l_cov);
+    e.left.edge_params<true>(false, &r_len, &r_cov);
     std::swap(xstart, xend); std::swap(wl, wr); std::swap(zl, zr);
     if (always_fill) { l_fill = r_fill = true; }
     else {
@@ -826,8 +830,8 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
     }
   } else {
     const Vertex &vlnext = gx_->vertex(p.vtx[e.next_vl]), &vrnext = gx_->vertex(p.vtx[e.next_vr]);
-    e.left.edge_params<false>(&l_len, &l_cov);
-    e.right.edge_params<false>(&r_len, &r_cov);
+    e.left.edge_params<false>(false, &l_len, &l_cov);
+    e.right.edge_params<false>(false, &r_len, &r_cov);
     if (always_fill) { l_fill = r_fill = true; }
     else {
       l_fill = ((e.left.negative || !e.left.xmajor) || ((y == p.ybot - 1) && e.left.xmajor && (vlnext.sx != vrnext.sx))) ||
@@ -849,7 +853,10 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
   if (xb > xa) span_stage(sb, xstart, xend, xa, xb, wl, wr, zl, zr, p.wbuffer, nullptr, nullptr, false, 0);
   const int mode = pick_depth_mode(p);
 
-  // Set stencil bits where the depth test fails; draw nothing.
+  // Set stencil bits where the depth test fails; draw nothing. Bit 2 (the
+  // pixel underneath) only ever steers writes to the under layer, which is
+  // dead without AA -- see dispcnt_.
+  const bool under = dispcnt_ & (1 << 4);
   const u32 row = row_of(y) + 1;
   auto stencil_span = [&](s32 xlimit) {
     for (; x < xlimit; ++x) {
@@ -865,7 +872,7 @@ void Renderer3D::render_shadow_mask_line(Edge& e, s32 y) {
         }
       };
       if (fails(addr, dstattr)) shadow_stencil[x] = 1;
-      if (dstattr & 0xF) {
+      if (under && (dstattr & 0xF)) {
         addr += RSIZE;
         if (fails(addr, attr_[addr])) shadow_stencil[x] |= 2;
       }
@@ -901,13 +908,14 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
     if (shadow) {
       const u8 st = stencil[x];
       if (!st) continue;
-      if (!(st & 1)) addr += RSIZE;
+      if (!(st & 1)) { if (!aa) continue; addr += RSIZE; }   // under layer only: dead without AA
       if (!(st & 2)) dstattr &= ~0xFu;      // no shadow under anti-aliased edges
     }
     const s32 z = sb.z[i];
-    // Failing against the top pixel, try the one underneath.
+    // Failing against the top pixel, try the one underneath -- which only
+    // exists with AA (dispcnt_); without it the pre-pass never named it.
     if (!depth_pass<mode>(addr, z, dstattr)) {
-      if (!(dstattr & 0xF) || addr >= static_cast<u32>(RSIZE)) continue;
+      if (!aa || !(dstattr & 0xF) || addr >= static_cast<u32>(RSIZE)) continue;
       addr += RSIZE;
       dstattr = attr_[addr];
       if (!depth_pass<mode>(addr, z, dstattr)) continue;
@@ -940,25 +948,20 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
     } else {
       const u32 zz = (sh.polyattr_z) ? static_cast<u32>(z) : 0xFFFFFFFFu;
       plot_translucent(addr, color, zz, polyattr, shadow);
-      if ((dstattr & 0xF) && addr < static_cast<u32>(RSIZE)) plot_translucent(addr + RSIZE, color, zz, polyattr, shadow);
+      if (aa && (dstattr & 0xF) && addr < static_cast<u32>(RSIZE)) plot_translucent(addr + RSIZE, color, zz, polyattr, shadow);
     }
   }
 }
 
-void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
-  sh.polyattr = p.attr & 0x3F008000;
-  if (!p.facing) sh.polyattr |= (1 << 4);
-  sh.polyattr_z = (p.attr & (1 << 11)) != 0;
-  sh.polyalpha = (p.attr >> 16) & 0x1F;
-  sh.wireframe = sh.polyalpha == 0;
-  sh.shadow = p.shadow;
-  sh.dispcnt = rs_->dispcnt;
-  sh.alpha_ref = rs_->alpha_ref;
-  sh.blendmode = (p.attr >> 4) & 3;
-  sh.highlight = sh.dispcnt & (1 << 1);
-  sh.toon = rs_->toon.data();
+// The texture half of a Shade: format, size, VRAM addressing and the direct
+// host pointers. Returns whether the polygon samples through the decoded
+// cache, which is the one thing only the emulation thread may resolve
+// (TextureCache::lookup mutates its map and frame stamps): render() runs this
+// over the list once to record the pointers, and every worker -- job 0
+// included, now that edge setup runs on its pool thread -- reads them back.
+bool Renderer3D::texture_fields(Shade& sh, const Polygon& p) const {
   sh.fmt = (p.texparam >> 26) & 7;
-  sh.textured = (sh.dispcnt & 1) && sh.fmt != 0;
+  sh.textured = (dispcnt_ & 1) && sh.fmt != 0;
   sh.base = (p.texparam & 0xFFFF) << 3;
   sh.width = 8 << ((p.texparam >> 20) & 7);
   sh.height = 8 << ((p.texparam >> 23) & 7);
@@ -966,20 +969,6 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
   sh.trep = p.texparam & (1 << 17); sh.tflip = p.texparam & (1 << 19);
   sh.alpha0 = (p.texparam & (1 << 29)) ? 0 : 31;
   sh.texpal = p.texpal;
-  // DraStic decides constant attributes at polygon setup.  The endpoint values
-  // are then identical on every scanline, so span_attrs can skip five repeated
-  // comparisons (and take the fill path immediately).
-  sh.attrs_constant = true;
-  sh.rgb_constant = true;
-  const Vertex& v0 = gx_->vertex(p.vtx[0]);
-  for (u32 i = 1; i < p.nverts; ++i) {
-    const Vertex& v = gx_->vertex(p.vtx[i]);
-    for (int c = 0; c < 3; ++c) {
-      if (v.fcol[c] != v0.fcol[c]) sh.rgb_constant = false;
-    }
-    if (v.tex[0] != v0.tex[0] || v.tex[1] != v0.tex[1]) sh.attrs_constant = false;
-  }
-  sh.attrs_constant = sh.rgb_constant && sh.attrs_constant;
   // Direct pointers: every 16 KB block of the texture's range must be mapped
   // to one bank and follow the previous one in host memory.
   auto direct_range = [](const VramView& v, u32 addr, u32 len) -> const u8* {
@@ -1007,16 +996,39 @@ void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
   // cheaper than a word from a four-times-larger decoded array, so the
   // other formats keep the direct path (measured: Mario & Luigi and Meteos
   // lost 0.5-1 % with every texture cached).
-  if (sh.textured && (sh.fmt == 5 || !sh.tex_ptr || !sh.pal_ptr)) {
-    // The cache is resolved once on the calling thread; a band worker only
-    // reads the pointer that pass recorded, because TextureCache::lookup
-    // mutates its map and its per-entry frame stamps.
-    if (texels_in_) sh.texels = setup_poly_ < texels_in_->size() ? (*texels_in_)[setup_poly_] : nullptr;
-    else {
-      sh.texels = texcache_.lookup(*vm_, sh.fmt, sh.base, static_cast<u32>(sh.width), static_cast<u32>(sh.height), sh.texpal, sh.alpha0);
-      if (texels_out_ && setup_poly_ < texels_out_->size()) (*texels_out_)[setup_poly_] = sh.texels;
+  return sh.textured && (sh.fmt == 5 || !sh.tex_ptr || !sh.pal_ptr);
+}
+
+void Renderer3D::setup_shade(Shade& sh, const Polygon& p) {
+  sh.polyattr = p.attr & 0x3F008000;
+  if (!p.facing) sh.polyattr |= (1 << 4);
+  sh.polyattr_z = (p.attr & (1 << 11)) != 0;
+  sh.polyalpha = (p.attr >> 16) & 0x1F;
+  sh.wireframe = sh.polyalpha == 0;
+  sh.shadow = p.shadow;
+  sh.dispcnt = dispcnt_;   // AA bit as the raster honours it, not as written
+  sh.alpha_ref = rs_->alpha_ref;
+  sh.blendmode = (p.attr >> 4) & 3;
+  sh.highlight = sh.dispcnt & (1 << 1);
+  sh.toon = rs_->toon.data();
+  const bool cached = texture_fields(sh, p);
+  // DraStic decides constant attributes at polygon setup.  The endpoint values
+  // are then identical on every scanline, so span_attrs can skip five repeated
+  // comparisons (and take the fill path immediately).
+  sh.attrs_constant = true;
+  sh.rgb_constant = true;
+  const Vertex& v0 = gx_->vertex(p.vtx[0]);
+  for (u32 i = 1; i < p.nverts; ++i) {
+    const Vertex& v = gx_->vertex(p.vtx[i]);
+    for (int c = 0; c < 3; ++c) {
+      if (v.fcol[c] != v0.fcol[c]) sh.rgb_constant = false;
     }
+    if (v.tex[0] != v0.tex[0] || v.tex[1] != v0.tex[1]) sh.attrs_constant = false;
   }
+  sh.attrs_constant = sh.rgb_constant && sh.attrs_constant;
+  // The cache was resolved on the emulation thread (render()); every band
+  // worker only reads the pointer that pass recorded.
+  if (cached && texels_in_) sh.texels = setup_poly_ < texels_in_->size() ? (*texels_in_)[setup_poly_] : nullptr;
 #if DSPERATE_NEON
   sh.gather4 = select_gather4(sh);
   sh.vec = !sh.shadow && !sh.wireframe;   // toon / highlight (blendmode 2) are vector stages in flush_batch
@@ -1586,7 +1598,8 @@ template <int mode, bool textured, bool aa, bool opq>
           if constexpr (two) { mo1[k] = vandq_u32(mo[k], m1[k]); mt1[k] = vandq_u32(mt, m1[k]); mo2[k] = vandq_u32(mo[k], m2[k]); mt2[k] = vandq_u32(mt, m2[k]); }
           // bit 0 per lane: opaque, bit 1: translucent, bit 2: translucent with a pixel underneath;
           // bits 3 and 4: the same opaque / translucent, landing on the pixel underneath.
-          mb[k] = vandq_u32(mt1[k], vtstq_u32(dstattr[k], vdupq_n_u32(0xF)));
+          // The under layer is dead without AA (dispcnt_), so bit 2 is off there.
+          if constexpr (aa) mb[k] = vandq_u32(mt1[k], vtstq_u32(dstattr[k], vdupq_n_u32(0xF)));
           kv[k] = vorrq_u32(vorrq_u32(vandq_u32(mo1[k], vdupq_n_u32(1)), vandq_u32(mt1[k], vdupq_n_u32(2))), vandq_u32(mb[k], vdupq_n_u32(4)));
           if constexpr (two) kv[k] = vorrq_u32(kv[k], vorrq_u32(vandq_u32(mo2[k], vdupq_n_u32(8)), vandq_u32(mt2[k], vdupq_n_u32(16))));
         }
@@ -1646,7 +1659,9 @@ template <int mode, bool textured, bool aa, bool opq>
         }
       }
     };
-    if (p8 & 0x0202020202020202ull) {
+    // Without AA the pre-pass never sets bit 1 (the under layer is dead), so
+    // the two-layer group compiles out of that instantiation.
+    if (aa && (p8 & 0x0202020202020202ull)) {
       uint32x4_t m2[2] = {v0, v0};
       for (u32 k = 0; k < NH; ++k) {
         const int32x4_t dz = vld1q_s32(reinterpret_cast<const s32*>(&depth_[under + k * 4]));
@@ -1689,6 +1704,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
   const Shade& sh = e.sh;
   const bool always_fill = sh.always_fill;
   const bool wireframe = sh.wireframe;
+  const bool aa = sh.dispcnt & (1 << 4);   // coverage is only read by the AA resolve
   const bool flat = p.ytop == p.ybot;
   const s32 ybot1 = p.ybot - 1;
   const s32 ytop = p.ytop;
@@ -1721,8 +1737,8 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
       vlcur = e.vcr; vlnext = e.vnr;
       vrcur = e.vcl; vrnext = e.vnl;
       istart = &e.right.interp; iend = &e.left.interp;
-      e.right.edge_params<true>(&l_len, &l_cov);
-      e.left.edge_params<true>(&r_len, &r_cov);
+      e.right.edge_params<true>(aa, &l_len, &l_cov);
+      e.left.edge_params<true>(aa, &r_len, &r_cov);
       std::swap(xstart, xend); std::swap(wl, wr); std::swap(zl, zr);
       if (always_fill) { l_fill = r_fill = true; }
       else {
@@ -1733,8 +1749,8 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
       vlcur = e.vcl; vlnext = e.vnl;
       vrcur = e.vcr; vrnext = e.vnr;
       istart = &e.left.interp; iend = &e.right.interp;
-      e.left.edge_params<false>(&l_len, &l_cov);
-      e.right.edge_params<false>(&r_len, &r_cov);
+      e.left.edge_params<false>(aa, &l_len, &l_cov);
+      e.right.edge_params<false>(aa, &r_len, &r_cov);
       // Fill rules for opaque edges: left edges fill when their slope is <= 1,
       // right edges when > 1 or vertical; the bottom pixel of a negative
       // X-major edge fills next to a flat bottom; fully overlapping identical
@@ -1820,7 +1836,7 @@ void Renderer3D::stage_line(Edge& e, s32 y, const LineSpan& ls) {
     } else {
       const u32 row = row_of(y) + 1 + xa;
       const u32 r = kern::active::depth_candidates(mode, sb.z + off, &depth_[row], &attr_[row],
-                                                   static_cast<u32>(xb - xa), sb.pass + off);
+                                                   static_cast<u32>(xb - xa), sb.pass + off, (sh.dispcnt >> 4) & 1);
       if (r) { ca = xa + static_cast<s32>(r >> 16); cb = xa + static_cast<s32>(r & 0xFFFF); }
     }
   }
@@ -2118,7 +2134,7 @@ u32 Renderer3D::fog_density(u32 addr) const {
 // The scalar passes: the specification the NEON final_pass is checked against
 // (selftest_final_pass), and the whole of final_pass on non-NEON builds.
 void Renderer3D::final_pass_ref(s32 y) {
-  const u32 dispcnt = rs_->dispcnt;
+  const u32 dispcnt = dispcnt_;
   // Edge marking and anti-aliasing act on polygon pixels (edge flags); fog
   // on the fog bit, which the clear can set too. A line nothing touched
   // needs none of it unless the clear carries fog.
@@ -2162,11 +2178,12 @@ void Renderer3D::final_pass_ref(s32 y) {
       a = ((fa * d) + (a * (128 - d))) >> 7;
       color_[addr] = r | (g << 8) | (b << 16) | (a << 24);
     };
+    const bool under = dispcnt & (1 << 4);   // the lower pixel is only read by the AA blend
     for (int x = 0; x < 256; ++x) {
       u32 addr = row_of(y) + 1 + x;
       const u32 attr = attr_[addr];
       if (attr & (1 << 15)) apply(addr);
-      if (!(attr & 0xF)) continue;
+      if (!under || !(attr & 0xF)) continue;
       addr += RSIZE;
       if (attr_[addr] & (1 << 15)) apply(addr);
     }
@@ -2198,7 +2215,7 @@ void Renderer3D::final_pass_ref(s32 y) {
 
 #if DSPERATE_NEON
 void Renderer3D::final_pass(s32 y) {
-  const u32 dispcnt = rs_->dispcnt;
+  const u32 dispcnt = dispcnt_;
   // Edge marking and anti-aliasing act on polygon pixels (edge flags); fog
   // on the fog bit, which the clear can set too. A line nothing touched
   // needs none of it unless the clear carries fog.
@@ -2322,11 +2339,13 @@ void Renderer3D::final_pass(s32 y) {
       c.val[3] = vbslq_u8(m, mix(vandq_u8(c.val[3], vdupq_n_u8(0x1F)), vfa, d, inv), c.val[3]);
       vst4q_u8(cb + addr * 4, c);
     };
+    const bool under = dispcnt & (1 << 4);   // the lower pixel is only read by the AA blend
     for (u32 x = 0; x < 256; x += 16) {
       const u32 addr = base + x;
       const uint8x16x4_t at = vld4q_u8(ab + addr * 4);
       const uint8x16_t fog = vtstq_u8(at.val[1], vdupq_n_u8(0x80));
       if (vmaxvq_u8(fog)) apply16(addr, fog);
+      if (!under) continue;
       const uint8x16_t edge = vtstq_u8(at.val[0], vdupq_n_u8(0xF));
       if (vmaxvq_u8(edge) == 0) continue;
       const u32 under = addr + RSIZE;
@@ -2381,7 +2400,8 @@ u32 Renderer3D::selftest_final_pass(u32 seed, u32 dispcnt) {
   rs.fog_color = rnd() & 0x1F7FFF;
   rs.fog_offset = rnd() & 0x7FFF; rs.fog_shift = rnd() & 0xF;
   const RenderState* saved = rs_;
-  rs_ = &rs;
+  const u32 saved_dispcnt = dispcnt_;
+  rs_ = &rs; dispcnt_ = dispcnt;
   expand_toon();   // the edge colour planes come from rs_
   u32 diffs = 0;
   for (s32 y = 0; y < 8; ++y) {
@@ -2408,7 +2428,7 @@ u32 Renderer3D::selftest_final_pass(u32 seed, u32 dispcnt) {
     for (u32 i = 0; i < 256; ++i) diffs += o0[y * 256 + i] != o1[y * 256 + i];
   }
   out_dst_ = out_.data();
-  rs_ = saved;
+  rs_ = saved; dispcnt_ = saved_dispcnt;
   return diffs;
 }
 
@@ -2437,17 +2457,33 @@ void Renderer3D::clear_line(s32 y) {
   color_[row + 257] = 0; depth_[row + 257] = clearz; attr_[row + 257] = polyid;
   u32* color = &color_[row + 1]; u32* depth = &depth_[row + 1]; u32* attr = &attr_[row + 1];
   if (rs_->dispcnt & (1 << 14)) {
-    // Clear image from texture slots 2 (colour) and 3 (depth), scrolled.
+    // Clear image from texture slots 2 (colour) and 3 (depth), scrolled. The
+    // source line is 512 bytes, 512-aligned, so it never crosses a 16 KB
+    // block: when both slots map to one bank each, the line is two contiguous
+    // runs (the wrap at column 256) through the kernels instead of two
+    // view lookups per pixel. A slot mapped to several banks (or none) keeps
+    // the per-pixel path, which reads through the view.
     const u8 yoff = static_cast<u8>(((rs_->clear_attr2 >> 24) & 0xFF) + y);
-    u8 xoff = (rs_->clear_attr2 >> 16) & 0xFF;
-    for (int x = 0; x < 256; ++x, ++xoff) {
-      const u16 v2 = tex16(0x40000 + (yoff << 9) + (xoff << 1));
-      const u16 v3 = tex16(0x60000 + (yoff << 9) + (xoff << 1));
-      u32 r, g, b; rgb15_to_666(v2, r, g, b);
-      const u32 a = (v2 & 0x8000) ? 0x1F000000 : 0;
-      color[x] = r | (g << 8) | (b << 16) | a;
-      depth[x] = ((v3 & 0x7FFF) * 0x200) + 0x1FF;
-      attr[x] = polyid | (v3 & 0x8000);
+    const u32 xoff = (rs_->clear_attr2 >> 16) & 0xFF;
+    const u8* crow = texv_->direct(0x40000 + (yoff << 9), 512);
+    const u8* drow = texv_->direct(0x60000 + (yoff << 9), 512);
+    if (crow && drow) {
+      const u16* c16 = reinterpret_cast<const u16*>(crow);
+      const u16* d16 = reinterpret_cast<const u16*>(drow);
+      const u32 n0 = 256 - xoff;
+      kern::active::clear_image_run(c16 + xoff, d16 + xoff, n0, polyid, color, depth, attr);
+      if (xoff) kern::active::clear_image_run(c16, d16, xoff, polyid, color + n0, depth + n0, attr + n0);
+    } else {
+      u8 xo = static_cast<u8>(xoff);
+      for (int x = 0; x < 256; ++x, ++xo) {
+        const u16 v2 = tex16(0x40000 + (yoff << 9) + (xo << 1));
+        const u16 v3 = tex16(0x60000 + (yoff << 9) + (xo << 1));
+        u32 r, g, b; rgb15_to_666(v2, r, g, b);
+        const u32 a = (v2 & 0x8000) ? 0x1F000000 : 0;
+        color[x] = r | (g << 8) | (b << 16) | a;
+        depth[x] = ((v3 & 0x7FFF) * 0x200) + 0x1FF;
+        attr[x] = polyid | (v3 & 0x8000);
+      }
     }
   } else {
     u32 r, g, b; rgb15_to_666(static_cast<u16>(rs_->clear_attr1), r, g, b);
@@ -2474,6 +2510,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   static const bool no_raster = [] { const char* e = std::getenv("DS_ABLATE"); return e && (std::atoi(e) & 1); }();
   if (no_raster) return;
   rs_ = &gx.render_state();
+  dispcnt_ = rs_->dispcnt & (aa_ ? ~0u : ~(1u << 4));
   expand_toon();
   vm_ = &nds_.bus.vram_map();
   texv_ = &vm_->texture;
@@ -2488,7 +2525,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   // (a memcmp per texture, once) settles that, and when nothing had to be
   // re-decoded the previous colour buffer is kept; games that run their 3D
   // at 30 fps then cost half.
-  if (gx.render_identical() && texcache_.enabled() && rendered_once_) {
+  if (gx.render_identical() && texcache_.enabled() && rendered_once_ && aa_ == aa_rendered_) {
     for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
       const Polygon& p = *polys[i];
       const u32 fmt = (p.texparam >> 26) & 7;
@@ -2499,14 +2536,28 @@ void Renderer3D::render(const Gpu3D& gx) {
     if (texcache_.decodes_this_frame() == 0) { prof::add(prof::C_R3D_FRAMES_KEPT, 1); return; }
   }
   rendered_once_ = true;
-  poly_texels_.assign(gx.render_polygon_count(), nullptr);
-  texels_out_ = &poly_texels_;
-  texels_in_ = nullptr;
-  build_edges(gx);
-  texels_out_ = nullptr;
+  aa_rendered_ = aa_;
+  // What the emulation thread does itself is only what it must: resolve the
+  // (non-thread-safe) texture cache to plain pointers, in list order, and
+  // count the polygons that draw. Edge setup -- the per-polygon slopes,
+  // interpolants and buckets, ~2048 Edge records at the worst -- moved off
+  // it: job 0 now builds its own edges on its pool thread exactly as workers
+  // 1..n always did, and the bins are cut from the polygon list directly.
+  const u32 npoly = gx.render_polygon_count();
+  poly_texels_.assign(npoly, nullptr);
+  u32 live = 0;
+  for (u32 i = 0; i < npoly; ++i) {
+    const Polygon& p = *polys[i];
+    if (p.degenerate) continue;
+    ++live;
+    Shade sh;
+    if (texture_fields(sh, p))
+      poly_texels_[i] = texcache_.lookup(*vm_, sh.fmt, sh.base, static_cast<u32>(sh.width), static_cast<u32>(sh.height), sh.texpal, sh.alpha0);
+  }
+  texels_in_ = &poly_texels_;
 
-  const u32 maxb = band_count(edge_count_);
-  if (maxb <= 1) { pending_bands_ = 0; wait_ns_ = 0; render_band(0, 192, out_.data()); return; }
+  const u32 maxb = band_count(live);
+  if (maxb <= 1) { pending_bands_ = 0; wait_ns_ = 0; build_edges(gx); render_band(0, 192, out_.data()); return; }
 
   // The pool is always the maximum size and only `nb` of it is given work, so
   // ramping the thread count costs a dispatch flag rather than creating and
@@ -2514,6 +2565,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   if (bands_.size() < maxb - 1) {
     while (bands_.size() < maxb - 1) bands_.push_back(std::make_unique<Renderer3D>(nds_));
   }
+  for (auto& b : bands_) b->aa_ = aa_;   // the setting can change between frames
   if (!pool_ || pool_->workers() != maxb) pool_ = std::make_unique<Pool>(maxb);
 
   const u32 nb = (adapt_enabled() && !threads_forced()) ? adaptive_workers(maxb) : maxb;
@@ -2535,6 +2587,7 @@ void Renderer3D::render(const Gpu3D& gx) {
     const auto t0 = std::chrono::steady_clock::now();
     Renderer3D* r = this;
     if (w != 0) { r = bands_[w - 1].get(); r->prepare_worker(gxr, &poly_texels_); }
+    else build_edges(gxr);   // this instance's render state is already latched
     for (;;) {
       const u32 b = pool_->claim();
       if (b >= nbins_) break;
@@ -2642,12 +2695,15 @@ Renderer3D::Split Renderer3D::split_mode() {
 // ms to 760. The deadlines depend on the split, so it is solved once from the
 // equal-work split and then refined.
 //
-// The polygons' line ranges are already known -- build_edges has just walked
-// them -- so this is a difference array and a prefix sum over 192 entries.
+// The polygons' line ranges are in the list itself (ytop / ybot from the
+// geometry engine), so this is a difference array and a prefix sum over 192
+// entries and needs no edge setup first.
 void Renderer3D::compute_bins(u32 nbins, u32 workers) {
   std::array<s32, 194> delta{};
-  for (u32 i = 0; i < edge_count_; ++i) {
-    const Polygon& p = *edges_[i].poly;
+  const Polygon* const* polys = gx_->render_polygons();
+  for (u32 i = 0; i < gx_->render_polygon_count(); ++i) {
+    const Polygon& p = *polys[i];
+    if (p.degenerate) continue;
     const s32 y0 = p.ytop < 0 ? 0 : p.ytop;
     const s32 y1 = p.ybot > 191 ? 191 : p.ybot;
     if (y0 > 191 || y1 < y0) continue;
@@ -2878,12 +2934,12 @@ u32 Renderer3D::band_count(u32 polygons) {
 void Renderer3D::prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels) {
   gx_ = &gx;
   rs_ = &gx.render_state();
+  dispcnt_ = rs_->dispcnt & (aa_ ? ~0u : ~(1u << 4));
   expand_toon();
   vm_ = &nds_.bus.vram_map();
   texv_ = &vm_->texture;
   palv_ = &vm_->texpal;
   texels_in_ = texels;
-  texels_out_ = nullptr;
   build_edges(gx);
 }
 

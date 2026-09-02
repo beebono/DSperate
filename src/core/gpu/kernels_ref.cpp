@@ -259,6 +259,17 @@ bool text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v) {
   return any;
 }
 
+bool bmp_row_8(const u8* idx, u32 n, u16* v) {
+  bool any = false;
+  for (u32 i = 0; i < n; ++i) { const u8 x = idx[i]; v[i] = x ? static_cast<u16>(LV_OPAQUE | x) : 0; any |= x != 0; }
+  return any;
+}
+bool bmp_row_16(const u16* col, u32 n, u16* v) {
+  bool any = false;
+  for (u32 i = 0; i < n; ++i) { const u16 c = col[i]; v[i] = (c & 0x8000) ? c : 0; any |= (c & 0x8000) != 0; }
+  return any;
+}
+
 void master_brightness(u16 reg, u32* dst) {
   const u32 mode = reg >> 14;
   u32 factor = reg & 0x1F;
@@ -290,6 +301,12 @@ void expand_colours(u32* dst) {
 
 void output_line(const Pixel* src, u16 reg, u32* dst) {
   for (u32 i = 0; i < 256; ++i) dst[i] = src[i];
+  master_brightness(reg, dst);
+  expand_colours(dst);
+}
+
+void output_vram_line(const u16* src, u16 reg, u32* dst) {
+  for (u32 i = 0; i < 256; ++i) { const u32 c = src[i]; dst[i] = ((c & 0x001F) << 1) | (((c & 0x03E0) >> 4) << 8) | (((c & 0x7C00) >> 9) << 16); }
   master_brightness(reg, dst);
   expand_colours(dst);
 }
@@ -468,7 +485,21 @@ void span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* o
   }
 }
 
-u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass) {
+void span_z_const(s32 z, u32 n, s32* out) {
+  for (u32 i = 0; i < n; ++i) out[i] = z;
+}
+
+void clear_image_run(const u16* col, const u16* dep, u32 n, u32 polyid, u32* color, u32* depth, u32* attr) {
+  auto c6 = [](u32 c5) { return c5 ? c5 * 2 + 1 : 0; };
+  for (u32 i = 0; i < n; ++i) {
+    const u32 c = col[i], d = dep[i];
+    color[i] = c6(c & 0x1F) | (c6((c >> 5) & 0x1F) << 8) | (c6((c >> 10) & 0x1F) << 16) | ((c & 0x8000) ? 0x1F000000u : 0);
+    depth[i] = ((d & 0x7FFF) * 0x200) + 0x1FF;
+    attr[i] = polyid | (d & 0x8000);
+  }
+}
+
+u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass, bool under) {
   u32 first = n, last = 0;
   for (u32 i = 0; i < n; ++i) {
     const s32 d = static_cast<s32>(dstz[i]);
@@ -479,7 +510,7 @@ u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr
     case 2: ok = static_cast<u32>((d - z[i]) + 0x200) <= 0x400; break;
     default: ok = static_cast<u32>((d - z[i]) + 0xFF) <= 0x1FE; break;
     }
-    const u8 v = ok ? 1 : ((dstattr[i] & 0xF) ? 2 : 0);
+    const u8 v = ok ? 1 : ((under && (dstattr[i] & 0xF)) ? 2 : 0);
     pass[i] = v;
     if (v) { if (i < first) first = i; last = i; }
   }

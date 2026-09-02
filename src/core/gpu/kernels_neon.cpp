@@ -520,6 +520,47 @@ void resolve16_one(const u16* v, const Pixel* table, Pixel* out) {
   }
 }
 
+// Sixteen texels a step, then eight, then scalar: the runs start and end at
+// wrap or overflow boundaries, so nothing may be written past n.
+bool bmp_row_8(const u8* idx, u32 n, u16* v) {
+  const uint16x8_t op = vdupq_n_u16(0x8000);
+  uint8x16_t acc = vdupq_n_u8(0);
+  u32 i = 0;
+  auto eight = [&](uint8x8_t x) {
+    const uint16x8_t w = vmovl_u8(x), nz = vandq_u16(vshll_n_u8(vtst_u8(x, x), 8), op);
+    return vorrq_u16(w, nz);
+  };
+  for (; i + 16 <= n; i += 16) {
+    const uint8x16_t x = vld1q_u8(idx + i);
+    acc = vorrq_u8(acc, x);
+    vst1q_u16(v + i, eight(vget_low_u8(x)));
+    vst1q_u16(v + i + 8, eight(vget_high_u8(x)));
+  }
+  if (i + 8 <= n) {
+    const uint8x8_t x = vld1_u8(idx + i);
+    acc = vorrq_u8(acc, vcombine_u8(x, x));
+    vst1q_u16(v + i, eight(x));
+    i += 8;
+  }
+  bool any = vmaxvq_u8(acc) != 0;
+  for (; i < n; ++i) { const u8 x = idx[i]; v[i] = x ? static_cast<u16>(LV_OPAQUE | x) : 0; any |= x != 0; }
+  return any;
+}
+bool bmp_row_16(const u16* col, u32 n, u16* v) {
+  const uint16x8_t op = vdupq_n_u16(0x8000);
+  uint16x8_t acc = vdupq_n_u16(0);
+  u32 i = 0;
+  for (; i + 8 <= n; i += 8) {
+    const uint16x8_t c = vld1q_u16(col + i);
+    const uint16x8_t o = vandq_u16(c, vtstq_u16(c, op));
+    acc = vorrq_u16(acc, o);
+    vst1q_u16(v + i, o);
+  }
+  bool any = vmaxvq_u16(acc) != 0;
+  for (; i < n; ++i) { const u16 c = col[i]; v[i] = (c & 0x8000) ? c : 0; any |= (c & 0x8000) != 0; }
+  return any;
+}
+
 void master_brightness(u16 reg, u32* dst) {
   const u32 mode = reg >> 14;
   u32 factor = reg & 0x1F;
@@ -573,6 +614,32 @@ void output_line(const Pixel* src, u16 reg, u32* dst) {
     uint8x16_t c[3];
     for (u32 k = 0; k < 3; ++k) {
       c[k] = vandq_u8(p.val[k], v63);
+      if (bright) c[k] = brighten16(c[k], vf, 0);
+      else if (dark) c[k] = darken16(c[k], vf, 15);
+      c[k] = vorrq_u8(vshlq_n_u8(c[k], 2), vshrq_n_u8(c[k], 4));
+    }
+    const uint8x16x4_t rec = {c[2], c[1], c[0], vff};
+    vst4q_u8(reinterpret_cast<u8*>(dst + i), rec);
+  }
+}
+
+// BGR555 in: each 5-bit field is narrowed to a byte plane already doubled
+// (the 18-bit record's channel), then the same brightness and expansion.
+void output_vram_line(const u16* src, u16 reg, u32* dst) {
+  const u32 mode = reg >> 14;
+  u32 factor = reg & 0x1F;
+  if (factor > 16) factor = 16;
+  const uint8x8_t vf = vdup_n_u8(static_cast<u8>(factor));
+  const uint8x16_t vff = vdupq_n_u8(0xFF);
+  const uint16x8_t m3e = vdupq_n_u16(0x3E);
+  const bool bright = mode == 1, dark = mode == 2;
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint16x8_t lo = vld1q_u16(src + i), hi = vld1q_u16(src + i + 8);
+    uint8x16_t c[3];
+    c[0] = vcombine_u8(vmovn_u16(vandq_u16(vshlq_n_u16(lo, 1), m3e)), vmovn_u16(vandq_u16(vshlq_n_u16(hi, 1), m3e)));
+    c[1] = vcombine_u8(vmovn_u16(vandq_u16(vshrq_n_u16(lo, 4), m3e)), vmovn_u16(vandq_u16(vshrq_n_u16(hi, 4), m3e)));
+    c[2] = vcombine_u8(vmovn_u16(vandq_u16(vshrq_n_u16(lo, 9), m3e)), vmovn_u16(vandq_u16(vshrq_n_u16(hi, 9), m3e)));
+    for (u32 k = 0; k < 3; ++k) {
       if (bright) c[k] = brighten16(c[k], vf, 0);
       else if (dark) c[k] = darken16(c[k], vf, 15);
       c[k] = vorrq_u8(vshlq_n_u8(c[k], 2), vshrq_n_u8(c[k], 4));
@@ -1084,9 +1151,51 @@ void span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* o
   }
 }
 
+void span_z_const(s32 z, u32 n, s32* out) {
+  const int32x4_t v = vdupq_n_s32(z);
+  for (u32 i = 0; i < n; i += 4) vst1q_s32(out + i, v);
+}
+
+void clear_image_run(const u16* col, const u16* dep, u32 n, u32 polyid, u32* color, u32* depth, u32* attr) {
+  // Sixteen pixels a step as byte planes (r g b a, then st4), the 5-bit
+  // channel to 6 bits as c * 2 + (c != 0) in 16-bit lanes; the depth and
+  // attribute words widened from the depth row. Exactly n are written, so
+  // the tail is scalar.
+  const uint16x8_t m5 = vdupq_n_u16(0x1F), one16 = vdupq_n_u16(1), bit15 = vdupq_n_u16(0x8000);
+  const uint32x4_t vpid = vdupq_n_u32(polyid), v1ff = vdupq_n_u32(0x1FF);
+  auto c6 = [&](uint16x8_t c5) { return vaddq_u16(vshlq_n_u16(c5, 1), vandq_u16(vtstq_u16(c5, c5), one16)); };
+  auto plane = [&](uint16x8_t lo, uint16x8_t hi) { return vcombine_u8(vmovn_u16(lo), vmovn_u16(hi)); };
+  u32 i = 0;
+  for (; i + 16 <= n; i += 16) {
+    const uint16x8_t c0 = vld1q_u16(col + i), c1 = vld1q_u16(col + i + 8);
+    uint8x16x4_t o;
+    o.val[0] = plane(c6(vandq_u16(c0, m5)), c6(vandq_u16(c1, m5)));
+    o.val[1] = plane(c6(vandq_u16(vshrq_n_u16(c0, 5), m5)), c6(vandq_u16(vshrq_n_u16(c1, 5), m5)));
+    o.val[2] = plane(c6(vandq_u16(vshrq_n_u16(c0, 10), m5)), c6(vandq_u16(vshrq_n_u16(c1, 10), m5)));
+    o.val[3] = plane(vandq_u16(vtstq_u16(c0, bit15), m5), vandq_u16(vtstq_u16(c1, bit15), m5));
+    vst4q_u8(reinterpret_cast<u8*>(color + i), o);
+    for (u32 k = 0; k < 2; ++k) {
+      const uint16x8_t d = vld1q_u16(dep + i + k * 8);
+      const uint16x8_t dz = vbicq_u16(d, bit15), da = vandq_u16(d, bit15);
+      vst1q_u32(depth + i + k * 8, vaddq_u32(vshll_n_u16(vget_low_u16(dz), 9), v1ff));
+      vst1q_u32(depth + i + k * 8 + 4, vaddq_u32(vshll_high_n_u16(dz, 9), v1ff));
+      vst1q_u32(attr + i + k * 8, vorrq_u32(vmovl_u16(vget_low_u16(da)), vpid));
+      vst1q_u32(attr + i + k * 8 + 4, vorrq_u32(vmovl_high_u16(da), vpid));
+    }
+  }
+  for (; i < n; ++i) {
+    const u32 c = col[i], d = dep[i];
+    auto s6 = [](u32 c5) { return c5 ? c5 * 2 + 1 : 0; };
+    color[i] = s6(c & 0x1F) | (s6((c >> 5) & 0x1F) << 8) | (s6((c >> 10) & 0x1F) << 16) | ((c & 0x8000) ? 0x1F000000u : 0);
+    depth[i] = ((d & 0x7FFF) * 0x200) + 0x1FF;
+    attr[i] = polyid | (d & 0x8000);
+  }
+}
+
 // One instantiation per depth mode: the test is decided once per span, not
-// once per four pixels inside the loop.
-template <int mode>
+// once per four pixels inside the loop. `under` names the lower layer as a
+// candidate where the top pixel carries edge flags; off, only bit 0 is set.
+template <int mode, bool under>
 static u32 depth_candidates_m(const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass) {
   const uint32x4_t one = vdupq_n_u32(1), two = vdupq_n_u32(2);
   uint32x4_t any = vdupq_n_u32(0);
@@ -1100,8 +1209,9 @@ static u32 depth_candidates_m(const s32* z, const u32* dstz, const u32* dstattr,
       ok = vbslq_u32(back, vcleq_s32(zv, d), vcltq_s32(zv, d));
     } else if constexpr (mode == 2) ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(d, zv), vdupq_n_s32(0x200))), vdupq_n_u32(0x400));
     else ok = vcleq_u32(vreinterpretq_u32_s32(vaddq_s32(vsubq_s32(d, zv), vdupq_n_s32(0xFF))), vdupq_n_u32(0x1FE));
-    const uint32x4_t edge = vtstq_u32(a, vdupq_n_u32(0xF));
-    const uint32x4_t v = vbslq_u32(ok, one, vandq_u32(edge, two));
+    uint32x4_t v;
+    if constexpr (under) v = vbslq_u32(ok, one, vandq_u32(vtstq_u32(a, vdupq_n_u32(0xF)), two));
+    else { v = vandq_u32(ok, one); (void)two; }
     const uint16x4_t v16 = vmovn_u32(v);
     const uint8x8_t v8 = vmovn_u16(vcombine_u16(v16, v16));
     vst1_lane_u32(reinterpret_cast<u32*>(pass + i), vreinterpret_u32_u8(v8), 0);
@@ -1114,12 +1224,20 @@ static u32 depth_candidates_m(const s32* z, const u32* dstz, const u32* dstattr,
   return (first << 16) | last;
 }
 
-u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass) {
+u32 depth_candidates(int mode, const s32* z, const u32* dstz, const u32* dstattr, u32 n, u8* pass, bool under) {
+  if (under) {
+    switch (mode) {
+    case 0:  return depth_candidates_m<0, true>(z, dstz, dstattr, n, pass);
+    case 1:  return depth_candidates_m<1, true>(z, dstz, dstattr, n, pass);
+    case 2:  return depth_candidates_m<2, true>(z, dstz, dstattr, n, pass);
+    default: return depth_candidates_m<3, true>(z, dstz, dstattr, n, pass);
+    }
+  }
   switch (mode) {
-  case 0:  return depth_candidates_m<0>(z, dstz, dstattr, n, pass);
-  case 1:  return depth_candidates_m<1>(z, dstz, dstattr, n, pass);
-  case 2:  return depth_candidates_m<2>(z, dstz, dstattr, n, pass);
-  default: return depth_candidates_m<3>(z, dstz, dstattr, n, pass);
+  case 0:  return depth_candidates_m<0, false>(z, dstz, dstattr, n, pass);
+  case 1:  return depth_candidates_m<1, false>(z, dstz, dstattr, n, pass);
+  case 2:  return depth_candidates_m<2, false>(z, dstz, dstattr, n, pass);
+  default: return depth_candidates_m<3, false>(z, dstz, dstattr, n, pass);
   }
 }
 

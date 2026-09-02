@@ -57,6 +57,14 @@ public:
   // Portable pixel-pipeline pieces, exposed for the unit tests.
   static u32 alpha_blend(u32 dispcnt, u32 src, u32 dst, u32 alpha);
 
+  // Anti-aliasing (DISP3DCNT bit 4) honoured or not. Off, the raster treats
+  // the bit as clear for the whole frame -- no coverage, no pixel-stack push,
+  // no under-layer depth test, no AA blend in the final pass -- which is not
+  // what the hardware draws, so the core default is on; the SDL frontend
+  // makes it opt-in (video.aa), the CLI has --no-aa for measurement.
+  void set_aa(bool on) { aa_ = on; }
+  bool aa() const { return aa_; }
+
 private:
   NDS& nds_;
   // The ring holds a whole chunk of scanlines at once, not just the line
@@ -181,7 +189,9 @@ private:
     s32 setup(s32 x0_, s32 x1_, s32 y0, s32 y1, s32 w0, s32 w1, s32 y_, bool wbuf);
     s32 step();
     s32 xval() const;
-    template <bool swapped> void edge_params(s32* length, s32* coverage) const;
+    // `aa`: compute the coverage at all (a divide per X-major edge per line);
+    // off, it is 0 and nothing reads it (the resolve's AA path is off too).
+    template <bool swapped> void edge_params(bool aa, s32* length, s32* coverage) const;
   };
 
   struct Edge {
@@ -225,6 +235,21 @@ private:
 
   const Gpu3D* gx_ = nullptr;
   const RenderState* rs_ = nullptr;
+  bool aa_ = true, aa_rendered_ = true;   // aa_rendered_: the setting the kept frame was drawn with
+  // DISP3DCNT as the raster sees it this frame: rs_->dispcnt with bit 4
+  // cleared when AA is off. Every AA decision in the raster reads this, so
+  // one place decides. With the bit clear the whole under layer (the second
+  // half of the pixel buffers) is dead for the frame: the only reads of it
+  // that reach the output are the AA blend and, through the pushed copy, the
+  // under-layer depth test, translucent plot and fog -- all gated on this
+  // bit -- and every AA read is of a pixel pushed in the same frame (edge
+  // flags on a top pixel only ever come from an opaque write that pushed).
+  // A shadow polygon's stencil bit 2 also reads it, but that bit only steers
+  // under-layer writes (the edge-flag clear it makes is local to the
+  // resolve). So the depth pre-pass, the resolve, the shadow stencil and the
+  // fog pass all skip their under-layer work when the bit is clear, and
+  // nothing can tell -- with or without shadow polygons.
+  u32 dispcnt_ = 0;
   // The 32-entry toon table as three 6-bit byte planes, expanded once per
   // frame from rs_->toon for the vector toon / highlight stages (flush_batch).
   alignas(16) u8 toon6_[3][32] = {};
@@ -358,6 +383,9 @@ private:
   // setups (so it cannot be missed) and once per polygon for the flat case.
   void refresh_edge_state(Edge& e) const;
   void setup_shade(Shade& sh, const Polygon& p);
+  // The texture part of setup_shade; true when the polygon reads the decoded
+  // cache (resolved on the emulation thread only, see render()).
+  bool texture_fields(Shade& sh, const Polygon& p) const;
   // The resolve kernel for a decoded Shade (the dispatch tables live with
   // flush_batch in render3d.cpp).
   static ResolveFn select_resolve(const Shade& sh);
@@ -387,7 +415,8 @@ private:
   // writes only its own output lines, so the workers share nothing mutable:
   // the only shared state is the decoded-texture cache, which is resolved to
   // plain pointers on the calling thread before any worker starts (the cache
-  // itself is not thread-safe).
+  // itself is not thread-safe). Everything else -- the edge setup included --
+  // is a worker's own, built on its pool thread.
   //
   // Slope::setup takes the line to position at and computes the edge state
   // directly from it, so a band can enter a polygon that began above its
@@ -443,8 +472,7 @@ private:
 
   u32  edge_count_ = 0;
   u32* out_dst_ = nullptr;                              // where final_pass writes
-  std::vector<const u32*>* texels_out_ = nullptr;       // coordinator records decoded textures
-  const std::vector<const u32*>* texels_in_ = nullptr;  // worker reads them back
+  const std::vector<const u32*>* texels_in_ = nullptr;  // decoded textures per polygon (render() records them)
   s32  rendered_upto_ = 0;    // lines this instance has already rasterised this frame
   u32  setup_poly_ = 0;                                 // polygon index during build_edges
   std::vector<const u32*> poly_texels_;

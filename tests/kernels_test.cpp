@@ -200,6 +200,25 @@ static void test_composite() {
 }
 
 
+// Bitmap rows: any length at any offset, and nothing written past n.
+static void test_bmp_rows() {
+  alignas(16) u8 idx[512]; alignas(16) u16 col[512], va[512 + 16], vb[512 + 16];
+  for (u32 it = 0; it < 300; ++it) {
+    fill(idx, 512, 0xFF); fill(col, 512, 0xFFFF);
+    if (it % 4 == 0) for (u32 i = 0; i < 512; ++i) idx[i] &= (rng() & 1) ? 0 : 0xFF;   // sparse
+    if (it % 4 == 1) std::memset(idx, 0, sizeof idx);                                    // empty
+    if (it % 4 == 2) for (u32 i = 0; i < 512; ++i) col[i] &= 0x7FFF;                     // all transparent
+    fill(va, 528, 0xFFFF); std::memcpy(vb, va, sizeof va);
+    const u32 n = rng() % 257, off = rng() % 16, src = rng() % 256;
+    const bool a8 = kern::ref::bmp_row_8(idx + src, n, va + off), b8 = N::bmp_row_8(idx + src, n, vb + off);
+    CHECK_SAME("bmp_row_8", va, vb, sizeof va);
+    if (a8 != b8) { std::fprintf(stderr, "FAIL bmp_row_8 any (iteration %u)\n", it); ++failures; }
+    const bool a16 = kern::ref::bmp_row_16(col + src, n, va + off), b16 = N::bmp_row_16(col + src, n, vb + off);
+    CHECK_SAME("bmp_row_16", va, vb, sizeof va);
+    if (a16 != b16) { std::fprintf(stderr, "FAIL bmp_row_16 any (iteration %u)\n", it); ++failures; }
+  }
+}
+
 static void test_output() {
   for (u32 it = 0; it < 200; ++it) {
     Planes a; a.randomise(); Planes b = a;
@@ -210,6 +229,9 @@ static void test_output() {
     CHECK_SAME("expand", a.dst, b.dst, sizeof a.dst);
     kern::ref::output_line(a.top, reg, a.dst); N::output_line(b.top, reg, b.dst);
     CHECK_SAME("output_line", a.dst, b.dst, sizeof a.dst);
+    alignas(16) u16 v15[256]; fill(v15, 256, 0xFFFF);
+    kern::ref::output_vram_line(v15, reg, a.dst); N::output_vram_line(v15, reg, b.dst);
+    CHECK_SAME("output_vram_line", a.dst, b.dst, sizeof a.dst);
   }
 }
 
@@ -455,14 +477,59 @@ static void test_depth_candidates() {
     }
     std::memset(pa, 0xAA, sizeof pa); std::memset(pb, 0xAA, sizeof pb);
     const int mode = rng() & 3;
-    const u32 ra = kern::ref::depth_candidates(mode, z, dz, da, n, pa), rb = N::depth_candidates(mode, z, dz, da, n, pb);
+    const bool under = rng() & 1;
+    const u32 ra = kern::ref::depth_candidates(mode, z, dz, da, n, pa, under), rb = N::depth_candidates(mode, z, dz, da, n, pb, under);
     if (ra != rb) { std::fprintf(stderr, "FAIL depth_candidates range %08x vs %08x (iteration %u)\n", ra, rb, it); ++failures; }
     CHECK_SAME("depth pass", pa, pb, n);
+    if (!under) for (u32 i = 0; i < n; ++i) if (pa[i] & 2) { std::fprintf(stderr, "FAIL depth_candidates names the under layer without AA (iteration %u)\n", it); ++failures; break; }
+  }
+}
+
+// Constant depth fill and the clear-image row: neon against ref, and ref
+// against the per-pixel formulas the renderer used to apply itself.
+static void test_span_z_const() {
+  alignas(16) s32 oa[272], ob[272];
+  for (u32 it = 0; it < 200; ++it) {
+    const u32 n = 1 + rng() % 256;
+    const s32 z = static_cast<s32>(rng());
+    std::memset(oa, 0x55, sizeof oa); std::memset(ob, 0x55, sizeof ob);
+    kern::ref::span_z_const(z, n, oa); N::span_z_const(z, n, ob);
+    CHECK_SAME("span_z_const", oa, ob, n * 4);
+    for (u32 i = 0; i < n; ++i) if (oa[i] != z) { std::fprintf(stderr, "FAIL span_z_const value (iteration %u)\n", it); ++failures; break; }
+  }
+}
+
+static void test_clear_image_run() {
+  alignas(16) u16 col[256], dep[256];
+  alignas(16) u32 ca[258], da[258], aa[258], cb[258], db[258], ab[258];
+  for (u32 it = 0; it < 300; ++it) {
+    const u32 n = 1 + rng() % 256;
+    const u32 polyid = (rng() & 0x3F) << 24;
+    fill(col, 256, 0xFFFF); fill(dep, 256, 0xFFFF);
+    // Exactly n entries: the word after the run must survive (the ring's border pixel).
+    for (u32 i = 0; i < 258; ++i) { ca[i] = cb[i] = 0xDEADBEEF; da[i] = db[i] = 0xDEADBEEF; aa[i] = ab[i] = 0xDEADBEEF; }
+    kern::ref::clear_image_run(col, dep, n, polyid, ca, da, aa);
+    N::clear_image_run(col, dep, n, polyid, cb, db, ab);
+    CHECK_SAME("clear_image colour", ca, cb, sizeof ca);
+    CHECK_SAME("clear_image depth", da, db, sizeof da);
+    CHECK_SAME("clear_image attr", aa, ab, sizeof aa);
+    for (u32 i = 0; i < n; ++i) {
+      auto c6 = [](u32 c, u32 shift) { u32 v = (shift == 0 ? (c << 1) : (c >> shift)) & 0x3E; if (v) ++v; return v; };   // rgb15_to_666
+      const u32 want_c = c6(col[i], 0) | (c6(col[i], 4) << 8) | (c6(col[i], 9) << 16) | ((col[i] & 0x8000) ? 0x1F000000u : 0);
+      const u32 want_d = ((dep[i] & 0x7FFF) * 0x200) + 0x1FF, want_a = polyid | (dep[i] & 0x8000);
+      if (ca[i] != want_c || da[i] != want_d || aa[i] != want_a) {
+        std::fprintf(stderr, "FAIL clear_image_run pixel %u: %08x/%08x/%08x want %08x/%08x/%08x (iteration %u)\n", i, ca[i], da[i], aa[i], want_c, want_d, want_a, it);
+        ++failures; break;
+      }
+    }
+    if (ca[n] != 0xDEADBEEF || da[n] != 0xDEADBEEF || aa[n] != 0xDEADBEEF) { std::fprintf(stderr, "FAIL clear_image_run wrote past n (iteration %u)\n", it); ++failures; }
   }
 }
 
 int main() {
   test_depth_candidates();
+  test_span_z_const();
+  test_clear_image_run();
   test_select16();
   test_resolve16();
   test_resolve16_one();
@@ -475,6 +542,7 @@ int main() {
   test_translucent_3d();
   test_composite();
   test_output();
+  test_bmp_rows();
   test_capture();
   test_scale_row();
   test_scale_row_grid();
