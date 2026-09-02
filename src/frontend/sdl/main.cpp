@@ -72,6 +72,14 @@ const char* kUsage =
     "  --fast-load     cart DMA reads the card without its clock (may affect accuracy); emu.fast_load\n"
     "  --aa / --no-aa  3D anti-aliasing on (hardware behaviour) or off; video.aa, off by default\n"
     "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
+    "  --frameskip N   skip drawing up to N frames in N+1 (0 = off); emu.frameskip. Skipping runs\n"
+    "                  in whole display periods, so on a game that drives its screens on\n"
+    "                  alternate frames the limit counts pairs (DS_DEBUG_SKIP=1 shows the period)\n"
+    "  --frameskip-mode M  adaptive (default; skip only while the emulator is behind, up to N)\n"
+    "                  | fixed (always skip N of every N+1)\n"
+    "  --frameskip-capture  skip frames that display-capture too (INEXACT: the captured VRAM\n"
+    "                  holds the last drawn frame). Without it a game that captures every\n"
+    "                  frame -- Pokemon B/W, Golden Sun -- skips nothing; emu.frameskip_capture\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
     "  --replay F      play the inputs in F instead of the controls; quits at its end\n"
@@ -273,6 +281,9 @@ int main(int argc, char** argv) {
     else if (flag("--timing-oc")) cli.set("emu.timing_oc", "true");
     else if (flag("--cpu-oc")) cli.set("emu.cpu_oc", "true");
     else if (flag("--fast-load")) cli.set("emu.fast_load", "true");
+    else if (arg("--frameskip")) cli.set("emu.frameskip", argv[++i]);
+    else if (arg("--frameskip-mode")) cli.set("emu.frameskip_mode", argv[++i]);
+    else if (flag("--frameskip-capture")) cli.set("emu.frameskip_capture", "true");
     else if (flag("--aa")) cli.set("video.aa", "true");
     else if (flag("--no-aa")) cli.set("video.aa", "false");
     // The two halves of Timing OC separately: they pull in opposite directions
@@ -289,7 +300,7 @@ int main(int argc, char** argv) {
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "video.aa"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
   if (bios9.empty() || bios7.empty() || fw.empty()) { std::fprintf(stderr, "BIOS and firmware paths are needed (--bios9/--bios7/--firmware or [paths] in %s)\n", global_ini.c_str()); return 2; }
@@ -498,6 +509,38 @@ int main(int argc, char** argv) {
   // one frame in ff_skip+1 -- every frame is still emulated (the display
   // capture and VRAM feedback keep the run exact), only its scaling and
   // present are skipped.
+  // Frameskip. [emu] frameskip is the limit N: at most N frames in a row are
+  // skipped, so at least one in N+1 is drawn. "fixed" always skips exactly
+  // that pattern; "adaptive" (the default) skips only while the emulator is
+  // behind real time, which is measured as a debt in milliseconds -- how far
+  // the work of the frames so far has run over their budget -- and pays the
+  // debt down by the time a skipped frame saves.
+  //
+  // A skipped frame is not merely un-presented: the core leaves out both
+  // engines' line rendering, the 3D raster feeding it, and the scaling, while
+  // everything the guest can observe still runs (see Gpu::set_frame_skip).
+  // The decision has to reach the core one frame early, because the 3D raster
+  // for a frame runs at line 215 of the frame before it; will_skip_frame()
+  // reports what the frame about to run will actually do (a frame that
+  // display-captures is never skipped, whatever the policy asks for).
+  const int fs_limit = cfg.num("emu.frameskip", 0);
+  const bool fs_adaptive = cfg.str("emu.frameskip_mode", "adaptive") != "fixed";
+  const bool fs_capture = cfg.flag("emu.frameskip_capture", false);
+  nds.gpu.set_frameskip_capture(fs_capture);
+  u64 fs_refused = 0;         // skips the core would not take (capture / display FIFO)
+  const double frame_budget_ms = frame_ns / 1e6;
+  // Skipping runs in blocks of a whole display period (see
+  // Gpu::display_phase_period), and so does drawing: a game that renders one
+  // screen per frame and swaps them needs every phase of a period drawn, or
+  // each presented frame has one fresh screen and one several frames old, and
+  // which one alternates -- the two screens look like they are swapping.
+  int fs_left = 0;            // frames left in the current block
+  bool fs_in_skip = false;    // that block is a skip block
+  int fs_blocks = 0;          // skip blocks run back to back, against the limit
+  bool fs_period_warned = false;
+  int fs_drawn_run = 0;       // drawn frames since the last skipped one
+  u64 fs_skipped = 0;         // reported with the frame statistics
+  double fs_debt_ms = 0;      // adaptive: how far behind real time we are
   bool ff_toggle = cfg.flag("emu.fast_forward", false);
   const int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
   bool was_fast = false;
@@ -513,7 +556,7 @@ int main(int argc, char** argv) {
     if (p == paused) return;
     paused = p;
     audio.pause(p);
-    if (p) flush_save(); else next_frame = SDL_GetPerformanceCounter();
+    if (p) flush_save(); else { next_frame = SDL_GetPerformanceCounter(); fs_debt_ms = 0; }
     std::fprintf(stderr, "%s\n", p ? "paused" : "resumed");
   };
   while (!input.quit() && !g_signalled && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
@@ -572,6 +615,7 @@ int main(int argc, char** argv) {
         if (load_state_file(nds, state_path(nds, states_dir, state_slot))) {
           audio.clear();
           next_frame = SDL_GetPerformanceCounter();
+          fs_debt_ms = 0;
           flush_save();
         }
         break;
@@ -635,7 +679,50 @@ int main(int argc, char** argv) {
     // emu/draw split shifts accordingly; the total is what compares.
     const bool fast = ff_toggle || input.fast_forward_held();
     if (fast != was_fast) { was_fast = fast; next_frame = SDL_GetPerformanceCounter(); }
-    const bool present = !fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0;
+    // The policy decides for the frame after the one about to run; what the
+    // core settled for this one is what governs the present.
+    if (fs_limit > 0) {
+      const int period = nds.gpu.display_phase_period();
+      // The limit counts blocks, not frames: on a game whose screens take a
+      // whole period to come round, `frameskip = 3` means three of those
+      // periods skipped for one drawn, the same ratio a period-1 game gets.
+      const int max_blocks = fs_limit;
+      if (period > 1 && !fs_period_warned) {
+        fs_period_warned = true;
+        std::fprintf(stderr, "frameskip: this game drives its screens over %d frames, so it skips %d of every %d\n",
+                     period, fs_limit * period, (fs_limit + 1) * period);
+      }
+      if (fs_left == 0) {                         // a block ended: pick the next one
+        // Fixed skips its blocks whatever the clock says; adaptive skips only
+        // while it is behind, and both stop at the limit and draw a period.
+        const bool want = !fs_adaptive || fs_debt_ms > frame_budget_ms * 0.5;
+        const bool skip = max_blocks > 0 && want && fs_blocks < max_blocks;
+        fs_blocks = skip ? fs_blocks + 1 : 0;
+        fs_in_skip = skip;
+        fs_left = period;
+      }
+      --fs_left;
+      nds.gpu.set_frame_skip(fs_in_skip);
+    }
+    const bool skipped = nds.gpu.will_skip_frame();
+    // The first drawn frames of a block are not presented when the game needs
+    // a whole period to come round: on Golden Sun each frame renders one
+    // screen and leaves the other to the capture the next frame reads, so the
+    // first frame after a skip has one screen fresh and one from before the
+    // skip -- presenting it flashes the stale screen. Drawing the block
+    // through and presenting its last frame shows both screens of one moment.
+    // A run of drawn frames longer than a period presents every frame, so
+    // adaptive that stops skipping goes straight back to full rate.
+    const int fs_period = fs_limit > 0 ? nds.gpu.display_phase_period() : 1;
+    if (skipped) { ++fs_skipped; fs_drawn_run = 0; } else ++fs_drawn_run;
+    const bool fs_partial = fs_period > 1 && fs_drawn_run < fs_period;
+    // Say why frameskip is doing nothing, once, rather than leaving it to look
+    // like a broken setting: on a game that captures every frame the exact
+    // policy has nothing it may skip.
+    if (!skipped && fs_in_skip && ++fs_refused == 120 && !fs_capture)
+      std::fprintf(stderr, "frameskip: this game display-captures its frames, which cannot be skipped exactly;\n"
+                           "           --frameskip-capture (or [emu] frameskip_capture) skips them anyway\n");
+    const bool present = !skipped && !fs_partial && (!fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0);
     ds::sdl::Display::Target target[2] = {};
     bool scaled = false;
     if (present) {
@@ -685,6 +772,15 @@ int main(int argc, char** argv) {
       frame_ms.push_back(static_cast<double>(t1 - t0) * ticks_to_ms);
       work_ms.push_back(static_cast<double>(t2 - t0) * ticks_to_ms);
     }
+    if (fs_adaptive && fs_limit > 0) {
+      // Only real-time play has a budget to fall behind: unthrottled fast
+      // forward is always "behind" and would skip to the limit forever.
+      const double work = static_cast<double>(t2 - t0) * ticks_to_ms;
+      fs_debt_ms += (fast && ff_speed <= 0) ? 0.0 : work - frame_budget_ms;
+      if (fs_debt_ms < 0) fs_debt_ms = 0;
+      const double cap = frame_budget_ms * (fs_limit + 1);
+      if (fs_debt_ms > cap) fs_debt_ms = cap;   // a long stall must not buy a run of skips
+    }
     ds::prof::frame_mark();   // marks the emu slice: the present is not in a stage, it lands in "untimed" of work_ms
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
@@ -718,12 +814,17 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, audio queued %.1f frames\n",
                    60.0 / secs, 100.0 * (60.0 / secs) / (ds::ARM9_CLOCK_HZ / double(ds::CYCLES_PER_FRAME)),
                    emu_ticks * to_ms, draw_ticks * to_ms, audio.queued_frames());
+      if (fs_limit > 0) std::fprintf(stderr, "  frameskip: %llu frames skipped (%s, limit %d)\n",
+                                     static_cast<unsigned long long>(fs_skipped), fs_adaptive ? "adaptive" : "fixed", fs_limit);
       fps_mark = now;
       emu_ticks = draw_ticks = 0;
     }
   }
 
   flush_save();
+  if (fs_limit > 0)
+    std::fprintf(stderr, "frameskip (%s, limit %d): %llu of %llu frames not drawn\n", fs_adaptive ? "adaptive" : "fixed", fs_limit,
+                 static_cast<unsigned long long>(fs_skipped), static_cast<unsigned long long>(frames));
   if (log.writing()) std::fprintf(stderr, "recorded %u frames to %s\n", log.frames(), record);
   // Emulation work only -- see frame_report.h. The two excluded costs are
   // named on their own line so a CLI/SDL disagreement can be attributed.

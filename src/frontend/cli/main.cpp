@@ -104,6 +104,8 @@ int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
   const char* hide_screen = nullptr;
+  int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
+  bool frameskip_capture = false;
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
   // A whole 1800-frame dump is ~708 MB, so a window can be selected: the
   // frame-budget report below names the frames worth looking at.
@@ -147,6 +149,8 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
+    else if (arg("--frameskip")) frameskip = std::atoi(argv[++i]);          // skip drawing N of every N+1 frames (Gpu::set_frame_skip); a dump of a skipped frame is stale
+    else if (flag("--frameskip-capture")) frameskip_capture = true;          // INEXACT: skip frames that display-capture too
     else if (arg("--hide-screen")) hide_screen = argv[++i];                 // top | bottom: the engine on it skips its drawing (Gpu::set_screen_visible); its half of the dump goes stale
     // Frames before N are run but left out of the statistics. A --load-state
     // starts cold: every translated block was dropped with the old run, the
@@ -178,6 +182,7 @@ int main(int argc, char** argv) {
               "");
 #endif
   ds::NDS nds;
+  if (frameskip_capture) nds.gpu.set_frameskip_capture(true);
   if (hide_screen) nds.gpu.set_screen_visible(!std::strcmp(hide_screen, "bottom") ? 1 : 0, false);
   if (bios9 && bios7 && fw) {
     if (!nds.load_bios(bios9, bios7, fw)) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
@@ -290,6 +295,17 @@ int main(int argc, char** argv) {
 #endif
     if (trace && i == trace_from) { nds.trace = trace_cb; nds.trace_user = &ts; }
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
+    // The core takes the decision one frame ahead (the 3D raster for a frame
+    // runs during the frame before it), so this asks for frame i + 1.
+    if (frameskip > 0) {
+      // Same rule as the SDL frontend: skip and draw in whole display periods
+      // (Gpu::display_phase_period), the limit counting periods rather than
+      // frames. Here as a fixed pattern.
+      const int period = nds.gpu.display_phase_period();
+      const int skip = frameskip * period;
+      const int cycle = skip + period;
+      nds.gpu.set_frame_skip(skip > 0 && static_cast<int>((i + 1) % cycle) < skip);
+    }
     nds.run_frame();
     if (!write_state(i + 1)) return 1;
     if (static const bool fh = std::getenv("DS_FRAME_HASH") != nullptr; fh) {

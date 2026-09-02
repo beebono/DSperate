@@ -110,6 +110,42 @@ public:
   // frames only (the engine-B worker reads it during one).
   void set_screen_visible(int screen, bool on) { screen_visible_[screen] = on; }
 
+  // Frameskip (frontend policy; see the SDL frontend's [emu] frameskip). A
+  // skipped frame runs the machine unchanged -- the CPUs, the journals, the
+  // latches, the geometry -- and only leaves out what nothing else observes:
+  // both engines' line rendering and output, and the 3D rasterisation that
+  // feeds them. The framebuffers keep the last drawn frame, so the frontend
+  // simply does not present.
+  //
+  // The 3D raster for a frame runs at line 215 of the frame before it, so the
+  // decision has to be one frame ahead of the display lines it governs: the
+  // flag set here is taken at line 215 and applies to the *next* frame's
+  // display, which is what will_skip_frame() reports back. A frame that
+  // display-captures or feeds the display FIFO is never skipped -- both write
+  // bytes the guest reads back -- which is settled per frame for the 2D and
+  // predicted from the current frame at line 215 for the 3D.
+  void set_frame_skip(bool on) { skip_req_ = on; }
+  // Skip frames that display-capture as well (INEXACT, [emu] frameskip_capture).
+  // The capture write is skipped along with the drawing, so the destination
+  // bank keeps the picture it last captured; DISPCAPCNT itself behaves exactly
+  // as before. A game that reads the captured pixels back with the CPU, rather
+  // than only displaying them, sees an older frame than the hardware would.
+  void set_frameskip_capture(bool on) { skip_capture_ok_ = on; }
+
+  // How many frames it takes the display setup to come back round. Games drive
+  // the two screens on alternate frames: Golden Sun swaps POWCNT1's screen bit
+  // every frame and renders one screen's content each time, and a capture can
+  // alternate between two destination banks the same way. Drawing one frame in
+  // a multiple of this period would then draw the same phase for ever -- one
+  // screen frozen on its off-frame, which reads as the two screens swapping --
+  // so a frontend must keep its drawn cadence off a multiple of it (1 = no
+  // alternation, nothing to avoid). Watched: the POWCNT1 swap bit, each
+  // engine's display mode and VRAM display bank, and the capture destination.
+  u8 display_phase_period() const { return phase_period_; }
+  // begin_frame() for the frame about to run has already happened when
+  // run_frame() returns, so this is settled before the frontend asks.
+  bool will_skip_frame() const { return skip_frame_; }
+
   // A frontend-owned, panel-sized destination for one screen. When set, the
   // output stage scales each line into it as the line is produced instead of
   // filling fb_ for the frontend to rescale afterwards: the source line is
@@ -162,7 +198,27 @@ private:
   bool frame_begun_ = false;
   bool screens_on_ = false;   // POWCNT1 bit 0, latched at frame start
   bool screen_visible_[2] = {true, true};
-  bool b_skipped_ = false;    // engine B's last line was skipped: its next drawn line re-renders its sprites
+  bool skipped_[2] = {false, false};   // this engine's last line was skipped: its next drawn line re-renders its sprites
+  bool skip_req_ = false;     // frameskip: the frontend's request, taken at line 215
+  bool skip_next_ = false;    // taken there: the next frame's display lines are skipped
+  bool skip_frame_ = false;   // latched in begin_frame from skip_next_, gated by skippable()
+  // Never skip a frame the guest reads back: one that display-captures or
+  // feeds the display FIFO. capture_recent_ keeps that true for a few frames
+  // after the last capture as well, because the 3D raster is skipped a frame
+  // ahead of the display it feeds -- a game that captures every other frame
+  // would otherwise capture a stale 3D picture into VRAM.
+  static constexpr u8 CAPTURE_STICKY = 8;
+  u8 capture_recent_ = 0;
+  bool skip_capture_ok_ = false;
+  bool skippable() const { return !run_fifo_ && (skip_capture_ok_ || (!capture_on_ && !capture_recent_)); }
+  // Display-phase detection (see display_phase_period). The signature of the
+  // last PHASE_HISTORY frames, newest last, and the smallest period that
+  // explains them.
+  static constexpr u32 PHASE_HISTORY = 8, PHASE_MAX = 4;
+  u32 phase_sig_[PHASE_HISTORY] = {};
+  u32 phase_seen_ = 0;
+  u8 phase_period_ = 1;
+  void update_phase();
   u16 master_bright_g_[2] = {0, 0};   // guest-visible; the engines hold the render-side value
   u32 capcnt_ = 0;
   bool capture_on_ = false;

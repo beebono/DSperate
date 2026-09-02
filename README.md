@@ -228,6 +228,57 @@ hotkey) drops the pacing -- `[emu] ff_speed = N` caps it at N times real time
 emulated, so the run stays exact, and the audio queue keeps the newest frames
 rather than falling behind.
 
+Frameskip (`--frameskip N` / `[emu] frameskip`, 0 = off) drops the drawing of
+up to N frames in a row, so at least one in N+1 is drawn. A skipped frame runs
+the machine and the game exactly as usual -- the CPUs, the DMA, the geometry,
+the 2D journals and latches -- and leaves out only what nothing else observes:
+both engines' line rendering and output, the 3D rasterisation that feeds them,
+and the scaling and present. The saved-state comparison above is bit-identical
+with and without it on every recorded scene, apart from the framebuffers
+themselves. A frame that display-captures or feeds the display FIFO is drawn
+whatever the setting, since the game reads those pixels back (and the 3D raster
+for a frame runs during the frame before it, so a few frames around a capture
+are drawn too); a title that captures every frame -- Pokemon B/W's overworld,
+Etrian Odyssey's dungeon view, Golden Sun -- therefore skips little or nothing
+by default, and says so once on the console.
+
+`--frameskip-capture` (`[emu] frameskip_capture`) skips those frames too. It is
+inexact by construction: the capture write is skipped along with the drawing,
+so the destination bank keeps the picture it last captured. DISPCAPCNT itself
+behaves exactly as it does on a drawn frame; what differs from hardware is the
+pixels, and only a game that reads them back with the CPU rather than
+displaying them can tell.
+
+Skipping and drawing both happen in whole *display periods*. Games drive the
+two screens over several frames rather than one: Golden Sun toggles POWCNT1's
+screen-swap bit every frame and renders one screen's 3D each time, capturing it
+for the other screen to display next frame, and a game can alternate its
+capture destination the same way. Drawing one frame in four there would draw
+the same phase for ever -- every presented frame with one fresh screen and one
+several frames old, and which one alternates, so the two screens look like they
+are swapping. `Gpu::display_phase_period` watches the swap bit, both engines'
+display modes and VRAM display banks, and the capture destination, and reports
+the period of that sequence; the frontends then skip in blocks of it and draw a
+block of it, and the limit counts those blocks rather than frames. So
+`--frameskip 3` skips three frames in four on a period-1 title, and six in eight
+on a period-2 title like Golden Sun -- the same ratio either way
+(`DS_DEBUG_SKIP=1` prints the period, and the frontend says which it picked).
+
+Only the last drawn frame of a block is presented. The first one has one screen
+freshly rendered and the other still showing what it held before the skip --
+Golden Sun renders one screen per frame and leaves the other to the capture the
+next frame displays -- so presenting it flashes the stale screen. Drawing the
+block through and presenting its last frame shows both screens of one moment. A
+run of drawn frames longer than a period presents every frame, so an adaptive
+run that stops skipping goes straight back to full rate.
+
+`--frameskip-mode` picks the policy: `adaptive` (the default) skips only while
+the emulator is running behind real time, measured as the milliseconds by which
+the frames so far have run over their budget, and stops as soon as it has caught
+up; `fixed` always skips N of every N+1 frames. `DS_DEBUG_SKIP=1` prints the
+per-frame decision and why a frame was drawn anyway. The CLI harness takes
+`--frameskip N` too, in the fixed pattern, for measuring what the drawing costs.
+
 ### Display and handhelds
 
 Layouts (`--layout` / `[video] layout`; `F4`/`F10` step through

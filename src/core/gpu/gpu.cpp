@@ -317,11 +317,18 @@ void Gpu::on_hblank() {
     if (line_ == 215) {
       // The 3D frame flushed at VBlank is rasterised now, ahead of the next
       // frame's display lines.
-      nds_.gpu3d.render_frame();
+      // Frameskip: the raster at this line feeds the next frame's display
+      // lines, so the decision is taken here for begin_frame() to latch.
+      // Capture and the display FIFO are read from the current frame -- a
+      // game turning either on across this boundary gets one frame of the
+      // previous 3D picture, which is the only inexactness frameskip adds
+      // beyond the skipped frames themselves.
+      skip_next_ = skip_req_ && skippable();
+      if (!skip_next_) nds_.gpu3d.render_frame();
       if (probe_enabled_) async_probe_start();
     } else if (line_ == 262) {
       engine[0].render_sprites(0); engine[1].render_sprites(0);
-      b_skipped_ = false;   // line 0's sprites are drawn whether or not engine B is shown
+      skipped_[0] = skipped_[1] = false;   // line 0's sprites are drawn whether or not an engine is shown
     }
     engine[0].post_draw(frame_reset);
     engine[1].post_draw(frame_reset);
@@ -409,6 +416,33 @@ void Gpu::on_scanline_start() {
   nds_.sched.schedule(EventId::HBlank, nds_.sched.event_time() + HBLANK_START, ev_hblank);
 }
 
+// The display-phase signature of the frame starting now, and the period of
+// the sequence it belongs to (see display_phase_period). Only structural
+// choices go in: which engine drives which screen, what each engine displays
+// and out of which VRAM bank, and where a capture lands. Things that change
+// every frame on their own -- master brightness during a fade, scroll
+// registers -- are deliberately left out; they would make every frame look
+// like a new phase.
+void Gpu::update_phase() {
+  const u32 a = engine[0].dispcnt(), b = engine[1].dispcnt();
+  const u32 sig = ((nds_.io.powcnt1 >> 15) & 1)
+                | (((a >> 16) & 3) << 1) | (((a >> 18) & 3) << 3)
+                | (((b >> 16) & 3) << 5)
+                | ((capture_on_ ? 1u + ((capcnt_ >> 16) & 0xF) : 0u) << 7);
+  for (u32 i = 0; i + 1 < PHASE_HISTORY; ++i) phase_sig_[i] = phase_sig_[i + 1];
+  phase_sig_[PHASE_HISTORY - 1] = sig;
+  if (phase_seen_ < PHASE_HISTORY) { ++phase_seen_; phase_period_ = 1; return; }
+  // The smallest period that explains the whole window; none means treat it as
+  // 1 and let the frontend skip freely, since anything it does is as wrong as
+  // anything else.
+  for (u32 p = 1; p <= PHASE_MAX; ++p) {
+    bool ok = true;
+    for (u32 i = p; i < PHASE_HISTORY && ok; ++i) ok = phase_sig_[i] == phase_sig_[i - p];
+    if (ok) { phase_period_ = static_cast<u8>(p); return; }
+  }
+  phase_period_ = 1;
+}
+
 void Gpu::begin_frame() {
   frame_begun_ = true;
   if (std::getenv("DS_DEBUG_GPU"))
@@ -432,6 +466,15 @@ void Gpu::begin_frame() {
   // or a DMA channel is waiting on it.
   run_fifo_ = uses_fifo() || nds_.dma.in_mode(Cpu::ARM9, dma::MODE9_DISPLAY_FIFO);
   if (capcnt_ & (1u << 31)) capture_on_ = true;
+  if (capture_on_) capture_recent_ = CAPTURE_STICKY; else if (capture_recent_) --capture_recent_;
+  update_phase();
+  // Frameskip, for this frame's display lines: what the raster at line 215
+  // assumed, re-checked now that this frame's capture bit is known.
+  skip_frame_ = skip_next_ && skippable();
+  if (std::getenv("DS_DEBUG_SKIP"))   // frameskip: the decision, and what refused it
+    std::fprintf(stderr, "[skip] frame %llu req %d raster %d capture %d/%u fifo %d period %u -> %s\n",
+                 static_cast<unsigned long long>(nds_.frame_count), skip_req_ ? 1 : 0, skip_next_ ? 1 : 0,
+                 capture_on_ ? 1 : 0, capture_recent_, run_fifo_ ? 1 : 0, phase_period_, skip_frame_ ? "skipped" : "drawn");
   // The frame's rendering mode. The FIFO is sampled per line and capture
   // writes VRAM the guest may read back per line: both stay per-line.
   render_next_[0] = render_next_[1] = 0;
@@ -545,15 +588,21 @@ void Gpu::step_engine(int e, u32 line) {
   en.update_windows(line);
   en.replay_to(line * 2 + 1);
   en.pre_draw(line, false);
-  if (e == 0) { line3d_ = nds_.gpu3d.line(line); en.set_3d_line(line3d_); }
   const unsigned abl = ablate();
   // Engine B on a screen the frontend hides (set_screen_visible) draws
   // nothing; the line it comes back on re-renders its own sprites, which the
   // skipped line before it would have drawn.
-  const bool draw = !(abl & 2) && !(e == 1 && !screen_visible_[en.screen()]);
-  if (e == 1) { if (!draw) b_skipped_ = true; else if (b_skipped_) { b_skipped_ = false; en.render_sprites(line); } }
+  const bool draw = !(abl & 2) && !skip_frame_ && !(e == 1 && !screen_visible_[en.screen()]);
+  if (!draw) skipped_[e] = true; else if (skipped_[e]) { skipped_[e] = false; en.render_sprites(line); }
+  // Reading the 3D line joins the raster bands, so a skipped frame (whose
+  // raster never ran) must not ask for it; capture, which also reads it, is
+  // never on for a skipped frame.
+  if (e == 0 && (draw || capture_on_)) { line3d_ = nds_.gpu3d.line(line); en.set_3d_line(line3d_); }
   if (draw) { en.render_line(line); output_engine(e, line); }
-  if (e == 0 && capture_on_ && !(abl & 4)) { DS_PROF(CAPTURE); capture(line); }
+  // A skipped frame has nothing to capture: its destination bank keeps the
+  // picture it last captured, and display_phase_period() is what stops an
+  // alternating destination from going unrefreshed.
+  if (e == 0 && capture_on_ && !skip_frame_ && !(abl & 4)) { DS_PROF(CAPTURE); capture(line); }
   // Sprites are rendered one line ahead of the backgrounds.
   if (draw && line < SCREEN_H - 1) {
     prof::Scope* sc = (e == 0 && prof::enabled) ? new prof::Scope(prof::OBJ_DRAW) : nullptr;
@@ -958,6 +1007,7 @@ void Gpu::capture(u32 line) {
   }
   }
 }
+
 
 void Gpu::apply_master_brightness(u16 reg, u32* dst) { kern::active::master_brightness(reg, dst); }
 
