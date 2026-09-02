@@ -185,7 +185,13 @@ which screen is alone/large/dominant and `F8` moves the PiP inset (all three
 remembered for the game), `F9` takes a screenshot (both screens, BMP, in the
 states directory), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
 the state in the current slot and `F2`/`F3` change the slot, `L` closes and
-opens the lid, `M` held is the fake microphone. Controller, with Mode held:
+opens the lid, `M` held is the fake microphone. The `fps` hotkey toggles an
+on-screen frames-per-second counter and is unbound by default (`[video] fps =
+true` starts it on). It and the save-state slot number are drawn in the corners
+of the primary screen -- the one shown alone, large or dominant -- so they
+follow `screen` and the screen-swap hotkey rather than sitting on a panel the
+layout may not be showing. In `pip`, whichever of the two is in the corner the
+inset occupies moves down its own edge instead of being buried under it. Controller, with Mode held:
 Start+Select quits, Start opens the pause menu, right trigger fast-forwards, R/L save/load
 the state, Right/Left change the slot, Select/X cycle the layout forward/back, Y swaps the screens;
 the left stick's click is the microphone.
@@ -250,6 +256,13 @@ save, on any recorded scene (the CLI takes `--save-state-at N:file` and
 both points). Loading a state is refused during `--record` (the recording
 could not replay past it) and `--replay` refuses to load or save states at
 all.
+
+`[emu] autosave = true` writes one state on quit to an unlisted eleventh slot,
+`<states>/<GAMECODE>.auto.dss`. Nothing is written while playing, so it costs
+no frame time; a Ctrl-C or a launcher's SIGTERM is covered, a `SIGKILL` is not.
+Resume it with `--load-state` on that path -- the slot never shows in the pause
+menu and the slot hotkeys never reach it, so it cannot be overwritten by hand.
+It is skipped during a replay or a recording, like the save-state hotkey.
 
 ### Firmware boot
 

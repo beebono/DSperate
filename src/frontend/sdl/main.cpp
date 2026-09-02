@@ -157,6 +157,14 @@ std::string state_path(NDS& nds, const std::string& dir, int slot) {
   return dir + "/" + code + "." + std::to_string(slot) + ".dss";
 }
 
+// The auto-save slot. Named ".auto" rather than a number so it can never
+// collide with a slot the player picks, and so refresh_slots() -- which walks
+// 0..9 -- leaves it out of the menu: it is reached only by --load-state.
+std::string auto_state_path(NDS& nds, const std::string& dir) {
+  const std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
+  return dir + "/" + code + ".auto.dss";
+}
+
 bool save_state_file(NDS& nds, const std::string& path) {
   ds::state::Writer w; std::string err;
   if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
@@ -213,9 +221,15 @@ void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
   box(cx + c0, cy + c0, c1 - c0, c1 - c0, centre);
 }
 
-// The state slot, shown briefly after a slot hotkey: a white digit (3x5
-// font, doubled) on a black box in the top-left corner of the top screen.
-void draw_slot(const CursorDst& d, int digit) {
+// A small white number (3x5 font, doubled) on a black box, in DS screen
+// coordinates so it lands the same whether the frame was scaled straight into
+// the window (the xrun path) or copied first. `right` anchors the box to the
+// right edge instead of the left, which is how the two callers -- the state
+// slot in the top-left, the FPS counter in the top-right -- stay clear of
+// each other. A value too wide for the field saturates to all nines.
+// `bottom` anchors to the bottom edge instead of the top, which is how an
+// overlay steps out of the way of the PiP inset sharing its corner.
+void draw_number(const CursorDst& d, int value, int digits, bool right, bool bottom) {
   static const u8 font[10][5] = {
     {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
     {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7}};
@@ -224,12 +238,32 @@ void draw_slot(const CursorDst& d, int digit) {
     const u32 y0 = d.h * static_cast<u32>(y) / 192, y1 = d.h * static_cast<u32>(y + 1) / 192;
     for (u32 yy = y0; yy < y1; ++yy) for (u32 xx = x0; xx < x1; ++xx) d.px[yy * d.pitch + xx] = colour;
   };
-  const int S = 2, X = 4, Y = 4;                     // glyph scale and box origin
-  for (int y = 0; y < 5 * S + 4; ++y) for (int x = 0; x < 3 * S + 4; ++x) fill(X + x, Y + y, 0xFF000000);
-  for (int r = 0; r < 5; ++r) for (int c = 0; c < 3; ++c)
-    if ((font[digit][r] >> (2 - c)) & 1)
-      for (int y = 0; y < S; ++y) for (int x = 0; x < S; ++x) fill(X + 2 + c * S + x, Y + 2 + r * S + y, 0xFFFFFFFF);
+  if (value < 0) value = 0;
+  if (digits < 1) digits = 1;
+  if (digits > 8) digits = 8;
+  // Saturate rather than let the loop below keep the low digits: 1234 in a
+  // 3-digit field reads as 999, never as 234.
+  int cap = 1; for (int i = 0; i < digits; ++i) cap *= 10;
+  if (value >= cap) value = cap - 1;
+  int glyph[8];                                      // most significant first
+  int n = 0;
+  do { glyph[n++] = value % 10; value /= 10; } while (value != 0 && n < digits);
+  for (int i = 0; i < n / 2; ++i) { const int t = glyph[i]; glyph[i] = glyph[n - 1 - i]; glyph[n - 1 - i] = t; }
+  const int S = 2;                                   // glyph scale
+  const int w = n * 3 * S + (n - 1) * S + 4;         // glyphs, one S-wide gap between each, 2px border
+  const int h = 5 * S + 4;
+  const int X = right ? static_cast<int>(ds::SCREEN_W) - 4 - w : 4;
+  const int Y = bottom ? static_cast<int>(ds::SCREEN_H) - 4 - h : 4;
+  for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) fill(X + x, Y + y, 0xFF000000);
+  for (int g = 0; g < n; ++g)
+    for (int r = 0; r < 5; ++r) for (int c = 0; c < 3; ++c)
+      if ((font[glyph[g]][r] >> (2 - c)) & 1)
+        for (int y = 0; y < S; ++y) for (int x = 0; x < S; ++x)
+          fill(X + 2 + g * 4 * S + c * S + x, Y + 2 + r * S + y, 0xFFFFFFFF);
 }
+
+// The state slot, shown briefly after a slot hotkey.
+void draw_slot(const CursorDst& d, int digit, bool bottom) { draw_number(d, digit, 1, false, bottom); }
 
 // A launcher's SIGTERM (or Ctrl-C) must still flush the battery save.
 volatile std::sig_atomic_t g_signalled = 0;
@@ -548,6 +582,13 @@ int main(int argc, char** argv) {
   const double ticks_per_ns = static_cast<double>(SDL_GetPerformanceFrequency()) / 1e9;
 
   const bool show_fps = std::getenv("DS_FPS") != nullptr;
+  // The on-screen counter. It reads the same 60-frame measurement the DS_FPS
+  // log line does -- presented frames per second, so frameskip and fast
+  // forward are visible in the number -- and holds the last value between
+  // measurements rather than blinking. [video] fps starts it on; the `fps`
+  // hotkey toggles it and is unbound by default.
+  bool fps_osd = cfg.flag("video.fps", false);
+  int fps_value = 0;                        // last measured, 0..999
   Uint64 fps_mark = SDL_GetPerformanceCounter();
   Uint64 emu_ticks = 0, draw_ticks = 0;
   u64 frames = 0;
@@ -599,11 +640,15 @@ int main(int argc, char** argv) {
   int fs_drawn_run = 0;       // drawn frames since the last skipped one
   u64 fs_skipped = 0;         // reported with the frame statistics
   double fs_debt_ms = 0;      // adaptive: how far behind real time we are
+  // Auto-save: one state written to the unlisted ".auto" slot when the
+  // session ends, so a launcher's kill or a Ctrl-C can be resumed with
+  // --load-state. Nothing is written while playing, so it costs no frame time.
+  const bool autosave = cfg.flag("emu.autosave", false);
   bool ff_toggle = cfg.flag("emu.fast_forward", false);
   const int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
   bool was_fast = false;
   std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
-  std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // top screen with the slot digit
+  std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // the primary screen with the slot digit / FPS counter
   int slot_shown = 0;                                        // frames left to show the slot digit
   // The pause menu (menu.h) and the two screen copies it is composited into.
   ds::sdl::Menu menu;
@@ -657,6 +702,13 @@ int main(int argc, char** argv) {
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
   u64 sram_quiet_since = 0;
   auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, sav); };
+  // The session is ending: leave a state behind. The same two guards the
+  // save-state hotkey carries -- a replay must not write, and a recording is
+  // the inputs from boot, so a state alongside it would only mislead.
+  auto autosave_now = [&] {
+    if (!autosave || save_readonly || log.writing()) return;
+    if (save_state_file(nds, auto_state_path(nds, states_dir))) flush_save();   // the .sav and the state never diverge
+  };
   auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled) {
     for (int i = 0; i < 2; ++i)
       nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, grid, chunky, chunky_thresh, seam_blend, target[i].seam_w,
@@ -737,6 +789,13 @@ int main(int argc, char** argv) {
           fs_debt_ms = 0;
           flush_save();
         }
+        break;
+      // Without DS_FPS the measurement only runs while the counter is on, so
+      // fps_mark is stale by however long it was off: restart the window, or
+      // the first number shown would average over that whole gap.
+      case A::FpsToggle:
+        fps_osd = !fps_osd;
+        if (fps_osd && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = 0; }
         break;
       case A::FastForwardToggle: ff_toggle = !ff_toggle; std::fprintf(stderr, "fast forward %s\n", ff_toggle ? "on" : "off"); break;
       default: break;
@@ -956,6 +1015,7 @@ int main(int argc, char** argv) {
         else if (nds.firmware_override_dirty())
           std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
         std::fprintf(stderr, "power off: rebooting the firmware\n");
+        autosave_now();       // the reset below discards the session
 #if DSPERATE_JIT
         if (jit) ds::jit::flush_all();
 #endif
@@ -970,9 +1030,29 @@ int main(int argc, char** argv) {
       const bool cursor = input.stylus_visible() && !log.reading();
       const bool slot_osd = slot_shown > 0;
       if (slot_shown > 0) --slot_shown;
+      // Which screen the overlays land on. Layout::primary is the one shown
+      // alone (Single), large (PiP) or dominant, so following it keeps them
+      // where the player is looking -- and, in Single with screen = bottom,
+      // visible at all: the other screen's view is not shown, so anything
+      // drawn there goes into a side buffer that is never presented. Dual
+      // window has no primary; both panels are shown, so the top screen it is.
+      const Disp::Layout& osd_l = display.current_layout();
+      const int osd_screen = dual_window ? 0 : osd_l.primary;
+      // The PiP inset is blitted over the primary screen after this, so an
+      // overlay in the inset's corner would be buried. Only the two top
+      // corners are contested -- the slot digit sits top-left, the counter
+      // top-right -- so the one whose corner the inset takes moves down its
+      // own edge. Nothing else in the layout puts a screen in a corner: the
+      // dominant modes lay the secondary out as a strip.
+      const bool pip = !dual_window && osd_l.mode == Disp::Mode::Pip;
+      const bool inset_top = pip && (osd_l.corner == Disp::Corner::TopLeft || osd_l.corner == Disp::Corner::TopRight);
+      const bool inset_left = osd_l.corner == Disp::Corner::TopLeft || osd_l.corner == Disp::Corner::BottomLeft;
+      const bool slot_bottom = inset_top && inset_left, fps_bottom = inset_top && !inset_left;
       if (scaled) {
         if (cursor) draw_cursor(CursorDst{target[1].px, target[1].pitch, target[1].h, target[1].xrun}, input.stylus_x(), input.stylus_y(), input.stylus_size());
-        if (slot_osd) draw_slot(CursorDst{target[0].px, target[0].pitch, target[0].h, target[0].xrun}, state_slot);
+        const CursorDst od{target[osd_screen].px, target[osd_screen].pitch, target[osd_screen].h, target[osd_screen].xrun};
+        if (slot_osd) draw_slot(od, state_slot, slot_bottom);
+        if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
         display.end_frame();
         if (dual_window) display2.end_frame();
       } else {
@@ -982,10 +1062,14 @@ int main(int argc, char** argv) {
           draw_cursor(CursorDst{cursor_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, input.stylus_x(), input.stylus_y(), input.stylus_size());
           fb[1] = cursor_fb.data();
         }
-        if (slot_osd) {
-          std::memcpy(osd_fb.data(), fb[0], osd_fb.size() * 4);
-          draw_slot(CursorDst{osd_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, state_slot);
-          fb[0] = osd_fb.data();
+        // After the cursor: when the overlays are on the bottom screen this
+        // copies the frame that already has the crosshair in it, so both show.
+        if (slot_osd || fps_osd) {
+          std::memcpy(osd_fb.data(), fb[osd_screen], osd_fb.size() * 4);
+          const CursorDst od{osd_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr};
+          if (slot_osd) draw_slot(od, state_slot, slot_bottom);
+          if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
+          fb[osd_screen] = osd_fb.data();
         }
         display.draw(fb);
         if (dual_window) display2.draw(fb);
@@ -1046,20 +1130,25 @@ int main(int argc, char** argv) {
       else if (frames - sram_quiet_since >= 60) flush_save();
     }
 
-    if (show_fps && frames % 60 == 0) {   // DS_FPS=1: speed and audio slack
+    if ((show_fps || fps_osd) && frames % 60 == 0) {   // DS_FPS=1 and/or the on-screen counter
       const Uint64 now = SDL_GetPerformanceCounter();
       const double secs = static_cast<double>(now - fps_mark) / SDL_GetPerformanceFrequency();
       const double to_ms = 1e3 / SDL_GetPerformanceFrequency() / 60.0;
-      std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, audio queued %.1f frames\n",
-                   60.0 / secs, 100.0 * (60.0 / secs) / (ds::ARM9_CLOCK_HZ / double(ds::CYCLES_PER_FRAME)),
-                   emu_ticks * to_ms, draw_ticks * to_ms, audio.queued_frames());
-      if (fs_limit > 0) std::fprintf(stderr, "  frameskip: %llu frames skipped (%s, limit %d)\n",
-                                     static_cast<unsigned long long>(fs_skipped), fs_adaptive ? "adaptive" : "fixed", fs_limit);
+      const double fps = secs > 0 ? 60.0 / secs : 0.0;
+      fps_value = fps >= 999.0 ? 999 : static_cast<int>(fps + 0.5);
+      if (show_fps) {
+        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, audio queued %.1f frames\n",
+                     fps, 100.0 * fps / (ds::ARM9_CLOCK_HZ / double(ds::CYCLES_PER_FRAME)),
+                     emu_ticks * to_ms, draw_ticks * to_ms, audio.queued_frames());
+        if (fs_limit > 0) std::fprintf(stderr, "  frameskip: %llu frames skipped (%s, limit %d)\n",
+                                       static_cast<unsigned long long>(fs_skipped), fs_adaptive ? "adaptive" : "fixed", fs_limit);
+      }
       fps_mark = now;
       emu_ticks = draw_ticks = 0;
     }
   }
 
+  autosave_now();
   flush_save();
   if (nds.firmware_override_dirty()) {
     std::string err;
