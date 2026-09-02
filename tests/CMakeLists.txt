@@ -47,3 +47,7 @@ add_test(NAME texcache COMMAND test_texcache)
 add_executable(test_menu menu_test.cpp ../src/frontend/sdl/menu.cpp)
 target_link_libraries(test_menu PRIVATE dsperate_core)
 add_test(NAME menu COMMAND test_menu)
+
+add_executable(test_cheat cheat_test.cpp)
+target_link_libraries(test_cheat PRIVATE dsperate_core)
+add_test(NAME cheat COMMAND test_cheat)

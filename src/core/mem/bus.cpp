@@ -355,6 +355,10 @@ void Bus::set_vram_trap(bool on, bool lcdc) {
   if (lcdc) pt9.set_write_trap(0x06800000, 0x00800000, on);    // LCDC and its 1 MB mirrors
 }
 
+u8 Bus::dma_read8(Cpu cpu, u32 addr) {
+  if (u8* p = nds_.cpu(cpu).page_table.read_ptr(addr)) return *p;
+  return static_cast<u8>(io_read(cpu, addr, 8));
+}
 u16 Bus::dma_read16(Cpu cpu, u32 addr) {
   addr &= ~1u;
   if (u8* p = nds_.cpu(cpu).page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
@@ -364,6 +368,11 @@ u32 Bus::dma_read32(Cpu cpu, u32 addr) {
   addr &= ~3u;
   if (u8* p = nds_.cpu(cpu).page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
   return io_read(cpu, addr, 32);
+}
+void Bus::dma_write8(Cpu cpu, u32 addr, u8 v) {
+  bool code = false;
+  if (u8* p = nds_.cpu(cpu).page_table.write_ptr(addr, &code)) { if (code) store_code(p, &v, 1); else *p = v; return; }
+  io_write(cpu, addr, 8, v);
 }
 void Bus::dma_write16(Cpu cpu, u32 addr, u16 v) {
   addr &= ~1u; bool code = false;

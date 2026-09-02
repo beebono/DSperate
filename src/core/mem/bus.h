@@ -42,6 +42,11 @@ public:
   void set_vram_trap(bool on, bool lcdc);
 
   // DMA accesses (no CPU cycle accounting; page-table fast path then MMIO).
+  // The 8-bit pair is not reachable by a real DMA, which is 16- or 32-bit
+  // only; it is here for the cheat engine, whose byte writes are not the
+  // guest's and must not be priced (core/cheat/ar_engine.h).
+  u8  dma_read8 (Cpu cpu, u32 addr);
+  void dma_write8(Cpu cpu, u32 addr, u8 v);
   u16 dma_read16(Cpu cpu, u32 addr);
   u32 dma_read32(Cpu cpu, u32 addr);
   void dma_write16(Cpu cpu, u32 addr, u16 v);

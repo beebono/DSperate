@@ -7,6 +7,7 @@ add_library(dsperate_core STATIC
   mem/timing.cpp
   dma/dma.cpp
   cart/cart.cpp
+  cheat/ar_engine.cpp
   sched/scheduler.cpp
   cpu/cpu.cpp
   cpu/cp15.cpp
