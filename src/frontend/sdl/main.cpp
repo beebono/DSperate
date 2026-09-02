@@ -546,7 +546,7 @@ int main(int argc, char** argv) {
     bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
     display.set_chunky(chunky != 0, chunky_cell); display2.set_chunky(chunky != 0, chunky_cell);
     if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel, 0, 1 - bottom_display) ||
-        !display2.open("DSperate (bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, bottom_display)) { SDL_Quit(); return 1; }
+        !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
   } else { display.set_chunky(chunky != 0, chunky_cell); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; } }
   // A single-screen layout shows one screen: the core skips the other's

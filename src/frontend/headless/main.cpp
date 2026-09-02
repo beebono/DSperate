@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
   if (replay && !direct)
     std::fprintf(stderr, "warning: --replay without --direct boots the firmware, not the ROM;"
                          " the replay will not reproduce the recorded session\n");
-  std::fprintf(stderr, "DSperate 0.0.1 (%s%s)\n",
+  std::fprintf(stderr, "DSperate 1.0.0 (%s%s)\n",
 #if DSPERATE_JIT
               "jit",
 #else
