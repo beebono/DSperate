@@ -53,8 +53,19 @@ public:
   // Shown on the root row so the player can see what a save would overwrite.
   void set_slot_used(int s, bool used) { if (s >= 0 && s < 10) used_[s] = used; }
 
-  Result input(u32 presses);       // a DS button mask (io::Io::Button bits)
+  // One menu tick. `presses` are the button edges since the last call, `held`
+  // is what is down now (for key repeat) and `ms` is how long since the last
+  // call (for repeat and for scrolling a name too long to fit). A menu that
+  // is only ever given edges still works; it simply does neither.
+  Result update(u32 presses, u32 held, u32 ms);
+  Result input(u32 presses) { return update(presses, 0, 0); }
   void   draw(const Blit& d) const;
+
+  // True when the picture would differ from the last draw: a press was acted
+  // on, a repeat fired, or a name is part way through scrolling. The frontend
+  // composites only when this says to, since nothing else is running.
+  bool dirty() const { return dirty_; }
+  void clear_dirty() { dirty_ = false; }
 
   // The root page is a table in menu.cpp (kRoot); this is its length, and the
   // panel grows with it. Adding a row is one entry there -- eight rows still
@@ -80,6 +91,27 @@ private:
   int  cheat_top_ = 0;           // first line shown, for scrolling
   bool cheats_dirty_ = false;
 
+  // Holding a direction walks the list: 400 ms before it starts, then one
+  // row every 55 ms, which is brisk enough for a list of thousands without
+  // running away on a list of six.
+  static constexpr u32 kRepeatDelayMs = 400, kRepeatRateMs = 55;
+  // A selected name too long for the panel scrolls sideways so the rest can
+  // be read: still for half a second, then 26 px a second, then a pause at
+  // the end before it snaps back and does it again.
+  static constexpr u32 kMarqueeDelayMs = 500, kMarqueeHoldMs = 900, kMarqueePxPerSec = 26;
+
+  bool dirty_ = false;
+  int  repeat_dir_ = 0;          // -1 up, +1 down, 0 nothing held
+  u32  repeat_ms_ = 0;
+  bool repeating_ = false;       // past the initial delay
+  u32  marquee_ms_ = 0;          // since the selection last moved
+
+  // How far the selected name is scrolled, given how much of it overflows.
+  Result handle(u32 presses);    // the button handling, without the timing
+  int marquee_offset(int overflow) const;
+  // How far the selected name overruns its row, measured by the last draw so
+  // update() can animate it without re-measuring the layout.
+  mutable int marquee_overflow_ = 0;
   bool have_cheats() const { return codes_ && !codes_->empty(); }
   // The root page hides the cheats row when there is nothing to show, so the
   // rows on screen are not the table's rows; this maps one to the other.

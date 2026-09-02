@@ -305,6 +305,146 @@ void test_cheats_draw_empty() {
   m.draw(ds::sdl::Blit{fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr});
 }
 
+// --- key repeat and the scrolling name ------------------------------------
+
+// A flat list, so a step is a step: no headings or notes in the way.
+struct FlatFixture {
+  std::vector<ds::cheat::Code> codes;
+  std::vector<ds::cheat::Group> groups;
+  explicit FlatFixture(int n, const char* name = "Cheat") {
+    for (int i = 0; i < n; ++i) {
+      ds::cheat::Code c;
+      c.name = std::string(name) + " " + std::to_string(i);
+      c.words = {0x02000000, 1};
+      codes.push_back(c);
+    }
+  }
+  // Which code is selected, read off by toggling it.
+  int selected(Menu& m) {
+    m.input(press(B::BTN_A));
+    for (size_t i = 0; i < codes.size(); ++i)
+      if (codes[i].enabled) { codes[i].enabled = false; return static_cast<int>(i); }
+    return -1;
+  }
+};
+
+void open_flat(Menu& m) {
+  m.set_open(true);
+  m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+}
+
+// Holding a direction does nothing until the delay has passed, then steps.
+// A real press arrives with the button already held, which is what starts
+// the timer, so the tests send both.
+void test_key_repeat() {
+  const u32 down = 1u << B::BTN_DOWN;
+  {
+    FlatFixture f(40);
+    Menu m;
+    m.set_cheats(&f.codes, &f.groups);
+    open_flat(m);
+    m.update(down, down, 0);                             // the press itself: one row
+    for (int t = 0; t < 39; ++t) m.update(0, down, 10);  // 390 ms, just under the delay
+    CHECK(f.selected(m) == 1);                           // nothing repeated yet
+  }
+  {
+    FlatFixture f(40);
+    Menu m;
+    m.set_cheats(&f.codes, &f.groups);
+    open_flat(m);
+    m.update(down, down, 0);
+    for (int t = 0; t < 40; ++t) m.update(0, down, 10);  // 400 ms: the first repeat
+    CHECK(f.selected(m) == 2);
+  }
+  {
+    FlatFixture f(40);
+    Menu m;
+    m.set_cheats(&f.codes, &f.groups);
+    open_flat(m);
+    m.update(down, down, 0);
+    for (int t = 0; t < 51; ++t) m.update(0, down, 10);  // 400 + two 55 ms steps
+    CHECK(f.selected(m) == 4);
+  }
+}
+
+// Letting go and pressing again starts the wait over, so a series of taps
+// does not accelerate.
+void test_key_repeat_restarts() {
+  FlatFixture f(40);
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  open_flat(m);
+  const u32 down = 1u << B::BTN_DOWN;
+  m.update(down, down, 0);
+  for (int t = 0; t < 39; ++t) m.update(0, down, 10);   // just under the delay
+  for (int t = 0; t < 5; ++t) m.update(0, 0, 10);       // released
+  m.update(down, down, 0);                              // and pressed again
+  for (int t = 0; t < 39; ++t) m.update(0, down, 10);
+  CHECK(f.selected(m) == 2);                            // two presses, no repeats
+}
+
+// The other pages keep their one-step-per-press feel.
+void test_key_repeat_only_on_cheats() {
+  FlatFixture f(40);
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  m.set_open(true);
+  const u32 down = 1u << B::BTN_DOWN;
+  for (int t = 0; t < 200; ++t) m.update(0, down, 10);  // two seconds on the root page
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::Save);   // still the first row
+}
+
+// A name too long for its row scrolls after a pause; a short one never does.
+// The overflow is measured while drawing, so the page has to be drawn first.
+void test_marquee() {
+  const u32 w = ds::SCREEN_W, h = ds::SCREEN_H;
+  std::vector<u32> fb(w * h, 0);
+  const ds::sdl::Blit d{fb.data(), w, h, nullptr};
+
+  FlatFixture longnames(4, "An extremely long cheat name that cannot possibly fit across the panel");
+  Menu m;
+  m.set_cheats(&longnames.codes, &longnames.groups);
+  open_flat(m);
+  m.draw(d);
+  m.clear_dirty();
+  // Nothing moves during the initial pause.
+  for (int t = 0; t < 40; ++t) { m.update(0, 0, 10); m.draw(d); }
+  CHECK(!m.dirty());
+  // Then it starts, and keeps asking to be redrawn.
+  for (int t = 0; t < 20; ++t) { m.update(0, 0, 10); m.draw(d); }
+  CHECK(m.dirty());
+
+  // A short name never scrolls, however long it is selected.
+  FlatFixture shortnames(4, "Short");
+  Menu m2;
+  m2.set_cheats(&shortnames.codes, &shortnames.groups);
+  open_flat(m2);
+  m2.draw(d);
+  m2.clear_dirty();
+  for (int t = 0; t < 500; ++t) { m2.update(0, 0, 10); m2.draw(d); }
+  CHECK(!m2.dirty());
+}
+
+// Moving the selection puts the new name back to its start.
+void test_marquee_resets_on_move() {
+  const u32 w = ds::SCREEN_W, h = ds::SCREEN_H;
+  std::vector<u32> fb(w * h, 0);
+  const ds::sdl::Blit d{fb.data(), w, h, nullptr};
+  FlatFixture f(10, "An extremely long cheat name that cannot possibly fit across the panel");
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  open_flat(m);
+  m.draw(d);
+  // Scroll well into it, then move: the new row starts from still again.
+  for (int t = 0; t < 80; ++t) { m.update(0, 0, 10); m.draw(d); }
+  m.update(press(B::BTN_DOWN), 0, 10);
+  m.draw(d);
+  m.clear_dirty();
+  for (int t = 0; t < 40; ++t) { m.update(0, 0, 10); m.draw(d); }
+  CHECK(!m.dirty());               // back inside the initial pause
+}
+
 } // namespace
 
 int main() {
@@ -324,6 +464,11 @@ int main() {
   test_cheat_navigation_clamps();
   test_cheats_draw_bounds();
   test_cheats_draw_empty();
+  test_key_repeat();
+  test_key_repeat_restarts();
+  test_key_repeat_only_on_cheats();
+  test_marquee();
+  test_marquee_resets_on_move();
   std::printf("menu: ok\n");
   return 0;
 }

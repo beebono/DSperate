@@ -609,6 +609,7 @@ int main(int argc, char** argv) {
   load_enabled();
   std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
   bool menu_dirty = false;      // the menu screens need compositing and presenting again
+  Uint32 menu_ms = 0;           // SDL_GetTicks at the menu's last tick
   // Pausing waits for one more presented, *unscaled* frame. The fast scaling
   // path has the GPU write its lines straight into the window surface and
   // never fills fb_ (Gpu::output_engine), so stopping the moment the hotkey
@@ -713,8 +714,14 @@ int main(int argc, char** argv) {
     if (paused) {
       // Nothing runs behind the menu, so it is composited only when something
       // about it changed -- otherwise this is a plain idle tick.
-      if (const u32 presses = menu.open() ? input.take_menu_presses() : 0u; presses) {
-        switch (menu.input(presses)) {
+      if (menu.open()) {
+        // The menu is ticked every idle pass, not only when a button moves:
+        // holding a direction repeats, and a cheat name too long for its row
+        // scrolls, both of which need to know how much time has gone by.
+        const Uint32 now_ms = SDL_GetTicks();
+        const u32 elapsed = static_cast<u32>(now_ms - menu_ms);
+        menu_ms = now_ms;
+        switch (menu.update(input.take_menu_presses(), input.menu_held(), elapsed)) {
         case Menu::Result::None: break;
         case Menu::Result::Resume:
           state_slot = menu.slot();
@@ -747,10 +754,10 @@ int main(int argc, char** argv) {
           break;
         case Menu::Result::Quit: input.request_quit(); break;
         }
-        menu_dirty = true;
       }
-      if (menu_dirty && menu.open()) {
+      if (menu.open() && (menu_dirty || menu.dirty())) {
         menu_dirty = false;
+        menu.clear_dirty();
         // The menu goes on the DS top screen in dual-window mode (`display`
         // is opened with only_screen 0, so it is the top one whichever
         // physical output it landed on), and on the layout's primary screen
@@ -938,6 +945,7 @@ int main(int argc, char** argv) {
       refresh_slots();
       menu.set_open(true);
       menu_dirty = true;
+      menu_ms = SDL_GetTicks();
       set_paused(true);
     }
     const Uint64 t2 = SDL_GetPerformanceCounter();

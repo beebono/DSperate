@@ -53,6 +53,9 @@ public:
   // frame() is not being called. Edge-triggered: a held direction moves one
   // row, the same as the taps frame() is built to catch.
   u32 take_menu_presses() { const u32 p = pressed_ | stick_pressed_; pressed_ = 0; stick_pressed_ = 0; return p; }
+  // What is held right now, for the menu's key repeat. Not the same as the
+  // edges above: a direction held down produces one press and then nothing.
+  u32 menu_held() const { return buttons_ | stick_; }
   bool fast_forward_held() const { return ff_key_ || ff_pad_; }
 
   // Hinge: a real lid switch (lid.h) drives set_lid() directly; the `lid`

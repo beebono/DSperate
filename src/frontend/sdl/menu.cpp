@@ -63,7 +63,13 @@ int glyph(char c) {
 
 // One DS pixel, mapped onto the destination. Clipped to the DS screen so a
 // caller may lay out past the edges without checking.
+// Columns outside [clip_x0, clip_x1) are dropped, which is what lets a name
+// scroll under the panel edge instead of over it. The default admits the
+// whole screen.
+int g_clip_x0 = 0, g_clip_x1 = static_cast<int>(ds::SCREEN_W);
+
 void put(const Blit& d, int x, int y, u32 colour) {
+  if (x < g_clip_x0 || x >= g_clip_x1) return;
   if (x < 0 || x >= static_cast<int>(ds::SCREEN_W) || y < 0 || y >= static_cast<int>(ds::SCREEN_H)) return;
   const u32 x0 = d.xrun ? d.xrun[x] : static_cast<u32>(x), x1 = d.xrun ? d.xrun[x + 1] : static_cast<u32>(x + 1);
   const u32 y0 = d.h * static_cast<u32>(y) / ds::SCREEN_H, y1 = d.h * static_cast<u32>(y + 1) / ds::SCREEN_H;
@@ -204,7 +210,52 @@ void Menu::toggle_cheat() {
   }
 }
 
-Menu::Result Menu::input(u32 presses) {
+int Menu::marquee_offset(int overflow) const {
+  if (overflow <= 0) return 0;
+  const u32 scroll_ms = static_cast<u32>(overflow) * 1000u / kMarqueePxPerSec;
+  const u32 cycle = kMarqueeDelayMs + scroll_ms + kMarqueeHoldMs;
+  const u32 t = marquee_ms_ % cycle;    // still, scroll, hold, and round again
+  if (t < kMarqueeDelayMs) return 0;
+  if (t < kMarqueeDelayMs + scroll_ms)
+    return static_cast<int>((t - kMarqueeDelayMs) * kMarqueePxPerSec / 1000u);
+  return overflow;
+}
+
+Menu::Result Menu::update(u32 presses, u32 held, u32 ms) {
+  using B = io::Io::Button;
+  const int was_row = cheat_row_;
+  const int before = marquee_offset(marquee_overflow_);
+  if (presses) dirty_ = true;
+
+  // Key repeat, on the cheats page only: the other pages are a handful of
+  // rows where a held direction would overshoot more often than it helps.
+  if (page_ == Page::Cheats) {
+    const int dir = (held & (1u << B::BTN_UP)) ? -1 : (held & (1u << B::BTN_DOWN)) ? 1 : 0;
+    if (dir != repeat_dir_) { repeat_dir_ = dir; repeat_ms_ = 0; repeating_ = false; }
+    else if (dir != 0) {
+      repeat_ms_ += ms;
+      for (u32 step = repeating_ ? kRepeatRateMs : kRepeatDelayMs;
+           repeat_ms_ >= step; step = kRepeatRateMs) {
+        repeat_ms_ -= step;
+        repeating_ = true;
+        move_cheat_row(dir);
+        dirty_ = true;
+      }
+    }
+  } else {
+    repeat_dir_ = 0; repeat_ms_ = 0; repeating_ = false;
+  }
+
+  const Result r = handle(presses);
+
+  // A name only scrolls once the selection has settled on it.
+  if (cheat_row_ != was_row) marquee_ms_ = 0;
+  else marquee_ms_ += ms;
+  if (marquee_offset(marquee_overflow_) != before) dirty_ = true;
+  return r;
+}
+
+Menu::Result Menu::handle(u32 presses) {
   using B = io::Io::Button;
   const auto hit = [&](B b) { return (presses >> b) & 1; };
   if (page_ == Page::Slot) {
@@ -295,6 +346,7 @@ void Menu::draw_cheats(const Blit& d) const {
   if (top < 0) top = 0;
 
   const int text_x = px0 + 8, avail = kCheatPanelW - 16 - 6;
+  marquee_overflow_ = 0;   // set below if the selected row is actually too long
   for (int i = 0; i < kCheatVisible && top + i < n; ++i) {
     const Line& l = lines_[static_cast<size_t>(top + i)];
     const int ry = py0 + kCheatRowsY + i * kCheatRowH;
@@ -311,8 +363,30 @@ void Menu::draw_cheats(const Blit& d) const {
       draw_text(d, text_x + 4, ry, kCheatScale, kDim, fit(c.name, kCheatScale, avail - 4).c_str());
       continue;
     }
-    const std::string label = std::string(c.enabled ? "[X] " : "[ ] ") + c.name;
-    draw_text(d, text_x, ry, kCheatScale, c.enabled || sel ? kInk : kDim, fit(label, kCheatScale, avail).c_str());
+    const char* box = c.enabled ? "[X] " : "[ ] ";
+    const u32 ink = c.enabled || sel ? kInk : kDim;
+    if (!sel) {
+      draw_text(d, text_x, ry, kCheatScale, ink, fit(std::string(box) + c.name, kCheatScale, avail).c_str());
+      continue;
+    }
+    // The selected row scrolls its name rather than cutting it, so the whole
+    // of it can be read without leaving the row. The checkbox stays put --
+    // it is the thing being toggled, and it must not scroll out of sight --
+    // so only the name moves, inside what is left of the row.
+    const int box_w = text_width(kCheatScale, box) + kCheatScale;
+    draw_text(d, text_x, ry, kCheatScale, ink, box);
+    const int name_x = text_x + box_w, name_avail = avail - box_w;
+    marquee_overflow_ = text_width(kCheatScale, c.name.c_str()) - name_avail;
+    if (marquee_overflow_ <= 0) {
+      draw_text(d, name_x, ry, kCheatScale, ink, c.name.c_str());
+      continue;
+    }
+    const int clip0 = g_clip_x0, clip1 = g_clip_x1;
+    g_clip_x0 = name_x;
+    g_clip_x1 = name_x + name_avail;
+    draw_text(d, name_x - marquee_offset(marquee_overflow_), ry, kCheatScale, ink, c.name.c_str());
+    g_clip_x0 = clip0;
+    g_clip_x1 = clip1;
   }
 
   // A scroll bar, because the list gives no other clue how long it is: some
