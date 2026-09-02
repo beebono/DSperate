@@ -50,7 +50,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist/dsperate-${GITHUB_REF_NAME}-linux-aarch64
-          cp build/host/src/frontend/cli/dsperate build/host/src/frontend/sdl/dsperate-sdl \
+          cp build/host/src/frontend/sdl/dsperate build/host/src/frontend/headless/dsperate-headless \
              LICENSE README.md dist/dsperate-${GITHUB_REF_NAME}-linux-aarch64/
           tar -C dist -czf dsperate-${GITHUB_REF_NAME}-linux-aarch64.tar.gz dsperate-${GITHUB_REF_NAME}-linux-aarch64
       - uses: actions/upload-artifact@v4
