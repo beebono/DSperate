@@ -15,6 +15,7 @@
 #endif
 #include "core/profile.h"
 #include "core/frame_report.h"
+#include "core/cheat/database.h"
 
 #include <cstdio>
 #include <thread>
@@ -123,6 +124,9 @@ int main(int argc, char** argv) {
   bool no_aa = false;
   bool cpu_oc = false;
   bool frames_given = false;
+  const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
+  bool list_cheats = false;
+  std::vector<std::string> enable_cheats;   // names (or #index) to switch on
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
     auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };
@@ -138,6 +142,9 @@ int main(int argc, char** argv) {
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
+    else if (arg("--cheats")) cheat_db = argv[++i];         // usrcheat.dat; the entry matching this ROM is loaded
+    else if (flag("--list-cheats")) list_cheats = true;     // print them (with their index) and exit
+    else if (arg("--cheat")) enable_cheats.push_back(argv[++i]);   // enable one by name, or by "#N" from --list-cheats
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
     else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
@@ -195,6 +202,44 @@ int main(int argc, char** argv) {
   nds.gpu3d.set_timing_oc(timing_oc);
   nds.gpu3d.renderer().set_aa(!no_aa);
 
+  if (rom && cheat_db) {
+    ds::cheat::GameCheats found;
+    std::string err;
+    if (!ds::cheat::load_for_rom(cheat_db, rom, found, err)) {
+      if (!err.empty()) { std::fprintf(stderr, "cheats: %s\n", err.c_str()); return 1; }
+      std::fprintf(stderr, "cheats: this ROM is not in %s\n", cheat_db);
+      if (list_cheats) return 0;
+    } else {
+      if (!err.empty()) std::fprintf(stderr, "cheats: %s\n", err.c_str());
+      std::fprintf(stderr, "cheats: %s -- %zu codes in %zu groups\n",
+                   found.name.c_str(), found.codes.size(), found.groups.size());
+      if (list_cheats) {
+        for (size_t i = 0; i < found.codes.size(); ++i) {
+          const ds::cheat::Code& c = found.codes[i];
+          const char* g = c.group >= 0 ? found.groups[static_cast<size_t>(c.group)].name.c_str() : "";
+          std::printf("#%-5zu %-6s %-52s %s\n", i, c.is_note() ? "note" : "code", c.name.c_str(), g);
+        }
+        return 0;
+      }
+      nds.cheats.codes = std::move(found.codes);
+      // Enabling by name matches the whole name; "#N" is the index the
+      // listing printed, which is the way to reach one of the many codes
+      // whose names are duplicated within a game.
+      for (const std::string& want : enable_cheats) {
+        bool hit = false;
+        if (want.size() > 1 && want[0] == '#') {
+          const size_t at = std::strtoul(want.c_str() + 1, nullptr, 10);
+          if (at < nds.cheats.codes.size()) { nds.cheats.codes[at].enabled = true; hit = true; }
+        } else {
+          for (ds::cheat::Code& c : nds.cheats.codes) if (c.name == want) { c.enabled = true; hit = true; }
+        }
+        if (!hit) std::fprintf(stderr, "cheats: no code called \"%s\"\n", want.c_str());
+      }
+      size_t on = 0;
+      for (const ds::cheat::Code& c : nds.cheats.codes) if (c.enabled) ++on;
+      std::fprintf(stderr, "cheats: %zu enabled\n", on);
+    }
+  }
   if (rom && direct) nds.setup_direct_boot();
   // A recording made with a save present only replays if the save is there:
   // the game otherwise stops to create one. Loaded in the same place the SDL

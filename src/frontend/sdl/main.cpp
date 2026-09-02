@@ -11,6 +11,7 @@
 #include "core/frame_report.h"
 #include "core/input/input_log.h"
 #include "core/state/state.h"
+#include "core/cheat/database.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
@@ -384,6 +385,29 @@ int main(int argc, char** argv) {
   const std::string saves_dir = cfg.str("paths.saves");
   const std::string rom_dir = std::string(rom).find_last_of('/') == std::string::npos ? "." : std::string(rom).substr(0, std::string(rom).find_last_of('/'));
   const std::string states_dir = cfg.str("paths.states", rom_dir);   // states and screenshots
+  // Cheats: a usrcheat.dat, from [paths] cheats or beside the ROM or in the
+  // config directory. The entry matching this ROM's game code and header
+  // checksum is loaded; nothing is enabled by that alone, so a database that
+  // is simply present costs a file read at startup and nothing after it.
+  ds::cheat::GameCheats cheat_set;
+  {
+    std::string db = cfg.str("paths.cheats");
+    if (db.empty()) {
+      for (const std::string& candidate : {rom_dir + "/usrcheat.dat", ds::sdl::Config::dir() + "/usrcheat.dat"}) {
+        if (FILE* f = std::fopen(candidate.c_str(), "rb")) { std::fclose(f); db = candidate; break; }
+      }
+    }
+    if (!db.empty()) {
+      std::string err;
+      if (ds::cheat::load_for_rom(db, rom, cheat_set, err)) {
+        std::fprintf(stderr, "cheats: %s -- %zu codes in %zu groups\n",
+                     cheat_set.name.c_str(), cheat_set.codes.size(), cheat_set.groups.size());
+        nds.cheats.codes = cheat_set.codes;
+      } else if (!err.empty()) {
+        std::fprintf(stderr, "cheats: %s\n", err.c_str());
+      }
+    }
+  }
 
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));

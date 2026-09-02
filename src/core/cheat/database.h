@@ -48,6 +48,15 @@ struct GameCheats {
 // over the ROM's first 512 bytes.
 u32 header_checksum(const u8* header, size_t n = 512);
 
+// The whole job a frontend wants: read the database, work out which entry
+// this ROM file is, and hand back its cheats. The ROM is opened only for its
+// first 512 bytes -- the game code lives at offset 0x0C and the checksum is
+// over the header -- so this costs nothing next to loading the ROM itself.
+// False with `err` set if the database or the ROM cannot be read; false with
+// `err` empty if both were fine and the game simply is not in the database,
+// which is the common case and not an error worth showing.
+bool load_for_rom(const std::string& db_path, const std::string& rom_path, GameCheats& out, std::string& err);
+
 class Database {
 public:
   // Reads and indexes the file. False (with `err` set) if it is missing, too

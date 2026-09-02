@@ -105,6 +105,23 @@ bool Database::open(const std::string& path, std::string& err) {
   return true;
 }
 
+bool load_for_rom(const std::string& db_path, const std::string& rom_path, GameCheats& out, std::string& err) {
+  u8 header[512];
+  FILE* rom = std::fopen(rom_path.c_str(), "rb");
+  if (!rom) { err = "cannot open " + rom_path; return false; }
+  const bool got = std::fread(header, 1, sizeof header, rom) == sizeof header;
+  std::fclose(rom);
+  if (!got) { err = rom_path + " is too short to be a DS ROM"; return false; }
+
+  u32 game_code = 0;
+  for (int i = 3; i >= 0; --i) game_code = (game_code << 8) | header[0x0C + static_cast<size_t>(i)];
+
+  Database db;
+  if (!db.open(db_path, err)) return false;
+  err.clear();
+  return db.best_entry(game_code, header_checksum(header), out, err);
+}
+
 bool Database::has(u32 game_code) const {
   for (const Entry& e : index_) if (e.game_code == game_code) return true;
   return false;
