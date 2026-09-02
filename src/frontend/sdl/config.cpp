@@ -157,6 +157,12 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 # bios9 = /path/to/bios9.bin
 # bios7 = /path/to/bios7.bin
 # firmware = /path/to/firmware.bin
+# firmware_override = /path/to/firmware.bin.ovr
+#                               # where settings changed inside the firmware's own menu are kept
+#                               # (nickname, birthday, favourite colour, message, language).
+#                               # Only the changed 256-byte pages are stored, and the firmware
+#                               # dump itself is never written to; delete this file to put the
+#                               # console back to whatever the dump says. Default: <firmware>.ovr
 # saves = /path/to/saves        # battery saves; default next to the ROM
 # states = /path/to/states      # save states and screenshots; default next to the ROM
 

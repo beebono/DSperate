@@ -39,7 +39,9 @@ namespace {
 using namespace ds;
 
 const char* kUsage =
-    "usage: dsperate-sdl <rom.nds> [--bios9 F --bios7 F --firmware F] [options]\n"
+    "usage: dsperate-sdl [rom.nds] [--bios9 F --bios7 F --firmware F] [options]\n"
+    "  With no ROM (or a file named BootMenu.nds) the console boots its own\n"
+    "  firmware: the DS menu, with the clock set from this machine and PictoChat.\n"
     "  --config F      settings file (default ~/.config/dsperate/dsperate.ini; every\n"
     "                  option below has a key there; games/<rom name>.ini and games/<CODE>.ini\n"
     "                  override it per game, the filename one winning)\n"
@@ -295,8 +297,6 @@ int main(int argc, char** argv) {
     else if (argv[i][0] == '-' && argv[i][1] == '-') { std::fprintf(stderr, "unknown option %s\n", argv[i]); std::fputs(kUsage, stderr); return 2; }
     else rom = argv[i];
   }
-  if (!rom) { std::fputs(kUsage, stderr); return 2; }
-
   ds::sdl::Config cfg;
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
@@ -308,18 +308,41 @@ int main(int argc, char** argv) {
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
   if (bios9.empty() || bios7.empty() || fw.empty()) { std::fprintf(stderr, "BIOS and firmware paths are needed (--bios9/--bios7/--firmware or [paths] in %s)\n", global_ini.c_str()); return 2; }
 
+  // No ROM boots the firmware's own menu. A file called BootMenu.nds selects
+  // the same thing without a command line -- a launcher that only knows how to
+  // start games can point at one, and it never needs to exist. Either way a
+  // path is settled on here rather than threaded through as "no ROM": every
+  // per-game path below (config, saves, states, screenshots, cheats) is
+  // derived from this string, and they all want somewhere to live.
+  const bool boot_firmware = !rom || rom_stem(base_name(rom)) == "BootMenu";
+  const std::string rom_path = rom ? std::string(rom) : ds::sdl::Config::dir() + "/BootMenu.nds";
+  if (boot_firmware) std::fprintf(stderr, "no game: booting the firmware\n");
+
   NDS nds;
   if (!nds.load_bios(bios9.c_str(), bios7.c_str(), fw.c_str())) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
   nds.reset();
-  if (!nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
+  if (!boot_firmware && !nds.load_rom(rom_path.c_str())) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); return 1; }
+  // The firmware writes its settings pages to flash over SPI. Those go to a
+  // sidecar beside the firmware rather than into the dump itself, so a rename
+  // in the DS menu survives a restart without the emulator ever writing to a
+  // file the user cannot regenerate. See NDS::load_firmware_override.
+  const std::string fw_override = cfg.str("paths.firmware_override", fw + ".ovr");
+  {
+    std::string err;
+    if (!nds.load_firmware_override(fw_override, err)) {
+      if (err != "cannot open") std::fprintf(stderr, "firmware settings: %s: %s\n", fw_override.c_str(), err.c_str());
+    } else {
+      std::fprintf(stderr, "firmware settings: %s%s%s\n", fw_override.c_str(), err.empty() ? "" : " -- warning: ", err.c_str());
+    }
+  }
   // The per-game file goes on top of the global one, the command line on top of both.
   // Title ID first, then the ROM's filename, so the file named like the ROM
   // wins; that is also where hotkey-picked settings are remembered.
   std::string game_ini;
   if (nds.cart) {
-    for (const std::string& p : {ds::sdl::Config::game_path_code(nds.cart->header().game_code), ds::sdl::Config::game_path_rom(rom)})
+    for (const std::string& p : {ds::sdl::Config::game_path_code(nds.cart->header().game_code), ds::sdl::Config::game_path_rom(rom_path)})
       if (!p.empty() && cfg.load(p)) std::fprintf(stderr, "config: %s\n", p.c_str());
-    game_ini = ds::sdl::Config::game_path_rom(rom);
+    game_ini = ds::sdl::Config::game_path_rom(rom_path);
     if (game_ini.empty()) game_ini = ds::sdl::Config::game_path_code(nds.cart->header().game_code);
     apply_cli();
     std::fprintf(stderr, "game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
@@ -383,7 +406,7 @@ int main(int argc, char** argv) {
     layout.dominant = std::clamp(cfg.real("video.dominant_ratio", 0.5), 0.1, 0.99);
   }
   const std::string saves_dir = cfg.str("paths.saves");
-  const std::string rom_dir = std::string(rom).find_last_of('/') == std::string::npos ? "." : std::string(rom).substr(0, std::string(rom).find_last_of('/'));
+  const std::string rom_dir = rom_path.find_last_of('/') == std::string::npos ? "." : rom_path.substr(0, rom_path.find_last_of('/'));
   const std::string states_dir = cfg.str("paths.states", rom_dir);   // states and screenshots
   // Cheats: a usrcheat.dat, from [paths] cheats or beside the ROM or in the
   // config directory. The entry matching this ROM's game code and header
@@ -399,7 +422,7 @@ int main(int argc, char** argv) {
     }
     if (!db.empty()) {
       std::string err;
-      if (ds::cheat::load_for_rom(db, rom, cheat_set, err)) {
+      if (ds::cheat::load_for_rom(db, rom_path, cheat_set, err)) {
         std::fprintf(stderr, "cheats: %s -- %zu codes in %zu groups\n",
                      cheat_set.name.c_str(), cheat_set.codes.size(), cheat_set.groups.size());
         nds.cheats.codes = cheat_set.codes;
@@ -413,7 +436,15 @@ int main(int argc, char** argv) {
   nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
   nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
   nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
-  nds.setup_direct_boot();
+  if (!boot_firmware) nds.setup_direct_boot();
+  // A real console's clock, seeded from this machine. Off in the core by
+  // default so the verification harness stays reproducible; a frontend
+  // showing someone their own DS menu wants the real date on it. Not under
+  // --replay: a recorded scene has to reproduce frame for frame, and a game
+  // that reads the date (Animal Crossing, the Pokemon day/night cycle) would
+  // otherwise play differently every time it was replayed.
+  if (!replay) nds.io.start_rtc_clock();
+  else std::fprintf(stderr, "rtc: frozen for the replay\n");
 #if DSPERATE_JIT
   if (jit && !ds::jit::attach(nds, true, true)) return 1;
   if (jit && cfg.flag("emu.cpu_oc", false)) ds::jit::set_cpu_oc(true);   // see config.cpp; translate-time pricing, so before the first block
@@ -426,7 +457,7 @@ int main(int argc, char** argv) {
   // has always loaded --save read-only for this reason; match it here, and
   // take an explicit --save too so both frontends can be pointed at the same
   // scene save rather than one silently picking up <rom>.sav.
-  const std::string sav = save_arg ? std::string(save_arg) : save_path(rom, saves_dir);
+  const std::string sav = save_arg ? std::string(save_arg) : save_path(rom_path, saves_dir);
   load_save(nds, sav);
   const bool save_readonly = replay != nullptr;
   if (save_readonly) std::fprintf(stderr, "save: read-only for the replay\n");
@@ -910,6 +941,30 @@ int main(int argc, char** argv) {
     const Uint64 t0 = SDL_GetPerformanceCounter();
     nds.run_frame();
 
+    // The console has switched itself off. On a firmware boot that is the
+    // firmware leaving its settings pages -- the flash writes that saved them
+    // have already landed in the image, so this is the moment to put them on
+    // disk, and then to start the console again, which is what pressing the
+    // power button would do next. A game reaching here is left running: it is
+    // not expected to, and quitting on one stray write would lose more than
+    // it saved.
+    if (nds.power_off) {
+      if (boot_firmware) {
+        std::string err;
+        if (nds.firmware_override_dirty() && !nds.save_firmware_override(fw_override, err))
+          std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
+        else if (nds.firmware_override_dirty())
+          std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
+        std::fprintf(stderr, "power off: rebooting the firmware\n");
+#if DSPERATE_JIT
+        if (jit) ds::jit::flush_all();
+#endif
+        nds.reset();          // clears power_off, and re-seeds the clock
+      } else {
+        nds.power_off = false;
+      }
+    }
+
     const Uint64 t1 = SDL_GetPerformanceCounter();
     if (present) {
       const bool cursor = input.stylus_visible() && !log.reading();
@@ -1006,6 +1061,11 @@ int main(int argc, char** argv) {
   }
 
   flush_save();
+  if (nds.firmware_override_dirty()) {
+    std::string err;
+    if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
+    else std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
+  }
   if (fs_limit > 0)
     std::fprintf(stderr, "frameskip (%s, limit %d): %llu of %llu frames not drawn\n", fs_adaptive ? "adaptive" : "fixed", fs_limit,
                  static_cast<unsigned long long>(fs_skipped), static_cast<unsigned long long>(frames));

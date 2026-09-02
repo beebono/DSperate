@@ -121,6 +121,8 @@ int main(int argc, char** argv) {
 #endif
   TraceState ts;
   bool timing_oc = false;
+  bool rtc_host = false;              // --rtc-host: free-running clock seeded from the wall
+  const char* fw_override = nullptr;  // --firmware-override: sidecar of changed firmware pages
   bool no_aa = false;
   bool cpu_oc = false;
   bool frames_given = false;
@@ -148,6 +150,8 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
     else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
+    else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
+    else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
     else if (flag("--timing-oc")) timing_oc = true;                          // no FIFO + untimed geometry (DraStic's model); see Gpu3D::set_timing_oc
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
     else if (flag("--cpu-oc")) cpu_oc = true;                                // INEXACT: JIT data accesses priced as main RAM at translate time; see jit::set_cpu_oc
@@ -193,7 +197,14 @@ int main(int argc, char** argv) {
   if (hide_screen) nds.gpu.set_screen_visible(!std::strcmp(hide_screen, "bottom") ? 1 : 0, false);
   if (bios9 && bios7 && fw) {
     if (!nds.load_bios(bios9, bios7, fw)) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
+    if (fw_override) {
+      std::string err;
+      if (!nds.load_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware override: %s\n", err.c_str());
+      else if (!err.empty()) std::fprintf(stderr, "firmware override: warning: %s\n", err.c_str());
+    }
     nds.reset();
+    // After reset(), which clears the RTC.
+    if (rtc_host) nds.io.start_rtc_clock();
   } else {
     std::fprintf(stderr, "note: no --bios9/--bios7/--firmware given; running with empty BIOS\n");
   }
@@ -387,10 +398,37 @@ int main(int argc, char** argv) {
 #endif
     if (i >= stats_from)
       frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    // The console has switched itself off. On a firmware boot that is the
+    // firmware leaving its settings pages, with the pages it wrote already in
+    // the image, so this is the moment to put them on disk -- and then to
+    // start the console again, which is what the hardware's power button
+    // would do next. A cart session is left alone: a game is not expected to
+    // reach here, and quitting a benchmark on one stray write would be worse
+    // than running on.
+    if (nds.power_off) {
+      std::fprintf(stderr, "power off at frame %d%s\n", i, nds.cart ? "" : "; saving settings and rebooting");
+      if (!nds.cart) {
+        if (fw_override) {
+          std::string err;
+          if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware override: cannot save: %s\n", err.c_str());
+        }
+#if DSPERATE_JIT
+        if (jit9 || jit7) ds::jit::flush_all();
+#endif
+        nds.reset();          // clears power_off, and re-seeds the clock if --rtc-host
+      } else {
+        nds.power_off = false;
+      }
+    }
     ds::prof::frame_mark();
     if (per_frame && trace) { std::fprintf(stderr, "frame %d arm9 %llu arm7 %llu\n", i, ts.executed[0] - last9, ts.executed[1] - last7); last9 = ts.executed[0]; last7 = ts.executed[1]; }
   }
   wd_stop.store(true); if (wd.joinable()) wd.join();
+  if (fw_override && nds.firmware_override_dirty()) {
+    std::string err;
+    if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware override: cannot save: %s\n", err.c_str());
+    else std::fprintf(stderr, "firmware override: saved %s\n", fw_override);
+  }
   if (dump_out) std::fclose(dump_out);
   if (audio_out) std::fclose(audio_out);
   if (ts.pc_hist) {
