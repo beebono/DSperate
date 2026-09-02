@@ -7,6 +7,8 @@ add_library(dsperate_core STATIC
   mem/timing.cpp
   dma/dma.cpp
   cart/cart.cpp
+  cart/zip.cpp
+  cart/miniz/miniz_tinfl.c
   cheat/ar_engine.cpp
   cheat/database.cpp
   sched/scheduler.cpp
@@ -28,6 +30,13 @@ add_library(dsperate_core STATIC
   io/io.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# The vendored miniz decompression core (cart/miniz/README.md). Only the
+# inflate half is compiled: the compressor and miniz's own ZIP reader are not
+# vendored, and the archive parsing in cart/zip.cpp is ours.
+set_source_files_properties(cart/miniz/miniz_tinfl.c PROPERTIES
+  COMPILE_DEFINITIONS "MINIZ_NO_DEFLATE_APIS;MINIZ_NO_ARCHIVE_APIS;MINIZ_NO_STDIO;MINIZ_NO_TIME"
+  INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/cart/miniz")
 
 if(DSPERATE_JIT)
   target_sources(dsperate_core PRIVATE cpu/jit/runtime.cpp cpu/jit/translate.cpp)

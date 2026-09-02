@@ -8,6 +8,7 @@
 #endif
 #include "core/cpu/interp/interp.h"
 #include "core/cpu/cp15.h"
+#include "core/cart/zip.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -191,6 +192,20 @@ namespace { u64 rom_identity(const std::vector<u8>& rom) {
 
 bool NDS::load_rom(const std::string& path) {
   std::vector<u8> image = slurp(path);
+  // A zipped ROM is unpacked here and nothing downstream can tell: rom_id is
+  // hashed from the decompressed bytes below, so save states, .sav files and
+  // scene hashes are interchangeable between a zipped and a loose copy of the
+  // same game. Sniffed by magic rather than by extension.
+  if (cart::is_zip(image.data(), image.size())) {
+    std::vector<u8> rom;
+    std::string err, chosen;
+    if (!cart::extract_nds(image.data(), image.size(), rom, err, &chosen)) {
+      std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), err.c_str());
+      return false;
+    }
+    rom_zip_entry = std::move(chosen);
+    image = std::move(rom);
+  }
   if (image.size() < 0x1000) return false;
   rom_id = rom_identity(image);   // before the move; Cart pads to a power of two
   cart = std::make_unique<cart::Cart>(*this, std::move(image));

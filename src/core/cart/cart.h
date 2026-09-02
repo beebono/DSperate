@@ -100,4 +100,10 @@ private:
 // Save type per game code (a small list; default is 64 KB EEPROM).
 SaveType save_type_for(u32 game_code, u32& size);
 
+// Whether the save-type database (save_list.inc) carries this game code at
+// all. save_type_for() answers for every code, falling back to the commonest
+// chip, so it cannot be used to ask the question. Used to pick the real game
+// out of a multi-ROM zip -- see zip.h.
+bool known_game_code(u32 game_code);
+
 } // namespace ds::cart

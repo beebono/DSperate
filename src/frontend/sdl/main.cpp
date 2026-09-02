@@ -48,7 +48,7 @@ bool verbose() { static const bool v = std::getenv("DS_VERBOSE") != nullptr; ret
 using namespace ds;
 
 const char* kUsage =
-    "usage: dsperate-sdl [rom.nds] [--bios9 F --bios7 F --firmware F] [options]\n"
+    "usage: dsperate [rom.nds|rom.zip] [--bios9 F --bios7 F --firmware F] [options]\n"
     "  With no ROM (or a file named BootMenu.nds) the console boots its own\n"
     "  firmware: the DS menu, with the clock set from this machine and PictoChat.\n"
     "  --config F      settings file (default ~/.config/dsperate/dsperate.ini; every\n"
@@ -391,6 +391,9 @@ int main(int argc, char** argv) {
     if (game_ini.empty()) game_ini = ds::sdl::Config::game_path_code(nds.cart->header().game_code);
     apply_cli();
     VLOG("game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
+    // Which entry a zip was read from -- the interesting case is an archive
+    // holding more than one, where the pick is worth being able to check.
+    if (!nds.rom_zip_entry.empty()) VLOG("zip: %s\n", nds.rom_zip_entry.c_str());
   }
   // Core knobs that the core reads from the environment.
   if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);

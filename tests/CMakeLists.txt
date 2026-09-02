@@ -55,3 +55,8 @@ add_test(NAME cheat COMMAND test_cheat)
 add_executable(test_cheat_db cheat_db_test.cpp)
 target_link_libraries(test_cheat_db PRIVATE dsperate_core)
 add_test(NAME cheat_db COMMAND test_cheat_db)
+
+add_executable(test_zip zip_test.cpp)
+target_link_libraries(test_zip PRIVATE dsperate_core)
+target_include_directories(test_zip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME zip COMMAND test_zip)

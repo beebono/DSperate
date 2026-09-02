@@ -18,22 +18,35 @@ namespace {
 inline u32 bswap(u32 v) { return __builtin_bswap32(v); }
 }
 
-SaveType save_type_for(u32 code, u32& size) {
-  // melonDS SaveMemType numbering: 1 = 512 B EEPROM, 2 = 8 KB, 3 = 64 KB,
-  // 4 = 128 KB EEPROM, 5 = 256 KB, 6 = 512 KB, 7 = 1 MB, 8..10 = 8/16/64 MB FLASH.
-  // The table is the melonDS ROM list (save_list.inc), sorted by game code.
+namespace {
+// The melonDS ROM list (save_list.inc), sorted by game code. Returns the
+// listed type, or -1 when the code is not in the table at all -- which is the
+// difference between "this game uses a 64 KB EEPROM" and "never heard of it",
+// and both callers below need one of the two answers.
+int lookup_save_type(u32 code) {
   struct E { u32 code; u32 type; };
   static const E list[] = {
 #include "core/cart/save_list.inc"
   };
-  u32 t = 3;   // unknown title: 64 KB EEPROM, the most common chip
   size_t lo = 0, hi = sizeof list / sizeof list[0];
   while (lo < hi) {
     const size_t mid = (lo + hi) / 2;
     if (list[mid].code < code) lo = mid + 1;
     else if (list[mid].code > code) hi = mid;
-    else { if (list[mid].type >= 1 && list[mid].type <= 10) t = list[mid].type; break; }
+    else return static_cast<int>(list[mid].type);
   }
+  return -1;
+}
+} // namespace
+
+bool known_game_code(u32 code) { return lookup_save_type(code) >= 0; }
+
+SaveType save_type_for(u32 code, u32& size) {
+  // melonDS SaveMemType numbering: 1 = 512 B EEPROM, 2 = 8 KB, 3 = 64 KB,
+  // 4 = 128 KB EEPROM, 5 = 256 KB, 6 = 512 KB, 7 = 1 MB, 8..10 = 8/16/64 MB FLASH.
+  const int found = lookup_save_type(code);
+  u32 t = 3;   // unknown title: 64 KB EEPROM, the most common chip
+  if (found >= 1 && found <= 10) t = static_cast<u32>(found);
   static const u32 sizes[] = {0, 512, 8192, 65536, 131072, 262144, 524288, 1048576,
                               8388608, 16777216, 67108864};
   size = sizes[t];

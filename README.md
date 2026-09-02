@@ -105,7 +105,10 @@ default for both CPUs (`--interp`, `--jit9`, `--jit7` select otherwise); it is
 verified against the interpreter instruction by instruction
 (`tests/jit_test.cpp`) and slice by slice on whole games. `DSPERATE_JIT`,
 `DSPERATE_NEON`, `DSPERATE_TESTS`, `DSPERATE_HEADLESS` and `DSPERATE_SDL` are the
-CMake switches.
+CMake switches. The only vendored third-party code is miniz's DEFLATE
+decompressor, for reading zipped ROMs (`src/core/cart/miniz/`, MIT); the zip
+container parsing is ours. There are no other dependencies beyond SDL2 for
+the SDL frontend.
 
 The two CPUs are interleaved either in 128-cycle lockstep with melonDS
 (`--quantum 128`, the headless default — every frame dump and trace comparison
@@ -147,7 +150,20 @@ stray `.sav` next to a ROM cannot silently move a frame baseline: give it
 input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it). The
 ROM is optional -- without one it boots the firmware menu, see below.
 
-    dsperate [game.nds] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
+A ROM may be a plain `.nds` or a `.zip` holding one. Zips are recognised by
+their magic rather than their extension, so a launcher that hands over `.ZIP`
+or an extensionless temporary file still works. If an archive holds more than
+one `.nds`, the one whose game code is in the save-type database wins over one
+that is not (homebrew, translations and hacks are not listed, so an archive of
+those still loads), then the highest header revision, then archive order --
+`DS_VERBOSE=1` prints which entry was taken. The image is hashed after
+unpacking, so save states, `.sav` files and scene hashes are interchangeable
+between a zipped and a loose copy of the same game. Only stored and deflated
+entries: no zip64, no encryption, and no `.7z` or `.rar`, which would need real
+dependencies. Unpacking a 64--256 MB ROM costs roughly 0.5--2 s at launch on an
+A55, before the window appears.
+
+    dsperate [game.nds|game.zip] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
                  [--config F] [--scale N] [--fullscreen] [--layout L] [--screen top|bottom]
                  [--dual-window] [--linear] [--lcd-grid S] [--chunky] [--accel] [--no-vsync] [--no-audio]
                  [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N] [--timing-oc]

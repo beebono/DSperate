@@ -31,6 +31,9 @@ struct NDS {
   void reset();
   bool load_bios(const std::string& bios9, const std::string& bios7, const std::string& firmware);
   bool load_rom(const std::string& path);
+  // Which entry a zipped ROM came from, empty when it was a loose .nds. Only
+  // for reporting -- nothing about the machine depends on it.
+  std::string rom_zip_entry;
   void normalise_touch_calibration();   // see nds.cpp; called by load_bios
   void setup_direct_boot();          // skip the firmware: load the ROM's binaries and jump to them
 
