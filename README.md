@@ -289,6 +289,12 @@ calendar, the owner's nickname, the settings pages, and "There is no DS Card
 inserted." It needs the real BIOS pair and firmware dump like everything else
 does.
 
+If a `BootMenu.nds` really exists beside the config it is put in the card slot
+as well, still under a firmware boot, and the menu draws its banner instead.
+`tools/mkcart.py` builds such a card with an icon and title of your choosing;
+tapping it plays the console's own launch animation. The card needs nothing
+from a commercial dump.
+
 The clock is seeded from the host's local time and runs, so the menu shows
 today's date. In the core the clock is off and frozen at 2000-01-01, because
 the whole verification harness compares runs against each other and against
