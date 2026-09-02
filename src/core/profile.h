@@ -8,7 +8,8 @@
 
 namespace ds::prof {
 
-// Coarse stage timer for the headless builds (DS_PROFILE=1 in the CLI):
+// Coarse stage timer for the headless builds (DS_PROFILE=1 in the headless
+// frontend):
 // wall time accumulated per stage, one branch of overhead when disabled.
 enum Stage : u32 {
   CPU9, CPU7, DMA, GX_RUN,

@@ -36,6 +36,15 @@
 
 namespace {
 
+// Startup chatter and hotkey echoes: useful at a terminal, pure noise on a
+// handheld where nobody reads stderr. Errors, refusals and the confirmations
+// for actions that touch the disk (a state written, a screenshot taken) are
+// never gated -- those are the lines you need precisely when something went
+// wrong. DS_VERBOSE=1 brings the rest back.
+bool verbose() { static const bool v = std::getenv("DS_VERBOSE") != nullptr; return v; }
+#define VLOG(...) do { if (verbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
+
+
 using namespace ds;
 
 const char* kUsage =
@@ -115,7 +124,7 @@ void load_save(NDS& nds, const std::string& path) {
   std::vector<u8>& sram = nds.cart->sram();
   const size_t n = std::fread(sram.data(), 1, sram.size(), f);
   std::fclose(f);
-  std::fprintf(stderr, "save: loaded %zu bytes from %s\n", n, path.c_str());
+  VLOG("save: loaded %zu bytes from %s\n", n, path.c_str());
 }
 
 void write_save(NDS& nds, const std::string& path) {
@@ -350,7 +359,7 @@ int main(int argc, char** argv) {
   // derived from this string, and they all want somewhere to live.
   const bool boot_firmware = !rom || rom_stem(base_name(rom)) == "BootMenu";
   const std::string rom_path = rom ? std::string(rom) : ds::sdl::Config::dir() + "/BootMenu.nds";
-  if (boot_firmware) std::fprintf(stderr, "no game: booting the firmware\n");
+  if (boot_firmware) VLOG("no game: booting the firmware\n");
 
   NDS nds;
   if (!nds.load_bios(bios9.c_str(), bios7.c_str(), fw.c_str())) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
@@ -365,8 +374,10 @@ int main(int argc, char** argv) {
     std::string err;
     if (!nds.load_firmware_override(fw_override, err)) {
       if (err != "cannot open") std::fprintf(stderr, "firmware settings: %s: %s\n", fw_override.c_str(), err.c_str());
+    } else if (err.empty()) {
+      VLOG("firmware settings: %s\n", fw_override.c_str());   // loaded cleanly: chatter
     } else {
-      std::fprintf(stderr, "firmware settings: %s%s%s\n", fw_override.c_str(), err.empty() ? "" : " -- warning: ", err.c_str());
+      std::fprintf(stderr, "firmware settings: %s -- warning: %s\n", fw_override.c_str(), err.c_str());
     }
   }
   // The per-game file goes on top of the global one, the command line on top of both.
@@ -375,11 +386,11 @@ int main(int argc, char** argv) {
   std::string game_ini;
   if (nds.cart) {
     for (const std::string& p : {ds::sdl::Config::game_path_code(nds.cart->header().game_code), ds::sdl::Config::game_path_rom(rom_path)})
-      if (!p.empty() && cfg.load(p)) std::fprintf(stderr, "config: %s\n", p.c_str());
+      if (!p.empty() && cfg.load(p)) VLOG("config: %s\n", p.c_str());
     game_ini = ds::sdl::Config::game_path_rom(rom_path);
     if (game_ini.empty()) game_ini = ds::sdl::Config::game_path_code(nds.cart->header().game_code);
     apply_cli();
-    std::fprintf(stderr, "game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
+    VLOG("game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
   }
   // Core knobs that the core reads from the environment.
   if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);
@@ -457,7 +468,7 @@ int main(int argc, char** argv) {
     if (!db.empty()) {
       std::string err;
       if (ds::cheat::load_for_rom(db, rom_path, cheat_set, err)) {
-        std::fprintf(stderr, "cheats: %s -- %zu codes in %zu groups\n",
+        VLOG("cheats: %s -- %zu codes in %zu groups\n",
                      cheat_set.name.c_str(), cheat_set.codes.size(), cheat_set.groups.size());
         nds.cheats.codes = cheat_set.codes;
       } else if (!err.empty()) {
@@ -478,7 +489,7 @@ int main(int argc, char** argv) {
   // that reads the date (Animal Crossing, the Pokemon day/night cycle) would
   // otherwise play differently every time it was replayed.
   if (!replay) nds.io.start_rtc_clock();
-  else std::fprintf(stderr, "rtc: frozen for the replay\n");
+  else VLOG("rtc: frozen for the replay\n");
 #if DSPERATE_JIT
   if (jit && !ds::jit::attach(nds, true, true)) return 1;
   if (jit && cfg.flag("emu.cpu_oc", false)) ds::jit::set_cpu_oc(true);   // see config.cpp; translate-time pricing, so before the first block
@@ -487,21 +498,21 @@ int main(int argc, char** argv) {
 #endif
   // A replay is a measurement, not a play session: it must start from the
   // same battery save every time or it is not reproducible, and writing back
-  // would mean the second run of a scene no longer matches the first. The CLI
-  // has always loaded --save read-only for this reason; match it here, and
+  // would mean the second run of a scene no longer matches the first. The headless
+  // frontend has always loaded --save read-only for this reason; match it here, and
   // take an explicit --save too so both frontends can be pointed at the same
   // scene save rather than one silently picking up <rom>.sav.
   const std::string sav = save_arg ? std::string(save_arg) : save_path(rom_path, saves_dir);
   load_save(nds, sav);
   const bool save_readonly = replay != nullptr;
-  if (save_readonly) std::fprintf(stderr, "save: read-only for the replay\n");
+  if (save_readonly) VLOG("save: read-only for the replay\n");
 
   ds::input::Log log;
   if (record && replay) { std::fprintf(stderr, "--record and --replay are exclusive\n"); return 2; }
   if (record && !log.open_write(record)) { std::fprintf(stderr, "cannot write %s\n", record); return 1; }
   if (replay) {
     if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return 1; }
-    std::fprintf(stderr, "replay: %u frames from %s\n", log.frames(), replay);
+    VLOG("replay: %u frames from %s\n", log.frames(), replay);
   }
   // After the battery save, so a state's SRAM wins over <rom>.sav, and after
   // the replay log is open so it can be wound forward to the state's frame.
@@ -592,7 +603,7 @@ int main(int argc, char** argv) {
   Uint64 fps_mark = SDL_GetPerformanceCounter();
   Uint64 emu_ticks = 0, draw_ticks = 0;
   u64 frames = 0;
-  // Per-frame emulation time, for the same report the CLI prints. Only the
+  // Per-frame emulation time, for the same report the headless frontend prints. Only the
   // run_frame() slice goes in: the present blocks on vsync and audio.pace()
   // sleeps, and either one would peg every frame at the refresh interval and
   // hide exactly the clusters this is here to find.
@@ -672,7 +683,7 @@ int main(int argc, char** argv) {
         if (!c.is_note() && c.name == want) { c.enabled = true; ++on; }
     }
     std::fclose(f);
-    if (on) std::fprintf(stderr, "cheats: %zu enabled from %s\n", on, cheats_on_path.c_str());
+    if (on) VLOG("cheats: %zu enabled from %s\n", on, cheats_on_path.c_str());
   };
   auto save_enabled = [&] {
     if (cheats_on_path.empty()) return;
@@ -720,7 +731,7 @@ int main(int argc, char** argv) {
     paused = p;
     audio.pause(p);
     if (p) flush_save(); else { next_frame = SDL_GetPerformanceCounter(); fs_debt_ms = 0; }
-    std::fprintf(stderr, "%s\n", p ? "paused" : "resumed");
+    VLOG("%s\n", p ? "paused" : "resumed");
   };
   while (!input.quit() && !g_signalled && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
     SDL_Event e;
@@ -737,9 +748,9 @@ int main(int argc, char** argv) {
         }
         else pause_pending = true;
         break;
-      case A::VolumeUp: audio.set_volume(audio.volume() + 10); audio.set_muted(false); std::fprintf(stderr, "volume %d%%\n", audio.volume()); break;
-      case A::VolumeDown: audio.set_volume(audio.volume() - 10); std::fprintf(stderr, "volume %d%%\n", audio.volume()); break;
-      case A::Mute: audio.set_muted(!audio.muted()); std::fprintf(stderr, "%s\n", audio.muted() ? "muted" : "unmuted"); break;
+      case A::VolumeUp: audio.set_volume(audio.volume() + 10); audio.set_muted(false); VLOG("volume %d%%\n", audio.volume()); break;
+      case A::VolumeDown: audio.set_volume(audio.volume() - 10); VLOG("volume %d%%\n", audio.volume()); break;
+      case A::Mute: audio.set_muted(!audio.muted()); VLOG("%s\n", audio.muted() ? "muted" : "unmuted"); break;
       case A::Fullscreen: display.toggle_fullscreen(); if (dual_window) display2.toggle_fullscreen(); break;
       case A::LayoutNext: case A::LayoutPrev: {
         if (dual_window) break;
@@ -750,7 +761,7 @@ int main(int argc, char** argv) {
         l.mode = layout_cycle[static_cast<size_t>(at)];
         display.set_layout(l);
         apply_visibility();
-        std::fprintf(stderr, "layout: %s\n", Disp::mode_name(l.mode));
+        VLOG("layout: %s\n", Disp::mode_name(l.mode));
         if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.layout", Disp::mode_name(l.mode));
         break;
       }
@@ -772,9 +783,9 @@ int main(int argc, char** argv) {
         break;
       }
       case A::Screenshot: screenshot(nds, states_dir, display.across()); break;
-      case A::Lid: input.set_lid(!input.lid()); std::fprintf(stderr, "lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
-      case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; std::fprintf(stderr, "state slot %d\n", state_slot); break;
-      case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; std::fprintf(stderr, "state slot %d\n", state_slot); break;
+      case A::Lid: input.set_lid(!input.lid()); VLOG("lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
+      case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
+      case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
       case A::SaveState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (save_state_file(nds, state_path(nds, states_dir, state_slot))) flush_save();   // the .sav and the state never diverge
@@ -797,7 +808,7 @@ int main(int argc, char** argv) {
         fps_osd = !fps_osd;
         if (fps_osd && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = 0; }
         break;
-      case A::FastForwardToggle: ff_toggle = !ff_toggle; std::fprintf(stderr, "fast forward %s\n", ff_toggle ? "on" : "off"); break;
+      case A::FastForwardToggle: ff_toggle = !ff_toggle; VLOG("fast forward %s\n", ff_toggle ? "on" : "off"); break;
       default: break;
       }
     }
@@ -1156,21 +1167,29 @@ int main(int argc, char** argv) {
     else std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
   }
   if (fs_limit > 0)
-    std::fprintf(stderr, "frameskip (%s, limit %d): %llu of %llu frames not drawn\n", fs_adaptive ? "adaptive" : "fixed", fs_limit,
-                 static_cast<unsigned long long>(fs_skipped), static_cast<unsigned long long>(frames));
+    VLOG("frameskip (%s, limit %d): %llu of %llu frames not drawn\n", fs_adaptive ? "adaptive" : "fixed", fs_limit,
+         static_cast<unsigned long long>(fs_skipped), static_cast<unsigned long long>(frames));
   if (log.writing()) std::fprintf(stderr, "recorded %u frames to %s\n", log.frames(), record);
-  // Emulation work only -- see frame_report.h. The two excluded costs are
-  // named on their own line so a CLI/SDL disagreement can be attributed.
-  ds::frame_report(frame_ms);
-  // The same statistics over emulation + present, which is what a missed
-  // display frame actually is. Only worth reading with --no-vsync: with
-  // vsync on the present blocks and the tail pins to the refresh.
-  ds::frame_report(work_ms, "work");
-  ds::prof::frame_breakdown(frame_ms);
-  if (!frame_ms.empty())
-    std::fprintf(stderr, "  (emulation only; excluded: present %.1f ms, pacing %.1f ms total over %zu frames)\n",
-                 static_cast<double>(draw_ticks_total) * ticks_to_ms,
-                 static_cast<double>(pace_ticks) * ticks_to_ms, frame_ms.size());
+  // The per-frame timing statistics and the over-budget window histogram.
+  // A measurement tool, not something a player wants at the end of every
+  // session, so this frontend prints them only on request -- the headless
+  // one, whose whole job is measuring, always does. DS_PROFILE implies it:
+  // asking for the stage breakdown without the frame series it annotates
+  // would give a table with nothing to read it against.
+  if (std::getenv("DS_FRAME_STATS") || ds::prof::enabled) {
+    // Emulation work only -- see frame_report.h. The two excluded costs are
+    // named on their own line so a headless/SDL disagreement can be attributed.
+    ds::frame_report(frame_ms);
+    // The same statistics over emulation + present, which is what a missed
+    // display frame actually is. Only worth reading with --no-vsync: with
+    // vsync on the present blocks and the tail pins to the refresh.
+    ds::frame_report(work_ms, "work");
+    ds::prof::frame_breakdown(frame_ms);
+    if (!frame_ms.empty())
+      std::fprintf(stderr, "  (emulation only; excluded: present %.1f ms, pacing %.1f ms total over %zu frames)\n",
+                   static_cast<double>(draw_ticks_total) * ticks_to_ms,
+                   static_cast<double>(pace_ticks) * ticks_to_ms, frame_ms.size());
+  }
   log.close();
   ds::prof::report();
   lid.close();

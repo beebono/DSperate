@@ -1,11 +1,11 @@
 #!/bin/bash
 # Per-frame SHA-1 of both framebuffers for a recorded scene, without touching
-# the disk: the CLI's --dump-frames stream goes through a FIFO into a hasher.
+# the disk: the harness's --dump-frames stream goes through a FIFO into a hasher.
 # Two runs of the same scene through different builds (or the same build with
 # DS_2D_LAZY=0 / DS_2D_THREAD=0 / --interp) must produce identical files;
 # `diff` then names the first frame that differs.
 #
-#   tools/scene_hashes.sh <dsperate-cli> <scene> <frames> <out.txt> [extra CLI args]
+#   tools/scene_hashes.sh <dsperate-headless> <scene> <frames> <out.txt> [extra args]
 #
 # Set DS_ROMS to the directory holding the ROMs and DS_BIOS to the one holding
 # bios7.bin, bios9.bin and firmware.bin. Scene names are those in scenes/; the

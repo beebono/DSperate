@@ -2,7 +2,7 @@
 # Hash every recorded scene through one binary into a directory, so two
 # directories can be diffed to find the first frame any change moved.
 #
-#   tools/all_scene_hashes.sh <dsperate-cli-or-wrapper> <out-dir> [frames] [extra CLI args]
+#   tools/all_scene_hashes.sh <dsperate-headless-or-wrapper> <out-dir> [frames] [extra args]
 #
 # Runs the five replays (and the Golden Sun phase-2 save state when the ROM is
 # present) in parallel. DS_ROMS / DS_BIOS as for scene_hashes.sh.

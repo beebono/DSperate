@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
-// Headless CLI: boots the BIOS/firmware (and optionally a ROM), runs N frames,
+// Headless frontend: boots the BIOS/firmware (and optionally a ROM), runs N frames,
 // optionally writing per-CPU instruction traces in the shared trace format:
 //   <pc> <instr> <cpsr> r0 .. r14     (hex, one line per instruction)
 // and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py

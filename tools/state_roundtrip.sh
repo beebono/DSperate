@@ -5,7 +5,7 @@
 # and a state saved straight after the load must be byte-identical to the one
 # loaded (a field that was forgotten shows up in one or the other).
 #
-#   tools/state_roundtrip.sh <dsperate-cli> <scene> <N> <M> [extra CLI args]
+#   tools/state_roundtrip.sh <dsperate-headless> <scene> <N> <M> [extra args]
 #
 # DS_ROMS / DS_BIOS as for scene_hashes.sh. Exit status is the verdict.
 set -u

@@ -90,7 +90,7 @@ and the direct-boot path, KEY1 key table, touchscreen calibration and
 firmware settings all read the real ones.
 
     cmake --preset host && cmake --build --preset host && ctest --preset host
-    ./build/host/src/frontend/cli/dsperate --bios9 bios9.bin --bios7 bios7.bin \
+    ./build/host/src/frontend/headless/dsperate-headless --bios9 bios9.bin --bios7 bios7.bin \
         --firmware firmware.bin [--direct game.nds] --frames 60
 
 Cross-building for ARM64 handhelds (needs `aarch64-linux-gnu-g++`; tests run under
@@ -104,19 +104,19 @@ interpreter and the portable C++ renderer. On AArch64 the recompiler is the
 default for both CPUs (`--interp`, `--jit9`, `--jit7` select otherwise); it is
 verified against the interpreter instruction by instruction
 (`tests/jit_test.cpp`) and slice by slice on whole games. `DSPERATE_JIT`,
-`DSPERATE_NEON`, `DSPERATE_TESTS`, `DSPERATE_CLI` and `DSPERATE_SDL` are the
+`DSPERATE_NEON`, `DSPERATE_TESTS`, `DSPERATE_HEADLESS` and `DSPERATE_SDL` are the
 CMake switches.
 
 The two CPUs are interleaved either in 128-cycle lockstep with melonDS
-(`--quantum 128`, the CLI's default — every frame dump and trace comparison
+(`--quantum 128`, the headless default — every frame dump and trace comparison
 assumes it) or event-bound, each CPU running to the next scheduled event as
 DraStic does (`--quantum 0`, the SDL frontend's default; `--lockstep` there
 selects the former). Event-bound is a few percent faster at the cost of the
 CPUs seeing each other's IPC writes and IRQs up to an event interval late.
 
-## The CLI
+## The headless frontend
 
-`dsperate` is the headless harness: it boots the firmware (or a ROM with
+`dsperate-headless` is the measurement harness: it boots the firmware (or a ROM with
 `--direct`), runs `--frames N`, and is what every measurement and comparison
 runs through.
 
@@ -130,24 +130,24 @@ runs through.
 `--rtc-host` and `--firmware-override` are for driving the firmware menu from
 the harness and are off by default, because both break reproducibility: the
 first seeds the clock from the wall, and the second lets a run change the
-console's settings. Without them the CLI is what every baseline assumes -- a
+console's settings. Without them the harness is what every baseline assumes -- a
 clock frozen at 2000-01-01 and a firmware image identical to the dump.
 
 `--trace` writes per-CPU instruction traces (`<pc> <instr> <cpsr> r0..r14`,
 one line per instruction, spin loops collapsed) for `tools/compare_traces.py`;
 `--dump-frames` writes raw framebuffers for `tools/compare_frames.py`, and
-`--dump-audio` the raw s16 stereo stream for `tools/compare_audio.py`. The CLI
+`--dump-audio` the raw s16 stereo stream for `tools/compare_audio.py`. It
 has no audio output. It does not pick up `<rom>.sav` automatically, so that a
 stray `.sav` next to a ROM cannot silently move a frame baseline: give it
 `--save file`, which loads read-only and is never written back.
 
 ## Playing
 
-`dsperate-sdl` is the SDL2 frontend: direct boot, both screens, sound and
+`dsperate` is the SDL2 frontend: direct boot, both screens, sound and
 input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it). The
 ROM is optional -- without one it boots the firmware menu, see below.
 
-    dsperate-sdl [game.nds] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
+    dsperate [game.nds] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
                  [--config F] [--scale N] [--fullscreen] [--layout L] [--screen top|bottom]
                  [--dual-window] [--linear] [--lcd-grid S] [--chunky] [--accel] [--no-vsync] [--no-audio]
                  [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N] [--timing-oc]
@@ -249,9 +249,9 @@ the two never disagree. The recompiler's translations are dropped on load and
 rebuilt as the game runs. `src/core/state/state.h` describes the chunked
 format; each subsystem lists its own fields in one `sync_state` that both
 writes and reads, so a state saved straight after a load is byte-identical to
-the one loaded -- `tools/state_roundtrip.sh <dsperate-cli> <scene> <N> <M>`
+the one loaded -- `tools/state_roundtrip.sh <dsperate-headless> <scene> <N> <M>`
 checks that, and that the frames after a load match the frames after the
-save, on any recorded scene (the CLI takes `--save-state-at N:file` and
+save, on any recorded scene (the harness takes `--save-state-at N:file` and
 `--load-state file`; `DS_STATE_DEBUG=1` prints the cycle-accounting state at
 both points). Loading a state is refused during `--record` (the recording
 could not replay past it) and `--replay` refuses to load or save states at
@@ -267,7 +267,7 @@ It is skipped during a replay or a recording, like the save-state hotkey.
 ### Firmware boot
 
 Started with no ROM -- or with one named `BootMenu.nds`, so a launcher that
-only knows how to start games can reach it -- `dsperate-sdl` boots the
+only knows how to start games can reach it -- `dsperate` boots the
 console's own firmware instead of a game. That is the DS menu: the clock and
 calendar, the owner's nickname, the settings pages, and "There is no DS Card
 inserted." It needs the real BIOS pair and firmware dump like everything else
@@ -324,7 +324,7 @@ alternatives (a difficulty, a character) allows only one at a time. What you
 turn on is remembered per game, next to the save states.
 
 Codes run once a frame from the ARM7's VBlank IRQ, which is where the real
-cartridge hooks itself. `dsperate` (the CLI) has `--cheats <file>`,
+cartridge hooks itself. `dsperate-headless` has `--cheats <file>`,
 `--list-cheats` and `--cheat <name|#N>` for the same thing without a UI.
 
 
@@ -382,7 +382,7 @@ run that stops skipping goes straight back to full rate.
 the emulator is running behind real time, measured as the milliseconds by which
 the frames so far have run over their budget, and stops as soon as it has caught
 up; `fixed` always skips N of every N+1 frames. `DS_DEBUG_SKIP=1` prints the
-per-frame decision and why a frame was drawn anyway. The CLI harness takes
+per-frame decision and why a frame was drawn anyway. The harness takes
 `--frameskip N` too, in the fixed pattern, for measuring what the drawing costs.
 
 ### Display and handhelds
@@ -448,11 +448,21 @@ judged on the tail, not the mean.
 Environment knobs the core reads; the ones that change timing or output are
 for A/B runs, not for play.
 
+- `DS_VERBOSE=1` (SDL) -- the startup lines (`game:`, `config:`, `cheats:`,
+  `replay:`, the battery save) and the hotkey echoes (`paused`, `volume`,
+  `layout`, `state slot`, `lid`). Off by default: on a handheld nobody reads
+  stderr. Errors, refusals and the confirmations for anything written to disk
+  (a state, a screenshot) are never gated -- those are the lines you want
+  precisely when something went wrong.
+- `DS_FRAME_STATS=1` (SDL) -- the per-frame timing statistics and the
+  over-budget window histogram at exit. The headless frontend, whose job is
+  measuring, always prints them. `DS_PROFILE=1` implies this.
 - `DS_FPS=1` -- speed, per-stage times and audio buffer depth per second;
-  with `--frames N` comparable between runs by frame index.
-- `DS_PROFILE=1` (CLI) -- wall time per stage, event counters and the slice
+  with `--frames N` comparable between runs by frame index. The SDL frontend
+  also has an on-screen counter -- `[video] fps` and the `fps` hotkey.
+- `DS_PROFILE=1` (headless) -- wall time per stage, event counters and the slice
   census at exit; `DS_PROFILE_THREADS=1` per thread.
-- `DS_FRAME_HASH=1` (CLI) -- a digest of RAM and both CPUs' registers after
+- `DS_FRAME_HASH=1` (headless) -- a digest of RAM and both CPUs' registers after
   every frame, and `DS_FRAME_DUMP=<frame>:<path>` writes that frame's RAM, so
   two builds can be diffed to the first frame their *state* differs --
   usually long before the first pixel does.
@@ -465,7 +475,7 @@ for A/B runs, not for play.
   writes listed separately, at exit. Reads are the point: a game polling a
   status bit costs a slow-path access per read and leaves no trace in any
   write log.
-- `DS_WATCHDOG=<seconds>` (CLI) -- aborts a run whose frame count stops
+- `DS_WATCHDOG=<seconds>` (headless) -- aborts a run whose frame count stops
   advancing for that long, after printing the display-line and raster
   hand-off state.
 - `--timing-oc` (or `[emu] timing_oc = true`) -- "Timing OC": DraStic's geometry

@@ -61,7 +61,7 @@ public:
   // the bit as clear for the whole frame -- no coverage, no pixel-stack push,
   // no under-layer depth test, no AA blend in the final pass -- which is not
   // what the hardware draws, so the core default is on; the SDL frontend
-  // makes it opt-in (video.aa), the CLI has --no-aa for measurement.
+  // makes it opt-in (video.aa), the headless frontend has --no-aa for measurement.
   void set_aa(bool on) { aa_ = on; }
   bool aa() const { return aa_; }
 

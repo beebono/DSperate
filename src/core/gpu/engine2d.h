@@ -99,7 +99,7 @@ public:
   void set_3d_line(const Pixel* line) { line3d_ = line; }
 
   u32 dispcnt() const { return dispcnt_; }   // render side
-  void debug_dump(u32 line);   // stderr dump of register/latch state and a rendered line (debug builds of the CLI)
+  void debug_dump(u32 line);   // stderr dump of register/latch state and a rendered line (debug builds of the headless frontend)
   void debug_outhash(u32 line);   // DS_DEBUG_OUTHASH: per-frame / per-line output hashes
   bool forced_blank() const { return forced_blank_; }
 

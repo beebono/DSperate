@@ -55,7 +55,7 @@ public:
   Timing& timing() { return timing_; }
   const Timing& timing() const { return timing_; }
   void update_gba_slot_timings();    // EXMEMCNT
-  void enable_watch(u32 addr);       // debug: log writes to a main-RAM word (see DS_WATCH in the CLI)
+  void enable_watch(u32 addr);       // debug: log writes to a main-RAM word (see DS_WATCH, headless)
 
   // Slow paths, reached when the page table returns nullptr.
   u8  read8 (Cpu cpu, u32 addr);

@@ -3,7 +3,7 @@
 //
 // The per-frame host time report both frontends print at the end of a run.
 // It lives here, and not in either main.cpp, so the two cannot drift: the
-// whole point of the numbers is that a CLI replay and an SDL replay of the
+// whole point of the numbers is that a headless replay and an SDL replay of the
 // same scene can be put side by side.
 //
 // What goes in the series matters as much as the statistics. It must be
