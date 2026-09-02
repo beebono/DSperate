@@ -85,6 +85,29 @@ void fill_rect(const Blit& d, int x, int y, int w, int h, u32 colour) {
 constexpr u32 kInk = 0xFFFFFFFF, kDim = 0xFF909090, kPanel = 0xFF101018, kEdge = 0xFF5060A0, kSel = 0xFF3050A0;
 constexpr u32 kEdgeText = 0xFFA0B0E0, kPanelEdgeDim = 0xFF303040;   // group headings; the scroll-bar track
 
+// The panel every page sits in: a filled box with a one-pixel edge.
+void panel(const Blit& d, int x, int y, int w, int h) {
+  fill_rect(d, x, y, w, h, kPanel);
+  fill_rect(d, x, y, w, 1, kEdge);
+  fill_rect(d, x, y + h - 1, w, 1, kEdge);
+  fill_rect(d, x, y, 1, h, kEdge);
+  fill_rect(d, x + w - 1, y, 1, h, kEdge);
+}
+
+// A scroll bar for a list page, because the list gives no other clue how long
+// it is: some games have five thousand cheats, and a library can be as long.
+// Drawn only when there is something off screen.
+void scroll_bar(const Blit& d, int px0, int py0, int n, int top) {
+  if (n <= kCheatVisible) return;
+  const int track_x = px0 + kCheatPanelW - 5, track_y = py0 + kCheatRowsY - 2;
+  const int track_h = kCheatVisible * kCheatRowH;
+  fill_rect(d, track_x, track_y, 2, track_h, kPanelEdgeDim);
+  int bar = track_h * kCheatVisible / n;
+  if (bar < 4) bar = 4;
+  const int span = track_h - bar;
+  fill_rect(d, track_x, track_y + (span > 0 ? span * top / (n - kCheatVisible) : 0), 2, bar, kEdge);
+}
+
 // The root page, in order. A null label is the slot row: it is formatted from
 // the current slot and opens the slot page rather than returning a result.
 // New entries go here and nowhere else -- the panel sizes itself to the count.
@@ -210,6 +233,32 @@ void Menu::toggle_cheat() {
   }
 }
 
+void Menu::open_games() {
+  open_ = true;
+  page_ = Page::Games;
+  game_row_ = 0;
+  game_top_ = 0;
+  chosen_.clear();
+  marquee_ms_ = 0;
+  dirty_ = true;
+}
+
+// The games list is selectable all the way down -- there are no headings in
+// it -- so this is the plain clamped step, with the same "scroll only as far
+// as it takes" rule the cheats list uses.
+void Menu::move_game_row(int delta) {
+  if (!games_ || games_->empty()) return;
+  const int n = static_cast<int>(games_->size());
+  const int at = game_row_ + delta;
+  game_row_ = at < 0 ? 0 : at >= n ? n - 1 : at;
+  if (game_row_ < game_top_) game_top_ = game_row_;
+  if (game_row_ >= game_top_ + kCheatVisible) game_top_ = game_row_ - kCheatVisible + 1;
+  if (game_top_ > n - kCheatVisible) game_top_ = n - kCheatVisible;
+  if (game_top_ < 0) game_top_ = 0;
+}
+
+int Menu::list_row() const { return page_ == Page::Games ? game_row_ : cheat_row_; }
+
 int Menu::marquee_offset(int overflow) const {
   if (overflow <= 0) return 0;
   const u32 scroll_ms = static_cast<u32>(overflow) * 1000u / kMarqueePxPerSec;
@@ -223,13 +272,13 @@ int Menu::marquee_offset(int overflow) const {
 
 Menu::Result Menu::update(u32 presses, u32 held, u32 ms) {
   using B = io::Io::Button;
-  const int was_row = cheat_row_;
+  const int was_row = list_row();
   const int before = marquee_offset(marquee_overflow_);
   if (presses) dirty_ = true;
 
   // Key repeat, on the cheats page only: the other pages are a handful of
   // rows where a held direction would overshoot more often than it helps.
-  if (page_ == Page::Cheats) {
+  if (list_page()) {
     const int dir = (held & (1u << B::BTN_UP)) ? -1 : (held & (1u << B::BTN_DOWN)) ? 1 : 0;
     if (dir != repeat_dir_) { repeat_dir_ = dir; repeat_ms_ = 0; repeating_ = false; }
     else if (dir != 0) {
@@ -238,7 +287,7 @@ Menu::Result Menu::update(u32 presses, u32 held, u32 ms) {
            repeat_ms_ >= step; step = kRepeatRateMs) {
         repeat_ms_ -= step;
         repeating_ = true;
-        move_cheat_row(dir);
+        if (page_ == Page::Games) move_game_row(dir); else move_cheat_row(dir);
         dirty_ = true;
       }
     }
@@ -249,7 +298,7 @@ Menu::Result Menu::update(u32 presses, u32 held, u32 ms) {
   const Result r = handle(presses);
 
   // A name only scrolls once the selection has settled on it.
-  if (cheat_row_ != was_row) marquee_ms_ = 0;
+  if (list_row() != was_row) marquee_ms_ = 0;
   else marquee_ms_ += ms;
   if (marquee_offset(marquee_overflow_) != before) dirty_ = true;
   return r;
@@ -266,6 +315,19 @@ Menu::Result Menu::handle(u32 presses) {
     if (hit(B::BTN_LEFT) || hit(B::BTN_RIGHT)) row_ = (row_ + kSlotRows) % 10;
     if (hit(B::BTN_B)) { page_ = Page::Root; row_ = kSlotRow; return Result::None; }
     if (hit(B::BTN_A) || hit(B::BTN_START)) { slot_ = row_; page_ = Page::Root; row_ = kSlotRow; }
+    return Result::None;
+  }
+  if (page_ == Page::Games) {
+    // The same walk as the cheats page: up/down step, the shoulders page.
+    // A is the only way off it -- see open_games() on why B is inert.
+    if (hit(B::BTN_UP))   move_game_row(-1);
+    if (hit(B::BTN_DOWN)) move_game_row(+1);
+    if (hit(B::BTN_L)) move_game_row(-kCheatVisible);
+    if (hit(B::BTN_R)) move_game_row(+kCheatVisible);
+    if ((hit(B::BTN_A) || hit(B::BTN_START)) && games_ && !games_->empty()) {
+      chosen_ = (*games_)[static_cast<size_t>(game_row_)].path;
+      return Result::Launch;
+    }
     return Result::None;
   }
   if (page_ == Page::Cheats) {
@@ -318,11 +380,7 @@ std::string fit(const std::string& text, int scale, int width_px) {
 void Menu::draw_cheats(const Blit& d) const {
   const int px0 = (static_cast<int>(ds::SCREEN_W) - kCheatPanelW) / 2;
   const int py0 = (static_cast<int>(ds::SCREEN_H) - kCheatPanelH) / 2;
-  fill_rect(d, px0, py0, kCheatPanelW, kCheatPanelH, kPanel);
-  fill_rect(d, px0, py0, kCheatPanelW, 1, kEdge);
-  fill_rect(d, px0, py0 + kCheatPanelH - 1, kCheatPanelW, 1, kEdge);
-  fill_rect(d, px0, py0, 1, kCheatPanelH, kEdge);
-  fill_rect(d, px0 + kCheatPanelW - 1, py0, 1, kCheatPanelH, kEdge);
+  panel(d, px0, py0, kCheatPanelW, kCheatPanelH);
 
   // The heading counts the codes, not the lines, so it matches the number the
   // frontend logged when it loaded them.
@@ -389,20 +447,61 @@ void Menu::draw_cheats(const Blit& d) const {
     g_clip_x1 = clip1;
   }
 
-  // A scroll bar, because the list gives no other clue how long it is: some
-  // games have five thousand codes.
-  if (n > kCheatVisible) {
-    const int track_x = px0 + kCheatPanelW - 5, track_y = py0 + kCheatRowsY - 2;
-    const int track_h = kCheatVisible * kCheatRowH;
-    fill_rect(d, track_x, track_y, 2, track_h, kPanelEdgeDim);
-    int bar = track_h * kCheatVisible / n;
-    if (bar < 4) bar = 4;
-    const int span = track_h - bar;
-    fill_rect(d, track_x, track_y + (span > 0 ? span * top / (n - kCheatVisible) : 0), 2, bar, kEdge);
+  scroll_bar(d, px0, py0, n, top);
+}
+
+// The game picker: the cheats page's list, with a row per ROM and nothing to
+// toggle. A long filename is the rule rather than the exception here, so the
+// selected row scrolls its name exactly as a long cheat name does.
+void Menu::draw_games(const Blit& d) const {
+  const int px0 = (static_cast<int>(ds::SCREEN_W) - kCheatPanelW) / 2;
+  const int py0 = (static_cast<int>(ds::SCREEN_H) - kCheatPanelH) / 2;
+  panel(d, px0, py0, kCheatPanelW, kCheatPanelH);
+
+  const int n = games_ ? static_cast<int>(games_->size()) : 0;
+  char title[32];
+  std::snprintf(title, sizeof title, "GAMES  %d", n);
+  draw_text(d, px0 + (kCheatPanelW - text_width(kScale, title)) / 2, py0 + kTitleY, kScale, kInk, title);
+  fill_rect(d, px0 + 8, py0 + kRuleY, kCheatPanelW - 16, 1, kEdge);
+
+  if (n == 0) {
+    // Say what is wrong rather than showing an empty box: an unset or empty
+    // games directory is the likely reason, and it is fixable.
+    draw_text(d, px0 + 10, py0 + kCheatRowsY + 4, kCheatScale, kDim, "NO GAMES FOUND -- SET");
+    draw_text(d, px0 + 10, py0 + kCheatRowsY + 4 + kCheatRowH, kCheatScale, kDim, "[PATHS] GAMES IN THE");
+    draw_text(d, px0 + 10, py0 + kCheatRowsY + 4 + 2 * kCheatRowH, kCheatScale, kDim, "CONFIG FILE");
+    return;
   }
+
+  int top = game_top_;
+  if (top > n - kCheatVisible) top = n - kCheatVisible;
+  if (top < 0) top = 0;
+
+  const int text_x = px0 + 8, avail = kCheatPanelW - 16 - 6;
+  marquee_overflow_ = 0;
+  for (int i = 0; i < kCheatVisible && top + i < n; ++i) {
+    const std::string& name = (*games_)[static_cast<size_t>(top + i)].title;
+    const int ry = py0 + kCheatRowsY + i * kCheatRowH;
+    const bool sel = top + i == game_row_;
+    if (sel) fill_rect(d, px0 + 4, ry - 2, kCheatPanelW - 14, kCheatRowH, kSel);
+    if (!sel) {
+      draw_text(d, text_x, ry, kCheatScale, kDim, fit(name, kCheatScale, avail).c_str());
+      continue;
+    }
+    marquee_overflow_ = text_width(kCheatScale, name.c_str()) - avail;
+    if (marquee_overflow_ <= 0) { draw_text(d, text_x, ry, kCheatScale, kInk, name.c_str()); continue; }
+    const int clip0 = g_clip_x0, clip1 = g_clip_x1;
+    g_clip_x0 = text_x;
+    g_clip_x1 = text_x + avail;
+    draw_text(d, text_x - marquee_offset(marquee_overflow_), ry, kCheatScale, kInk, name.c_str());
+    g_clip_x0 = clip0;
+    g_clip_x1 = clip1;
+  }
+  scroll_bar(d, px0, py0, n, top);
 }
 
 void Menu::draw(const Blit& d) const {
+  if (page_ == Page::Games) { draw_games(d); return; }
   if (page_ == Page::Cheats) { draw_cheats(d); return; }
   const bool slots = page_ == Page::Slot;
   const int scale = kScale, row_h = kRowH, title_y = kTitleY, rule_y = kRuleY, rows_y = kRowsY;
@@ -411,11 +510,7 @@ void Menu::draw(const Blit& d) const {
   const int panel_h = panel_height(rows);
   const int px0 = (static_cast<int>(ds::SCREEN_W) - panel_w) / 2;
   const int py0 = (static_cast<int>(ds::SCREEN_H) - panel_h) / 2;
-  fill_rect(d, px0, py0, panel_w, panel_h, kPanel);
-  fill_rect(d, px0, py0, panel_w, 1, kEdge);
-  fill_rect(d, px0, py0 + panel_h - 1, panel_w, 1, kEdge);
-  fill_rect(d, px0, py0, 1, panel_h, kEdge);
-  fill_rect(d, px0 + panel_w - 1, py0, 1, panel_h, kEdge);
+  panel(d, px0, py0, panel_w, panel_h);
 
   const char* title = slots ? "STATE SLOT" : "PAUSED";
   draw_text(d, px0 + (panel_w - text_width(scale, title)) / 2, py0 + title_y, scale, kInk, title);

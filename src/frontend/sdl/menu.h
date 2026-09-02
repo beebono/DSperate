@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/cheat/database.h"
 
+#include <string>
 #include <vector>
 
 namespace ds::sdl {
@@ -31,8 +32,14 @@ void dim_framebuffer(u32* px, u32 n);
 // already mapped; the guest cannot see them while the menu is up.
 class Menu {
 public:
-  // What the frontend should do after input(). Save/Load act on slot().
-  enum class Result : u8 { None, Resume, Save, Load, Quit };
+  // What the frontend should do after input(). Save/Load act on slot();
+  // Launch acts on chosen().
+  enum class Result : u8 { None, Resume, Save, Load, Quit, Launch };
+
+  // One game in the picker. `title` is what the list shows -- the ROM
+  // header's own title where it could be read, the filename otherwise -- and
+  // `path` is what gets loaded.
+  struct GameEntry { std::string title, path; };
 
   bool open() const { return open_; }
   void set_open(bool o);
@@ -47,6 +54,21 @@ public:
   // selection. Cleared by the frontend once it has.
   bool cheats_dirty() const { return cheats_dirty_; }
   void clear_cheats_dirty() { cheats_dirty_ = false; }
+
+  // The game picker. The list is owned by the frontend (it is built once at
+  // boot) and the menu only points at it. Passing null, or an empty list,
+  // leaves open_games() with nothing to show, which it says on the page
+  // rather than by refusing to open: "no games" is the answer to the
+  // player's question, and a blank screen is not.
+  void set_games(const std::vector<GameEntry>* games) { games_ = games; }
+  // Raise the picker as the launcher's own modal page: not reached from the
+  // root menu, and B does not back out of it, because there is nothing
+  // behind it to go back to -- the loader cart has faded to white and is
+  // spinning. The way out is to choose a game (or to quit the emulator,
+  // which the window close and the quit hotkey still do).
+  void open_games();
+  // The path of the game picked, valid when update() returned Launch.
+  const std::string& chosen() const { return chosen_; }
 
   int  slot() const { return slot_; }
   void set_slot(int s) { slot_ = s; }
@@ -74,7 +96,7 @@ public:
   static constexpr int kSlotRows = 5;   // ten slots as two columns of five
 
 private:
-  enum class Page : u8 { Root, Slot, Cheats };
+  enum class Page : u8 { Root, Slot, Cheats, Games };
   // One line of the cheats page. Headings and notes are shown but cannot be
   // selected; the list is built once when the page opens.
   struct Line { enum Kind : u8 { Heading, Note, Toggle } kind; int at; };
@@ -90,6 +112,11 @@ private:
   int  cheat_row_ = 0;           // index into lines_
   int  cheat_top_ = 0;           // first line shown, for scrolling
   bool cheats_dirty_ = false;
+
+  const std::vector<GameEntry>* games_ = nullptr;
+  int  game_row_ = 0;            // index into *games_
+  int  game_top_ = 0;            // first game shown, for scrolling
+  std::string chosen_;           // the path Result::Launch names
 
   // Holding a direction walks the list: 400 ms before it starts, then one
   // row every 55 ms, which is brisk enough for a list of thousands without
@@ -118,8 +145,14 @@ private:
   int root_rows() const;
   int root_item(int row) const;
   void draw_cheats(const Blit& d) const;
+  void draw_games(const Blit& d) const;
   void build_lines();
   void move_cheat_row(int delta);
+  void move_game_row(int delta);
+  // The two scrolling pages share the repeat and marquee timing, which both
+  // key off "has the selection moved"; this is the selection they mean.
+  int  list_row() const;
+  bool list_page() const { return page_ == Page::Cheats || page_ == Page::Games; }
   void toggle_cheat();
 };
 

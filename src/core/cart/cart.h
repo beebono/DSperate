@@ -59,6 +59,16 @@ public:
   u32  sram_writes() const { return sram_writes_; }
   void clear_sram_dirty() { sram_dirty_ = false; }
 
+  // The loader cart's launch signal. A read at the cart's own arm9_rom_offset
+  // only ever happens when the firmware's menu launches the card: the header
+  // is read once at boot by the plain `00` command, and no `B7` read in an
+  // ordinary session goes near it. So the first one is unambiguously "the
+  // player tapped the card", which is what a frontend serving a game list
+  // waits for. Sticky until cleared, and deliberately not in the save state:
+  // it describes what the frontend is waiting for, not the machine.
+  bool launch_read() const { return launch_read_; }
+  void clear_launch_read() { launch_read_ = false; }
+
   // Secure area for direct boot: 0x800 bytes from arm9_rom_offset, decrypted.
   void decrypt_secure_area(u8 out[0x800]);
 
@@ -79,6 +89,7 @@ private:
   u32 data_mode_ = 0;
   u8  rom_cmd_[8]{};
   u32 rom_addr_ = 0;
+  bool launch_read_ = false;
   u32 rom_read32();
 
   std::array<u32, 0x412> key1_{};

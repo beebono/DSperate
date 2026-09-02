@@ -87,6 +87,7 @@ Cart::Cart(NDS& nds, std::vector<u8> rom) : nds_(nds), rom_(std::move(rom)) {
 
 void Cart::reset() {
   in_reset_ = true; cmd_mode_ = data_mode_ = 0; rom_addr_ = 0; std::memset(rom_cmd_, 0, 8);
+  launch_read_ = false;
   spi_pos_ = 0; spi_cmd_ = 0; spi_addr_ = 0; spi_status_ = 0;
 }
 
@@ -211,6 +212,12 @@ void Cart::command_start(const u8 cmd[8]) {
   std::memcpy(rom_cmd_, cmd, 8);
   if (rom_cmd_[0] == 0xB7) {
     rom_addr_ = ((rom_cmd_[1] << 24) | (rom_cmd_[2] << 16) | (rom_cmd_[3] << 8) | rom_cmd_[4]) & rom_mask_;
+    // The launch signal (see launch_read()), taken from the address the menu
+    // actually asked for. It has to be read before the clamp below, which
+    // folds every sub-0x8000 read onto 0x8000 -- exactly where a loader cart
+    // puts its arm9_rom_offset -- and would otherwise forge the signal out of
+    // an unrelated read of the header area.
+    if (rom_addr_ == header_.arm9_rom_offset) launch_read_ = true;
     if (rom_addr_ < 0x8000) rom_addr_ = 0x8000 + (rom_addr_ & 0x1FF);   // secure area is not readable here
   }
 }

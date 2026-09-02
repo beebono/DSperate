@@ -295,6 +295,20 @@ as well, still under a firmware boot, and the menu draws its banner instead.
 tapping it plays the console's own launch animation. The card needs nothing
 from a commercial dump.
 
+**Picking a game from the DS menu.** Point `[paths] games` at a directory and
+tapping that card raises a list of what is in it, over the white the launch
+animation fades to; choosing one boots it. The list shows each ROM's own
+header title where it has one (the filename otherwise, which is what a `.zip`
+gets), and it is the pause menu's cheats page underneath, so it scrolls,
+pages with the shoulder buttons and scrolls a name too long to fit.
+
+The chosen game is direct-booted rather than firmware-booted a second time,
+which is both faster and better looking -- the loader's fade covers the
+transition, so there is no second Nintendo logo -- and it sidesteps the
+firmware's own cartridge launch entirely. Saves, save states, screenshots and
+cheats are all re-derived from the game that was picked, so nothing lands
+under the loader's name.
+
 The clock is seeded from the host's local time and runs, so the menu shows
 today's date. In the core the clock is off and frozen at 2000-01-01, because
 the whole verification harness compares runs against each other and against

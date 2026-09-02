@@ -21,6 +21,9 @@
 #include "input.h"
 #include "lid.h"
 #include "menu.h"
+
+#include <dirent.h>
+#include <algorithm>
 #include "mic_alsa.h"
 
 #include <SDL2/SDL.h>
@@ -97,6 +100,9 @@ const char* kUsage =
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
     "  --replay F      play the inputs in F instead of the controls; quits at its end\n"
+    "  --rtc-host      run the clock from this machine even under --replay (INEXACT: a game\n"
+    "                  that reads the date no longer replays the same, but the firmware's own\n"
+    "                  menu needs a real clock to appear at all)\n"
     "  --load-state F  start from a save state instead of booting the game\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n";
@@ -205,6 +211,160 @@ bool load_state_file(NDS& nds, const std::string& path) {
   return true;
 }
 
+// The game library, for the picker the loader cart raises.
+//
+// A ROM's own header title is what the player recognises, so the first 0x200
+// bytes of each file are read for it -- cheap even for a big library, since
+// it is one short read per file and no image is loaded. The title is only
+// trusted when the header looks like one (printable title and game code);
+// anything else, a zip included, falls back to the filename, because getting
+// a title out of an archive would mean inflating the ROM.
+std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
+  std::vector<ds::sdl::Menu::GameEntry> games;
+  if (dir.empty()) return games;
+  DIR* d = opendir(dir.c_str());
+  if (!d) { std::fprintf(stderr, "games: cannot read %s\n", dir.c_str()); return games; }
+  while (dirent* e = readdir(d)) {
+    const std::string name = e->d_name;
+    if (name.empty() || name[0] == '.') continue;
+    const size_t dot = name.find_last_of('.');
+    if (dot == std::string::npos) continue;
+    std::string ext = name.substr(dot + 1);
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (ext != "nds" && ext != "zip") continue;
+    const std::string path = dir + "/" + name;
+
+    std::string title = rom_stem(name);
+    if (ext == "nds") {
+      if (FILE* f = std::fopen(path.c_str(), "rb")) {
+        u8 head[0x200];
+        const size_t got = std::fread(head, 1, sizeof head, f);
+        std::fclose(f);
+        if (got == sizeof head) {
+          // Printable-or-padding title, printable game code: enough to tell a
+          // header from a file that merely ends in .nds.
+          bool ok = true;
+          for (int i = 0; i < 12 && ok; ++i) if (head[i] && (head[i] < 0x20 || head[i] > 0x7E)) ok = false;
+          for (int i = 12; i < 16 && ok; ++i) if (head[i] < 0x20 || head[i] > 0x7E) ok = false;
+          std::string t(reinterpret_cast<char*>(head), 12);
+          while (!t.empty() && (t.back() == ' ' || t.back() == '\0')) t.pop_back();
+          if (ok && !t.empty()) title = t;
+        }
+      }
+    }
+    games.push_back({title, path});
+  }
+  closedir(d);
+  // By what the list shows, so the order on screen is the order it is read in.
+  std::sort(games.begin(), games.end(), [](const ds::sdl::Menu::GameEntry& a, const ds::sdl::Menu::GameEntry& b) {
+    return a.title < b.title;
+  });
+  return games;
+}
+
+// Both screens pure white: where the console's own launch animation settles,
+// and the cue the game picker waits for. Alpha is ignored -- the framebuffer
+// carries it set, but nothing here depends on that.
+bool screen_is_white(NDS& nds, int screen) {
+  const u32* fb = nds.gpu.framebuffer(screen);
+  for (u32 i = 0; i < ds::SCREEN_W * ds::SCREEN_H; ++i)
+    if ((fb[i] & 0x00FFFFFFu) != 0x00FFFFFFu) return false;
+  return true;
+}
+
+// Everything keyed to which ROM is in the slot: where its battery save, its
+// states and screenshots and its cheats live, and which per-game .ini a
+// hotkey writes to. Boot fills this once; launching a game from the loader
+// cart resets the machine and opens it again, because otherwise a session
+// begun on BootMenu.nds would go on writing the loader's paths and its own
+// game code for the game the player actually chose.
+//
+// Config layering is deliberately *not* redone on a re-open: the per-game
+// .ini is merged into cfg at boot, and merging a second game's over the top
+// would accumulate rather than replace. Only game_ini itself is re-keyed, so
+// a layout picked with a hotkey after a launch lands on the right game.
+struct Session {
+  std::string rom_path;         // what is in the slot
+  std::string rom_dir;          // its directory: the default home for everything below
+  std::string game_ini;         // per-game settings; empty when there is no cart
+  std::string states_dir;       // save states and screenshots
+  std::string sav;              // battery save
+  std::string cheats_on_path;   // which cheats are on, one name per line
+  ds::cheat::GameCheats cheats; // the database entry for this ROM; the menu points at its groups
+
+  // `save_arg` is --save, which pins the battery save whatever the ROM is.
+  void open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom, const char* save_arg);
+  void load_enabled(NDS& nds) const;
+  void save_enabled(NDS& nds) const;
+};
+
+void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom, const char* save_arg) {
+  rom_path = rom;
+  const size_t slash = rom_path.find_last_of('/');
+  rom_dir = slash == std::string::npos ? "." : rom_path.substr(0, slash);
+  states_dir = cfg.str("paths.states", rom_dir);
+  sav = save_arg ? std::string(save_arg) : save_path(rom_path, cfg.str("paths.saves"));
+  game_ini.clear();
+  if (nds.cart) {
+    game_ini = ds::sdl::Config::game_path_rom(rom_path);
+    if (game_ini.empty()) game_ini = ds::sdl::Config::game_path_code(nds.cart->header().game_code);
+  }
+
+  // Cheats: a usrcheat.dat, from [paths] cheats or beside the ROM or in the
+  // config directory. The entry matching this ROM's game code and header
+  // checksum is loaded; nothing is enabled by that alone, so a database that
+  // is simply present costs a file read at startup and nothing after it.
+  cheats = ds::cheat::GameCheats{};
+  nds.cheats.codes.clear();
+  cheats_on_path.clear();
+  std::string db = cfg.str("paths.cheats");
+  if (db.empty()) {
+    for (const std::string& candidate : {rom_dir + "/usrcheat.dat", ds::sdl::Config::dir() + "/usrcheat.dat"}) {
+      if (FILE* f = std::fopen(candidate.c_str(), "rb")) { std::fclose(f); db = candidate; break; }
+    }
+  }
+  if (!db.empty()) {
+    std::string err;
+    if (ds::cheat::load_for_rom(db, rom_path, cheats, err)) {
+      VLOG("cheats: %s -- %zu codes in %zu groups\n", cheats.name.c_str(), cheats.codes.size(), cheats.groups.size());
+      nds.cheats.codes = cheats.codes;
+    } else if (!err.empty()) {
+      std::fprintf(stderr, "cheats: %s\n", err.c_str());
+    }
+  }
+  // Which cheats are on is remembered per game, next to the save states, as
+  // one code name per line. Names rather than indices: a database update
+  // renumbers everything, and a name that no longer exists is simply dropped.
+  if (!cheats.codes.empty())
+    cheats_on_path = states_dir + "/" + std::string(nds.cart ? nds.cart->header().game_code : "NONE", 4) + ".cheats";
+}
+
+void Session::load_enabled(NDS& nds) const {
+  if (cheats_on_path.empty()) return;
+  FILE* f = std::fopen(cheats_on_path.c_str(), "rb");
+  if (!f) return;
+  char line[512];
+  size_t on = 0;
+  while (std::fgets(line, sizeof line, f)) {
+    std::string want(line);
+    while (!want.empty() && (want.back() == '\n' || want.back() == '\r')) want.pop_back();
+    if (want.empty()) continue;
+    for (ds::cheat::Code& c : nds.cheats.codes)
+      if (!c.is_note() && c.name == want) { c.enabled = true; ++on; }
+  }
+  std::fclose(f);
+  if (on) VLOG("cheats: %zu enabled from %s\n", on, cheats_on_path.c_str());
+}
+
+void Session::save_enabled(NDS& nds) const {
+  if (cheats_on_path.empty()) return;
+  FILE* f = std::fopen(cheats_on_path.c_str(), "wb");
+  if (!f) { std::fprintf(stderr, "cheats: cannot write %s\n", cheats_on_path.c_str()); return; }
+  for (const ds::cheat::Code& c : nds.cheats.codes)
+    if (c.enabled && !c.is_note()) std::fprintf(f, "%s\n", c.name.c_str());
+  std::fclose(f);
+}
+
 // The stick-driven pen: an outlined crosshair with a red centre, drawn over
 // the bottom screen in DS pixel space and mapped onto the destination (the
 // frontend's scaled buffer, or a copy of the framebuffer).
@@ -285,6 +445,7 @@ int main(int argc, char** argv) {
   const char* config_arg = nullptr;
   long frame_limit = 0;
   const char *record = nullptr, *replay = nullptr, *save_arg = nullptr, *load_state = nullptr;
+  bool rtc_host = false;              // --rtc-host: a real clock even under a replay (the firmware menu needs one)
   long stats_from = 0;   // frames run but left out of the timing statistics
 
   // The command line is one more settings layer, applied after the files.
@@ -302,6 +463,7 @@ int main(int argc, char** argv) {
     else if (arg("--layout")) cli.set("video.layout", argv[++i]);
     else if (arg("--screen")) cli.set("video.screen", argv[++i]);
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
+    else if (flag("--rtc-host")) rtc_host = true;
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
     else if (arg("--save")) save_arg = argv[++i];
@@ -391,12 +553,9 @@ int main(int argc, char** argv) {
   // The per-game file goes on top of the global one, the command line on top of both.
   // Title ID first, then the ROM's filename, so the file named like the ROM
   // wins; that is also where hotkey-picked settings are remembered.
-  std::string game_ini;
   if (nds.cart) {
     for (const std::string& p : {ds::sdl::Config::game_path_code(nds.cart->header().game_code), ds::sdl::Config::game_path_rom(rom_path)})
       if (!p.empty() && cfg.load(p)) VLOG("config: %s\n", p.c_str());
-    game_ini = ds::sdl::Config::game_path_rom(rom_path);
-    if (game_ini.empty()) game_ini = ds::sdl::Config::game_path_code(nds.cart->header().game_code);
     apply_cli();
     VLOG("game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
     // Which entry a zip was read from -- the interesting case is an archive
@@ -461,32 +620,11 @@ int main(int argc, char** argv) {
     layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
     layout.dominant = std::clamp(cfg.real("video.dominant_ratio", 0.5), 0.1, 0.99);
   }
-  const std::string saves_dir = cfg.str("paths.saves");
-  const std::string rom_dir = rom_path.find_last_of('/') == std::string::npos ? "." : rom_path.substr(0, rom_path.find_last_of('/'));
-  const std::string states_dir = cfg.str("paths.states", rom_dir);   // states and screenshots
-  // Cheats: a usrcheat.dat, from [paths] cheats or beside the ROM or in the
-  // config directory. The entry matching this ROM's game code and header
-  // checksum is loaded; nothing is enabled by that alone, so a database that
-  // is simply present costs a file read at startup and nothing after it.
-  ds::cheat::GameCheats cheat_set;
-  {
-    std::string db = cfg.str("paths.cheats");
-    if (db.empty()) {
-      for (const std::string& candidate : {rom_dir + "/usrcheat.dat", ds::sdl::Config::dir() + "/usrcheat.dat"}) {
-        if (FILE* f = std::fopen(candidate.c_str(), "rb")) { std::fclose(f); db = candidate; break; }
-      }
-    }
-    if (!db.empty()) {
-      std::string err;
-      if (ds::cheat::load_for_rom(db, rom_path, cheat_set, err)) {
-        VLOG("cheats: %s -- %zu codes in %zu groups\n",
-                     cheat_set.name.c_str(), cheat_set.codes.size(), cheat_set.groups.size());
-        nds.cheats.codes = cheat_set.codes;
-      } else if (!err.empty()) {
-        std::fprintf(stderr, "cheats: %s\n", err.c_str());
-      }
-    }
-  }
+  // Everything keyed to the ROM in the slot -- saves, states, screenshots,
+  // cheats -- lives here, so that launching a game from the loader cart can
+  // re-derive the lot rather than keep writing the loader's.
+  Session session;
+  session.open(nds, cfg, rom_path, save_arg);
 
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
@@ -499,8 +637,9 @@ int main(int argc, char** argv) {
   // --replay: a recorded scene has to reproduce frame for frame, and a game
   // that reads the date (Animal Crossing, the Pokemon day/night cycle) would
   // otherwise play differently every time it was replayed.
-  if (!replay) nds.io.start_rtc_clock();
+  if (!replay || rtc_host) nds.io.start_rtc_clock();
   else VLOG("rtc: frozen for the replay\n");
+  if (replay && rtc_host) std::fprintf(stderr, "rtc: --rtc-host over a replay; this run is not reproducible\n");
 #if DSPERATE_JIT
   if (jit && !ds::jit::attach(nds, true, true)) return 1;
   if (jit && cfg.flag("emu.cpu_oc", false)) ds::jit::set_cpu_oc(true);   // see config.cpp; translate-time pricing, so before the first block
@@ -513,8 +652,7 @@ int main(int argc, char** argv) {
   // frontend has always loaded --save read-only for this reason; match it here, and
   // take an explicit --save too so both frontends can be pointed at the same
   // scene save rather than one silently picking up <rom>.sav.
-  const std::string sav = save_arg ? std::string(save_arg) : save_path(rom_path, saves_dir);
-  load_save(nds, sav);
+  load_save(nds, session.sav);
   const bool save_readonly = replay != nullptr;
   if (save_readonly) VLOG("save: read-only for the replay\n");
 
@@ -686,37 +824,23 @@ int main(int argc, char** argv) {
   int slot_shown = 0;                                        // frames left to show the slot digit
   // The pause menu (menu.h) and the two screen copies it is composited into.
   ds::sdl::Menu menu;
-  menu.set_cheats(&nds.cheats.codes, &cheat_set.groups);
-  // Which cheats are on is remembered per game, next to the save states, as
-  // one code name per line. Names rather than indices: a database update
-  // renumbers everything, and a name that no longer exists is simply dropped.
-  const std::string cheats_on_path = cheat_set.codes.empty() ? std::string()
-                                   : states_dir + "/" + std::string(nds.cart ? nds.cart->header().game_code : "NONE", 4) + ".cheats";
-  auto load_enabled = [&] {
-    if (cheats_on_path.empty()) return;
-    FILE* f = std::fopen(cheats_on_path.c_str(), "rb");
-    if (!f) return;
-    char line[512];
-    size_t on = 0;
-    while (std::fgets(line, sizeof line, f)) {
-      std::string want(line);
-      while (!want.empty() && (want.back() == '\n' || want.back() == '\r')) want.pop_back();
-      if (want.empty()) continue;
-      for (ds::cheat::Code& c : nds.cheats.codes)
-        if (!c.is_note() && c.name == want) { c.enabled = true; ++on; }
-    }
-    std::fclose(f);
-    if (on) VLOG("cheats: %zu enabled from %s\n", on, cheats_on_path.c_str());
-  };
-  auto save_enabled = [&] {
-    if (cheats_on_path.empty()) return;
-    FILE* f = std::fopen(cheats_on_path.c_str(), "wb");
-    if (!f) { std::fprintf(stderr, "cheats: cannot write %s\n", cheats_on_path.c_str()); return; }
-    for (const ds::cheat::Code& c : nds.cheats.codes)
-      if (c.enabled && !c.is_note()) std::fprintf(f, "%s\n", c.name.c_str());
-    std::fclose(f);
-  };
-  load_enabled();
+  menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
+  session.load_enabled(nds);
+  // The library the loader cart's picker offers. Only read when there is a
+  // loader cart to raise it: a normal session never shows the list.
+  const std::vector<ds::sdl::Menu::GameEntry> games =
+      boot_firmware && nds.cart ? enumerate_games(cfg.str("paths.games")) : std::vector<ds::sdl::Menu::GameEntry>{};
+  menu.set_games(&games);
+  // Armed until a game is launched: after that the cart in the slot is a real
+  // one, and its own reads at its own arm9_rom_offset mean nothing.
+  bool launcher = boot_firmware && nds.cart != nullptr;
+  if (launcher) VLOG("launcher: %zu games in %s\n", games.size(), cfg.str("paths.games").c_str());
+  int launch_wait = -1;         // frames since the card was tapped; -1 = not armed
+  // How long to wait for the fade before showing the list anyway. The fade
+  // measured ~20 frames; this is loose enough to absorb a slower one and
+  // short enough that a firmware quirk cannot strand the player on a white
+  // screen with no way forward.
+  constexpr int kLaunchWaitFrames = 120;
   std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
   bool menu_dirty = false;      // the menu screens need compositing and presenting again
   Uint32 menu_ms = 0;           // SDL_GetTicks at the menu's last tick
@@ -727,7 +851,7 @@ int main(int argc, char** argv) {
   // costs a frame nobody can see and guarantees a real picture underneath.
   bool pause_pending = false;
   auto refresh_slots = [&] { for (int i = 0; i < 10; ++i) {
-    FILE* f = std::fopen(state_path(nds, states_dir, i).c_str(), "rb");
+    FILE* f = std::fopen(state_path(nds, session.states_dir, i).c_str(), "rb");
     menu.set_slot_used(i, f != nullptr);
     if (f) std::fclose(f);
   } };
@@ -735,13 +859,13 @@ int main(int argc, char** argv) {
   // every point a session could end (pause, lid, quit).
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
   u64 sram_quiet_since = 0;
-  auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, sav); };
+  auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav); };
   // The session is ending: leave a state behind. The same two guards the
   // save-state hotkey carries -- a replay must not write, and a recording is
   // the inputs from boot, so a state alongside it would only mislead.
   auto autosave_now = [&] {
     if (!autosave || save_readonly || log.writing()) return;
-    if (save_state_file(nds, auto_state_path(nds, states_dir))) flush_save();   // the .sav and the state never diverge
+    if (save_state_file(nds, auto_state_path(nds, session.states_dir))) flush_save();   // the .sav and the state never diverge
   };
   auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled) {
     for (int i = 0; i < 2; ++i)
@@ -765,7 +889,7 @@ int main(int argc, char** argv) {
       case A::Pause:
         if (paused) {
           state_slot = menu.slot();
-          if (menu.cheats_dirty()) { save_enabled(); menu.clear_cheats_dirty(); }
+          if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
           menu.set_open(false);
           set_paused(false);
         }
@@ -785,7 +909,7 @@ int main(int argc, char** argv) {
         display.set_layout(l);
         apply_visibility();
         VLOG("layout: %s\n", Disp::mode_name(l.mode));
-        if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.layout", Disp::mode_name(l.mode));
+        if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.layout", Disp::mode_name(l.mode));
         break;
       }
       case A::ScreenSwap: {
@@ -794,7 +918,7 @@ int main(int argc, char** argv) {
         l.primary = 1 - l.primary;
         display.set_layout(l);
         apply_visibility();
-        if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.screen", l.primary ? "bottom" : "top");
+        if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.screen", l.primary ? "bottom" : "top");
         break;
       }
       case A::PipCornerNext: {
@@ -802,22 +926,22 @@ int main(int argc, char** argv) {
         Disp::Layout l = display.current_layout();
         l.corner = static_cast<Disp::Corner>((static_cast<int>(l.corner) + 1) % static_cast<int>(Disp::Corner::Count));
         display.set_layout(l);
-        if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.pip_corner", Disp::corner_name(l.corner));
+        if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.pip_corner", Disp::corner_name(l.corner));
         break;
       }
-      case A::Screenshot: screenshot(nds, states_dir, display.across()); break;
+      case A::Screenshot: screenshot(nds, session.states_dir, display.across()); break;
       case A::Lid: input.set_lid(!input.lid()); VLOG("lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
       case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
       case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
       case A::SaveState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
-        if (save_state_file(nds, state_path(nds, states_dir, state_slot))) flush_save();   // the .sav and the state never diverge
+        if (save_state_file(nds, state_path(nds, session.states_dir, state_slot))) flush_save();   // the .sav and the state never diverge
         break;
       case A::LoadState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         // A recording is the inputs from boot; a load would leave it unreplayable.
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
-        if (load_state_file(nds, state_path(nds, states_dir, state_slot))) {
+        if (load_state_file(nds, state_path(nds, session.states_dir, state_slot))) {
           audio.clear();
           next_frame = SDL_GetPerformanceCounter();
           fs_debt_ms = 0;
@@ -849,7 +973,7 @@ int main(int argc, char** argv) {
         case Menu::Result::None: break;
         case Menu::Result::Resume:
           state_slot = menu.slot();
-          if (menu.cheats_dirty()) { save_enabled(); menu.clear_cheats_dirty(); }
+          if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
           menu.set_open(false);
           set_paused(false);
           break;
@@ -858,7 +982,7 @@ int main(int argc, char** argv) {
         // which a load would leave unreplayable.
         case Menu::Result::Save:
           if (save_readonly) std::fprintf(stderr, "state: not during a replay\n");
-          else if (save_state_file(nds, state_path(nds, states_dir, menu.slot()))) flush_save();
+          else if (save_state_file(nds, state_path(nds, session.states_dir, menu.slot()))) flush_save();
           refresh_slots();
           break;
         case Menu::Result::Load:
@@ -866,7 +990,7 @@ int main(int argc, char** argv) {
           if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
           // A load replaces the picture the menu is drawn over, so it also
           // leaves the menu: the player wants to see where they landed.
-          if (load_state_file(nds, state_path(nds, states_dir, menu.slot()))) {
+          if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()))) {
             state_slot = menu.slot();
             menu.set_open(false);
             set_paused(false);
@@ -876,6 +1000,38 @@ int main(int argc, char** argv) {
             flush_save();
           } else refresh_slots();
           break;
+        case Menu::Result::Launch: {
+          const std::string pick = menu.chosen();
+          VLOG("launcher: %s\n", pick.c_str());
+          flush_save();
+#if DSPERATE_JIT
+          if (jit) ds::jit::flush_all();
+#endif
+          nds.reset();
+          if (!nds.load_rom(pick.c_str())) {
+            // Stay on the list rather than reset into nothing: another game
+            // in the same directory may well be readable.
+            std::fprintf(stderr, "launcher: could not read %s\n", pick.c_str());
+            break;
+          }
+          nds.setup_direct_boot();
+          // Everything keyed to the ROM follows it, or the game would go on
+          // writing the loader's saves, states, screenshots and cheats under
+          // the loader's game code. --save is deliberately not carried over:
+          // it pins one file, and it was given for the ROM on the command
+          // line, not for whatever the player picks here.
+          launcher = false;
+          session.open(nds, cfg, pick, nullptr);
+          menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
+          session.load_enabled(nds);
+          load_save(nds, session.sav);
+          sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
+          state_slot = 0;
+          refresh_slots();
+          menu.set_open(false);
+          set_paused(false);
+          break;
+        }
         case Menu::Result::Quit: input.request_quit(); break;
         }
       }
@@ -1115,13 +1271,41 @@ int main(int argc, char** argv) {
     // the unscaled path, is in fb_ as well. Now it is safe to stop.
     if (pause_pending && present) {
       pause_pending = false;
-      menu.set_slot(state_slot);
-      refresh_slots();
-      menu.set_open(true);
-      menu_dirty = true;
-      menu_ms = SDL_GetTicks();
-      set_paused(true);
+      // Raising the picker and raising the pause menu are the same stop: a
+      // real, unscaled frame has just been presented and is in fb_, which is
+      // what either page is drawn over.
+      bool raise = true;
+      if (launch_wait >= 0) {
+        // The fade has settled when both screens are pure white. If it never
+        // does, the list still goes up: a player left looking at a spinning
+        // stub has no way forward, and a list they did not expect at least has
+        // one.
+        const bool white = screen_is_white(nds, 0) && screen_is_white(nds, 1);
+        if (!white && launch_wait < kLaunchWaitFrames) raise = false;
+        else if (!white) std::fprintf(stderr, "launcher: the launch never faded to white; raising the list anyway\n");
+      }
+      if (raise) {
+        if (launch_wait >= 0) { launch_wait = -1; menu.open_games(); }
+        else { menu.set_slot(state_slot); refresh_slots(); menu.set_open(true); }
+        menu_dirty = true;
+        menu_ms = SDL_GetTicks();
+        set_paused(true);
+      }
     }
+    // The loader cart's picker. The cart read arms it (Cart::launch_read);
+    // the list goes up on the first white frame after that, because the read
+    // lands mid-frame while the console's own launch animation is still
+    // fading, and the white it settles into is what the menu should sit on.
+    // Whiteness alone would not do: the firmware boot has a white stretch of
+    // its own, long before any of this.
+    if (launcher && launch_wait < 0 && nds.cart->launch_read()) {
+      nds.cart->clear_launch_read();
+      launch_wait = 0;
+      VLOG("launcher: the card was tapped\n");
+    }
+    // Waiting for the fade means presenting unscaled frames, which is the
+    // only path that leaves a picture in fb_ for the menu to sit on.
+    if (launch_wait >= 0) { ++launch_wait; pause_pending = true; }
     const Uint64 t2 = SDL_GetPerformanceCounter();
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;

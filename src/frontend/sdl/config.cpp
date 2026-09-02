@@ -163,6 +163,12 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 #                               # Only the changed 256-byte pages are stored, and the firmware
 #                               # dump itself is never written to; delete this file to put the
 #                               # console back to whatever the dump says. Default: <firmware>.ovr
+# games = /path/to/games        # the library the loader cart's game picker lists (.nds and .zip,
+#                               # one level, sorted by the ROM header's own title where it has one).
+#                               # Only used on a firmware boot with a BootMenu.nds in the slot:
+#                               # tapping the card in the DS menu raises this list, and picking a
+#                               # game boots it. Unset, the picker says so rather than showing
+#                               # an empty box.
 # saves = /path/to/saves        # battery saves; default next to the ROM
 # states = /path/to/states      # save states and screenshots; default next to the ROM
 # cheats = /path/to/usrcheat.dat # Action Replay database; default: beside the ROM,
