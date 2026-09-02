@@ -49,6 +49,11 @@ melonDS (frame dumps, instruction traces) and measured on the Anbernic RG DS
 - **Sessions.** Battery saves, save states (ten slots, exact round trip),
   input recording and replay (a played scene becomes a benchmark), a real or
   fake microphone, and the lid/hinge.
+- **Firmware boot.** With no game the console boots its own firmware: the DS
+  menu, with the clock and calendar set from the host and the console's own
+  settings editable from inside it. What the firmware writes to its flash is
+  kept in a sidecar file, so the dump itself is never written to. Wi-Fi is
+  register-level only, so PictoChat and Download Play do not work.
 - **Frontend.** SDL2: INI config with per-game overrides, keyboard and
   controller remapping, hotkeys, fast forward, screenshots, per-scanline
   scaling straight into the window surface, zero-copy dmabuf presentation
@@ -120,6 +125,13 @@ runs through.
              [--trace F [--max N]] [--dump-frames F [--dump-from N] [--dump-count N]]
              [--dump-audio F] [--save-state-at N:file] [--load-state F]
              [--cheats usrcheat.dat] [--list-cheats] [--cheat <name|#N>]
+             [--rtc-host] [--firmware-override F]
+
+`--rtc-host` and `--firmware-override` are for driving the firmware menu from
+the harness and are off by default, because both break reproducibility: the
+first seeds the clock from the wall, and the second lets a run change the
+console's settings. Without them the CLI is what every baseline assumes -- a
+clock frozen at 2000-01-01 and a firmware image identical to the dump.
 
 `--trace` writes per-CPU instruction traces (`<pc> <instr> <cpsr> r0..r14`,
 one line per instruction, spin loops collapsed) for `tools/compare_traces.py`;
@@ -132,9 +144,10 @@ stray `.sav` next to a ROM cannot silently move a frame baseline: give it
 ## Playing
 
 `dsperate-sdl` is the SDL2 frontend: direct boot, both screens, sound and
-input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it).
+input. It is built when SDL2 is found (`-DDSPERATE_SDL=OFF` to skip it). The
+ROM is optional -- without one it boots the firmware menu, see below.
 
-    dsperate-sdl game.nds [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
+    dsperate-sdl [game.nds] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
                  [--config F] [--scale N] [--fullscreen] [--layout L] [--screen top|bottom]
                  [--dual-window] [--linear] [--lcd-grid S] [--chunky] [--accel] [--no-vsync] [--no-audio]
                  [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N] [--timing-oc]
@@ -151,7 +164,9 @@ as `game: ... [XXXX]` at start, shared by every dump of that title); the
 filename one wins, and is where a layout picked with the hotkey is
 remembered. The command line overrides all of them. `[paths]` holds the BIOS/firmware so they need not
 be passed every time, plus optional `saves` and `states` directories (default:
-next to the ROM) and `cheats`, a `usrcheat.dat` database. `[keys]` and `[pad]` remap the DS buttons to SDL key and
+next to the ROM), `cheats`, a `usrcheat.dat` database, and
+`firmware_override`, where settings changed inside the firmware are kept
+(default `<firmware>.ovr`). `[keys]` and `[pad]` remap the DS buttons to SDL key and
 controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);
 `[hotkeys]` and `[padhotkeys]` bind the frontend's actions, on the controller
 usually as `mod+button` (or a chord, `mod+start+back` -- SDL calls Select
@@ -235,6 +250,51 @@ save, on any recorded scene (the CLI takes `--save-state-at N:file` and
 both points). Loading a state is refused during `--record` (the recording
 could not replay past it) and `--replay` refuses to load or save states at
 all.
+
+### Firmware boot
+
+Started with no ROM -- or with one named `BootMenu.nds`, so a launcher that
+only knows how to start games can reach it -- `dsperate-sdl` boots the
+console's own firmware instead of a game. That is the DS menu: the clock and
+calendar, the owner's nickname, the settings pages, and "There is no DS Card
+inserted." It needs the real BIOS pair and firmware dump like everything else
+does.
+
+The clock is seeded from the host's local time and runs, so the menu shows
+today's date. In the core the clock is off and frozen at 2000-01-01, because
+the whole verification harness compares runs against each other and against
+melonDS; only the frontends turn it on, and not under `--replay`, where a game
+that reads the date would otherwise play differently every time the scene was
+replayed.
+
+**Changing the console's settings.** The settings pages work, so the nickname,
+birthday, favourite colour, greeting and language can be set from inside the
+firmware exactly as on hardware. The firmware saves them by writing its own
+flash -- and those writes are kept in a **sidecar file**, `<firmware>.ovr`
+(`[paths] firmware_override` to move it), which holds only the 256-byte pages
+that changed and is applied over the image at load. `firmware.bin` itself is
+never opened for writing: it is a dump of your console that you cannot
+regenerate. Deleting the sidecar puts the console back to whatever the dump
+says.
+
+Leaving the settings pages, the firmware switches the console off. The
+frontend takes that as its cue to write the sidecar out and start the console
+again, so the settings you just changed are on disk and the menu comes back
+with them applied -- which is what the hardware's power button would have done
+next. A game is never rebooted this way.
+
+The touchscreen calibration screen is cosmetic. The frontend reports pen
+positions as plain screen pixels and normalises the stored calibration to
+match, so a calibration run inside the firmware is accepted and then
+normalised away rather than being allowed to aim the pen wrongly.
+
+**PictoChat and Download Play do not work.** Wi-Fi is emulated at the register
+level only -- enough for games to probe the hardware, with no frames, no
+timers and no interrupts -- and both of those are Wi-Fi applications. They are
+on the menu because the firmware puts them there, not because they are
+supported. **Download Play in particular softlocks the menu**: it does not
+fail and return, it hangs, and the only way out is to quit the emulator.
+PictoChat will open its room list and go no further.
 
 ### Cheats
 
