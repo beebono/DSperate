@@ -568,7 +568,19 @@ int main(int argc, char** argv) {
   // Not during a replay: the log carries the mic, and an open capture device
   // would only add work to a measurement.
   ds::sdl::MicAlsa mic_alsa;
-  if (mic_on && !replay && !mic_alsa.open(ds::spu::Spu::SAMPLE_RATE, cfg.str("audio.mic_dev").c_str())) audio.open_capture();
+  // Opened lazily, on the game's first AUX read. Most titles never sample the
+  // mic, and on the handhelds the capture PCM shares a DAI with the playback
+  // stream SDL is holding: a failed setup there can leave playback not
+  // consuming, which costs the frame pacer far more than the mic is worth.
+  // `rejected` means the device is present but would not take our parameters;
+  // opening it again through SDL would only poke the same codec twice.
+  bool mic_tried = !(mic_on && !replay);
+  auto open_mic = [&] {
+    if (mic_tried) return;
+    mic_tried = true;
+    if (!mic_alsa.open(ds::spu::Spu::SAMPLE_RATE, cfg.str("audio.mic_dev").c_str()) && !mic_alsa.rejected())
+      audio.open_capture();
+  };
 
   ds::sdl::Input input;
   input.configure(cfg);
@@ -914,6 +926,7 @@ int main(int argc, char** argv) {
       in.lid = input.lid();
       if (input.fake_mic()) input.fake_mic_frame(mic);
       else {
+        if (nds.io.mic_used()) open_mic();
         if (mic_alsa.active()) mic_alsa.capture(mic_raw);
         else if (audio.capturing()) mic_raw = audio.capture();
         else mic_raw.clear();
@@ -1121,11 +1134,18 @@ int main(int argc, char** argv) {
     ds::prof::frame_mark();   // marks the emu slice: the present is not in a stage, it lands in "untimed" of work_ms
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
+    bool on_the_clock = true;
     if (fast && ff_speed <= 0) {
-      // unthrottled
+      on_the_clock = false;    // unthrottled
     } else if (audio.active() && !fast) {
       audio.pace();
-    } else {
+      // A device that accepts samples but never plays them is no clock at
+      // all: pace() returns at once and we fall back to the wall clock
+      // rather than paying its probe every frame.
+      on_the_clock = audio.stalled();
+      if (!on_the_clock) next_frame = SDL_GetPerformanceCounter();
+    }
+    if (on_the_clock) {
       next_frame += static_cast<Uint64>(frame_ns * ticks_per_ns / (fast ? ff_speed : 1));
       const Uint64 now = SDL_GetPerformanceCounter();
       if (next_frame > now) {

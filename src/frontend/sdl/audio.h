@@ -44,15 +44,22 @@ public:
   const std::vector<s16>& capture();
   bool capturing() const { return cap_ != 0; }
   void pace();              // sleep while the queue is above the target depth
+  // True once the device has been found to accept samples without playing
+  // them. The caller must pace on the wall clock while this holds: pace()
+  // deliberately does not wait, so a dead device costs nothing per frame.
+  bool stalled() const { return stalled_; }
   double queued_frames() const;   // how much audio is buffered, in frames
 
 private:
   static constexpr int TARGET_FRAMES = 3;    // ~50 ms of slack
   static constexpr int STALLED_FRAMES = 30;  // a queue this deep means nothing is playing
+  static constexpr Uint32 STALL_RETRY_MS = 5000;   // how often a stalled device is probed again
   SDL_AudioDeviceID dev_ = 0, cap_ = 0;
   std::vector<s16> mic_;
   u32 frame_bytes_ = 0;
   bool stalled_ = false;
+  bool announced_ = false;
+  Uint32 stall_mark_ = 0;
   int  volume_ = 100;
   bool muted_ = false;
 };

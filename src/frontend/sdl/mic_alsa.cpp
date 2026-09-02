@@ -30,7 +30,12 @@ bool MicAlsa::open(u32 rate, const char* device) {
   int err = pcm_open(&pcm_, dev, 1, 1);
   if (err < 0) { std::fprintf(stderr, "mic: alsa %s: %s\n", dev, strerr ? strerr(err) : "?"); pcm_ = nullptr; close(); return false; }
   err = set_params(pcm_, 2, 3, 1, rate, 1, 100000);   // mono, soft resample allowed, 100 ms buffer
-  if (err < 0) { std::fprintf(stderr, "mic: alsa %s: %s\n", dev, strerr ? strerr(err) : "?"); close(); return false; }
+  if (err < 0) {
+    std::fprintf(stderr, "mic: alsa %s: %s\n", dev, strerr ? strerr(err) : "?");
+    rejected_ = true;   // the device exists; do not have SDL open it as well
+    close();
+    return false;
+  }
   std::fprintf(stderr, "mic: alsa %s\n", dev);
   return true;
 #else
@@ -43,7 +48,10 @@ void MicAlsa::close() {
 #ifdef __linux__
   if (pcm_ && close_) close_(pcm_);
   pcm_ = nullptr;
-  if (lib_) { dlclose(lib_); lib_ = nullptr; }
+  // libasound is deliberately not dlclose'd: SDL's own ALSA backend may be
+  // holding the same library, and unloading it out from under a running
+  // playback stream is not worth the few hundred kB.
+  lib_ = nullptr;
 #endif
 }
 

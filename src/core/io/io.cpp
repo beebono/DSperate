@@ -367,6 +367,7 @@ void Io::set_mic(const s16* samples, size_t count) {
 // silence there serves nobody. DS_MIC_LOG=1 prints the PMIC writes and a
 // per-second count of AUX reads with their peak.
 u16 Io::mic_sample() const {
+  mic_used_ = true;
   static const bool log = std::getenv("DS_MIC_LOG") != nullptr;
   if (log) {
     static u64 reads = 0, last_frame = 0; static int peak = 0;
