@@ -11,6 +11,7 @@
 #include "core/io/io.h"
 #include "core/dma/dma.h"
 #include "core/cart/cart.h"
+#include "core/cheat/ar_engine.h"
 
 #include <memory>
 #include <string>
@@ -66,6 +67,11 @@ struct NDS {
   io::Io     io;
   dma::Dma   dma;
   std::unique_ptr<cart::Cart> cart;
+
+  // Action Replay codes, run from the ARM7's VBlank IRQ (CpuContext::check_irq)
+  // when any are enabled. Not part of a save state: which cheats are on is the
+  // frontend's business, and a state should load the same either way.
+  cheat::Engine cheats;
 
   u64  frame_count = 0;
   bool frame_ready = false;

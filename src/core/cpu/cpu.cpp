@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/cpu/cpu.h"
+#include "core/nds.h"
 #include "core/state/state.h"
 #include "core/cpu/cpu_cycles.h"
 
@@ -148,6 +149,21 @@ void CpuContext::check_irq() {
   if (hot.irq_pending && !(hot.cpsr & 0x80)) {
     halted = false;
     raise_exception(Exception::Irq);
+    // Action Replay codes run from the ARM7's VBlank handler, which is what
+    // the cartridge patches itself into on real hardware. Doing it here --
+    // every path that takes an IRQ comes through check_irq, the JIT's
+    // included -- puts their writes at the one moment a frame when the game
+    // has finished with its own state and has not started on the next.
+    //
+    // The test is the same as melonDS's: VBlank pending *and* enabled, which
+    // can also be true while some other IRQ is being taken, so a code may run
+    // more than once in a frame. AR codes write fixed values and are written
+    // to be re-run, so that is harmless, and matching the reference matters
+    // more than being clever about it.
+    if (which == Cpu::ARM7 && !nds->cheats.codes.empty()) {
+      const io::CpuIo& io7 = nds->io.cpu_io[static_cast<int>(Cpu::ARM7)];
+      if ((io7.if_ & io7.ie) & (1u << io::IRQ_VBLANK)) nds->cheats.run(*nds);
+    }
   }
 }
 

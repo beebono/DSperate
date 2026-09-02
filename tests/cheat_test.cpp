@@ -316,6 +316,102 @@ void test_engine_enable() {
   CHECK(r32(nds, RAM + 0x1C0) == 1);
 }
 
+// The hook: codes run when the ARM7 takes its VBlank IRQ, and only then.
+// Every path that takes an IRQ -- interpreter, JIT and the scheduler's
+// between-slices check -- goes through CpuContext::check_irq, so this covers
+// all three.
+void arm_vblank(NDS& nds) {
+  CpuContext& arm7 = nds.cpu(Cpu::ARM7);
+  arm7.hot.cpsr &= ~0x80u;                                   // IRQs unmasked
+  nds.io.cpu_io[1].ime = 1;
+  nds.io.cpu_io[1].ie = 1u << io::IRQ_VBLANK;
+  nds.io.set_irq_line(Cpu::ARM7, io::IRQ_VBLANK, true);      // the GPU's own path
+  CHECK(arm7.hot.irq_pending);
+}
+
+void test_hook_runs_on_arm7_vblank() {
+  NDS nds;
+  w32(nds, RAM + 0x200, 0);
+  cheat::Code c;
+  c.name = "hook";
+  c.enabled = true;
+  c.words = {at(0x00, 0x2000200), 0x1234};
+  nds.cheats.codes.push_back(c);
+
+  arm_vblank(nds);
+  nds.cpu(Cpu::ARM7).check_irq();
+  CHECK(r32(nds, RAM + 0x200) == 0x1234);
+
+  // A disabled code is not run by the hook either.
+  w32(nds, RAM + 0x200, 0);
+  nds.cheats.codes[0].enabled = false;
+  nds.io.set_irq_line(Cpu::ARM7, io::IRQ_VBLANK, true);
+  nds.cpu(Cpu::ARM7).hot.cpsr &= ~0x80u;
+  nds.cpu(Cpu::ARM7).check_irq();
+  CHECK(r32(nds, RAM + 0x200) == 0);
+}
+
+// The ARM9 takes VBlank too, and must not run the codes: on hardware the
+// cartridge hooks the ARM7's handler, and running them twice a frame would
+// double every "add one" style code.
+void test_hook_ignores_arm9() {
+  NDS nds;
+  w32(nds, RAM + 0x204, 0);
+  cheat::Code c;
+  c.name = "hook";
+  c.enabled = true;
+  c.words = {at(0x00, 0x2000204), 0x99};
+  nds.cheats.codes.push_back(c);
+
+  CpuContext& arm9 = nds.cpu(Cpu::ARM9);
+  arm9.hot.cpsr &= ~0x80u;
+  nds.io.cpu_io[0].ime = 1;
+  nds.io.cpu_io[0].ie = 1u << io::IRQ_VBLANK;
+  nds.io.set_irq_line(Cpu::ARM9, io::IRQ_VBLANK, true);
+  arm9.check_irq();
+  CHECK(r32(nds, RAM + 0x204) == 0);
+}
+
+// Another IRQ on the ARM7 is not the cheats' cue.
+void test_hook_ignores_other_irqs() {
+  NDS nds;
+  w32(nds, RAM + 0x208, 0);
+  cheat::Code c;
+  c.name = "hook";
+  c.enabled = true;
+  c.words = {at(0x00, 0x2000208), 0x77};
+  nds.cheats.codes.push_back(c);
+
+  CpuContext& arm7 = nds.cpu(Cpu::ARM7);
+  arm7.hot.cpsr &= ~0x80u;
+  nds.io.cpu_io[1].ime = 1;
+  nds.io.cpu_io[1].ie = 1u << io::IRQ_HBLANK;
+  nds.io.set_irq_line(Cpu::ARM7, io::IRQ_HBLANK, true);
+  arm7.check_irq();
+  CHECK(r32(nds, RAM + 0x208) == 0);
+}
+
+// A VBlank that is pending but not enabled is not the handler running, so it
+// is not the cheats' cue either.
+void test_hook_needs_ie_and_if() {
+  NDS nds;
+  w32(nds, RAM + 0x20C, 0);
+  cheat::Code c;
+  c.name = "hook";
+  c.enabled = true;
+  c.words = {at(0x00, 0x200020C), 0x55};
+  nds.cheats.codes.push_back(c);
+
+  CpuContext& arm7 = nds.cpu(Cpu::ARM7);
+  arm7.hot.cpsr &= ~0x80u;
+  nds.io.cpu_io[1].ime = 1;
+  nds.io.cpu_io[1].ie = 1u << io::IRQ_HBLANK;      // HBlank is what is enabled
+  nds.io.cpu_io[1].if_ = 1u << io::IRQ_VBLANK;     // VBlank is merely pending
+  nds.io.set_irq_line(Cpu::ARM7, io::IRQ_HBLANK, true);
+  arm7.check_irq();
+  CHECK(r32(nds, RAM + 0x20C) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -335,6 +431,10 @@ int main() {
   test_block_copy();
   test_malformed();
   test_engine_enable();
+  test_hook_runs_on_arm7_vblank();
+  test_hook_ignores_arm9();
+  test_hook_ignores_other_irqs();
+  test_hook_needs_ie_and_if();
   std::printf("cheat: ok\n");
   return 0;
 }
