@@ -975,11 +975,20 @@ void Gpu3D::submit_vertex() {
     lo = vmlal_s32(lo, vget_low_s32(r1), vget_low_s32(q1)); hi = vmlal_high_s32(hi, r1, q1);
     lo = vmlal_s32(lo, vget_low_s32(r2), vget_low_s32(q2)); hi = vmlal_high_s32(hi, r2, q2);
     lo = vmlal_s32(lo, vget_low_s32(r3), vget_low_s32(q3)); hi = vmlal_high_s32(hi, r3, q3);
-    vst1q_s32(vt.pos, vcombine_s32(vmovn_s64(vshrq_n_s64(lo, 12)), vmovn_s64(vshrq_n_s64(hi, 12))));
+    const int32x4_t p = vcombine_s32(vmovn_s64(vshrq_n_s64(lo, 12)), vmovn_s64(vshrq_n_s64(hi, 12)));
+    vst1q_s32(vt.pos, p);
+    // The six frustum tests while the position is still in a register: two
+    // compares against +W and -W, packed to the same bits the scalar
+    // outcode() produces. Lane 3 is W itself; its bit constants are zero, so
+    // whatever its compares say is discarded.
+    const int32x4_t w = vdupq_laneq_s32(p, 3);
+    static const uint32x4_t gt_bits = {1, 4, 16, 0}, lt_bits = {2, 8, 32, 0};
+    vt.oc = static_cast<u8>(vaddvq_u32(vorrq_u32(vandq_u32(vcgtq_s32(p, w), gt_bits), vandq_u32(vcltq_s32(p, vnegq_s32(w)), lt_bits))));
   }
 #else
   for (int c = 0; c < 4; ++c)
     vt.pos[c] = static_cast<s32>((v[0] * clip_[c] + v[1] * clip_[4 + c] + v[2] * clip_[8 + c] + v[3] * clip_[12 + c]) >> 12);
+  vt.oc = outcode(vt.pos);
 #endif
   for (int c = 0; c < 3; ++c) vt.col[c] = (vertex_color_[c] << 12) + 0xFFF;
   if ((texparam_ >> 30) == 3) {
@@ -1021,16 +1030,93 @@ void Gpu3D::submit_vertex() {
   add_cycles(3);
 }
 
+namespace {
+// Viewport transform of one vertex in place. W is truncated to 24 bits; the
+// 32-bit divider loses a bit of precision when W exceeds 16 bits.
+inline void viewport_vertex(Vertex& vt, const std::array<u32, 6>& viewport) {
+  vt.pos[3] &= 0x00FFFFFF;
+  u32 px, py;
+  const u32 w = static_cast<u32>(vt.pos[3]);
+  if (w == 0) { px = 0; py = 0; }
+  else {
+    px = static_cast<u32>(vt.pos[0]) + w;
+    py = static_cast<u32>(-vt.pos[1]) + w;
+    u32 den = w;
+    if (w > 0xFFFF) { px >>= 1; py >>= 1; den >>= 1; }
+    den <<= 1;
+    px = ((px * viewport[4]) / den) + viewport[0];
+    py = ((py * viewport[5]) / den) + viewport[3];
+  }
+  vt.sx = px & 0x1FF;
+  vt.sy = py & 0xFF;
+}
+
+// 5-bit colour to 9 bits: (c << 4) + 0xF for non-zero components.
+inline void final_colour(Vertex& vt) {
+  for (int c = 0; c < 3; ++c) { vt.fcol[c] = vt.col[c] >> 12; if (vt.fcol[c]) vt.fcol[c] = (vt.fcol[c] << 4) + 0xF; }
+}
+} // namespace
+
+// The clipper's six plane tests as a bit set, one bit per plane.
+u8 Gpu3D::outcode(const s32* pos) {
+  const s32 w = pos[3];
+  unsigned oc = 0;
+  if (pos[0] >  w) oc |= 1u << 0;
+  if (pos[0] < -w) oc |= 1u << 1;
+  if (pos[1] >  w) oc |= 1u << 2;
+  if (pos[1] < -w) oc |= 1u << 3;
+  if (pos[2] >  w) oc |= 1u << 4;
+  if (pos[2] < -w) oc |= 1u << 5;
+  return static_cast<u8>(oc);
+}
+
+// Polygon submission is three legs. On Golden Sun's title 91 % of the 7.4 k
+// submissions a frame end in the clipper's trivial reject or the back-face
+// cull, so this entry does only those, reading the source vertices where
+// they are: no 56-byte copies and no stack frame for the clipper's scratch
+// array. The survivors go to one of two out-of-line emitters: the common one
+// needs no clipping and writes its vertices straight into vertex RAM, the
+// rare one runs the plane passes over a scratch copy as before. Every
+// observable effect keeps its order: the pipeline state is set before the
+// cull, the strip-reuse decision precedes the reject test (it decides which
+// vertices the test covers), the overflow flag is raised only for polygons
+// the clipper kept.
 void Gpu3D::submit_polygon() {
-  Vertex clipped[10];
-  const Vertex* reused[2] = {nullptr, nullptr};
+  const Vertex* src[4];
   u16 reused_idx[2] = {0, 0};
   int clipstart = 0, lastpolyverts = 0;
-  int nverts = (poly_mode_ & 1) ? 4 : 3;
+  const int nverts = (poly_mode_ & 1) ? 4 : 3;
 
   // Submitting a polygon starts the polygon pipeline; one vertex slot is
   // reserved now, more once it survives culling and clipping.
   polygon_pipeline_ = 8; vertex_slot_counter_ = 1; vertex_slots_free_ = 0b11110;
+
+  // Strips share two unclipped vertices with the previous polygon. Decided
+  // first because it decides which vertices the reject test covers; it
+  // writes nothing but locals, so the cull's placement below is unchanged.
+  if (poly_mode_ >= 2 && last_strip_poly_) {
+    int id0, id1;
+    if (poly_mode_ == 2) {
+      if (consecutive_polys_ & 1) { id0 = 2; id1 = 1; } else { id0 = 0; id1 = 2; }
+      lastpolyverts = 3;
+    } else { id0 = 3; id1 = 2; lastpolyverts = 4; }
+    if (static_cast<int>(last_strip_poly_->nverts) == lastpolyverts &&
+        !vram_[last_strip_poly_->vtx[id0]].clipped && !vram_[last_strip_poly_->vtx[id1]].clipped) {
+      reused_idx[0] = last_strip_poly_->vtx[id0]; reused_idx[1] = last_strip_poly_->vtx[id1];
+      src[0] = &vram_[reused_idx[0]]; src[1] = &vram_[reused_idx[1]];
+      clipstart = 2;
+    }
+  }
+  for (int i = clipstart; i < nverts; ++i) src[i] = vptr_[i];
+
+  // The clipper's trivial reject, from the outcodes the transform left on
+  // the vertices: every new vertex outside the same plane. A rejected and a
+  // culled polygon leave the same state (the pipeline set above, the strip
+  // broken), so this may run before the cull and spare it. Reused strip
+  // vertices are untested and forbid the reject, as in the clipper.
+  unsigned oc_all = clipstart == 0 ? 0x3Fu : 0u, oc_any = 0;
+  for (int i = clipstart; i < nverts; ++i) { oc_all &= src[i]->oc; oc_any |= src[i]->oc; }
+  if (oc_all) { last_strip_poly_ = nullptr; return; }
 
   // Culling from the first three vertices' clip-space positions.
   const Vertex &v0 = *vptr_[0], &v1 = *vptr_[1], &v2 = *vptr_[2];
@@ -1043,22 +1129,64 @@ void Gpu3D::submit_polygon() {
   if (dot < 0) { if (!(cur_polygon_attr_ & (1 << 7))) { last_strip_poly_ = nullptr; return; } }
   else if (dot > 0) { if (!(cur_polygon_attr_ & (1 << 6))) { last_strip_poly_ = nullptr; return; } }
 
-  // Strips share two unclipped vertices with the previous polygon.
-  if (poly_mode_ >= 2 && last_strip_poly_) {
-    int id0, id1;
-    if (poly_mode_ == 2) {
-      if (consecutive_polys_ & 1) { id0 = 2; id1 = 1; } else { id0 = 0; id1 = 2; }
-      lastpolyverts = 3;
-    } else { id0 = 3; id1 = 2; lastpolyverts = 4; }
-    if (static_cast<int>(last_strip_poly_->nverts) == lastpolyverts &&
-        !vram_[last_strip_poly_->vtx[id0]].clipped && !vram_[last_strip_poly_->vtx[id1]].clipped) {
-      reused_idx[0] = last_strip_poly_->vtx[id0]; reused_idx[1] = last_strip_poly_->vtx[id1];
-      reused[0] = &vram_[reused_idx[0]]; reused[1] = &vram_[reused_idx[1]];
-      clipped[0] = *reused[0]; clipped[1] = *reused[1];
-      clipstart = 2;
-    }
+  if (oc_any == 0) emit_polygon_unclipped(src, nverts, clipstart, reused_idx, facing);
+  else emit_polygon_clipped(src, nverts, clipstart, reused_idx, lastpolyverts, facing);
+}
+
+// A polygon the clipper accepts whole: with the source vertices untouched
+// (a strip carries them into the next polygon) and no clipping, the vertex
+// count is the previous polygon's and reused vertices are shared by index,
+// so the new vertices can be written to their vertex RAM slots directly and
+// finished there. The slots stay beyond num_vertices_ until the zero-dot
+// test passes, so a dropped polygon leaves nothing visible.
+void Gpu3D::emit_polygon_unclipped(const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, bool facing) {
+  if (num_polygons_ >= PRAM_BANK || num_vertices_ + nverts > VRAM_BANK) {
+    last_strip_poly_ = nullptr;
+    dispcnt_ |= (1 << 13);                     // RAM overflow flag
+    return;
   }
-  for (int i = clipstart; i < nverts; ++i) clipped[i] = *vptr_[i];
+  Vertex* vr = cur_vram();
+  Vertex* fresh = vr + num_vertices_;
+  const Vertex* vv[4];
+  for (int i = 0; i < clipstart; ++i) vv[i] = src[i];
+  for (int i = clipstart; i < nverts; ++i) {
+    Vertex& vt = fresh[i - clipstart];
+    vt = *src[i];
+    // Colours keep only their 5-bit integer part across the clip stage.
+    for (int k = 0; k < 3; ++k) { vt.col[k] &= ~0xFFF; vt.col[k] += 0xFFF; }
+    viewport_vertex(vt, viewport_);
+    vv[i] = &vt;
+  }
+
+  // Zero-dot polygons (all vertices on one pixel) beyond the W limit are dropped.
+  if (!(cur_polygon_attr_ & (1 << 13))) {
+    bool zerodot = true, allbehind = true;
+    for (int i = 0; i < nverts; ++i) {
+      if (vv[i]->sx != vv[0]->sx || vv[i]->sy != vv[0]->sy) { zerodot = false; break; }
+      if (static_cast<u32>(vv[i]->pos[3]) <= zero_dot_w_limit_) { allbehind = false; break; }
+    }
+    if (zerodot && allbehind) { last_strip_poly_ = nullptr; return; }
+  }
+
+  if (nverts == 4) { polygon_pipeline_ = 35; vertex_slot_counter_ = 1; vertex_slots_free_ = (poly_mode_ & 2) ? 0b11100 : 0b11110; }
+  else { polygon_pipeline_ = 26; vertex_slot_counter_ = 1; vertex_slots_free_ = (poly_mode_ & 2) ? 0b1000 : 0b1110; }
+
+  Polygon* poly = new_polygon(facing);
+  for (int i = 0; i < clipstart; ++i) poly->vtx[i] = reused_idx[i];
+  for (int i = clipstart; i < nverts; ++i) {
+    final_colour(fresh[i - clipstart]);
+    poly->vtx[i] = static_cast<u16>(vram_base() + num_vertices_++);
+  }
+  poly->nverts = static_cast<u32>(nverts);
+  finish_polygon(poly, nverts);
+}
+
+// A polygon that crosses the frustum: the plane passes run over a scratch
+// copy, which may change the vertex count and so whether the reused strip
+// vertices can still be shared by index.
+void Gpu3D::emit_polygon_clipped(const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, int lastpolyverts, bool facing) {
+  Vertex clipped[10];
+  for (int i = 0; i < nverts; ++i) clipped[i] = *src[i];
 
   nverts = clip_polygon<true>(clipped, nverts, clipstart, cur_polygon_attr_ & (1 << 12));
   if (nverts == 0) { last_strip_poly_ = nullptr; return; }
@@ -1069,26 +1197,7 @@ void Gpu3D::submit_polygon() {
     return;
   }
 
-  // Viewport transform. W is truncated to 24 bits; the 32-bit divider loses
-  // a bit of precision when W exceeds 16 bits.
-  for (int i = clipstart; i < nverts; ++i) {
-    Vertex& vt = clipped[i];
-    vt.pos[3] &= 0x00FFFFFF;
-    u32 px, py;
-    const u32 w = static_cast<u32>(vt.pos[3]);
-    if (w == 0) { px = 0; py = 0; }
-    else {
-      px = static_cast<u32>(vt.pos[0]) + w;
-      py = static_cast<u32>(-vt.pos[1]) + w;
-      u32 den = w;
-      if (w > 0xFFFF) { px >>= 1; py >>= 1; den >>= 1; }
-      den <<= 1;
-      px = ((px * viewport_[4]) / den) + viewport_[0];
-      py = ((py * viewport_[5]) / den) + viewport_[3];
-    }
-    vt.sx = px & 0x1FF;
-    vt.sy = py & 0xFF;
-  }
+  for (int i = clipstart; i < nverts; ++i) viewport_vertex(clipped[i], viewport_);
 
   // Zero-dot polygons (all vertices on one pixel) beyond the W limit are dropped.
   if (!(cur_polygon_attr_ & (1 << 13))) {
@@ -1103,6 +1212,30 @@ void Gpu3D::submit_polygon() {
   if (nverts == 4) { polygon_pipeline_ = 35; vertex_slot_counter_ = 1; vertex_slots_free_ = (poly_mode_ & 2) ? 0b11100 : 0b11110; }
   else { polygon_pipeline_ = 26; vertex_slot_counter_ = 1; vertex_slots_free_ = (poly_mode_ & 2) ? 0b1000 : 0b1110; }
 
+  Polygon* poly = new_polygon(facing);
+  Vertex* vr = cur_vram();
+  if (clipstart > 0) {
+    if (nverts == lastpolyverts) { poly->vtx[0] = reused_idx[0]; poly->vtx[1] = reused_idx[1]; }
+    else {
+      vr[num_vertices_] = *src[0]; poly->vtx[0] = static_cast<u16>(vram_base() + num_vertices_);
+      vr[num_vertices_ + 1] = *src[1]; poly->vtx[1] = static_cast<u16>(vram_base() + num_vertices_ + 1);
+      num_vertices_ += 2;
+    }
+    poly->nverts += 2;
+  }
+  for (int i = clipstart; i < nverts; ++i) {
+    Vertex& vt = vr[num_vertices_];
+    vt = clipped[i];
+    poly->vtx[i] = static_cast<u16>(vram_base() + num_vertices_);
+    ++num_vertices_; ++poly->nverts;
+    final_colour(vt);
+  }
+  finish_polygon(poly, nverts);
+}
+
+// Allocate the next polygon RAM entry and fill the attributes that do not
+// depend on its vertices.
+Polygon* Gpu3D::new_polygon(bool facing) {
   Polygon* poly = &cur_pram()[num_polygons_++];
   poly->nverts = 0;
   poly->attr = cur_polygon_attr_; poly->texparam = texparam_; poly->texpal = texpal_;
@@ -1113,26 +1246,11 @@ void Gpu3D::submit_polygon() {
   poly->shadow_mask = (cur_polygon_attr_ & 0x3F000030) == 0x00000030;
   poly->shadow = ((cur_polygon_attr_ & 0x30) == 0x30) && !poly->shadow_mask;
   if (!poly->translucent) ++num_opaque_;
+  return poly;
+}
 
-  Vertex* vr = cur_vram();
-  if (last_strip_poly_ && clipstart > 0) {
-    if (nverts == lastpolyverts) { poly->vtx[0] = reused_idx[0]; poly->vtx[1] = reused_idx[1]; }
-    else {
-      vr[num_vertices_] = *reused[0]; poly->vtx[0] = static_cast<u16>(vram_base() + num_vertices_);
-      vr[num_vertices_ + 1] = *reused[1]; poly->vtx[1] = static_cast<u16>(vram_base() + num_vertices_ + 1);
-      num_vertices_ += 2;
-    }
-    poly->nverts += 2;
-  }
-  for (int i = clipstart; i < nverts; ++i) {
-    Vertex& vt = vr[num_vertices_];
-    vt = clipped[i];
-    poly->vtx[i] = static_cast<u16>(vram_base() + num_vertices_);
-    ++num_vertices_; ++poly->nverts;
-    // 5-bit colour to 9 bits: (c << 4) + 0xF for non-zero components.
-    for (int c = 0; c < 3; ++c) { vt.fcol[c] = vt.col[c] >> 12; if (vt.fcol[c]) vt.fcol[c] = (vt.fcol[c] << 4) + 0xF; }
-  }
-
+// Bounds, sort key and per-vertex depth from the polygon's vertex RAM entries.
+void Gpu3D::finish_polygon(Polygon* poly, int nverts) {
   // Bounds, and the W range used to normalise W to 16 bits.
   u32 vtop = 0, vbot = 0; s32 ytop = 192, ybot = 0, xtop = 256, xbot = 0; u32 wsize = 0;
   for (int i = 0; i < nverts; ++i) {
@@ -1309,7 +1427,8 @@ void Gpu3D::finalise_list() {
 }
 
 void Gpu3D::vblank() {
-  if (std::getenv("DS_DEBUG_GX"))
+  static const bool debug_gx = std::getenv("DS_DEBUG_GX") != nullptr;
+  if (debug_gx)
     std::fprintf(stderr, "[gx] frame %llu geom %d rend %d flush %u attr %u polys %u verts %u disp3dcnt %04x alpharef %u clear %08x/%08x fifo %u gxstat %08x ie %08x if %08x\n",
                  static_cast<unsigned long long>(nds_.frame_count), geometry_on_, rendering_on_, flush_request_, flush_attr_, num_polygons_, num_vertices_,
                  dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_n_, gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
@@ -1563,6 +1682,9 @@ template <class S> void Gpu3D::sync_state(S& s) {
   if constexpr (S::reading) reset_vptr();
   else normalise_temp_vtx();
   for (Vertex& v : temp_vtx_) sync_vertex(s, v);
+  // The outcode is derived from pos and only read off temp_vtx_; rebuilt on
+  // load rather than stored, so the state format is unchanged.
+  if constexpr (S::reading) for (Vertex& v : temp_vtx_) v.oc = outcode(v.pos);
   s.fields(vertex_num_, vertex_in_poly_, consecutive_polys_, num_opaque_, bank_, num_vertices_, num_polygons_,
            render_count_, render_identical_, flush_request_, flush_attr_, prev_swap_polys_, prev_swap_verts_, rendered_before_);
   // Pointers into the polygon RAM travel as indices.

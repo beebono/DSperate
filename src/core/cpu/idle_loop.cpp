@@ -26,6 +26,7 @@ struct Verdict {
   u32  pc = 0;             // key: address of the instruction queried
   bool valid = false;      // an entry lives here
   bool skippable = false;  // ... and it proved a pure loop
+  IdleReject reason = IdleReject::None;   // why not, kept so a cached rejection reports the same reason a fresh one did
   u32  head = 0, tail = 0;
   u32  checksum = 0;       // body words, re-verified per query (SMC / remap)
   u32  load_count = 0;
@@ -279,8 +280,8 @@ bool in_idle_loop(CpuContext& cpu, IdlePorts ports) {
   Verdict& v = g_cache[cpu.which == Cpu::ARM9 ? 0 : 1][cache_slot(pc)];
   const bool stale = v.valid && v.pc == pc && v.skippable &&
                      body_checksum(cpu, v.head, v.tail) != v.checksum;
-  if (!v.valid || v.pc != pc || stale) analyse(cpu, pc, v);
-  if (!v.skippable) return false;
+  if (!v.valid || v.pc != pc || stale) { analyse(cpu, pc, v); v.reason = g_reject; }
+  if (!v.skippable) return reject(v.reason);
 
   // Re-check every load against the live registers: the same code may run with
   // a base pointer into MMIO, where the read itself can have a side effect.

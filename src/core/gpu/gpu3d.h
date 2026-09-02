@@ -28,6 +28,7 @@ struct Vertex {
   s32 col[3];          // 5-bit colour with 12 fractional bits (kept through clipping)
   s16 tex[2];          // 12.4 texture coordinates
   bool clipped;
+  u8  oc;              // frustum outcode of pos (bits: +x -x +y -y +z -z), set at transform time
   s32 sx, sy;          // screen position after the viewport transform
   s32 fcol[3];         // final 9-bit colour used by the rasteriser
 };
@@ -89,6 +90,14 @@ public:
   // A DMA word landing on GXFIFO, without the bus and I/O dispatch a
   // register write goes through (the same semantics as write(0x04000400, 32)).
   void gxfifo_dma_write(u32 value) { if (geometry_on_) gxfifo_write(value); }
+  // A CPU word store to 0x04000400-0x040005CB, exactly the first case of
+  // write(): GXFIFO for the 0x400-0x43F window, a direct command port after.
+  void gx_port_write(u32 addr, u32 value) {
+    const u32 r = addr - 0x04000400;
+    if (!geometry_on_) return;
+    if (r < 0x40) gxfifo_write(value);
+    else fifo_write(Entry{value, static_cast<u8>((r & 0x1FC) >> 2)});
+  }
   // A run of `n` DMA words fed straight from a direct-mapped source page.
   // See the definition for why the burst is unobservable and what that buys.
   void gxfifo_dma_burst(const u8* src, u32 n);
@@ -330,6 +339,14 @@ private:
   void update_clip_matrix();
   void submit_vertex();
   void submit_polygon();
+  // The two survivor legs of submit_polygon (see there) and their shared tail.
+  // Out of line so the reject-only entry carries neither their stack frames
+  // nor their register pressure.
+  __attribute__((noinline)) void emit_polygon_unclipped(const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, bool facing);
+  __attribute__((noinline)) void emit_polygon_clipped(const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, int lastpolyverts, bool facing);
+  Polygon* new_polygon(bool facing);
+  static u8 outcode(const s32* pos);
+  void finish_polygon(Polygon* poly, int nverts);
   void calculate_lighting();
   void box_test(const u32* params);
   void pos_test();
