@@ -198,8 +198,9 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
   // Burst only the engines this store can actually reach. The budget is per
   // engine: one engine streaming tiles must not spend the other's.
   u32 burst_mask = 0;
+  const u32 limit = lazy_probe_ ? LAZY_PROBE_BURSTS : LAZY_BURST_LIMIT;
   for (int e = 0; e < 2; ++e)
-    if ((mask & (1u << e)) && !per_line_[e] && ++lazy_bursts_[e] < LAZY_BURST_LIMIT) burst_mask |= 1u << e;
+    if ((mask & (1u << e)) && !per_line_[e] && ++lazy_bursts_[e] < limit) burst_mask |= 1u << e;
   if (burst_mask) {
     // Lines whose HBlank has passed are drawn before the bytes change; the
     // burst continues per line, and the frame re-batches when it ends.
@@ -212,12 +213,16 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
     if (per_line_[0] && per_line_[1]) disarm_trap();
     return;
   }
-  fall_back_per_line(mask);
+  // Out of bursts: the frame is futile (see begin_frame); a probe frame
+  // gives up on both engines at once.
+  lazy_limit_hit_ = true;
+  fall_back_per_line(lazy_probe_ ? 3 : mask);
 }
 
 bool Gpu::vram_remap_begin() {
   catch_up(3);
   join_b();
+  engine[0].vram_remapped(); engine[1].vram_remapped();
   const bool was = trap_armed_;
   if (was) disarm_trap();
   return was;
@@ -316,6 +321,7 @@ void Gpu::on_hblank() {
       if (probe_enabled_) async_probe_start();
     } else if (line_ == 262) {
       engine[0].render_sprites(0); engine[1].render_sprites(0);
+      b_skipped_ = false;   // line 0's sprites are drawn whether or not engine B is shown
     }
     engine[0].post_draw(frame_reset);
     engine[1].post_draw(frame_reset);
@@ -433,8 +439,11 @@ void Gpu::begin_frame() {
   per_line_[0] = per_line_[1] = false; frame_finished_ = false;
   // Was last frame's trap worth arming? Both engines per line at the end means
   // no batch survived, so nothing it guarded was ever batched.
-  if (lazy_tried_) { if (per_line_prev_[0] && per_line_prev_[1]) ++lazy_futile_; else lazy_futile_ = 0; }
-  const bool futile = lazy_futile_ >= LAZY_FUTILE_LIMIT && (nds_.frame_count % LAZY_PROBE_PERIOD) != 0;
+  if (lazy_tried_) { if ((per_line_prev_[0] && per_line_prev_[1]) || lazy_limit_hit_) ++lazy_futile_; else lazy_futile_ = 0; }
+  lazy_limit_hit_ = false;
+  const bool skipping = lazy_futile_ >= LAZY_FUTILE_LIMIT;
+  lazy_probe_ = skipping && (nds_.frame_count % LAZY_PROBE_PERIOD) == 0;
+  const bool futile = skipping && !lazy_probe_;
   lazy_frame_ = lazy_enabled_ && !run_fifo_ && (!capture_on_ || lazy_capture_) && !futile;
   lazy_tried_ = lazy_frame_;
   if (futile) prof::add(prof::C_2D_LAZY_SKIPPED, 1);
@@ -538,10 +547,15 @@ void Gpu::step_engine(int e, u32 line) {
   en.pre_draw(line, false);
   if (e == 0) { line3d_ = nds_.gpu3d.line(line); en.set_3d_line(line3d_); }
   const unsigned abl = ablate();
-  if (!(abl & 2)) { en.render_line(line); output_engine(e, line); }
+  // Engine B on a screen the frontend hides (set_screen_visible) draws
+  // nothing; the line it comes back on re-renders its own sprites, which the
+  // skipped line before it would have drawn.
+  const bool draw = !(abl & 2) && !(e == 1 && !screen_visible_[en.screen()]);
+  if (e == 1) { if (!draw) b_skipped_ = true; else if (b_skipped_) { b_skipped_ = false; en.render_sprites(line); } }
+  if (draw) { en.render_line(line); output_engine(e, line); }
   if (e == 0 && capture_on_ && !(abl & 4)) { DS_PROF(CAPTURE); capture(line); }
   // Sprites are rendered one line ahead of the backgrounds.
-  if (!(abl & 2) && line < SCREEN_H - 1) {
+  if (draw && line < SCREEN_H - 1) {
     prof::Scope* sc = (e == 0 && prof::enabled) ? new prof::Scope(prof::OBJ_DRAW) : nullptr;
     en.render_sprites(line + 1);
     delete sc;
@@ -562,7 +576,9 @@ void Gpu::output_engine(int e, u32 line) {
     // The common display modes go through one fused kernel (copy, master
     // brightness, 6->8 bit expansion); the others build the line first.
     if (e == 0) {
-      if (((en.dispcnt() >> 16) & 3) == 1) kern::active::output_line(en.output(), en.master_bright(), dst);
+      const u32 mode = (en.dispcnt() >> 16) & 3;
+      if (mode == 1) kern::active::output_line(en.output(), en.master_bright(), dst);
+      else if (mode >= 2) output_a(line, dst);      // VRAM / FIFO display: expanded inside
       else { output_a(line, dst); expand_colours(dst); }
     } else {
       if ((en.dispcnt() >> 16) & 1) kern::active::output_line(en.output(), en.master_bright(), dst);
@@ -877,15 +893,16 @@ void Gpu::output_a(u32 line, u32* dst) {
   case 0: for (u32 i = 0; i < 256; ++i) dst[i] = 0x3F3F3F; return;          // display off: white
   case 1: { const Pixel* src = engine[0].output(); for (u32 i = 0; i < 256; ++i) dst[i] = src[i]; break; }
   case 2: {                                                                 // VRAM display (LCDC bank)
+    // One kernel does the 15 -> 18 bit unpack, master brightness and the
+    // 6 -> 8 expansion; an unmapped bank reads as zero.
     const u32 bank = (dispcnt >> 18) & 3;
     const VramMap& vm = nds_.bus.vram_map();
-    if (vm.lcdc_mask & (1u << bank)) {
-      const u16* src = reinterpret_cast<const u16*>(vm.bank(bank)) + line * 256;
-      for (u32 i = 0; i < 256; ++i) dst[i] = rgb15_to_18_plain(src[i]);
-    } else for (u32 i = 0; i < 256; ++i) dst[i] = 0;
-    break;
+    static constexpr u16 kZeroLine[256] = {};
+    const u16* src = (vm.lcdc_mask & (1u << bank)) ? reinterpret_cast<const u16*>(vm.bank(bank)) + line * 256 : kZeroLine;
+    kern::active::output_vram_line(src, engine[0].master_bright(), dst);
+    return;
   }
-  case 3: for (u32 i = 0; i < 256; ++i) dst[i] = rgb15_to_18_plain(fifo_line_[i]); break;
+  case 3: kern::active::output_vram_line(fifo_line_.data(), engine[0].master_bright(), dst); return;
   }
   apply_master_brightness(engine[0].master_bright(), dst);
 }

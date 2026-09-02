@@ -39,11 +39,17 @@ void VramMap::rebuild(const u8 vramcnt[9], u8* const banks[9]) {
   clear(abg_extpal, 0x8000); clear(bbg_extpal, 0x8000); clear(aobj_extpal, 0x2000); clear(bobj_extpal, 0x2000);
   clear(texture, 0x80000); clear(texpal, 0x20000); clear(arm7, 0x40000);
   lcdc_mask = 0;
+  ++gen_;
 
   for (int i = 0; i < 9; ++i) {
     const u8 cnt = vramcnt[i];
     if (!(cnt & 0x80)) continue;
     const u32 mst = cnt & 7, ofs = (cnt >> 3) & 3;
+    // Which modes have no CPU mapping (see generation()); everything else,
+    // including the invalid modes, counts as writable.
+    const bool unmapped = (i <= 3 && (mst & (i <= 1 ? 3u : 7u)) == 3) || (i == 4 && (mst == 3 || mst == 4)) ||
+                          ((i == 5 || i == 6) && mst >= 3 && mst <= 5) || (i == 7 && (mst & 3) == 2) || (i == 8 && (mst & 3) == 3);
+    if (!unmapped) writable_gen_[i] = gen_;
     switch (i) {
     case 0: case 1:                                   // A, B: 128 K
       switch (mst & 3) {
@@ -105,6 +111,16 @@ void VramMap::rebuild(const u8 vramcnt[9], u8* const banks[9]) {
     }
   }
   for (VramView* v : {&abg, &aobj, &bbg, &bobj, &abg_extpal, &bbg_extpal, &aobj_extpal, &bobj_extpal, &texture, &texpal, &arm7}) finish(*v);
+}
+
+u64 VramMap::block_signature(const VramView& v, u32 addr, u32 len, u32& banks) const {
+  u64 h = 0xcbf29ce484222325ull;
+  for (u32 off = 0; off < len; off += VramView::BLOCK - (( addr + off) & (VramView::BLOCK - 1))) {
+    const u32 b = ((addr + off) & v.addr_mask()) / VramView::BLOCK;
+    banks |= v.mask[b];
+    h = (h ^ (static_cast<u64>(v.mask[b]) | (static_cast<u64>(b) << 16))) * 0x100000001b3ull;
+  }
+  return h;
 }
 
 template <typename T>

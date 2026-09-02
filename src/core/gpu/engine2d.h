@@ -76,6 +76,7 @@ public:
 
   // Render side.
   void replay_to(u32 stamp);               // apply every journal entry stamped <= stamp
+  void vram_remapped() { extpal_checked_ = 0; objext_checked_ = 0; }   // VRAMCNT changed: revalidate the extended palettes on next use
   void apply_pending();                    // apply the whole journal now (tests, debug dumps)
   void frame_done();                       // every display line rendered: the journal must be drained
   bool enabled() const { return enabled_; }
@@ -136,6 +137,7 @@ private:
   alignas(16) std::array<u16, 512> pal_{};   // BG 0-255, OBJ 256-511
   alignas(16) std::array<u16, 512> oam_{};
   u32 pal_gen_ = 1, oam_gen_ = 1;            // bumped on every change, so caches compare a word, not the bytes
+  u32 oam_geom_gen_ = 1;                     // bumped only when a field the sprite lists depend on changes
 
   // Registers.
   u32 dispcnt_ = 0;
@@ -193,8 +195,9 @@ private:
   // Palettes as 18-bit records: the standard BG palette (rebuilt when
   // pal_gen_ moves) and the extended palettes by slot and number. An extended
   // palette lives in VRAM, which the journal does not cover, so its
-  // conversion is reused across lines while the source bytes still equal the
-  // copy taken at conversion time (checked once per line on first use).
+  // conversion is reused while the source bytes still equal the copy taken
+  // at conversion time -- checked on first use after a VRAMCNT remap, the
+  // only way those bytes can change (see cmp_differs).
   alignas(16) std::array<Pixel, 256> pal18_{};
   u32 pal18_gen_ = 0;
   alignas(16) std::array<Pixel, 4 * 16 * 256> extpal18_{};
@@ -230,6 +233,13 @@ private:
   void draw_bg_affine(u32 line, int bg);
   void draw_bg_extended(u32 line, int bg);
   void draw_bg_large(u32 line);
+  // Rotscale layers whose matrix is the identity within the line (pa 1.0,
+  // pc 0 -- only x advances, one texel a pixel): the row is read left to
+  // right in contiguous runs instead of sampled per pixel. The bitmap form
+  // fills the plane (the caller has cleared it); the tiled form gathers the
+  // 33 tile rows and goes through the text-layer kernel.
+  void bitmap_row_degenerate(Layer& plane, u32 base, u32 xmask, u32 ymask, u32 yshift, bool wrap, bool direct, s32 rx, s32 ry);
+  void tile_row_degenerate(Layer& plane, u32 tilemap, u32 tileset, u32 coordmask, u32 yshift, bool wrap, bool map16, bool ext, int bg, s32 rx, s32 ry);
   void draw_bg_3d();
   void draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, bool window);
   void draw_sprite_rotscale(const u16* attr, const u16* oam, int bw, int bh, int w, int h, s32 x, s32 y, bool window);

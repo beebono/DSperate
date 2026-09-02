@@ -58,8 +58,24 @@ public:
   u8* bank(int i) const { return banks_[i]; }
   static constexpr u32 BANK_MASK[9] = {0x1FFFF, 0x1FFFF, 0x1FFFF, 0x1FFFF, 0xFFFF, 0x3FFF, 0x3FFF, 0x7FFF, 0x3FFF};
 
+  // Change tracking for the views no CPU can write: a bank in texture,
+  // texture-palette or extended-palette mode has no mapping in either CPU's
+  // address space (Bus::update_vram maps the BG/OBJ/LCDC/ARM7 views only,
+  // and DMA goes through the same page table), so its bytes can only change
+  // after a remap has put it in a CPU-writable mode. `generation` counts
+  // rebuilds; `bank_writable_gen(b)` is the last generation at which bank b
+  // was reachable by a CPU (disabled banks are not). Bytes read through the
+  // texture view at generation g are still the same if the banks now behind
+  // them are the ones that were then and none has a writable generation
+  // above g. `block_signature` identifies which banks back a range, block
+  // by block, so a swap of two banks between slots reads as a change.
+  u32 generation() const { return gen_; }
+  u32 bank_writable_gen(int bank) const { return writable_gen_[bank]; }
+  u64 block_signature(const VramView& v, u32 addr, u32 len, u32& banks) const;
+
 private:
   u8* banks_[9] = {};
+  u32 gen_ = 0, writable_gen_[9] = {};
   void add(VramView& v, u32 base, u32 len, int bank);
   void finish(VramView& v);
 };

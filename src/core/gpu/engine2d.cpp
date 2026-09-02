@@ -19,31 +19,17 @@ namespace ds::gpu {
 
 namespace {
 
-// Census of the per-scanline change detection that remains: the extended
-// palettes live in VRAM, which the write journal does not cover, so they are
-// still validated by rescanning the source each line. (The standard palettes
-// and OAM are journaled and compare a generation word instead.) Counts only
-// executed compares -- the `!have_` short circuit skips the memcmp on the
-// first call. Two measurement knobs, so both arms can be A/B'd inside one
-// binary:
-//
-//   DS_2D_CMPPROBE=1  run each compare twice and throw the first result away.
-//                     Semantics and output are untouched by construction, so
-//                     the paired delta prices one pass of the compares. This
-//                     OVERestimates removal (the duplicate has nothing to
-//                     overlap with) -- report it as a ceiling.
-//   DS_2D_CMPFRAME=1  clear the per-line `_checked_` flags once per frame
-//                     instead of once per scanline, so each compare runs once
-//                     a frame. This is the optimistic floor for extending the
-//                     journal to VRAM, and it is NOT correct in general: a
-//                     mid-frame extended-palette change stops being seen.
-bool cmp_probe() { static const bool on = std::getenv("DS_2D_CMPPROBE") != nullptr; return on; }
-bool cmp_frame() { static const bool on = std::getenv("DS_2D_CMPFRAME") != nullptr; return on; }
-static volatile int g_cmp_sink;
-
+// Census of the change detection that remains: the extended palettes live in
+// VRAM, which the write journal does not cover, so they are validated by
+// comparing the source with the copy taken at conversion time -- once per
+// VRAMCNT remap (vram_remapped), the only event that can change what an
+// extended-palette view reads: no CPU mapping reaches a bank in that mode
+// (Bus::update_vram maps the BG/OBJ/LCDC/ARM7 views only). The standard
+// palettes and OAM are journaled and compare a generation word instead.
+// (The DS_2D_CMPPROBE / DS_2D_CMPFRAME measurement knobs priced the per-line
+// compares and are gone with them.)
 inline bool cmp_differs(const void* a, const void* b, size_t n, prof::Counter calls, prof::Counter diff) {
   prof::add(calls, 1);
-  if (cmp_probe()) g_cmp_sink = std::memcmp(a, b, n) != 0;   // discarded duplicate
   const bool d = std::memcmp(a, b, n) != 0;
   if (d) prof::add(diff, 1);
   return d;
@@ -67,7 +53,7 @@ void Engine2D::reset() {
   g_dispcnt_ = 0; g_bgcnt_.fill(0); g_wincnt_.fill(0); g_bldcnt_ = g_bldalpha_ = 0; g_enabled_ = false;
   jn_.store(0, std::memory_order_relaxed); jpos_ = 0;
   enabled_ = false; screen_ = 1 - num_; master_bright_ = 0;
-  pal_.fill(0); oam_.fill(0); pal_gen_ = oam_gen_ = 1;
+  pal_.fill(0); oam_.fill(0); pal_gen_ = oam_gen_ = oam_geom_gen_ = 1;
   dispcnt_ = 0; dispcnt_hist_.fill(0);
   bgcnt_.fill(0); bghofs_.fill(0); bgvofs_.fill(0);
   pa_.fill(0); pb_.fill(0); pc_.fill(0); pd_.fill(0);
@@ -199,7 +185,20 @@ void Engine2D::apply(u8 kind, u32 addr, u32 width, u32 value) {
   switch (kind) {
   case J_REG: apply_write(addr, width, value); return;
   case J_PAL: std::memcpy(reinterpret_cast<u8*>(pal_.data()) + addr, &value, width / 8); ++pal_gen_; return;
-  case J_OAM: std::memcpy(reinterpret_cast<u8*>(oam_.data()) + addr, &value, width / 8); ++oam_gen_; return;
+  case J_OAM: {
+    // The sprite lists read attr0's y / type / shape and attr1's size only;
+    // a write that leaves those bits alone (X, tiles, palette, the rotation
+    // parameters -- most of what a game animates) keeps the lists.
+    u8* dst = reinterpret_cast<u8*>(oam_.data()) + addr;
+    const u32 n = width / 8;
+    u32 old = 0; std::memcpy(&old, dst, n);
+    std::memcpy(dst, &value, n); ++oam_gen_;
+    static constexpr u16 kGeom[4] = {0xC3FF, 0xC000, 0, 0};   // per halfword of an entry
+    u32 changed = 0;
+    for (u32 b = 0; b < n; ++b) changed |= ((old ^ value) >> (b * 8)) & (kGeom[((addr + b) >> 1) & 3] >> (((addr + b) & 1) * 8)) & 0xFF;
+    if (changed) ++oam_geom_gen_;
+    return;
+  }
   case J_POWCNT:
     enabled_ = value & (num_ ? 1 << 9 : 1 << 1);
     screen_ = (value & (1 << 15)) ? num_ : 1 - num_;   // bit 15: engine A on the top screen
@@ -445,7 +444,6 @@ void Engine2D::render_line(u32 line) {
   if (forced_blank_) { out_.fill(0xFF3F3F3F); return; }
 
   for (auto& p : bg_) p.any = false;
-  if (!cmp_frame() || line == 0) { extpal_checked_ = 0; objext_checked_ = 0; }
   if (prof::enabled) {
     prof::add(prof::C_2D_LINES, 1);
     if ((layer_enable_ & 0x10) && num_sprites_) prof::add(prof::C_2D_OBJ_LINES, 1);
@@ -737,6 +735,7 @@ void Engine2D::draw_bg_affine(u32 line, int bg) {
   s32 rx = ref_x_int_[bg - 2], ry = ref_y_int_[bg - 2];
   const bool mosaic = (cnt & (1 << 6)) && bg_mosaic_w_ > 0;
   const u32 mw = bg_mosaic_w_ + 1;
+  if (!mosaic && dx == 0x100 && dy == 0) { tile_row_degenerate(plane, tilemap, tileset, coordmask, yshift, overflow == 0, false, false, bg, rx, ry); return; }
 
   u32 mosaic_phase = 0;
   s32 mosaic_rx = rx, mosaic_ry = ry;
@@ -774,6 +773,7 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
     const u32 base = (cnt & 0x1F00) << 6;
     const bool direct = cnt & (1 << 2);
     if (direct) plane.table = rgb555_table();
+    if (!mosaic && dx == 0x100 && dy == 0) { bitmap_row_degenerate(plane, base, xmask, ymask, yshift, ofx == 0, direct, rx, ry); return; }
     u32 mosaic_phase = 0;
     s32 mosaic_rx = rx, mosaic_ry = ry;
     for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy,
@@ -799,6 +799,7 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
     const u32 overflow = (cnt & (1 << 13)) ? 0 : ~(coordmask | 0x7FF);
     u32 tileset = (cnt & 0x003C) << 12, tilemap = (cnt & 0x1F00) << 3;
     if (!num_) { tileset += (dispcnt_ & 0x07000000) >> 8; tilemap += (dispcnt_ & 0x38000000) >> 11; }
+    if (!mosaic && dx == 0x100 && dy == 0) { tile_row_degenerate(plane, tilemap, tileset, coordmask, yshift, overflow == 0, true, extpal, bg, rx, ry); if (extpal) plane.table = extpal18_.data() + bg * 4096; return; }
     u32 palmask = 0;
     u32 mosaic_phase = 0;
     s32 mosaic_rx = rx, mosaic_ry = ry;
@@ -838,6 +839,7 @@ void Engine2D::draw_bg_large(u32 line) {
   s32 rx = ref_x_int_[0], ry = ref_y_int_[0];
   const bool mosaic = (cnt & (1 << 6)) && bg_mosaic_w_ > 0;
   const u32 mw = bg_mosaic_w_ + 1;
+  if (!mosaic && dx == 0x100 && dy == 0) { bitmap_row_degenerate(plane, 0, xmask, ymask, yshift, ofx == 0, false, rx, ry); return; }
   u32 mosaic_phase = 0;
   s32 mosaic_rx = rx, mosaic_ry = ry;
   for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy,
@@ -849,6 +851,88 @@ void Engine2D::draw_bg_large(u32 line) {
     if (!idx) continue;
     plane.v()[i] = LV_OPAQUE | idx; plane.any = true;
   }
+}
+
+// The per-pixel loops compute, for pixel i, fx = rx + i * pa and fy = ry +
+// i * pc; with pa = 0x100 and pc = 0 the row is fixed and the texel column is
+// (rx >> 8) + i, so the coordinate masks reduce to a wrap at the bitmap's
+// width (or, with overflow transparent, to the span 0 <= column < width).
+// Each run is contiguous in VRAM and is read a block at a time through the
+// view's direct pointers (an overlapping-bank block falls back to the OR
+// read); the row of a block cannot be split in the middle of a texel since
+// the bitmap base is 16 KB-aligned.
+void Engine2D::bitmap_row_degenerate(Layer& plane, u32 base, u32 xmask, u32 ymask, u32 yshift, bool wrap, bool direct, s32 rx, s32 ry) {
+  const VramView& vv = bg_vram();
+  const VramMap& vm = vram();
+  if (!wrap && (static_cast<u32>(ry) & ~ymask)) return;
+  const u32 rowoff = ((static_cast<u32>(ry) & ymask) >> 8) << yshift;
+  const u32 width = (xmask >> 8) + 1;
+  const s32 x0 = rx >> 8;
+  bool any = false;
+  auto emit = [&](u32 texel, u32 i, u32 n) {
+    // [i, i + n) of the line from texel offset `texel` of the row.
+    u32 addr = base + (direct ? texel << 1 : texel);
+    while (n) {
+      const u32 a = addr & vv.addr_mask();
+      const u32 in_block = (VramView::BLOCK - (a & (VramView::BLOCK - 1))) >> (direct ? 1 : 0);
+      const u32 m = n < in_block ? n : in_block;
+      if (const u8* p = vv.ptr[a / VramView::BLOCK]) {
+        const u8* src = p + (a & (VramView::BLOCK - 1));
+        any |= direct ? kern::active::bmp_row_16(reinterpret_cast<const u16*>(src), m, plane.v() + i) : kern::active::bmp_row_8(src, m, plane.v() + i);
+      } else if (direct) {
+        for (u32 k = 0; k < m; ++k) { const u16 c = vm.read16(vv, addr + k * 2); if (c & 0x8000) { plane.v()[i + k] = c; any = true; } }
+      } else {
+        for (u32 k = 0; k < m; ++k) { const u8 c = vm.read8(vv, addr + k); if (c) { plane.v()[i + k] = static_cast<u16>(LV_OPAQUE | c); any = true; } }
+      }
+      addr += direct ? m << 1 : m; i += m; n -= m;
+    }
+  };
+  if (wrap) {
+    u32 i = 0, x = static_cast<u32>(x0) & (width - 1);
+    while (i < 256) { const u32 n = 256 - i < width - x ? 256 - i : width - x; emit(rowoff + x, i, n); i += n; x = 0; }
+  } else {
+    const s32 i0 = x0 < 0 ? -x0 : 0, i1 = static_cast<s32>(width) - x0 < 256 ? static_cast<s32>(width) - x0 : 256;
+    if (i0 < i1 && i0 < 256) emit(rowoff + static_cast<u32>(x0 + i0), static_cast<u32>(i0), static_cast<u32>(i1 - i0));
+  }
+  plane.any = any;
+}
+
+// Tiled rotscale layers (8-bit map entries, or the extended 16-bit ones with
+// flips and a palette number) on the identity matrix: the 33 tile rows
+// covering the line are gathered as the text layer gathers them and go
+// through the same kernel at the sub-tile scroll offset; a tile past the
+// edge of a non-wrapping map is a blank row.
+void Engine2D::tile_row_degenerate(Layer& plane, u32 tilemap, u32 tileset, u32 coordmask, u32 yshift, bool wrap, bool map16, bool ext, int bg, s32 rx, s32 ry) {
+  const VramView& vv = bg_vram();
+  const VramMap& vm = vram();
+  const u32 tiles = (coordmask >> 11) + 1, size = tiles << 3;   // per axis, in tiles and pixels
+  if (!wrap && (static_cast<u32>(ry) & ~(coordmask | 0x7FF))) return;
+  const u32 maprow = (static_cast<u32>(ry) & coordmask) >> 11 << yshift, tyrow = (static_cast<u32>(ry) >> 8) & 7;
+  const s32 x0 = rx >> 8;
+  const u32 shift = static_cast<u32>(x0) & 7;
+  const s32 tpx0 = x0 - static_cast<s32>(shift);
+  alignas(16) u8 rows[33 * 8]; u8 ctl[33];
+  u32 palmask = 0;
+  const u32 amask = vv.addr_mask();
+  for (u32 t = 0; t < 33; ++t) {
+    const s32 tpx = tpx0 + static_cast<s32>(t << 3);
+    ctl[t] = 0;
+    if (!wrap && (tpx < 0 || tpx >= static_cast<s32>(size))) { std::memset(rows + t * 8, 0, 8); continue; }
+    const u32 tx = (static_cast<u32>(tpx) >> 3) & (tiles - 1);
+    u32 tile, ty = tyrow;
+    if (map16) {
+      tile = vram_fetch16(vm, vv, tilemap + (maprow + tx) * 2);
+      ctl[t] = static_cast<u8>((tile >> 12) | ((tile >> 6) & 0x10));
+      if (tile & (1 << 11)) ty = 7 - ty;
+      palmask |= 1u << (tile >> 12);
+      tile &= 0x3FF;
+    } else tile = vram_fetch8(vm, vv, tilemap + maprow + tx);
+    const u32 a = tileset + (tile << 6) + (ty << 3), am = a & amask;
+    if (const u8* p = vv.ptr[am / VramView::BLOCK]) std::memcpy(rows + t * 8, p + (am & (VramView::BLOCK - 1)), 8);
+    else for (u32 i = 0; i < 8; ++i) rows[t * 8 + i] = vm.read8(vv, a + i);
+  }
+  if (ext) for (u32 i = 0; i < 16; ++i) if (palmask & (1u << i)) ext_pal18(static_cast<u32>(bg), i);
+  plane.any = kern::active::text_row_256(rows, ctl, 33, ext, plane.v() - shift);
 }
 
 void Engine2D::draw_bg_3d() {
@@ -889,7 +973,7 @@ void Engine2D::render_sprites(u32 line) {
   static const s32 widths[16]  = {8, 16, 8, 8, 16, 32, 8, 8, 32, 32, 16, 8, 64, 64, 32, 8};
   static const s32 heights[16] = {8, 8, 16, 8, 16, 8, 32, 8, 32, 16, 32, 8, 64, 32, 64, 8};
 
-  if (oam_lists_gen_ != oam_gen_) { oam_lists_gen_ = oam_gen_; rebuild_sprite_lists(oam); }
+  if (oam_lists_gen_ != oam_geom_gen_) { oam_lists_gen_ = oam_geom_gen_; rebuild_sprite_lists(oam); }
   // (A mosaic sprite's candidacy is still its own box; the mosaic only
   // changes which of its rows is drawn.)
   const LineSprites& ls = line_sprites_[line & 0xFF];
@@ -1089,21 +1173,21 @@ void Engine2D::build_window_plane() {
   win_.fill(wincnt_[2]);                                     // outside all windows
   if (dispcnt_ & (1 << 15)) for (u32 i = 0; i < 256; ++i) if (obj_win_[i]) win_[i] = wincnt_[3];
   // Horizontal edges are evaluated per pixel with the same edge rule as the
-  // vertical ones, so x2 < x1 wraps and x1 == x2 covers nothing.
-  if (dispcnt_ & (1 << 14)) {
-    const u8 x1 = win1_[0], x2 = win1_[1];
-    for (u32 i = 0; i < 256; ++i) {
-      if (i == x2) win1_active_ &= ~2; else if (i == x1) win1_active_ |= 2;
-      if (win1_active_ == 3) win_[i] = wincnt_[1];
-    }
-  }
-  if (dispcnt_ & (1 << 13)) {
-    const u8 x1 = win0_[0], x2 = win0_[1];
-    for (u32 i = 0; i < 256; ++i) {
-      if (i == x2) win0_active_ &= ~2; else if (i == x1) win0_active_ |= 2;
-      if (win0_active_ == 3) win_[i] = wincnt_[0];
-    }
-  }
+  // vertical ones (at x2 the x bit clears, else at x1 it sets; a pixel is
+  // inside while both bits are set), so x2 < x1 wraps and x1 == x2 covers
+  // nothing. Pixels before the first edge keep the x state the previous
+  // line ended with, so a line is at most three runs: [0, first edge) in the
+  // carried state, then the two states the edges leave, in edge order.
+  auto span = [&](u8 x1, u8 x2, u8& active, u8 val) {
+    const u32 e1 = x1 < x2 ? x1 : x2, e2 = x1 < x2 ? x2 : x1;
+    const bool st[3] = {(active & 2) != 0, x1 < x2, x1 > x2};
+    const u32 edge[4] = {0, e1, e2, 256};
+    if (active & 1)
+      for (int k = 0; k < 3; ++k) if (st[k] && edge[k + 1] > edge[k]) std::memset(win_.data() + edge[k], val, edge[k + 1] - edge[k]);
+    active = static_cast<u8>((active & 1) | (st[2] ? 2 : 0));
+  };
+  if (dispcnt_ & (1 << 14)) span(win1_[0], win1_[1], win1_active_, wincnt_[1]);
+  if (dispcnt_ & (1 << 13)) span(win0_[0], win0_[1], win0_active_, wincnt_[0]);
 }
 
 // OBJ palettes as 18-bit records: the standard one (palette RAM + 0x200) and
@@ -1285,7 +1369,7 @@ template <class S> void Engine2D::sync_state(S& s) {
   if constexpr (S::reading) {
     // Every derived table revalidates against a generation it cannot match.
     jn_.store(0, std::memory_order_relaxed); jpos_ = 0;
-    ++pal_gen_; ++oam_gen_;
+    ++pal_gen_; ++oam_gen_; ++oam_geom_gen_;
     pal18_gen_ = objpal18_gen_ = 0; extpal_checked_ = extpal_have_ = 0; objext_checked_ = objext_have_ = 0;
     oam_lists_gen_ = 0;
   }

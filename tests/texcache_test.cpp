@@ -124,11 +124,40 @@ void test_validation() {
   std::puts("validation ok");
 }
 
+// The generation gate: with no remap, or with a remap that touches only
+// banks the entry does not read, the bytes are not compared at all -- shown
+// by poking the bank storage behind the cache's back, which no guest write
+// could do while the bank is in texture mode. A remap that puts the bank in
+// a CPU-writable mode makes the next lookup compare and see the poke.
+void test_remap_gate() {
+  Rig r;
+  gpu::TextureCache cache;
+  const u32 fmt = 4, w = 8, h = 8, base = 0x100, texpal = 0x20;
+  cache.begin_frame(1);
+  const u32* a = cache.lookup(r.nds.bus.vram_map(), fmt, base, w, h, texpal, 31);
+  const u32 before = a[3];
+  u8* bankA = r.nds.bus.vram_bank(0);
+  bankA[base + 3] ^= 0x3C;                                   // behind the cache's back
+  cache.begin_frame(2);
+  CHECK(cache.lookup(r.nds.bus.vram_map(), fmt, base, w, h, texpal, 31)[3] == before);   // no remap: not even compared
+  r.nds.io.write(Cpu::ARM9, 0x04000242, 8, 0x80);            // bank C to LCDC: a remap, but not of A / E
+  cache.begin_frame(3);
+  CHECK(cache.lookup(r.nds.bus.vram_map(), fmt, base, w, h, texpal, 31)[3] == before);   // unrelated remap: still gated
+  r.map_lcdc(); r.map_texture();                            // A was writable in between: compared, re-decoded
+  cache.begin_frame(4);
+  const u32* c = cache.lookup(r.nds.bus.vram_map(), fmt, base, w, h, texpal, 31);
+  CHECK(c[3] != before);
+  r.tex[base + 3] ^= 0x3C;
+  CHECK(c[3] == r.reference(fmt, base, w, 3, 0, texpal, 31));
+  std::puts("remap gate ok");
+}
+
 } // namespace
 
 int main() {
   test_formats();
   test_validation();
+  test_remap_gate();
   std::puts("texcache tests passed");
   return 0;
 }

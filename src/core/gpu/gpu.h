@@ -101,6 +101,15 @@ public:
 
   const u32* framebuffer(int screen) const { return fb_[screen].data(); }   // 0 = top, 1 = bottom
 
+  // A screen the frontend does not show (single-screen layouts). The engine
+  // driving it -- through POWCNT1's swap bit, checked per line -- skips its
+  // drawing (backgrounds, sprites, output) while its journal, latches,
+  // windows and lazy-2D bookkeeping keep running, so it is exact again the
+  // line it is shown. Engine A never skips: display capture reads its
+  // output. The hidden screen's framebuffer is stale meanwhile. Set between
+  // frames only (the engine-B worker reads it during one).
+  void set_screen_visible(int screen, bool on) { screen_visible_[screen] = on; }
+
   // A frontend-owned, panel-sized destination for one screen. When set, the
   // output stage scales each line into it as the line is produced instead of
   // filling fb_ for the frontend to rescale afterwards: the source line is
@@ -152,6 +161,8 @@ private:
   bool hblank_done_ = false;  // this line's HBlank event has run (its render, if any, is behind us)
   bool frame_begun_ = false;
   bool screens_on_ = false;   // POWCNT1 bit 0, latched at frame start
+  bool screen_visible_[2] = {true, true};
+  bool b_skipped_ = false;    // engine B's last line was skipped: its next drawn line re-renders its sprites
   u16 master_bright_g_[2] = {0, 0};   // guest-visible; the engines hold the render-side value
   u32 capcnt_ = 0;
   bool capture_on_ = false;
@@ -212,6 +223,13 @@ private:
   static constexpr u32 LAZY_FUTILE_LIMIT = 4, LAZY_PROBE_PERIOD = 64;
   u32  lazy_futile_ = 0;
   bool lazy_tried_ = false;
+  // A frame that spent its burst budget is futile whatever the engines'
+  // state at line 191 (with DS_2D_SPLIT the other engine may still be
+  // batching): counted at the fallback. A probe frame gets a smaller budget
+  // (LAZY_PROBE_BURSTS) and falls both engines back at once when it runs
+  // out, so re-checking a per-line scene costs half the arms it used to.
+  static constexpr u32 LAZY_PROBE_BURSTS = 8;
+  bool lazy_limit_hit_ = false, lazy_probe_ = false;
   u32  frontier() const { return hblank_done_ ? line_ + 1u : line_; }   // first line a write now can still affect
   void catch_up(u32 mask);             // render the masked engines' lines below the frontier
   void fall_back_per_line(u32 mask);   // catch up and render the rest of the frame per line

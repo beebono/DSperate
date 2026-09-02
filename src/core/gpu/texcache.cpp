@@ -3,6 +3,8 @@
 #include "core/profile.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace ds::gpu {
@@ -36,6 +38,9 @@ bool view_equal(const VramMap& vm, const VramView& v, u32 addr, u32 len, const u
 inline u32 pack(u32 colour16, u32 alpha) { return colour16 | (alpha << 16); }
 
 } // namespace
+
+TextureCache::TextureCache() { verify_ = std::getenv("DS_TEXCACHE_VERIFY") != nullptr; }
+TextureCache::~TextureCache() { if (verify_) std::fprintf(stderr, "[texcache] verify: %u gated validations, all agreed with the compare\n", gate_hits_); }
 
 u64 TextureCache::key(u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0) {
   // fmt 3 bits, base 19 bits (8-byte units: 16), width/height 3 bits each as
@@ -97,15 +102,35 @@ void TextureCache::snapshot(const VramMap& vm, Entry& e) {
   e.copy.resize(total);
   u8* dst = e.copy.data();
   for (u32 i = 0; i < e.nsrc; ++i) { view_copy(vm, e.src[i].palette ? vm.texpal : vm.texture, e.src[i].addr, e.src[i].len, dst); dst += e.src[i].len; }
+  stamp(vm, e);
 }
 
-bool TextureCache::unchanged(const VramMap& vm, const Entry& e) const {
+void TextureCache::stamp(const VramMap& vm, Entry& e) const {
+  e.gen = vm.generation(); e.banks = 0; e.sig = 0;
+  for (u32 i = 0; i < e.nsrc; ++i) e.sig = e.sig * 31 + vm.block_signature(e.src[i].palette ? vm.texpal : vm.texture, e.src[i].addr, e.src[i].len, e.banks);
+}
+
+bool TextureCache::unchanged(const VramMap& vm, Entry& e) {
+  // The gate (texcache.h): no remap since the last validation, or none that
+  // moved the banks behind the ranges or made one of them CPU-writable.
+  bool compare = vm.generation() != e.gen;
+  if (compare) {
+    u32 banks = 0; u64 sig = 0;
+    for (u32 i = 0; i < e.nsrc; ++i) sig = sig * 31 + vm.block_signature(e.src[i].palette ? vm.texpal : vm.texture, e.src[i].addr, e.src[i].len, banks);
+    compare = sig != e.sig;
+    for (u32 b = 0; b < 9 && !compare; ++b) if ((banks & (1u << b)) && vm.bank_writable_gen(static_cast<int>(b)) > e.gen) compare = true;
+  }
+  if (!compare) { ++gate_hits_; if (!verify_) { e.gen = vm.generation(); return true; } }
   const u8* src = e.copy.data();
   for (u32 i = 0; i < e.nsrc; ++i) {
     prof::add(prof::C_TEXCACHE_BYTES, e.src[i].len);
-    if (!view_equal(vm, e.src[i].palette ? vm.texpal : vm.texture, e.src[i].addr, e.src[i].len, src)) return false;
+    if (!view_equal(vm, e.src[i].palette ? vm.texpal : vm.texture, e.src[i].addr, e.src[i].len, src)) {
+      if (!compare) { std::fprintf(stderr, "[texcache] VERIFY FAILED: gate said unchanged, bytes differ (fmt %u base %x)\n", e.fmt, e.base); std::abort(); }
+      return false;
+    }
     src += e.src[i].len;
   }
+  stamp(vm, e);
   return true;
 }
 
