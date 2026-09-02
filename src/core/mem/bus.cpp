@@ -326,7 +326,13 @@ void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
     std::memcpy(main_ram.get() + (addr & (MAIN_RAM_SIZE - 1)), &v, width / 8); return;
   }
   switch (addr >> 24) {
-  case 0x04: nds_.io.write(cpu, addr, width, v); return;
+  case 0x04:
+    // ARM9 word stores to GXFIFO and the direct command ports: the one I/O
+    // store a 3D frame makes tens of thousands of times. Straight to the
+    // geometry engine, as the DMA path already goes, instead of through the
+    // census test, io_unowned and two owns_reg probes (~110 instructions).
+    if (width == 32 && cpu == Cpu::ARM9 && addr - 0x04000400 < 0x1CC && !io::Io::census_on()) { nds_.gpu3d.gx_port_write(addr, v); return; }
+    nds_.io.write(cpu, addr, width, v); return;
   case 0x05: nds_.gpu.palette_store(cpu, addr, width, v); return;
   case 0x07: nds_.gpu.oam_store(cpu, addr, width, v); return;
   case 0x06: {

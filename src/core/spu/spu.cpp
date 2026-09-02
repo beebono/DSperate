@@ -31,6 +31,13 @@ static s16 psg_sample(u32 duty, u32 phase) { return phase < 7 - duty ? -0x7FFF :
 void Spu::reset() {
   dbg_ = std::getenv("DS_DEBUG_SPU") != nullptr;
   if (const char* b = std::getenv("DS_SPU_BATCH")) batch_ = std::clamp(std::atoi(b), 1, 64);
+  // Capture writes ARM7 RAM, so the batch drops to one sample while one runs.
+  // Inside a batch run_to() still mixes sample by sample, so capture flushes
+  // and the FIFO refills that read a capture buffer back interleave in the
+  // per-sample order; the only observer that could tell is a CPU reading the
+  // capture buffer between two consecutive samples without touching an SPU
+  // register (every register access catches up first). Opt-in until measured.
+  if (const char* b = std::getenv("DS_SPU_CAP_BATCH")) cap_batch_ = std::clamp(std::atoi(b), 1, 64);
   for (auto& c : ch_) c = Channel{};
   for (auto& cp : cap_) cp = Capture{};
   cnt_ = 0; bias_ = 0; master_ = 0; muted_ = true;
@@ -319,7 +326,7 @@ void Spu::cap_run(Capture& cp, s32 sample) {
 void Spu::ev_mix(NDS& nds, u32) {
   Spu& s = nds.spu;
   s.run_to(nds.sched.event_time());
-  const u32 n = ((s.cap_[0].cnt | s.cap_[1].cnt) & 0x80) ? 1 : s.batch_;
+  const u32 n = ((s.cap_[0].cnt | s.cap_[1].cnt) & 0x80) ? s.cap_batch_ : s.batch_;
   nds.sched.schedule(EventId::Spu, s.mix_at_ + (n - 1) * MIX_PERIOD, ev_mix);
 }
 

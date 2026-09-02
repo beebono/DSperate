@@ -39,13 +39,14 @@ void Io::flush_lcd_irq() {
 void Io::reset() {
   lcd_irq_pending[0] = lcd_irq_pending[1] = 0;
   if (const char* e = std::getenv("DS_LCD_IRQ_DELAY")) lcd_irq_delay = static_cast<u32>(std::atoi(e));
+  if (const char* e = std::getenv("DS_CART_BULK")) cart_bulk_ = std::atoi(e) != 0;
   cpu_io[0] = CpuIo{}; cpu_io[1] = CpuIo{};
   dispstat[0] = dispstat[1] = 0; vcount = 0;
   wramcnt = 0; std::memset(vramcnt, 0, sizeof vramcnt);
   powcnt1 = 0; powcnt2 = 0; math = MathUnit{};
   keyinput = 0x03FF; extkeyin = 0x007F; keycnt[0] = keycnt[1] = 0;
   exmemcnt = 0;
-  spicnt = 0; spidata = 0;
+  spicnt = 0; spidata = 0; spi_ready_at = 0;
   spi_fw = SpiFirmware{}; spi_tsc = SpiTouch{}; spi_pm = SpiPower{};
   mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;
   rtc = Rtc{};
@@ -216,9 +217,12 @@ void Io::timer_write_control(Cpu cpu, int idx, u16 value) {
 static void spi_event(NDS& nds, u32) { nds.io.spi_done(); }
 
 void Io::spi_done() {
-  spicnt &= ~0x0080;
   if (spicnt & 0x4000) request_irq(Cpu::ARM7, IRQ_SPI);
 }
+
+u64 Io::nds_sched_now() const { return nds_.sched.now(); }
+
+void Io::set_cart_bulk(bool on) { if (!std::getenv("DS_CART_BULK")) cart_bulk_ = on; }
 
 u8 Io::spi_transfer(u8 value) {
   const int dev = (spicnt >> 8) & 3;
@@ -389,12 +393,12 @@ void Io::spi_release() {
 
 void Io::spi_write_data(u8 value) {
   if (!(spicnt & 0x8000)) return;
-  if (spicnt & 0x0080) return;
-  spicnt |= 0x0080;
+  if (spi_busy()) return;
   spidata = spi_transfer(value);
   if (!(spicnt & 0x0800)) spi_release();
   const u32 delay = 8 * (8u << (spicnt & 3));
-  nds_.sched.schedule(EventId::Spi, nds_.sched.now() + delay * 2, spi_event, 0);
+  spi_ready_at = nds_.sched.now() + delay * 2;
+  if (spicnt & 0x4000) nds_.sched.schedule(EventId::Spi, spi_ready_at, spi_event, 0);
 }
 
 // ---- RTC (ARM7, bit-banged on 0x04000138) ----------------------------------
@@ -486,7 +490,7 @@ void Io::cart_write_romctrl(u32 value) {
   u32 size_code = (cart.romctrl >> 24) & 7;
   u32 bytes = size_code == 7 ? 4 : size_code ? (0x100u << size_code) : 0;
   cart.transfer_pos = 0; cart.transfer_len = bytes;
-  cart.fifo_count = 0; cart.late = false;
+  cart.fifo_count = 0; cart.late = false; cart.bulk = false;
   cart.romctrl &= ~0x00800000u;
   const u32 xfer = (cart.romctrl & (1u << 27)) ? 8 : 5;
   u32 cmddelay = 8 + (cart.romctrl & 0x1FFF);
@@ -569,11 +573,31 @@ void Io::cart_receive_word(u64 at) {
   if (cart_dma_armed()) {
     nds_.dma.check(Cpu::ARM9, dma::MODE9_CART);
     nds_.dma.check(Cpu::ARM7, dma::MODE7_CART);
+    // DS_CART_BULK: with a DMA taking the words, nothing observes their
+    // cadence -- DRQ is consumed by the channel, ROMCTRL's busy bit holds to
+    // the end either way, and the words the DMA has not yet read are not in
+    // RAM on hardware either. So from here the words are produced as the DMA
+    // reads them (cart_read_data) and the transfer keeps one event, at the
+    // nominal time of the last word, for the done IRQ. What moves is where
+    // the DMA's bus stall lands: all at once instead of a unit per word, so
+    // the CPU interleave (and hashes) shift. Per 512-byte block this is 1
+    // scheduler event and 1 slice instead of 128 of each; a loading screen
+    // streams tens of blocks a frame. Opt-in until swept on the device.
+    if (cart_bulk_ && cart.transfer_pos < cart.transfer_len) {
+      const u32 xfer = (cart.romctrl & (1u << 27)) ? 8 : 5, gap2 = (cart.romctrl >> 16) & 0x3F;
+      const u32 words = (cart.transfer_len - cart.transfer_pos) / 4;
+      const u32 blocks = ((cart.transfer_len + 0x1FF) >> 9) - ((cart.transfer_pos + 0x1FF) >> 9);
+      cart.next_word_at = at + 2 * xfer * (4 * words + gap2 * blocks);   // the last word's nominal arrival
+      cart.bulk = true; cart.event_armed = true;
+      nds_.sched.schedule(EventId::Cart, cart.next_word_at, cart_ev, 0);
+      return;
+    }
   }
   if (cart.fifo_count < 2) cart_schedule_receive(at); else cart.late = true;
 }
 
 void Io::cart_end_transfer() {
+  cart.bulk = false;
   cart.romctrl &= ~0x80000000u;
   cart.transfer_pos = cart.transfer_len = 0;
   if (cart.auxspicnt & 0x4000) { request_irq(Cpu::ARM7, IRQ_CART_DONE); request_irq(Cpu::ARM9, IRQ_CART_DONE); }
@@ -581,6 +605,13 @@ void Io::cart_end_transfer() {
 
 void Io::cart_event(u32 param) {
   cart.event_armed = false;
+  if (param == 0 && cart.bulk) {
+    // The bulk transfer's end. If the DMA stopped taking words (disabled
+    // mid-transfer), fall back to the exact model from the point reached.
+    cart.bulk = false;
+    if (cart.transfer_pos < cart.transfer_len) { if (cart.fifo_count < 2) cart_schedule_receive(nds_.sched.now()); else cart.late = true; return; }
+    if (cart.fifo_count) return;   // ends with the read that empties the FIFO
+  }
   if (param == 0) cart_end_transfer(); else cart_receive_word(nds_.sched.now());
 }
 
@@ -591,10 +622,14 @@ u32 Io::cart_read_data() {
   if (cart.fifo_count > 0) { cart.fifo_count--; cart.fifo_head ^= 1; }
   cart.romctrl &= ~0x00800000u;
   if (cart.transfer_pos < cart.transfer_len) {
-    if (cart.late) { cart.late = false; cart_schedule_receive(nds_.sched.now()); }
+    if (cart.bulk) {   // the next word, now: the DMA's re-trigger test (cart_drq) sees it
+      cart.fifo[(cart.fifo_head + cart.fifo_count) & 1] = nds_.cart ? nds_.cart->command_receive() : 0;
+      cart.fifo_count++; cart.transfer_pos += 4;
+      cart.romctrl |= 0x00800000u;
+    } else if (cart.late) { cart.late = false; cart_schedule_receive(nds_.sched.now()); }
   } else {
-    if (cart.fifo_count == 0) cart_end_transfer();
-    else cart.romctrl |= 0x00800000u;
+    if (cart.fifo_count == 0 && !cart.bulk) cart_end_transfer();   // bulk: the end event carries the IRQ at the nominal time
+    else if (cart.fifo_count) cart.romctrl |= 0x00800000u;
   }
   return v;
 }
@@ -688,16 +723,21 @@ void Io::wifi_write16(u32 addr, u16 value) {
 // the busy bit is set meanwhile. Edge cases follow the hardware as documented
 // by GBATEK and melonDS: division by zero yields +/-1 with the numerator as
 // remainder, and the most-negative / -1 overflow wraps.
-static void ev_div(NDS& nds, u32)  { nds.io.div_done(); }
-static void ev_sqrt(NDS& nds, u32) { nds.io.sqrt_done(); }
+//
+// No event: the result is due at a recorded time and computed by the first
+// read after it (see MathUnit). The Div/Sqrt event ids stay bound so a save
+// state written while one was armed still loads; the handlers just settle.
+static void ev_div(NDS& nds, u32)  { nds.io.div_settle(); }
+static void ev_sqrt(NDS& nds, u32) { nds.io.sqrt_settle(); }
 
 void Io::div_start() {
-  math.divcnt |= 0x8000;
-  nds_.sched.schedule(EventId::Div, nds_.sched.now() + (((math.divcnt & 3) == 0) ? 18 : 34) * 2, ev_div);
+  math.div_pending = true;
+  math.div_ready_at = nds_.sched.now() + (((math.divcnt & 3) == 0) ? 18 : 34) * 2;
 }
 
 void Io::div_done() {
   MathUnit& m = math;
+  m.div_pending = false;
   m.divcnt &= ~0xC000;
   switch (m.divcnt & 3) {
   case 0: {
@@ -732,13 +772,13 @@ void Io::div_done() {
 }
 
 void Io::sqrt_start() {
-  math.sqrtcnt |= 0x8000;
-  nds_.sched.schedule(EventId::Sqrt, nds_.sched.now() + 13 * 2, ev_sqrt);
+  math.sqrt_pending = true;
+  math.sqrt_ready_at = nds_.sched.now() + 13 * 2;
 }
 
 void Io::sqrt_done() {
   MathUnit& m = math;
-  m.sqrtcnt &= ~0x8000;
+  m.sqrt_pending = false;
   u64 val = (m.sqrtcnt & 1) ? m.sqrt_val : (m.sqrt_val & 0xFFFFFFFFull);
   // Digit-by-digit integer square root.
   u64 res = 0, rem = 0;
@@ -795,6 +835,7 @@ struct IoCensus {
 };
 IoCensus g_ioc;
 }
+bool Io::census_on() { return g_ioc.on; }
 
 u32 Io::read(Cpu cpu, u32 addr, u32 width) {
   if (g_ioc.on) g_ioc.rd[cpu == Cpu::ARM9 ? 0 : 1][addr]++;
@@ -833,17 +874,17 @@ Io::Special Io::read32_special(Cpu cpu, u32 addr) {
   case 0x04100000: return {ipc_fifo_recv(cpu), true};
   case 0x04100010: return {cart_read_data(), true};
   case 0x040001A4: cart_catch_up(); return {cart.romctrl, true};
-  case 0x04000280: return {math.divcnt, true};
+  case 0x04000280: return {divcnt_read(), true};
   case 0x04000290: return {static_cast<u32>(math.div_num), true};
   case 0x04000294: return {static_cast<u32>(math.div_num >> 32), true};
   case 0x04000298: return {static_cast<u32>(math.div_den), true};
   case 0x0400029C: return {static_cast<u32>(math.div_den >> 32), true};
-  case 0x040002A0: return {static_cast<u32>(math.div_quot), true};
-  case 0x040002A4: return {static_cast<u32>(math.div_quot >> 32), true};
-  case 0x040002A8: return {static_cast<u32>(math.div_rem), true};
-  case 0x040002AC: return {static_cast<u32>(math.div_rem >> 32), true};
-  case 0x040002B0: return {math.sqrtcnt, true};
-  case 0x040002B4: return {math.sqrt_res, true};
+  case 0x040002A0: div_settle(); return {static_cast<u32>(math.div_quot), true};
+  case 0x040002A4: div_settle(); return {static_cast<u32>(math.div_quot >> 32), true};
+  case 0x040002A8: div_settle(); return {static_cast<u32>(math.div_rem), true};
+  case 0x040002AC: div_settle(); return {static_cast<u32>(math.div_rem >> 32), true};
+  case 0x040002B0: return {sqrtcnt_read(), true};
+  case 0x040002B4: sqrt_settle(); return {math.sqrt_res, true};
   case 0x040002B8: return {static_cast<u32>(math.sqrt_val), true};
   case 0x040002BC: return {static_cast<u32>(math.sqrt_val >> 32), true};
   case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: return {nds_.dma.read_src(cpu, (addr - 0x040000B0) / 12), true};
@@ -859,7 +900,7 @@ Io::Special Io::write32_special(Cpu cpu, u32 addr, u32 value) {
   switch (addr) {
   case 0x04000208: c.ime = value & 1; update_irq(cpu); return {0, true};
   case 0x04000210: c.ie = value; update_irq(cpu); return {0, true};
-  case 0x04000214: c.if_ &= ~value; update_irq(cpu); if (cpu == Cpu::ARM9) nds_.gpu3d.check_fifo_irq(); return {0, true};
+  case 0x04000214: c.if_ &= ~value; update_irq(cpu); if (cpu == Cpu::ARM9) nds_.gpu3d.check_fifo_irq_fast(); return {0, true};
   case 0x04000188: ipc_fifo_send(cpu, value); return {0, true};
   case 0x040001A4: cart_write_romctrl(value); return {0, true};
   case 0x04000280: math.divcnt = value & 0x3; div_start(); return {0, true};
@@ -898,7 +939,7 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0x040001A8: case 0x040001AA: case 0x040001AC: case 0x040001AE: {
     const u32 i = addr - 0x040001A8; return static_cast<u16>(cart.cmd[i] | (cart.cmd[i + 1] << 8));
   }
-  case 0x040001C0: return a9 ? 0 : spicnt;
+  case 0x040001C0: return a9 ? 0 : spicnt_read();
   case 0x040001C2: return a9 ? 0 : spidata;
   case 0x04000204: return exmemcnt;
   case 0x040000BA: case 0x040000C6: case 0x040000D2: case 0x040000DE: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000BA) / 12) >> 16);
@@ -911,8 +952,8 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0x04000240: return a9 ? static_cast<u16>(vramcnt[0] | (vramcnt[1] << 8)) : static_cast<u16>(((vramcnt[2] >> 0) & 7) == 2 ? 1 : 0) | ((((vramcnt[3] >> 0) & 7) == 2 ? 2 : 0)) | (wramcnt << 8);
   case 0x04000300: return c.postflg;
   case 0x04000304: return a9 ? powcnt1 : powcnt2;
-  case 0x04000280: return math.divcnt;
-  case 0x040002B0: return math.sqrtcnt;
+  case 0x04000280: return divcnt_read();
+  case 0x040002B0: return sqrtcnt_read();
   default: break;
   }
   if (a9 && addr >= 0x04000290 && addr < 0x040002C0) { const u32 v = read32_special(cpu, addr & ~3u).value; return static_cast<u16>((addr & 2) ? v >> 16 : v); }
@@ -955,7 +996,8 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   case 0x040001C0:
     if (a9) return;
     if ((spicnt & 0x8000) && !(value & 0x8000)) spi_release();
-    spicnt = (spicnt & 0x0080) | (value & 0xCF03);
+    spicnt = value & 0xCF03;
+    if ((spicnt & 0x4000) && spi_busy()) nds_.sched.schedule(EventId::Spi, spi_ready_at, spi_event, 0);   // IRQ enabled mid-transfer
     return;
   case 0x040001C2: if (!a9) spi_write_data(static_cast<u8>(value)); return;
   case 0x04000204: {
@@ -987,8 +1029,8 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   case 0x04000208: c.ime = value & 1; update_irq(cpu); return;
   case 0x04000210: c.ie = (c.ie & 0xFFFF0000) | value; update_irq(cpu); return;
   case 0x04000212: c.ie = (c.ie & 0x0000FFFF) | (static_cast<u32>(value) << 16); update_irq(cpu); return;
-  case 0x04000214: c.if_ &= ~static_cast<u32>(value); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq(); return;
-  case 0x04000216: c.if_ &= ~(static_cast<u32>(value) << 16); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq(); return;
+  case 0x04000214: c.if_ &= ~static_cast<u32>(value); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq_fast(); return;
+  case 0x04000216: c.if_ &= ~(static_cast<u32>(value) << 16); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq_fast(); return;
   case 0x04000300:
     c.postflg |= value & 1; if (a9) c.postflg = (c.postflg & 1) | (value & 2);
     if (!a9 && (value >> 8)) write8(cpu, 0x04000301, static_cast<u8>(value >> 8));
@@ -1062,6 +1104,7 @@ template <class S> void Io::sync_state(S& s) {
            cart.late, cart.next_word_at, cart.event_armed);
   s.fields(math.divcnt, math.sqrtcnt, math.div_num, math.div_den, math.div_quot, math.div_rem, math.sqrt_val, math.sqrt_res);
   s.fields(wifi_ram, wifi_io, wifi_bb, wifi_bb_ro, wifi_rf, wifi_rf_version, wifi_random);
+  s.fields(math.div_ready_at, math.sqrt_ready_at, math.div_pending, math.sqrt_pending, spi_ready_at, cart.bulk);   // appended: older states leave them at rest
   s.end();
   if constexpr (S::reading) {
     mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;   // the frontend hands a new buffer every frame

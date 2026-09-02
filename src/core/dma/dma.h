@@ -67,6 +67,9 @@ public:
   // Run the CPU's DMA channels for up to `budget` cycles (that CPU's clock).
   // Returns cycles consumed.
   u32 run(Cpu cpu, u32 budget);
+  // A cart-mode channel is running: only a bulk cart transfer (DS_CART_BULK)
+  // re-arms one inside run(); the exact model needs an event per word.
+  bool cart_running(Cpu cpu) const;
 
 private:
   void update_cart_armed();

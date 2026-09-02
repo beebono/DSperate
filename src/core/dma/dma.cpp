@@ -104,7 +104,7 @@ void Dma::start(Channel& c) {
   set_running(c, 2);
   c.in_progress = true;
   c.burst_table = MRAM_DUMMY.data; c.burst_pos = 0;
-  nds_.sched.preempt(nds_.cpu(c.cpu));   // an immediate start stalls the CPU that issued it
+  if (!nds_.sched.in_dma()) nds_.sched.preempt(nds_.cpu(c.cpu));   // an immediate start stalls the CPU that issued it (a re-trigger from inside run() is already in the DMA's share)
 }
 
 void Dma::check(Cpu cpu, u32 mode) {
@@ -332,7 +332,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
         // page is plain memory again -- so the run copies at full speed. (A
         // page still trapped afterwards falls to the per-word path below.)
         if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
-          prof::add(prof::C_DMA_VRAM_TRAP, 1); prof::add(dma_zone(c.cur_dst, true), 1);
+          prof::add(prof::C_DMA_VRAM_TRAP, 1); if (prof::enabled) prof::add(dma_zone(c.cur_dst, true), 1);
           nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
           pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
         }
@@ -380,7 +380,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
               c.cur_src += 4 * lo; c.cur_dst += 4 * lo;
               c.iter_count -= lo; c.rem_count -= lo;
               prof::add(prof::C_DMA_RUN_W, lo);
-              prof::add(dma_zone(zdst, false), z0 - c.iter_count);
+              if (prof::enabled) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
               continue;
             }
           }
@@ -392,12 +392,12 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
             cost = rc.next(c); if (a9) cost <<= 1; used += cost;
             ps += 4; pd += 4;
           }
-          prof::add(dma_zone(zdst, false), z0 - c.iter_count);
+          if (prof::enabled) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
           continue;
         }
         no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
       }
-      prof::add(prof::C_DMA_SLOW_W, 1); prof::add(dma_zone(c.cur_dst, false), 1);
+      prof::add(prof::C_DMA_SLOW_W, 1); if (prof::enabled) prof::add(dma_zone(c.cur_dst, false), 1);
       bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
     }
     else {
@@ -411,7 +411,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
         bool code = false;
         u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
         if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
-          prof::add(prof::C_DMA_VRAM_TRAP, 1); prof::add(dma_zone(c.cur_dst, true), 1);
+          prof::add(prof::C_DMA_VRAM_TRAP, 1); if (prof::enabled) prof::add(dma_zone(c.cur_dst, true), 1);
           nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
           pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
         }
@@ -459,7 +459,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
               c.cur_src += 2 * lo; c.cur_dst += 2 * lo;
               c.iter_count -= lo; c.rem_count -= lo;
               prof::add(prof::C_DMA_RUN_H, lo);
-              prof::add(dma_zone(zdst, false), z0 - c.iter_count);
+              if (prof::enabled) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
               continue;
             }
           }
@@ -471,12 +471,12 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
             cost = rc.next(c); if (a9) cost <<= 1; used += cost;
             ps += 2; pd += 2;
           }
-          prof::add(dma_zone(zdst, false), z0 - c.iter_count);
+          if (prof::enabled) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
           continue;
         }
         no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
       }
-      prof::add(prof::C_DMA_SLOW_H, 1); prof::add(dma_zone(c.cur_dst, false), 1);
+      prof::add(prof::C_DMA_SLOW_H, 1); if (prof::enabled) prof::add(dma_zone(c.cur_dst, false), 1);
       bus.dma_write16(c.cpu, c.cur_dst, bus.dma_read16(c.cpu, c.cur_src));
     }
     const u32 step = word ? 4 : 2;
@@ -505,11 +505,21 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
 
 u32 Dma::run(Cpu cpu, u32 budget) {
   u32 used = 0;
-  for (int n = 0; n < 4 && used < budget; ++n) {
-    Channel& c = channel(cpu, n);
-    if (c.running) used += run_channel(c, budget - used);
-  }
+  do {
+    for (int n = 0; n < 4 && used < budget; ++n) {
+      Channel& c = channel(cpu, n);
+      if (c.running) used += run_channel(c, budget - used);
+    }
+    // A bulk cart transfer re-triggers its channel from inside run_channel
+    // (the next word is there as soon as the last was read): keep going in
+    // this share instead of ending the slice per word.
+  } while (used < budget && cart_running(cpu));
   return used;
+}
+
+bool Dma::cart_running(Cpu cpu) const {
+  for (int n = 0; n < 4; ++n) { const Channel& c = channel(cpu, n); if (c.running && (c.start_mode == MODE9_CART || c.start_mode == MODE7_CART)) return true; }
+  return false;
 }
 
 

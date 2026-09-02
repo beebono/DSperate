@@ -111,6 +111,7 @@ private:
   bool dbg_ = false;                     // DS_DEBUG_SPU: log control/key-on writes
   u64  mix_at_ = 0;                      // nominal time of the next sample
   u32  batch_ = 16;                      // samples per mix event (DS_SPU_BATCH)
+  u32  cap_batch_ = 1;                   // ... while a capture runs (DS_SPU_CAP_BATCH; 1 = a sample per event, the conservative default)
 
   static constexpr size_t RING_FRAMES = 16384;   // half a second
   std::array<s16, RING_FRAMES * 2> ring_{};

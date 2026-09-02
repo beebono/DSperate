@@ -87,14 +87,24 @@ struct Cart {
   u32 fifo[2] = {0, 0}; u32 fifo_head = 0;
   bool late = false;                        // FIFO was full; receive paused
   u64 next_word_at = 0;                     // when the next word lands (nominal, not a slice end)
-  bool event_armed = false;                 // a per-word Cart event is pending (DMA path only)
+  bool event_armed = false;                 // a per-word Cart event is pending (DMA path only); in bulk mode, the end event
+  bool bulk = false;                        // DS_CART_BULK: a DMA is taking the words as fast as it reads, one end event
 };
 
 // ARM9 hardware divider and square root unit (0x04000280-0x040002BF).
 struct MathUnit {
-  u16 divcnt = 0, sqrtcnt = 0;              // bit 15 busy; DIVCNT bit 14 division by zero
+  u16 divcnt = 0, sqrtcnt = 0;              // bit 15 (busy) is never stored: it is `pending && now < ready_at`; DIVCNT bit 14 division by zero
   u64 div_num = 0, div_den = 0, div_quot = 0, div_rem = 0;
   u64 sqrt_val = 0; u32 sqrt_res = 0;
+  // A started operation and when its result is due. The result is computed
+  // on the first read at or after that time, not by an event: a scheduled
+  // event cannot fire before the current slice ends (the running CPU's
+  // budget is never shortened), so the busy bit stayed set for the rest of
+  // the slice -- up to 2048 cycles at --quantum 0 against 36-68 on hardware
+  // -- and every game that polls DIVCNT/SQRTCNT spun on it. Time comparisons
+  // against sched.now() are cycle-exact inside a slice.
+  u64  div_ready_at = 0, sqrt_ready_at = 0;
+  bool div_pending = false, sqrt_pending = false;
 };
 
 class Io {
@@ -105,6 +115,9 @@ public:
 
   u32  read (Cpu cpu, u32 addr, u32 width);
   void write(Cpu cpu, u32 addr, u32 width, u32 value);
+  static bool census_on();   // DS_IO_CENSUS: a bypass around write() must keep counting
+  // The frontend's fast_load: cart DMA without the card's clock (cart_bulk_); DS_CART_BULK in the environment wins.
+  void set_cart_bulk(bool on);
 
   // IRQ lines.
   void request_irq(Cpu cpu, u32 bit);
@@ -154,7 +167,8 @@ public:
   u16  mic_sample() const;          // 12-bit ADC value after the PMIC amplifier
   void update_key_irq();
   u16 exmemcnt = 0;
-  u16 spicnt = 0; u8 spidata = 0;
+  u16 spicnt = 0; u8 spidata = 0;   // bit 7 never stored, see spi_busy()
+  u64 spi_ready_at = 0;
   SpiFirmware spi_fw; SpiTouch spi_tsc; SpiPower spi_pm;
   const s16* mic_ = nullptr; size_t mic_count_ = 0; u64 mic_start_ = 0;
   Rtc rtc;
@@ -183,6 +197,12 @@ public:
   MathUnit math;
   void div_start(); void div_done();
   void sqrt_start(); void sqrt_done();
+  // Compute a due result; compose the control register with its live busy bit.
+  void div_settle()  { if (math.div_pending  && nds_sched_now() >= math.div_ready_at)  div_done(); }
+  void sqrt_settle() { if (math.sqrt_pending && nds_sched_now() >= math.sqrt_ready_at) sqrt_done(); }
+  u16  divcnt_read()  { div_settle();  return static_cast<u16>(math.divcnt  | (math.div_pending  ? 0x8000 : 0)); }
+  u16  sqrtcnt_read() { sqrt_settle(); return static_cast<u16>(math.sqrtcnt | (math.sqrt_pending ? 0x8000 : 0)); }
+  u64  nds_sched_now() const;
 
   // Timers are sampled lazily from scheduler time.
   u16 timer_value(Cpu cpu, int idx);
@@ -190,6 +210,10 @@ public:
 
   // SPI transfer completion (scheduled).
   void spi_done();
+  // SPICNT bit 7 (busy) is time-derived like the divider's, for the same
+  // reason; the completion event is only armed when the SPI IRQ is enabled.
+  bool spi_busy() const { return nds_sched_now() < spi_ready_at; }
+  u16  spicnt_read() const { return static_cast<u16>(spicnt | (spi_busy() ? 0x0080 : 0)); }
 
 private:
   NDS& nds_;
@@ -224,6 +248,7 @@ private:
   void rtc_cmd_write(u8 value);
 
   void cart_write_romctrl(u32 value);
+  bool cart_bulk_ = false;   // DS_CART_BULK=1 or the frontend's fast_load, see cart_receive_word
   u32  cart_read_data();
   void cart_end_transfer();
   void cart_receive_word(u64 at);
