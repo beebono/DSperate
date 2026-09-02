@@ -303,11 +303,13 @@ name without its extension -- the ROM header's own title reads
 menu's cheats page underneath, so it scrolls, pages with the shoulder buttons
 and scrolls a name too long to fit.
 
-The tap is what arms it: the list goes up on the first frame where both
-screens are pure white, which is where the console's launch animation
-settles. Whiteness alone would not do, since the firmware boot has a white
-stretch of its own, and a tap that goes somewhere else in the DS menu drops
-the arm again after three seconds.
+A tap on the card panel is what arms it, and the list goes up once the launch
+animation has faded to white -- read from MASTER_BRIGHT rather than from the
+pixels, so the animation itself plays at full speed down the normal drawing
+path. Both halves are needed: the firmware boot has a white stretch of its
+own, and powering off from the settings fades to white in exactly the same
+way, but neither has a tap on the card in front of it. A tap that leads
+somewhere else in the menu drops the arm again after three seconds.
 
 The chosen game is direct-booted rather than firmware-booted a second time,
 which is both faster and better looking -- the loader's fade covers the

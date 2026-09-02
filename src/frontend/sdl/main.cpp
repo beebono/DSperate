@@ -242,15 +242,15 @@ std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
   return games;
 }
 
-// Both screens pure white: where the console's own launch animation settles,
-// and the cue the game picker waits for. Alpha is ignored -- the framebuffer
-// carries it set, but nothing here depends on that.
-bool screen_is_white(NDS& nds, int screen) {
-  const u32* fb = nds.gpu.framebuffer(screen);
-  for (u32 i = 0; i < ds::SCREEN_W * ds::SCREEN_H; ++i)
-    if ((fb[i] & 0x00FFFFFFu) != 0x00FFFFFFu) return false;
-  return true;
-}
+// Where the DS menu draws the Slot-1 card panel on the touch screen, and so
+// where a tap means "launch this card". Measured off the menu itself; the
+// panel's interior runs x 35..218, y 28..66, and this is that with a little
+// margin. PictoChat's panel starts around y 80, so there is room either side.
+//
+// A tap outside it is some other part of the menu -- the settings, which fade
+// to white on the way to powering off exactly as a launch does. Whiteness is
+// what raises the list, so without this the power-off fade raises it too.
+constexpr int kCardX0 = 30, kCardX1 = 224, kCardY0 = 22, kCardY1 = 72;
 
 // Everything keyed to which ROM is in the slot: where its battery save, its
 // states and screenshots and its cheats live, and which per-game .ini a
@@ -817,6 +817,7 @@ int main(int argc, char** argv) {
   if (launcher) VLOG("launcher: %zu games in %s\n", games.size(), cfg.str("paths.games").c_str());
   int launch_wait = -1;         // frames since the card was tapped; -1 = not armed
   bool pen_was_down = false;    // for the release edge that ends a tap
+  int  pen_x = -1, pen_y = -1;  // where it went down; a release parks the sample
   // How long a tap gets to turn into the launch's white. Measured at ~60
   // frames from the release; past this the tap was for something else in the
   // DS menu -- the settings, the calendar -- and the arm is simply dropped.
@@ -1254,28 +1255,11 @@ int main(int argc, char** argv) {
       // Raising the picker and raising the pause menu are the same stop: a
       // real, unscaled frame has just been presented and is in fb_, which is
       // what either page is drawn over.
-      bool raise = true;
-      if (launch_wait >= 0) {
-        // The launch has faded when both screens are pure white, and the
-        // loader's stub then spins on that white for as long as we like, so
-        // there is no hurry and no frame to miss.
-        const bool white = screen_is_white(nds, 0) && screen_is_white(nds, 1);
-        raise = white;
-        if (!white && launch_wait >= kLaunchWaitFrames) {
-          // The tap went somewhere else in the DS menu. Drop the arm rather
-          // than raise a list the player did not ask for; the next tap arms
-          // again.
-          launch_wait = -1;
-          VLOG("launcher: no launch after that tap\n");
-        }
-      }
-      if (raise) {
-        if (launch_wait >= 0) { launch_wait = -1; menu.open_games(); }
-        else { menu.set_slot(state_slot); refresh_slots(); menu.set_open(true); }
-        menu_dirty = true;
-        menu_ms = SDL_GetTicks();
-        set_paused(true);
-      }
+      if (launch_wait >= 0) { launch_wait = -1; menu.open_games(); }
+      else { menu.set_slot(state_slot); refresh_slots(); menu.set_open(true); }
+      menu_dirty = true;
+      menu_ms = SDL_GetTicks();
+      set_paused(true);
     }
     // The loader cart's picker: arm on a tap, raise the list on the white the
     // launch animation fades to.
@@ -1288,26 +1272,46 @@ int main(int argc, char** argv) {
     // touching the cart bus at all (measured: the Slot-1 log is byte
     // identical either side of the tap). Waiting for it would wait for ever.
     //
-    // A tap is enough because it is only ever half the test. Whiteness alone
-    // would not do -- the firmware boot has a white stretch of its own, at
-    // frames 62..136, long before any of this -- but that stretch has no tap
-    // in front of it. A tap that leads somewhere else in the DS menu simply
-    // times out below.
+    // A tap is enough because it is only ever half the test, and because it
+    // has to land on the card panel (kCardX0..): whiteness alone would not do
+    // -- the firmware boot has a white stretch of its own at frames 62..136,
+    // and powering off from the settings fades to white too -- but neither
+    // has a tap on the card in front of it. A tap that leads somewhere else
+    // in the menu times out below.
     if (launcher) {
+      // The calibration is normalised at load so an ADC reading is the pixel
+      // shifted left four (NDS::normalise_touch_calibration), and a release
+      // parks the sample rather than keeping it -- so the position has to be
+      // remembered while the pen is down.
       const bool pen_down = !(nds.io.extkeyin & (1u << 6));
-      if (launch_wait < 0 && (pen_was_down && !pen_down)) {
+      if (pen_down) { pen_x = nds.io.spi_tsc.x >> 4; pen_y = nds.io.spi_tsc.y >> 4; }
+      const bool on_card = pen_x >= kCardX0 && pen_x < kCardX1 && pen_y >= kCardY0 && pen_y < kCardY1;
+      if (launch_wait < 0 && pen_was_down && !pen_down && on_card) {
         launch_wait = 0;
-        VLOG("launcher: tapped; waiting for the launch to fade\n");
+        VLOG("launcher: card tapped; waiting for the launch to fade\n");
       } else if (launch_wait < 0 && nds.cart->launch_read()) {
         nds.cart->clear_launch_read();
         launch_wait = 0;
         VLOG("launcher: the card was launched; waiting for the fade\n");
       }
       pen_was_down = pen_down;
+      // Powering off from the settings pages fades to white as well. The
+      // frontend resets on that flag a few frames later, so drop the arm
+      // rather than raise a list over a console on its way out.
+      if (launch_wait >= 0 && nds.power_off) { launch_wait = -1; VLOG("launcher: powering off, not launching\n"); }
     }
-    // Waiting for the fade means presenting unscaled frames, which is the
-    // only path that leaves a picture in fb_ for the menu to sit on.
-    if (launch_wait >= 0) { ++launch_wait; pause_pending = true; }
+    // Stop only once the fade has actually finished. Asking the register
+    // rather than the pixels is what lets the animation play on the normal
+    // (scaled) path: a forced unscaled frame is needed only for the one frame
+    // the menu is drawn over, and pause_pending is what asks for that.
+    if (launch_wait >= 0) {
+      ++launch_wait;
+      if (nds.gpu.screens_forced_white()) pause_pending = true;
+      else if (launch_wait >= kLaunchWaitFrames) {
+        launch_wait = -1;
+        VLOG("launcher: no launch after that tap\n");
+      }
+    }
     const Uint64 t2 = SDL_GetPerformanceCounter();
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;

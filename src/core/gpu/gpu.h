@@ -198,6 +198,17 @@ public:
 
   Engine2D engine[2];
 
+  // Both screens forced to plain white by MASTER_BRIGHT: mode 1 (brightness
+  // up) at full factor on each engine, whatever they are drawing underneath.
+  // That is how the firmware's own fades end, and reading the register beats
+  // scanning two framebuffers for it -- the pixels are only white a frame
+  // later, and on the fast scaling path they are never in fb_ to scan at all.
+  bool screens_forced_white() const {
+    for (u16 mb : master_bright_g_)
+      if ((mb >> 14) != 1 || (mb & 0x1F) < 16) return false;
+    return true;
+  }
+
 private:
   NDS& nds_;
   u16 line_ = 0;
