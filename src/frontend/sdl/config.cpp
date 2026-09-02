@@ -182,6 +182,9 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 # chunky_threshold = 180        # extreme only: how far (luma, 0..255) an outlier must stand from the mean to win
 # chunky_cell = auto            # panel pixels per cell: auto (smallest of 4..16 dividing the screen; 4 on 640x480 =
                                 # 160x120 cells, an area-weighted box of 1.6 DS pixels each) | pair (2x2 DS pixels) | N
+# aa = false                    # 3D anti-aliasing (DISP3DCNT bit 4). Opt-in: off, the rasteriser draws
+                                # every frame as if the game had it off (no edge coverage, no pixel stack),
+                                # which is cheaper and looks like most emulators; true = hardware behaviour
 # accel = false                 # GPU renderer
 # vsync = true
 
@@ -200,6 +203,14 @@ R"(# DSperate settings. Command-line flags override this file, and two files
                                 # (Golden Sun -4%), less accurate: games that pace on the FIFO or the swap
                                 # wait see different timing (Dragon Ball Origins' intro desyncs). The old
                                 # DMA half is gone: untimed DMA measured worse everywhere.
+# cpu_oc = false                # "CPU OC": the recompiler prices every data access as main RAM at
+                                # translate time instead of looking the region's cost up per access.
+                                # Less accurate than timing_oc (timer-race titles drift); measure first.
+# fast_load = false             # a cart DMA takes ROM words as fast as it reads them instead of on the
+                                # card's clock, with one event per transfer for the done IRQ: fewer
+                                # scheduler slices on loading screens and streaming. May introduce
+                                # accuracy issues: the DMA's bus stall lands all at once, so games that
+                                # race the card (timing loops, mid-transfer polling) can behave differently.
 # idle_skip = 1                 # 0 | 1 | all, see README
 # fast_forward = false          # start fast-forwarding (the hotkeys toggle it)
 # ff_speed = 0                  # fast-forward cap as a multiple of real time; 0 = unlimited

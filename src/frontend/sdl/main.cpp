@@ -68,6 +68,9 @@ const char* kUsage =
     "  --interp        interpreter instead of the recompiler\n"
     "  --timing-oc     Timing OC: no GX FIFO, untimed geometry (faster, less accurate; DraStic's model).\n"
     "                  emu.timing_oc in the config\n"
+    "  --cpu-oc        CPU OC: recompiled data accesses priced as main RAM (less accurate); emu.cpu_oc\n"
+    "  --fast-load     cart DMA reads the card without its clock (may affect accuracy); emu.fast_load\n"
+    "  --aa / --no-aa  3D anti-aliasing on (hardware behaviour) or off; video.aa, off by default\n"
     "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
@@ -268,6 +271,10 @@ int main(int argc, char** argv) {
     else if (flag("--lockstep")) cli.set("emu.quantum", std::to_string(ds::LOCKSTEP_QUANTUM));
     else if (arg("--quantum")) cli.set("emu.quantum", argv[++i]);
     else if (flag("--timing-oc")) cli.set("emu.timing_oc", "true");
+    else if (flag("--cpu-oc")) cli.set("emu.cpu_oc", "true");
+    else if (flag("--fast-load")) cli.set("emu.fast_load", "true");
+    else if (flag("--aa")) cli.set("video.aa", "true");
+    else if (flag("--no-aa")) cli.set("video.aa", "false");
     // The two halves of Timing OC separately: they pull in opposite directions
     // on Golden Sun, so the bundled flag reads flat while neither half is.
     else if (flag("--help")) { std::fputs(kUsage, stderr); return 0; }
@@ -282,7 +289,7 @@ int main(int argc, char** argv) {
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "video.aa"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
   if (bios9.empty() || bios7.empty() || fw.empty()) { std::fprintf(stderr, "BIOS and firmware paths are needed (--bios9/--bios7/--firmware or [paths] in %s)\n", global_ini.c_str()); return 2; }
@@ -366,9 +373,12 @@ int main(int argc, char** argv) {
 
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
+  nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
+  nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
   nds.setup_direct_boot();
 #if DSPERATE_JIT
   if (jit && !ds::jit::attach(nds, true, true)) return 1;
+  if (jit && cfg.flag("emu.cpu_oc", false)) ds::jit::set_cpu_oc(true);   // see config.cpp; translate-time pricing, so before the first block
 #else
   (void)jit;
 #endif
@@ -425,6 +435,15 @@ int main(int argc, char** argv) {
         !display2.open("DSperate (bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
   } else { display.set_chunky(chunky != 0, chunky_cell); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; } }
+  // A single-screen layout shows one screen: the core skips the other's
+  // engine (Gpu::set_screen_visible). Every other layout, and dual-window,
+  // shows both.
+  auto apply_visibility = [&] {
+    const Disp::Layout& l = display.current_layout();
+    const bool single = !dual_window && l.mode == Disp::Mode::Single;
+    for (int s = 0; s < 2; ++s) nds.gpu.set_screen_visible(s, !single || s == l.primary);
+  };
+  apply_visibility();
 
   ds::sdl::Audio audio;
   if (audio_on) audio.open();
@@ -516,6 +535,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; ++i) if (layout_cycle[static_cast<size_t>(i)] == l.mode) { at = a == A::LayoutNext ? (i + 1) % n : (i + n - 1) % n; break; }
         l.mode = layout_cycle[static_cast<size_t>(at)];
         display.set_layout(l);
+        apply_visibility();
         std::fprintf(stderr, "layout: %s\n", Disp::mode_name(l.mode));
         if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.layout", Disp::mode_name(l.mode));
         break;
@@ -525,6 +545,7 @@ int main(int argc, char** argv) {
         Disp::Layout l = display.current_layout();
         l.primary = 1 - l.primary;
         display.set_layout(l);
+        apply_visibility();
         if (!game_ini.empty()) ds::sdl::Config::store(game_ini, "video.screen", l.primary ? "bottom" : "top");
         break;
       }

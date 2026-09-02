@@ -103,6 +103,7 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
 int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
+  const char* hide_screen = nullptr;
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
   // A whole 1800-frame dump is ~708 MB, so a window can be selected: the
   // frame-budget report below names the frames worth looking at.
@@ -117,6 +118,8 @@ int main(int argc, char** argv) {
 #endif
   TraceState ts;
   bool timing_oc = false;
+  bool no_aa = false;
+  bool cpu_oc = false;
   bool frames_given = false;
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
@@ -137,11 +140,14 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--interp")) jit9 = jit7 = false;          // interpreter for both CPUs
     else if (arg("--quantum")) quantum = std::atol(argv[++i]);                // CPU interleave in ARM9 cycles; 0 = event-bound (the frontends' mode)
     else if (flag("--timing-oc")) timing_oc = true;                          // no FIFO + untimed geometry (DraStic's model); see Gpu3D::set_timing_oc
+    else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
+    else if (flag("--cpu-oc")) cpu_oc = true;                                // INEXACT: JIT data accesses priced as main RAM at translate time; see jit::set_cpu_oc
     // Split A/B knobs: the bundled flag above is three separate changes.
 
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
     else if (!std::strcmp(argv[i], "--jit7")) { jit9 = false; jit7 = true; }
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
+    else if (arg("--hide-screen")) hide_screen = argv[++i];                 // top | bottom: the engine on it skips its drawing (Gpu::set_screen_visible); its half of the dump goes stale
     // Frames before N are run but left out of the statistics. A --load-state
     // starts cold: every translated block was dropped with the old run, the
     // texture cache is empty and the host caches hold the loader's data, so
@@ -172,6 +178,7 @@ int main(int argc, char** argv) {
               "");
 #endif
   ds::NDS nds;
+  if (hide_screen) nds.gpu.set_screen_visible(!std::strcmp(hide_screen, "bottom") ? 1 : 0, false);
   if (bios9 && bios7 && fw) {
     if (!nds.load_bios(bios9, bios7, fw)) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
     nds.reset();
@@ -181,6 +188,7 @@ int main(int argc, char** argv) {
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(timing_oc);
+  nds.gpu3d.renderer().set_aa(!no_aa);
 
   if (rom && direct) nds.setup_direct_boot();
   // A recording made with a save present only replays if the save is there:
@@ -199,8 +207,9 @@ int main(int argc, char** argv) {
   }
 #if DSPERATE_JIT
   if ((jit9 || jit7) && !ds::jit::attach(nds, jit9, jit7)) return 1;
+  if ((jit9 || jit7) && cpu_oc) ds::jit::set_cpu_oc(true);
 #else
-  (void)jit9; (void)jit7;
+  (void)jit9; (void)jit7; (void)cpu_oc;
 #endif
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
   if (const char* w = std::getenv("DS_WATCH")) nds.bus.enable_watch(static_cast<ds::u32>(std::strtoul(w, nullptr, 16)));
