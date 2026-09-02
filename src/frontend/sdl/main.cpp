@@ -576,6 +576,37 @@ int main(int argc, char** argv) {
   int slot_shown = 0;                                        // frames left to show the slot digit
   // The pause menu (menu.h) and the two screen copies it is composited into.
   ds::sdl::Menu menu;
+  menu.set_cheats(&nds.cheats.codes, &cheat_set.groups);
+  // Which cheats are on is remembered per game, next to the save states, as
+  // one code name per line. Names rather than indices: a database update
+  // renumbers everything, and a name that no longer exists is simply dropped.
+  const std::string cheats_on_path = cheat_set.codes.empty() ? std::string()
+                                   : states_dir + "/" + std::string(nds.cart ? nds.cart->header().game_code : "NONE", 4) + ".cheats";
+  auto load_enabled = [&] {
+    if (cheats_on_path.empty()) return;
+    FILE* f = std::fopen(cheats_on_path.c_str(), "rb");
+    if (!f) return;
+    char line[512];
+    size_t on = 0;
+    while (std::fgets(line, sizeof line, f)) {
+      std::string want(line);
+      while (!want.empty() && (want.back() == '\n' || want.back() == '\r')) want.pop_back();
+      if (want.empty()) continue;
+      for (ds::cheat::Code& c : nds.cheats.codes)
+        if (!c.is_note() && c.name == want) { c.enabled = true; ++on; }
+    }
+    std::fclose(f);
+    if (on) std::fprintf(stderr, "cheats: %zu enabled from %s\n", on, cheats_on_path.c_str());
+  };
+  auto save_enabled = [&] {
+    if (cheats_on_path.empty()) return;
+    FILE* f = std::fopen(cheats_on_path.c_str(), "wb");
+    if (!f) { std::fprintf(stderr, "cheats: cannot write %s\n", cheats_on_path.c_str()); return; }
+    for (const ds::cheat::Code& c : nds.cheats.codes)
+      if (c.enabled && !c.is_note()) std::fprintf(f, "%s\n", c.name.c_str());
+    std::fclose(f);
+  };
+  load_enabled();
   std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
   bool menu_dirty = false;      // the menu screens need compositing and presenting again
   // Pausing waits for one more presented, *unscaled* frame. The fast scaling
@@ -614,7 +645,12 @@ int main(int argc, char** argv) {
       using A = ds::sdl::Action;
       switch (a) {
       case A::Pause:
-        if (paused) { state_slot = menu.slot(); menu.set_open(false); set_paused(false); }
+        if (paused) {
+          state_slot = menu.slot();
+          if (menu.cheats_dirty()) { save_enabled(); menu.clear_cheats_dirty(); }
+          menu.set_open(false);
+          set_paused(false);
+        }
         else pause_pending = true;
         break;
       case A::VolumeUp: audio.set_volume(audio.volume() + 10); audio.set_muted(false); std::fprintf(stderr, "volume %d%%\n", audio.volume()); break;
@@ -680,7 +716,12 @@ int main(int argc, char** argv) {
       if (const u32 presses = menu.open() ? input.take_menu_presses() : 0u; presses) {
         switch (menu.input(presses)) {
         case Menu::Result::None: break;
-        case Menu::Result::Resume: state_slot = menu.slot(); menu.set_open(false); set_paused(false); break;
+        case Menu::Result::Resume:
+          state_slot = menu.slot();
+          if (menu.cheats_dirty()) { save_enabled(); menu.clear_cheats_dirty(); }
+          menu.set_open(false);
+          set_paused(false);
+          break;
         // Both carry the same guards as the save-state hotkeys: a replay must
         // stay the run it recorded, and a recording is the inputs from boot,
         // which a load would leave unreplayable.

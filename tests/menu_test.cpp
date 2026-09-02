@@ -2,6 +2,7 @@
 // The pause menu's navigation and the drawing's bounds.
 #include "frontend/sdl/menu.h"
 #include "core/io/io.h"
+#include "core/cheat/database.h"
 #include "check.h"
 
 #include <algorithm>
@@ -138,6 +139,172 @@ void test_dim() {
   CHECK(px[2] == 0xFF402010);   // alpha kept, every channel halved
 }
 
+// --- the cheats page -------------------------------------------------------
+
+// A small list with a note, an ordinary group and an exclusive one.
+struct Fixture {
+  std::vector<ds::cheat::Code> codes;
+  std::vector<ds::cheat::Group> groups;
+  Fixture() {
+    groups.push_back({"Misc", "", false});
+    groups.push_back({"Difficulty", "", true});
+    auto add = [&](const char* name, int group, bool note) {
+      ds::cheat::Code c;
+      c.name = name;
+      c.group = group;
+      if (!note) c.words = {0x02000000, 1};
+      codes.push_back(c);
+    };
+    add("(M) note", 0, true);      // 0
+    add("Infinite Lives", 0, false);  // 1
+    add("Infinite Coins", 0, false);  // 2
+    add("Easy", 1, false);            // 3
+    add("Normal", 1, false);          // 4
+    add("Hard", 1, false);            // 5
+  }
+};
+
+// Reaching the page: the root row exists only when a database matched.
+void open_cheats(Menu& m) {
+  m.set_open(true);
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_DOWN));    // SAVE, LOAD, SLOT, CHEATS
+  m.input(press(B::BTN_A));
+}
+
+void test_cheats_row_hidden_without_codes() {
+  Menu m;
+  m.set_open(true);
+  // With no cheats the root page is five rows and the fourth is RESUME.
+  m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN));
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::Resume);
+  // Empty is the same as absent.
+  std::vector<ds::cheat::Code> none;
+  std::vector<ds::cheat::Group> no_groups;
+  m.set_cheats(&none, &no_groups);
+  m.set_open(true);
+  m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN));
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::Resume);
+}
+
+// With codes the row appears, and the rows after it shift down by one.
+void test_cheats_row_shifts_the_rest() {
+  Fixture f;
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  m.set_open(true);
+  m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                        // CHEATS: opens a page, no result
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::None);   // and B comes back to it
+  m.input(press(B::BTN_DOWN));
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::Resume); // RESUME is now the fifth
+}
+
+// A is a toggle, and only codes can be selected -- not headings, not notes.
+void test_cheat_toggle() {
+  Fixture f;
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  open_cheats(m);
+  CHECK(!m.cheats_dirty());
+  // The first selectable line is the first real code, not the heading above
+  // it and not the note before it.
+  m.input(press(B::BTN_A));
+  CHECK(f.codes[1].enabled);
+  CHECK(!f.codes[0].enabled);      // the note was never selectable
+  CHECK(m.cheats_dirty());
+  m.clear_cheats_dirty();
+  m.input(press(B::BTN_A));        // and A again turns it off
+  CHECK(!f.codes[1].enabled);
+  CHECK(m.cheats_dirty());
+}
+
+// In a group the database marks as alternatives, only one may be on.
+void test_exclusive_group() {
+  Fixture f;
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  open_cheats(m);
+  // Down to "Easy" (codes 1, 2, then the Difficulty heading is skipped).
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+  CHECK(f.codes[3].enabled);
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));        // "Normal"
+  CHECK(f.codes[4].enabled);
+  CHECK(!f.codes[3].enabled);      // which turned "Easy" off
+  // The ordinary group is unaffected by any of it.
+  CHECK(!f.codes[1].enabled && !f.codes[2].enabled);
+}
+
+// Turning one off does not turn a sibling on.
+void test_exclusive_off_is_not_a_switch() {
+  Fixture f;
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  open_cheats(m);
+  m.input(press(B::BTN_DOWN)); m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));        // Easy on
+  m.input(press(B::BTN_A));        // Easy off again
+  CHECK(!f.codes[3].enabled && !f.codes[4].enabled && !f.codes[5].enabled);
+}
+
+// The selection stops at the ends instead of wrapping: a list of thousands
+// is not one to wrap by accident.
+void test_cheat_navigation_clamps() {
+  Fixture f;
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  open_cheats(m);
+  for (int i = 0; i < 20; ++i) m.input(press(B::BTN_UP));
+  m.input(press(B::BTN_A));
+  CHECK(f.codes[1].enabled);       // still the first code
+  m.clear_cheats_dirty();
+  for (int i = 0; i < 50; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+  CHECK(f.codes[5].enabled);       // and the last
+}
+
+// The page must stay on screen however far down the list it is scrolled.
+void test_cheats_draw_bounds() {
+  Fixture f;
+  // A list long enough to scroll, with names long enough to need truncating.
+  for (int i = 0; i < 200; ++i) {
+    ds::cheat::Code c;
+    c.name = "A very long cheat name that will not fit across the panel " + std::to_string(i);
+    c.group = i % 3 == 0 ? 0 : 1;
+    c.words = {0x02000000, 1};
+    f.codes.push_back(c);
+  }
+  const u32 w = ds::SCREEN_W, h = ds::SCREEN_H;
+  std::vector<u32> fb((w + 2) * (h + 2), 0xDEADBEEF);
+  Menu m;
+  m.set_cheats(&f.codes, &f.groups);
+  open_cheats(m);
+  for (int step = 0; step < 210; ++step) {
+    std::fill(fb.begin(), fb.end(), 0xDEADBEEF);
+    m.draw(ds::sdl::Blit{fb.data() + (w + 2) + 1, w + 2, h, nullptr});
+    for (u32 x = 0; x < w + 2; ++x) CHECK(fb[x] == 0xDEADBEEF);
+    for (u32 x = 0; x < w + 2; ++x) CHECK(fb[(h + 1) * (w + 2) + x] == 0xDEADBEEF);
+    for (u32 y = 0; y < h + 2; ++y) CHECK(fb[y * (w + 2)] == 0xDEADBEEF);
+    for (u32 y = 0; y < h + 2; ++y) CHECK(fb[y * (w + 2) + w + 1] == 0xDEADBEEF);
+    m.input(press(B::BTN_DOWN));
+  }
+}
+
+// An empty page draws rather than dividing by zero on the scroll bar.
+void test_cheats_draw_empty() {
+  std::vector<ds::cheat::Code> none;
+  std::vector<ds::cheat::Group> no_groups;
+  std::vector<u32> fb(ds::SCREEN_W * ds::SCREEN_H, 0);
+  Menu m;
+  m.set_cheats(&none, &no_groups);
+  m.set_open(true);
+  m.draw(ds::sdl::Blit{fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr});
+}
+
 } // namespace
 
 int main() {
@@ -149,6 +316,14 @@ int main() {
   test_draw_bounds();
   test_text_metrics();
   test_dim();
+  test_cheats_row_hidden_without_codes();
+  test_cheats_row_shifts_the_rest();
+  test_cheat_toggle();
+  test_exclusive_group();
+  test_exclusive_off_is_not_a_switch();
+  test_cheat_navigation_clamps();
+  test_cheats_draw_bounds();
+  test_cheats_draw_empty();
   std::printf("menu: ok\n");
   return 0;
 }

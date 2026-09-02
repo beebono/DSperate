@@ -213,7 +213,25 @@ slot list on screen, which is what a handheld with no keyboard needs. It
 draws over the held frame on the top screen, dims both to show the machine
 is stopped, and is driven by the DS buttons: up/down to move, left/right to
 change the slot in place, A to choose, B to go back or resume. Slots that
-already hold a state are marked, so a save says what it would overwrite. A state is the whole machine at a
+already hold a state are marked, so a save says what it would overwrite.
+
+### Cheats
+
+Action Replay codes, read from a `usrcheat.dat` database -- the format the
+published DS cheat collections come in. Put one beside the ROM or in the
+config directory (or name it with `[paths] cheats`) and the entry matching
+the ROM's game code and header checksum is loaded, so a game with several
+revisions gets the right one. Nothing is enabled by loading it.
+
+The pause menu grows a **Cheats** page listing them under the database's own
+headings, with the shoulder buttons paging through the long ones -- some
+games have thousands. A is a toggle; a group the database marks as
+alternatives (a difficulty, a character) allows only one at a time. What you
+turn on is remembered per game, next to the save states.
+
+Codes run once a frame from the ARM7's VBlank IRQ, which is where the real
+cartridge hooks itself. `dsperate` (the CLI) has `--cheats <file>`,
+`--list-cheats` and `--cheat <name|#N>` for the same thing without a UI. A state is the whole machine at a
 frame boundary (~5.5 MB, uncompressed: RAM, VRAM, both CPUs, every
 peripheral, the geometry engine's polygon RAM and the rasterised 3D frame)
 and loads only with the same ROM; the battery save is written alongside it so
