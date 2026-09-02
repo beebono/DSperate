@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <memory>
+#include <vector>
 
 namespace ds { struct CpuContext; }
 
@@ -87,7 +88,26 @@ public:
   // PU map for the ARM9: per 4 KB, bit 4 = data cacheable, bit 6 = code cacheable.
   std::unique_ptr<u8[]> pu_map;
 
+  // The PU state pu_map was last built from (cp15_update_pu_map): with it, a
+  // PU write only re-derives the pages inside the regions that changed instead
+  // of rebuilding and comparing the whole 1 M-page map. Invalid after reset().
+  struct PuMemo { bool valid = false; u32 ctl = 0, dc = 0, cc = 0, region[8] = {}; } pu_memo;
+
+  // Retime dependency set for the recompiler. A translation bakes at most two
+  // bytes of a 4 KB entry: c[0] (code fetch cost: its own pages, a static
+  // branch target's refill) and c[2] (N32 load: a pc-relative literal). Every
+  // other cost is read at run time. update_cpu9 flags the pages where one of
+  // those bytes actually changed; the JIT kills only the blocks that depend on
+  // a flagged page, then calls retime_clear(). Flags are sticky across the
+  // several update_cpu9 calls of one notify (cp15_update_pu_map, update_tcm).
+  static constexpr u8 RETIME_CODE = 1, RETIME_DATA = 2;
+  u8 retime_flag(u32 page) const { return retime_flags_[page]; }
+  const std::vector<u32>& retime_pages() const { return retime_list_; }
+  void retime_clear() { for (u32 p : retime_list_) retime_flags_[p] = 0; retime_list_.clear(); }
+
 private:
+  std::unique_ptr<u8[]> retime_flags_;   // 0x100000, RETIME_* bits
+  std::vector<u32> retime_list_;         // pages with a non-zero flag
   std::unique_ptr<u8[]> bus9_;     // 0x40000 * 8
   std::unique_ptr<u8[]> regions9_; // 0x40000
   // [0, BUS7_BYTES) the raw ARM7 bus table, then the precomputed cost table.

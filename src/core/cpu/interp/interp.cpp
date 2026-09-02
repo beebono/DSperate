@@ -174,13 +174,15 @@ void run(CpuContext& cpu) {
   if (cpu.halted) { cpu.hot.cycle_budget = -1; return; }
   const bool a9 = cpu.which == Cpu::ARM9;
 
+  // DS_DEBUG_CYCLES=1: budget before every instruction (engine lockstep
+  // debugging). Read outside the loop: a function-local static is an acquire
+  // load and a guard test on every use.
+  static const bool debug_cycles = std::getenv("DS_DEBUG_CYCLES") != nullptr;
   // Each handler charges its own cycles (cpu_cycles.h) at the point melonDS
   // does; the loop only computes the ARM9 prefetch cost and advances r15.
   while (cpu.hot.cycle_budget > 0) {
     cpu.data_cycles = 0;
     cpu.jumped = false;
-    // DS_DEBUG_CYCLES=1: budget before every instruction (engine lockstep debugging).
-    static const bool debug_cycles = std::getenv("DS_DEBUG_CYCLES") != nullptr;
     if (debug_cycles) std::fprintf(stderr, "[cyc%d] %08x %d\n", a9 ? 9 : 7, cpu.hot.regs[15], cpu.hot.cycle_budget);
     if (cpu.thumb()) {
       const u32 pc = cpu.hot.regs[15] - 4;

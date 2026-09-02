@@ -13,13 +13,17 @@ constexpr u32 CACHE_CODE = 3, CACHE_DATA = 3;   // cycles for a cached fetch/acc
 
 Timing::Timing()
     : pu_map(new u8[0x100000]), bus9_(new u8[0x40000 * 8]), regions9_(new u8[0x40000]),
-      tim7_(new u8[COST7_OFFSET + COST7_BYTES]), regions7_(new u8[0x20000]), cpu9_(new u8[0x100000 * 8]) {
+      tim7_(new u8[COST7_OFFSET + COST7_BYTES]), regions7_(new u8[0x20000]), cpu9_(new u8[0x100000 * 8]),
+      retime_flags_(new u8[0x100000]) {
+  std::memset(retime_flags_.get(), 0, 0x100000);
   reset();
 }
 
 void Timing::reset() {
   cost7_ready_ = false;   // the set_region7 calls below rebuild once, at the end
   std::memset(pu_map.get(), 0, 0x100000);
+  pu_memo = PuMemo{};
+  retime_clear();
   set_region9(0x00000000, 0xFFFFFFFF, REGION_NONE, 32, 1, 1);
   set_region9(0xFFFF0000, 0xFFFFFFFF, REGION_BIOS, 32, 1, 1);
   set_region9(0x02000000, 0x03000000, REGION_MAIN_RAM, 16, 8, 1);
@@ -154,11 +158,17 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
   // DS_DEBUG_TIMING=1: log every rebuild (each one also drops every translated block).
   static const bool debug = std::getenv("DS_DEBUG_TIMING") != nullptr;
   if (debug) std::fprintf(stderr, "[timing] update_cpu9 %08x-%08x ctl %08x dtcm %08x itcm %08x pu %08x/%08x\n", start, end, cpu.cp15_control, cpu.cp15_dtcm, cpu.cp15_itcm, cpu.pu_data_cacheable, cpu.pu_code_cacheable);
+  // Stores ([5..7]): the ARM946E-S data cache does not allocate on write, so
+  // a store to a cacheable page that misses goes out through the write
+  // buffer at bus speed; only the TCMs are free. DS_STORE_BUS=0 keeps the
+  // old pricing (stores as cache hits) for comparison.
+  static const bool store_bus = [] { const char* e = std::getenv("DS_STORE_BUS"); return !e || std::atoi(e) != 0; }();
   const u32 first = start >> 12, last = (end == 0xFFFFFFFF) ? 0x100000 : (end >> 12);
   for (u32 i = first; i < last; ++i) {
     const u8 pu = pu_map[i];
     const u8* b = &bus9_[(i >> 2) * 8];
     u8* c = &cpu9_[i * 8];
+    const u8 old_code = c[0], old_data = c[2];
     const u32 addr = i << 12;
     const bool itcm = addr < cpu.itcm_size;
     const bool dtcm = (addr & cpu.dtcm_mask) == cpu.dtcm_base;
@@ -166,14 +176,15 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
     if (itcm || dtcm) { c[1] = 1; c[2] = 1; c[3] = 1; }
     else if (pu & 0x10) { c[1] = CACHE_DATA; c[2] = CACHE_DATA; c[3] = 1; }
     else { c[1] = static_cast<u8>(b[0] << 1); c[2] = static_cast<u8>(b[2] << 1); c[3] = static_cast<u8>(b[3] << 1); }
-    // Stores ([5..7]): the ARM946E-S data cache does not allocate on write, so
-    // a store to a cacheable page that misses goes out through the write
-    // buffer at bus speed; only the TCMs are free. DS_STORE_BUS=0 keeps the
-    // old pricing (stores as cache hits) for comparison.
-    static const bool store_bus = [] { const char* e = std::getenv("DS_STORE_BUS"); return !e || std::atoi(e) != 0; }();
     c[4] = c[0];
     if (!(itcm || dtcm) && (pu & 0x10) && store_bus) { c[5] = static_cast<u8>(b[0] << 1); c[6] = static_cast<u8>(b[2] << 1); c[7] = static_cast<u8>(b[3] << 1); }
     else { c[5] = c[1]; c[6] = c[2]; c[7] = c[3]; }
+    // Only the bytes a translation can have baked count as a retime.
+    const u8 f = static_cast<u8>((c[0] != old_code ? RETIME_CODE : 0) | (c[2] != old_data ? RETIME_DATA : 0));
+    if (f && (retime_flags_[i] & f) != f) {
+      if (!retime_flags_[i]) retime_list_.push_back(i);
+      retime_flags_[i] |= f;
+    }
   }
   if (notify) notify_cpu9(cpu);
 }

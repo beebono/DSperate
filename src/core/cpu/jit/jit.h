@@ -53,6 +53,11 @@ void flush_all();
 // NDS::trace before executing, exactly as the interpreter does.
 void set_trace(bool on);
 
+// --cpu-oc: price every data access at a translate-time main-RAM constant
+// instead of looking the page's cost up at run time. INEXACT (frame hashes
+// move on every scene); opt-in only. Flushes both CPUs when it changes.
+void set_cpu_oc(bool on);
+
 // DS_JIT_DENSITY: zero the executed-density counters (not the translations
 // themselves), so a run can exclude the frames that only warm the code cache.
 void density_reset();

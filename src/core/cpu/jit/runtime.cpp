@@ -463,25 +463,38 @@ void emit_stubs(Runtime& rt) {
     e.str_w(1, R_CTX, OFF_CPSR);
     e.and_imm(2, 0, ~1u);                   // a
     if (c == 0) {
-      // ARM9 refill: ARM a: cost(a,B)+cost(a+4,S); Thumb: a&2 ? cost(a-2,B)+cost(a+2,S) : cost(a,B)
-      size_t thumb = e.tbnz_fwd(0, 0);
-      emit_fetch_cost9(e, 2, 3, 4, true);
-      e.add_imm(5, 2, 4);
-      emit_fetch_cost9(e, 5, 6, 4, false);
-      e.add_reg(3, 3, 6);
-      size_t done = e.b_fwd();
-      e.bind(thumb);
-      size_t odd = e.tbnz_fwd(2, 1);
-      emit_fetch_cost9(e, 2, 3, 4, true);
-      size_t done2 = e.b_fwd();
-      e.bind(odd);
-      e.sub_imm(5, 2, 2);
-      emit_fetch_cost9(e, 5, 3, 4, true);
-      e.add_imm(5, 2, 2);
-      emit_fetch_cost9(e, 5, 6, 4, false);
-      e.add_reg(3, 3, 6);
-      e.bind(done);
-      e.bind(done2);
+      // ARM9 refill: ARM a: cost(a,B)+cost(a+4,S); Thumb: a&2 ? cost(a-2,B)+cost(a+2,S) : cost(a,B).
+      // Branch-free: the three shapes are one formula. With T = bit 0 of w0
+      // and odd = bit 1 of a (clear for ARM, whose a is word aligned):
+      //   first  = a - 2*odd            (B fetch)
+      //   second = a + 4 - 2*T          (S fetch, dropped when T && !odd)
+      // The old form took a data-dependent branch per state and one inside
+      // every S fetch (the 0xFF cache-line test); the second page byte is
+      // simply loaded as well -- same line as the first unless the pair
+      // crosses a 4 KB page -- and selected. Flags are free here (x17).
+      e.and_imm(4, 0, 1);                       // T
+      e.ubfx(5, 2, 1, 1);                       // odd
+      e.sub_reg(3, 2, 5, LSL, 1);               // first
+      e.lsr_imm(3, 3, 12);
+      e.add_reg(3, R_TIM, 3, LSL, 3, true);
+      e.ldrb(3, 3, 0);
+      e.movz(6, 3);
+      e.cmp_imm(3, 0xFF);
+      e.csel(3, 6, 3, EQ);                      // cost(first, B): 0xFF -> 3
+      e.add_imm(7, 2, 4);
+      e.sub_reg(7, 7, 4, LSL, 1);               // second
+      e.lsr_imm(1, 7, 12);
+      e.add_reg(1, R_TIM, 1, LSL, 3, true);
+      e.ldrb(1, 1, 0);
+      e.tst_imm(7, 0x1F);
+      e.movz(7, 1);
+      e.csel(7, 6, 7, EQ);                      // line-aligned ? 3 : 1
+      e.cmp_imm(1, 0xFF);
+      e.csel(1, 7, 1, EQ);                      // cost(second, S)
+      e.bic_reg(4, 4, 5);                       // T && !odd: no second fetch
+      e.cmp_imm(4, 0);
+      e.csel(1, ZR, 1, NE);
+      e.add_reg(3, 3, 1);
     } else {
       // ARM7 refill: t = timing7[a >> 15]; Thumb: t0 + t1; ARM: t2 + t3
       e.lsr_imm(4, 2, 15);
@@ -515,6 +528,7 @@ static std::map<u32, u64> retrans;             // guest pc -> translations
 static std::map<u64, u64> trans_by_frame;      // frame -> translations (first-time + re)
 static std::map<u64, u64> retrans_by_frame;    // frame -> retranslations only
 static u64 inval = 0, killed = 0, trans = 0, frames_seen = 0, range_miss = 0, resets = 0;
+static u64 retime_calls = 0, retime_killed = 0;   // ARM9 timing-table rebuilds and the blocks they killed
 // Lead-time census: for each retranslation, guest time between the page's
 // last invalidating write and the translate -- the window a pre-translator
 // seeded at write time would have had. Buckets in ARM9 cycles
@@ -536,6 +550,9 @@ static void report() {
   std::fprintf(stderr, "[churn] frames %llu arena resets %llu invalidations %llu blocks killed %llu translations %llu | code-page stores: silent %llu changed %llu, changed-but-no-block %llu\n",
                (unsigned long long)frames_seen, (unsigned long long)resets, (unsigned long long)inval, (unsigned long long)killed, (unsigned long long)trans,
                (unsigned long long)mem::code_store_stats.silent, (unsigned long long)mem::code_store_stats.changed, (unsigned long long)range_miss);
+  std::fprintf(stderr, "[churn] retimes %llu (%.2f/frame) blocks killed by retimes %llu (%.1f/frame)\n",
+               (unsigned long long)retime_calls, frames_seen ? static_cast<double>(retime_calls) / static_cast<double>(frames_seen) : 0.0,
+               (unsigned long long)retime_killed, frames_seen ? static_cast<double>(retime_killed) / static_cast<double>(frames_seen) : 0.0);
   top(writers, "writers (pc of the store / DMA start)", 15, pk);
   top(victims_by_page, "invalidated guest pages (2 KB)", 15, pa);
   top(retrans, "retranslated block pcs", 20, pa);
@@ -701,8 +718,45 @@ void reset_arena() {
   r.stats.flushes++;
 }
 
+// The ARM9 timing table was rebuilt (PU / TCM / EXMEMCNT write). A block bakes
+// only the code-fetch byte of its own pages and its static branch target's,
+// and the N32 byte of its pc-relative literals' pages (Block::dep_*); every
+// other cost is read from the live table. So only the blocks whose recorded
+// pages had that byte change are killed -- the rest are still the translation
+// the new table would produce. Parked translations and the pre-translation
+// worker's output keep the old rule: dropped whole (they carry no
+// dependency check on revival beyond the region stamp, which a PU write does
+// not bump).
 void on_timing_changed(CpuContext& cpu) {
-  if (cpu.jit) invalidate_cpu(*static_cast<JitCpu*>(cpu.jit));
+  if (!cpu.jit) return;
+  JitCpu& jc = *static_cast<JitCpu*>(cpu.jit);
+  mem::Timing& t = cpu.nds->bus.timing();
+  if (churn::on()) { static bool reg = (std::atexit(churn::report), true); (void)reg; }
+  u64 killed = 0;
+  if (g_rt.retime_all) {   // DS_JIT_RETIME_ALL: the old rule, for the census
+    for (Block* b : jc.all_blocks) if (!b->dead) ++killed;
+    t.retime_clear();
+    invalidate_cpu(jc);
+  } else {
+    pretx::purge();
+    if (!t.retime_pages().empty()) {
+      for (Block* b : jc.all_blocks) {
+        if (b->dead) continue;
+        bool hit = b->dep_overflow;
+        for (u32 i = 0; i < b->ndep && !hit; ++i) hit = (t.retime_flag(b->dep_page[i]) & b->dep_kind[i]) != 0;
+        if (!hit) continue;
+        remove_from_page_lists(b);
+        kill_block(jc, b);
+        ++killed;
+      }
+    }
+    t.retime_clear();
+    jc.parked.clear();
+    if (killed) jc.ctx->hot.alerts |= ALERT_INVALIDATED;
+  }
+  prof::add(prof::C_JIT_INVALIDATE_CPU, 1);
+  prof::add(prof::C_JIT_INVALIDATE_CPU_KILLED, killed);
+  if (churn::on()) { churn::retime_calls++; churn::retime_killed += killed; churn::frames_seen = cpu.nds->frame_count; }
 }
 
 } // namespace
@@ -1292,6 +1346,7 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     r.hist = std::getenv("DS_JIT_HIST") != nullptr;
     r.density = std::getenv("DS_JIT_DENSITY") != nullptr;
     r.fastcost = std::getenv("DS_JIT_FASTCOST") != nullptr;
+    r.retime_all = std::getenv("DS_JIT_RETIME_ALL") != nullptr;
     r.nocsel  = std::getenv("DS_JIT_NOCSEL") != nullptr;
     r.nocost7 = std::getenv("DS_JIT_NOCOST7") != nullptr;
     if (const char* cp = std::getenv("DS_JIT_COSTPROBE")) r.costprobe = std::atoi(cp);
@@ -1340,6 +1395,7 @@ void detach(NDS& nds) {
 void flush(CpuContext& cpu) { if (cpu.jit) invalidate_cpu(*static_cast<JitCpu*>(cpu.jit)); }
 void flush_all() { reset_arena(); }
 void set_trace(bool on) { if (g_rt.trace != on) { g_rt.trace = on; for (JitCpu& jc : g_rt.cpus) if (jc.ctx) invalidate_cpu(jc); } }
+void set_cpu_oc(bool on) { if (g_rt.cpu_oc != on) { g_rt.cpu_oc = on; for (JitCpu& jc : g_rt.cpus) if (jc.ctx) invalidate_cpu(jc); } }
 const Stats& stats() { return g_rt.stats; }
 
 static double ex_total_pct(unsigned long long v, unsigned long long tot) {

@@ -3,6 +3,7 @@
 #include "core/cpu/cp15.h"
 #include "core/nds.h"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 
@@ -14,41 +15,94 @@ namespace ds {
 // 7 has the highest priority.
 void cp15_update_pu_map(CpuContext& cpu);
 static void update_pu_map(CpuContext& cpu) { cp15_update_pu_map(cpu); }
+namespace {
+// One PU region as the map sees it: [start, start + size) in 4 KB pages and
+// the cacheability bits it paints, or `on` false.
+struct PuRegion { bool on; u32 start, size; u8 m; };
+PuRegion decode_region(u32 ctl, u32 dc, u32 cc, u32 rgn, int n) {
+  PuRegion r{};
+  if (!(rgn & 1)) return r;
+  const int size_bits = static_cast<int>((rgn >> 1) & 0x1F) - 11;   // in 4 KB pages
+  r.size = size_bits <= 0 ? 1 : (size_bits >= 20 ? 0x100000 : (1u << size_bits));
+  r.start = ((rgn >> 12) / r.size) * r.size;
+  if ((ctl & (1u << 2)) && ((dc >> n) & 1)) r.m |= 0x10;
+  if ((ctl & (1u << 12)) && ((cc >> n) & 1)) r.m |= 0x40;
+  r.on = true;
+  return r;
+}
+bool same_region(const PuRegion& a, const PuRegion& b) {
+  return a.on == b.on && (!a.on || (a.start == b.start && a.size == b.size && a.m == b.m));
+}
+} // namespace
+
 void cp15_update_pu_map(CpuContext& cpu) {
   mem::Timing& t = cpu.nds->bus.timing();
   u8* map = t.pu_map.get();
-  static std::unique_ptr<u8[]> fresh(new u8[0x100000]);
-  u8* next = fresh.get();
   const u32 ctl = cpu.cp15_control;
-  if (!(ctl & 1)) {                                   // PU disabled: caches apply everywhere if enabled
-    u8 m = 0; if (ctl & (1u << 2)) m |= 0x10; if (ctl & (1u << 12)) m |= 0x40;
-    std::memset(next, m, 0x100000);
-  } else {
-    std::memset(next, 0, 0x100000);
-    for (int n = 0; n < 8; ++n) {
-      const u32 rgn = cpu.pu_region[n];
-      if (!(rgn & 1)) continue;
-      const int size_bits = static_cast<int>((rgn >> 1) & 0x1F) - 11;   // in 4 KB pages
-      const u32 size = size_bits <= 0 ? 1 : (size_bits >= 20 ? 0x100000 : (1u << size_bits));
-      const u32 start = ((rgn >> 12) / size) * size;
-      u8 m = 0;
-      if ((ctl & (1u << 2)) && ((cpu.pu_data_cacheable >> n) & 1)) m |= 0x10;
-      if ((ctl & (1u << 12)) && ((cpu.pu_code_cacheable >> n) & 1)) m |= 0x40;
-      for (u32 i = start; i < start + size && i < 0x100000; ++i) next[i] = m;
-    }
-  }
-  // Diff in 256-page (1 MB of guest space) chunks; rebuild the runs that differ.
+  mem::Timing::PuMemo& memo = t.pu_memo;
   bool changed = false;
-  constexpr u32 CHUNK = 256;
-  u32 run_start = 0; bool in_run = false;
-  for (u32 i = 0; i <= 0x100000; i += CHUNK) {
-    const bool differs = i < 0x100000 && std::memcmp(map + i, next + i, CHUNK) != 0;
-    if (differs) { if (!in_run) { run_start = i; in_run = true; } std::memcpy(map + i, next + i, CHUNK); }
-    else if (in_run) {
-      t.update_cpu9(cpu, run_start << 12, i == 0x100000 ? 0xFFFFFFFF : (i << 12), false);
-      changed = true; in_run = false;
+
+  if ((ctl & 1) && memo.valid && (memo.ctl & 1)) {
+    // PU on before and after: the map only differs inside the regions whose
+    // decode changed -- the old extent (its pages fall back to whatever now
+    // covers them) and the new one. Everything outside is untouched, so
+    // neither the 1 MB rebuild nor the 1 MB compare is needed; a typical
+    // write (one region's cacheability, one 4 MB region) visits ~1 k pages.
+    PuRegion cur[8], prev[8];
+    for (int n = 0; n < 8; ++n) {
+      cur[n] = decode_region(ctl, cpu.pu_data_cacheable, cpu.pu_code_cacheable, cpu.pu_region[n], n);
+      prev[n] = decode_region(memo.ctl, memo.dc, memo.cc, memo.region[n], n);
+    }
+    auto value = [&](u32 page) -> u8 {   // highest-numbered enabled region wins, as the full build below
+      for (int n = 7; n >= 0; --n) if (cur[n].on && page - cur[n].start < cur[n].size) return cur[n].m;
+      return 0;
+    };
+    auto rescan = [&](const PuRegion& r) {
+      if (!r.on) return;
+      const u32 end = std::min<u32>(r.start + r.size, 0x100000);
+      u32 run_start = 0; bool in_run = false;
+      for (u32 i = r.start; i <= end; ++i) {
+        const bool differs = i < end && map[i] != value(i);
+        if (differs) { if (!in_run) { run_start = i; in_run = true; } map[i] = value(i); }
+        else if (in_run) {
+          t.update_cpu9(cpu, run_start << 12, i == 0x100000 ? 0xFFFFFFFF : (i << 12), false);
+          changed = true; in_run = false;
+        }
+      }
+    };
+    for (int n = 0; n < 8; ++n) {
+      if (same_region(cur[n], prev[n])) continue;
+      rescan(prev[n]);   // a page visited twice compares equal the second time
+      rescan(cur[n]);
+    }
+  } else {
+    // PU toggled, or disabled (caches apply everywhere if enabled), or the
+    // memo is stale (reset): build the whole map and diff it in 1 MB chunks.
+    static std::unique_ptr<u8[]> fresh(new u8[0x100000]);
+    u8* next = fresh.get();
+    if (!(ctl & 1)) {
+      u8 m = 0; if (ctl & (1u << 2)) m |= 0x10; if (ctl & (1u << 12)) m |= 0x40;
+      std::memset(next, m, 0x100000);
+    } else {
+      std::memset(next, 0, 0x100000);
+      for (int n = 0; n < 8; ++n) {
+        const PuRegion r = decode_region(ctl, cpu.pu_data_cacheable, cpu.pu_code_cacheable, cpu.pu_region[n], n);
+        if (r.on) for (u32 i = r.start; i < r.start + r.size && i < 0x100000; ++i) next[i] = r.m;
+      }
+    }
+    constexpr u32 CHUNK = 256;
+    u32 run_start = 0; bool in_run = false;
+    for (u32 i = 0; i <= 0x100000; i += CHUNK) {
+      const bool differs = i < 0x100000 && std::memcmp(map + i, next + i, CHUNK) != 0;
+      if (differs) { if (!in_run) { run_start = i; in_run = true; } std::memcpy(map + i, next + i, CHUNK); }
+      else if (in_run) {
+        t.update_cpu9(cpu, run_start << 12, i == 0x100000 ? 0xFFFFFFFF : (i << 12), false);
+        changed = true; in_run = false;
+      }
     }
   }
+  memo.valid = true; memo.ctl = ctl; memo.dc = cpu.pu_data_cacheable; memo.cc = cpu.pu_code_cacheable;
+  for (int n = 0; n < 8; ++n) memo.region[n] = cpu.pu_region[n];
   if (changed) t.notify_cpu9(cpu);
 }
 

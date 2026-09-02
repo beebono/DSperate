@@ -371,13 +371,43 @@ private:
   }
 
   // ---- cycles -----------------------------------------------------------------------------
+  // Record that this translation baked byte `kind` (mem::Timing::RETIME_*) of
+  // the ARM9 entry for `addr`'s 4 KB page: the retime path kills the block
+  // only when one of these bytes changes (Block::dep_*). Blocks are at most
+  // 64 instructions, so the set is small; a fuller one dies conservatively.
+  void note_dep(u32 addr, u8 kind) const {
+    const u32 page = addr >> 12;
+    for (u32 i = 0; i < blk_.ndep; ++i) if (blk_.dep_page[i] == page) { blk_.dep_kind[i] |= kind; return; }
+    if (blk_.ndep < Block::DEP_MAX) { blk_.dep_page[blk_.ndep] = page; blk_.dep_kind[blk_.ndep] = kind; ++blk_.ndep; }
+    else blk_.dep_overflow = true;
+  }
   u32 numC(u32 addr) const {
     if (a9_) {
       const u32 pf = addr + (thumb_ ? 4 : 8);
       if (thumb_ && (pf & 2)) return 0;
+      note_dep(pf, mem::Timing::RETIME_CODE);
       return fetch_cost9(cpu_, pf, false);
     }
     return t7_[thumb_ ? 1 : 3];
+  }
+  // The whole CD/CDI charge for a data cost known at translate time (a
+  // pc-relative literal, or every access under --cpu-oc). Mirrors
+  // emit_charge_data_body exactly; the ARM7 arm takes the data as main RAM,
+  // which only --cpu-oc reaches.
+  u32 const_charge(u32 nd, bool cdi) const {
+    const s32 d = static_cast<s32>(nd);
+    if (rt().fastcost) return (a9_ ? numC(pc_) : numC_nonseq7()) + nd;   // DS_JIT_FASTCOST's inexact numC + numD
+    if (a9_) { const s32 nc = static_cast<s32>(numC(pc_)); return max3(nc + d - 6, nc, d); }
+    const s32 nc = static_cast<s32>(numC_nonseq7());
+    if (code_region7_ == 0x02) return static_cast<u32>(d + nc);
+    const s32 ncx = nc + (cdi ? 1 : 0);
+    return max3(ncx, d, d + ncx - 3);
+  }
+  // --cpu-oc: the data cost of a main-RAM access of this width, from the
+  // tables as they stand at translate time (see Runtime::cpu_oc).
+  u32 oc_data_cost(bool word, bool seq, bool store) const {
+    if (a9_) return cpu_.timing9[0x02000000u >> 12][(store ? 4 : 0) + (seq ? 3 : (word ? 2 : 1))];
+    return cpu_.timing7[0x02000000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
   }
   u32 numC_nonseq7() const { return t7_[thumb_ ? 0 : 2]; }
   u32 numC_internal() const { return a9_ ? numC(pc_) : numC_nonseq7(); }   // base cost of a CI instruction
@@ -576,7 +606,14 @@ private:
 
   // ---- branches ----------------------------------------------------------------------------------
   void emit_branch_static(u32 target, bool to_thumb, bool refill) {
-    if (refill) add_pending(refill_cycles(cpu_, target, to_thumb));
+    if (refill) {
+      if (a9_) {   // the pages refill_cycles reads (cpu_cycles.h)
+        if (!to_thumb) { note_dep(target, mem::Timing::RETIME_CODE); note_dep(target + 4, mem::Timing::RETIME_CODE); }
+        else if (target & 2) { note_dep(target - 2, mem::Timing::RETIME_CODE); note_dep(target + 2, mem::Timing::RETIME_CODE); }
+        else note_dep(target, mem::Timing::RETIME_CODE);
+      }
+      add_pending(refill_cycles(cpu_, target, to_thumb));
+    }
     flush_pending();
     if (to_thumb != thumb_) {
       e().ldr_w(SCRATCH0, R_CTX, OFF_CPSR);
@@ -771,11 +808,20 @@ private:
   // The hot path issues the timing-table load and the address arithmetic
   // between the page-entry load and its first use, and the charge between
   // the data load and its use, so the in-order core stalls on neither.
-  void emit_single(Mem m, u32 wdata, u32 dst, bool wb, u32 wb_reg, bool cdi) {
-    flush_pending();
+  // `const_nd` >= 0: the data cost is a translate-time constant (a
+  // pc-relative literal's page, or --cpu-oc), so the whole charge joins the
+  // block's static cycles and the access emits no cost lookup at all. The
+  // charge lands before the access instead of after it; nothing observes the
+  // budget between the two (the strict-mode check is per instruction).
+  void emit_single(Mem m, u32 wdata, u32 dst, bool wb, u32 wb_reg, bool cdi, int const_nd = -1) {
     const bool word = is_word(m);
-    const int slot7 = cost7_slot(cdi, word);
+    if (rt().cpu_oc && const_nd < 0) const_nd = static_cast<int>(oc_data_cost(word, false, !is_load(m)));
+    const bool const_cost = const_nd >= 0;
+    if (const_cost) add_pending(const_charge(static_cast<u32>(const_nd), cdi));
+    flush_pending();
+    const int slot7 = const_cost ? -1 : cost7_slot(cdi, word);
     auto cost = [&] {
+      if (const_cost) return;
       if (slot7 < 0) { emit_data_cost(SCRATCH1, SCRATCH6, word, false, !is_load(m)); return; }
       e().lsr_imm(SCRATCH6, SCRATCH1, 15);
       e().add_reg(SCRATCH6, R_TIM, SCRATCH6, LSL, 5, true);
@@ -784,6 +830,7 @@ private:
     };
     auto charge = [&] {
       if (wb) e().mov(host_reg(wb_reg), SCRATCH7);
+      if (const_cost) return;
       if (slot7 < 0) { emit_charge_data(SCRATCH6, SCRATCH1, cdi); return; }
       flush_pending();
       e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH6);
@@ -880,18 +927,23 @@ private:
       }
       if (writeback) e().mov(host_reg(rn), SCRATCH7);
     }
-    // cost: N + (n - 1) S from the page's entry
-    emit_data_cost(SCRATCH1, SCRATCH6, true, false, !load);
-    if (n > 1) {
-      emit_data_cost(SCRATCH1, SCRATCH5, true, true, !load);
-      e().mov_imm(SCRATCH4, n - 1);
-      e().madd(SCRATCH6, SCRATCH5, SCRATCH4, SCRATCH6);
+    // cost: N + (n - 1) S from the page's entry (--cpu-oc: main RAM's, at translate time)
+    const bool oc = rt().cpu_oc;
+    u32 oc_nd = 0;
+    if (oc) oc_nd = oc_data_cost(true, false, !load) + (n - 1) * oc_data_cost(true, true, !load);
+    else {
+      emit_data_cost(SCRATCH1, SCRATCH6, true, false, !load);
+      if (n > 1) {
+        emit_data_cost(SCRATCH1, SCRATCH5, true, true, !load);
+        e().mov_imm(SCRATCH4, n - 1);
+        e().madd(SCRATCH6, SCRATCH5, SCRATCH4, SCRATCH6);
+      }
     }
     if (load && pc_in_list) {
       // The interpreter charges the CDI cost after the jump: the stub does it
       // from the new pc/state (w1 = numD, w2 = data address for the ARM7 rule).
       e().mov(SCRATCH2, SCRATCH1);
-      e().mov(SCRATCH1, SCRATCH6);
+      if (oc) e().mov_imm(SCRATCH1, oc_nd); else e().mov(SCRATCH1, SCRATCH6);
       emit_branch_indirect(SCRATCH0, interwork_pc, true);
       cold_begin(fail);
       emit_fallback(instr, true);
@@ -899,7 +951,8 @@ private:
       ended_ = true;
       return;
     }
-    emit_charge_data(SCRATCH6, SCRATCH1, load);
+    if (oc) { add_pending(const_charge(oc_nd, load)); flush_pending(); }
+    else emit_charge_data(SCRATCH6, SCRATCH1, load);
     const size_t join = hot_.size();
     cold_begin(fail);
     emit_fallback(instr, false);
@@ -1108,7 +1161,15 @@ void Translator::arm_ldr_str(u32 instr, AOp op) {
 
   if (l) {
     if (writeback) e().mov(host_reg(rn), SCRATCH7);   // before the load: with rd == rn the loaded value wins
-    emit_single(b ? Mem::Ld8 : Mem::Ld32, 0, host_reg(rd), false, 0, true);
+    // ldr rd, [pc, #imm] (ARM9): the literal's address, hence its page's N32
+    // cost, is known now. Baked; the block depends on that page's data byte.
+    int const_nd = -1;
+    if (a9_ && !b && op == AOp::LdrStrImm && rn == 15 && !writeback) {
+      const u32 addr = u ? pc_ + 8 + (instr & 0xFFF) : pc_ + 8 - (instr & 0xFFF);
+      note_dep(addr, mem::Timing::RETIME_DATA);
+      const_nd = cpu_.timing9[addr >> 12][2];
+    }
+    emit_single(b ? Mem::Ld8 : Mem::Ld32, 0, host_reg(rd), false, 0, true, const_nd);
   } else {
     u32 data = host_reg(rd);
     if (rd == 15) { e().mov_imm(SCRATCH0, pc_ + 12); data = SCRATCH0; }
@@ -1406,12 +1467,16 @@ void Translator::thumb_alu(u16 instr) {
 void Translator::thumb_ldr_str(u16 instr, TOp op) {
   Mem m;
   u32 rd;
+  int const_nd = -1;
   // effective address -> w1
   switch (op) {
   case TOp::LdrPcRel: {
     rd = (instr >> 8) & 7;
-    e().mov_imm(SCRATCH1, ((pc_ + 4) & ~3u) + ((instr & 0xFF) << 2));
+    const u32 addr = ((pc_ + 4) & ~3u) + ((instr & 0xFF) << 2);
+    e().mov_imm(SCRATCH1, addr);
     m = Mem::Ld32;
+    // ARM9: the literal's page is known, so its N32 cost is baked (see arm_ldr_str).
+    if (a9_) { note_dep(addr, mem::Timing::RETIME_DATA); const_nd = cpu_.timing9[addr >> 12][2]; }
     break;
   }
   case TOp::LdrStrReg: {
@@ -1444,7 +1509,7 @@ void Translator::thumb_ldr_str(u16 instr, TOp op) {
     break;
   }
   }
-  if (is_load(m)) emit_single(m, 0, host_reg(rd), false, 0, true);
+  if (is_load(m)) emit_single(m, 0, host_reg(rd), false, 0, true, const_nd);
   else emit_single(m, host_reg(rd), 0, false, 0, false);
 }
 
@@ -1636,6 +1701,9 @@ void Translator::translate_thumb(u16 instr) {
 bool Translator::run() {
   const u32 start = key_pc(key_);
   if (!a9_) { t7_ = cpu_.timing7[start >> 15]; code_region7_ = start >> 24; }
+  // --cpu-oc bakes main RAM's data costs into every access: not a page the
+  // dependency set tracks, so such a block dies on any retime.
+  if (rt().cpu_oc) blk_.dep_overflow = true;
 
   // Decode the straight-line run.
   u32 addr = start;

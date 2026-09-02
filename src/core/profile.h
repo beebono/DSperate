@@ -116,6 +116,11 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   // the stores could be unconditional. FULL8 is a whole 8-lane group; FULLPX
   // counts its pixels so the share can be read against resolved pixels.
   C_RK_FULL_OPAQUE, C_RK_FULL_OPAQUE_PX,
+  // JIT retimes (ARM9 timing-table rebuilds: PU / TCM / EXMEMCNT writes):
+  // calls, and the blocks each one killed because a byte they baked changed.
+  C_JIT_INVALIDATE_CPU, C_JIT_INVALIDATE_CPU_KILLED,
+  // Slices the ARM9 sat out with the geometry FIFO full (the 128-cycle drain poll).
+  C_SLICES_GX_STALLED,
   C_COUNT };
 // Unbounded on purpose: profile.cpp defines it with a deduced size and
 // static_asserts that size against C_COUNT. Declared as [C_COUNT] instead, a

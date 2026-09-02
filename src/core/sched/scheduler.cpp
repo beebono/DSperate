@@ -157,6 +157,7 @@ void Scheduler::count_slice(bool skipped, s64 slice) const {
   if (a9.halted && a7.halted) prof::add(prof::C_SLICES_BOTH_HALTED, 1);
   if (nds_.dma.any_running(Cpu::ARM9) || nds_.dma.any_running(Cpu::ARM7)) prof::add(prof::C_SLICES_DMA, 1);
   if (skipped) prof::add(prof::C_SLICES_SKIPPED, 1);
+  if (nds_.gpu3d.stalled()) prof::add(prof::C_SLICES_GX_STALLED, 1);
 
   // Cycle-weighted halt state: slice counts hide it, because the slices where
   // a CPU is awake are the ones the quantum keeps short.
@@ -291,7 +292,8 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
       if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which) || a9_gx_stalled(cpu)) return;
     }
     {
-      const auto t0 = std::chrono::steady_clock::now();
+      std::chrono::steady_clock::time_point t0;
+      if (prof::enabled) t0 = std::chrono::steady_clock::now();   // a vDSO call per slice otherwise
       run(cpu);
       if (prof::enabled) {
         const int ci = which == Cpu::ARM9 ? 0 : 1;

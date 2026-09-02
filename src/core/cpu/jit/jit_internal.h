@@ -118,6 +118,17 @@ struct Block {
   u64  stamp;
   u32  guest_copy_len;
   u8   guest_copy[GUEST_COPY_MAX];
+  // Timing-table dependencies (ARM9): the 4 KB pages whose entry this
+  // translation baked a byte from, with which byte (mem::Timing::RETIME_*).
+  // Code pages (the prefetch address of every instruction: up to two), the
+  // static branch target's refill pages (up to two) and the literal pages of
+  // pc-relative loads. A translation that needs more than fit sets
+  // `dep_overflow` and dies on every retime, as every block used to.
+  static constexpr u32 DEP_MAX = 8;
+  u32  dep_page[DEP_MAX];
+  u8   dep_kind[DEP_MAX];
+  u8   ndep;
+  bool dep_overflow;
 };
 
 // Direct-mapped branch-target cache, one per CPU, indexed by `(key >> 1)`.
@@ -212,6 +223,14 @@ struct Runtime {
   std::deque<DensitySlot> density_slots;
   bool hist = false;      // DS_JIT_HIST: histogram of fallback executions by pc
   bool fastcost = false;  // DS_JIT_FASTCOST: measurement knob (inexact data-cost arithmetic)
+  // --cpu-oc (jit::set_cpu_oc): INEXACT opt-in tier. No per-access timing
+  // lookup at all: every data access is priced at translate time as if it hit
+  // main RAM (the ARM9 CPU-table entry / ARM7 bus entry of 0x02000000 for its
+  // width), and the whole CD/CDI charge folds into the block's static cycles.
+  bool cpu_oc = false;
+  // DS_JIT_RETIME_ALL: a timing-table rebuild kills every ARM9 block (the old
+  // rule) instead of only the blocks that baked a changed byte. A/B knob.
+  bool retime_all = false;
   // DS_JIT_COSTPROBE_PART: which half of the per-access cost model the probe
   // duplicates -- 1 = the timing-table lookup, 2 = the combine arithmetic,
   // 3 (default) = both. Splits §A's price between the load and the maths.
