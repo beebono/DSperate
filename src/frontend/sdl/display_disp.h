@@ -24,15 +24,20 @@
 // its dummy video driver in this mode (main.cpp sets it before SDL_Init),
 // so no EGL window is ever created on fb0.
 //
-// What it does not do: the DE scaler filters, so the LCD grid, chunky and
-// seam modes (CPU scanline features) do not apply; only the vertical and
-// single layouts are laid out (two screens side by side in panel space, or
-// one filling it); and there is no touch (the A30 has none).
+// Layouts: the layer's source is a canvas in DS pixels laid out by
+// Display::layout() at the primary screen's native size -- stacked, side by
+// side, single, PiP, dominant: the same rectangles the SDL path uses, with
+// the canvas standing in for the window. A 1:1 view is a NEON rotate; a
+// smaller one (the PiP inset, the dominant layouts' secondary) is a box
+// downscale into a cached temporary and row copies. The scaler then fits the
+// whole canvas to the panel, which is what the layouts' own fit would have
+// done. One layer, because the A33 has one scaler: the driver accepts a
+// second layer in scaler mode but shows its source unscaled (seen on the
+// unit), so per-view layers are not an option.
 //
-// The ioctl ABI is libvdpau-sunxi's kernel-headers/drv_display.h (disp 1.5),
-// reproduced here in the subset used: ioctl(fd, cmd, unsigned long[4]) with
-// {screen, layer, &info}. The layer info layout was verified byte-for-byte
-// against the driver's own answer for the UI layer.
+// What it does not do: the DE scaler filters, so the LCD grid, chunky and
+// seam modes (CPU scanline features) do not apply; and there is no touch
+// (the A30 has none).
 #pragma once
 
 #include "core/types.h"
@@ -41,58 +46,73 @@
 #include <cstddef>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace ds::sdl {
 
 class DispOut {
 public:
-  static constexpr int BUFS = 3;
+  static constexpr int BUFS = 3, VIEWS = 2;
 
   // True when /dev/disp and /dev/fb0 open and a layer query answers: the
   // device runs a disp-1.5 kernel. Cheap, cached; safe to call before SDL_Init.
   static bool available();
 
   // rot: 0, 90, 180 or 270, the rotation that takes the DS layout onto the
-  // panel (DS_ROTATE on the spruce launcher: 270 on the A30). screens: 1 or
-  // 2, stacked in slot order. False leaves nothing changed on the device.
-  bool open(int rot, int screens, bool vsync);
+  // panel (DS_ROTATE on the spruce launcher: 270 on the A30). False leaves
+  // nothing changed on the device.
+  bool open(int rot, bool vsync);
   void close();
-
-  // The DS layout's own size in panel pixels, before rotation: what layout()
-  // and map_point() work in. The panel size, swapped for 90/270.
-  int logical_w() const { return (rot_ == 90 || rot_ == 270) ? panel_h_ : panel_w_; }
-  int logical_h() const { return (rot_ == 90 || rot_ == 270) ? panel_w_ : panel_h_; }
-  int screens() const { return screens_; }
-
   bool vsync() const { return vsync_; }
 
-  // Rotates each slot's 256x192 framebuffer into a free composite (null
-  // skips the slot, leaving it black) and flips the layer to it. Without
-  // vsync the flip is immediate. With vsync the flip and the refresh wait
-  // happen on the presenter thread: this returns as soon as the rotate is
-  // done, never blocking the emulation on the panel. A frame posted before
-  // the previous one reached the panel replaces it (the panel shows the
-  // newest; nothing waits), and the buffer being scanned out and the one
-  // latched for the next refresh are never written -- three buffers cover
-  // displayed + latched + the one being rotated into.
-  void present(const u32* const fb[2]);
+  // The canvas: the layout's natural size at scale 1 (Display::natural_size),
+  // in DS pixels before rotation. What layout() and map_point() work in;
+  // logical_w/h() report it. At most two screens' worth of pixels.
+  void set_canvas(int w, int h);
+  int  logical_w() const { return canvas_w_; }
+  int  logical_h() const { return canvas_h_; }
+
+  // View i's rectangle on the canvas (Display::layout()'s views_, in order:
+  // later views are drawn over earlier ones, so the PiP inset is last).
+  void set_view(int i, int x, int y, int w, int h, bool shown);
+
+  // Draws each view's 256x192 framebuffer (null skips the view) into a free
+  // composite and flips the layer to it. Without vsync the flip is
+  // immediate. With vsync the flip and the refresh wait happen on the
+  // presenter thread: this returns as soon as the composite is drawn, never
+  // blocking the emulation on the panel. A frame posted before the previous
+  // one reached the panel replaces it (the panel shows the newest; nothing
+  // waits), and the buffer being scanned out and the one latched for the
+  // next refresh are never written -- three buffers cover displayed +
+  // latched + the one being drawn.
+  void present(const u32* const fb[VIEWS]);
 
 private:
-  bool set_layer(u32 addr);
+  struct ViewRect { int x = 0, y = 0, w = 0, h = 0; bool shown = false; };
+  struct Dims { int w = 0, h = 0; };          // a composite's size (the canvas, rotated)
+  bool set_layer(u32 addr, Dims d);
+  void flip(int buf);
   void wait_vsync();
-  void fill_black(u32* buf);
+  void draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb);
   void presenter();
+  u32  buf_addr(int buf) const { return phys_ + static_cast<u32>(buf * buf_bytes_); }
+  u32* buf_ptr(int buf) const { return reinterpret_cast<u32*>(map_ + buf * buf_bytes_); }
 
   int  disp_ = -1, fb_ = -1;
   u8*  map_ = nullptr;
   size_t map_len_ = 0;
   u32  phys_ = 0;
   int  panel_w_ = 0, panel_h_ = 0;
-  int  rot_ = 0, screens_ = 0;
-  int  comp_w_ = 0, comp_h_ = 0;    // composite (source) size in pixels
-  size_t comp_bytes_ = 0;
+  int  rot_ = 0;
+  int  canvas_w_ = 0, canvas_h_ = 0;
+  size_t buf_bytes_ = 0;            // one composite's allocation (the largest canvas)
   int  layer_ = -1, ui_layer_ = -1;
   bool ui_was_enabled_ = false;
+  bool layer_enabled_ = false;      // our layer is on (enabled on the first flip)
+  ViewRect views_[VIEWS];
+  Dims dims_[BUFS];                 // what each buffer holds, set by present, read by flip
+  unsigned dirty_ = 0;              // buffers to black out before the next draw (canvas changed)
+  std::vector<u32> tmp_, tmp2_;     // cached temporaries for the downscaled views
   int  cur_ = 0;
   bool vsync_ = true;
   bool pan_blocks_ = true;          // FBIOPAN_DISPLAY waits for the refresh (measured once)
@@ -105,7 +125,7 @@ private:
   std::condition_variable cv_;
   int  displayed_ = 0;              // on the panel now
   int  latched_ = -1;               // flipped to, waiting for the refresh
-  int  pending_ = -1;               // rotated into, not yet flipped
+  int  pending_ = -1;               // drawn into, not yet flipped
   bool stop_ = false;
 };
 

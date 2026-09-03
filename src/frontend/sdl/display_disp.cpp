@@ -153,11 +153,10 @@ bool DispOut::available() {
 #endif
 }
 
-bool DispOut::open(int rot, int screens, bool vsync) {
+bool DispOut::open(int rot, bool vsync) {
 #if defined(__linux__)
   if (!available()) return false;
   if (rot != 0 && rot != 90 && rot != 180 && rot != 270) { std::fprintf(stderr, "disp: rotation %d not supported\n", rot); return false; }
-  if (screens < 1 || screens > 2) return false;
   disp_ = ::open("/dev/disp", O_RDWR | O_CLOEXEC);
   fb_ = ::open("/dev/fb0", O_RDWR | O_CLOEXEC);
   if (disp_ < 0 || fb_ < 0) { std::perror("disp: open"); close(); return false; }
@@ -167,12 +166,9 @@ bool DispOut::open(int rot, int screens, bool vsync) {
   panel_w_ = static_cast<int>(ioctl(disp_, CMD_GET_SCN_WIDTH, a));
   panel_h_ = static_cast<int>(ioctl(disp_, CMD_GET_SCN_HEIGHT, a));
   if (panel_w_ <= 0 || panel_h_ <= 0) { std::fprintf(stderr, "disp: no screen size\n"); close(); return false; }
-  rot_ = rot; screens_ = screens; vsync_ = vsync;
-  const bool turned = rot == 90 || rot == 270;
-  comp_w_ = turned ? H * screens : W;
-  comp_h_ = turned ? W : H * screens;
-  comp_bytes_ = static_cast<size_t>(comp_w_) * comp_h_ * sizeof(u32);
-  if (comp_bytes_ * BUFS > fix.smem_len) { std::fprintf(stderr, "disp: fb0 too small for %d composites\n", BUFS); close(); return false; }
+  rot_ = rot; vsync_ = vsync;
+  buf_bytes_ = static_cast<size_t>(W) * H * VIEWS * sizeof(u32);   // the largest canvas: two screens
+  if (buf_bytes_ * BUFS > fix.smem_len) { std::fprintf(stderr, "disp: fb0 too small for %d composites\n", BUFS); close(); return false; }
   map_len_ = fix.smem_len;
   void* m = mmap(nullptr, map_len_, PROT_READ | PROT_WRITE, MAP_SHARED, fb_, 0);
   if (m == MAP_FAILED) { std::perror("disp: mmap fb0"); map_ = nullptr; close(); return false; }
@@ -184,18 +180,21 @@ bool DispOut::open(int rot, int screens, bool vsync) {
   unsigned long hdl = 0;
   if (ioctl(fb_, FBIOGET_LAYER_HDL_0, &hdl) == 0) ui_layer_ = static_cast<int>(hdl);
   for (int l = 0; l < 4; ++l) if (l != ui_layer_) { layer_ = l; break; }
-  for (int b = 0; b < BUFS; ++b) fill_black(reinterpret_cast<u32*>(map_ + b * comp_bytes_));
+  for (auto& v : views_) v = ViewRect{};
+  for (auto& d : dims_) d = Dims{};
+  canvas_w_ = W; canvas_h_ = H;
+  dirty_ = (1u << BUFS) - 1;
+  const size_t n = buf_bytes_ / sizeof(u32);
+  for (int b = 0; b < BUFS; ++b) { u32* p = buf_ptr(b); for (size_t i = 0; i < n; ++i) p[i] = 0xFF000000u; }
 
   if (ui_layer_ >= 0) ui_was_enabled_ = layer_ioctl(disp_, CMD_LAYER_DISABLE, static_cast<unsigned>(ui_layer_), nullptr) == 0;
   cur_ = 0;
-  if (!set_layer(phys_)) { close(); return false; }
-  if (layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(layer_), nullptr) != 0) { std::perror("disp: LAYER_ENABLE"); close(); return false; }
   next_ns_ = now_ns();
   displayed_ = 0; latched_ = pending_ = -1; stop_ = false;
   if (vsync_) thread_ = std::thread([this] { presenter(); });
   return true;
 #else
-  (void)rot; (void)screens; (void)vsync;
+  (void)rot; (void)vsync;
   return false;
 #endif
 }
@@ -215,37 +214,104 @@ void DispOut::close() {
   if (map_) munmap(map_, map_len_);
   if (fb_ >= 0) ::close(fb_);
 #endif
-  disp_ = fb_ = -1; map_ = nullptr; map_len_ = 0; layer_ = ui_layer_ = -1; ui_was_enabled_ = false;
+  disp_ = fb_ = -1; map_ = nullptr; map_len_ = 0; layer_ = ui_layer_ = -1; ui_was_enabled_ = false; layer_enabled_ = false;
 }
 
-void DispOut::fill_black(u32* buf) {
-  // Opaque black: the layer is in global-alpha mode, but keep the pixels sane
-  // for anything that reads them back.
-  const size_t n = static_cast<size_t>(comp_w_) * comp_h_;
-  for (size_t i = 0; i < n; ++i) buf[i] = 0xFF000000u;
+void DispOut::set_canvas(int w, int h) {
+  if (w <= 0 || h <= 0 || static_cast<size_t>(w) * h > static_cast<size_t>(W) * H * VIEWS) return;
+  if (w == canvas_w_ && h == canvas_h_) return;
+  canvas_w_ = w; canvas_h_ = h;
+  dirty_ = (1u << BUFS) - 1;   // gaps between views must be black again
 }
 
-bool DispOut::set_layer(u32 addr) {
+void DispOut::set_view(int i, int x, int y, int w, int h, bool shown) {
+  if (i < 0 || i >= VIEWS) return;
+  views_[i] = ViewRect{x, y, w, h, shown};
+}
+
+bool DispOut::set_layer(u32 addr, Dims d) {
 #if defined(__linux__)
+  if (d.w <= 0 || d.h <= 0) return false;
   // Fit the composite to the panel, aspect kept, centred: the DE does the scale.
-  const double s = std::min(static_cast<double>(panel_w_) / comp_w_, static_cast<double>(panel_h_) / comp_h_);
-  const unsigned ww = static_cast<unsigned>(comp_w_ * s), wh = static_cast<unsigned>(comp_h_ * s);
+  const double s = std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h);
+  const unsigned ww = static_cast<unsigned>(d.w * s), wh = static_cast<unsigned>(d.h * s);
   DispLayerInfo info{};
   info.mode = LAYER_MODE_SCALER;
   info.pipe = 1; info.zorder = 0; info.alpha_mode = 1; info.alpha_value = 255; info.ck_enable = 0;
   info.screen_win = {static_cast<int>((panel_w_ - ww) / 2), static_cast<int>((panel_h_ - wh) / 2), ww, wh};
   info.fb.addr[0] = addr;
-  info.fb.size = {static_cast<unsigned>(comp_w_), static_cast<unsigned>(comp_h_)};
+  info.fb.size = {static_cast<unsigned>(d.w), static_cast<unsigned>(d.h)};
   info.fb.format = FORMAT_ARGB_8888;
-  info.fb.src_win = {0, 0, static_cast<unsigned>(comp_w_), static_cast<unsigned>(comp_h_)};
+  info.fb.src_win = {0, 0, static_cast<unsigned>(d.w), static_cast<unsigned>(d.h)};
   if (layer_ioctl(disp_, CMD_LAYER_SET_INFO, static_cast<unsigned>(layer_), &info) != 0) { std::perror("disp: LAYER_SET_INFO"); return false; }
+  if (!layer_enabled_) {
+    if (layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(layer_), nullptr) != 0) { std::perror("disp: LAYER_ENABLE"); return false; }
+    layer_enabled_ = true;
+  }
   return true;
 #else
-  (void)addr; return false;
+  (void)addr; (void)d; return false;
 #endif
 }
 
-void DispOut::present(const u32* const fb[2]) {
+void DispOut::flip(int buf) { set_layer(buf_addr(buf), dims_[buf]); }
+
+// One view into the composite. A 1:1 view takes the NEON rotate; any other
+// size is a box downscale (area average over the source block each output
+// pixel covers) into a cached temporary, rotated there, and copied in by
+// rows so the uncached panel memory sees whole lines.
+void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb) {
+  const bool turned = rot_ == 90 || rot_ == 270;
+  // The view's top-left in the composite: the same rotation the pixels get.
+  int cx, cy;
+  switch (rot_) {
+    case 270: cx = r.y; cy = canvas_w_ - (r.x + r.w); break;
+    case 90:  cx = canvas_h_ - (r.y + r.h); cy = r.x; break;
+    case 180: cx = canvas_w_ - (r.x + r.w); cy = canvas_h_ - (r.y + r.h); break;
+    default:  cx = r.x; cy = r.y; break;
+  }
+  u32* dst = comp + static_cast<size_t>(cy) * comp_w + cx;
+  if (r.w == W && r.h == H) {
+    switch (rot_) {
+      case 270: rot270(fb, dst, comp_w); break;
+      case 90:  rot90(fb, dst, comp_w); break;
+      case 180: rot180(fb, dst, comp_w); break;
+      default:  rot0(fb, dst, comp_w); break;
+    }
+    return;
+  }
+  if (r.w <= 0 || r.h <= 0 || r.w > W || r.h > H) return;
+  // Downscale, unrotated, into tmp_ (r.w x r.h).
+  tmp_.resize(static_cast<size_t>(r.w) * r.h);
+  for (int dy = 0; dy < r.h; ++dy) {
+    const int sy0 = dy * H / r.h, sy1 = std::max(sy0 + 1, (dy + 1) * H / r.h);
+    for (int dx = 0; dx < r.w; ++dx) {
+      const int sx0 = dx * W / r.w, sx1 = std::max(sx0 + 1, (dx + 1) * W / r.w);
+      unsigned rs = 0, gs = 0, bs = 0, n = 0;
+      for (int sy = sy0; sy < sy1; ++sy) for (int sx = sx0; sx < sx1; ++sx) {
+        const u32 p = fb[sy * W + sx];
+        rs += (p >> 16) & 0xFF; gs += (p >> 8) & 0xFF; bs += p & 0xFF; ++n;
+      }
+      tmp_[static_cast<size_t>(dy) * r.w + dx] = 0xFF000000u | ((rs / n) << 16) | ((gs / n) << 8) | (bs / n);
+    }
+  }
+  // Rotate into tmp2_ (tw x th) with the same mapping the 1:1 kernels use.
+  const int tw = turned ? r.h : r.w, th = turned ? r.w : r.h;
+  tmp2_.resize(static_cast<size_t>(tw) * th);
+  for (int py = 0; py < th; ++py) for (int px = 0; px < tw; ++px) {
+    int vx, vy;
+    switch (rot_) {
+      case 270: vx = r.w - 1 - py; vy = px; break;
+      case 90:  vx = py; vy = r.h - 1 - px; break;
+      case 180: vx = r.w - 1 - px; vy = r.h - 1 - py; break;
+      default:  vx = px; vy = py; break;
+    }
+    tmp2_[static_cast<size_t>(py) * tw + px] = tmp_[static_cast<size_t>(vy) * r.w + vx];
+  }
+  for (int py = 0; py < th; ++py) std::memcpy(dst + static_cast<size_t>(py) * comp_w, tmp2_.data() + static_cast<size_t>(py) * tw, static_cast<size_t>(tw) * sizeof(u32));
+}
+
+void DispOut::present(const u32* const fb[VIEWS]) {
 #if defined(__linux__)
   if (!map_) return;
   int buf;
@@ -254,34 +320,20 @@ void DispOut::present(const u32* const fb[2]) {
     if (pending_ >= 0) { buf = pending_; pending_ = -1; }   // not yet flipped: take it back and overwrite it (the panel skips that frame)
     else { buf = 0; while (buf == displayed_ || buf == latched_) ++buf; }
   } else buf = cur_ = (cur_ + 1) % BUFS;
-  u32* comp = reinterpret_cast<u32*>(map_ + buf * comp_bytes_);
-  for (int s = 0; s < screens_; ++s) {
-    // Slot s's top-left in the composite. 270 puts the DS's top edge on the
-    // panel's left edge, so the stack runs left to right; 90 runs the other
-    // way; 0 and 180 stack vertically (180 upside down, so reversed).
-    u32* dst;
-    switch (rot_) {
-      case 270: dst = comp + s * H; break;
-      case 90:  dst = comp + (screens_ - 1 - s) * H; break;
-      case 180: dst = comp + static_cast<size_t>((screens_ - 1 - s) * H) * comp_w_; break;
-      default:  dst = comp + static_cast<size_t>(s * H) * comp_w_; break;
-    }
-    if (!fb[s]) {
-      for (int y = 0; y < (rot_ == 90 || rot_ == 270 ? W : H); ++y)
-        for (int x = 0; x < (rot_ == 90 || rot_ == 270 ? H : W); ++x) dst[y * comp_w_ + x] = 0xFF000000u;
-      continue;
-    }
-    switch (rot_) {
-      case 270: rot270(fb[s], dst, comp_w_); break;
-      case 90:  rot90(fb[s], dst, comp_w_); break;
-      case 180: rot180(fb[s], dst, comp_w_); break;
-      default:  rot0(fb[s], dst, comp_w_); break;
-    }
+  const bool turned = rot_ == 90 || rot_ == 270;
+  const Dims d{turned ? canvas_h_ : canvas_w_, turned ? canvas_w_ : canvas_h_};
+  u32* comp = buf_ptr(buf);
+  if (dirty_ & (1u << buf)) {
+    const size_t n = static_cast<size_t>(d.w) * d.h;
+    for (size_t i = 0; i < n; ++i) comp[i] = 0xFF000000u;
+    dirty_ &= ~(1u << buf);
   }
+  for (int v = 0; v < VIEWS; ++v) if (fb[v] && views_[v].shown) draw_view(comp, d.w, views_[v], fb[v]);
+  dims_[buf] = d;
   if (thread_.joinable()) {
     { std::lock_guard<std::mutex> g(mu_); pending_ = buf; }
     cv_.notify_one();
-  } else set_layer(phys_ + static_cast<u32>(buf * comp_bytes_));
+  } else flip(buf);
 #else
   (void)fb;
 #endif
@@ -290,14 +342,15 @@ void DispOut::present(const u32* const fb[2]) {
 void DispOut::presenter() {
 #if defined(__linux__)
   // One flip per refresh: take the newest posted frame, flip to it, wait for
-  // the refresh, and only then is the buffer it replaced free again.
+  // the refresh, and only then is the buffer it replaced free again. The
+  // ioctls run outside the lock so a post never waits on them.
   std::unique_lock<std::mutex> lk(mu_);
   for (;;) {
     cv_.wait(lk, [this] { return stop_ || pending_ >= 0; });
     if (stop_) return;
     latched_ = pending_; pending_ = -1;
     lk.unlock();
-    set_layer(phys_ + static_cast<u32>(latched_ * comp_bytes_));
+    flip(latched_);
     wait_vsync();
     lk.lock();
     displayed_ = latched_; latched_ = -1;

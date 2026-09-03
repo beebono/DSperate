@@ -52,25 +52,20 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
 
-  // Display-engine tier: the hardware scales a DS-resolution composite, so
-  // there is no renderer and no scaling here at all; draw() rotates the
-  // framebuffers into the layer's source. Only the stacked and single layouts
-  // have a composite shape; anything else takes the SDL paths below.
+  // Display-engine tier: the hardware scales a DS-resolution canvas, so
+  // there is no renderer and no scaling here at all; the views are laid out
+  // on the canvas (the layout's natural size at scale 1) and draw() draws
+  // them into the layer's source.
   if (disp_wanted_ && only_screen_ < 0 && DispOut::available()) {
-    const bool single = layout_.mode == Mode::Single;
-    if (!single && layout_.mode != Mode::Vertical) {
-      std::fprintf(stderr, "disp: layout %s has no composite; using the SDL path\n", mode_name(layout_.mode));
-    } else {
-      int rot = 0;
-      if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
-      auto d = std::make_unique<DispOut>();
-      if (d->open(rot, single ? 1 : 2, vsync)) {
-        disp_ = std::move(d);
-        layout();
-        std::fprintf(stderr, "video: display-engine scaler, rot %d, %d screen%s, %s driver, vsync %s\n",
-                     rot, single ? 1 : 2, single ? "" : "s", SDL_GetCurrentVideoDriver(), vsync ? "on" : "off");
-        return true;
-      }
+    int rot = 0;
+    if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
+    auto d = std::make_unique<DispOut>();
+    if (d->open(rot, vsync)) {
+      disp_ = std::move(d);
+      layout();
+      std::fprintf(stderr, "video: display-engine scaler, rot %d, layout %s, %s driver, vsync %s\n",
+                   rot, mode_name(layout_.mode), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off");
+      return true;
     }
   }
 
@@ -210,6 +205,7 @@ void Display::close() {
 // stack 1.875 times, and rounding that down to 1 would waste most of the
 // screen.
 void Display::layout() {
+  if (disp_) { int cw = 0, ch = 0; natural_size(layout_, 1.0, cw, ch); disp_->set_canvas(cw, ch); }
   int w = 0, h = 0;
   if (!out_size(w, h)) return;
   const double sw = SCREEN_W, sh = SCREEN_H;
@@ -272,13 +268,14 @@ void Display::layout() {
     }
     case Mode::Count: break;
   }
+  if (disp_) for (int i = 0; i < nviews_; ++i) disp_->set_view(i, views_[i].rect.x, views_[i].rect.y, views_[i].rect.w, views_[i].rect.h, views_[i].shown);
 }
 
 void Display::draw(const u32* const fb[SCREENS]) {
   if (disp_) {
-    // Slots in view order: views_[0] is the primary, the top of the stack.
-    const u32* slots[SCREENS] = {nullptr, nullptr};
-    for (int i = 0; i < nviews_ && i < disp_->screens(); ++i) slots[i] = views_[i].shown ? fb[views_[i].screen] : nullptr;
+    // In view order: view i is layer i, later views on top.
+    const u32* slots[DispOut::VIEWS] = {nullptr, nullptr};
+    for (int i = 0; i < nviews_ && i < DispOut::VIEWS; ++i) slots[i] = views_[i].shown ? fb[views_[i].screen] : nullptr;
     disp_->present(slots);
     return;
   }
@@ -307,21 +304,7 @@ void Display::toggle_fullscreen() {
 
 void Display::set_layout(const Layout& l) {
   if (only_screen_ >= 0) return;
-  if (disp_) {
-    // The composite has two shapes; switching between them reopens the
-    // layer. Other modes keep the current one and say so.
-    if (l.mode != Mode::Vertical && l.mode != Mode::Single) { std::fprintf(stderr, "disp: layout %s has no composite; kept %s\n", mode_name(l.mode), mode_name(layout_.mode)); return; }
-    const int screens = l.mode == Mode::Single ? 1 : 2;
-    if (screens != disp_->screens()) {
-      int rot = 0;
-      if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
-      disp_->close();
-      if (!disp_->open(rot, screens, disp_->vsync())) { std::fprintf(stderr, "disp: reopen failed\n"); disp_.reset(); }
-    }
-    layout_ = l;
-    layout();
-    return;
-  }
+  if (disp_) { layout_ = l; layout(); return; }
   const Mode was = layout_.mode;
   layout_ = l;
   if (!fullscreen_ && was != l.mode) {
