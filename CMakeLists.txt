@@ -16,6 +16,7 @@ option(DSPERATE_NEON     "Build NEON renderer kernels (AArch64 hosts only)"     
 option(DSPERATE_TESTS    "Build unit tests"                                       ON)
 option(DSPERATE_HEADLESS "Build the headless frontend"                            ON)
 option(DSPERATE_SDL      "Build the SDL2 frontend (off when SDL2 is not found)"   ON)
+option(DSPERATE_WAYLAND  "Build the Wayland dmabuf scanout tier (off when SDL2 has no Wayland)" ON)
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
   set(DSPERATE_HOST_AARCH64 ON)
@@ -57,6 +58,28 @@ if(DSPERATE_SDL)
     endif()
   endif()
   if(SDL2_FOUND)
+    # The dmabuf tier reads SDL_SysWMinfo's wl member, which SDL_syswm.h only
+    # declares when SDL2 itself was built with its Wayland driver.  The
+    # handheld SDL2s are fbdev/KMSDRM builds with none, so the tier is dropped
+    # there at configure time rather than failing to compile.  libwayland is
+    # never linked either way (wl_dyn.h dlopens it).
+    if(DSPERATE_WAYLAND)
+      include(CheckCXXSourceCompiles)
+      set(CMAKE_REQUIRED_INCLUDES "${SDL2_INCLUDE_DIRS}")
+      if(TARGET SDL2::SDL2)
+        get_target_property(_sdl2_inc SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
+        if(_sdl2_inc)
+          list(APPEND CMAKE_REQUIRED_INCLUDES ${_sdl2_inc})
+        endif()
+      endif()
+      check_cxx_source_compiles("#include <SDL2/SDL_syswm.h>
+        int main() { SDL_SysWMinfo i; return i.info.wl.display ? 1 : 0; }" DSPERATE_SDL2_HAS_WAYLAND)
+      unset(CMAKE_REQUIRED_INCLUDES)
+      if(NOT DSPERATE_SDL2_HAS_WAYLAND)
+        message(STATUS "DSperate: SDL2 built without Wayland; the dmabuf scanout tier is not built")
+        set(DSPERATE_WAYLAND OFF)
+      endif()
+    endif()
     add_subdirectory(src/frontend/sdl)
   else()
     message(STATUS "DSperate: SDL2 not found; the SDL frontend is not built")
