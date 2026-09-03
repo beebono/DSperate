@@ -209,6 +209,7 @@ R"(# DSperate settings. Command-line flags override this file, and two files
                                 # every frame as if the game had it off (no edge coverage, no pixel stack),
                                 # which is cheaper and looks like most emulators; true = hardware behaviour
 # accel = false                 # GPU renderer
+# disp = auto                   # display-engine scaler layer (Miyoo A30 class): auto | true | false
 # vsync = true
 # fps = false                   # show a frames-per-second counter in the top-right corner of the primary
 #                               # screen -- the one shown alone, large or dominant, so it follows `screen`

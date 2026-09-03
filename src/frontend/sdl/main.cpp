@@ -77,6 +77,8 @@ const char* kUsage =
     "                  mode (dominant colour, mean when all differ) | tl (top-left pixel) | min | max\n"
     "  --chunky-cell C panel pixels per chunky cell: auto (default; the smallest of 4..16 that divides the\n"
     "                  screen, 4 on a 640x480 panel = 160x120 cells) | pair (2x2 DS pixels) | N\n"
+    "  --disp / --no-disp  present through the display engine's scaler layer (Miyoo A30 class\n"
+    "                  devices; the default is auto: wherever /dev/disp answers). video.disp\n"
     "  --accel         GPU renderer; the default is software, which measures faster\n"
     "                  on the handhelds (the GL driver's threads cost more than the scale)\n"
     "  --no-audio      run without sound (frames are paced by the clock)\n"
@@ -453,6 +455,8 @@ int main(int argc, char** argv) {
     else if (arg("--chunky-cell")) cli.set("video.chunky_cell", argv[++i]);
     else if (arg("--seam")) cli.set("video.seam", argv[++i]);
     else if (flag("--accel")) cli.set("video.accel", "true");
+    else if (flag("--disp")) cli.set("video.disp", "true");
+    else if (flag("--no-disp")) cli.set("video.disp", "false");
     else if (flag("--no-audio")) cli.set("audio.enabled", "false");
     else if (arg("--volume")) cli.set("audio.volume", argv[++i]);
     else if (flag("--no-mic")) cli.set("audio.mic", "false");
@@ -479,7 +483,7 @@ int main(int argc, char** argv) {
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
-                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.vsync", "audio.enabled", "audio.volume",
+                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.disp", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
@@ -666,6 +670,34 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
 
+  // The display-engine tier (display_disp.h) owns the panel itself, so SDL
+  // must not put an EGL window on it: its dummy video driver keeps the window,
+  // events and controllers and draws nothing. Decided before SDL_Init, which is
+  // where the driver is chosen. auto (the default) takes it wherever the
+  // device answers the disp ioctls; on/off force it.
+  const std::string disp_mode = cfg.str("video.disp");
+  const bool disp_auto = disp_mode.empty() || disp_mode == "auto";
+  bool use_disp = disp_mode == "true" || disp_mode == "on";
+  if ((use_disp || disp_auto) && !dual_window) {
+    if (ds::sdl::DispOut::available()) {
+      use_disp = true;
+      // Whichever headless driver this SDL2 was built with: the handheld
+      // builds drop "dummy" but keep "offscreen".
+      if (!std::getenv("SDL_VIDEODRIVER")) {
+        const char* pick = nullptr;
+        for (const char* want : {"dummy", "offscreen"}) {
+          for (int i = 0; i < SDL_GetNumVideoDrivers() && !pick; ++i) if (!std::strcmp(SDL_GetVideoDriver(i), want)) pick = want;
+          if (pick) break;
+        }
+        if (pick) setenv("SDL_VIDEODRIVER", pick, 1);
+        else std::fprintf(stderr, "video.disp: this SDL2 has no headless video driver; its own driver will also open the panel\n");
+      }
+    } else if (use_disp) {
+      std::fprintf(stderr, "video.disp: /dev/disp not usable; using SDL\n");
+      use_disp = false;
+    }
+  } else use_disp = false;
+
   u32 init = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
   if (audio_on || mic_on) init |= SDL_INIT_AUDIO;
   if (SDL_Init(init) != 0) {
@@ -689,7 +721,7 @@ int main(int argc, char** argv) {
     if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel, 0, 1 - bottom_display) ||
         !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
-  } else { display.set_chunky(chunky != 0, chunky_cell); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; } }
+  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; } }
   // A single-screen layout shows one screen: the core skips the other's
   // engine (Gpu::set_screen_visible). Every other layout, and dual-window,
   // shows both.

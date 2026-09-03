@@ -52,6 +52,28 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
 
+  // Display-engine tier: the hardware scales a DS-resolution composite, so
+  // there is no renderer and no scaling here at all; draw() rotates the
+  // framebuffers into the layer's source. Only the stacked and single layouts
+  // have a composite shape; anything else takes the SDL paths below.
+  if (disp_wanted_ && only_screen_ < 0 && DispOut::available()) {
+    const bool single = layout_.mode == Mode::Single;
+    if (!single && layout_.mode != Mode::Vertical) {
+      std::fprintf(stderr, "disp: layout %s has no composite; using the SDL path\n", mode_name(layout_.mode));
+    } else {
+      int rot = 0;
+      if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
+      auto d = std::make_unique<DispOut>();
+      if (d->open(rot, single ? 1 : 2, vsync)) {
+        disp_ = std::move(d);
+        layout();
+        std::fprintf(stderr, "video: display-engine scaler, rot %d, %d screen%s, %s driver, vsync %s\n",
+                     rot, single ? 1 : 2, single ? "" : "s", SDL_GetCurrentVideoDriver(), vsync ? "on" : "off");
+        return true;
+      }
+    }
+  }
+
   // Per-scanline scaling renders into the presented buffer directly, which
   // cannot coexist with an SDL_Renderer on the same window, so it is decided
   // here and the renderer is skipped entirely.
@@ -175,6 +197,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
 }
 
 void Display::close() {
+  if (disp_) { disp_->close(); disp_.reset(); }
   if (out_) { out_->close(); out_.reset(); }
   surf_ = nullptr;   // owned by SDL, freed with the window
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
@@ -252,6 +275,13 @@ void Display::layout() {
 }
 
 void Display::draw(const u32* const fb[SCREENS]) {
+  if (disp_) {
+    // Slots in view order: views_[0] is the primary, the top of the stack.
+    const u32* slots[SCREENS] = {nullptr, nullptr};
+    for (int i = 0; i < nviews_ && i < disp_->screens(); ++i) slots[i] = views_[i].shown ? fb[views_[i].screen] : nullptr;
+    disp_->present(slots);
+    return;
+  }
   // The renderer tier only: open() returns before creating a renderer on the
   // scanline tiers, where begin_frame/end_frame is the way to the screen.
   if (!ren_) return;
@@ -267,6 +297,7 @@ void Display::draw(const u32* const fb[SCREENS]) {
 }
 
 void Display::toggle_fullscreen() {
+  if (disp_) return;   // the panel is the window
   fullscreen_ = !fullscreen_;
   SDL_SetWindowFullscreen(win_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
   layout();
@@ -276,6 +307,21 @@ void Display::toggle_fullscreen() {
 
 void Display::set_layout(const Layout& l) {
   if (only_screen_ >= 0) return;
+  if (disp_) {
+    // The composite has two shapes; switching between them reopens the
+    // layer. Other modes keep the current one and say so.
+    if (l.mode != Mode::Vertical && l.mode != Mode::Single) { std::fprintf(stderr, "disp: layout %s has no composite; kept %s\n", mode_name(l.mode), mode_name(layout_.mode)); return; }
+    const int screens = l.mode == Mode::Single ? 1 : 2;
+    if (screens != disp_->screens()) {
+      int rot = 0;
+      if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
+      disp_->close();
+      if (!disp_->open(rot, screens, true)) { std::fprintf(stderr, "disp: reopen failed\n"); disp_.reset(); }
+    }
+    layout_ = l;
+    layout();
+    return;
+  }
   const Mode was = layout_.mode;
   layout_ = l;
   if (!fullscreen_ && was != l.mode) {
@@ -309,6 +355,7 @@ bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
 // The renderer's output size, or the window surface's when there is no
 // renderer. Both are in pixels, which is what the views are in.
 bool Display::out_size(int& w, int& h) const {
+  if (disp_) { w = disp_->logical_w(); h = disp_->logical_h(); return true; }
   if (ren_) return SDL_GetRendererOutputSize(ren_, &w, &h) == 0;
   if (!win_) return false;
   // On a scanout tier the window size is the truth: the shm surface can lag a

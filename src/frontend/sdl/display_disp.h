@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
+//
+// Presentation through the Allwinner display engine's scaler layer, for the
+// Miyoo A30 (Allwinner A33, "disp 1.5" driver) and anything else that
+// answers the same /dev/disp ioctls.
+//
+// Why this tier exists: the A30's SDL2 has one video driver, Mali EGL over
+// fbdev, and every SDL path to the panel is a GLES upload and swap (3 ms per
+// frame with --accel, 97 ms through the window surface). The panel is also
+// mounted portrait, and rotating a panel-sized frame on the Cortex-A7 costs
+// 4.7 ms -- more than the GPU present it would replace. The display engine
+// removes both costs at once: a layer in scaler mode takes a source of any
+// size and scales it to a screen window in hardware, and the source can be
+// the DS's own resolution. So the core's 256x192 framebuffers are rotated
+// at DS resolution (two 48 K-pixel transposes, NEON, into an uncached buffer
+// with 64-byte stores) into a composite the layer scans out scaled. No GL,
+// no driver threads, no panel-sized copy. Measured on the unit: a source
+// repaint 0.36 ms, the address flip 0.05 ms.
+//
+// What it takes over: the UI's own framebuffer layer is disabled while this
+// is open (the panel is ours) and re-enabled on close. The composite lives in
+// fb0's memory, which nothing else is drawing into meanwhile -- SDL runs on
+// its dummy video driver in this mode (main.cpp sets it before SDL_Init),
+// so no EGL window is ever created on fb0.
+//
+// What it does not do: the DE scaler filters, so the LCD grid, chunky and
+// seam modes (CPU scanline features) do not apply; only the vertical and
+// single layouts are laid out (two screens side by side in panel space, or
+// one filling it); and there is no touch (the A30 has none).
+//
+// The ioctl ABI is libvdpau-sunxi's kernel-headers/drv_display.h (disp 1.5),
+// reproduced here in the subset used: ioctl(fd, cmd, unsigned long[4]) with
+// {screen, layer, &info}. The layer info layout was verified byte-for-byte
+// against the driver's own answer for the UI layer.
+#pragma once
+
+#include "core/types.h"
+
+#include <cstddef>
+
+namespace ds::sdl {
+
+class DispOut {
+public:
+  static constexpr int BUFS = 3;
+
+  // True when /dev/disp and /dev/fb0 open and a layer query answers: the
+  // device runs a disp-1.5 kernel. Cheap, cached; safe to call before SDL_Init.
+  static bool available();
+
+  // rot: 0, 90, 180 or 270, the rotation that takes the DS layout onto the
+  // panel (DS_ROTATE on the spruce launcher: 270 on the A30). screens: 1 or
+  // 2, stacked in slot order. False leaves nothing changed on the device.
+  bool open(int rot, int screens, bool vsync);
+  void close();
+
+  // The DS layout's own size in panel pixels, before rotation: what layout()
+  // and map_point() work in. The panel size, swapped for 90/270.
+  int logical_w() const { return (rot_ == 90 || rot_ == 270) ? panel_h_ : panel_w_; }
+  int logical_h() const { return (rot_ == 90 || rot_ == 270) ? panel_w_ : panel_h_; }
+  int screens() const { return screens_; }
+
+  // Rotates each slot's 256x192 framebuffer into the composite (null skips
+  // the slot, leaving it black), flips the layer to it and, with vsync,
+  // waits for the refresh.
+  void present(const u32* const fb[2]);
+
+private:
+  bool set_layer(u32 addr);
+  void wait_vsync();
+  void fill_black(u32* buf);
+
+  int  disp_ = -1, fb_ = -1;
+  u8*  map_ = nullptr;
+  size_t map_len_ = 0;
+  u32  phys_ = 0;
+  int  panel_w_ = 0, panel_h_ = 0;
+  int  rot_ = 0, screens_ = 0;
+  int  comp_w_ = 0, comp_h_ = 0;    // composite (source) size in pixels
+  size_t comp_bytes_ = 0;
+  int  layer_ = -1, ui_layer_ = -1;
+  bool ui_was_enabled_ = false;
+  int  cur_ = 0;
+  bool vsync_ = true;
+  bool pan_blocks_ = true;          // FBIOPAN_DISPLAY waits for the refresh (measured once)
+  bool pan_measured_ = false;
+  u64  next_ns_ = 0;                // fallback pacing when pan does not block
+};
+
+} // namespace ds::sdl

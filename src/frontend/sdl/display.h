@@ -3,6 +3,7 @@
 #pragma once
 #include "core/gpu/gpu.h"
 #include "core/types.h"
+#include "display_disp.h"
 #include "display_drm.h"  // complete types for the unique_ptr
 #include "display_wl.h"
 
@@ -96,6 +97,11 @@ public:
   // N >= 4 that does, up to 16.
   void set_chunky(bool on, int cell = 0) { chunky_ = on; chunky_cell_ = cell; }
   bool chunky() const { return chunky_; }
+  // Present through the display engine's scaler layer (display_disp.h) when
+  // the device has one; the DS_ROTATE environment gives the panel rotation.
+  // Set before open(); draw() is then the way to the screen.
+  void set_disp(bool on) { disp_wanted_ = on; }
+  bool disp() const { return disp_ != nullptr; }
   // The cell map in use for `screen` (null when the pair path is), for the core.
   const void* cell_map(int screen) const { return cells_[screen].x.cells ? &cells_[screen] : nullptr; }
   // Locks the panel-sized texture and fills in one target per screen. False
@@ -145,6 +151,8 @@ private:
   Layout        layout_;
 
   bool              scaled_ = false;
+  bool              disp_wanted_ = false;
+  std::unique_ptr<DispOut> disp_;       // display-engine tier; null otherwise
   bool              chunky_ = false;
   int               chunky_cell_ = 0;
   std::unique_ptr<ScanoutOut> out_;     // tier 1; null on the surface tier
