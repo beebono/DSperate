@@ -13,6 +13,7 @@ endif()
 
 option(DSPERATE_JIT      "Build the ARM->AArch64 recompiler (AArch64 hosts only)" ON)
 option(DSPERATE_NEON     "Build NEON renderer kernels (AArch64 or ARMv7+NEON)"    ON)
+option(DSPERATE_A32_SUBSET "Force the ARMv7 NEON subset on an AArch64 host (a test)" OFF)
 option(DSPERATE_TESTS    "Build unit tests"                                       ON)
 option(DSPERATE_HEADLESS "Build the headless frontend"                            ON)
 option(DSPERATE_SDL      "Build the SDL2 frontend (off when SDL2 is not found)"   ON)

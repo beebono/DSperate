@@ -47,7 +47,12 @@ if(DSPERATE_NEON)
   target_compile_definitions(dsperate_core PUBLIC DSPERATE_NEON=1)
   # The kernels reach A64-only intrinsics through gpu/neon_compat.h; on an
   # ARMv7 host that header switches to bodies the A32 encoding can express.
-  if(DSPERATE_HOST_ARM32)
+  # DSPERATE_A32_SUBSET forces the same bodies on an AArch64 host.  That is
+  # not a 32-bit build -- the JIT and everything else are held fixed -- but it
+  # is how the subset's exactness is gated (tools/scene_hashes.sh) and how its
+  # instruction mix is measured, neither of which needs an ARMv7 machine.
+  if(DSPERATE_HOST_ARM32 OR DSPERATE_A32_SUBSET)
     target_compile_definitions(dsperate_core PUBLIC DS_A32_SUBSET=1)
+    message(STATUS "DSperate: NEON kernels restricted to the ARMv7-expressible subset")
   endif()
 endif()
