@@ -45,4 +45,9 @@ endif()
 if(DSPERATE_NEON)
   target_sources(dsperate_core PRIVATE gpu/kernels_neon.cpp)
   target_compile_definitions(dsperate_core PUBLIC DSPERATE_NEON=1)
+  # The kernels reach A64-only intrinsics through gpu/neon_compat.h; on an
+  # ARMv7 host that header switches to bodies the A32 encoding can express.
+  if(DSPERATE_HOST_ARM32)
+    target_compile_definitions(dsperate_core PUBLIC DS_A32_SUBSET=1)
+  endif()
 endif()

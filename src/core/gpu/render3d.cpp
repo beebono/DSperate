@@ -21,9 +21,13 @@
 #include <cstdio>
 #if DSPERATE_NEON
 #include <arm_neon.h>
+#include "core/gpu/neon_compat.h"
 #endif
 
 namespace ds::gpu {
+
+// The A64-only NEON intrinsics the kernels use, in both spellings.
+namespace compat = kern::compat;
 
 // ---- interpolation --------------------------------------------------------------
 //
@@ -1381,9 +1385,9 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
       const uint8x16_t vv[4] = {vld1q_u8(ra + i), vld1q_u8(ga + i), vld1q_u8(ba + i), vpa};
       for (int k = 0; k < 4; ++k) {
         uint16x8_t lo = vaddl_u8(vget_low_u8(tv[k]), vget_low_u8(vv[k]));
-        uint16x8_t hi = vaddl_high_u8(tv[k], vv[k]);
+        uint16x8_t hi = compat::addl_high_u8(tv[k], vv[k]);
         lo = vmlal_u8(lo, vget_low_u8(tv[k]), vget_low_u8(vv[k]));
-        hi = vmlal_high_u8(hi, tv[k], vv[k]);
+        hi = compat::mlal_high_u8(hi, tv[k], vv[k]);
         ch[k] = k == 3 ? vcombine_u8(vshrn_n_u16(lo, 5), vshrn_n_u16(hi, 5))
                        : vcombine_u8(vshrn_n_u16(lo, 6), vshrn_n_u16(hi, 6));
       }
@@ -1411,9 +1415,9 @@ void Renderer3D::span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const 
     const uint8x16_t vv[3] = {vld1q_u8(ra + i), vld1q_u8(ga + i), vld1q_u8(ba + i)};
     for (int k = 0; k < 3; ++k) {
       uint16x8_t lo = vmull_u8(vget_low_u8(tv[k]), vget_low_u8(tal));
-      uint16x8_t hi = vmull_high_u8(tv[k], tal);
+      uint16x8_t hi = compat::mull_high_u8(tv[k], tal);
       lo = vmlal_u8(lo, vget_low_u8(vv[k]), vget_low_u8(inv));
-      hi = vmlal_high_u8(hi, vv[k], inv);
+      hi = compat::mlal_high_u8(hi, vv[k], inv);
       const uint8x16_t m = vcombine_u8(vshrn_n_u16(lo, 5), vshrn_n_u16(hi, 5));
       ch[k] = vbslq_u8(at0, vv[k], vbslq_u8(at31, tv[k], m));
     }
@@ -1519,7 +1523,7 @@ template <int mode, bool textured, bool aa, bool opq>
     vst4_u8(ab + base * 4, oa);
     if (sh.polyattr_z) {
       const int16x8_t mw = vmovl_s8(vreinterpret_s8_u8(m8));
-      const uint32x4_t mz[2] = {vreinterpretq_u32_s32(vmovl_s16(vget_low_s16(mw))), vreinterpretq_u32_s32(vmovl_high_s16(mw))};
+      const uint32x4_t mz[2] = {vreinterpretq_u32_s32(vmovl_s16(vget_low_s16(mw))), vreinterpretq_u32_s32(compat::movl_high_s16(mw))};
       for (u32 k = 0; k < 2; ++k)
         vst1q_s32(reinterpret_cast<s32*>(&depth_[base + k * 4]), vbslq_s32(mz[k], z[k], vld1q_s32(reinterpret_cast<const s32*>(&depth_[base + k * 4]))));
     }
@@ -1550,7 +1554,7 @@ template <int mode, bool textured, bool aa, bool opq>
     // The pass bytes as lane vectors straight from memory: no general-register
     // to vector transfer, no per-lane shift to spread a word.
     const uint16x8_t p16 = vmovl_u8(vld1_u8(sb.pass + i));
-    uint32x4_t pv[2] = {vmovl_u16(vget_low_u16(p16)), vmovl_high_u16(p16)};
+    uint32x4_t pv[2] = {vmovl_u16(vget_low_u16(p16)), compat::movl_high_u16(p16)};
     if (rem < 8) {
       const uint32x4_t vr = vdupq_n_u32(static_cast<u32>(rem));
       pv[0] = vandq_u32(pv[0], vcltq_u32(lane, vr));
@@ -1976,9 +1980,9 @@ void Renderer3D::flush_batch(const Shade& sh) {
         const uint8x16x2_t tb = {vld1q_u8(toon6_[2]), vld1q_u8(toon6_[2] + 16)};
         for (u32 i = 0; i < n16; i += 16) {
           const uint8x16_t idx = vshrq_n_u8(vld1q_u8(sb.vr + i), 1);
-          vst1q_u8(sb.vr + i, vqtbl2q_u8(tr, idx));
-          vst1q_u8(sb.vg + i, vqtbl2q_u8(tg, idx));
-          vst1q_u8(sb.vb + i, vqtbl2q_u8(tb, idx));
+          vst1q_u8(sb.vr + i, compat::tbl2q_u8(tr, idx));
+          vst1q_u8(sb.vg + i, compat::tbl2q_u8(tg, idx));
+          vst1q_u8(sb.vb + i, compat::tbl2q_u8(tb, idx));
         }
       } else {
         for (u32 i = 0; i < n16; i += 16) { const uint8x16_t r = vld1q_u8(sb.vr + i); vst1q_u8(sb.vg + i, r); vst1q_u8(sb.vb + i, r); }
@@ -1996,9 +2000,9 @@ void Renderer3D::flush_batch(const Shade& sh) {
         const uint8x16_t idx = vshrq_n_u8(vld1q_u8(sb.vr + i), 1);
         u8* rec = reinterpret_cast<u8*>(sb.col + i);
         uint8x16x4_t c = vld4q_u8(rec);
-        c.val[0] = vminq_u8(vaddq_u8(c.val[0], vqtbl2q_u8(tr, idx)), v63);
-        c.val[1] = vminq_u8(vaddq_u8(c.val[1], vqtbl2q_u8(tg, idx)), v63);
-        c.val[2] = vminq_u8(vaddq_u8(c.val[2], vqtbl2q_u8(tb, idx)), v63);
+        c.val[0] = vminq_u8(vaddq_u8(c.val[0], compat::tbl2q_u8(tr, idx)), v63);
+        c.val[1] = vminq_u8(vaddq_u8(c.val[1], compat::tbl2q_u8(tg, idx)), v63);
+        c.val[2] = vminq_u8(vaddq_u8(c.val[2], compat::tbl2q_u8(tb, idx)), v63);
         vst4q_u8(rec, c);
       }
     }
@@ -2250,7 +2254,7 @@ void Renderer3D::final_pass(s32 y) {
       const u32 addr = base + x;
       uint8x16x4_t at = vld4q_u8(ab + addr * 4);
       const uint8x16_t edge = vtstq_u8(at.val[0], vdupq_n_u8(0xF));
-      if (vmaxvq_u8(edge) == 0) continue;
+      if (compat::maxv_u8(edge) == 0) continue;
       const uint8x16_t id = at.val[3];
       uint32x4_t z[4];
       for (u32 k = 0; k < 4; ++k) z[k] = vld1q_u32(&depth_[addr + k * 4]);
@@ -2265,12 +2269,12 @@ void Renderer3D::final_pass(s32 y) {
       };
       uint8x16_t mark = vorrq_u8(vorrq_u8(nb(addr - 1), nb(addr + 1)), vorrq_u8(nb(up + x), nb(dn + x)));
       mark = vandq_u8(mark, edge);
-      if (vmaxvq_u8(mark) == 0) continue;
+      if (compat::maxv_u8(mark) == 0) continue;
       const uint8x16_t idx = vshrq_n_u8(id, 3);
       uint8x16x4_t c = vld4q_u8(cb + addr * 4);
-      c.val[0] = vbslq_u8(mark, vqtbl1q_u8(er, idx), c.val[0]);
-      c.val[1] = vbslq_u8(mark, vqtbl1q_u8(eg, idx), c.val[1]);
-      c.val[2] = vbslq_u8(mark, vqtbl1q_u8(ebl, idx), c.val[2]);
+      c.val[0] = vbslq_u8(mark, compat::tbl1q_u8(er, idx), c.val[0]);
+      c.val[1] = vbslq_u8(mark, compat::tbl1q_u8(eg, idx), c.val[1]);
+      c.val[2] = vbslq_u8(mark, compat::tbl1q_u8(ebl, idx), c.val[2]);
       vst4q_u8(cb + addr * 4, c);
       // attr = (attr & 0xFFFFE0FF) | 0x1000: byte 1 keeps bits 5-7, coverage 0x10.
       at.val[1] = vbslq_u8(mark, vorrq_u8(vandq_u8(at.val[1], vdupq_n_u8(0xE0)), vdupq_n_u8(0x10)), at.val[1]);
@@ -2306,13 +2310,13 @@ void Renderer3D::final_pass(s32 y) {
       }
       const uint8x16_t i8 = vcombine_u8(vmovn_u16(vcombine_u16(vmovn_u32(id[0]), vmovn_u32(id[1]))),
                                         vmovn_u16(vcombine_u16(vmovn_u32(id[2]), vmovn_u32(id[3]))));
-      const uint8x16_t d0 = vqtbl4q_u8(dens, i8), d1 = vqtbl4q_u8(dens, vaddq_u8(i8, vdupq_n_u8(1)));
+      const uint8x16_t d0 = compat::tbl4q_u8(dens, i8), d1 = compat::tbl4q_u8(dens, vaddq_u8(i8, vdupq_n_u8(1)));
       const int16x8_t dlo = vreinterpretq_s16_u16(vsubl_u8(vget_low_u8(d1), vget_low_u8(d0)));
-      const int16x8_t dhi = vreinterpretq_s16_u16(vsubl_high_u8(d1, d0));
-      const int32x4_t dd[4] = {vmovl_s16(vget_low_s16(dlo)), vmovl_high_s16(dlo), vmovl_s16(vget_low_s16(dhi)), vmovl_high_s16(dhi)};
-      const uint16x8_t d0lo = vmovl_u8(vget_low_u8(d0)), d0hi = vmovl_high_u8(d0);
-      const int32x4_t b[4] = {vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(d0lo))), vreinterpretq_s32_u32(vmovl_high_u16(d0lo)),
-                              vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(d0hi))), vreinterpretq_s32_u32(vmovl_high_u16(d0hi))};
+      const int16x8_t dhi = vreinterpretq_s16_u16(compat::subl_high_u8(d1, d0));
+      const int32x4_t dd[4] = {vmovl_s16(vget_low_s16(dlo)), compat::movl_high_s16(dlo), vmovl_s16(vget_low_s16(dhi)), compat::movl_high_s16(dhi)};
+      const uint16x8_t d0lo = vmovl_u8(vget_low_u8(d0)), d0hi = compat::movl_high_u8(d0);
+      const int32x4_t b[4] = {vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(d0lo))), vreinterpretq_s32_u32(compat::movl_high_u16(d0lo)),
+                              vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(d0hi))), vreinterpretq_s32_u32(compat::movl_high_u16(d0hi))};
       uint32x4_t d[4];
       for (u32 k = 0; k < 4; ++k) {
         int32x4_t v = vaddq_s32(b[k], vshrq_n_s32(vmulq_s32(dd[k], vreinterpretq_s32_u32(frac[k])), 17));
@@ -2344,13 +2348,13 @@ void Renderer3D::final_pass(s32 y) {
       const u32 addr = base + x;
       const uint8x16x4_t at = vld4q_u8(ab + addr * 4);
       const uint8x16_t fog = vtstq_u8(at.val[1], vdupq_n_u8(0x80));
-      if (vmaxvq_u8(fog)) apply16(addr, fog);
+      if (compat::maxv_u8(fog)) apply16(addr, fog);
       if (!under) continue;
       const uint8x16_t edge = vtstq_u8(at.val[0], vdupq_n_u8(0xF));
-      if (vmaxvq_u8(edge) == 0) continue;
+      if (compat::maxv_u8(edge) == 0) continue;
       const u32 under = addr + RSIZE;
       const uint8x16_t ufog = vandq_u8(edge, vtstq_u8(vld4q_u8(ab + under * 4).val[1], vdupq_n_u8(0x80)));
-      if (vmaxvq_u8(ufog)) apply16(under, ufog);
+      if (compat::maxv_u8(ufog)) apply16(under, ufog);
     }
   }
   if (dispcnt & (1 << 4)) {
@@ -2369,7 +2373,7 @@ void Renderer3D::final_pass(s32 y) {
       const uint8x16x4_t at = vld4q_u8(ab + addr * 4);
       const uint8x16_t cov = vandq_u8(at.val[1], a5);
       const uint8x16_t m = vbicq_u8(vtstq_u8(at.val[0], vdupq_n_u8(0xF)), vceqq_u8(cov, v31));
-      if (vmaxvq_u8(m) == 0) continue;
+      if (compat::maxv_u8(m) == 0) continue;
       const uint8x16x4_t top = vld4q_u8(cb + addr * 4), bot = vld4q_u8(cb + (addr + RSIZE) * 4);
       const uint8x16_t c1 = vaddq_u8(cov, vdupq_n_u8(1)), c2 = vsubq_u8(v32, c1);
       const uint8x16_t ta = vandq_u8(top.val[3], a5), ba = vandq_u8(bot.val[3], a5);

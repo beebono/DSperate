@@ -6,6 +6,7 @@
 #include "core/profile.h"
 #if DSPERATE_NEON
 #include <arm_neon.h>
+#include "core/gpu/neon_compat.h"
 #endif
 
 #include <algorithm>
@@ -14,6 +15,9 @@
 #include <cstring>
 
 namespace ds::gpu {
+
+// The A64-only NEON intrinsics the kernels use, in both spellings.
+namespace compat = kern::compat;
 
 namespace {
 
@@ -971,19 +975,19 @@ void Gpu3D::submit_vertex() {
     const int32x4_t q0 = vdupq_n_s32(cur_vertex_[0]), q1 = vdupq_n_s32(cur_vertex_[1]);
     const int32x4_t q2 = vdupq_n_s32(cur_vertex_[2]), q3 = vdupq_n_s32(0x1000);
     int64x2_t lo = vmull_s32(vget_low_s32(r0), vget_low_s32(q0));
-    int64x2_t hi = vmull_high_s32(r0, q0);
-    lo = vmlal_s32(lo, vget_low_s32(r1), vget_low_s32(q1)); hi = vmlal_high_s32(hi, r1, q1);
-    lo = vmlal_s32(lo, vget_low_s32(r2), vget_low_s32(q2)); hi = vmlal_high_s32(hi, r2, q2);
-    lo = vmlal_s32(lo, vget_low_s32(r3), vget_low_s32(q3)); hi = vmlal_high_s32(hi, r3, q3);
+    int64x2_t hi = compat::mull_high_s32(r0, q0);
+    lo = vmlal_s32(lo, vget_low_s32(r1), vget_low_s32(q1)); hi = compat::mlal_high_s32(hi, r1, q1);
+    lo = vmlal_s32(lo, vget_low_s32(r2), vget_low_s32(q2)); hi = compat::mlal_high_s32(hi, r2, q2);
+    lo = vmlal_s32(lo, vget_low_s32(r3), vget_low_s32(q3)); hi = compat::mlal_high_s32(hi, r3, q3);
     const int32x4_t p = vcombine_s32(vmovn_s64(vshrq_n_s64(lo, 12)), vmovn_s64(vshrq_n_s64(hi, 12)));
     vst1q_s32(vt.pos, p);
     // The six frustum tests while the position is still in a register: two
     // compares against +W and -W, packed to the same bits the scalar
     // outcode() produces. Lane 3 is W itself; its bit constants are zero, so
     // whatever its compares say is discarded.
-    const int32x4_t w = vdupq_laneq_s32(p, 3);
+    const int32x4_t w = compat::dup_laneq_s32<3>(p);
     static const uint32x4_t gt_bits = {1, 4, 16, 0}, lt_bits = {2, 8, 32, 0};
-    vt.oc = static_cast<u8>(vaddvq_u32(vorrq_u32(vandq_u32(vcgtq_s32(p, w), gt_bits), vandq_u32(vcltq_s32(p, vnegq_s32(w)), lt_bits))));
+    vt.oc = static_cast<u8>(compat::addv_u32(vorrq_u32(vandq_u32(vcgtq_s32(p, w), gt_bits), vandq_u32(vcltq_s32(p, vnegq_s32(w)), lt_bits))));
   }
 #else
   for (int c = 0; c < 4; ++c)

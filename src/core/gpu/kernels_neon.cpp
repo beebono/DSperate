@@ -12,6 +12,7 @@
 
 #if DSPERATE_NEON
 #include <arm_neon.h>
+#include "core/gpu/neon_compat.h"
 #include <cstring>
 
 namespace ds::gpu::kern::neon {
@@ -80,7 +81,7 @@ template <int shift>
 inline uint8x16_t blend16(uint8x16_t a, uint8x16_t b, uint8x16_t ea, uint8x16_t eb) {
   const uint16x8_t rnd = vdupq_n_u16(1u << (shift - 1));
   const uint16x8_t lo = vmlal_u8(vmlal_u8(rnd, vget_low_u8(a), vget_low_u8(ea)), vget_low_u8(b), vget_low_u8(eb));
-  const uint16x8_t hi = vmlal_high_u8(vmlal_high_u8(rnd, a, ea), b, eb);
+  const uint16x8_t hi = compat::mlal_high_u8(compat::mlal_high_u8(rnd, a, ea), b, eb);
   return vminq_u8(vcombine_u8(vshrn_n_u16(lo, shift), vshrn_n_u16(hi, shift)), vdupq_n_u8(63));
 }
 // c + (((63 - c) * factor + bias) >> 4): the scalar's & 0x3F after the shift
@@ -108,7 +109,7 @@ bool line_has_translucent_3d(const Pixel* line3d) {
     const uint32x4_t a = vandq_u32(vshrq_n_u32(vld1q_u32(line3d + i), 24), m);
     acc = vorrq_u32(acc, vbicq_u32(vmvnq_u32(vceqq_u32(a, zero)), vceqq_u32(a, v31)));
   }
-  return vmaxvq_u32(acc) != 0;
+  return compat::maxv_u32(acc) != 0;
 }
 
 
@@ -136,12 +137,12 @@ void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, con
     // they are (bytes 0-2 whole, alpha 0xFF).
     uint8x16x4_t a = vld4q_u8(reinterpret_cast<const u8*>(top + i));
     // Most blocks of most lines blend nothing: copy through.
-    if (vmaxvq_u8(vorrq_u8(vorrq_u8(objblend, blend3d), fx)) == 0) {
+    if (compat::maxv_u8(vorrq_u8(vorrq_u8(objblend, blend3d), fx)) == 0) {
       a.val[3] = vff;
       vst4q_u8(reinterpret_cast<u8*>(out + i), a);
       continue;
     }
-    const bool has_obj = vmaxvq_u8(objblend) != 0, has_3d = vmaxvq_u8(blend3d) != 0, has_fx = vmaxvq_u8(fx) != 0;
+    const bool has_obj = compat::maxv_u8(objblend) != 0, has_3d = compat::maxv_u8(blend3d) != 0, has_fx = compat::maxv_u8(fx) != 0;
     const uint8x16x4_t b = vld4q_u8(reinterpret_cast<const u8*>(second + i));
     uint8x16_t a6[3], b6[3], o[3];
     for (u32 c = 0; c < 3; ++c) { a6[c] = vandq_u8(a.val[c], v63); b6[c] = vandq_u8(b.val[c], v63); o[c] = a.val[c]; }
@@ -199,8 +200,8 @@ inline void pal16_row(uint8x8_t idx, const uint8x16x4_t& table, Pixel* px) {
   const uint8x16_t twice = vcombine_u8(z1.val[0], z1.val[1]);
   const uint8x16x2_t z2 = vzipq_u8(twice, twice);
   const uint8x16_t step = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3};
-  vst1q_u8(reinterpret_cast<u8*>(px), vqtbl4q_u8(table, vaddq_u8(z2.val[0], step)));
-  vst1q_u8(reinterpret_cast<u8*>(px) + 16, vqtbl4q_u8(table, vaddq_u8(z2.val[1], step)));
+  vst1q_u8(reinterpret_cast<u8*>(px), compat::tbl4q_u8(table, vaddq_u8(z2.val[0], step)));
+  vst1q_u8(reinterpret_cast<u8*>(px) + 16, compat::tbl4q_u8(table, vaddq_u8(z2.val[1], step)));
 }
 }
 
@@ -239,9 +240,9 @@ void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables
   const uint8x16_t ids = vld1q_u8(id_tab);
   for (u32 i = 0; i < 256; i += 16) {
     const uint8x16_t tt = vld1q_u8(top_tid + i);
-    vst1q_u8(top_id + i, vqtbl1q_u8(ids, tt));
+    vst1q_u8(top_id + i, compat::tbl1q_u8(ids, tt));
     const u8 t0 = top_tid[i];
-    if (vmaxvq_u8(tt) == vminvq_u8(tt) && !(line3d && t0 == T_BG0)) {
+    if (compat::maxv_u8(tt) == compat::minv_u8(tt) && !(line3d && t0 == T_BG0)) {
       const Pixel* tab = tables[t0];
       for (u32 k = 0; k < 16; ++k) top_px[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
     } else {
@@ -277,8 +278,8 @@ void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const 
   const uint8x16_t ids = vld1q_u8(id_tab), zero = vdupq_n_u8(0);
   for (u32 i = 0; i < 256; i += 16) {
     const uint8x16_t tt = vld1q_u8(top_tid + i), st = vld1q_u8(second_tid + i);
-    vst1q_u8(top_id + i, vqtbl1q_u8(ids, tt));
-    vst1q_u8(second_id + i, vqtbl1q_u8(ids, st));
+    vst1q_u8(top_id + i, compat::tbl1q_u8(ids, tt));
+    vst1q_u8(second_id + i, compat::tbl1q_u8(ids, st));
     const uint8x16_t at = vld1q_u8(attr + i);
     const uint8x16_t isobj = vandq_u8(vcgeq_u8(tt, vdupq_n_u8(T_OBJ_STD)), vcleq_u8(tt, vdupq_n_u8(T_OBJ_DIRECT)));
     uint8x16_t kind = vbslq_u8(vtstq_u8(at, vdupq_n_u8(OA_BITMAP)), vdupq_n_u8(K_OBJ_BITMAP), vbslq_u8(vtstq_u8(at, vdupq_n_u8(OA_SEMI)), vdupq_n_u8(K_OBJ_SEMI), zero));
@@ -298,8 +299,8 @@ void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const 
     // The 3D override must remain per-pixel, so it disables only the top
     // lookup hoist when BG0 is the selected layer.
     const u8 t0 = top_tid[i], s0 = second_tid[i];
-    const bool top_run = vmaxvq_u8(tt) == vminvq_u8(tt) && !(line3d && t0 == T_BG0);
-    const bool second_run = vmaxvq_u8(st) == vminvq_u8(st);
+    const bool top_run = compat::maxv_u8(tt) == compat::minv_u8(tt) && !(line3d && t0 == T_BG0);
+    const bool second_run = compat::maxv_u8(st) == compat::minv_u8(st);
     if (top_run && second_run) {
       const Pixel* top_tab = tables[t0];
       const Pixel* second_tab = tables[s0];
@@ -345,7 +346,7 @@ bool layer16_3d(const u32* line3d, u16* v) {
     any = vorrq_u16(any, m);
     vst1q_u16(v + i, vandq_u16(m, vorrq_u16(opq, vaddq_u16(lane, vdupq_n_u16(static_cast<u16>(i))))));
   }
-  return vmaxvq_u16(any) != 0;
+  return compat::maxv_u16(any) != 0;
 }
 
 bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {
@@ -363,7 +364,7 @@ bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {
     vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | ((ctl[t] & 0xF) << 4))))));
     any = vorr_u8(any, idx);
   }
-  return vmaxv_u8(any) != 0;
+  return compat::maxv_u8(any) != 0;
 }
 
 bool text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v) {
@@ -378,7 +379,7 @@ bool text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v) {
     vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | (ext ? (ctl[t] & 0xF) << 8 : 0))))));
     any = vorr_u8(any, idx);
   }
-  return vmaxv_u8(any) != 0;
+  return compat::maxv_u8(any) != 0;
 }
 
 namespace {
@@ -492,7 +493,7 @@ void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pi
   // is hoisted per 16 pixels when the ids agree.
   for (u32 i = 0; i < 256; i += 16) {
     const uint8x16_t t = vld1q_u8(top_tid + i);
-    if (vmaxvq_u8(t) == vminvq_u8(t)) {
+    if (compat::maxv_u8(t) == compat::minv_u8(t)) {
       const Pixel* tab = tables[top_tid[i]];
       for (u32 k = 0; k < 16; ++k) out[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
     } else {
@@ -542,7 +543,7 @@ bool bmp_row_8(const u8* idx, u32 n, u16* v) {
     vst1q_u16(v + i, eight(x));
     i += 8;
   }
-  bool any = vmaxvq_u8(acc) != 0;
+  bool any = compat::maxv_u8(acc) != 0;
   for (; i < n; ++i) { const u8 x = idx[i]; v[i] = x ? static_cast<u16>(LV_OPAQUE | x) : 0; any |= x != 0; }
   return any;
 }
@@ -556,7 +557,7 @@ bool bmp_row_16(const u16* col, u32 n, u16* v) {
     acc = vorrq_u16(acc, o);
     vst1q_u16(v + i, o);
   }
-  bool any = vmaxvq_u16(acc) != 0;
+  bool any = compat::maxv_u16(acc) != 0;
   for (; i < n; ++i) { const u16 c = col[i]; v[i] = (c & 0x8000) ? c : 0; any |= (c & 0x8000) != 0; }
   return any;
 }
@@ -836,20 +837,16 @@ void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool se
 // Four pixels per step (the buffers are 256 wide, so rounding `n` up is safe).
 // Divisions: a correctly rounded f64 quotient of two u32 values, truncated, is
 // the exact integer quotient (the error is below num * 2^-53 < 1/den), so
-// vdivq_f64 reproduces the reference's integer division with no fix-up.
+// the f64 divide reproduces the reference's integer division with no fix-up.
+// On an ARMv7 host there is no vector f64 at all, so compat::udiv_exact takes
+// the quotients a lane at a time on the scalar VFP unit -- same values, and
+// the one shim in the set with a cost worth watching in a span-heavy profile.
 
 namespace {
-inline uint32x4_t udiv_exact(uint32x4_t num, uint32x4_t den) {
-  const float64x2_t nlo = vcvtq_f64_u64(vmovl_u32(vget_low_u32(num))), nhi = vcvtq_f64_u64(vmovl_u32(vget_high_u32(num)));
-  const float64x2_t dlo = vcvtq_f64_u64(vmovl_u32(vget_low_u32(den))), dhi = vcvtq_f64_u64(vmovl_u32(vget_high_u32(den)));
-  const uint64x2_t qlo = vcvtq_u64_f64(vdivq_f64(nlo, dlo)), qhi = vcvtq_u64_f64(vdivq_f64(nhi, dhi));
-  return vcombine_u32(vmovn_u64(qlo), vmovn_u64(qhi));
-}
-// (u64 lanes) / d, exact, for products below 2^53.
-inline uint64x2_t udiv64_exact(uint64x2_t n, float64x2_t d) { return vcvtq_u64_f64(vdivq_f64(vcvtq_f64_u64(n), d)); }
+using compat::udiv_exact;   // f64 quotient on A64, scalar VFP lanes on ARMv7
 inline int32x4_t mul_hi8_add(int32x4_t base, uint32x4_t d, uint32x4_t f) {   // base + ((d * f) >> 8), 64-bit product, low 32 bits kept
   const uint64x2_t lo = vshrq_n_u64(vmull_u32(vget_low_u32(d), vget_low_u32(f)), 8);
-  const uint64x2_t hi = vshrq_n_u64(vmull_high_u32(d, f), 8);
+  const uint64x2_t hi = vshrq_n_u64(compat::mull_high_u32(d, f), 8);
   return vaddq_s32(base, vreinterpretq_s32_u32(vcombine_u32(vmovn_u64(lo), vmovn_u64(hi))));
 }
 const int32x4_t kLane = {0, 1, 2, 3};
@@ -900,7 +897,7 @@ void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac)
     den = vreinterpretq_u32_s32(vaddq_s32(vmulq_s32(x0, vdupq_n_s32(w0d)),
                                           vmulq_s32(vsubq_s32(vdupq_n_s32(xdiff), x0), vdupq_n_s32(w1d))));
     for (u32 i = 0; i < n; i += 4) {
-      const uint32x4_t zero = vceqzq_u32(den);
+      const uint32x4_t zero = compat::ceqz_u32(den);
       const uint32x4_t d = vorrq_u32(den, vandq_u32(zero, one));
       const float32x4_t fd = vcvtq_f32_u32(d);
       float32x4_t rcp = vrecpeq_f32(fd);
@@ -920,13 +917,13 @@ void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac)
       den = vaddq_u32(den, dden);
     }
   }
-  if (vmaxvq_u32(bad) == 0) return;
+  if (compat::maxv_u32(bad) == 0) return;
   // Anything the fast path could not prove exact: redo the span by division.
   num = vshlq_n_u32(vreinterpretq_u32_s32(vmulq_s32(x0, vdupq_n_s32(w0n))), 8);
   den = vreinterpretq_u32_s32(vaddq_s32(vmulq_s32(x0, vdupq_n_s32(w0d)),
                                         vmulq_s32(vsubq_s32(vdupq_n_s32(xdiff), x0), vdupq_n_s32(w1d))));
   for (u32 i = 0; i < n; i += 4) {
-    const uint32x4_t zero = vceqzq_u32(den);
+    const uint32x4_t zero = compat::ceqz_u32(den);
     const uint32x4_t d = vorrq_u32(den, vandq_u32(zero, one));
     vst1q_u32(fac + i, vbicq_u32(udiv_exact(num, d), zero));
     num = vaddq_u32(num, dnum);
@@ -1048,7 +1045,7 @@ struct LinAttr {
     const uint32x4_t num = vmulq_u32(d, vreinterpretq_u32_s32(x));
     uint32x4_t q = num;
     if (has_m) {
-      q = vcombine_u32(vshrn_n_u64(vmull_u32(vget_low_u32(num), vget_low_u32(vm)), 32), vshrn_n_u64(vmull_high_u32(num, vm), 32));
+      q = vcombine_u32(vshrn_n_u64(vmull_u32(vget_low_u32(num), vget_low_u32(vm)), 32), vshrn_n_u64(compat::mull_high_u32(num, vm), 32));
       q = vaddq_u32(q, vcgtq_u32(vmulq_u32(q, vxd), num));   // all-ones lane = -1
     }
     return vaddq_s32(base, vreinterpretq_s32_u32(q));
@@ -1127,7 +1124,7 @@ void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
     const uint32x4_t num = vmulq_u32(d, vreinterpretq_u32_s32(xv));
     uint32x4_t q = num;
     if (m) {
-      q = vcombine_u32(vshrn_n_u64(vmull_u32(vget_low_u32(num), vget_low_u32(vm)), 32), vshrn_n_u64(vmull_high_u32(num, vm), 32));
+      q = vcombine_u32(vshrn_n_u64(vmull_u32(vget_low_u32(num), vget_low_u32(vm)), 32), vshrn_n_u64(compat::mull_high_u32(num, vm), 32));
       q = vaddq_u32(q, vcgtq_u32(vmulq_u32(q, vxd), num));   // all-ones lane = -1
     }
     vst1q_s32(out + i, vaddq_s32(base, vreinterpretq_s32_u32(q)));
@@ -1146,7 +1143,7 @@ void span_z_linear(s32 z0, s32 z1, s32 xv0, u32 n, s32 xdiff, s32 xrecip, s32* o
     if (!up) xv = vsubq_s32(vxdiff, xv);
     const uint32x4_t df = vmulq_u32(disp, vreinterpretq_u32_s32(xv));          // disp * factor < 2^24
     const uint64x2_t lo = vshrq_n_u64(vmull_u32(vget_low_u32(df), vget_low_u32(vrecip)), 13);
-    const uint64x2_t hi = vshrq_n_u64(vmull_high_u32(df, vrecip), 13);
+    const uint64x2_t hi = vshrq_n_u64(compat::mull_high_u32(df, vrecip), 13);
     vst1q_s32(out + i, vaddq_s32(base, vreinterpretq_s32_u32(vcombine_u32(vmovn_u64(lo), vmovn_u64(hi)))));
   }
 }
@@ -1178,9 +1175,9 @@ void clear_image_run(const u16* col, const u16* dep, u32 n, u32 polyid, u32* col
       const uint16x8_t d = vld1q_u16(dep + i + k * 8);
       const uint16x8_t dz = vbicq_u16(d, bit15), da = vandq_u16(d, bit15);
       vst1q_u32(depth + i + k * 8, vaddq_u32(vshll_n_u16(vget_low_u16(dz), 9), v1ff));
-      vst1q_u32(depth + i + k * 8 + 4, vaddq_u32(vshll_high_n_u16(dz, 9), v1ff));
+      vst1q_u32(depth + i + k * 8 + 4, vaddq_u32(compat::shll_high_n_u16<9>(dz), v1ff));
       vst1q_u32(attr + i + k * 8, vorrq_u32(vmovl_u16(vget_low_u16(da)), vpid));
-      vst1q_u32(attr + i + k * 8 + 4, vorrq_u32(vmovl_high_u16(da), vpid));
+      vst1q_u32(attr + i + k * 8 + 4, vorrq_u32(compat::movl_high_u16(da), vpid));
     }
   }
   for (; i < n; ++i) {
@@ -1217,7 +1214,7 @@ static u32 depth_candidates_m(const s32* z, const u32* dstz, const u32* dstattr,
     vst1_lane_u32(reinterpret_cast<u32*>(pass + i), vreinterpret_u32_u8(v8), 0);
     any = vorrq_u32(any, v);
   }
-  if (vmaxvq_u32(any) == 0) return 0;
+  if (compat::maxv_u32(any) == 0) return 0;
   u32 first = 0; while (!pass[first]) ++first;
   u32 last = n; while (last && !pass[last - 1]) --last;
   if (!last) return 0;   // the only hits were in the rounded-up tail

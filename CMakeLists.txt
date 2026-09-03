@@ -12,23 +12,52 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(DSPERATE_JIT      "Build the ARM->AArch64 recompiler (AArch64 hosts only)" ON)
-option(DSPERATE_NEON     "Build NEON renderer kernels (AArch64 hosts only)"       ON)
+option(DSPERATE_NEON     "Build NEON renderer kernels (AArch64 or ARMv7+NEON)"    ON)
 option(DSPERATE_TESTS    "Build unit tests"                                       ON)
 option(DSPERATE_HEADLESS "Build the headless frontend"                            ON)
 option(DSPERATE_SDL      "Build the SDL2 frontend (off when SDL2 is not found)"   ON)
 option(DSPERATE_WAYLAND  "Build the Wayland dmabuf scanout tier (off when SDL2 has no Wayland)" ON)
 
+# Host tiers.  These are two independent questions and the build keeps them
+# apart: the recompiler emits A64 and so needs an AArch64 host, while the
+# renderer kernels need only *a* NEON unit.  A 32-bit ARMv7 host therefore gets
+# vector kernels with the interpreter behind them, which used to be impossible
+# because a single aarch64 test gated both.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
   set(DSPERATE_HOST_AARCH64 ON)
+  set(DSPERATE_HOST_ARM32 OFF)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|armv7|armv7l|armv7a|armhf)$")
+  set(DSPERATE_HOST_AARCH64 OFF)
+  set(DSPERATE_HOST_ARM32 ON)
 else()
   set(DSPERATE_HOST_AARCH64 OFF)
-  if(DSPERATE_JIT)
-    message(STATUS "DSperate: host is ${CMAKE_SYSTEM_PROCESSOR}; JIT disabled (interpreter only)")
-    set(DSPERATE_JIT OFF)
-  endif()
-  if(DSPERATE_NEON)
+  set(DSPERATE_HOST_ARM32 OFF)
+endif()
+
+if(NOT DSPERATE_HOST_AARCH64 AND DSPERATE_JIT)
+  message(STATUS "DSperate: host is ${CMAKE_SYSTEM_PROCESSOR}; JIT disabled (interpreter only)")
+  set(DSPERATE_JIT OFF)
+endif()
+
+# On ARMv7 the kernels are built from the ARMv7-expressible NEON subset
+# (gpu/neon_compat.h).  ARMv7 NEON is not IEEE-clean for single precision in
+# its default mode, so ask for the VFPv4 unit and full float ABI rather than
+# leaving the compiler to pick a baseline that would quietly change results.
+if(DSPERATE_HOST_ARM32 AND DSPERATE_NEON)
+  include(CheckCXXSourceCompiles)
+  set(CMAKE_REQUIRED_FLAGS "-mfpu=neon-vfpv4 -mfloat-abi=hard")
+  check_cxx_source_compiles("#include <arm_neon.h>
+    int main() { return vgetq_lane_u8(vdupq_n_u8(0), 0); }" DSPERATE_ARM32_NEON_OK)
+  unset(CMAKE_REQUIRED_FLAGS)
+  if(DSPERATE_ARM32_NEON_OK)
+    add_compile_options(-mfpu=neon-vfpv4 -mfloat-abi=hard)
+    message(STATUS "DSperate: ARMv7 host; NEON kernels built from the A32 subset")
+  else()
+    message(STATUS "DSperate: ARMv7 host without usable NEON; ref kernels only")
     set(DSPERATE_NEON OFF)
   endif()
+elseif(NOT DSPERATE_HOST_AARCH64 AND DSPERATE_NEON)
+  set(DSPERATE_NEON OFF)
 endif()
 
 foreach(cfg RELEASE RELWITHDEBINFO)
