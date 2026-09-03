@@ -26,8 +26,10 @@
 
 namespace ds::gpu {
 
+#if DSPERATE_NEON
 // The A64-only NEON intrinsics the kernels use, in both spellings.
 namespace compat = kern::compat;
+#endif
 
 // ---- interpolation --------------------------------------------------------------
 //
