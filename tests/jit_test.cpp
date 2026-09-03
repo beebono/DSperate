@@ -317,6 +317,33 @@ void directed() {
     // ... and with C set going in (cmp r0, r0 first).
     {Cpu::ARM9, false, {0xE1500000, 0xE2FFA4D2, 0xB1A01002, 0xE2800001}, {0, 0, 0x12345678u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM9, false, {0xE1500000, 0xE2F0A4D2, 0xB1A01002, 0xE2800001}, {0x02000008u, 0, 0x12345678u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // Indirect branches (refill costs are compared through the budget).
+    // bx r1 -> the ARM halt stub; bx r1 -> Thumb code at +4 (even) / +6 (odd)
+    // that loads the halt stub's address and bx's to it; blx r1 (ARM9).
+    {Cpu::ARM9, false, {0xE12FFF11, 0xE2800001}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE12FFF11, 0xE2800001}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE12FFF11, 0x47004801, 0x46C046C0, HALT_STUB}, {0, CODE_BASE + 4 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE12FFF11, 0x47004801, 0x46C046C0, HALT_STUB}, {0, CODE_BASE + 4 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE12FFF11, 0x480146C0, 0x46C04700, HALT_STUB}, {0, CODE_BASE + 6 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE12FFF11, 0x480146C0, 0x46C04700, HALT_STUB}, {0, CODE_BASE + 6 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE12FFF31, 0xE2800001}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // Conditional bx, taken and not taken.
+    {Cpu::ARM9, false, {0xE1500000, 0x012FFF11, 0xE2800001}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE1500000, 0x112FFF11, 0xE2800001}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // str r2, [r9]; ldmia r9, {pc}  and  ldmia r9!, {r0, pc} (the CDI charge after the jump)
+    {Cpu::ARM9, false, {0xE5892000, 0xE8998000}, {0, 0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE5892000, 0xE8998000}, {0, 0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE5892004, 0xE8B98001}, {0, 0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE5892004, 0xE8B98001}, {0, 0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // Thumb: bx r1; mov pc, r1 / add pc, r1 (odd targets: Thumb code at +4 that bx's to the halt stub);
+    // push {r2}; pop {pc}; an unpaired blx suffix (lr = halt stub).
+    {Cpu::ARM9, true, {0x4708, 0x46C0, 0x4801, 0x4700, 0x46C0, 0x46C0, static_cast<u32>(HALT_STUB & 0xFFFF), static_cast<u32>(HALT_STUB >> 16)}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, true, {0x4708, 0x46C0, 0x4801, 0x4700, 0x46C0, 0x46C0, static_cast<u32>(HALT_STUB & 0xFFFF), static_cast<u32>(HALT_STUB >> 16)}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, true, {0x468F, 0x46C0, 0x4801, 0x4700, 0x46C0, 0x46C0, static_cast<u32>(HALT_STUB & 0xFFFF), static_cast<u32>(HALT_STUB >> 16)}, {0, CODE_BASE + 4 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, true, {0x468F, 0x46C0, 0x4801, 0x4700, 0x46C0, 0x46C0, static_cast<u32>(HALT_STUB & 0xFFFF), static_cast<u32>(HALT_STUB >> 16)}, {0, CODE_BASE + 4 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, true, {0x448F, 0x46C0, 0x4801, 0x4700, 0x46C0, 0x46C0, static_cast<u32>(HALT_STUB & 0xFFFF), static_cast<u32>(HALT_STUB >> 16)}, {0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, true, {0xB404, 0xBD00}, {0, 0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, true, {0xE800}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, HALT_STUB}},
     // Thumb: movs then ldr [r6 + r0] far away.
     {Cpu::ARM9, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM7, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},

@@ -334,8 +334,147 @@ void emit_stubs(Runtime& rt) {
       e.b(rt.exit_r15);
     }
 
-    // Indirect branches are interpreter fallbacks in this phase.
-    jc.branch_indirect = jc.branch_indirect_cdi = nullptr;
+    // branch_indirect_cdi: r0 = target (bit 0 = new T), r1 = numD, r2 = data
+    // address. Charges the CDI cost of an LDM/POP that loaded pc the way the
+    // interpreter does *after* the jump (new pc, state and code region), then
+    // continues as branch_indirect. Both are reached with `b`, so lr is a
+    // temporary; the guest flags wait on the stack (8-byte frame) so the
+    // cost arithmetic may compare and predicate freely.
+    const u32 OFF_TIMING9 = offsetof(CpuContext, timing9), OFF_TIMING7 = offsetof(CpuContext, timing7);
+    jc.branch_indirect_cdi = e.cur();
+    e.mrs_apsr(R_FN);
+    e.dp_imm(SUB, false, R_SP, R_SP, 8);
+    e.str(R_FN, R_SP, 0);
+    e.tst_imm(0, 1);
+    e.and_imm(0, 0, ~3u, EQ);                   // ARM target: word aligned
+    e.and_imm(3, 0, ~1u);                       // a
+    if (c == 0) {
+      // numC after the jump: ARM cost(a+4, S); Thumb odd cost(a+2, S); Thumb even 0.
+      e.ldr(R_LR, R_CTX, OFF_TIMING9);
+      size_t thumb = e.b_fwd(NE);
+      e.add_imm(R_FN, 3, 4, R_FN);
+      size_t fetch = e.b_fwd();
+      e.bind(thumb);
+      e.tst_imm(3, 2);
+      e.mov_imm(R_FN, 0, EQ);
+      size_t even = e.b_fwd(EQ);
+      e.add_imm(R_FN, 3, 2, R_FN);
+      e.bind(fetch);
+      // r12 = cost(x = r12, S): tbl[x >> 12][0], 0xFF -> (x & 0x1F) == 0 ? 3 : 1
+      e.lsr_imm(3, R_FN, 12);
+      e.add_reg(3, R_LR, 3, LSL, 3);
+      e.ldrb(3, 3, 0);
+      e.cmp_imm(3, 0xFF);
+      size_t plain = e.b_fwd(NE);
+      e.tst_imm(R_FN, 0x1F);
+      e.mov_imm(3, 3, EQ);
+      e.mov_imm(3, 1, NE);
+      e.bind(plain);
+      e.mov(R_FN, 3);
+      e.bind(even);
+      // cost = max3(nc + d - 6, nc, d)
+      e.add_reg(3, R_FN, 1);
+      e.sub_imm(3, 3, 6, R_LR);
+      e.cmp_reg(R_FN, 1);
+      e.mov(R_FN, 1, LS);                       // unsigned max(nc, d)
+      e.cmp_reg(3, R_FN);
+      e.mov(R_FN, 3, GT);                       // signed max with nc + d - 6
+      e.sub_reg(R_BUDGET, R_BUDGET, R_FN);
+    } else {
+      // numC = t_new[T ? 0 : 2]; then charge_CDI's main-RAM rules with the
+      // code region = target, data region = r2.
+      e.ldr(R_LR, R_CTX, OFF_TIMING7);
+      e.lsr_imm(R_FN, 3, 15);
+      e.add_reg(R_FN, R_LR, R_FN, LSL, 2);
+      e.tst_imm(0, 1);
+      e.ldrb(R_FN, R_FN, 0, NE);
+      e.ldrb(R_FN, R_FN, 2, EQ);                // nc
+      e.lsr_imm(R_LR, 3, 24);                   // code region
+      e.lsr_imm(3, 2, 24);                      // data region
+      e.cmp_imm(3, 2);
+      size_t not_data_main = e.b_fwd(NE);
+      e.cmp_imm(R_LR, 2);
+      e.add_reg(R_FN, R_FN, 1, LSL, 0, EQ);     // both main: nc + d
+      size_t done = e.b_fwd(EQ);
+      e.add_imm(R_FN, R_FN, 1, 3);              // nc + 1
+      size_t maxform = e.b_fwd();
+      e.bind(not_data_main);
+      e.cmp_imm(R_LR, 2);
+      size_t plain = e.b_fwd(NE);
+      e.add_imm(1, 1, 1, 3);                    // d + 1
+      e.bind(maxform);                          // max3(nc + d - 3, nc, d)
+      e.add_reg(3, R_FN, 1);
+      e.sub_imm(3, 3, 3, R_LR);
+      e.cmp_reg(R_FN, 1);
+      e.mov(R_FN, 1, LS);
+      e.cmp_reg(3, R_FN);
+      e.mov(R_FN, 3, GT);
+      size_t done2 = e.b_fwd();
+      e.bind(plain);                            // neither main: nc + d + 1
+      e.add_reg(R_FN, R_FN, 1);
+      e.add_imm(R_FN, R_FN, 1, 3);
+      e.bind(done);
+      e.bind(done2);
+      e.sub_reg(R_BUDGET, R_BUDGET, R_FN);
+    }
+    size_t to_body = e.b_fwd();
+
+    // branch_indirect: r0 = target address, bit 0 = new T.
+    jc.branch_indirect = e.cur();
+    e.mrs_apsr(R_FN);
+    e.dp_imm(SUB, false, R_SP, R_SP, 8);
+    e.str(R_FN, R_SP, 0);
+    e.tst_imm(0, 1);
+    e.and_imm(0, 0, ~3u, EQ);
+    e.bind(to_body);
+    e.ldr(1, R_CTX, OFF_CPSR);
+    e.bfi(1, 0, 5, 1);                          // T
+    e.str(1, R_CTX, OFF_CPSR);
+    e.and_imm(2, 0, ~1u);                       // a
+    if (c == 0) {
+      // ARM9 refill: ARM cost(a,B)+cost(a+4,S); Thumb odd cost(a-2,B)+cost(a+2,S), even cost(a,B).
+      // first = a - 2*odd (B fetch), second = a + 4 - 2*T (S fetch, dropped when T && !odd).
+      e.ldr(R_LR, R_CTX, OFF_TIMING9);
+      e.and_imm(3, 0, 1);                       // T
+      e.ubfx(R_FN, 2, 1, 1);                    // odd
+      e.sub_reg(1, 2, R_FN, LSL, 1);            // first
+      e.bic_reg(R_FN, 3, R_FN);                 // skip = T && !odd
+      e.sub_reg(3, 2, 3, LSL, 1);
+      e.add_imm(3, 3, 4, 2);                    // second (a is dead now)
+      e.lsr_imm(1, 1, 12);
+      e.add_reg(1, R_LR, 1, LSL, 3);
+      e.ldrb(1, 1, 0);
+      e.cmp_imm(1, 0xFF);
+      e.mov_imm(1, 3, EQ);                      // cost(first, B)
+      e.lsr_imm(2, 3, 12);
+      e.add_reg(2, R_LR, 2, LSL, 3);
+      e.ldrb(2, 2, 0);
+      e.cmp_imm(2, 0xFF);
+      size_t have2 = e.b_fwd(NE);
+      e.tst_imm(3, 0x1F);
+      e.mov_imm(2, 3, EQ);
+      e.mov_imm(2, 1, NE);                      // cost(second, S)
+      e.bind(have2);
+      e.cmp_imm(R_FN, 0);
+      e.mov_imm(2, 0, NE);                      // no second fetch
+      e.add_reg(1, 1, 2);
+    } else {
+      // ARM7 refill: t = timing7[a >> 15]; Thumb t0 + t1, ARM t2 + t3.
+      e.ldr(R_LR, R_CTX, OFF_TIMING7);
+      e.lsr_imm(1, 2, 15);
+      e.add_reg(1, R_LR, 1, LSL, 2);
+      e.tst_imm(0, 1);
+      e.ldrb(3, 1, 0, NE);
+      e.ldrb(1, 1, 1, NE);
+      e.ldrb(3, 1, 2, EQ);
+      e.ldrb(1, 1, 3, EQ);
+      e.add_reg(1, 1, 3);
+    }
+    e.sub_reg(R_BUDGET, R_BUDGET, 1);
+    e.ldr(R_FN, R_SP, 0);
+    e.dp_imm(ADD, false, R_SP, R_SP, 8);
+    e.msr_apsr_nzcvq(R_FN);
+    e.b(jc.dispatch);
   }
 
   rt.stubs_end = (e.size() + 63) & ~size_t{63};

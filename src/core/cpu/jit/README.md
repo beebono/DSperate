@@ -29,7 +29,7 @@ the stubs and the translator behind the `backend` interface in
 | `a32/emit.h` | A32 (ARMv7) encoder, ARM state |
 | `a32/convention.h` | the ARMv7 register map: guest r0-r3 and sp pinned in r4-r8, budget r9, page table r10, context r11; the other guest registers in memory and a per-block cache; guest NZCVQ in the APSR |
 | `a32/stubs.cpp` | the ARMv7 stubs (AAPCS32: `blx` to Thumb-2 helpers, struct return in memory, 8-byte stack frames) |
-| `a32/translate.cpp` | ARMv7 translator: register cache, data processing / multiplies / static branches by field substitution with native flags and predication, single loads/stores and same-page LDM/STM with a page-table fast path; indirect branches, LDM pc and MSR through the fallback stub (phase 2 step 2); same block shape as a64 |
+| `a32/translate.cpp` | ARMv7 translator: register cache, data processing / multiplies / branches (static and indirect) by field substitution with native flags and predication, single loads/stores and same-page LDM/STM (pc included) with a page-table fast path, same-mode MSR; the rest through the fallback stub; same block shape as a64 |
 
 The ARMv7 backend is scoped in `docs/arm32-jit-scoping.md`. Its gates, run
 after every step: `test_jit` under qemu-arm (1600 trials), the five replay
@@ -48,6 +48,15 @@ LDM/STM the cold path is the interpreter, so the base writeback waits in a
 temporary until the transfer is done, and a conditional memory body keeps
 the flags across its page tests even when nothing after it reads them: the
 interpreter re-evaluates the condition on them.
+
+Phase 2 step 3 (2026-09-03): the indirect-branch stubs (`branch_indirect`,
+`branch_indirect_cdi`) park the guest flags on the stack so the refill and
+post-jump CDI arithmetic can compare and predicate freely; BX/BLX, Thumb
+hi-register pc forms, unpaired BL suffixes, LDM/POP pc and same-mode MSR
+are inline. The directed cases in `tests/jit_test.cpp` cover every one of
+those forms on both CPUs, because the fuzzer's generator reaches none of
+them; they caught a register-permutation bug the scenes only showed as a
+late hash divergence.
 
 Two A32 rules the AArch64 backend never needed: a predicated cycle charge
 must come *before* a flag-writing (S) body, because the body rewrites the

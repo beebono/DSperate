@@ -1,8 +1,7 @@
 # Scoping: an ARM → ARMv7 (A32) recompiler
 
-Status: phase 1 and phase 2 steps 1-2 built 2026-09-03 on branch `a32-jit`
-(see §7 and `src/core/cpu/jit/README.md`); the rest of phase 2 and phases
-3-4 open. Branch context:
+Status: phases 1 and 2 built 2026-09-03 on branch `a32-jit` (see §7 and
+`src/core/cpu/jit/README.md`); phases 3-4 open. Branch context:
 `arm32-build` already gives an ARMv7 host tier (NEON subset kernels,
 interpreter only); the JIT is the one thing that tier lacks.
 
@@ -313,9 +312,23 @@ orders. Two lessons: the LDM/STM base writeback must wait in a temporary
 because the cold path is the interpreter; and a conditional memory body
 must keep its flags across the page tests whatever the liveness pass says,
 because the interpreter re-evaluates the condition on the cold path.
-Next: indirect branches (`branch_indirect` stub), LDM pc / POP pc, same-mode
-MSR; then phase 3 on the device (pinned page table vs literal, LUT size,
-the inter-block flag hint, cost lookup before the access for latency).
+*Step 3, done 2026-09-03:* indirect branches and MSR. `branch_indirect`
+(refill: ARM9 with predicated selects, ARM7 from the table) and
+`branch_indirect_cdi` (LDM/POP pc: the post-jump CDI charge from the new
+pc/state/code region) with the flags parked on the stack; BX/BLX reg,
+Thumb hi-register pc, unpaired BL/BLX suffixes, LDM/POP pc, same-mode MSR
+inline. Exact: 55 directed + 4 × 1600 fuzz; all five scenes identical to
+the A64 JIT; strict identical to the interpreter. **A30 firmware boot:
+10.7 ms median (step 2: 11.5, interpreter 62)**. Lesson: the fuzzer never
+generates these forms, so a wrong scratch choice in the register
+permutation before the stub only showed as late hash divergences on three
+scenes; the directed cases now cover every form on both CPUs.
+Phase 2 is functionally complete: what still falls back is SWI/undefined,
+coprocessor, SWP, LDRD/STRD, user-bank LDM/STM, mode-changing MSR,
+pc-destination data processing and LDR pc -- the same set as the A64
+backend. Next: phase 3 on the device (pinned page table vs literal, LUT
+size, the inter-block flag hint, cost lookup before the access, and the
+replay scenes on the A30 once ROMs are on its card).
 
 **Phase 3 — device tuning (≈ 1 week, needs the device).** Pinned subset;
 page-table base pinned vs literal; LUT size; A/B by PMU categories with

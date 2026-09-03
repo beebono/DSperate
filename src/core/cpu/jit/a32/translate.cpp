@@ -75,6 +75,8 @@ static_assert(OFF_COST7 < 4096, "CpuContext timing pointers must be reachable fr
 // Flag bits for the liveness pass.
 constexpr u32 F_N = 8, F_Z = 4, F_C = 2, F_V = 1, F_ALL = 15;
 
+inline u32 rotr(u32 v, u32 n) { n &= 31; return n ? (v >> n) | (v << (32 - n)) : v; }
+
 u32 cond_reads(u32 cond) {
   switch (cond) {
   case 0x0: case 0x1: return F_Z;
@@ -91,6 +93,7 @@ u32 cond_reads(u32 cond) {
 struct FlagUse { u32 reads, writes; };
 
 using shape::mcr_is_nop;
+using shape::msr_inline;
 
 // What this backend hands to the interpreter. The liveness pass treats these
 // as reading every flag (the stub syncs the APSR to memory), so the two must
@@ -108,10 +111,11 @@ bool arm_needs_fallback(u32 instr, bool a9) {
     if (rd == 15 && !test) return true;
     return op == AOp::DpRegShift && ((instr >> 8) & 0xF) == 15;
   }
-  case AOp::Mrs: case AOp::B: case AOp::Bl: case AOp::Pld:
+  case AOp::Mrs: case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::Pld:
     return false;
   case AOp::Mcr: return !mcr_is_nop(instr, a9);
-  case AOp::Clz: return !a9;
+  case AOp::MsrReg: case AOp::MsrImm: return !msr_inline(instr);
+  case AOp::BlxReg: case AOp::Clz: return !a9;
   case AOp::Mul: case AOp::Mla:
     return rd == 15 || ((instr >> 8) & 0xF) == 15 || (instr & 0xF) == 15 || rn == 15;
   case AOp::Umull: case AOp::Umlal: case AOp::Smull: case AOp::Smlal:
@@ -129,7 +133,7 @@ bool arm_needs_fallback(u32 instr, bool a9) {
     return (!l && sh != 1) || rd == 15 || (rn == 15 && (!p || w)) || (op == AOp::LdrStrHReg && (instr & 0xF) == 15);
   }
   case AOp::Ldm: case AOp::Stm:
-    return (instr & (1u << 22)) || (instr & 0xFFFF) == 0 || rn == 15 || (op == AOp::Ldm && (instr & 0x8000));
+    return (instr & (1u << 22)) || (instr & 0xFFFF) == 0 || rn == 15;
   default:
     return true;
   }
@@ -139,18 +143,14 @@ bool arm_needs_fallback(u32 instr, bool a9) {
 // suffix has a static target.
 bool thumb_needs_fallback(u16 instr, bool a9, bool paired) {
   switch (arm::decode_thumb(instr)) {
-  case TOp::HiRegOp: {
-    const u32 rd = (instr & 7) | ((instr >> 4) & 8), op = (instr >> 8) & 3;
-    return rd == 15 && (op == 0 || op == 2);
-  }
-  case TOp::ShiftImm: case TOp::AddSubReg: case TOp::AddSubImm3: case TOp::MovCmpAddSubImm8: case TOp::Alu:
-  case TOp::B: case TOp::BCond: case TOp::BlPrefix: case TOp::AddPcSp: case TOp::AdjustSp:
+  case TOp::HiRegOp: case TOp::ShiftImm: case TOp::AddSubReg: case TOp::AddSubImm3: case TOp::MovCmpAddSubImm8: case TOp::Alu:
+  case TOp::B: case TOp::BCond: case TOp::BlPrefix: case TOp::AddPcSp: case TOp::AdjustSp: case TOp::BlSuffix:
   case TOp::LdrPcRel: case TOp::LdrStrReg: case TOp::LdrStrImm5: case TOp::LdrStrHImm5: case TOp::LdrStrSpRel:
     return false;
-  case TOp::PushPop: return ((instr & 0xFF) | ((instr >> 8) & 1)) == 0 || ((instr & (1 << 11)) && (instr & (1 << 8)));   // empty, or pop pc
+  case TOp::BxBlx: return (instr & (1 << 7)) && !a9;
+  case TOp::PushPop: return ((instr & 0xFF) | ((instr >> 8) & 1)) == 0;
   case TOp::StmLdm: return (instr & 0xFF) == 0;
-  case TOp::BlSuffix: return !paired;
-  case TOp::BlxSuffix: return !a9 || !paired;
+  case TOp::BlxSuffix: return !a9;
   default: return true;
   }
 }
@@ -185,7 +185,11 @@ FlagUse arm_flag_use(u32 instr, bool a9) {
     if (s) u.writes = F_N | F_Z;   // the ARM7 also clears C; claiming less written is the safe side
     break;
   case AOp::Mrs: u.reads = F_ALL; break;
-  case AOp::B: case AOp::Bl: case AOp::Clz: case AOp::Pld: case AOp::Mcr:
+  case AOp::MsrReg: case AOp::MsrImm:
+    u.reads = F_ALL;                                   // the mode-change path syncs CPSR through the interpreter
+    if (instr & (1u << 19)) u.writes = F_ALL;          // f field
+    break;
+  case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::BlxReg: case AOp::Clz: case AOp::Pld: case AOp::Mcr:
   case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY:
   case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg: case AOp::Ldm: case AOp::Stm:
     break;
@@ -197,6 +201,7 @@ FlagUse arm_flag_use(u32 instr, bool a9) {
 
 FlagUse thumb_flag_use(u16 instr, bool a9, bool paired) {
   if (thumb_needs_fallback(instr, a9, paired)) return {F_ALL, 0};
+  (void)paired;
   switch (arm::decode_thumb(instr)) {
   case TOp::ShiftImm: {
     const u32 type = (instr >> 11) & 3, amt = (instr >> 6) & 0x1F;
@@ -383,6 +388,10 @@ private:
   void call_stub(const u8* stub) {
     if (!in_cold()) { hot_.bl(stub); return; }
     fixes_.push_back({cold_.bl_fwd(), true, 0, false, stub});
+  }
+  void jump_stub(const u8* stub) {
+    if (!in_cold()) { hot_.b(stub); return; }
+    fixes_.push_back({cold_.b_fwd(), true, 0, false, stub});
   }
   void cold_begin(const std::vector<size_t>& hot_fixups) {
     assert(!in_cold());
@@ -751,8 +760,9 @@ private:
   // the interpreter, so rn must still hold its old value there: the
   // writeback value waits in `t_w` (a locked temp; 0xFF: it equals `a`) and
   // reaches rn after the transfer. `a` = start address (a locked temp).
-  void emit_block_transfer(u32 instr, u32 list, bool load, bool writeback, u32 rn, u32 a, u32 t_w, u32 pc_store_value) {
+  void emit_block_transfer(u32 instr, u32 list, bool load, bool writeback, u32 rn, u32 a, u32 t_w, u32 pc_store_value, bool interwork_pc = false) {
     const u32 n = static_cast<u32>(__builtin_popcount(list));
+    const bool pc_in_list = load && (list & 0x8000);
     flush_pending();
     const u32 f = flags_begin();
     const u32 en = cache_.temp(), e2 = cache_.temp();
@@ -774,9 +784,11 @@ private:
     u32 k = 0;
     bool first = true;
     const u32 wv = t_w == 0xFF ? a : t_w;
+    u32 hpc = 0xFF;
     if (load) {
       for (u32 i = 0; i < 16; ++i) {
         if (!(list & (1u << i))) continue;
+        if (i == 15) { hpc = cache_.temp(); e().ldr(hpc, en, 4 * k); ++k; continue; }
         const u32 h = cache_.write(i, false);
         e().ldr(h, en, 4 * k);
         cache_.unlock(h);
@@ -808,6 +820,30 @@ private:
     if (t_w != 0xFF) cache_.release(t_w);
     cache_.release(en);
     // cost: N + (n - 1) S from the page's entry (--cpu-oc: main RAM's, at translate time)
+    if (pc_in_list) {
+      // The interpreter charges the CDI cost after the jump: the stub does
+      // it from the new pc/state (numD, data address).
+      const u32 c = cache_.temp(), t = cache_.temp();
+      if (rt().cpu_oc) e().mov_imm(c, oc_data_cost(true, false, true) + (n - 1) * oc_data_cost(true, true, true));
+      else {
+        emit_data_cost(a, c, t, true, false, false);
+        if (n > 1) {
+          const u32 c2 = cache_.temp();
+          emit_data_cost(a, c2, t, true, true, false);
+          e().mov_imm(t, n - 1);
+          e().mla(c, c2, t, c);
+          cache_.release(c2);
+        }
+      }
+      cache_.release(t);
+      emit_branch_indirect(hpc, interwork_pc, true, c, a);
+      cold_begin(fail);
+      if (f != 0xFF) e().msr_apsr_nzcvq(f);
+      cache_.restore(s0);
+      emit_fallback(instr, true);
+      cold_end();
+      return;
+    }
     if (rt().cpu_oc) {
       const u32 nd = oc_data_cost(true, false, !load) + (n - 1) * oc_data_cost(true, true, !load);
       add_pending(const_charge(nd, load));
@@ -885,6 +921,47 @@ private:
     if (blk_.nsucc < 4) blk_.succ[blk_.nsucc++] = make_key(target, to_thumb);
     ended_ = true;
   }
+  // Move `n` values into r0.. (dst[i] <- src[i]) with every other slot
+  // register free (the cache is flushed): cycles go through a scratch that
+  // is none of the sources.
+  void emit_permute(const u32* dst, const u32* src, u32 n) {
+    u32 d[3], sr[3];
+    for (u32 i = 0; i < n; ++i) { d[i] = dst[i]; sr[i] = src[i]; }
+    bool pending[3] = {true, true, true};
+    for (u32 left = n; left;) {
+      bool progress = false;
+      for (u32 i = 0; i < n; ++i) {
+        if (!pending[i]) continue;
+        if (d[i] == sr[i]) { pending[i] = false; --left; progress = true; continue; }
+        bool blocked = false;
+        for (u32 j = 0; j < n; ++j) if (j != i && pending[j] && sr[j] == d[i]) blocked = true;
+        if (blocked) continue;
+        e().mov(d[i], sr[i]);
+        pending[i] = false; --left; progress = true;
+      }
+      if (progress || !left) continue;
+      u32 scratch = SCRATCH4;                       // break a cycle: park one source in a register no move touches
+      for (u32 r : RegCache::HOST) { bool used = false; for (u32 j = 0; j < n; ++j) if (sr[j] == r || d[j] == r) used = true; if (!used) { scratch = r; break; } }
+      for (u32 i = 0; i < n; ++i) if (pending[i]) { e().mov(scratch, sr[i]); sr[i] = scratch; break; }
+    }
+  }
+  // Indirect branch; `htarget` holds the address (any host register). With
+  // `interwork` bit 0 selects the state, otherwise the current state is
+  // kept. `cdi`: an LDM/POP that loaded pc -- `hnumd` and `haddr` carry the
+  // post-jump charge's inputs. Ends the block.
+  void emit_branch_indirect(u32 htarget, bool interwork, bool cdi = false, u32 hnumd = 0, u32 haddr = 0) {
+    assert(cond_ == AL);
+    cache_.flush();                                 // stores only: the temporaries keep their values
+    flush_pending();
+    if (cdi) { const u32 d[3] = {0, 1, 2}, sr[3] = {htarget, hnumd, haddr}; emit_permute(d, sr, 3); }
+    else if (htarget != SCRATCH0) e().mov(SCRATCH0, htarget);
+    if (!interwork) {
+      if (thumb_) e().orr_imm(SCRATCH0, SCRATCH0, 1);
+      else e().and_imm(SCRATCH0, SCRATCH0, ~1u);
+    }
+    jump_stub(cdi ? jc_.branch_indirect_cdi : jc_.branch_indirect);
+    ended_ = true;
+  }
   // A conditional static branch: both arms end the block. `taken` emits the
   // lr write (if any) and the branch; the fall-through arm charges numC and
   // links to the next instruction.
@@ -939,6 +1016,7 @@ private:
   void arm_data_processing(u32 instr, AOp op);
   void arm_multiply(u32 instr, AOp op);
   void arm_dsp_multiply(u32 instr, AOp op);
+  void arm_msr(u32 instr, AOp op);
   void arm_ldr_str(u32 instr, AOp op);
   void arm_ldr_str_h(u32 instr, AOp op);
   void arm_ldm_stm(u32 instr, bool load);
@@ -947,6 +1025,67 @@ private:
   void thumb_push_pop(u16 instr);
   void thumb_stm_ldm(u16 instr);
 };
+
+// MSR CPSR_<fields>, Rm / #imm. Inline when the mode stays the same and the
+// CPU is not in user mode (both tested at run time); the control field then
+// only moves I and F, the other fields merge into the memory copy, and the
+// flags field sets the APSR. Everything else runs through the interpreter on
+// the cold path. T is never written (as in the interpreter). The cache is
+// flushed first: the poll after an I write and the cold fallback both need
+// memory current, and MSR is rare.
+void Translator::arm_msr(u32 instr, AOp op) {
+  const u32 fields = (instr >> 16) & 0xF;
+  cache_.flush();
+  flush_pending();                 // the cold path charges through the interpreter; numC is charged after the tests
+  u32 wv;
+  if (op == AOp::MsrImm) { wv = cache_.temp(); e().mov_imm(wv, rotr(instr & 0xFF, ((instr >> 8) & 0xF) * 2)); }
+  else wv = cache_.read(instr & 0xF);
+  const u32 mem_mask = ((fields & 1) ? 0xC0u : 0) | ((fields & 2) ? 0xFF00u : 0) | ((fields & 4) ? 0xFF0000u : 0) | ((fields & 8) ? 0x0F000000u : 0);
+  const bool tests = (fields & 7) != 0;
+  std::vector<size_t> fail;
+  u32 f = 0xFF;
+  const u32 t2 = cache_.temp(), t3 = cache_.temp();
+  const RegCache::State s0 = cache_.save();
+  if (tests) {
+    f = cache_.temp();
+    e().mrs_apsr(f);                              // the interpreter path must see the guest flags
+    e().ldr(t2, R_CTX, OFF_CPSR);
+    e().tst_imm(t2, 0xF);
+    fail.push_back(e().b_fwd(EQ));                // user mode: flags only (interpreter)
+    if (fields & 1) {
+      e().eor_reg(t3, t2, wv);
+      e().tst_imm(t3, 0x1F);
+      fail.push_back(e().b_fwd(NE));              // mode change: bank switch (interpreter)
+    }
+    e().msr_apsr_nzcvq(f);
+  } else if (mem_mask) e().ldr(t2, R_CTX, OFF_CPSR);
+  add_pending(numC(pc_));
+  flush_pending();
+  if (mem_mask) {
+    if (mem_mask == 0xC0) { e().ubfx(t3, wv, 6, 2); e().bfi(t2, t3, 6, 2); }
+    else {
+      e().mov_imm(t3, mem_mask);
+      e().dp_reg(BIC, false, t2, t2, t3);        // clear the fields, then merge the new bits
+      e().and_reg(t3, wv, t3);
+      e().orr_reg(t2, t2, t3);
+    }
+    e().str(t2, R_CTX, OFF_CPSR);
+  }
+  if (fields & 8) e().msr_apsr_nzcvq(wv);
+  if (fields & 1) { call_stub(rt().poll); e().word(make_key(pc_ + 4, thumb_)); }   // I may have changed
+  cache_.release(t2); cache_.release(t3);
+  if (f != 0xFF) cache_.release(f);
+  if (fail.empty()) return;
+  const size_t join = hot_.size();
+  const RegCache::State s1 = cache_.save();
+  cold_begin(fail);
+  e().msr_apsr_nzcvq(f);
+  cache_.restore(s0);
+  emit_fallback(instr, false);
+  cache_.restore(s1);
+  cache_.reload();
+  cold_end_jump(join);
+}
 
 // ---- memory instructions ------------------------------------------------------------------------
 
@@ -1004,8 +1143,8 @@ void Translator::arm_ldm_stm(u32 instr, bool load) {
     if (u) e().add_imm(t_w, hb, n * 4, t_w); else e().sub_imm(t_w, hb, n * 4, t_w);
   }
   cache_.unlock(hb);
-  emit_block_transfer(instr, list, load, w, rn, a, t_w, pc_ + 12);
-  cache_.release(a);
+  emit_block_transfer(instr, list, load, w, rn, a, t_w, pc_ + 12, a9_);
+  if (!ended_) cache_.release(a);
 }
 
 void Translator::thumb_ldr_str(u16 instr, TOp op) {
@@ -1073,19 +1212,19 @@ void Translator::thumb_push_pop(u16 instr) {
   const u32 sp = pinned_host(13);
   const u32 a = cache_.temp();
   if (pop) {
-    if (r) list |= 0x4000;   // lr (pc is a fallback)
+    if (r) list |= 0x8000;   // pc
     const u32 n = static_cast<u32>(__builtin_popcount(list));
     e().mov(a, sp);
     const u32 t_w = cache_.temp();
     e().add_imm(t_w, sp, n * 4, t_w);                     // POP always writes back; sp is never in a Thumb list
-    emit_block_transfer(instr, list, true, true, 13, a, t_w, 0);
+    emit_block_transfer(instr, list, true, true, 13, a, t_w, 0, a9_);
   } else {
     if (r) list |= 0x4000;
     const u32 n = static_cast<u32>(__builtin_popcount(list));
     e().sub_imm(a, sp, n * 4, a);
     emit_block_transfer(instr, list, false, true, 13, a, 0xFF, 0);   // writeback value = start address
   }
-  cache_.release(a);
+  if (!ended_) cache_.release(a);
 }
 
 void Translator::thumb_stm_ldm(u16 instr) {
@@ -1228,10 +1367,24 @@ void Translator::translate_arm(u32 instr, bool fb) {
     return;
   }
 
-  // Memory: a data-dependent cost, so a conditional form branches around
-  // the body (cache empty on both arms) and the skipped arm charges numC.
+  if (op == AOp::Bx || op == AOp::BlxReg) {
+    const u32 rm = instr & 0xF;
+    auto taken = [&] {
+      const u32 t = reg_read(rm, pc_ + 8);
+      if (op == AOp::BlxReg) e().mov_imm(cache_.write(14, false), pc_ + 4);
+      emit_branch_indirect(t, true);
+    };
+    if (cond != 0xE) emit_branch_cond(cond, taken); else taken();
+    return;
+  }
+
+  // Memory and MSR: a data-dependent cost (or an interpreter cold path), so
+  // a conditional form branches around the body (cache empty on both arms)
+  // and the skipped arm charges numC; a body that ends the block (LDM pc)
+  // links the skipped arm to the next instruction.
   switch (op) {
-  case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg: case AOp::Ldm: case AOp::Stm: {
+  case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg: case AOp::Ldm: case AOp::Stm:
+  case AOp::MsrReg: case AOp::MsrImm: {
     size_t skip = 0;
     if (cond != 0xE) {
       cache_.flush(); flush_pending();
@@ -1245,9 +1398,18 @@ void Translator::translate_arm(u32 instr, bool fb) {
     case AOp::LdrStrImm: case AOp::LdrStrReg: arm_ldr_str(instr, op); break;
     case AOp::LdrStrHImm: case AOp::LdrStrHReg: arm_ldr_str_h(instr, op); break;
     case AOp::Ldm: arm_ldm_stm(instr, true); break;
-    default: arm_ldm_stm(instr, false); break;
+    case AOp::Stm: arm_ldm_stm(instr, false); break;
+    default: arm_msr(instr, op); break;
     }
     if (cond != 0xE) {
+      if (ended_) {
+        hot_.bind(skip);
+        cache_.restore(RegCache::State{});
+        ended_ = false;
+        add_pending(numC(pc_));
+        emit_branch_static(pc_ + 4, false, false);
+        return;
+      }
       cache_.flush();
       flush_pending();
       const size_t join = hot_.b_fwd();
@@ -1420,13 +1582,28 @@ void Translator::translate_thumb(u16 instr, bool fb) {
   case TOp::Alu: thumb_alu(instr); return;
   case TOp::HiRegOp: {
     const u32 rd = (instr & 7) | ((instr >> 4) & 8), rs = (instr >> 3) & 0xF;
-    add_pending(numC(pc_));
+    add_pending(numC(pc_));             // charged before a jump too (melonDS T_ADD_HIREG)
     switch ((instr >> 8) & 3) {
-    case 0: { const u32 b = reg_read(rs, pc_ + 4), hd = cache_.write(rd, true); e().add_reg(hd, hd, b); return; }
+    case 0: {
+      const u32 b = reg_read(rs, pc_ + 4);
+      if (rd == 15) { const u32 t = cache_.temp(); e().add_imm(t, b, pc_ + 4, t); emit_branch_indirect(t, false); return; }
+      const u32 hd = cache_.write(rd, true); e().add_reg(hd, hd, b); return;
+    }
     case 1: { const u32 a = reg_read(rd, pc_ + 4), b = reg_read(rs, pc_ + 4); e().cmp_reg(a, b); return; }
-    case 2: { const u32 b = reg_read(rs, pc_ + 4), hd = cache_.write(rd, false); e().mov(hd, b); return; }
+    case 2: {
+      const u32 b = reg_read(rs, pc_ + 4);
+      if (rd == 15) { emit_branch_indirect(b, false); return; }
+      const u32 hd = cache_.write(rd, false); e().mov(hd, b); return;
+    }
     default: return;
     }
+  }
+  case TOp::BxBlx: {
+    const u32 rs = (instr >> 3) & 0xF;
+    const u32 t = reg_read(rs, pc_ + 4);
+    if (instr & (1 << 7)) e().mov_imm(cache_.write(14, false), (pc_ + 2) | 1);
+    emit_branch_indirect(t, true);
+    return;
   }
   case TOp::AddPcSp: {
     const u32 rd = (instr >> 8) & 7, imm = (instr & 0xFF) * 4;
@@ -1467,12 +1644,20 @@ void Translator::translate_thumb(u16 instr, bool fb) {
   case TOp::PushPop: thumb_push_pop(instr); return;
   case TOp::StmLdm: thumb_stm_ldm(instr); return;
   case TOp::BlSuffix: case TOp::BlxSuffix: {
-    assert(was_prefix); (void)was_prefix;
     const bool blx = op == TOp::BlxSuffix;
-    const u32 target = bl_prefix_lr_ + ((instr & 0x7FF) << 1);
-    e().mov_imm(cache_.write(14, false), (pc_ + 2) | 1);
-    if (blx) emit_branch_static(target & ~3u, false, true);
-    else emit_branch_static(target & ~1u, true, true);
+    const u32 ret = (pc_ + 2) | 1;
+    if (was_prefix) {
+      const u32 target = bl_prefix_lr_ + ((instr & 0x7FF) << 1);
+      e().mov_imm(cache_.write(14, false), ret);
+      if (blx) emit_branch_static(target & ~3u, false, true);
+      else emit_branch_static(target & ~1u, true, true);
+      return;
+    }
+    const u32 t = cache_.temp();
+    e().add_imm(t, cache_.read(14), (instr & 0x7FF) << 1, t);
+    e().mov_imm(cache_.write(14, false), ret);
+    if (blx) e().and_imm(t, t, ~3u); else e().orr_imm(t, t, 1);
+    emit_branch_indirect(t, true);
     return;
   }
   default:
