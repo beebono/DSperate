@@ -134,6 +134,12 @@ public:
   void smull(u32 rdlo, u32 rdhi, u32 rn, u32 rm, bool s = false, Cond c = AL) { emit((c << 28) | 0x00C00090u | (s ? (1u << 20) : 0) | (rdhi << 16) | (rdlo << 12) | (rm << 8) | rn); }
   void umlal(u32 rdlo, u32 rdhi, u32 rn, u32 rm, bool s = false, Cond c = AL) { emit((c << 28) | 0x00A00090u | (s ? (1u << 20) : 0) | (rdhi << 16) | (rdlo << 12) | (rm << 8) | rn); }
   void smlal(u32 rdlo, u32 rdhi, u32 rn, u32 rm, bool s = false, Cond c = AL) { emit((c << 28) | 0x00E00090u | (s ? (1u << 20) : 0) | (rdhi << 16) | (rdlo << 12) | (rm << 8) | rn); }
+  // v5TE halfword multiplies (x, y select the top halves of rn, rm). The
+  // accumulating forms set Q on overflow, as the guest's do.
+  void smla_xy(u32 rd, u32 rn, u32 rm, u32 ra, bool x, bool y, Cond c = AL) { emit((c << 28) | 0x01000080u | (rd << 16) | (ra << 12) | (rm << 8) | (y ? 0x40u : 0) | (x ? 0x20u : 0) | rn); }
+  void smul_xy(u32 rd, u32 rn, u32 rm, bool x, bool y, Cond c = AL) { emit((c << 28) | 0x01600080u | (rd << 16) | (rm << 8) | (y ? 0x40u : 0) | (x ? 0x20u : 0) | rn); }
+  void smlaw_y(u32 rd, u32 rn, u32 rm, u32 ra, bool y, Cond c = AL) { emit((c << 28) | 0x01200080u | (rd << 16) | (ra << 12) | (rm << 8) | (y ? 0x40u : 0) | rn); }
+  void smulw_y(u32 rd, u32 rn, u32 rm, bool y, Cond c = AL) { emit((c << 28) | 0x012000A0u | (rd << 16) | (rm << 8) | (y ? 0x40u : 0) | rn); }
 
   // ---- loads / stores -------------------------------------------------------------
   // Word/byte with an immediate offset (-4095..4095), pre-indexed, no writeback.

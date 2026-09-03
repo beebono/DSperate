@@ -27,14 +27,23 @@ the stubs and the translator behind the `backend` interface in
 | `a64/stubs.cpp` | the AArch64 stubs and code patches |
 | `a64/translate.cpp` | one-pass block translator for ARM and Thumb, flag-liveness pre-pass, cycle accounting |
 | `a32/emit.h` | A32 (ARMv7) encoder, ARM state |
-| `a32/convention.h` | the ARMv7 register map: budget r9, page table r10, context r11; guest registers in memory (phase 1) |
+| `a32/convention.h` | the ARMv7 register map: guest r0-r3 and sp pinned in r4-r8, budget r9, page table r10, context r11; the other guest registers in memory and a per-block cache; guest NZCVQ in the APSR |
 | `a32/stubs.cpp` | the ARMv7 stubs (AAPCS32: `blx` to Thumb-2 helpers, struct return in memory, 8-byte stack frames) |
-| `a32/translate.cpp` | phase 1: every instruction through the fallback stub; same block shape as a64 |
+| `a32/translate.cpp` | ARMv7 translator: register cache, data processing / multiplies / static branches by field substitution with native flags and predication; memory, LDM/STM, indirect branches and MSR through the fallback stub (phase 2 step 1); same block shape as a64 |
 
-The ARMv7 backend is scoped in `docs/arm32-jit-scoping.md`. Its phase-1 gate,
-run 2026-09-03: `test_jit` under qemu-arm (1600 trials), and the SM64DS scene's
-300-frame hashes identical between the ARMv7 JIT, the AArch64 JIT, the ARMv7
-JIT in strict mode and the interpreter.
+The ARMv7 backend is scoped in `docs/arm32-jit-scoping.md`. Its gates, run
+after every step: `test_jit` under qemu-arm (1600 trials), the five replay
+scenes' 300-frame hashes against the AArch64 JIT's, and strict mode against
+the interpreter. Phase 2 step 1 (2026-09-03): four scenes identical to the
+AArch64 JIT; etody differs (the fallback stub polls after every memory
+instruction, which moves that scene's ARM7 timer race) and is gated in
+strict mode against the interpreter instead until memory is inline.
+
+Two A32 rules the AArch64 backend never needed: a predicated cycle charge
+must come *before* a flag-writing (S) body, because the body rewrites the
+flags the predication reads; and anything that must run after such a body
+under the same condition (the ARM7 multiply's C clear) uses a branch around
+the body instead of predication.
 
 ## How it works
 

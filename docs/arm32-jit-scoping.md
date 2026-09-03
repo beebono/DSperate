@@ -281,6 +281,24 @@ fast path with the flag bracket; LDM/STM; static/indirect branches; multiply
 and DSP; same-mode MSR; CP15 no-ops. Fuzzer after every step; `DS_JIT_
 FASTCOST=1` must still make it fail (mutation check).
 
+*Step 1, done 2026-09-03:* pinned r0–r3 + sp in r4–r8 (the census's
+subset), a five-slot LRU cache in r0–r3/r12 for the rest, guest NZCVQ in
+the APSR (Q rides along so the v5TE multiplies are native), data
+processing / multiplies / DSP / MRS / CLZ / static branches inline,
+predicated when conditional; memory, LDM/STM, indirect branches and MSR
+still fallbacks. Exact: `test_jit` 4 × 1600 under qemu-arm; sm64, mlbis,
+meteos, dbori 300-frame hashes identical to the A64 JIT; strict mode
+identical to the interpreter (sm64, mlbis, etody). etody non-strict differs
+from the A64 JIT because the fallback stub polls after every memory
+instruction, which shifts that scene's ARM7 timer race; expected to
+converge once memory is inline. **A30, firmware boot 300 frames at
+1344 MHz: median 26.1 ms (p99 63) against 60.0 ms interpreter and 66.4 ms
+phase 1**, both run orders. One rule learned: a predicated cycle charge
+must precede a flag-writing body (`subcc` after `bicscc` reads the new C);
+the ARM7 conditional `muls` with a live C is branched around instead.
+Next: memory fast path (u32 page-table entry, flag bracket from the
+liveness pass, inter-block hint), LDM/STM, indirect branches, MSR.
+
 **Phase 3 — device tuning (≈ 1 week, needs the device).** Pinned subset;
 page-table base pinned vs literal; LUT size; A/B by PMU categories with
 p99 and over-budget frames reported, both run orders, `--quantum 0`.

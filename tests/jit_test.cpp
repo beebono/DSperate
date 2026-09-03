@@ -304,6 +304,13 @@ void directed() {
     {Cpu::ARM9, false, {0x3101218C, 0xE2800001}, {0, 0x00004321u, 0x00000100u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00001234u, 0, 0}},
     // On the ARM7 these encodings are undefined and must still fall back.
     {Cpu::ARM7, false, {0xE1003281, 0xE2800001}, {0, 0x00001234u, 0x00005678u, 0x100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // A conditional register-shift data-processing instruction: taken (CC with C clear),
+    // not taken (CS), unconditional; and a taken conditional immediate form.
+    {Cpu::ARM9, false, {0x31dceb70, 0xE2800001}, {0x7a2fbc14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7b20dd03, 0xe41d8363, 0, 0xd1cea9ce}},
+    {Cpu::ARM9, false, {0x21dceb70, 0xE2800001}, {0x7a2fbc14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7b20dd03, 0xe41d8363, 0, 0xd1cea9ce}},
+    {Cpu::ARM9, false, {0xE1dceb70, 0xE2800001}, {0x7a2fbc14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7b20dd03, 0xe41d8363, 0, 0xd1cea9ce}},
+    {Cpu::ARM9, false, {0x33dce001, 0xE2800001}, {0x7a2fbc14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7b20dd03, 0xe41d8363, 0, 0xd1cea9ce}},
+    {Cpu::ARM7, false, {0x31dceb70, 0xE2800001}, {0x7a2fbc14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7b20dd03, 0xe41d8363, 0, 0xd1cea9ce}},
     // Thumb: movs then ldr [r6 + r0] far away.
     {Cpu::ARM9, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM7, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
@@ -323,6 +330,7 @@ void directed() {
     t.cpsr = 0;
     const bool ok = run_both(mi, mj, t, a9, 100000 + n, true);
     jit::detach(mj.nds);
+    if (!ok) std::fprintf(stderr, "directed case %u failed\n", n);
     CHECK(ok);
     ++n;
   }
