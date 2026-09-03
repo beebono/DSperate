@@ -191,6 +191,8 @@ bool DispOut::open(int rot, int screens, bool vsync) {
   if (!set_layer(phys_)) { close(); return false; }
   if (layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(layer_), nullptr) != 0) { std::perror("disp: LAYER_ENABLE"); close(); return false; }
   next_ns_ = now_ns();
+  displayed_ = 0; latched_ = pending_ = -1; stop_ = false;
+  if (vsync_) thread_ = std::thread([this] { presenter(); });
   return true;
 #else
   (void)rot; (void)screens; (void)vsync;
@@ -200,6 +202,11 @@ bool DispOut::open(int rot, int screens, bool vsync) {
 
 void DispOut::close() {
 #if defined(__linux__)
+  if (thread_.joinable()) {
+    { std::lock_guard<std::mutex> g(mu_); stop_ = true; }
+    cv_.notify_all();
+    thread_.join();
+  }
   if (disp_ >= 0) {
     if (layer_ >= 0) layer_ioctl(disp_, CMD_LAYER_DISABLE, static_cast<unsigned>(layer_), nullptr);
     if (ui_layer_ >= 0 && ui_was_enabled_) layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(ui_layer_), nullptr);
@@ -241,8 +248,13 @@ bool DispOut::set_layer(u32 addr) {
 void DispOut::present(const u32* const fb[2]) {
 #if defined(__linux__)
   if (!map_) return;
-  cur_ = (cur_ + 1) % BUFS;
-  u32* comp = reinterpret_cast<u32*>(map_ + cur_ * comp_bytes_);
+  int buf;
+  if (thread_.joinable()) {
+    std::lock_guard<std::mutex> g(mu_);
+    if (pending_ >= 0) { buf = pending_; pending_ = -1; }   // not yet flipped: take it back and overwrite it (the panel skips that frame)
+    else { buf = 0; while (buf == displayed_ || buf == latched_) ++buf; }
+  } else buf = cur_ = (cur_ + 1) % BUFS;
+  u32* comp = reinterpret_cast<u32*>(map_ + buf * comp_bytes_);
   for (int s = 0; s < screens_; ++s) {
     // Slot s's top-left in the composite. 270 puts the DS's top edge on the
     // panel's left edge, so the stack runs left to right; 90 runs the other
@@ -266,10 +278,30 @@ void DispOut::present(const u32* const fb[2]) {
       default:  rot0(fb[s], dst, comp_w_); break;
     }
   }
-  set_layer(phys_ + static_cast<u32>(cur_ * comp_bytes_));
-  if (vsync_) wait_vsync();
+  if (thread_.joinable()) {
+    { std::lock_guard<std::mutex> g(mu_); pending_ = buf; }
+    cv_.notify_one();
+  } else set_layer(phys_ + static_cast<u32>(buf * comp_bytes_));
 #else
   (void)fb;
+#endif
+}
+
+void DispOut::presenter() {
+#if defined(__linux__)
+  // One flip per refresh: take the newest posted frame, flip to it, wait for
+  // the refresh, and only then is the buffer it replaced free again.
+  std::unique_lock<std::mutex> lk(mu_);
+  for (;;) {
+    cv_.wait(lk, [this] { return stop_ || pending_ >= 0; });
+    if (stop_) return;
+    latched_ = pending_; pending_ = -1;
+    lk.unlock();
+    set_layer(phys_ + static_cast<u32>(latched_ * comp_bytes_));
+    wait_vsync();
+    lk.lock();
+    displayed_ = latched_; latched_ = -1;
+  }
 #endif
 }
 

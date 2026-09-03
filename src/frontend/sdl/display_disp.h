@@ -37,7 +37,10 @@
 
 #include "core/types.h"
 
+#include <condition_variable>
 #include <cstddef>
+#include <mutex>
+#include <thread>
 
 namespace ds::sdl {
 
@@ -61,15 +64,24 @@ public:
   int logical_h() const { return (rot_ == 90 || rot_ == 270) ? panel_w_ : panel_h_; }
   int screens() const { return screens_; }
 
-  // Rotates each slot's 256x192 framebuffer into the composite (null skips
-  // the slot, leaving it black), flips the layer to it and, with vsync,
-  // waits for the refresh.
+  bool vsync() const { return vsync_; }
+
+  // Rotates each slot's 256x192 framebuffer into a free composite (null
+  // skips the slot, leaving it black) and flips the layer to it. Without
+  // vsync the flip is immediate. With vsync the flip and the refresh wait
+  // happen on the presenter thread: this returns as soon as the rotate is
+  // done, never blocking the emulation on the panel. A frame posted before
+  // the previous one reached the panel replaces it (the panel shows the
+  // newest; nothing waits), and the buffer being scanned out and the one
+  // latched for the next refresh are never written -- three buffers cover
+  // displayed + latched + the one being rotated into.
   void present(const u32* const fb[2]);
 
 private:
   bool set_layer(u32 addr);
   void wait_vsync();
   void fill_black(u32* buf);
+  void presenter();
 
   int  disp_ = -1, fb_ = -1;
   u8*  map_ = nullptr;
@@ -86,6 +98,15 @@ private:
   bool pan_blocks_ = true;          // FBIOPAN_DISPLAY waits for the refresh (measured once)
   bool pan_measured_ = false;
   u64  next_ns_ = 0;                // fallback pacing when pan does not block
+
+  // Presenter thread state (vsync only). Buffer indices; -1 = none.
+  std::thread             thread_;
+  std::mutex              mu_;
+  std::condition_variable cv_;
+  int  displayed_ = 0;              // on the panel now
+  int  latched_ = -1;               // flipped to, waiting for the refresh
+  int  pending_ = -1;               // rotated into, not yet flipped
+  bool stop_ = false;
 };
 
 } // namespace ds::sdl

@@ -316,7 +316,7 @@ void Display::set_layout(const Layout& l) {
       int rot = 0;
       if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
       disp_->close();
-      if (!disp_->open(rot, screens, true)) { std::fprintf(stderr, "disp: reopen failed\n"); disp_.reset(); }
+      if (!disp_->open(rot, screens, disp_->vsync())) { std::fprintf(stderr, "disp: reopen failed\n"); disp_.reset(); }
     }
     layout_ = l;
     layout();
