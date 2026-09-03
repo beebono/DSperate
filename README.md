@@ -318,6 +318,14 @@ firmware's own cartridge launch entirely. Saves, save states, screenshots and
 cheats are all re-derived from the game that was picked, so nothing lands
 under the loader's name.
 
+The firmware runs under the recompiler's strict timing -- per-instruction
+budget checks, in lockstep with the interpreter. Without them the boot has
+been seen to fail on the RG DS, not every time, which is what a timing race
+looks like; block-granularity overshoot is the suspect. The console is idle
+enough in its own menu for the checks not to show, and they are dropped again
+the moment a game is launched from the card, where they would. `DS_JIT_STRICT`
+still forces them on for everything.
+
 The clock is seeded from the host's local time and runs, so the menu shows
 today's date. In the core the clock is off and frozen at 2000-01-01, because
 the whole verification harness compares runs against each other and against

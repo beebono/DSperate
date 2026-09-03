@@ -58,6 +58,13 @@ void set_trace(bool on);
 // move on every scene); opt-in only. Flushes both CPUs when it changes.
 void set_cpu_oc(bool on);
 
+// Per-instruction budget checks, the same lockstep with the interpreter that
+// DS_JIT_STRICT asks for. Slower, and exact: the frontend turns it on for a
+// firmware boot, where the console is idle enough for the cost not to show
+// and where block-granularity overshoot has been seen to wedge the boot.
+// Flushes both CPUs when it changes, because it changes what is emitted.
+void set_strict(bool on);
+
 // DS_JIT_DENSITY: zero the executed-density counters (not the translations
 // themselves), so a run can exclude the frames that only warm the code cache.
 void density_reset();

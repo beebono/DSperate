@@ -1396,6 +1396,7 @@ void flush(CpuContext& cpu) { if (cpu.jit) invalidate_cpu(*static_cast<JitCpu*>(
 void flush_all() { reset_arena(); }
 void set_trace(bool on) { if (g_rt.trace != on) { g_rt.trace = on; for (JitCpu& jc : g_rt.cpus) if (jc.ctx) invalidate_cpu(jc); } }
 void set_cpu_oc(bool on) { if (g_rt.cpu_oc != on) { g_rt.cpu_oc = on; for (JitCpu& jc : g_rt.cpus) if (jc.ctx) invalidate_cpu(jc); } }
+void set_strict(bool on) { if (g_rt.strict != on) { g_rt.strict = on; for (JitCpu& jc : g_rt.cpus) if (jc.ctx) invalidate_cpu(jc); } }
 const Stats& stats() { return g_rt.stats; }
 
 static double ex_total_pct(unsigned long long v, unsigned long long tot) {

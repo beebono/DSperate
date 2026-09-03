@@ -623,6 +623,12 @@ int main(int argc, char** argv) {
 #if DSPERATE_JIT
   if (jit && !ds::jit::attach(nds, true, true)) return 1;
   if (jit && cfg.flag("emu.cpu_oc", false)) ds::jit::set_cpu_oc(true);   // see config.cpp; translate-time pricing, so before the first block
+  // The firmware boots under per-instruction budget checks. Block-granularity
+  // overshoot has been seen to stop it booting at all on the RG DS -- not
+  // every time, which is what a timing race looks like -- and the console is
+  // idle enough there that the cost of checking does not show. It is dropped
+  // again the moment a game is launched, where it very much would.
+  if (jit && boot_firmware) { ds::jit::set_strict(true); VLOG("jit: strict timing for the firmware\n"); }
 #else
   (void)jit;
 #endif
@@ -986,7 +992,9 @@ int main(int argc, char** argv) {
           VLOG("launcher: %s\n", pick.c_str());
           flush_save();
 #if DSPERATE_JIT
-          if (jit) ds::jit::flush_all();
+          // Back off the firmware's strict timing: the game wants the speed,
+          // and the environment override still wins if it was asked for.
+          if (jit) { ds::jit::set_strict(std::getenv("DS_JIT_STRICT") != nullptr); ds::jit::flush_all(); }
 #endif
           nds.reset();
           if (!nds.load_rom(pick.c_str())) {
