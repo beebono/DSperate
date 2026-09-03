@@ -39,7 +39,14 @@ set_source_files_properties(cart/miniz/miniz_tinfl.c PROPERTIES
   INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/cart/miniz")
 
 if(DSPERATE_JIT)
-  target_sources(dsperate_core PRIVATE cpu/jit/runtime.cpp cpu/jit/translate.cpp)
+  # The runtime is host-agnostic; the backend directory is the host's.
+  target_sources(dsperate_core PRIVATE cpu/jit/runtime.cpp)
+  if(DSPERATE_HOST_AARCH64)
+    target_sources(dsperate_core PRIVATE cpu/jit/a64/stubs.cpp cpu/jit/a64/translate.cpp)
+  elseif(DSPERATE_HOST_ARM32)
+    target_sources(dsperate_core PRIVATE cpu/jit/a32/stubs.cpp cpu/jit/a32/translate.cpp)
+    target_compile_definitions(dsperate_core PUBLIC DSPERATE_JIT_A32=1)
+  endif()
   target_compile_definitions(dsperate_core PUBLIC DSPERATE_JIT=1)
 endif()
 if(DSPERATE_NEON)

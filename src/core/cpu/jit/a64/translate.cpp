@@ -24,6 +24,9 @@
 //   w4-w7 temporaries of the shifter, the cost arithmetic, flag merging;
 //        w7 = writeback value (preserved by the slow path)
 #include "core/cpu/jit/jit_internal.h"
+#include "core/cpu/jit/a64/convention.h"
+#include "core/cpu/jit/a64/emit.h"
+#include "core/cpu/jit/block_shape.h"
 #include "core/cpu/arm_decode.h"
 #include "core/cpu/cpu_cycles.h"
 #include "core/nds.h"
@@ -67,19 +70,8 @@ struct FlagUse { u32 reads, writes; };
 // Instructions the translator hands to the interpreter whole. The liveness
 // pass treats these as reading every flag (the helper syncs CPSR and may
 // observe it: exceptions, MSR, MRS...), so the two must agree.
-// CP15 writes the core accepts and ignores (cp15.cpp): every c7 cache /
-// write-buffer operation except wait-for-interrupt (c7,c0,4 and c7,c8,2).
-bool mcr_is_nop(u32 instr, bool a9) {
-  if (!a9 || ((instr >> 8) & 0xF) != 15) return false;
-  const u32 crn = (instr >> 16) & 0xF, crm = instr & 0xF, opc2 = (instr >> 5) & 7;
-  return crn == 7 && !((crm == 0 && opc2 == 4) || (crm == 8 && opc2 == 2));
-}
-// MSR forms translated inline: CPSR writes from a register or immediate. The
-// mode must not change (tested at run time; otherwise the interpreter runs it).
-bool msr_inline(u32 instr) {
-  if (instr & (1u << 22)) return false;                                   // SPSR
-  return !(arm::decode_arm(instr) == AOp::MsrReg && (instr & 0xF) == 15);
-}
+using shape::mcr_is_nop;
+using shape::msr_inline;
 
 bool arm_needs_fallback(u32 instr, bool a9) {
   const u32 cond = instr >> 28;
@@ -335,41 +327,6 @@ private:
     }
     return thumb_ ? cpu_.nds->bus.read16(cpu_.which, addr) : cpu_.nds->bus.read32(cpu_.which, addr);
   }
-  static bool arm_ends_block(u32 instr, bool a9) {
-    const u32 cond = instr >> 28;
-    if (cond == 0xF) return true;
-    switch (arm::decode_arm(instr)) {
-    case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::BlxReg: case AOp::Swi: case AOp::Bkpt: case AOp::Undefined:
-    case AOp::Cdp: case AOp::Ldc: case AOp::Stc: case AOp::Mrc:
-      return true;
-    case AOp::Mcr: return !mcr_is_nop(instr, a9);
-    case AOp::MsrReg: case AOp::MsrImm: return !msr_inline(instr);
-    case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift: {
-      const u32 opcode = (instr >> 21) & 0xF;
-      const bool test = opcode >= 8 && opcode <= 0xB;
-      return !test && ((instr >> 12) & 0xF) == 15;
-    }
-    case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg:
-      return (instr & (1u << 20)) && ((instr >> 12) & 0xF) == 15;
-    case AOp::Ldm: return (instr & 0x8000) != 0;
-    default: return false;
-    }
-  }
-  static bool thumb_ends_block(u16 instr) {
-    switch (arm::decode_thumb(instr)) {
-    case TOp::HiRegOp: {
-      const u32 rd = (instr & 7) | ((instr >> 4) & 8), op = (instr >> 8) & 3;
-      return rd == 15 && (op == 0 || op == 2);
-    }
-    case TOp::BxBlx: case TOp::BCond: case TOp::Swi: case TOp::B: case TOp::BlSuffix: case TOp::BlxSuffix:
-    case TOp::Bkpt: case TOp::Undefined:
-      return true;
-    case TOp::PushPop: return (instr & (1 << 11)) && (instr & (1 << 8));
-    case TOp::StmLdm: return (instr & 0xFF) == 0;
-    default: return false;
-    }
-  }
-
   // ---- cycles -----------------------------------------------------------------------------
   // Record that this translation baked byte `kind` (mem::Timing::RETIME_*) of
   // the ARM9 entry for `addr`'s 4 KB page: the retime path kills the block
@@ -1710,7 +1667,7 @@ bool Translator::run() {
   for (u32 i = 0; i < MAX_INSTRS; ++i) {
     const u32 raw = fetch(addr);
     instrs_.push_back({addr, raw, F_ALL});
-    const bool ends = thumb_ ? thumb_ends_block(static_cast<u16>(raw)) : arm_ends_block(raw, a9_);
+    const bool ends = thumb_ ? shape::thumb_ends_block(static_cast<u16>(raw)) : shape::arm_ends_block(raw, a9_);
     addr += step();
     if (ends) break;
     if (!cpu_.page_table.read_ptr(addr)) break;   // do not walk into unmapped space
@@ -1756,9 +1713,12 @@ bool Translator::run() {
 
 } // namespace
 
-bool translate_block(JitCpu& jc, u32 key, Emitter& e, Block& b) {
+bool backend::translate_block(JitCpu& jc, u32 key, u8* buf, size_t cap, Block& b, u32& size) {
+  Emitter e(buf, cap);
   Translator t(jc, key, e, b);
-  return t.run();
+  if (!t.run()) return false;
+  size = static_cast<u32>(e.size());
+  return true;
 }
 
 } // namespace ds::jit

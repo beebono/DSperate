@@ -5,7 +5,6 @@
 // translator. Nothing here is visible outside cpu/jit.
 #pragma once
 #include "core/cpu/jit/jit.h"
-#include "core/cpu/jit/emit.h"
 #include "core/cpu/cpu.h"
 
 #include <cstddef>
@@ -14,37 +13,6 @@
 #include <vector>
 
 namespace ds::jit {
-
-// ---- host register convention -------------------------------------------------
-// Translated code runs with the guest registers pinned; every block and every
-// stub agrees on this map, so linked blocks reconcile nothing at the edge.
-//
-//   x0-x7, x16, x17   scratch (also C call arguments)
-//   w8                cycle budget minus one (bit 31 set => leave): one `tbnz`
-//                     tests it; the stubs add/subtract the one at the boundary
-//   x9-x13            guest r8-r12   (caller-saved: the call stubs spill them)
-//   x14               page-table base for this CPU
-//   x15               per-page timing table (timing9 or timing7)
-//   x18               base of the code arena: the branch LUTs sit at its front
-//                     and every block pointer is a 32-bit offset from it, so
-//                     one register serves the dispatch probe and the jump.
-//                     Linux leaves the platform register alone; C code may
-//                     clobber it, so the call stubs reload it like x14/x15.
-//   x19-x26           guest r0-r7    (callee-saved: survive C calls)
-//   x27, x28          guest r13, r14
-//   x29               CpuContext*
-//   x30               link register: stubs called with `bl` read their literal
-//                     arguments (instruction, key, ...) through it
-//
-// Guest NZCV live in the host NZCV; the rest of CPSR lives in memory.
-constexpr u32 R_BUDGET = 8, R_PT = 14, R_TIM = 15, R_ARENA = 18, R_CTX = 29, R_LR = 30;
-constexpr u32 SCRATCH0 = 0, SCRATCH1 = 1, SCRATCH2 = 2, SCRATCH3 = 3, SCRATCH4 = 4, SCRATCH5 = 5, SCRATCH6 = 6, SCRATCH7 = 7;
-constexpr u32 R_FN = 16;        // function address for the call stubs
-
-inline constexpr u32 host_reg(u32 guest) {
-  return guest < 8 ? 19 + guest : guest < 13 ? 9 + (guest - 8) : guest == 13 ? 27 : 28;
-}
-inline constexpr bool host_reg_callee_saved(u32 guest) { return guest < 8 || guest >= 13; }
 
 // ---- CpuContext offsets ---------------------------------------------------------
 constexpr u32 OFF_HALTED   = offsetof(CpuContext, halted);
@@ -55,9 +23,9 @@ constexpr u32 OFF_BUDGET   = offsetof(CpuContext, hot) + offsetof(JitHot, cycle_
 constexpr u32 OFF_IRQ      = offsetof(CpuContext, hot) + offsetof(JitHot, irq_pending);
 constexpr u32 OFF_ALERTS   = offsetof(CpuContext, hot) + offsetof(JitHot, alerts);
 constexpr u32 OFF_JIT      = offsetof(CpuContext, jit);
-constexpr u32 OFF_JC_PT    = 0;    // JitCpuHot::pt
-constexpr u32 OFF_JC_TIM   = 8;    // JitCpuHot::timing
-constexpr u32 OFF_JC_ARENA = 16;   // JitCpuHot::arena
+constexpr u32 OFF_JC_PT    = 0;                    // JitCpuHot::pt
+constexpr u32 OFF_JC_TIM   = sizeof(void*);        // JitCpuHot::timing
+constexpr u32 OFF_JC_ARENA = 2 * sizeof(void*);    // JitCpuHot::arena
 inline constexpr u32 off_reg(u32 r) { return OFF_REGS + 4 * r; }
 
 // Alert bits (JitHot::alerts): set by the runtime while translated code is
@@ -109,7 +77,7 @@ struct Block {
   u8   nsucc;
   // Park-and-revive (see kill_block / revive in runtime.cpp): a block killed
   // by a store into its range keeps its translation, the guest bytes it was
-  // built from, the three entry words the kill overwrites, and the timing
+  // built from, the entry bytes the kill overwrites (backend::ENTRY_PATCH), and the timing
   // stamp it was built under. When the same key is looked up again and the
   // guest bytes match one parked version, that version comes back instead of
   // a retranslation. Exact: the translation is a pure function of (key, guest
@@ -266,9 +234,30 @@ void   lut_insert(JitCpu& jc, Block* b);
 DensitySlot* density_new_slot();                 // null unless DS_JIT_DENSITY
 Block* translate(JitCpu& jc, u32 key);          // null when the arena is full
 const u8* find_native(JitCpu& jc, u32 key);      // translates on miss; null when arena is full
-// translate.cpp: emit one block for `key` at the emitter's position. Returns
-// false when the emitter ran out of room (the caller resets the arena).
-bool   translate_block(JitCpu& jc, u32 key, Emitter& e, Block& b);
+// ---- backend -----------------------------------------------------------------------
+// What the host-specific half provides (a64/, a32/): the stubs, the
+// translator, and the two code patches the runtime applies itself. Every
+// backend agrees on the Runtime/JitCpu stub slots, the LUT entry format
+// `(native offset << 32) | key`, and the literal-argument stub convention.
+namespace backend {
+// Bytes the killed-block redirect overwrites at a block's entry; a block is
+// always at least this long, and revive restores exactly these.
+constexpr u32 ENTRY_PATCH = 12;
+// Emit every stub into rt.arena after the LUTs, fill the Runtime/JitCpu stub
+// pointers, set rt.stubs_end and rt.pos.
+void emit_stubs(Runtime& rt);
+// Emit one block for `key` into buf[0..cap). Returns false when it ran out
+// of room (the caller resets the arena); `size` is the bytes emitted.
+bool translate_block(JitCpu& jc, u32 key, u8* buf, size_t cap, Block& b, u32& size);
+// Overwrite a killed block's first ENTRY_PATCH bytes with a jump into the
+// dispatcher carrying `key`.
+void write_entry_redirect(u8* entry, u32 key, const u8* dispatch);
+// Turn the `bl link` at `site` into a direct branch to `target`.
+void patch_link(u8* site, const u8* target);
+// 0 when `word` is not a pc-relative branch, else a class id equal for two
+// encodings of the same branch kind (DS_JIT_PRETX_VERIFY tolerates those).
+u32  relative_branch_class(u32 word);
+}
 
 // Helpers called from translated code (through the stubs).
 extern "C" {
