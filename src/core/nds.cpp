@@ -206,6 +206,10 @@ bool NDS::load_rom(const std::string& path) {
     rom_zip_entry = std::move(chosen);
     image = std::move(rom);
   }
+  return load_rom_image(std::move(image));
+}
+
+bool NDS::load_rom_image(std::vector<u8> image) {
   if (image.size() < 0x1000) return false;
   rom_id = rom_identity(image);   // before the move; Cart pads to a power of two
   cart = std::make_unique<cart::Cart>(*this, std::move(image));

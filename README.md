@@ -285,31 +285,35 @@ It is skipped during a replay or a recording, like the save-state hotkey.
 Started with no ROM -- or with one named `BootMenu.nds`, so a launcher that
 only knows how to start games can reach it -- `dsperate` boots the
 console's own firmware instead of a game. That is the DS menu: the clock and
-calendar, the owner's nickname, the settings pages, and "There is no DS Card
-inserted." It needs the real BIOS pair and firmware dump like everything else
-does.
+calendar, the owner's nickname, the settings pages and the card panel. It needs
+the real BIOS pair and firmware dump like everything else does.
 
-If a `BootMenu.nds` really exists beside the config it is put in the card slot
-as well, still under a firmware boot, and the menu draws its banner instead.
-`tools/mkcart.py` builds such a card with an icon and title of your choosing;
-tapping it plays the console's own launch animation. The card needs nothing
-from a commercial dump.
+A card goes in the slot either way, still under a firmware boot, so the menu
+has a banner to draw and something to launch. It is built into the emulator --
+nothing has to be shipped beside the binary -- and `[loader] title` and
+`subtitle` set its two banner lines. A `BootMenu.nds` beside the config
+replaces it entirely: `tools/mkcart.py` builds such a card with an icon and
+title of your choosing, and its `--emit-header` is how the built-in one's icon
+was generated. Neither needs anything from a commercial dump, and `[loader]
+card = false` leaves the slot empty.
 
 **Picking a game from the DS menu.** Point `[paths] games` at a directory and
-tapping that card raises a list of what is in it, over the white the launch
+launching that card raises a list of what is in it, over the white the launch
 animation fades to; choosing one boots it. The list shows each file's
 name without its extension -- the ROM header's own title reads
 `ARTACADEMYRT` where the file reads `Art Academy` -- and it is the pause
 menu's cheats page underneath, so it scrolls, pages with the shoulder buttons
 and scrolls a name too long to fit.
 
-A tap on the card panel is what arms it, and the list goes up once the launch
-animation has faded to white -- read from MASTER_BRIGHT rather than from the
+The console's own launch animation is what raises it: the list goes up once
+the animation has faded to white, read from MASTER_BRIGHT rather than from the
 pixels, so the animation itself plays at full speed down the normal drawing
-path. Both halves are needed: the firmware boot has a white stretch of its
-own, and powering off from the settings fades to white in exactly the same
-way, but neither has a tap on the card in front of it. A tap that leads
-somewhere else in the menu drops the arm again after three seconds.
+path. Launching the card is the only thing in the menu that forces both
+screens white that way -- PictoChat, DS Download Play, the settings pages and
+the shutdown they end in never do, and the white stretch of the firmware's own
+boot is white pixels rather than a forced screen -- so nothing else raises the
+list, and it does not matter whether the card was tapped or selected with the
+D-pad and A.
 
 The chosen game is direct-booted rather than firmware-booted a second time,
 which is both faster and better looking -- the loader's fade covers the

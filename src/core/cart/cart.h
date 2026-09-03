@@ -63,8 +63,10 @@ public:
   // only ever happens when the firmware's menu launches the card: the header
   // is read once at boot by the plain `00` command, and no `B7` read in an
   // ordinary session goes near it. So the first one is unambiguously "the
-  // player tapped the card", which is what a frontend serving a game list
-  // waits for. Sticky until cleared, and deliberately not in the save state:
+  // player launched the card". The DS firmware never gets that far -- it fades
+  // to white and leaves the cart bus alone -- so the SDL frontend watches the
+  // fade instead; this stays for a loader that does read its own binary.
+  // Sticky until cleared, and deliberately not in the save state:
   // it describes what the frontend is waiting for, not the machine.
   bool launch_read() const { return launch_read_; }
   void clear_launch_read() { launch_read_ = false; }

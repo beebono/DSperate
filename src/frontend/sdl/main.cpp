@@ -20,6 +20,7 @@
 #include "display.h"
 #include "input.h"
 #include "lid.h"
+#include "loader_cart.h"
 #include "menu.h"
 
 #include <dirent.h>
@@ -242,15 +243,6 @@ std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
   return games;
 }
 
-// Where the DS menu draws the Slot-1 card panel on the touch screen, and so
-// where a tap means "launch this card". Measured off the menu itself; the
-// panel's interior runs x 35..218, y 28..66, and this is that with a little
-// margin. PictoChat's panel starts around y 80, so there is room either side.
-//
-// A tap outside it is some other part of the menu -- the settings, which fade
-// to white on the way to powering off exactly as a launch does. Whiteness is
-// what raises the list, so without this the power-off fade raises it too.
-constexpr int kCardX0 = 30, kCardX1 = 224, kCardY0 = 22, kCardY1 = 72;
 
 // Everything keyed to which ROM is in the slot: where its battery save, its
 // states and screenshots and its cheats live, and which per-game .ini a
@@ -512,9 +504,23 @@ int main(int argc, char** argv) {
   if (!nds.load_bios(bios9.c_str(), bios7.c_str(), fw.c_str())) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
   nds.reset();
   if (!boot_firmware && !nds.load_rom(rom_path.c_str())) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); return 1; }
-  // A missing or unreadable BootMenu.nds is not an error: it is the name a
-  // launcher passes to mean "just the firmware", and the slot stays empty.
-  if (boot_firmware && nds.load_rom(rom_path.c_str())) VLOG("loader cart: %s\n", rom_path.c_str());
+  // On a firmware boot the loader cart goes in the slot. A BootMenu.nds beside
+  // the config wins if there is one -- that is how a hand-made card from
+  // tools/mkcart.py is used -- and otherwise the built-in one is assembled in
+  // memory, so the emulator needs no file shipped alongside it. Its two banner
+  // lines are the only part worth configuring; a different icon means building
+  // a card with the script.
+  if (boot_firmware) {
+    if (nds.load_rom(rom_path.c_str())) {
+      VLOG("loader cart: %s\n", rom_path.c_str());
+    } else if (cfg.flag("loader.card", true) &&
+               nds.load_rom_image(ds::sdl::build_loader_cart(cfg.str("loader.title", "Game Menu"),
+                                                             cfg.str("loader.subtitle", "Dariragan! Dagozuban!")))) {
+      VLOG("loader cart: built in\n");
+    } else {
+      VLOG("loader cart: none; the slot stays empty\n");
+    }
+  }
   // The firmware writes its settings pages to flash over SPI. Those go to a
   // sidecar beside the firmware rather than into the dump itself, so a rename
   // in the DS menu survives a restart without the emulator ever writing to a
@@ -821,13 +827,8 @@ int main(int argc, char** argv) {
   // one, and its own reads at its own arm9_rom_offset mean nothing.
   bool launcher = boot_firmware && nds.cart != nullptr;
   if (launcher) VLOG("launcher: %zu games in %s\n", games.size(), cfg.str("paths.games").c_str());
-  int launch_wait = -1;         // frames since the card was tapped; -1 = not armed
-  bool pen_was_down = false;    // for the release edge that ends a tap
-  int  pen_x = -1, pen_y = -1;  // where it went down; a release parks the sample
-  // How long a tap gets to turn into the launch's white. Measured at ~60
-  // frames from the release; past this the tap was for something else in the
-  // DS menu -- the settings, the calendar -- and the arm is simply dropped.
-  constexpr int kLaunchWaitFrames = 180;
+  bool launching = false;       // the card's launch fade is on screen; the list is going up
+  bool launch_latched = false;  // ... and it has already been raised once for this fade
   std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
   bool menu_dirty = false;      // the menu screens need compositing and presenting again
   Uint32 menu_ms = 0;           // SDL_GetTicks at the menu's last tick
@@ -1263,63 +1264,47 @@ int main(int argc, char** argv) {
       // Raising the picker and raising the pause menu are the same stop: a
       // real, unscaled frame has just been presented and is in fb_, which is
       // what either page is drawn over.
-      if (launch_wait >= 0) { launch_wait = -1; menu.open_games(); }
+      if (launching) { launching = false; menu.open_games(); }
       else { menu.set_slot(state_slot); refresh_slots(); menu.set_open(true); }
       menu_dirty = true;
       menu_ms = SDL_GetTicks();
       set_paused(true);
     }
-    // The loader cart's picker: arm on a tap, raise the list on the white the
-    // launch animation fades to.
+    // The loader cart's picker: the console's own launch fade is the signal.
     //
-    // The arm is the player's own tap -- the pen leaving the screen -- rather
-    // than the cart read at the loader's arm9_rom_offset that would say "the
-    // firmware is launching this card". That read is the better signal in
-    // principle and Cart::launch_read() still offers it, but this firmware
-    // never issues it: tapping the card fades to white and then stops
-    // touching the cart bus at all (measured: the Slot-1 log is byte
-    // identical either side of the tap). Waiting for it would wait for ever.
+    // Launching the card is the only thing in the DS menu that drives both
+    // engines' MASTER_BRIGHT to white (Gpu::screens_forced_white). PictoChat,
+    // DS Download Play, the settings pages and the shutdown they end in never
+    // touch it, and the white stretch of the firmware's own boot is white
+    // pixels rather than a forced screen -- checked on all of them. So the
+    // register alone says "the card was launched", with no tap, no rectangle
+    // of the menu's layout to keep up to date, and no timeout: it catches the
+    // launch whether the player tapped the panel or selected it with the
+    // D-pad and A, which a tap test cannot see at all.
     //
-    // A tap is enough because it is only ever half the test, and because it
-    // has to land on the card panel (kCardX0..): whiteness alone would not do
-    // -- the firmware boot has a white stretch of its own at frames 62..136,
-    // and powering off from the settings fades to white too -- but neither
-    // has a tap on the card in front of it. A tap that leads somewhere else
-    // in the menu times out below.
+    // The cart read at the loader's arm9_rom_offset would be better still and
+    // Cart::launch_read() still offers it, but this firmware never issues it:
+    // the fade lands and the cart bus stays silent for ever after (measured --
+    // the ROMCTRL access count is identical either side of the launch), so
+    // nothing downstream of the fade can be waited on.
+    //
+    // Latched, because the white stays up: the picker would otherwise go
+    // straight back up the moment the player closed it.
     if (launcher) {
-      // The calibration is normalised at load so an ADC reading is the pixel
-      // shifted left four (NDS::normalise_touch_calibration), and a release
-      // parks the sample rather than keeping it -- so the position has to be
-      // remembered while the pen is down.
-      const bool pen_down = !(nds.io.extkeyin & (1u << 6));
-      if (pen_down) { pen_x = nds.io.spi_tsc.x >> 4; pen_y = nds.io.spi_tsc.y >> 4; }
-      const bool on_card = pen_x >= kCardX0 && pen_x < kCardX1 && pen_y >= kCardY0 && pen_y < kCardY1;
-      if (launch_wait < 0 && pen_was_down && !pen_down && on_card) {
-        launch_wait = 0;
-        VLOG("launcher: card tapped; waiting for the launch to fade\n");
-      } else if (launch_wait < 0 && nds.cart->launch_read()) {
-        nds.cart->clear_launch_read();
-        launch_wait = 0;
-        VLOG("launcher: the card was launched; waiting for the fade\n");
-      }
-      pen_was_down = pen_down;
-      // Powering off from the settings pages fades to white as well. The
-      // frontend resets on that flag a few frames later, so drop the arm
-      // rather than raise a list over a console on its way out.
-      if (launch_wait >= 0 && nds.power_off) { launch_wait = -1; VLOG("launcher: powering off, not launching\n"); }
-    }
-    // Stop only once the fade has actually finished. Asking the register
-    // rather than the pixels is what lets the animation play on the normal
-    // (scaled) path: a forced unscaled frame is needed only for the one frame
-    // the menu is drawn over, and pause_pending is what asks for that.
-    if (launch_wait >= 0) {
-      ++launch_wait;
-      if (nds.gpu.screens_forced_white()) pause_pending = true;
-      else if (launch_wait >= kLaunchWaitFrames) {
-        launch_wait = -1;
-        VLOG("launcher: no launch after that tap\n");
+      const bool white = nds.gpu.screens_forced_white();
+      if (white && !launch_latched) {
+        launch_latched = true;
+        launching = true;
+        VLOG("launcher: the card was launched; raising the list\n");
+      } else if (!white) {
+        launch_latched = false;
       }
     }
+    // Stop only once the fade is up. Asking the register rather than the
+    // pixels is what lets the animation play on the normal (scaled) path: a
+    // forced unscaled frame is needed only for the one frame the menu is
+    // drawn over, and pause_pending is what asks for that.
+    if (launching) pause_pending = true;
     const Uint64 t2 = SDL_GetPerformanceCounter();
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;

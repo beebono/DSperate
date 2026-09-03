@@ -31,6 +31,10 @@ struct NDS {
   void reset();
   bool load_bios(const std::string& bios9, const std::string& bios7, const std::string& firmware);
   bool load_rom(const std::string& path);
+  // A ROM the caller already has in memory -- the frontend's built-in loader
+  // cart. Identical to the path form from the slot's side: the same identity
+  // hash, so saves and states are keyed the same way.
+  bool load_rom_image(std::vector<u8> image);
   // Which entry a zipped ROM came from, empty when it was a loose .nds. Only
   // for reporting -- nothing about the machine depends on it.
   std::string rom_zip_entry;
