@@ -40,10 +40,10 @@ PageTable::PageTable() {
 
 static Entry make_entry(u32 guest_page_addr, u8* host, u32 flags) {
   if (flags & PAGE_MMIO) return TAG_SPECIAL;
-  auto h = reinterpret_cast<u64>(host);
+  auto h = reinterpret_cast<uintptr_t>(host);
   assert((h & (PAGE_SIZE - 1)) == 0 && "host backing must be PAGE_SIZE-aligned (see alloc_page_buf)");
-  u64 biased = h - guest_page_addr;          // wraps; recovered by (e<<2)+addr
-  assert(((biased >> 2) & ~BASE_MASK) == 0 && "host pointer does not fit in 62 bits");
+  const Entry biased = h - guest_page_addr;  // wraps; recovered by (e<<2)+addr
+  assert(((biased >> 2) & ~BASE_MASK) == 0 && "host pointer does not fit below the tag bits");
   Entry e = biased >> 2;
   if (!(flags & PAGE_WRITABLE)) e |= TAG_SPECIAL;
   if (PageTable::code_query && PageTable::code_query(host)) e |= TAG_CODE;
@@ -104,12 +104,12 @@ void PageTable::unmap(u32 guest, u32 size) {
 
 PageTable::~PageTable() { munmap(table_, TABLE_BYTES); delete index_; }
 
-static inline u64 host_page_of(Entry e, u32 p) { return ((e << 2) + (static_cast<u64>(p) << PAGE_SHIFT)) >> PAGE_SHIFT; }
+static inline Entry host_page_of(Entry e, u32 p) { return ((e << 2) + (static_cast<Entry>(p) << PAGE_SHIFT)) >> PAGE_SHIFT; }
 
 void PageTable::index_insert(u32 p, Entry e) {
   if (p >= HostIndex::TRACKED || !(e << 2)) return;
   HostIndex& ix = *index_;
-  const u64 hp = host_page_of(e, p);
+  const Entry hp = host_page_of(e, p);
   const u32 s = ix.slot(hp);
   ix.key[s] = hp;
   ix.next[p] = ix.head[s];
@@ -130,7 +130,7 @@ void PageTable::index_remove(u32 p, Entry e) {
 }
 
 void PageTable::set_code_host(const u8* host_page, bool is_code) {
-  const u64 want = reinterpret_cast<u64>(host_page) >> PAGE_SHIFT;
+  const Entry want = reinterpret_cast<uintptr_t>(host_page) >> PAGE_SHIFT;
   const HostIndex& ix = *index_;
   const u32 s = ix.slot(want);
   if (ix.key[s] != want) return;

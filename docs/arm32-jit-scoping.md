@@ -1,7 +1,8 @@
 # Scoping: an ARM → ARMv7 (A32) recompiler
 
-Status: phase 1 built 2026-09-03 on branch `a32-jit` (see §7 and
-`src/core/cpu/jit/README.md`); phases 2-4 open. Branch context:
+Status: phase 1 and phase 2 steps 1-2 built 2026-09-03 on branch `a32-jit`
+(see §7 and `src/core/cpu/jit/README.md`); the rest of phase 2 and phases
+3-4 open. Branch context:
 `arm32-build` already gives an ARMv7 host tier (NEON subset kernels,
 interpreter only); the JIT is the one thing that tier lacks.
 
@@ -296,8 +297,25 @@ converge once memory is inline. **A30, firmware boot 300 frames at
 phase 1**, both run orders. One rule learned: a predicated cycle charge
 must precede a flag-writing body (`subcc` after `bicscc` reads the new C);
 the ARM7 conditional `muls` with a live C is branched around instead.
-Next: memory fast path (u32 page-table entry, flag bracket from the
-liveness pass, inter-block hint), LDM/STM, indirect branches, MSR.
+*Step 2, done 2026-09-03:* memory. `mem::Entry` is pointer-sized (u32 on
+ARM32, tags in bits 31/30); single accesses probe the table with one
+`ldr`, test with `tst`/`lsls` inside an `mrs`/`msr` bracket only when the
+flags are live after the instruction, access at the host-aligned address
+with the guest's rotate/extend, and charge from the timing table (ARM7:
+the precomputed cost7 table; an access it cannot price stays a fallback).
+Same-page LDM/STM inline, pc-in-list a fallback. Cold paths reconcile the
+cache by writeback-at-branch-state + reload-at-join-state (README). Exact:
+`test_jit` 4 × 1600; **all five scenes identical to the A64 JIT** (etody
+converged as predicted); strict mode identical to the interpreter (sm64,
+dbori, etody). **A30 firmware boot: median 11.6 ms, p99 35-40 ms, 86 % of
+frames in budget, against 61 ms interpreter and 26.5 ms step 1**, both run
+orders. Two lessons: the LDM/STM base writeback must wait in a temporary
+because the cold path is the interpreter; and a conditional memory body
+must keep its flags across the page tests whatever the liveness pass says,
+because the interpreter re-evaluates the condition on the cold path.
+Next: indirect branches (`branch_indirect` stub), LDM pc / POP pc, same-mode
+MSR; then phase 3 on the device (pinned page table vs literal, LUT size,
+the inter-block flag hint, cost lookup before the access for latency).
 
 **Phase 3 — device tuning (≈ 1 week, needs the device).** Pinned subset;
 page-table base pinned vs literal; LUT size; A/B by PMU categories with

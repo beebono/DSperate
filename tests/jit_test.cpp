@@ -311,6 +311,12 @@ void directed() {
     {Cpu::ARM9, false, {0xE1dceb70, 0xE2800001}, {0x7a2fbc14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7b20dd03, 0xe41d8363, 0, 0xd1cea9ce}},
     {Cpu::ARM9, false, {0x33dce001, 0xE2800001}, {0x7a2fbc14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7b20dd03, 0xe41d8363, 0, 0xd1cea9ce}},
     {Cpu::ARM7, false, {0x31dceb70, 0xE2800001}, {0x7a2fbc14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7b20dd03, 0xe41d8363, 0, 0xd1cea9ce}},
+    // RSCS with a pc operand, then a conditional on N/V (seed 2003's shape).
+    {Cpu::ARM9, false, {0xE2FFA4D2, 0xB1A01002, 0xE2800001}, {0, 0, 0x12345678u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE2F0A4D2, 0xB1A01002, 0xE2800001}, {0x02000008u, 0, 0x12345678u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // ... and with C set going in (cmp r0, r0 first).
+    {Cpu::ARM9, false, {0xE1500000, 0xE2FFA4D2, 0xB1A01002, 0xE2800001}, {0, 0, 0x12345678u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE1500000, 0xE2F0A4D2, 0xB1A01002, 0xE2800001}, {0x02000008u, 0, 0x12345678u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     // Thumb: movs then ldr [r6 + r0] far away.
     {Cpu::ARM9, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM7, true, {0x2001, 0x5871}, {0, 0x12345678, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
@@ -374,9 +380,10 @@ void fuzz(Cpu which, bool thumb, u32 trials, u32 seed0) {
 
 int main(int argc, char** argv) {
   const u32 trials = argc > 1 ? static_cast<u32>(std::atoi(argv[1])) : 400;
-  if (argc > 2) {   // single trial: test_jit 1 <seed>  (seed range selects cpu/state)
+  if (argc > 2) {   // single trial: test_jit 1 <seed> [set]; set = 0..3 (arm9 arm/thumb, arm7 arm/thumb), default by seed range
     const u32 seed = static_cast<u32>(std::atoi(argv[2]));
-    fuzz(seed >= 3000 ? Cpu::ARM7 : Cpu::ARM9, (seed / 1000) % 2 == 0, 1, seed);
+    const int set = argc > 3 ? std::atoi(argv[3]) : (seed >= 3000 ? 2 : 0) + ((seed / 1000) % 2 == 0 ? 1 : 0);
+    fuzz(set >= 2 ? Cpu::ARM7 : Cpu::ARM9, set & 1, 1, seed);
     return 0;
   }
   directed();

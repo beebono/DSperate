@@ -4,6 +4,7 @@
 #include <cstring>
 #include <new>
 #include <memory>
+#include <cstdint>
 #include <cstdlib>
 #include "core/types.h"
 #include "core/profile.h"
@@ -12,21 +13,22 @@ namespace ds::mem {
 
 // The single memory abstraction shared by the interpreter, the JIT and DMA.
 //
-// Design: one flat table of 8-byte tagged entries,
+// Design: one flat table of pointer-sized tagged entries (8 bytes on a
+// 64-bit host, 4 on a 32-bit one),
 // one per 2 KB guest page, covering the whole 32-bit guest address space so that
 // no address ever needs masking before lookup. The entry stores a *pre-biased*
 // host base so that `host_base + guest_addr` addresses the byte directly; the
-// low 62 bits hold that base >> 2, and the top two bits are tags:
+// low bits hold that base >> 2, and the top two bits are tags:
 //
-//   bit 63  CODE     page contains translated code -> stores must check for SMC
-//   bit 62  SPECIAL  not plain RAM for *writes*    -> MMIO / ROM / write-protect
+//   top bit      CODE     page contains translated code -> stores must check for SMC
+//   next bit     SPECIAL  not plain RAM for *writes*    -> MMIO / ROM / write-protect
 //
 // Recovering the pointer is `entry << 2`, which discards both tags at once, so
 // loads from a CODE page are exactly as fast as loads from plain RAM and a pure
 // MMIO page (base 0, SPECIAL set) falls to the slow path with no extra branch.
 //
 // Host pointers must therefore be 4-byte aligned and the biased value must fit
-// in 62 bits; both are asserted at map time.
+// in the remaining bits; both are asserted at map time.
 
 // Self-modifying-code notification: every store path that lands on a page
 // tagged CODE reports the host bytes it wrote. The recompiler installs the
@@ -71,10 +73,10 @@ inline PageBuf alloc_page_buf(size_t bytes) {
   return PageBuf(p);
 }
 
-using Entry = u64;
+using Entry = uintptr_t;
 
-constexpr Entry TAG_CODE    = Entry{1} << 63;
-constexpr Entry TAG_SPECIAL = Entry{1} << 62;
+constexpr Entry TAG_CODE    = Entry{1} << (sizeof(Entry) * 8 - 1);
+constexpr Entry TAG_SPECIAL = Entry{1} << (sizeof(Entry) * 8 - 2);
 constexpr Entry BASE_MASK   = ~(TAG_CODE | TAG_SPECIAL);
 
 enum PageFlags : u32 {
@@ -120,7 +122,7 @@ public:
   // Fast-path helpers. Return nullptr when the access must take the slow path.
   inline u8* read_ptr(u32 addr) const {
     Entry e = table_[addr >> PAGE_SHIFT];
-    u64 base = e << 2;
+    const Entry base = e << 2;
     return base ? reinterpret_cast<u8*>(base + addr) : nullptr;
   }
   inline u8* write_ptr(u32 addr, bool* is_code) const {
@@ -132,7 +134,7 @@ public:
     Entry e = table_[addr >> PAGE_SHIFT];
     if (e & TAG_SPECIAL) return nullptr;
     *is_code = (e & TAG_CODE) != 0;
-    u64 base = e << 2;
+    const Entry base = e << 2;
     return base ? reinterpret_cast<u8*>(base + addr) : nullptr;
   }
 

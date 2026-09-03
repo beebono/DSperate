@@ -29,15 +29,25 @@ the stubs and the translator behind the `backend` interface in
 | `a32/emit.h` | A32 (ARMv7) encoder, ARM state |
 | `a32/convention.h` | the ARMv7 register map: guest r0-r3 and sp pinned in r4-r8, budget r9, page table r10, context r11; the other guest registers in memory and a per-block cache; guest NZCVQ in the APSR |
 | `a32/stubs.cpp` | the ARMv7 stubs (AAPCS32: `blx` to Thumb-2 helpers, struct return in memory, 8-byte stack frames) |
-| `a32/translate.cpp` | ARMv7 translator: register cache, data processing / multiplies / static branches by field substitution with native flags and predication; memory, LDM/STM, indirect branches and MSR through the fallback stub (phase 2 step 1); same block shape as a64 |
+| `a32/translate.cpp` | ARMv7 translator: register cache, data processing / multiplies / static branches by field substitution with native flags and predication, single loads/stores and same-page LDM/STM with a page-table fast path; indirect branches, LDM pc and MSR through the fallback stub (phase 2 step 2); same block shape as a64 |
 
 The ARMv7 backend is scoped in `docs/arm32-jit-scoping.md`. Its gates, run
 after every step: `test_jit` under qemu-arm (1600 trials), the five replay
 scenes' 300-frame hashes against the AArch64 JIT's, and strict mode against
-the interpreter. Phase 2 step 1 (2026-09-03): four scenes identical to the
-AArch64 JIT; etody differs (the fallback stub polls after every memory
-instruction, which moves that scene's ARM7 timer race) and is gated in
-strict mode against the interpreter instead until memory is inline.
+the interpreter. Phase 2 step 2 (2026-09-03, memory inline): all five
+scenes identical to the AArch64 JIT (etody included, once memory stopped
+going through the polling fallback stub), strict mode identical to the
+interpreter. The page-table entry is pointer-sized (`mem::Entry` is
+`uintptr_t`, tags in the top two bits), so the 32-bit probe is one `ldr`.
+
+Cold-path rule for the register cache: a cold path is emitted in the cache
+state of its branch point, writes that state's dirty slots back, does its
+work, and reconciles to the hot path's end state by reloading every slot
+that state holds -- so the hot path may evict freely after the branch. For
+LDM/STM the cold path is the interpreter, so the base writeback waits in a
+temporary until the transfer is done, and a conditional memory body keeps
+the flags across its page tests even when nothing after it reads them: the
+interpreter re-evaluates the condition on them.
 
 Two A32 rules the AArch64 backend never needed: a predicated cycle charge
 must come *before* a flag-writing (S) body, because the body rewrites the

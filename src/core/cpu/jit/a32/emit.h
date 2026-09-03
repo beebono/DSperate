@@ -157,6 +157,11 @@ public:
   void strh(u32 rt, u32 rn, s32 off, Cond c = AL) { ldst_h(false, 1, 1, rt, rn, off, c); }
   void ldrsb(u32 rt, u32 rn, s32 off, Cond c = AL) { ldst_h(true, 1, 0, rt, rn, off, c); }
   void ldrsh(u32 rt, u32 rn, s32 off, Cond c = AL) { ldst_h(true, 1, 1, rt, rn, off, c, true); }
+  // Halfword / signed forms with a register offset (no shift).
+  void ldrh_reg(u32 rt, u32 rn, u32 rm, Cond c = AL) { ldst_h_reg(true, 0b01, rt, rn, rm, c); }
+  void strh_reg(u32 rt, u32 rn, u32 rm, Cond c = AL) { ldst_h_reg(false, 0b01, rt, rn, rm, c); }
+  void ldrsb_reg(u32 rt, u32 rn, u32 rm, Cond c = AL) { ldst_h_reg(true, 0b10, rt, rn, rm, c); }
+  void ldrsh_reg(u32 rt, u32 rn, u32 rm, Cond c = AL) { ldst_h_reg(true, 0b11, rt, rn, rm, c); }
   // ldrd/strd: rt even, rt+1 implied; immediate offset (-255..255), 8-byte aligned address.
   void ldrd(u32 rt, u32 rn, s32 off, Cond c = AL) { assert((rt & 1) == 0); ldst_h(false, 1, 0, rt, rn, off, c); }
   void strd(u32 rt, u32 rn, s32 off, Cond c = AL) { assert((rt & 1) == 0); ldst_h(false, 1, 1, rt, rn, off, c, true); }
@@ -213,6 +218,10 @@ private:
     else       op2 = sh_form ? 0b11u : (second ? 0b01u : 0b10u);      // strd  / strh / ldrd
     (void)h_or_d;
     emit((c << 28) | 0x01400090u | (u << 23) | (load ? (1u << 20) : 0) | (rn << 16) | (rt << 12) | ((a >> 4) << 8) | (op2 << 5) | (a & 0xF));
+  }
+
+  void ldst_h_reg(bool load, u32 op2, u32 rt, u32 rn, u32 rm, Cond c) {
+    emit((c << 28) | 0x01800090u | (load ? (1u << 20) : 0) | (rn << 16) | (rt << 12) | (op2 << 5) | rm);
   }
 
   u8*    base_;

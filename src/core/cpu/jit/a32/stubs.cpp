@@ -230,9 +230,23 @@ void emit_stubs(Runtime& rt) {
     e.b(rt.exit_key);
   }
 
-  // Slow accesses and flag merges: nothing inlines memory yet, so no stub.
-  for (int k = 0; k < 3; ++k) { rt.slow_load[k] = nullptr; rt.slow_store[k] = nullptr; }
-  rt.merge_keep_cv = rt.merge_set_c = nullptr;
+  // ---- slow loads/stores: r1 = address (r2 = value) -> r0; r1-r3, r12 preserved ------
+  // The translator's cache slots are all caller-saved, so the stub keeps them
+  // (24-byte frame); the result goes back through the saved r0.
+  {
+    const void* lds[3] = {reinterpret_cast<const void*>(&jit_h_ld8), reinterpret_cast<const void*>(&jit_h_ld16), reinterpret_cast<const void*>(&jit_h_ld32)};
+    const void* sts[3] = {reinterpret_cast<const void*>(&jit_h_st8), reinterpret_cast<const void*>(&jit_h_st16), reinterpret_cast<const void*>(&jit_h_st32)};
+    for (int k = 0; k < 6; ++k) {
+      (k < 3 ? rt.slow_load[k] : rt.slow_store[k - 3]) = e.cur();
+      e.push(M(0) | M(1) | M(2) | M(3) | M(R_FN) | M(R_LR));
+      e.mov(0, R_CTX);
+      e.mov_ptr(R_FN, k < 3 ? lds[k] : sts[k - 3]);
+      e.bl(rt.call_pure);
+      e.str(0, R_SP, 0);
+      e.pop(M(0) | M(1) | M(2) | M(3) | M(R_FN) | M(R_PC));
+    }
+  }
+  rt.merge_keep_cv = rt.merge_set_c = nullptr;   // flags merge natively on this host
 
   // ---- per-CPU stubs ------------------------------------------------------------------
   for (int c = 0; c < 2; ++c) {
