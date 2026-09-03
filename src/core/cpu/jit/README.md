@@ -11,13 +11,30 @@ nothing has been.
 
 ## Files
 
+The runtime is host-agnostic; each backend directory provides the encoder,
+the stubs and the translator behind the `backend` interface in
+`jit_internal.h` (`emit_stubs`, `translate_block`, `write_entry_redirect`,
+`patch_link`, `relative_branch_class`). CMake picks the directory by host.
+
 | file | role |
 |---|---|
-| `emit.h` | AArch64 encoder: only the forms the translator and stubs use. Verified against `aarch64-linux-gnu-objdump`. |
-| `runtime.cpp` | code arena, stubs (entry/exit, call trampolines, dispatcher, block linker, indirect branch), block cache, LUT, SMC tracking by host page, the helpers translated code calls |
-| `translate.cpp` | one-pass block translator for ARM and Thumb, flag-liveness pre-pass, cycle accounting |
+| `runtime.cpp` | code arena, block cache, LUT, block linking, park-and-revive, SMC tracking by host page, the pre-translation worker, the helpers translated code calls |
 | `jit.h` | public API: `attach`, `run` (a `RunFn`), `flush`, `set_trace`, `stats` |
-| `jit_internal.h` | register convention, context offsets, block/runtime structures |
+| `jit_internal.h` | context offsets, block/runtime structures, the backend interface |
+| `block_shape.h` | where a block ends -- shared so every backend cuts blocks identically and their frame hashes are comparable |
+| `a64/emit.h` | AArch64 encoder: only the forms the translator and stubs use. Verified against `aarch64-linux-gnu-objdump`. |
+| `a64/convention.h` | the AArch64 register map (guest registers pinned in x9-x13, x19-x28) |
+| `a64/stubs.cpp` | the AArch64 stubs and code patches |
+| `a64/translate.cpp` | one-pass block translator for ARM and Thumb, flag-liveness pre-pass, cycle accounting |
+| `a32/emit.h` | A32 (ARMv7) encoder, ARM state |
+| `a32/convention.h` | the ARMv7 register map: budget r9, page table r10, context r11; guest registers in memory (phase 1) |
+| `a32/stubs.cpp` | the ARMv7 stubs (AAPCS32: `blx` to Thumb-2 helpers, struct return in memory, 8-byte stack frames) |
+| `a32/translate.cpp` | phase 1: every instruction through the fallback stub; same block shape as a64 |
+
+The ARMv7 backend is scoped in `docs/arm32-jit-scoping.md`. Its phase-1 gate,
+run 2026-09-03: `test_jit` under qemu-arm (1600 trials), and the SM64DS scene's
+300-frame hashes identical between the ARMv7 JIT, the AArch64 JIT, the ARMv7
+JIT in strict mode and the interpreter.
 
 ## How it works
 

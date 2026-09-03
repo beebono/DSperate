@@ -1,6 +1,7 @@
 # Scoping: an ARM → ARMv7 (A32) recompiler
 
-Status: scoping only, 2026-09-02. Nothing here is built. Branch context:
+Status: phase 1 built 2026-09-03 on branch `a32-jit` (see §7 and
+`src/core/cpu/jit/README.md`); phases 2-4 open. Branch context:
 `arm32-build` already gives an ARMv7 host tier (NEON subset kernels,
 interpreter only); the JIT is the one thing that tier lacks.
 
@@ -227,7 +228,17 @@ design choice above:
 
 ## 7. Phases 1–4
 
-**Phase 1 — exact skeleton (≈ 3–4 days).** Runtime split; `u32` page-table
+**Phase 1 — exact skeleton (≈ 3–4 days). DONE 2026-09-03, one session:**
+runtime split (`runtime.cpp` host-agnostic, `a64/` and `a32/` behind a
+five-function backend interface, `block_shape.h` shared), A32 encoder, stubs
+and an all-fallback translator; `test_jit` under qemu-arm 1600 trials ok;
+SM64 300-frame hashes identical to the AArch64 JIT and to the interpreter;
+runs on the A30 (74 ms/frame all-fallback against 61 ms interpreter -- the
+per-instruction stub cost phase 2 removes). One lesson: AAPCS32's 8-byte
+stack alignment is not optional -- a 36-byte push in the slice loop put a
+`vst1.64 [sp:64]` in the renderer on a misaligned sp (SIGBUS), on hardware
+and under qemu alike; every stub frame is now a multiple of 8.
+Original plan: Runtime split; `u32` page-table
 entry; `emit_a32.h` verified against `arm-linux-gnueabihf-objdump` the way
 `emit.h` was; stubs; a translator that emits every instruction as a
 fallback, then straight-line blocks with the budget test and dispatch.
