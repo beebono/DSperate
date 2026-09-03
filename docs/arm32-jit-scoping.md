@@ -202,6 +202,30 @@ starting point under our licence policy, with attribution.
 
 ## 6. Phase 0: measure before designing (A64 side, 1–2 days)
 
+**Run 2026-09-03** (`DS_JIT_CENSUS=1`, five scenes, 900/300 frames, full
+tables in `docs/material/a32-phase0-census.md`). What it decided:
+
+- **Blocks are short: 4–5 instructions per entry, 65–75 % of entries are
+  blocks of four or fewer.** Register-cache boundary traffic is therefore
+  the dominant cost of a per-block cache, and a pinned subset is needed.
+- **Pin r0–r3 (plus sp/lr if slots allow).** Traffic per entry, mean over
+  scenes: r0 1.55, r1 1.15, r2 0.86, r3 0.83, then sp 0.46, r4 0.44,
+  lr 0.44; r9–r11 and pc are below 0.15. r0–r3 are also live-in at
+  13–39 % of entries. Five callee-saved slots cover r0–r3 + sp exactly.
+- **NZCV after memory instructions: 57–71 % live by the intra-block pass
+  (flags assumed live at every block end), but only 12–22 % certainly
+  live within the block.** The conservative figure would bracket most
+  accesses with mrs/msr; the certain figure says most of that is the
+  block-end assumption. An inter-block flag-liveness hint (does the
+  successor read flags before writing them, known once the successor is
+  translated or pre-scanned) is worth building before the memory fast
+  path. Flags are live at block entry for 38–69 % of entries, so the
+  budget test needs the flag-neutral form regardless.
+- **Fallbacks are 0.15–0.8 % of executed instructions** on the A64
+  backend: the A32 backend inherits the same fallback set and the
+  interpreter path stays negligible.
+
+
 Everything below is cheap instrumentation in the *existing* translator, run
 on the five replay scenes under qemu or the rig, and each answer changes a
 design choice above:
