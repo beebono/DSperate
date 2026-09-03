@@ -9,6 +9,7 @@
 #include "core/cpu/interp/interp.h"
 #include "core/cpu/cp15.h"
 #include "core/cart/zip.h"
+#include "core/cart/zip_cache.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -181,38 +182,79 @@ bool NDS::save_firmware_override(const std::string& path, std::string& err) {
   return true;
 }
 
-namespace { u64 rom_identity(const std::vector<u8>& rom) {
+namespace { u64 rom_identity(const cart::RomSource& rom) {
   // The header plus the size: enough to reject the wrong ROM without
-  // hashing 100 MB on every save.
+  // hashing 100 MB on every save. The size is the image's own, not the
+  // card's padded one, so a mapped and an in-memory copy agree.
+  u8 head[0x160];
+  rom.read(0, head, sizeof head);
   u64 h = 1469598103934665603ull;
-  for (size_t i = 0; i < 0x160 && i < rom.size(); ++i) h = (h ^ rom[i]) * 1099511628211ull;
+  for (size_t i = 0; i < sizeof head && i < rom.size(); ++i) h = (h ^ head[i]) * 1099511628211ull;
   return h ^ rom.size();
 }
 } // namespace
 
 bool NDS::load_rom(const std::string& path) {
-  std::vector<u8> image = slurp(path);
-  // A zipped ROM is unpacked here and nothing downstream can tell: rom_id is
-  // hashed from the decompressed bytes below, so save states, .sav files and
-  // scene hashes are interchangeable between a zipped and a loose copy of the
-  // same game. Sniffed by magic rather than by extension.
-  if (cart::is_zip(image.data(), image.size())) {
-    std::vector<u8> rom;
-    std::string err, chosen;
-    if (!cart::extract_nds(image.data(), image.size(), rom, err, &chosen)) {
-      std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), err.c_str());
-      return false;
-    }
-    rom_zip_entry = std::move(chosen);
-    image = std::move(rom);
+  // A zipped ROM comes out the same as a loose one from here on: rom_id is
+  // hashed from the decompressed bytes, so save states, .sav files and scene
+  // hashes are interchangeable between a zipped and a loose copy of the same
+  // game. Sniffed by magic rather than by extension.
+  bool zipped = false;
+  {
+    std::ifstream f(path, std::ios::binary);
+    u8 magic[4] = {};
+    f.read(reinterpret_cast<char*>(magic), 4);
+    zipped = f.gcount() == 4 && cart::is_zip(magic, 4);
   }
-  return load_rom_image(std::move(image));
+  rom_zip_entry.clear();
+  rom_cache_path.clear();
+  // DS_CART_MMAP=0 reads everything into memory as before, for A/B and for a
+  // filesystem that cannot map. Otherwise a loose .nds is mapped and a zip
+  // goes through the cache beside it (cart/zip_cache.h): the kernel pages the
+  // image in as the game touches it and gives it back under pressure
+  // (docs/cart-streaming-scoping.md).
+  static const bool no_map = [] { const char* e = std::getenv("DS_CART_MMAP"); return e && std::atoi(e) == 0; }();
+  if (no_map) {
+    std::vector<u8> image = slurp(path);
+    if (zipped) {
+      std::vector<u8> rom;
+      std::string err, chosen;
+      if (!cart::extract_nds(image.data(), image.size(), rom, err, &chosen)) {
+        std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), err.c_str());
+        return false;
+      }
+      rom_zip_entry = std::move(chosen);
+      image = std::move(rom);
+    }
+    return load_rom_image(std::move(image));
+  }
+  std::string err;
+  std::unique_ptr<cart::RomSource> src;
+  if (zipped) {
+    cart::ZipOpen how;
+    how.fallback_dir = rom_cache_dir;
+    how.max_bytes = rom_cache_max_bytes;
+    how.progress = rom_progress; how.progress_user = rom_progress_user;
+    how.cancel = rom_cancel;
+    src = cart::open_zip(path, how, err);
+    rom_zip_entry = how.chosen;
+    rom_cache_path = how.cache_path;
+  } else {
+    src = cart::RomSource::map_file(path, err);
+  }
+  if (!src) { std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), err.c_str()); return false; }
+  src->prefetch();   // no-op unless DS_CART_PREFETCH=1, see rom_source.h
+  return load_rom_source(std::move(src));
 }
 
 bool NDS::load_rom_image(std::vector<u8> image) {
-  if (image.size() < 0x1000) return false;
-  rom_id = rom_identity(image);   // before the move; Cart pads to a power of two
-  cart = std::make_unique<cart::Cart>(*this, std::move(image));
+  return load_rom_source(cart::RomSource::from_memory(std::move(image)));
+}
+
+bool NDS::load_rom_source(std::unique_ptr<cart::RomSource> src) {
+  if (!src || src->size() < 0x1000) return false;
+  rom_id = rom_identity(*src);
+  cart = std::make_unique<cart::Cart>(*this, std::move(src));
   return true;
 }
 
@@ -221,13 +263,13 @@ bool NDS::load_rom_image(std::vector<u8> image) {
 void NDS::setup_direct_boot() {
   if (!cart) return;
   const cart::Header& h = cart->header();
-  const u8* r = cart->rom();
   auto w32 = [&](u32 a, u32 v) { bus.dma_write32(Cpu::ARM9, a, v); };
   auto w16 = [&](u32 a, u16 v) { bus.dma_write16(Cpu::ARM9, a, v); };
   auto rd32 = [&](const u8* p) { u32 v; std::memcpy(&v, p, 4); return v; };
+  auto rom32 = [&](u32 off) { return cart->rom_read32_at(off); };
 
   io.wramcnt = 3; bus.update_wram();
-  for (u32 i = 0; i < 0x170; i += 4) w32(0x027FFE00 + i, rd32(r + i));
+  for (u32 i = 0; i < 0x170; i += 4) w32(0x027FFE00 + i, rom32(i));
   const u32 id = cart->chip_id();
   w32(0x027FF800, id); w32(0x027FF804, id); w16(0x027FF808, h.header_crc16); w16(0x027FF80A, h.secure_area_crc16);
   w16(0x027FF850, 0x5835);
@@ -241,8 +283,8 @@ void NDS::setup_direct_boot() {
     for (u32 i = 0; i < 0x800; i += 4) w32(h.arm9_ram_address + i, rd32(secure + i));
     arm9_start = 0x800;
   }
-  for (u32 i = arm9_start; i < h.arm9_size; i += 4) w32(h.arm9_ram_address + i, rd32(r + h.arm9_rom_offset + i));
-  for (u32 i = 0; i < h.arm7_size; i += 4) bus.dma_write32(Cpu::ARM7, h.arm7_ram_address + i, rd32(r + h.arm7_rom_offset + i));
+  for (u32 i = arm9_start; i < h.arm9_size; i += 4) w32(h.arm9_ram_address + i, rom32(h.arm9_rom_offset + i));
+  for (u32 i = 0; i < h.arm7_size; i += 4) bus.dma_write32(Cpu::ARM7, h.arm7_ram_address + i, rom32(h.arm7_rom_offset + i));
 
   // Firmware user settings, as the firmware copies them.
   if (firmware.size() >= 0x40000) {

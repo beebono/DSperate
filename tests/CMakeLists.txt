@@ -60,3 +60,7 @@ add_executable(test_zip zip_test.cpp)
 target_link_libraries(test_zip PRIVATE dsperate_core)
 target_include_directories(test_zip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME zip COMMAND test_zip)
+
+add_executable(test_rom_source rom_source_test.cpp)
+target_link_libraries(test_rom_source PRIVATE dsperate_core)
+add_test(NAME rom_source COMMAND test_rom_source)

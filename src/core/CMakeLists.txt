@@ -7,7 +7,9 @@ add_library(dsperate_core STATIC
   mem/timing.cpp
   dma/dma.cpp
   cart/cart.cpp
+  cart/rom_source.cpp
   cart/zip.cpp
+  cart/zip_cache.cpp
   cart/miniz/miniz_tinfl.c
   cheat/ar_engine.cpp
   cheat/database.cpp

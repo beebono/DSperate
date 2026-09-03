@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
 #include "core/types.h"
+#include "core/cart/rom_source.h"
 
 #include <array>
 #include <memory>
@@ -34,13 +35,19 @@ enum class SaveType : u8 { None, EepromTiny, Eeprom, Flash };
 // and the save chip on the AUXSPI bus.
 class Cart {
 public:
-  Cart(NDS& nds, std::vector<u8> rom);
+  Cart(NDS& nds, std::unique_ptr<RomSource> rom);
+  Cart(NDS& nds, std::vector<u8> rom) : Cart(nds, RomSource::from_memory(std::move(rom))) {}
   void reset();
   template <class S> void sync_state(S& s);
 
   const Header& header() const { return header_; }
-  const u8* rom() const { return rom_.data(); }
-  u32 rom_size() const { return static_cast<u32>(rom_.size()); }
+  // Bounded reads of the image, wherever it lives (see rom_source.h); past
+  // the end the bytes are 0xFF, as on a card.
+  void rom_read(u32 addr, u8* dst, u32 n) const { rom_->read(addr, dst, n); }
+  u32  rom_read32_at(u32 addr) const { return rom_->read32(addr); }
+  u32 rom_size() const { return rom_->size(); }          // bytes in the image
+  u32 rom_padded_size() const { return rom_mask_ + 1; }  // what the card wraps at
+  const RomSource& source() const { return *rom_; }
   u32 chip_id() const { return chip_id_; }
 
   // Cart bus.
@@ -81,7 +88,10 @@ public:
 
 private:
   NDS& nds_;
-  std::vector<u8> rom_;
+  std::unique_ptr<RomSource> rom_;
+  // The page the last block read was in: rom_read32 stays pointer
+  // arithmetic and only asks the source when the address leaves it.
+  u32 page_base_ = 0xFFFFFFFFu; const u8* page_ = nullptr;
   Header header_{};
   u32 chip_id_ = 0;
   u32 rom_mask_ = 0;

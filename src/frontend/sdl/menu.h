@@ -21,6 +21,10 @@ int  draw_text(const Blit& d, int x, int y, int scale, u32 colour, const char* s
 int  text_width(int scale, const char* s);
 // Halves every pixel's brightness, in place, over a whole DS framebuffer.
 void dim_framebuffer(u32* px, u32 n);
+// A small centred panel with a title, a second line at the same size, and a
+// dim third one: the "unpacking" notice a first launch of a zipped game
+// shows while the image is written. Drawn over a dimmed frame like the menu.
+void draw_notice(const Blit& d, const char* title, const char* line2, const char* line3);
 
 // The pause menu: a blitted, modal list drawn over the held last frame while
 // emulation is stopped. It is not an overlay -- nothing runs behind it -- so

@@ -208,6 +208,14 @@ int main(int argc, char** argv) {
   } else {
     std::fprintf(stderr, "note: no --bios9/--bios7/--firmware given; running with empty BIOS\n");
   }
+  // A zipped ROM may be inflated to disk on first use; say so, since on an
+  // SD card that is seconds to a minute.
+  nds.rom_progress = [](void*, ds::u64 done, ds::u64 total) {
+    static ds::u64 last = ~0ull;
+    const ds::u64 pct = total ? done * 100 / total : 100;
+    if (pct / 10 != last / 10 || done == total) { std::fprintf(stderr, "\rzip: extracting %llu%%", static_cast<unsigned long long>(pct)); last = pct; }
+    if (done == total) std::fputc('\n', stderr);
+  };
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(timing_oc);

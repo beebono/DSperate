@@ -7,6 +7,11 @@
 // error, so the failure cases carry as much weight as the happy ones.
 #include "core/cart/cart.h"
 #include "core/cart/zip.h"
+#include "core/cart/zip_cache.h"
+
+#include <atomic>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "check.h"
 
 #include <cstring>
@@ -56,7 +61,9 @@ std::vector<u8> make_rom(u32 game_code, u8 revision, size_t size = 0x400, u8 fil
 // Builds archives byte by byte, so a field can be made wrong on purpose.
 struct Zip {
   std::vector<u8> buf;
-  struct Rec { std::string name; u16 method, flags; u32 csize, usize, local; };
+  struct Rec { std::string name; u16 method, flags; u32 crc, csize, usize, local; };
+  // A wrong CRC on purpose, for the test that wants the check to fire.
+  bool break_crc = false;
   std::vector<Rec> recs;
 
   void u16le(u32 v) { buf.push_back(u8(v)); buf.push_back(u8(v >> 8)); }
@@ -86,10 +93,11 @@ struct Zip {
            u16 flags = 0, long usize_override = -1, const std::vector<u8>* payload = nullptr) {
     std::vector<u8> body = payload ? *payload
                          : method == 8 ? stored_blocks(data) : data;
-    Rec r{name, method, flags, u32(body.size()),
+    const u32 crc = cart::crc32_update(0, data.data(), data.size()) ^ (break_crc ? 1 : 0);
+    Rec r{name, method, flags, crc, u32(body.size()),
           u32(usize_override >= 0 ? usize_override : long(data.size())), u32(buf.size())};
     u32le(0x04034B50); u16le(20); u16le(flags); u16le(method);
-    u16le(0); u16le(0); u32le(0);
+    u16le(0); u16le(0); u32le(crc);
     u32le(r.csize); u32le(r.usize);
     u16le(u32(name.size())); u16le(0);
     raw(reinterpret_cast<const u8*>(name.data()), name.size());
@@ -104,7 +112,7 @@ struct Zip {
     for (const Rec& r : recs) {
       u32le(break_central && &r == &recs[0] ? 0xDEADBEEF : 0x02014B50);
       u16le(20); u16le(20); u16le(r.flags); u16le(r.method);
-      u16le(0); u16le(0); u32le(0);
+      u16le(0); u16le(0); u32le(r.crc);
       u32le(r.csize); u32le(r.usize);
       u16le(u32(r.name.size())); u16le(0); u16le(0);
       u16le(0); u16le(0); u32le(0);
@@ -260,7 +268,7 @@ void test_failures() {
   }
   {   // stored, but the two sizes disagree
     Zip z; z.add("game.nds", make_rom(kKnownCode, 0, 0x400), 0, 0, 0x800); z.finish();
-    fails(z, "ended early");
+    fails(z, "sizes disagree");
   }
   {   // an absurd declared size must be refused before anything is allocated
     Zip z; z.add("game.nds", make_rom(kKnownCode, 0, 0x400), 8, 0, 0x7FFFFFFF); z.finish();
@@ -334,7 +342,179 @@ void test_database_premise() {
 
 } // namespace
 
+// The CRC is checked as the bytes come out: a stream that inflates cleanly
+// to the right length but the wrong bytes is still a corrupt archive.
+void test_crc() {
+  Zip z; z.break_crc = true;
+  z.add("game.nds", make_rom(kKnownCode, 0, 0x4000), 8);
+  z.finish();
+  std::vector<u8> out; std::string err;
+  CHECK(!z.extract(out, err));
+  CHECK(err.find("CRC") != std::string::npos);
+  CHECK(out.empty());
+  CHECK(cart::crc32_update(0, reinterpret_cast<const u8*>("123456789"), 9) == 0xCBF43926u);   // the check value
+}
+
+// open_zip: stored entries mapped in place, deflated ones through the cache
+// beside the archive, with the tag deciding whether the cache is reused.
+static std::string write_temp_zip(const std::string& dir, const std::string& name, const Zip& z) {
+  const std::string path = dir + "/" + name;
+  FILE* f = std::fopen(path.c_str(), "wb");
+  CHECK(f && std::fwrite(z.buf.data(), 1, z.buf.size(), f) == z.buf.size());
+  std::fclose(f);
+  return path;
+}
+static bool exists(const std::string& p) { struct stat st{}; return stat(p.c_str(), &st) == 0; }
+static long mtime_of(const std::string& p) { struct stat st{}; return stat(p.c_str(), &st) == 0 ? long(st.st_mtime) : -1; }
+
+void test_cache() {
+  char tmpl[] = "/tmp/dsperate-zipcache-XXXXXX";
+  const std::string dir = mkdtemp(tmpl);
+  const std::vector<u8> rom = make_rom(kKnownCode, 0, 0x4321, 0x5C);   // not a page multiple
+  std::string err;
+
+  // Stored: no cache, the mapping is a range of the archive.
+  {
+    Zip z; z.add("stored.nds", rom, 0); z.finish();
+    const std::string path = write_temp_zip(dir, "stored.zip", z);
+    cart::ZipOpen how;
+    auto src = cart::open_zip(path, how, err);
+    CHECK(src && err.empty());
+    CHECK(how.chosen == "stored.nds" && how.cache_path.empty() && !how.extracted);
+    CHECK(src->size() == rom.size() && src->mapped());
+    std::vector<u8> got(rom.size()); src->read(0, got.data(), u32(got.size()));
+    CHECK(got == rom);
+    CHECK(src->page(0x4000)[0x321] == 0xFF);
+    CHECK(!exists(dir + "/.dsperate"));
+  }
+  // Deflated: extracted once beside the archive, reused after.
+  {
+    Zip z; z.add("deflated.nds", rom, 8); z.finish();
+    const std::string path = write_temp_zip(dir, "game.zip", z);
+    cart::ZipOpen how;
+    long progress_calls = 0;
+    how.progress = [](void* u, u64 done, u64 total) { ++*static_cast<long*>(u); CHECK(done <= total); };
+    how.progress_user = &progress_calls;
+    auto src = cart::open_zip(path, how, err);
+    CHECK(src && err.empty());
+    CHECK(how.extracted && how.cache_path == dir + "/.dsperate/game.nds");
+    CHECK(how.cache_path == cart::zip_cache_path(path));
+    CHECK(progress_calls >= 1);
+    CHECK(exists(how.cache_path) && exists(how.cache_path + ".tag") && !exists(how.cache_path + ".part"));
+    std::vector<u8> got(rom.size()); src->read(0, got.data(), u32(got.size()));
+    CHECK(got == rom);
+    src.reset();
+
+    // Same archive again: the image is not rebuilt.
+    const long stamp = mtime_of(how.cache_path);
+    sleep(1);   // mtime resolution
+    cart::ZipOpen again;
+    auto src2 = cart::open_zip(path, again, err);
+    CHECK(src2 && !again.extracted && again.cache_path == how.cache_path);
+    CHECK(mtime_of(how.cache_path) == stamp);
+    src2.reset();
+
+    // A different archive under the same name (new entry, new CRC): rebuilt.
+    const std::vector<u8> rom2 = make_rom(kKnownCode, 1, 0x4321, 0x77);
+    Zip z2; z2.add("deflated.nds", rom2, 8); z2.finish();
+    write_temp_zip(dir, "game.zip", z2);
+    cart::ZipOpen third;
+    auto src3 = cart::open_zip(path, third, err);
+    CHECK(src3 && third.extracted);
+    std::vector<u8> got3(rom2.size()); src3->read(0, got3.data(), u32(got3.size()));
+    CHECK(got3 == rom2);
+    src3.reset();
+
+    // A corrupt archive fails loudly and leaves neither a .part nor a tag
+    // that would vouch for the old image.
+    Zip z3; z3.break_crc = true; z3.add("deflated.nds", rom, 8); z3.finish();
+    write_temp_zip(dir, "game.zip", z3);
+    cart::ZipOpen bad;
+    CHECK(!cart::open_zip(path, bad, err) && err.find("CRC") != std::string::npos);
+    CHECK(!exists(how.cache_path + ".part") && !exists(how.cache_path + ".tag"));
+  }
+  // Sweep: an image whose archive is gone is removed on the next open of
+  // any archive in that directory; a stray .part goes with it.
+  {
+    const std::string keep_zip = dir + "/keep.zip", gone_zip = dir + "/gone.zip";
+    Zip a; a.add("keep.nds", rom, 8); a.finish(); write_temp_zip(dir, "keep.zip", a);
+    Zip b; b.add("gone.nds", make_rom(kKnownCode, 2, 0x4321, 0x33), 8); b.finish(); write_temp_zip(dir, "gone.zip", b);
+    cart::ZipOpen o1, o2;
+    CHECK(cart::open_zip(keep_zip, o1, err) && cart::open_zip(gone_zip, o2, err));
+    CHECK(exists(o1.cache_path) && exists(o2.cache_path));
+    const std::string cache_dir = dir + "/.dsperate";
+    CHECK(cart::list_cache(cache_dir).size() >= 2);
+    { FILE* f = std::fopen((cache_dir + "/junk.nds.part").c_str(), "wb"); CHECK(f); std::fclose(f); }
+    CHECK(unlink(gone_zip.c_str()) == 0);
+    cart::ZipOpen o3;
+    CHECK(cart::open_zip(keep_zip, o3, err) && !o3.extracted);
+    CHECK(exists(o1.cache_path) && !exists(o2.cache_path) && !exists(o2.cache_path + ".tag"));
+    CHECK(!exists(cache_dir + "/junk.nds.part"));
+    // clear_cache keeps only what it is told to.
+    cart::clear_cache(cache_dir, o1.cache_path);
+    CHECK(exists(o1.cache_path));
+    CHECK(cart::list_cache(cache_dir).size() == 1);
+    CHECK(cart::clear_cache(cache_dir, "") == rom.size());
+    CHECK(cart::list_cache(cache_dir).empty());
+    unlink(keep_zip.c_str());
+  }
+  // Size cap: the least recently launched image is evicted to make room,
+  // never the one being opened.
+  {
+    const std::string cache_dir = dir + "/.dsperate";
+    for (const char* n : {"c1.zip", "c2.zip", "c3.zip"}) {
+      Zip z; z.add(std::string(n).substr(0, 2) + ".nds", make_rom(kKnownCode, 0, 0x4321, u8(n[1])), 8); z.finish();
+      write_temp_zip(dir, n, z);
+    }
+    cart::ZipOpen o;
+    o.max_bytes = rom.size() * 2 + 100;   // room for two images
+    CHECK(cart::open_zip(dir + "/c1.zip", o, err));
+    sleep(1);
+    CHECK(cart::open_zip(dir + "/c2.zip", o, err));
+    sleep(1);
+    CHECK(cart::open_zip(dir + "/c1.zip", o, err) && !o.extracted);   // c1 launched again: now the newest
+    sleep(1);
+    CHECK(cart::open_zip(dir + "/c3.zip", o, err) && o.extracted);    // needs room: c2 goes, c1 stays
+    CHECK(exists(cache_dir + "/c1.nds") && !exists(cache_dir + "/c2.nds") && exists(cache_dir + "/c3.nds"));
+    cart::clear_cache(cache_dir, "");
+    for (const char* n : {"c1.zip", "c2.zip", "c3.zip"}) unlink((dir + "/" + n).c_str());
+  }
+  // Cancel: the extraction stops, fails as "cancelled", and leaves nothing.
+  {
+    Zip z; z.add("big.nds", make_rom(kKnownCode, 0, 0x40000), 8); z.finish();
+    const std::string path = write_temp_zip(dir, "big.zip", z);
+    std::atomic<bool> cancel{true};
+    cart::ZipOpen o; o.cancel = &cancel;
+    CHECK(!cart::open_zip(path, o, err) && err == "cancelled");
+    CHECK(!exists(o.cache_path) && !exists(o.cache_path + ".part") && !exists(o.cache_path + ".tag"));
+    unlink(path.c_str());
+  }
+  // An unwritable directory falls back to the configured one, then fails.
+  {
+    const std::string ro = dir + "/ro";
+    mkdir(ro.c_str(), 0555);
+    Zip z; z.add("d.nds", rom, 8); z.finish();
+    // The archive has to be written before the directory is read-only.
+    chmod(ro.c_str(), 0755);
+    const std::string path = write_temp_zip(ro, "g.zip", z);
+    chmod(ro.c_str(), 0555);
+    if (access(ro.c_str(), W_OK) != 0) {   // not root
+      cart::ZipOpen none;
+      CHECK(!cart::open_zip(path, none, err) && !err.empty());
+      cart::ZipOpen fb; fb.fallback_dir = dir + "/cache";
+      auto src = cart::open_zip(path, fb, err);
+      CHECK(src && fb.cache_path == dir + "/cache/g.nds");
+    }
+    chmod(ro.c_str(), 0755);
+  }
+  // Leave nothing behind.
+  const int rc = std::system(("rm -rf '" + dir + "'").c_str());
+  CHECK(rc == 0);
+}
+
 int main() {
+  test_crc();
+  test_cache();
   test_database_premise();
   test_sniffing();
   test_roundtrip();

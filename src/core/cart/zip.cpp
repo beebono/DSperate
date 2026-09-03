@@ -42,22 +42,25 @@ bool ends_with_nds(const char* name, size_t len) {
 struct Entry {
   size_t   name_off = 0, name_len = 0;
   u16      method = 0;
+  u32      crc = 0;
   u64      csize = 0, usize = 0;
   size_t   local_off = 0;
   size_t   order = 0;         // position in the central directory, the tie-break
 };
 
-// Inflates raw DEFLATE from `src` into `dst`, stopping once `want` bytes have
-// been produced. Used twice: once with want = 0x160 to peek at a candidate's
-// header without paying for the whole ROM, and once with want = the declared
-// uncompressed size to extract the winner. Returns the number of bytes
-// produced, which the caller compares against what it asked for -- a stream
-// that ends early is a corrupt archive, not a short ROM.
+// Inflates raw DEFLATE from `src`, handing the output to `sink` in order,
+// stopping once `want` bytes have been produced. Used twice: with want =
+// 0x160 to peek at a candidate's header without paying for the whole ROM,
+// and with want = the declared uncompressed size to extract the winner.
+// Returns the number of bytes produced, which the caller compares against
+// what it asked for -- a stream that ends early is a corrupt archive, not a
+// short ROM.
 //
 // The dictionary has to be the full 32 KB window whether or not we intend to
 // keep all of it: a back-reference may reach that far, so decoding even the
 // first 0x160 bytes correctly needs the real window.
-size_t inflate_raw(const u8* src, size_t csize, u8* dst, size_t want) {
+template <class Sink>
+size_t inflate_raw(const u8* src, size_t csize, size_t want, Sink&& sink) {
   tinfl_decompressor d;
   tinfl_init(&d);
   std::vector<u8> dict(TINFL_LZ_DICT_SIZE);
@@ -71,7 +74,7 @@ size_t inflate_raw(const u8* src, size_t csize, u8* dst, size_t want) {
     in_ofs += in_bytes;
     if (out_bytes) {
       const size_t take = out_total + out_bytes > want ? want - out_total : out_bytes;
-      std::memcpy(dst + out_total, dict.data() + dict_ofs, take);
+      if (!sink(dict.data() + dict_ofs, take)) return out_total;
       out_total += take;
       if (out_total >= want) return out_total;   // got what we came for
     }
@@ -93,7 +96,9 @@ bool read_entry(const u8* zip, const Entry& e, size_t data_off, u8* dst, size_t 
     std::memcpy(dst, zip + data_off, want);
     return true;
   }
-  return inflate_raw(zip + data_off, static_cast<size_t>(e.csize), dst, want) == want;
+  size_t got = 0;
+  return inflate_raw(zip + data_off, static_cast<size_t>(e.csize), want,
+                     [&](const u8* p, size_t n) { std::memcpy(dst + got, p, n); got += n; return true; }) == want;
 }
 
 // Where an entry's payload starts. The central directory records the local
@@ -116,8 +121,7 @@ bool is_zip(const u8* data, size_t size) {
   return size >= 4 && rd32(data) == SIG_LOCAL;
 }
 
-bool extract_nds(const u8* zip, size_t size, std::vector<u8>& out, std::string& err,
-                 std::string* chosen) {
+bool find_nds(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
   err.clear();
   // The end-of-central-directory record is last, but a trailing comment of up
   // to 64 KB may follow it, so it is found by scanning back over that window.
@@ -144,7 +148,7 @@ bool extract_nds(const u8* zip, size_t size, std::vector<u8>& out, std::string& 
     if (rd32(h) != SIG_CENTRAL) { err = "corrupt zip (bad central directory entry)"; return false; }
     const u16 flags = rd16(h + 8);
     const u16 method = rd16(h + 10);
-    const u32 csize = rd32(h + 20), usize = rd32(h + 24);
+    const u32 crc = rd32(h + 16), csize = rd32(h + 20), usize = rd32(h + 24);
     const u16 name_len = rd16(h + 28), extra_len = rd16(h + 30), cmt_len = rd16(h + 32);
     const u32 local_off = rd32(h + 42);
     const size_t name_off = p + 46;
@@ -164,7 +168,7 @@ bool extract_nds(const u8* zip, size_t size, std::vector<u8>& out, std::string& 
 
     Entry e;
     e.name_off = name_off; e.name_len = name_len;
-    e.method = method; e.csize = csize; e.usize = usize;
+    e.method = method; e.crc = crc; e.csize = csize; e.usize = usize;
     e.local_off = local_off; e.order = cands.size();
     cands.push_back(e);
   }
@@ -206,13 +210,74 @@ bool extract_nds(const u8* zip, size_t size, std::vector<u8>& out, std::string& 
   const Entry& e = cands[best];
   size_t off = 0;
   if (!data_offset(zip, size, e, off)) { err = "corrupt zip (entry data out of range)"; return false; }
-  out.assign(static_cast<size_t>(e.usize), 0);
-  if (!read_entry(zip, e, off, out.data(), out.size())) {
-    out.clear();
-    err = "corrupt zip (the compressed stream ended early)";
-    return false;
+  if (e.method == METHOD_STORE && e.csize != e.usize) { err = "corrupt zip (stored entry sizes disagree)"; return false; }
+  entry.name.assign(reinterpret_cast<const char*>(zip + e.name_off), e.name_len);
+  entry.method = e.method; entry.data_off = off;
+  entry.csize = e.csize; entry.usize = e.usize; entry.crc32 = e.crc;
+  return true;
+}
+
+u32 crc32_update(u32 crc, const u8* data, size_t n) {
+  static const u32* table = [] {
+    static u32 t[256];
+    for (u32 i = 0; i < 256; ++i) {
+      u32 c = i;
+      for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+      t[i] = c;
+    }
+    return t;
+  }();
+  crc = ~crc;
+  for (size_t i = 0; i < n; ++i) crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+  return ~crc;
+}
+
+bool inflate_entry(const u8* zip, size_t size, const ZipEntry& entry, ZipSink sink, void* sink_user,
+                   ZipProgress progress, void* progress_user, std::string& err) {
+  err.clear();
+  if (entry.data_off > size || entry.csize > size - entry.data_off) { err = "corrupt zip (entry data out of range)"; return false; }
+  const u8* src = zip + entry.data_off;
+  const u64 total = entry.usize;
+  u64 done = 0, next_report = 0;
+  u32 crc = 0;
+  bool sink_ok = true;
+  auto feed = [&](const u8* p, size_t n) {
+    crc = crc32_update(crc, p, n);
+    if (!sink(sink_user, p, n)) { sink_ok = false; return false; }
+    done += n;
+    if (progress && done >= next_report) { progress(progress_user, done, total); next_report = done + (1u << 20); }
+    return true;
+  };
+  if (entry.stored()) {
+    // In 1 MB pieces so a sink writing to disk and the progress callback see
+    // the same rhythm as the deflate path.
+    while (done < total) {
+      const size_t n = static_cast<size_t>(total - done < (1u << 20) ? total - done : (1u << 20));
+      if (!feed(src + done, n)) break;
+    }
+  } else {
+    inflate_raw(src, static_cast<size_t>(entry.csize), static_cast<size_t>(total), feed);
   }
-  if (chosen) chosen->assign(reinterpret_cast<const char*>(zip + e.name_off), e.name_len);
+  if (!sink_ok) { err = "could not write the extracted ROM"; return false; }
+  if (done != total) { err = "corrupt zip (the compressed stream ended early)"; return false; }
+  if (crc != entry.crc32) { err = "corrupt zip (the .nds file's CRC does not match)"; return false; }
+  if (progress) progress(progress_user, done, total);
+  return true;
+}
+
+bool extract_nds(const u8* zip, size_t size, std::vector<u8>& out, std::string& err,
+                 std::string* chosen) {
+  ZipEntry e;
+  if (!find_nds(zip, size, e, err)) return false;
+  out.clear();
+  out.reserve(static_cast<size_t>(e.usize));
+  auto sink = [](void* user, const u8* p, size_t n) {
+    auto& v = *static_cast<std::vector<u8>*>(user);
+    v.insert(v.end(), p, p + n);
+    return true;
+  };
+  if (!inflate_entry(zip, size, e, sink, &out, nullptr, nullptr, err)) { out.clear(); return false; }
+  if (chosen) *chosen = e.name;
   return true;
 }
 

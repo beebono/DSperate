@@ -154,6 +154,8 @@ void dim_framebuffer(u32* px, u32 n) {
   for (u32 i = 0; i < n; ++i) px[i] = 0xFF000000 | ((px[i] >> 1) & 0x007F7F7F);
 }
 
+
+
 void Menu::set_open(bool o) {
   open_ = o;
   page_ = Page::Root;
@@ -375,6 +377,20 @@ std::string fit(const std::string& text, int scale, int width_px) {
   return out + "...";
 }
 } // namespace
+
+void draw_notice(const Blit& d, const char* title, const char* line2, const char* line3) {
+  constexpr int w = 232, h = kTitleY + kGlyphPx * 2 + 6 + kGlyphH + 22;
+  const int x0 = (SCREEN_W - w) / 2, y0 = (static_cast<int>(d.h) - h) / 2;
+  panel(d, x0, y0, w, h);
+  const auto centred = [&](int y, int scale, u32 ink, const char* s) {
+    draw_text(d, x0 + (w - text_width(scale, s)) / 2, y, scale, ink, s);
+  };
+  // Titles run long ("Mario & Luigi - Bowser's Inside Story"): cut to the
+  // panel with an ellipsis, as the game list does.
+  centred(y0 + kTitleY, kScale, kInk, fit(title, kScale, w - 16).c_str());
+  centred(y0 + kTitleY + kGlyphPx + 6, kScale, kInk, line2);
+  centred(y0 + kTitleY + kGlyphPx * 2 + 12, 1, kDim, line3);
+}
 
 // The cheats page: one scrolling list with the database's own headings in it.
 void Menu::draw_cheats(const Blit& d) const {

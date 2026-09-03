@@ -55,12 +55,12 @@ SaveType save_type_for(u32 code, u32& size) {
   return SaveType::Flash;
 }
 
-Cart::Cart(NDS& nds, std::vector<u8> rom) : nds_(nds), rom_(std::move(rom)) {
-  // Pad to a power of two so address masking wraps like the hardware.
-  u32 size = 0x1000; while (size < rom_.size()) size <<= 1;
-  rom_.resize(size, 0xFF);
-  rom_mask_ = size - 1;
-  std::memcpy(&header_, rom_.data(), sizeof header_);
+Cart::Cart(NDS& nds, std::unique_ptr<RomSource> rom) : nds_(nds), rom_(std::move(rom)) {
+  // The card wraps its address at a power of two and reads 0xFF past the
+  // image; the source pads that way (rom_source.h), so no copy is made here.
+  const u32 size = rom_->mask() + 1;
+  rom_mask_ = rom_->mask();
+  rom_->read(0, reinterpret_cast<u8*>(&header_), sizeof header_);
   chip_id_ = 0x000000C2;
   if (size >= 1024 * 1024 && size <= 128 * 1024 * 1024) chip_id_ |= ((size >> 20) - 1) << 8;
   else chip_id_ |= (0x100 - (size >> 28)) << 8;
@@ -70,16 +70,19 @@ Cart::Cart(NDS& nds, std::vector<u8> rom) : nds_(nds), rom_(std::move(rom)) {
   sram_.assign(sram_size, 0xFF);
 
   // Dumps often carry a decrypted secure area; the cart must hand out the
-  // encrypted form, so re-encrypt if the "decrypted" marker is present.
+  // encrypted form, so re-encrypt if the "decrypted" marker is present. The
+  // 0x800 bytes sit inside one page (arm9_rom_offset is 0x4000 on a retail
+  // card), rewritten in the source's overlay rather than the file.
   const u32 a9 = header_.arm9_rom_offset;
   if (a9 >= 0x4000 && a9 < 0x8000) {
-    u32 w0, w4; std::memcpy(&w0, &rom_[a9], 4); std::memcpy(&w4, &rom_[a9 + 0x10], 4);
+    const u32 w0 = rom_->read32(a9), w4 = rom_->read32(a9 + 0x10);
     if (w0 == 0xE7FFDEFF && w4 != 0xE7FFDEFF) {
-      std::memcpy(&rom_[a9], "encryObj", 8);
+      u8* sec = rom_->patch(a9) + (a9 & (RomSource::PAGE - 1));
+      std::memcpy(sec, "encryObj", 8);
       key1_init(header_.game_code_u32(), 3, 2);
-      for (u32 i = 0; i < 0x800; i += 8) key1_encrypt(reinterpret_cast<u32*>(&rom_[a9 + i]));
+      for (u32 i = 0; i < 0x800; i += 8) key1_encrypt(reinterpret_cast<u32*>(sec + i));
       key1_init(header_.game_code_u32(), 2, 2);
-      key1_encrypt(reinterpret_cast<u32*>(&rom_[a9]));
+      key1_encrypt(reinterpret_cast<u32*>(sec));
     }
   }
   reset();
@@ -148,7 +151,7 @@ void Cart::key1_init(u32 idcode, u32 level, u32 mod) {
 
 void Cart::decrypt_secure_area(u8 out[0x800]) {
   const u32 a9 = header_.arm9_rom_offset;
-  std::memcpy(out, &rom_[a9], 0x800);
+  rom_->read(a9, out, 0x800);
   key1_init(header_.game_code_u32(), 2, 2);
   key1_decrypt(reinterpret_cast<u32*>(&out[0]));
   key1_init(header_.game_code_u32(), 3, 2);
@@ -166,8 +169,9 @@ u32 Cart::rom_read32() {
   // Reads wrap within a 4 KB page.
   const u32 hi = rom_addr_ & rom_mask_ & ~0xFFFu;
   u32 lo = rom_addr_ & 0xFFF;
+  if (hi != page_base_) { page_base_ = hi; page_ = rom_->page(hi); }
   u32 v = 0;
-  for (int i = 0; i < 4; ++i) { v |= static_cast<u32>(rom_[hi | lo]) << (8 * i); lo = (lo + 1) & 0xFFF; }
+  for (int i = 0; i < 4; ++i) { v |= static_cast<u32>(page_[lo]) << (8 * i); lo = (lo + 1) & 0xFFF; }
   rom_addr_ = hi | lo;
   return v;
 }

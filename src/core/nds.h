@@ -11,8 +11,10 @@
 #include "core/io/io.h"
 #include "core/dma/dma.h"
 #include "core/cart/cart.h"
+#include "core/cart/zip.h"
 #include "core/cheat/ar_engine.h"
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,9 +37,21 @@ struct NDS {
   // cart. Identical to the path form from the slot's side: the same identity
   // hash, so saves and states are keyed the same way.
   bool load_rom_image(std::vector<u8> image);
+  // The general form: any RomSource (a mapping, a range of a zip, memory).
+  bool load_rom_source(std::unique_ptr<cart::RomSource> src);
   // Which entry a zipped ROM came from, empty when it was a loose .nds. Only
   // for reporting -- nothing about the machine depends on it.
   std::string rom_zip_entry;
+  // Loading a zip: where the extracted image goes when the archive's own
+  // directory cannot be written (see cart/zip_cache.h), and a progress
+  // callback for the extraction. Both optional; set before load_rom.
+  std::string rom_cache_dir;
+  u64 rom_cache_max_bytes = 0;                 // 0: no limit
+  cart::ZipProgress rom_progress = nullptr;
+  void* rom_progress_user = nullptr;
+  std::atomic<bool>* rom_cancel = nullptr;     // set from another thread to abandon the extraction
+  // The extracted image the current cart was mapped from, empty otherwise.
+  std::string rom_cache_path;
   void normalise_touch_calibration();   // see nds.cpp; called by load_bios
   void setup_direct_boot();          // skip the firmware: load the ROM's binaries and jump to them
 

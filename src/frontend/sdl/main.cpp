@@ -7,6 +7,8 @@
 // handheld needs (volume, layout, screenshots, save states), and the pause
 // key opens a blitted menu over the held frame (menu.h).
 #include "core/nds.h"
+#include "core/cart/zip.h"
+#include "core/cart/zip_cache.h"
 #include "core/profile.h"
 #include "core/frame_report.h"
 #include "core/input/input_log.h"
@@ -34,6 +36,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <thread>
+#include <atomic>
 #include <ctime>
 #include <string>
 #include <vector>
@@ -108,7 +113,14 @@ const char* kUsage =
     "                  menu needs a real clock to appear at all)\n"
     "  --load-state F  start from a save state instead of booting the game\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
-    "                  (a --replay never writes the save back, so a scene repeats)\n";
+    "                  (a --replay never writes the save back, so a scene repeats)\n"
+    "  --clear-cache   delete every unpacked zipped game (the .dsperate directories beside the\n"
+    "                  games and paths.cache) except the one being launched, then run as usual\n";
+
+std::string rom_dir_of(const std::string& rom) {
+  const size_t slash = rom.find_last_of('/');
+  return slash == std::string::npos ? "." : rom.substr(0, slash);
+}
 
 std::string rom_stem(const std::string& rom) {
   const size_t dot = rom.find_last_of('.');
@@ -419,6 +431,7 @@ int main(int argc, char** argv) {
   const char* config_arg = nullptr;
   long frame_limit = 0;
   const char *record = nullptr, *replay = nullptr, *save_arg = nullptr, *load_state = nullptr;
+  bool clear_cache = false;
   bool rtc_host = false;              // --rtc-host: a real clock even under a replay (the firmware menu needs one)
   long stats_from = 0;   // frames run but left out of the timing statistics
 
@@ -438,6 +451,7 @@ int main(int argc, char** argv) {
     else if (arg("--screen")) cli.set("video.screen", argv[++i]);
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (flag("--rtc-host")) rtc_host = true;
+    else if (flag("--clear-cache")) clear_cache = true;
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
     else if (arg("--save")) save_arg = argv[++i];
@@ -507,24 +521,6 @@ int main(int argc, char** argv) {
   NDS nds;
   if (!nds.load_bios(bios9.c_str(), bios7.c_str(), fw.c_str())) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
   nds.reset();
-  if (!boot_firmware && !nds.load_rom(rom_path.c_str())) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); return 1; }
-  // On a firmware boot the loader cart goes in the slot. A BootMenu.nds beside
-  // the config wins if there is one -- that is how a hand-made card from
-  // tools/mkcart.py is used -- and otherwise the built-in one is assembled in
-  // memory, so the emulator needs no file shipped alongside it. Its two banner
-  // lines are the only part worth configuring; a different icon means building
-  // a card with the script.
-  if (boot_firmware) {
-    if (nds.load_rom(rom_path.c_str())) {
-      VLOG("loader cart: %s\n", rom_path.c_str());
-    } else if (cfg.flag("loader.card", true) &&
-               nds.load_rom_image(ds::sdl::build_loader_cart(cfg.str("loader.title", "Game Menu"),
-                                                             cfg.str("loader.subtitle", "Dariragan! Dagozuban!")))) {
-      VLOG("loader cart: built in\n");
-    } else {
-      VLOG("loader cart: none; the slot stays empty\n");
-    }
-  }
   // The firmware writes its settings pages to flash over SPI. Those go to a
   // sidecar beside the firmware rather than into the dump itself, so a rename
   // in the DS menu survives a restart without the emulator ever writing to a
@@ -539,18 +535,6 @@ int main(int argc, char** argv) {
     } else {
       std::fprintf(stderr, "firmware settings: %s -- warning: %s\n", fw_override.c_str(), err.c_str());
     }
-  }
-  // The per-game file goes on top of the global one, the command line on top of both.
-  // Title ID first, then the ROM's filename, so the file named like the ROM
-  // wins; that is also where hotkey-picked settings are remembered.
-  if (nds.cart) {
-    for (const std::string& p : {ds::sdl::Config::game_path_code(nds.cart->header().game_code), ds::sdl::Config::game_path_rom(rom_path)})
-      if (!p.empty() && cfg.load(p)) VLOG("config: %s\n", p.c_str());
-    apply_cli();
-    VLOG("game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
-    // Which entry a zip was read from -- the interesting case is an archive
-    // holding more than one, where the pick is worth being able to check.
-    if (!nds.rom_zip_entry.empty()) VLOG("zip: %s\n", nds.rom_zip_entry.c_str());
   }
   // Core knobs that the core reads from the environment.
   if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);
@@ -609,62 +593,6 @@ int main(int argc, char** argv) {
     if (layout_cycle.empty()) layout_cycle.push_back(layout.mode);
     layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
     layout.dominant = std::clamp(cfg.real("video.dominant_ratio", 0.5), 0.1, 0.99);
-  }
-  // Everything keyed to the ROM in the slot -- saves, states, screenshots,
-  // cheats -- lives here, so that launching a game from the loader cart can
-  // re-derive the lot rather than keep writing the loader's.
-  Session session;
-  session.open(nds, cfg, rom_path, save_arg);
-
-  nds.sched.set_quantum(quantum);
-  nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
-  nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
-  nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
-  if (!boot_firmware) nds.setup_direct_boot();
-  // A real console's clock, seeded from this machine. Off in the core by
-  // default so the verification harness stays reproducible; a frontend
-  // showing someone their own DS menu wants the real date on it. Not under
-  // --replay: a recorded scene has to reproduce frame for frame, and a game
-  // that reads the date (Animal Crossing, the Pokemon day/night cycle) would
-  // otherwise play differently every time it was replayed.
-  if (!replay || rtc_host) nds.io.start_rtc_clock();
-  else VLOG("rtc: frozen for the replay\n");
-  if (replay && rtc_host) std::fprintf(stderr, "rtc: --rtc-host over a replay; this run is not reproducible\n");
-#if DSPERATE_JIT
-  if (jit && !ds::jit::attach(nds, true, true)) return 1;
-  if (jit && cfg.flag("emu.cpu_oc", false)) ds::jit::set_cpu_oc(true);   // see config.cpp; translate-time pricing, so before the first block
-  // The firmware boots under per-instruction budget checks. Block-granularity
-  // overshoot has been seen to stop it booting at all on the RG DS -- not
-  // every time, which is what a timing race looks like -- and the console is
-  // idle enough there that the cost of checking does not show. It is dropped
-  // again the moment a game is launched, where it very much would.
-  if (jit && boot_firmware) { ds::jit::set_strict(true); VLOG("jit: strict timing for the firmware\n"); }
-#else
-  (void)jit;
-#endif
-  // A replay is a measurement, not a play session: it must start from the
-  // same battery save every time or it is not reproducible, and writing back
-  // would mean the second run of a scene no longer matches the first. The headless
-  // frontend has always loaded --save read-only for this reason; match it here, and
-  // take an explicit --save too so both frontends can be pointed at the same
-  // scene save rather than one silently picking up <rom>.sav.
-  load_save(nds, session.sav);
-  const bool save_readonly = replay != nullptr;
-  if (save_readonly) VLOG("save: read-only for the replay\n");
-
-  ds::input::Log log;
-  if (record && replay) { std::fprintf(stderr, "--record and --replay are exclusive\n"); return 2; }
-  if (record && !log.open_write(record)) { std::fprintf(stderr, "cannot write %s\n", record); return 1; }
-  if (replay) {
-    if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return 1; }
-    VLOG("replay: %u frames from %s\n", log.frames(), replay);
-  }
-  // After the battery save, so a state's SRAM wins over <rom>.sav, and after
-  // the replay log is open so it can be wound forward to the state's frame.
-  if (load_state) {
-    if (!load_state_file(nds, load_state)) return 1;
-    // A replay continues from the state's frame, not from the log's start.
-    if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
   }
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
   std::signal(SIGINT, on_signal);
@@ -755,6 +683,192 @@ int main(int argc, char** argv) {
   ds::sdl::Input input;
   input.configure(cfg);
   input.open_controllers();
+  std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
+  // Where a zipped game unpacks to when it cannot unpack beside its zip, how
+  // much the cache may hold, and whether it survives the session
+  // (cart/zip_cache.h; config [paths] cache, [cart] cache_mb, cache).
+  nds.rom_cache_dir = cfg.str("paths.cache", "");
+  nds.rom_cache_max_bytes = static_cast<u64>(std::max(0, cfg.num("cart.cache_mb", 2048))) << 20;
+  const bool cache_session = cfg.str("cart.cache", "keep") == "session";
+  // --clear-cache: every unpacked image goes, except the one this launch is
+  // about to use, which would only be unpacked again.
+  if (clear_cache) {
+    std::string keep;
+    { std::ifstream f(rom_path, std::ios::binary); u8 magic[4] = {}; f.read(reinterpret_cast<char*>(magic), 4);
+      if (f.gcount() == 4 && ds::cart::is_zip(magic, 4)) keep = ds::cart::zip_cache_path(rom_path); }
+    u64 freed = 0;
+    std::vector<std::string> dirs = {ds::cart::zip_cache_dir(rom_dir_of(rom_path))};
+    if (!nds.rom_cache_dir.empty()) dirs.push_back(nds.rom_cache_dir);
+    if (!cfg.str("paths.games").empty()) dirs.push_back(ds::cart::zip_cache_dir(cfg.str("paths.games")));
+    for (const std::string& d : dirs) freed += ds::cart::clear_cache(d, keep);
+    std::fprintf(stderr, "cache: cleared %llu MB of unpacked games\n", static_cast<unsigned long long>(freed >> 20));
+  }
+  auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled) {
+    for (int i = 0; i < 2; ++i)
+      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, grid, chunky, chunky_thresh, seam_blend, target[i].seam_w,
+                                                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i))}
+                                         : ds::gpu::Gpu::ScaleTarget{});
+  };
+  // Loads a ROM with the "unpacking" notice up if it takes more than a
+  // moment -- a zipped game's first launch writes the whole image to the
+  // card. The load runs on a worker; this thread pumps events (B cancels,
+  // quit cancels) and redraws the notice over the dimmed held frame the way
+  // the pause menu is drawn. Nothing on the panel is a forecast: the dots
+  // advance only when the extraction reports progress, so they prove the
+  // worker is alive rather than that time is passing, and after a while
+  // with no progress the line says so.
+  auto load_rom_notice = [&](const std::string& path) -> bool {
+    std::atomic<bool> cancel{false}, done{false};
+    std::atomic<u64> progress{0};
+    bool ok = false;
+    nds.rom_cancel = &cancel;
+    nds.rom_progress = [](void* u, u64 bytes, u64) { static_cast<std::atomic<u64>*>(u)->store(bytes); };
+    nds.rom_progress_user = &progress;
+    std::thread worker([&] { ok = nds.load_rom(path); done = true; });
+    const std::string title = rom_stem(base_name(path));
+    const Uint32 start = SDL_GetTicks();
+    Uint32 last_change = start, last_step = start;
+    u64 last_progress = 0;
+    int dots = 0;
+    bool shown = false;
+    while (!done) {
+      SDL_Event e;
+      while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
+      if (input.quit() || g_signalled || ((input.take_menu_presses() >> ds::io::Io::Button::BTN_B) & 1)) cancel = true;
+      const Uint32 now = SDL_GetTicks();
+      const u64 p = progress.load();
+      if (p != last_progress) {
+        last_progress = p; last_change = now;
+        if (now - last_step >= 250) { dots = (dots + 1) % 4; last_step = now; }
+      }
+      if (!shown && now - start < 300) { SDL_Delay(10); continue; }   // a loose or cached game never shows it
+      shown = true;
+      const int menu_screen = dual_window ? 0 : display.current_layout().primary;
+      const u32* fb[2];
+      for (int i = 0; i < 2; ++i) {
+        std::memcpy(menu_fb[i].data(), nds.gpu.framebuffer(i), menu_fb[i].size() * 4);
+        ds::sdl::dim_framebuffer(menu_fb[i].data(), static_cast<u32>(menu_fb[i].size()));
+        fb[i] = menu_fb[i].data();
+      }
+      char line2[32];
+      if (cancel) std::snprintf(line2, sizeof line2, "STOPPING");
+      else if (now - last_change > 5000) std::snprintf(line2, sizeof line2, "WAITING ON THE CARD");
+      else std::snprintf(line2, sizeof line2, "UNPACKING%.*s", dots, "...");
+      ds::sdl::draw_notice(ds::sdl::Blit{menu_fb[menu_screen].data(), ds::SCREEN_W, ds::SCREEN_H, nullptr},
+                           title.c_str(), line2, "FIRST LAUNCH ONLY    B CANCELS");
+      ds::sdl::Display::Target target[2] = {};
+      bool scaled = display.begin_frame(target);
+      if (dual_window) scaled = display2.begin_frame(target) && scaled;
+      if (scaled) {
+        set_scale_targets(target, true);
+        for (int i = 0; i < 2; ++i) nds.gpu.scale_image(i, menu_fb[i].data());
+        display.end_frame();
+        if (dual_window) display2.end_frame();
+        set_scale_targets(target, false);
+      } else {
+        display.draw(fb);
+        if (dual_window) display2.draw(fb);
+      }
+      SDL_Delay(50);
+    }
+    worker.join();
+    nds.rom_cancel = nullptr; nds.rom_progress = nullptr; nds.rom_progress_user = nullptr;
+    if (!ok && cancel) VLOG("unpacking cancelled\n");
+    return ok;
+  };
+  // Session mode: the image is for this run only.
+  auto discard_session_cache = [&] {
+    if (cache_session && !nds.rom_cache_path.empty()) { ds::cart::remove_cached(nds.rom_cache_path); nds.rom_cache_path.clear(); }
+  };
+  // The ROM goes in after the display is open, so a zipped game's first
+  // launch -- which unpacks it to the card, seconds to a minute -- can show
+  // the notice instead of a black panel.
+  if (!boot_firmware && !load_rom_notice(rom_path)) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); SDL_Quit(); return 1; }
+  // On a firmware boot the loader cart goes in the slot. A BootMenu.nds beside
+  // the config wins if there is one -- that is how a hand-made card from
+  // tools/mkcart.py is used -- and otherwise the built-in one is assembled in
+  // memory, so the emulator needs no file shipped alongside it. Its two banner
+  // lines are the only part worth configuring; a different icon means building
+  // a card with the script.
+  if (boot_firmware) {
+    if (nds.load_rom(rom_path.c_str())) {
+      VLOG("loader cart: %s\n", rom_path.c_str());
+    } else if (cfg.flag("loader.card", true) &&
+               nds.load_rom_image(ds::sdl::build_loader_cart(cfg.str("loader.title", "Game Menu"),
+                                                             cfg.str("loader.subtitle", "Dariragan! Dagozuban!")))) {
+      VLOG("loader cart: built in\n");
+    } else {
+      VLOG("loader cart: none; the slot stays empty\n");
+    }
+  }
+  // The per-game file goes on top of the global one, the command line on top of both.
+  // Title ID first, then the ROM's filename, so the file named like the ROM
+  // wins; that is also where hotkey-picked settings are remembered.
+  if (nds.cart) {
+    for (const std::string& p : {ds::sdl::Config::game_path_code(nds.cart->header().game_code), ds::sdl::Config::game_path_rom(rom_path)})
+      if (!p.empty() && cfg.load(p)) VLOG("config: %s\n", p.c_str());
+    apply_cli();
+    VLOG("game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
+    // Which entry a zip was read from -- the interesting case is an archive
+    // holding more than one, where the pick is worth being able to check.
+    if (!nds.rom_zip_entry.empty()) VLOG("zip: %s\n", nds.rom_zip_entry.c_str());
+  }
+  // Everything keyed to the ROM in the slot -- saves, states, screenshots,
+  // cheats -- lives here, so that launching a game from the loader cart can
+  // re-derive the lot rather than keep writing the loader's.
+  Session session;
+  session.open(nds, cfg, rom_path, save_arg);
+
+  nds.sched.set_quantum(quantum);
+  nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
+  nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
+  nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
+  if (!boot_firmware) nds.setup_direct_boot();
+  // A real console's clock, seeded from this machine. Off in the core by
+  // default so the verification harness stays reproducible; a frontend
+  // showing someone their own DS menu wants the real date on it. Not under
+  // --replay: a recorded scene has to reproduce frame for frame, and a game
+  // that reads the date (Animal Crossing, the Pokemon day/night cycle) would
+  // otherwise play differently every time it was replayed.
+  if (!replay || rtc_host) nds.io.start_rtc_clock();
+  else VLOG("rtc: frozen for the replay\n");
+  if (replay && rtc_host) std::fprintf(stderr, "rtc: --rtc-host over a replay; this run is not reproducible\n");
+#if DSPERATE_JIT
+  if (jit && !ds::jit::attach(nds, true, true)) return 1;
+  if (jit && cfg.flag("emu.cpu_oc", false)) ds::jit::set_cpu_oc(true);   // see config.cpp; translate-time pricing, so before the first block
+  // The firmware boots under per-instruction budget checks. Block-granularity
+  // overshoot has been seen to stop it booting at all on the RG DS -- not
+  // every time, which is what a timing race looks like -- and the console is
+  // idle enough there that the cost of checking does not show. It is dropped
+  // again the moment a game is launched, where it very much would.
+  if (jit && boot_firmware) { ds::jit::set_strict(true); VLOG("jit: strict timing for the firmware\n"); }
+#else
+  (void)jit;
+#endif
+  // A replay is a measurement, not a play session: it must start from the
+  // same battery save every time or it is not reproducible, and writing back
+  // would mean the second run of a scene no longer matches the first. The headless
+  // frontend has always loaded --save read-only for this reason; match it here, and
+  // take an explicit --save too so both frontends can be pointed at the same
+  // scene save rather than one silently picking up <rom>.sav.
+  load_save(nds, session.sav);
+  const bool save_readonly = replay != nullptr;
+  if (save_readonly) VLOG("save: read-only for the replay\n");
+
+  ds::input::Log log;
+  if (record && replay) { std::fprintf(stderr, "--record and --replay are exclusive\n"); return 2; }
+  if (record && !log.open_write(record)) { std::fprintf(stderr, "cannot write %s\n", record); return 1; }
+  if (replay) {
+    if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return 1; }
+    VLOG("replay: %u frames from %s\n", log.frames(), replay);
+  }
+  // After the battery save, so a state's SRAM wins over <rom>.sav, and after
+  // the replay log is open so it can be wound forward to the state's frame.
+  if (load_state) {
+    if (!load_state_file(nds, load_state)) return 1;
+    // A replay continues from the state's frame, not from the log's start.
+    if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
+  }
   ds::sdl::Lid lid;
   if (!replay) lid.open();
   std::vector<s16> mic, mic_raw, mic_queue;
@@ -861,7 +975,6 @@ int main(int argc, char** argv) {
   if (launcher) VLOG("launcher: %zu games in %s\n", games.size(), cfg.str("paths.games").c_str());
   bool launching = false;       // the card's launch fade is on screen; the list is going up
   bool launch_latched = false;  // ... and it has already been raised once for this fade
-  std::vector<u32> menu_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};
   bool menu_dirty = false;      // the menu screens need compositing and presenting again
   Uint32 menu_ms = 0;           // SDL_GetTicks at the menu's last tick
   // Pausing waits for one more presented, *unscaled* frame. The fast scaling
@@ -886,12 +999,6 @@ int main(int argc, char** argv) {
   auto autosave_now = [&] {
     if (!autosave || save_readonly || log.writing()) return;
     if (save_state_file(nds, auto_state_path(nds, session.states_dir))) flush_save();   // the .sav and the state never diverge
-  };
-  auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled) {
-    for (int i = 0; i < 2; ++i)
-      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, grid, chunky, chunky_thresh, seam_blend, target[i].seam_w,
-                                                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i))}
-                                         : ds::gpu::Gpu::ScaleTarget{});
   };
   auto set_paused = [&](bool p) {
     if (p == paused) return;
@@ -1030,9 +1137,11 @@ int main(int argc, char** argv) {
           if (jit) { ds::jit::set_strict(std::getenv("DS_JIT_STRICT") != nullptr); ds::jit::flush_all(); }
 #endif
           nds.reset();
-          if (!nds.load_rom(pick.c_str())) {
+          discard_session_cache();
+          if (!load_rom_notice(pick)) {
             // Stay on the list rather than reset into nothing: another game
-            // in the same directory may well be readable.
+            // in the same directory may well be readable, and a cancelled
+            // unpacking is a change of mind, not an error.
             std::fprintf(stderr, "launcher: could not read %s\n", pick.c_str());
             break;
           }
@@ -1407,6 +1516,7 @@ int main(int argc, char** argv) {
 
   autosave_now();
   flush_save();
+  discard_session_cache();
   if (nds.firmware_override_dirty()) {
     std::string err;
     if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
