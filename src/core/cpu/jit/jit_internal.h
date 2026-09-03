@@ -53,6 +53,22 @@ struct DensitySlot {
   u64 execs = 0;          // block entries (bumped from translated code)
   u32 hot_bytes = 0;      // hot section, the instrumentation itself excluded
   u32 guest_instrs = 0;   // guest instructions translated inline into this block
+  // DS_JIT_CENSUS (implies density): the static facts about this translation
+  // that, weighted by `execs`, size the A32 backend's design choices
+  // (docs/arm32-jit-scoping.md §6): which guest registers carry the traffic
+  // and cross block boundaries live, how often NZCV are live where a
+  // flag-clobbering host sequence would sit, and how much is fallback.
+  u16 reg_reads[16] = {};   // per-instruction reads of each guest register
+  u16 reg_writes[16] = {};  // per-instruction writes
+  u16 live_in = 0;          // registers read before written in the block
+  u16 written = 0;          // registers written in the block (live-out candidates)
+  u8  n_instrs = 0;         // guest instructions decoded (inline + fallback)
+  u8  n_fallback = 0;       // of which interpreter fallbacks
+  u8  n_mem = 0;            // memory instructions (single, multiple, swap)
+  u8  n_mem_flags_live = 0; // of which with any of NZCV live after them (flags assumed live at block end)
+  u8  n_mem_flags_intra = 0;// of which read by a later instruction of the same block (the certain part)
+  u8  n_flags_live = 0;     // instructions with NZCV live after them
+  bool entry_flags_live = false;   // the block reads NZCV before writing them
 };
 
 constexpr u32 GUEST_COPY_MAX = 64 * 4;   // a block is at most 64 ARM instructions
@@ -185,6 +201,7 @@ struct Runtime {
   bool cyclog = false;    // DS_DEBUG_CYCLES: log the budget after every instruction (needs strict)
   bool density = false;   // DS_JIT_DENSITY: count block entries so bytes-per-guest-instruction
                           // can be weighted by execution instead of by translation.
+  bool census = false;    // DS_JIT_CENSUS: the phase-0 census for the A32 backend (implies density)
   // deque: the entry code holds the absolute address of a slot's `execs`, so
   // slots must never move. Only the emulation thread appends (DS_JIT_PRETX is
   // refused in density mode).

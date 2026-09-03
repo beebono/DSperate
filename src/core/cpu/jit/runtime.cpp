@@ -864,6 +864,8 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     r.cyclog = std::getenv("DS_DEBUG_CYCLES") != nullptr;
     r.hist = std::getenv("DS_JIT_HIST") != nullptr;
     r.density = std::getenv("DS_JIT_DENSITY") != nullptr;
+    r.census = std::getenv("DS_JIT_CENSUS") != nullptr;
+    if (r.census) r.density = true;
     r.fastcost = std::getenv("DS_JIT_FASTCOST") != nullptr;
     r.retime_all = std::getenv("DS_JIT_RETIME_ALL") != nullptr;
     r.nocsel  = std::getenv("DS_JIT_NOCSEL") != nullptr;
@@ -943,6 +945,34 @@ void report(std::FILE* out) {
   std::fprintf(out, "[jit] code %llu KB (hot %llu KB): %.1f bytes per guest instruction, %.1f hot\n", (unsigned long long)(s.code_bytes >> 10), (unsigned long long)(s.hot_bytes >> 10),
                s.instrs_translated ? static_cast<double>(s.code_bytes) / static_cast<double>(s.instrs_translated) : 0.0,
                s.instrs_translated ? static_cast<double>(s.hot_bytes) / static_cast<double>(s.instrs_translated) : 0.0);
+  if (g_rt.census) {
+    // Everything executed-weighted: a block translated once and run a million
+    // times counts a million times. Machine-readable, one fact per line.
+    long double ex = 0, gi = 0, fb = 0, mem = 0, memfl = 0, memfli = 0, fl = 0, efl = 0;
+    long double rr[16] = {}, rw[16] = {}, li[16] = {}, wr[16] = {};
+    long double len_hist[8] = {};   // 1-2, 3-4, 5-8, 9-16, 17-32, 33-64
+    for (const DensitySlot& d : g_rt.density_slots) {
+      const long double e = static_cast<long double>(d.execs);
+      ex += e; gi += e * d.n_instrs; fb += e * d.n_fallback; mem += e * d.n_mem; memfl += e * d.n_mem_flags_live; memfli += e * d.n_mem_flags_intra;
+      fl += e * d.n_flags_live; efl += d.entry_flags_live ? e : 0;
+      for (int r = 0; r < 16; ++r) {
+        rr[r] += e * d.reg_reads[r]; rw[r] += e * d.reg_writes[r];
+        if (d.live_in & (1u << r)) li[r] += e;
+        if (d.written & (1u << r)) wr[r] += e;
+      }
+      const u32 n = d.n_instrs;
+      len_hist[n <= 2 ? 0 : n <= 4 ? 1 : n <= 8 ? 2 : n <= 16 ? 3 : n <= 32 ? 4 : 5] += e;
+    }
+    std::fprintf(out, "[census] translations %zu entries %.0Lf guest_instrs %.0Lf fallback_instrs %.0Lf\n", g_rt.density_slots.size(), ex, gi, fb);
+    std::fprintf(out, "[census] instrs_per_entry %.2Lf fallback_pct %.2Lf\n", ex ? gi / ex : 0, gi ? 100 * fb / gi : 0);
+    std::fprintf(out, "[census] mem_instrs %.0Lf mem_nzcv_live %.0Lf mem_nzcv_live_pct %.2Lf mem_nzcv_intra %.0Lf mem_nzcv_intra_pct %.2Lf\n", mem, memfl, mem ? 100 * memfl / mem : 0, memfli, mem ? 100 * memfli / mem : 0);
+    std::fprintf(out, "[census] instrs_nzcv_live %.0Lf instrs_nzcv_live_pct %.2Lf entries_nzcv_live_at_entry %.0Lf entry_nzcv_live_pct %.2Lf\n", fl, gi ? 100 * fl / gi : 0, efl, ex ? 100 * efl / ex : 0);
+    static const char* const lens[6] = {"1-2", "3-4", "5-8", "9-16", "17-32", "33-64"};
+    for (int k = 0; k < 6; ++k) std::fprintf(out, "[census] block_len %s entries %.0Lf entries_pct %.2Lf\n", lens[k], len_hist[k], ex ? 100 * len_hist[k] / ex : 0);
+    for (int r = 0; r < 16; ++r)
+      std::fprintf(out, "[census] reg r%d reads %.0Lf writes %.0Lf live_in_entries %.0Lf written_entries %.0Lf reads_per_entry %.3Lf writes_per_entry %.3Lf live_in_pct %.2Lf written_pct %.2Lf\n",
+                   r, rr[r], rw[r], li[r], wr[r], ex ? rr[r] / ex : 0, ex ? rw[r] / ex : 0, ex ? 100 * li[r] / ex : 0, ex ? 100 * wr[r] / ex : 0);
+  }
   if (g_rt.density) {
     u64 ex = 0;
     long double hb = 0.0L, gi = 0.0L;

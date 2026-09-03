@@ -198,6 +198,133 @@ FlagUse thumb_flag_use(u16 instr, bool a9) {
   }
 }
 
+// DS_JIT_CENSUS: which guest registers an instruction reads and writes
+// (masks; pc is bit 15, counted like any other). Approximate at the edges the
+// census does not care about (user-bank transfers, coprocessors).
+struct RegUse { u16 reads, writes; };
+RegUse arm_reg_use(u32 instr) {
+  const u32 rn = (instr >> 16) & 0xF, rd = (instr >> 12) & 0xF, rs = (instr >> 8) & 0xF, rm = instr & 0xF;
+  auto bit = [](u32 r) { return static_cast<u16>(1u << r); };
+  RegUse u{0, 0};
+  if ((instr >> 28) == 0xF) return u;
+  switch (arm::decode_arm(instr)) {
+  case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift: {
+    const u32 op = (instr >> 21) & 0xF;
+    const bool test = op >= 8 && op <= 0xB, mov = op == 0xD || op == 0xF;
+    if (!mov) u.reads |= bit(rn);
+    const AOp k = arm::decode_arm(instr);
+    if (k != AOp::DpImm) u.reads |= bit(rm);
+    if (k == AOp::DpRegShift) u.reads |= bit(rs);
+    if (!test) u.writes |= bit(rd);
+    break;
+  }
+  case AOp::Mrs: u.writes = bit(rd); break;
+  case AOp::MsrReg: u.reads = bit(rm); break;
+  case AOp::Bl: u.writes = bit(14); break;
+  case AOp::Bx: u.reads = bit(rm); break;
+  case AOp::BlxReg: u.reads = bit(rm); u.writes = bit(14); break;
+  case AOp::Mul: u.reads = bit(rm) | bit(rs); u.writes = bit(rn); break;
+  case AOp::Mla: u.reads = bit(rm) | bit(rs) | bit(rd); u.writes = bit(rn); break;
+  case AOp::Umull: case AOp::Smull: u.reads = bit(rm) | bit(rs); u.writes = bit(rd) | bit(rn); break;
+  case AOp::Umlal: case AOp::Smlal: case AOp::SmlalXY: u.reads = bit(rm) | bit(rs) | bit(rd) | bit(rn); u.writes = bit(rd) | bit(rn); break;
+  case AOp::Clz: u.reads = bit(rm); u.writes = bit(rd); break;
+  case AOp::QAdd: case AOp::QSub: case AOp::QDAdd: case AOp::QDSub: u.reads = bit(rm) | bit(rn); u.writes = bit(rd); break;
+  case AOp::SmlaXY: case AOp::SmlawY: u.reads = bit(rm) | bit(rs) | bit(rd); u.writes = bit(rn); break;
+  case AOp::SmulXY: case AOp::SmulwY: u.reads = bit(rm) | bit(rs); u.writes = bit(rn); break;
+  case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg: {
+    const AOp k = arm::decode_arm(instr);
+    const bool l = instr & (1u << 20), p = instr & (1u << 24), w = instr & (1u << 21);
+    u.reads |= bit(rn);
+    if (k == AOp::LdrStrReg || k == AOp::LdrStrHReg) u.reads |= bit(rm);
+    const bool h = k == AOp::LdrStrHImm || k == AOp::LdrStrHReg;
+    const bool dual = h && !l && ((instr >> 5) & 3) != 1;   // LDRD/STRD carry L = 0
+    const bool load = dual ? ((instr >> 5) & 3) == 2 : l;
+    u16 data = bit(rd); if (dual) data |= bit((rd + 1) & 0xF);
+    if (load) u.writes |= data; else u.reads |= data;
+    if (!p || w) u.writes |= bit(rn);
+    break;
+  }
+  case AOp::Swp: case AOp::Swpb: u.reads = bit(rm) | bit(rn); u.writes = bit(rd); break;
+  case AOp::Ldm: u.reads = bit(rn); u.writes = static_cast<u16>(instr & 0xFFFF); if (instr & (1u << 21)) u.writes |= bit(rn); break;
+  case AOp::Stm: u.reads = static_cast<u16>((instr & 0xFFFF) | bit(rn)); if (instr & (1u << 21)) u.writes |= bit(rn); break;
+  case AOp::Mcr: u.reads = bit(rd); break;
+  case AOp::Mrc: if (rd != 15) u.writes = bit(rd); break;
+  case AOp::Ldc: case AOp::Stc: u.reads = bit(rn); break;
+  default: break;
+  }
+  return u;
+}
+RegUse thumb_reg_use(u16 instr) {
+  auto bit = [](u32 r) { return static_cast<u16>(1u << r); };
+  const u32 rd = instr & 7, rs = (instr >> 3) & 7, rn = (instr >> 6) & 7, r8 = (instr >> 8) & 7;
+  RegUse u{0, 0};
+  switch (arm::decode_thumb(instr)) {
+  case TOp::ShiftImm: u.reads = bit(rs); u.writes = bit(rd); break;
+  case TOp::AddSubReg: u.reads = bit(rs) | bit(rn); u.writes = bit(rd); break;
+  case TOp::AddSubImm3: u.reads = bit(rs); u.writes = bit(rd); break;
+  case TOp::MovCmpAddSubImm8: {
+    const u32 op = (instr >> 11) & 3;
+    if (op == 0) u.writes = bit(r8); else if (op == 1) u.reads = bit(r8); else { u.reads = bit(r8); u.writes = bit(r8); }
+    break;
+  }
+  case TOp::Alu: {
+    const u32 op = (instr >> 6) & 0xF;
+    u.reads = bit(rs);
+    if (op == 8 || op == 0xA || op == 0xB) u.reads |= bit(rd);        // TST CMP CMN
+    else if (op == 9) u.writes = bit(rd);                             // NEG
+    else { u.reads |= bit(rd); u.writes = bit(rd); }
+    break;
+  }
+  case TOp::HiRegOp: {
+    const u32 hd = rd | ((instr >> 4) & 8), hs = (instr >> 3) & 0xF, op = (instr >> 8) & 3;
+    if (op == 0) { u.reads = bit(hd) | bit(hs); u.writes = bit(hd); }
+    else if (op == 1) u.reads = bit(hd) | bit(hs);
+    else if (op == 2) { u.reads = bit(hs); u.writes = bit(hd); }
+    break;
+  }
+  case TOp::BxBlx: u.reads = bit((instr >> 3) & 0xF); if (instr & (1 << 7)) u.writes = bit(14); break;
+  case TOp::LdrPcRel: u.reads = bit(15); u.writes = bit(r8); break;
+  case TOp::LdrStrReg: {
+    const u32 op = (instr >> 9) & 7;   // 0 STR 1 STRH 2 STRB 3 LDRSB 4 LDR 5 LDRH 6 LDRB 7 LDRSH
+    u.reads = bit(rs) | bit(rn);
+    if (op >= 3) u.writes = bit(rd); else u.reads |= bit(rd);
+    break;
+  }
+  case TOp::LdrStrImm5: case TOp::LdrStrHImm5: u.reads = bit(rs); if (instr & (1 << 11)) u.writes = bit(rd); else u.reads |= bit(rd); break;
+  case TOp::LdrStrSpRel: u.reads = bit(13); if (instr & (1 << 11)) u.writes = bit(r8); else u.reads |= bit(r8); break;
+  case TOp::AddPcSp: u.reads = bit((instr & (1 << 11)) ? 13 : 15); u.writes = bit(r8); break;
+  case TOp::AdjustSp: u.reads = bit(13); u.writes = bit(13); break;
+  case TOp::PushPop: {
+    const u16 list = static_cast<u16>((instr & 0xFF) | ((instr & (1 << 8)) ? ((instr & (1 << 11)) ? bit(15) : bit(14)) : 0));
+    u.reads = bit(13); u.writes = bit(13);
+    if (instr & (1 << 11)) u.writes |= list; else u.reads |= list;
+    break;
+  }
+  case TOp::StmLdm: {
+    const u16 list = static_cast<u16>(instr & 0xFF);
+    u.reads = bit(r8); u.writes = bit(r8);
+    if (instr & (1 << 11)) u.writes |= list; else u.reads |= list;
+    break;
+  }
+  case TOp::BlPrefix: u.writes = bit(14); break;
+  case TOp::BlSuffix: case TOp::BlxSuffix: u.reads = bit(14); u.writes = bit(14); break;
+  default: break;
+  }
+  return u;
+}
+bool arm_is_mem(u32 instr) {
+  switch (arm::decode_arm(instr)) {
+  case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg: case AOp::Swp: case AOp::Swpb: case AOp::Ldm: case AOp::Stm: return true;
+  default: return false;
+  }
+}
+bool thumb_is_mem(u16 instr) {
+  switch (arm::decode_thumb(instr)) {
+  case TOp::LdrPcRel: case TOp::LdrStrReg: case TOp::LdrStrImm5: case TOp::LdrStrHImm5: case TOp::LdrStrSpRel: case TOp::PushPop: case TOp::StmLdm: return true;
+  default: return false;
+  }
+}
+
 enum class CarryKind { Keep, Const, Reg };
 struct Carry { CarryKind kind = CarryKind::Keep; u32 value = 0; u32 reg = 0; };
 
@@ -1681,9 +1808,47 @@ bool Translator::run() {
     live = u.reads | (live & ~u.writes);
   }
 
+  // DS_JIT_CENSUS: the static facts of this translation, for the slot the
+  // density bump below creates (weighted by executions at report time).
+  const bool census = rt().census;
+  u16 c_live_in = 0, c_written = 0;
+  u32 c_mem = 0, c_memfl = 0, c_memfl_intra = 0, c_fl = 0, c_fb = 0;
+  u16 c_reads[16] = {}, c_writes[16] = {};
+  std::vector<u32> intra_live;   // liveness with nothing live at the block end: the certain part
+  if (census) {
+    intra_live.assign(instrs_.size(), 0);
+    u32 il = 0;
+    for (size_t i = instrs_.size(); i-- > 0;) {
+      intra_live[i] = il;
+      const FlagUse u = thumb_ ? thumb_flag_use(static_cast<u16>(instrs_[i].raw), a9_) : arm_flag_use(instrs_[i].raw, a9_);
+      il = u.reads | (il & ~u.writes);
+    }
+    for (size_t i = 0; i < instrs_.size(); ++i) {
+      const u32 raw = instrs_[i].raw;
+      const RegUse u = thumb_ ? thumb_reg_use(static_cast<u16>(raw)) : arm_reg_use(raw);
+      for (int r = 0; r < 16; ++r) {
+        if (u.reads & (1u << r)) { ++c_reads[r]; if (!(c_written & (1u << r))) c_live_in |= static_cast<u16>(1u << r); }
+        if (u.writes & (1u << r)) ++c_writes[r];
+      }
+      c_written |= u.writes;
+      const bool mem = thumb_ ? thumb_is_mem(static_cast<u16>(raw)) : arm_is_mem(raw);
+      const bool flags_live = instrs_[i].live_out != 0;
+      if (mem) { ++c_mem; if (flags_live) ++c_memfl; if (intra_live[i]) ++c_memfl_intra; }
+      if (flags_live) ++c_fl;
+      if (thumb_ ? thumb_needs_fallback(static_cast<u16>(raw), a9_) : arm_needs_fallback(raw, a9_)) ++c_fb;
+    }
+  }
+
   // Prologue: leave when the budget is exhausted (the exit is cold; the
   // block is always long enough for kill_block's 12-byte redirect).
   if (rt().density) emit_density_bump();
+  if (census && dslot_) {
+    for (int r = 0; r < 16; ++r) { dslot_->reg_reads[r] = c_reads[r]; dslot_->reg_writes[r] = c_writes[r]; }
+    dslot_->live_in = c_live_in; dslot_->written = c_written;
+    dslot_->n_instrs = static_cast<u8>(instrs_.size()); dslot_->n_fallback = static_cast<u8>(c_fb);
+    dslot_->n_mem = static_cast<u8>(c_mem); dslot_->n_mem_flags_live = static_cast<u8>(c_memfl); dslot_->n_mem_flags_intra = static_cast<u8>(c_memfl_intra);
+    dslot_->n_flags_live = static_cast<u8>(c_fl); dslot_->entry_flags_live = live != 0;
+  }
   emit_budget_check(key_);
 
   u32 end_addr = addr;
