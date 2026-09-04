@@ -163,6 +163,7 @@ static void run_display_frame(NDS& nds, void (*mid)(NDS&, u32 line, bool hblank)
     nds.gpu.on_hblank();
     mid(nds, l, true);
   }
+  nds.gpu.quiesce();   // the batched frame is joined at line 0, which this loop never reaches
 }
 static void lazy_setup(NDS& nds) {
   nds.io.powcnt1 = 0x820F; nds.gpu.set_powcnt(0x820F);     // both engines, A on top

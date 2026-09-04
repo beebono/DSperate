@@ -99,7 +99,7 @@ static void test_flat_quad() {
   w32(nds, CMD(0x50), 0);                                      // swap buffers
   // Run to the frame after next so the polygon is flushed, rendered and displayed.
   nds.sched.run_until(nds.sched.now() + CYCLES_PER_FRAME * 2);
-  const u32* line = nds.gpu3d.line(96);
+  const u32* line = nds.gpu3d.line(nds.gpu3d.frame_ref(), 96);
   CHECK_EQ(line[128] & 0x1F00003F, 0x1F00003Fu);              // centre: red, opaque
   CHECK_EQ(line[10] >> 24, 0x1Fu);                              // outside the quad: clear colour
   CHECK_EQ(line[10] & 0xFFFFFF, 0u);

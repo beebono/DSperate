@@ -346,7 +346,7 @@ void Gpu3D::reset() {
   vertex_pipeline_ = normal_pipeline_ = polygon_pipeline_ = 0;
   vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
   num_pushpop_ = num_tests_ = 0;
-  gxstat_ = 0; geometry_on_ = rendering_on_ = false;
+  gxstat_ = 0; geometry_on_ = rendering_on_ = false; render_on_.store(false, std::memory_order_relaxed);
   dispcnt_ = 0; alpha_ref_val_ = alpha_ref_ = 0;
   toon_.fill(0); edge_.fill(0);
   fog_color_ = fog_offset_ = 0; fog_density_.fill(0);
@@ -384,7 +384,7 @@ void Gpu3D::reset() {
 
 void Gpu3D::set_powcnt(u16 value) {
   geometry_on_ = value & (1 << 3);
-  rendering_on_ = value & (1 << 2);
+  rendering_on_ = value & (1 << 2); render_on_.store(rendering_on_, std::memory_order_relaxed);
   if (!rendering_on_) reset_render_state();
 }
 
@@ -1440,6 +1440,12 @@ void Gpu3D::vblank() {
                  dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_n_, gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
   if (!geometry_on_) return;
   if (no_fifo_) drain_all();
+  // The raster of the frame being displayed may still be running: with the
+  // display composited on the worker thread, nothing on this thread has
+  // waited for its bands by now (the compositor used to, at line 191). It
+  // reads rstate_ and the polygon bank swapped below, so it must be done
+  // first. Free when it already is.
+  renderer_.sync_all();
   if (rendering_on_) {
     // The render registers this frame against the ones the last render used.
     // Both the no-swap path and the duplicate-list skip need this answer.
@@ -1492,18 +1498,18 @@ void Gpu3D::vblank() {
 void Gpu3D::render_frame() { renderer_.render(*this); }
 
 void Gpu3D::set_render_xpos(u16 value, u16 mask) {
-  if (!rendering_on_) return;
+  if (!render_on_.load(std::memory_order_relaxed)) return;
   render_xpos_ = (render_xpos_ & ~mask) | (value & mask & 0x1FF);
 }
 
 void Gpu3D::sync_raster() { renderer_.sync_all(); }
 
-const u32* Gpu3D::line(u32 y) {
-  renderer_.sync_line(static_cast<s32>(y));
-  const u32* raw = renderer_.raw_line(y);
+const u32* Gpu3D::line(const Renderer3D::FrameRef& f, u32 y) {
+  renderer_.sync_line(f, static_cast<s32>(y));
+  const u32* raw = f.line(y);
   const u32 xpos = render_xpos_;
   if (xpos == 0) return raw;
-  static u32 scrolled[256];
+  u32* const scrolled = scrolled_;
   if (xpos & 0x100) {
     u32 i = 0, j = xpos;
     for (; j < 512; ++i, ++j) scrolled[i] = 0;

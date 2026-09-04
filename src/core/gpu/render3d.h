@@ -7,6 +7,7 @@
 #include "core/gpu/texcache.h"
 
 #include <array>
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -51,8 +52,10 @@ public:
   // Rasterise the frame latched by the geometry engine.
   void render(const Gpu3D& gx);
 
-  // One output line: RGB666 in bits 0-21, 5-bit alpha in bits 24-28.
-  const u32* raw_line(u32 y) const { return &out_[y * 256]; }
+  // Output lines are RGB666 in bits 0-21, 5-bit alpha in bits 24-28, read
+  // through a FrameRef (below): the buffer is double-buffered so the raster
+  // can move on to the next frame at line 215 while the display of this one
+  // is still being composited.
 
   // Portable pixel-pipeline pieces, exposed for the unit tests.
   static u32 alpha_blend(u32 dispcnt, u32 src, u32 dst, u32 alpha);
@@ -101,7 +104,12 @@ private:
   // span start, and a group that begins near x = 255 of the last ring row
   // loads and writes back (unchanged) lanes past the under plane's end.
   std::array<u32, RSIZE * 2 + 8> color_{}, depth_{}, attr_{};
-  std::array<u32, 256 * 192> out_{};   // finished lines
+  // Finished lines, two frames' worth. render() draws into the buffer the
+  // display is not reading (display_ ^ 1) and then makes it the displayed
+  // one; a FrameRef taken before that keeps naming the old buffer, which is
+  // what lets the compositor of frame N run on past line 215 of frame N.
+  std::array<u32, 256 * 192> out_[2]{};
+  u32 display_ = 0;
   std::array<u8, 256 * RING> stencil_{};   // one row per ring line: see render_chunk
   // "the polygon drawn immediately before this one on THIS line was a shadow
   // mask", which is what decides whether the stencil row is cleared or added
@@ -452,7 +460,7 @@ private:
   static bool adapt_enabled();
   u32 workers_now_ = 0, quiet_frames_ = 0;
   s64 wait_ema_ = 0;             // averaged block time, the regime signal
-  u64 wait_ns_ = 0;              // emulation thread blocked on the raster, this frame
+  std::atomic<u64> wait_ns_{0};  // time blocked on the raster this frame (any thread: the compositor waits too)
   std::array<s32, MAX_BINS + 1> bin_y_{};
   u32 nbins_ = 0;
 
@@ -461,13 +469,29 @@ public:
   // sync_line waits for the one band that owns a display line; sync_all waits
   // for all of them and is the escape hatch for anything that would change
   // what the workers read.
-  void sync_line(s32 y);
+  //
+  // What the display reads for one frame: which output buffer, and which
+  // pool generation's bands to wait on before a line of it is read. Taken on
+  // the emulation thread at the start of the display frame (Gpu::begin_frame)
+  // and handed to whichever thread composites it -- the compositor keeps
+  // reading frame N's buffer and waiting on frame N's bands after render()
+  // has dispatched frame N+1 into the other buffer at line 215. A frame with
+  // nothing outstanding (rendered inline, kept, or ablated) has nbins 0.
+  struct FrameRef {
+    const u32* out = nullptr;
+    u64 gen = 0;
+    u32 nbins = 0;
+    std::array<s32, MAX_BINS + 1> bin_y{};
+    const u32* line(u32 y) const { return out + y * 256; }
+  };
+  FrameRef frame_ref() const;
+  void sync_line(const FrameRef& f, s32 y);   // any thread; each call waits for one band at most
   void sync_all();
   bool raster_pending() const { return pending_bands_ != 0; }
 private:
   std::function<void(u32)> job_fn_;   // outlives the dispatch, unlike a local
   u32 pending_bands_ = 0;             // bins in flight (0 = nothing running)
-  u64 waited_bits_ = 0;
+  u64 gen_ = 0;                       // pool generation of the bands in flight
   bool async_ = std::getenv("DS_R3D_SYNC") == nullptr;
 
   u32  edge_count_ = 0;

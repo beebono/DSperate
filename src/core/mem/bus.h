@@ -36,10 +36,17 @@ public:
   u32 tcm_prev_itcm_ = 0, tcm_prev_dtcm_base_ = 0, tcm_prev_dtcm_size_ = 0;   // windows mapped by the last update_tcm   // CP15 (ARM9)
   void update_wram();                 // WRAMCNT
   void update_vram();                 // VRAMCNT A-I
+  Entry lcdc_read_save_[8 * 64] = {};   // set_lcdc_read_trap: 8 mirrors x 128 KB / PAGE_SIZE
   // Lazy 2D (see gpu.h): trap ARM9 stores into the 2D engines' VRAM windows
   // (and, with `lcdc`, the LCDC window) so the first one in a frame can force
   // the deferred render to catch up before the bytes change.
   void set_vram_trap(bool on, bool lcdc);
+  // Read trap on one LCDC bank (A-D), all eight mirrors: ARM9 loads and DMA
+  // reads of it take the slow path while a batched display capture that
+  // writes the bank is still in flight on the compositor thread, so the
+  // reader can be joined before it sees stale bytes (Gpu::join_worker).
+  // The entries are saved and restored; a VRAMCNT remap lifts it first.
+  void set_lcdc_read_trap(int bank, bool on);
 
   // DMA accesses (no CPU cycle accounting; page-table fast path then MMIO).
   // The 8-bit pair is not reachable by a real DMA, which is 16- or 32-bit

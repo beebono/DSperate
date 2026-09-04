@@ -84,6 +84,12 @@ public:
   int  screen() const { return screen_; }  // 0 = top, 1 = bottom
 
   // Per-line hooks, in the order the hardware applies them.
+  // The per-line latches of a VBlank line, journaled: while the frame's
+  // display lines are still being rendered on another thread these cannot
+  // touch the render side directly, so they go through the journal in order
+  // with the register writes around them and run at the join (Gpu::latch).
+  enum Latch : u8 { L_WINDOWS, L_PREDRAW, L_POSTDRAW, L_SPRITES };
+  void latch(Latch k, u32 line, bool reset);
   void update_windows(u32 line);           // at scanline start
   void pre_draw(u32 line, bool frame_reset);   // at HBlank, before drawing `line`
   void render_sprites(u32 line);           // sprites for `line` (pre-rendered one line ahead)
@@ -115,7 +121,7 @@ private:
   bool g_enabled_ = false;
 
   // Journal of guest writes not yet seen by the render side, in stamp order.
-  enum JKind : u8 { J_REG, J_PAL, J_OAM, J_POWCNT, J_MBRIGHT };
+  enum JKind : u8 { J_REG, J_PAL, J_OAM, J_POWCNT, J_MBRIGHT, J_LATCH };
   struct JEntry { u16 stamp; u8 kind; u8 width; u16 addr; u32 value; };
   // Fixed storage with an atomic count: with the engine-B line in flight on
   // the worker (Gpu::render_lines), main appends entries stamped after that

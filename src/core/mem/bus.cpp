@@ -6,6 +6,7 @@
 #include "core/profile.h"
 #include "core/nds.h"
 
+#include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
@@ -225,6 +226,9 @@ static const gpu::VramView* vram_view_for(const gpu::VramMap& m, Cpu cpu, u32 ad
 }
 
 u32 Bus::vram_read(Cpu cpu, u32 addr, u32 width) {
+  // A read of an LCDC bank under the capture read trap (set_lcdc_read_trap):
+  // the batched capture writing it may still be in flight on the worker.
+  if (addr >= 0x06800000 && nds_.gpu.lcdc_read_trapped()) nds_.gpu.lcdc_read_hit(addr);
   int bank; u32 off;
   const gpu::VramView* v = vram_view_for(vram_map_, cpu, addr, bank, off);
   if (v) return width == 8 ? vram_map_.read8(*v, off) : width == 16 ? vram_map_.read16(*v, off) : vram_map_.read32(*v, off);
@@ -353,6 +357,27 @@ void Bus::set_vram_trap(bool on, bool lcdc) {
   PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
   pt9.set_write_trap(0x06000000, 0x00800000, on);              // the four engine windows
   if (lcdc) pt9.set_write_trap(0x06800000, 0x00800000, on);    // LCDC and its 1 MB mirrors
+}
+
+// A trapped entry keeps only its tags: read_ptr and write_ptr both see no
+// base and fall to io_read/io_write, which resolve LCDC through vram_read /
+// vram_write. The saved entry goes back on lift, with whatever code tag the
+// page picked up meanwhile; an entry that gained a base in between (a remap
+// that did not go through the join, which should not happen) is left alone.
+void Bus::set_lcdc_read_trap(int bank, bool on) {
+  assert(bank >= 0 && bank < 4);
+  static const u32 lcdc_base[4] = {0x00000, 0x20000, 0x40000, 0x60000};
+  Entry* const t = nds_.cpu(Cpu::ARM9).page_table.raw();
+  const u32 pages = VRAM_BANK_SIZES[bank] >> PAGE_SHIFT;
+  u32 k = 0;
+  for (u32 mirror = 0x06800000; mirror < 0x07000000; mirror += 0x100000) {
+    const u32 first = (mirror + lcdc_base[bank]) >> PAGE_SHIFT;
+    for (u32 p = 0; p < pages; ++p, ++k) {
+      Entry& e = t[first + p];
+      if (on) { lcdc_read_save_[k] = e; if (e & BASE_MASK) e = TAG_SPECIAL | (e & TAG_CODE); }
+      else if (!(e & BASE_MASK)) e = lcdc_read_save_[k] | (e & TAG_CODE);
+    }
+  }
 }
 
 u8 Bus::dma_read8(Cpu cpu, u32 addr) {

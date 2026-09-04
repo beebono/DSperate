@@ -106,9 +106,10 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
       queue(J_REG, r, 8, value & 0xFF);
       return;
     }
-    // BG0HOFS on engine A also scrolls the 3D layer, even with the engine powered down.
-    if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value & 0xFF), 0x00FF);
-    if (!num_ && r == 0x11) nds_.gpu3d.set_render_xpos(static_cast<u16>(value << 8), 0xFF00);
+    // BG0HOFS on engine A also scrolls the 3D layer, even with the engine
+    // powered down. Journaled byte-wise (the register is write-only, so the
+    // merge below cannot recover the other byte), applied in apply_write.
+    if (!num_ && (r == 0x10 || r == 0x11)) queue(J_REG, r, 8, value & 0xFF);
     if (!g_enabled_) return;
     switch (r) {
     case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
@@ -136,8 +137,11 @@ void Engine2D::write(u32 addr, u32 width, u32 value) {
   case 0x02: g_dispcnt_ = (g_dispcnt_ & 0x0000FFFF) | (value << 16); if (num_) g_dispcnt_ &= 0xC0B1FFF7; queue(J_REG, r, 16, value); return;
   default: break;
   }
-  if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value), 0xFFFF);
-  if (!g_enabled_) return;
+  // BG0HOFS on engine A scrolls the 3D layer even with the engine powered
+  // down. It is journaled like the rest and applied on the render side
+  // (apply_write), in display-line order, rather than at once: the 3D line
+  // is read where the 2D line is composited, which may be another thread.
+  if (!g_enabled_) { if (!num_ && r == 0x10) queue(J_REG, r, 16, value); return; }
   switch (r) {
   case 0x08: case 0x0A: case 0x0C: case 0x0E: g_bgcnt_[(r - 8) / 2] = static_cast<u16>(value); break;
   case 0x48: g_wincnt_[0] = value & 0xFF; g_wincnt_[1] = value >> 8; break;
@@ -157,8 +161,10 @@ void Engine2D::master_bright_write(u16 value) { queue(J_MBRIGHT, 0, 16, value); 
 void Engine2D::palette_written(u32 off, u32 width, u32 value) { queue(J_PAL, off, width, value); }
 void Engine2D::oam_written(u32 off, u32 width, u32 value) { queue(J_OAM, off, width, value); }
 
+void Engine2D::latch(Latch k, u32 line, bool reset) { queue(J_LATCH, k, 0, line | (reset ? 0x10000u : 0u)); }
+
 void Engine2D::queue(u8 kind, u32 addr, u32 width, u32 value) {
-  const u32 stamp = nds_.gpu.journal_stamp();
+  const u32 stamp = nds_.gpu.journal_stamp(num_);
   if (stamp == Gpu::NO_STAMP) { apply(kind, addr, width, value); return; }
   u32 n = jn_.load(std::memory_order_relaxed);
   if (n == JOURNAL_CAP) { nds_.gpu.journal_full(); n = jn_.load(std::memory_order_relaxed); if (n == JOURNAL_CAP) { apply_pending(); jn_.store(0, std::memory_order_relaxed); jpos_ = 0; n = 0; } }
@@ -204,6 +210,16 @@ void Engine2D::apply(u8 kind, u32 addr, u32 width, u32 value) {
     screen_ = (value & (1 << 15)) ? num_ : 1 - num_;   // bit 15: engine A on the top screen
     return;
   case J_MBRIGHT: master_bright_ = static_cast<u16>(value); return;
+  case J_LATCH: {
+    const u32 line = value & 0xFFFF, reset = value & 0x10000;
+    switch (static_cast<Latch>(addr)) {
+    case L_WINDOWS: update_windows(line); return;
+    case L_PREDRAW: pre_draw(line, reset != 0); return;
+    case L_POSTDRAW: post_draw(reset != 0); return;
+    case L_SPRITES: render_sprites(line); return;
+    }
+    return;
+  }
   }
 }
 
@@ -218,6 +234,8 @@ void Engine2D::apply_write(u32 addr, u32 width, u32 value) {
       if (num_) dispcnt_ &= 0xC0B1FFF7;
       return;
     }
+    if (!num_ && r == 0x10) { nds_.gpu3d.set_render_xpos(static_cast<u16>(value & 0xFF), 0x00FF); return; }
+    if (!num_ && r == 0x11) { nds_.gpu3d.set_render_xpos(static_cast<u16>(value << 8), 0xFF00); return; }
     if (!enabled_) return;
     switch (r) {
     case 0x40: win0_[1] = value; return; case 0x41: win0_[0] = value; return;
@@ -250,6 +268,8 @@ void Engine2D::apply_write(u32 addr, u32 width, u32 value) {
   case 0x02: dispcnt_ = (dispcnt_ & 0x0000FFFF) | (value << 16); if (num_) dispcnt_ &= 0xC0B1FFF7; return;
   default: break;
   }
+  // The 3D layer's X scroll, engine powered or not (see write()).
+  if (!num_ && r == 0x10) nds_.gpu3d.set_render_xpos(static_cast<u16>(value), 0xFFFF);
   // Everything below is ignored while the engine is powered down (POWCNT1),
   // which is the behaviour the reference implementation models.
   if (!enabled_) return;

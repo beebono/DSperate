@@ -48,7 +48,7 @@ void dump_cpu_timing(ds::NDS& nds, const char* when) {
     for (int i = 0; i < 4; ++i) std::fprintf(stderr, "%s%u", i ? " " : "", c.timing7[pc >> 15][i]);
     std::fprintf(stderr, "] itcm %u dtcm %08x/%08x\n", c.itcm_size, c.dtcm_base, c.dtcm_mask);
   }
-  { ds::u64 h = 1469598103934665603ull; const ds::u32* l = nds.gpu3d.line(0); for (int x = 0; x < 256; ++x) h = (h ^ l[x]) * 1099511628211ull;
+  { ds::u64 h = 1469598103934665603ull; const ds::u32* l = nds.gpu3d.line(nds.gpu3d.frame_ref(), 0); for (int x = 0; x < 256; ++x) h = (h ^ l[x]) * 1099511628211ull;
     std::fprintf(stderr, "[state %s] 3d line0 hash %016llx\n", when, (unsigned long long)h); }
   std::fprintf(stderr, "[state %s] now %llu next %llu a7debt? gx stalled %d idle %d\n", when, (unsigned long long)nds.sched.now(), (unsigned long long)nds.sched.next_deadline(), nds.gpu3d.stalled(), nds.gpu3d.idle());
 }

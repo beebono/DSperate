@@ -6,6 +6,8 @@
 #include "core/types.h"
 #include "core/gpu/engine2d.h"
 #include "core/gpu/line_worker.h"
+#include "core/gpu/render3d.h"
+#include "core/profile.h"
 
 #include <array>
 
@@ -20,8 +22,9 @@ namespace ds::gpu {
 // Lazy 2D. The engines are not rendered at each HBlank. Writes that can
 // change the picture are journaled per engine with the display line they
 // first affect (journal_stamp), and the frame is rendered in one batch at the
-// last display line's HBlank -- engine B on the line worker, engine A here,
-// one hand-off a frame -- replaying the journal in front of each line, so a
+// last display line's HBlank -- engine A on the worker thread, joined only
+// at the start of line 0 (see worker_), engine B here, one hand-off a frame
+// -- replaying the journal in front of each line, so a
 // scroll register written every HBlank still lands on the right line. What
 // the journal cannot cover is VRAM: stores into the pages the engines read
 // are trapped (Bus::set_vram_trap) for the display period, and the first one
@@ -80,15 +83,18 @@ public:
   void reg_write(u32 addr, u32 width, u32 value);
   void set_powcnt(u16 value);
 
-  // Journal stamp for a write happening now: twice the first display line it
-  // can affect, plus one when that line's scanline start has already passed
-  // (the window edges are evaluated there, before the line's own writes).
-  // NO_STAMP when the write lands after the last display line of the frame
-  // is rendered -- then nothing is pending and it applies at once.
+  // Journal stamp for a write to engine `e` happening now: twice the first
+  // display line it can affect, plus one when that line's scanline start has
+  // already passed (the window edges are evaluated there, before the line's
+  // own writes). NO_STAMP when the write lands after the last display line
+  // of the frame is rendered and nothing of that engine is in flight -- then
+  // it applies at once. While the engine's lines are still being drawn on
+  // the worker (engine A's batch, until line 0) the VBlank lines stamp too,
+  // and the entries are applied in order at the join.
   static constexpr u32 NO_STAMP = 0xFFFF;
-  u32 journal_stamp() const {
+  u32 journal_stamp(int e) const {
     const u32 l = hblank_done_ ? line_ + 1u : line_;
-    return l < SCREEN_H ? l * 2 + (hblank_done_ ? 0 : 1) : NO_STAMP;
+    return (l < SCREEN_H || inflight_[e]) ? l * 2 + (hblank_done_ ? 0 : 1) : NO_STAMP;
   }
   // Slow-path stores (Bus): palette / OAM land in the guest bytes and the
   // engine's journal; a VRAM store on a trapped page catches the render up.
@@ -107,7 +113,7 @@ public:
   // windows and lazy-2D bookkeeping keep running, so it is exact again the
   // line it is shown. Engine A never skips: display capture reads its
   // output. The hidden screen's framebuffer is stale meanwhile. Set between
-  // frames only (the engine-B worker reads it during one).
+  // frames only (the worker reads it during one).
   void set_screen_visible(int screen, bool on) { screen_visible_[screen] = on; }
 
   // Frameskip (frontend policy; see the SDL frontend's [emu] frameskip). A
@@ -142,6 +148,13 @@ public:
   // alternation, nothing to avoid). Watched: the POWCNT1 swap bit, each
   // engine's display mode and VRAM display bank, and the capture destination.
   u8 display_phase_period() const { return phase_period_; }
+  bool lines_in_flight() const { return inflight_[0] || inflight_[1]; }
+  // Bus::vram_read on an LCDC page under the capture read trap: join the
+  // lines in flight if the read is of the bank the capture is writing.
+  bool lcdc_read_trapped() const { return read_trap_bank_ >= 0; }
+  void lcdc_read_hit(u32 addr) {
+    if (static_cast<int>((addr >> 17) & 7) == read_trap_bank_) { prof::add(prof::C_2D_A_JOIN_READS, 1); join_worker(); }
+  }
   // begin_frame() for the frame about to run has already happened when
   // run_frame() returns, so this is settled before the frontend asks.
   bool will_skip_frame() const { return skip_frame_; }
@@ -259,7 +272,7 @@ private:
   // The output stage's line buffer when scaling: output_line writes here
   // instead of into fb_, at the same cost, and scale_row reads it back hot.
   alignas(16) std::array<std::array<u32, SCREEN_W>, 2> line_out_{};
-  const u32* line3d_ = nullptr;   // 3D output for the line being drawn (engine A's thread)
+  const u32* line3d_ = nullptr;   // 3D output for the line being drawn (whichever thread draws engine A)
 
   // Lazy-2D state for the frame in progress.
   bool lazy_enabled_ = true;      // DS_2D_LAZY != 0
@@ -319,23 +332,52 @@ private:
   u32 store_engines(u32 addr) const;
   void step_engine(int e, u32 line);        // one engine's display line: replay, latches, render, output
 
-  // Engine B's lines run on the worker while engine A's run here. The two
-  // engines share no mutable state -- the only statics they reach are the
-  // read-only colour tables -- and no CPU runs inside the callback, so the
-  // pair sees exactly the register and VRAM state the sequential order
+  // One worker thread beside the emulation thread, drawing a run of one
+  // engine's display lines (worker_job). Which engine depends on the frame.
+  //
+  // A batched frame hands engine A's 192 lines over at the last display
+  // line's HBlank and does not wait for them there: A carries the 3D
+  // composite, the display capture and its half of the frontend scaling --
+  // the expensive screen -- while engine B's batch is drawn here. The join
+  // is deferred to the start of line 0, so the compositor overlaps the
+  // VBlank period's emulation. Everything the guest can do meanwhile that
+  // the lines in flight could observe joins earlier: a store into VRAM
+  // engine A reads (the write trap stays armed until the join), a VRAMCNT
+  // remap, a read of the bank a batched capture is writing (a read trap on
+  // that bank, Bus::set_lcdc_read_trap), a full journal, a save state.
+  // Register, palette and OAM writes during VBlank go through the journal
+  // instead of the render side, as do the VBlank lines' own latches
+  // (Engine2D::latch), and are applied in order at the join.
+  //
+  // Per-line frames (capture per line, the display FIFO, a VRAM trap) run
+  // engine A here and hand engine B's lines to the worker, as before.
+  //
+  // The two engines share no mutable state -- the only statics they reach
+  // are the read-only colour tables -- and no CPU runs inside the callback,
+  // so a line sees exactly the register and VRAM state the sequential order
   // saw. DS_2D_THREAD=0 forces the sequential path for comparison.
-  LineWorker eng_b_;
+  LineWorker worker_;
 public:
   // DS_WATCHDOG: where the display pipeline stands when a frame stalls.
   void debug_dump(FILE* f);
 private:
-  u32 eng_b_first_ = 0, eng_b_last_ = 0;
+  int  job_e_ = 1;
+  u32  job_first_ = 0, job_last_ = 0;
   bool par_2d_ = false;
+  bool inflight_[2] = {false, false};   // that engine's lines are on the worker
+  // What the lines read of the frame-level capture state, latched at each
+  // render_ranges: DISPCAPCNT's enable bit clears itself at line 192 while
+  // a batched engine A is still drawing.
+  u32  capcnt_render_ = 0;
+  bool capture_render_ = false;
+  int  read_trap_bank_ = -1;            // LCDC bank under the capture read trap, or -1
+  bool defer_join_ = true;              // DS_2D_DEFER=0: join engine A's batch at once (bisecting tool)
+  Renderer3D::FrameRef ref3d_;          // the 3D frame these display lines read (begin_frame)
   // Per-line frames (capture, the display FIFO, a VRAM trap) hand engine B
   // one line at a time. Rather than wait for it at once -- which needs the
   // worker hot, i.e. spinning through the whole frame on a core the raster
   // workers want -- the line is left in flight and joined a line later
-  // (b_inflight_), so the worker can park between lines with no cost to the
+  // (inflight_[1]), so the worker can park between lines with no cost to the
   // emulation thread. What must join earlier: the last display line (writes
   // after it apply directly), a VRAMCNT remap, and a guest store into VRAM
   // the engines read (the trap stays armed in these frames for that; past
@@ -346,15 +388,19 @@ private:
   // frees (RG DS, 2026-08-29: +3.4 % with the lag, +1.3 % lag with the old
   // spin budget, +1.7 % parking alone; replay scenes flat). DS_2D_LAG=1.
   bool lag_enabled_ = false;      // DS_2D_LAG=1
-  bool b_inflight_ = false;
   bool lag_frame_ = false;        // this frame's per-line lines may stay in flight
   u32  lag_trap_hits_ = 0;
   static constexpr u32 LAG_TRAP_LIMIT = 4096;   // GSDD traps ~55 stores a frame in capture frames; 64 dropped the lag every frame
-  void join_b() { if (b_inflight_) { eng_b_.wait(); b_inflight_ = false; } }
+  // Wait for whatever is on the worker. Engine A's deferred batch also ends
+  // its frame here (finish_a): the journal drained -- the VBlank writes and
+  // latches so far, in order -- then frame_done and the traps lifted, as
+  // render_ranges does for a frame that finished on this thread.
+  void join_worker();
+  void finish_a();
 public:
-  void journal_full() { join_b(); }   // Engine2D::queue on a full journal
+  void journal_full() { join_worker(); }   // Engine2D::queue on a full journal
 private:
-  static void engine_b_job(void* self);
+  static void worker_job(void* self);
 
   void output_engine(int e, u32 line);
   void emit_scaled(int screen, u32 line, const u32* src);

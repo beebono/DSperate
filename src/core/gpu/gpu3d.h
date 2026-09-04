@@ -5,6 +5,7 @@
 #include "core/gpu/render3d.h"
 
 #include <array>
+#include <atomic>
 
 namespace ds { struct NDS; }
 
@@ -150,7 +151,11 @@ public:
   // Display timing hooks.
   void vblank();            // VCount 192: latch registers, sort, swap buffers
   void render_frame();      // VCount 215: rasterise the latched frame
-  const u32* line(u32 y);   // 3D output for display line y, X-scrolled (RGB666 + 5-bit alpha at 24-28)
+  // The frame the display reads now (see Renderer3D::FrameRef): taken on the
+  // emulation thread at the start of a display frame, used by whichever
+  // thread composites its lines.
+  Renderer3D::FrameRef frame_ref() const { return renderer_.frame_ref(); }
+  const u32* line(const Renderer3D::FrameRef& f, u32 y);   // 3D output for display line y, X-scrolled (RGB666 + 5-bit alpha at 24-28)
   // Force the asynchronous raster to finish. Called wherever something is
   // about to change what its workers are reading -- in practice only
   // Bus::update_vram, since texture VRAM is unreachable any other way.
@@ -237,7 +242,12 @@ private:
   u32 clear_attr1_ = 0x3F000000, clear_attr2_ = 0x00007FFF;
   u32 zero_dot_w_limit_ = 0xFFFFFF;
   RenderState rstate_;
+  // BG0HOFS of engine A, applied from its journal in display-line order (so
+  // on the compositor thread); render_on_ mirrors rendering_on_ for that
+  // thread's gate.
   u16 render_xpos_ = 0;
+  std::atomic<bool> render_on_{false};
+  alignas(16) u32 scrolled_[256] = {};
 
   // Matrices (20.12, row-major: m[row*4+col]).
   u32 matrix_mode_ = 0;

@@ -216,7 +216,7 @@ struct Renderer3D::Pool {
     for (u32 i = 0; i < n; ++i) threads_.emplace_back([this, i] { loop(i); });
   }
   ~Pool() {
-    { std::lock_guard<std::mutex> lk(m_); stop_ = true; ++generation_; }
+    { std::lock_guard<std::mutex> lk(m_); stop_ = true; generation_.fetch_add(1, std::memory_order_relaxed); }
     start_.notify_all();
     for (auto& t : threads_) t.join();
   }
@@ -225,7 +225,9 @@ struct Renderer3D::Pool {
   // Hand the bands to the workers and return. The caller (the emulation
   // thread) carries on and waits per band, at the line each band's output is
   // first read -- see Renderer3D::sync_line.
-  void dispatch(const std::function<void(u32)>& fn, u32 jobs, u32 bins) {
+  // Returns the generation of this dispatch, which is what wait_bits takes.
+  u64 dispatch(const std::function<void(u32)>& fn, u32 jobs, u32 bins) {
+    u64 gen;
     {
       std::lock_guard<std::mutex> lk(m_);
       job_ = &fn; jobs_ = jobs; remaining_.store(static_cast<u32>(threads_.size()), std::memory_order_relaxed);
@@ -235,9 +237,10 @@ struct Renderer3D::Pool {
       // generation must never see the previous frame's exhausted counter and
       // conclude there is nothing to do.
       next_bin_.store(0, std::memory_order_relaxed);
-      ++generation_;
+      gen = generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
     }
     start_.notify_all();
+    return gen;
   }
 
   // The next bin no worker has taken, or >= nbins when they are all claimed.
@@ -259,13 +262,25 @@ struct Renderer3D::Pool {
   // clock reads off the fast path. The blocking case is the signal the thread
   // count is chosen from: it is the emulation thread standing still, waiting
   // for a strip of the frame it is about to composite.
-  u64 wait_bits(u64 mask) {
+  //
+  // `gen` names the dispatch whose bins are meant: a wait for a generation
+  // that has since been superseded returns at once, since a dispatch only
+  // ever follows wait_idle on the one before it -- every bin of the old
+  // generation is done by then. The compositor of frame N asks for frame N's
+  // bands after the emulation thread has dispatched N+1 at line 215, and
+  // without the generation check it would be waiting on N+1's done bits,
+  // for ever if N+1 has fewer bins. Generation is read before the bits so
+  // that a reset between the two is caught by the locked re-check.
+  u64 wait_bits(u64 gen, u64 mask) {
     if (!mask) return 0;
+    if (generation_.load(std::memory_order_acquire) != gen) return 0;
     if ((done_bits_.load(std::memory_order_acquire) & mask) == mask) return 0;
     const auto t0 = std::chrono::steady_clock::now();
     {
       std::unique_lock<std::mutex> lk(m_);
-      done_.wait(lk, [this, mask] { return (done_bits_.load(std::memory_order_relaxed) & mask) == mask; });
+      done_.wait(lk, [this, gen, mask] {
+        return generation_.load(std::memory_order_relaxed) != gen || (done_bits_.load(std::memory_order_relaxed) & mask) == mask;
+      });
     }
     return static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   }
@@ -293,9 +308,9 @@ private:
     u64 seen = 0;
     for (;;) {
       std::unique_lock<std::mutex> lk(m_);
-      start_.wait(lk, [this, &seen] { return stop_ || generation_ != seen; });
+      start_.wait(lk, [this, &seen] { return stop_ || generation_.load(std::memory_order_relaxed) != seen; });
       if (stop_) return;
-      seen = generation_;
+      seen = generation_.load(std::memory_order_relaxed);
       const std::function<void(u32)>* fn = job_;
       const u32 jobs = jobs_;
       lk.unlock();
@@ -308,14 +323,14 @@ private:
 public:
   void debug_dump(FILE* f) {
     std::fprintf(f, "  band pool: workers %zu generation %llu jobs %u nbins %u next_bin %u remaining %u done_bits %016llx stop %d\n",
-                 threads_.size(), (unsigned long long)generation_, jobs_, nbins_, next_bin_.load(std::memory_order_relaxed),
+                 threads_.size(), (unsigned long long)generation_.load(std::memory_order_relaxed), jobs_, nbins_, next_bin_.load(std::memory_order_relaxed),
                  remaining_.load(std::memory_order_relaxed), (unsigned long long)done_bits_.load(std::memory_order_relaxed), stop_ ? 1 : 0);
   }
   std::vector<std::thread> threads_;
   std::mutex m_;
   std::condition_variable start_, done_;
   const std::function<void(u32)>* job_ = nullptr;
-  u64 generation_ = 0;
+  std::atomic<u64> generation_{0};   // bumped under m_; read lock-free by wait_bits
   std::atomic<u64> done_bits_{0};
   std::atomic<u32> next_bin_{0};
   std::atomic<u32> remaining_{0};
@@ -323,14 +338,16 @@ public:
   bool stop_ = false;
 };
 
-Renderer3D::Renderer3D(NDS& nds) : nds_(nds) { out_dst_ = out_.data(); reset(); }
+Renderer3D::Renderer3D(NDS& nds) : nds_(nds) { out_dst_ = out_[0].data(); reset(); }
 Renderer3D::~Renderer3D() = default;
 
 void Renderer3D::reset() {
-  color_.fill(0); depth_.fill(0); attr_.fill(0); out_.fill(0);
+  color_.fill(0); depth_.fill(0); attr_.fill(0); out_[0].fill(0); out_[1].fill(0);
   stencil_.fill(0);
   prev_shadow_mask_.fill(false);
-  out_dst_ = out_.data();
+  display_ = 0;
+  out_dst_ = out_[0].data();
+  pending_bands_ = 0; gen_ = 0;
   for (auto& b : bands_) b->reset();
 }
 
@@ -2433,7 +2450,7 @@ u32 Renderer3D::selftest_final_pass(u32 seed, u32 dispcnt) {
     }
     for (u32 i = 0; i < 256; ++i) diffs += o0[y * 256 + i] != o1[y * 256 + i];
   }
-  out_dst_ = out_.data();
+  out_dst_ = out_[display_].data();
   rs_ = saved; dispcnt_ = saved_dispcnt;
   return diffs;
 }
@@ -2563,7 +2580,10 @@ void Renderer3D::render(const Gpu3D& gx) {
   texels_in_ = &poly_texels_;
 
   const u32 maxb = band_count(live);
-  if (maxb <= 1) { pending_bands_ = 0; wait_ns_ = 0; build_edges(gx); render_band(0, 192, out_.data()); return; }
+  // The buffer the display is not reading; it becomes the displayed one once
+  // the frame is dispatched (its lines are then waited for per band).
+  u32* const dst = out_[display_ ^ 1].data();
+  if (maxb <= 1) { pending_bands_ = 0; wait_ns_.store(0, std::memory_order_relaxed); build_edges(gx); render_band(0, 192, dst); display_ ^= 1; return; }
 
   // The pool is always the maximum size and only `nb` of it is given work, so
   // ramping the thread count costs a dispatch flag rather than creating and
@@ -2572,10 +2592,12 @@ void Renderer3D::render(const Gpu3D& gx) {
     while (bands_.size() < maxb - 1) bands_.push_back(std::make_unique<Renderer3D>(nds_));
   }
   for (auto& b : bands_) b->aa_ = aa_;   // the setting can change between frames
-  if (!pool_ || pool_->workers() != maxb) pool_ = std::make_unique<Pool>(maxb);
+  // Never replaced once it is big enough: the compositor thread may be
+  // waiting on it for the previous frame's bands (sync_line).
+  if (!pool_ || pool_->workers() < maxb) pool_ = std::make_unique<Pool>(maxb);
 
   const u32 nb = (adapt_enabled() && !threads_forced()) ? adaptive_workers(maxb) : maxb;
-  wait_ns_ = 0;   // consumed by adaptive_workers; start the next frame's tally
+  wait_ns_.store(0, std::memory_order_relaxed);   // consumed by adaptive_workers; start the next frame's tally
 
   // Bins are cut for the maximum, not for `nb`, so that a ramp changes one
   // thing at a time: the same strips are drawn either way, by more or fewer
@@ -2583,7 +2605,6 @@ void Renderer3D::render(const Gpu3D& gx) {
   nbins_ = bin_count(maxb);
   compute_bins(nbins_, maxb);
   const Gpu3D& gxr = gx;
-  u32* const dst = out_.data();
   // The job outlives this call now, so it is a member, and every worker runs
   // on a pool thread -- the emulation thread's job is to go on emulating.
   // Each worker takes bins until they run out, rather than owning one band,
@@ -2606,7 +2627,8 @@ void Renderer3D::render(const Gpu3D& gx) {
     if (prof::enabled && w < 8) band_ns_[w] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   };
   pending_bands_ = nbins_;
-  pool_->dispatch(job_fn_, nb, nbins_);
+  gen_ = pool_->dispatch(job_fn_, nb, nbins_);
+  display_ ^= 1;
   if (!async_) sync_all();
   // The emulation thread waits for the slowest band, so that -- not the sum --
   // is what the 3D raster costs the frame. Both are recorded: the gap between
@@ -2769,21 +2791,32 @@ void Renderer3D::compute_bins(u32 nbins, u32 workers) {
 }
 
 void Renderer3D::debug_dump(FILE* f) {
-  std::fprintf(f, "  raster: async %d pending_bands %u waited_bits %016llx nbins %u\n", async_ ? 1 : 0, pending_bands_, (unsigned long long)waited_bits_, nbins_);
+  std::fprintf(f, "  raster: async %d pending_bands %u gen %llu nbins %u display %u\n", async_ ? 1 : 0, pending_bands_, (unsigned long long)gen_, nbins_, display_);
   if (pool_) pool_->debug_dump(f);
 }
 
-// Wait for the band that owns display line `y`, and no other: the bands are
-// independent and each writes only its own output lines, so the compositor
-// can read the top of the frame while the bottom is still being drawn.
-void Renderer3D::sync_line(s32 y) {
-  if (!pending_bands_) return;
+Renderer3D::FrameRef Renderer3D::frame_ref() const {
+  FrameRef f;
+  f.out = out_[display_].data();
+  f.gen = gen_;
+  f.nbins = pending_bands_;
+  if (pending_bands_) f.bin_y = bin_y_;
+  return f;
+}
+
+// Wait for the band that owns display line `y` of frame `f`, and no other:
+// the bands are independent and each writes only its own output lines, so
+// the compositor can read the top of the frame while the bottom is still
+// being drawn. Reads nothing of this object that render() changes -- the
+// frame's cut and generation travel in the ref -- so it can run on the
+// compositor thread while the emulation thread dispatches the next frame.
+void Renderer3D::sync_line(const FrameRef& f, s32 y) {
+  if (!f.nbins || !pool_) return;
   u32 b = 0;
-  while (b + 1 < pending_bands_ && y >= bin_y_[b + 1]) ++b;
-  { DS_PROF(R3D_WAIT); wait_ns_ += pool_->wait_bits(u64{1} << b); }
-  waited_bits_ |= u64{1} << b;
-  const u64 all = pending_bands_ >= 64 ? ~u64{0} : (u64{1} << pending_bands_) - 1;
-  if (waited_bits_ == all) { pending_bands_ = 0; waited_bits_ = 0; }
+  while (b + 1 < f.nbins && y >= f.bin_y[b + 1]) ++b;
+  DS_PROF(R3D_WAIT);
+  const u64 ns = pool_->wait_bits(f.gen, u64{1} << b);
+  if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed);
 }
 // Wait for all of them: before the next frame's raster, and whenever
 // something is about to change what the workers are reading (Bus::update_vram
@@ -2794,11 +2827,11 @@ void Renderer3D::sync_all() {
   // pending_bands_ once it has waited for every bin, and a worker can still
   // be inside the job at that point -- it marks its last bin done from in
   // there. Waiting on an idle pool costs one uncontended lock.
-  if (pool_) { DS_PROF(R3D_WAIT); wait_ns_ += pool_->wait_idle(); }
+  u64 ns = 0;
+  if (pool_) { DS_PROF(R3D_WAIT); ns = pool_->wait_idle(); if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed); }
   if (!pending_bands_) return;
-  prof::add(prof::C_R3D_SYNC_ALL, 1);
+  if (ns) prof::add(prof::C_R3D_SYNC_ALL, 1);   // bands were still running: something waited for the whole raster
   pending_bands_ = 0;
-  waited_bits_ = 0;
 }
 
 // How many workers to run this frame, from how long the emulation thread
@@ -2853,7 +2886,7 @@ u32 Renderer3D::adaptive_workers(u32 max_workers) {
   // *sustained*; mlbis's 4.1 % is episodic, and over a short window its
   // excursions cross any threshold etody needs. Averaging over about a second
   // separates sustained from episodic, which is the actual distinction.
-  wait_ema_ += (static_cast<s64>(wait_ns_) - wait_ema_) >> kShift;
+  wait_ema_ += (static_cast<s64>(wait_ns_.load(std::memory_order_relaxed)) - wait_ema_) >> kShift;
   const u64 avg = wait_ema_ > 0 ? static_cast<u64>(wait_ema_) : 0;
 
   // Ramping up needs only the average to cross, so a dungeon is served within
@@ -3055,7 +3088,7 @@ template <class S> void Renderer3D::sync_output(S& s) {
   sync_all();
   if constexpr (S::reading) { reset(); texcache_.clear(); }
   s.begin("R3DO");
-  s.fields(rendered_once_, out_);
+  s.fields(rendered_once_, out_[display_]);   // reset() above leaves display_ at 0 on a load
   s.end();
 }
 template void Renderer3D::sync_output<state::Writer>(state::Writer&);
