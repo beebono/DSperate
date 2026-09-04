@@ -634,11 +634,24 @@ int main(int argc, char** argv) {
 
   u32 init = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
   if (audio_on || mic_on) init |= SDL_INIT_AUDIO;
+  // The audio backend. SDL's default on a PipeWire system is its Pulse
+  // client, which on the RG DS costs Golden Sun ~1.5 ms a frame of work in
+  // the daemon and its wakeups; SDL's native pipewire backend costs a third
+  // of that (2026-09-04). Asked for first when the user set nothing, with
+  // SDL's own choice as the fallback if it is not built in.
+  const std::string audio_driver = cfg.str("audio.driver", "pipewire");
+  const bool driver_forced = std::getenv("SDL_AUDIODRIVER") != nullptr;
+  if ((init & SDL_INIT_AUDIO) && !driver_forced && !audio_driver.empty()) setenv("SDL_AUDIODRIVER", audio_driver.c_str(), 1);
   if (SDL_Init(init) != 0) {
+    if ((init & SDL_INIT_AUDIO) && !driver_forced && !audio_driver.empty()) {
+      unsetenv("SDL_AUDIODRIVER");
+      if (SDL_Init(init) == 0) goto sdl_ready;
+    }
     std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
     if (!(init & SDL_INIT_AUDIO) || SDL_Init(init & ~SDL_INIT_AUDIO) != 0) return 1;
     audio_on = mic_on = false;   // no audio subsystem: run silent
   }
+sdl_ready:
 
   ds::sdl::Display display;
   ds::sdl::Display display2;   // dual-window: the bottom screen's own window
@@ -667,7 +680,7 @@ int main(int argc, char** argv) {
   apply_visibility();
 
   ds::sdl::Audio audio;
-  if (audio_on) audio.open();
+  if (audio_on) audio.open(cfg.flag("audio.native_rate", true));
   audio.set_volume(cfg.num("audio.volume", 100));
   // Not during a replay: the log carries the mic, and an open capture device
   // would only add work to a measurement.

@@ -226,6 +226,8 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 [audio]
 # enabled = true
 # volume = 100                  # 0..100
+# driver = pipewire             # SDL audio backend tried first (pipewire, alsa, pulseaudio, ...); empty = SDL's choice; SDL_AUDIODRIVER overrides
+# native_rate = true            # open the device at its own rate and resample here (false: 32768 Hz, the daemon resamples)
 # mic = true                    # open the microphone
 # mic_dev = plughw:0,0          # ALSA capture device
 # mic_gain = 0.25

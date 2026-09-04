@@ -9,18 +9,38 @@
 
 namespace ds::sdl {
 
-bool Audio::open() {
+bool Audio::open(bool native_rate) {
   SDL_AudioSpec want{}, got{};
   want.freq = static_cast<int>(spu::Spu::SAMPLE_RATE);
+  if (native_rate) {
+    // The device's own rate, asked for explicitly: a daemon-backed device
+    // accepts any rate and converts, so "allow a change" alone never
+    // changes anything. SDL 2.24 can ask the default device; before that
+    // 48 kHz is what every such daemon runs at.
+    int freq = 48000;
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+    // Only the daemon backends implement the query; SDL 2.30's ALSA backend
+    // crashes inside it (RG DS, 2026-09-04) rather than failing.
+    const char* drv = SDL_GetCurrentAudioDriver();
+    if (drv && (std::strcmp(drv, "pipewire") == 0 || std::strcmp(drv, "pulseaudio") == 0)) {
+      SDL_AudioSpec def{};
+      if (SDL_GetDefaultAudioInfo(nullptr, &def, 0) == 0 && def.freq > 0) freq = def.freq;
+    }
+#endif
+    want.freq = freq;
+  }
   want.format = AUDIO_S16SYS;
   want.channels = 2;
-  want.samples = 1024;      // queue granularity only; there is no callback
+  want.samples = 2048;      // queue granularity only (no callback); fewer, larger device writes
   want.callback = nullptr;
-  dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &got, 0);   // no changes allowed: SDL converts
+  dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
   if (!dev_) { std::fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError()); return false; }
-  frame_bytes_ = (spu::Spu::SAMPLE_RATE * 4) / 60;
+  rate_ = got.freq > 0 ? static_cast<u32>(got.freq) : spu::Spu::SAMPLE_RATE;
+  frame_bytes_ = (rate_ * 4) / 60;
+  prev_l_ = prev_r_ = 0; phase_ = 0;
   SDL_PauseAudioDevice(dev_, 0);
-  std::fprintf(stderr, "audio: %d Hz, %d channels, %u-sample buffer\n", got.freq, got.channels, got.samples);
+  std::fprintf(stderr, "audio: %s driver, %d Hz, %d channels, %u-sample buffer%s\n", SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?",
+               got.freq, got.channels, got.samples, rate_ != spu::Spu::SAMPLE_RATE ? " (resampled from 32768 Hz here)" : "");
   return true;
 }
 
@@ -65,13 +85,36 @@ void Audio::push(NDS& nds, bool drop) {
   size_t n;
   while ((n = nds.spu.take(buf, 2048)) != 0) {
     if (!dev_) continue;
-    if (muted_) std::memset(buf, 0, n * 4);
+    s16* out = buf;
+    size_t m = n;
+    if (rate_ != spu::Spu::SAMPLE_RATE) {
+      // Linear interpolation between consecutive input frames; the phase
+      // advances by in/out per output frame, so the rates need share no
+      // factor. Sized for any output rate up to 8x the input.
+      const u32 step = static_cast<u32>((static_cast<u64>(spu::Spu::SAMPLE_RATE) << 16) / rate_);
+      out_.resize((n * rate_ / spu::Spu::SAMPLE_RATE + 2) * 2);
+      m = 0;
+      for (size_t i = 0; i < n; ++i) {
+        const s16 cl = buf[i * 2], cr = buf[i * 2 + 1];
+        while (phase_ < 0x10000) {
+          const u32 f = phase_;
+          out_[m * 2]     = static_cast<s16>(prev_l_ + (((cl - prev_l_) * static_cast<s32>(f)) >> 16));
+          out_[m * 2 + 1] = static_cast<s16>(prev_r_ + (((cr - prev_r_) * static_cast<s32>(f)) >> 16));
+          ++m;
+          phase_ += step;
+        }
+        phase_ -= 0x10000;
+        prev_l_ = cl; prev_r_ = cr;
+      }
+      out = out_.data();
+    }
+    if (muted_) std::memset(out, 0, m * 4);
     else if (volume_ != 100) {
       // Linear in amplitude; the SPU's own master volume is the game's.
       const int g = volume_ * 256 / 100;
-      for (size_t i = 0; i < n * 2; ++i) buf[i] = static_cast<s16>((buf[i] * g) >> 8);
+      for (size_t i = 0; i < m * 2; ++i) out[i] = static_cast<s16>((out[i] * g) >> 8);
     }
-    SDL_QueueAudio(dev_, buf, static_cast<u32>(n * 4));
+    SDL_QueueAudio(dev_, out, static_cast<u32>(m * 4));
   }
 }
 
