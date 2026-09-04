@@ -617,8 +617,14 @@ int main(int argc, char** argv) {
           for (int i = 0; i < SDL_GetNumVideoDrivers() && !pick; ++i) if (!std::strcmp(SDL_GetVideoDriver(i), want)) pick = want;
           if (pick) break;
         }
-        if (pick) setenv("SDL_VIDEODRIVER", pick, 1);
-        else std::fprintf(stderr, "video.disp: this SDL2 has no headless video driver; its own driver will also open the panel\n");
+        if (pick) {
+          setenv("SDL_VIDEODRIVER", pick, 1);
+          // A headless driver's window never takes keyboard focus, and SDL
+          // drops every joystick event while a window exists without focus
+          // (SDL_PrivateJoystickShouldIgnoreEvent). The pad is the only
+          // input on these devices, so let it through regardless.
+          SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+        } else std::fprintf(stderr, "video.disp: this SDL2 has no headless video driver; its own driver will also open the panel\n");
       }
     } else if (use_disp) {
       std::fprintf(stderr, "video.disp: /dev/disp not usable; using SDL\n");
