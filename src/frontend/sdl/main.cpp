@@ -30,6 +30,9 @@
 #include "mic_alsa.h"
 
 #include <SDL2/SDL.h>
+#include <sched.h>
+#include <cerrno>
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 #include <csignal>
@@ -518,6 +521,24 @@ int main(int argc, char** argv) {
   const std::string rom_path = rom ? std::string(rom) : ds::sdl::Config::dir() + "/BootMenu.nds";
   if (boot_firmware) VLOG("no game: booting the firmware\n");
 
+  // Real-time scheduling for the whole process: set here, before any thread
+  // exists (the NDS below starts the compositor), so the emulation thread,
+  // the compositor, the band workers and SDL's own threads all inherit it. On the RG DS (four cores that the
+  // emulator fills, a compositor and a sound daemon on the same cores at
+  // normal priority) Golden Sun's p90 went from 16.8-17.4 ms to 14.7-15.0
+  // and p99 from 23 to 18 with audio on (2026-09-04): the tail was
+  // preemption, not work. Needs the privilege (root, or an rtprio limit);
+  // refused quietly otherwise. emu.realtime = off | rr | fifo, emu.rt_priority.
+  {
+    const std::string rt = cfg.str("emu.realtime", "rr");
+    const int prio = cfg.num("emu.rt_priority", 5);
+    if (rt == "rr" || rt == "fifo") {
+      sched_param sp{}; sp.sched_priority = prio;
+      if (sched_setscheduler(0, rt == "rr" ? SCHED_RR : SCHED_FIFO, &sp) != 0)
+        VLOG("realtime scheduling (%s %d) not permitted: %s\n", rt.c_str(), prio, std::strerror(errno));
+      else VLOG("realtime scheduling: %s %d\n", rt.c_str(), prio);
+    }
+  }
   NDS nds;
   if (!nds.load_bios(bios9.c_str(), bios7.c_str(), fw.c_str())) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
   nds.reset();
