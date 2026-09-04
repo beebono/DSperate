@@ -243,7 +243,7 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 #                               # the emulator exits, for a card with no room to spare
 
 [emu]
-# realtime = rr                # rr | fifo | off: real-time scheduling for the emulator's threads (needs root or an rtprio limit)
+# realtime = rr                 # rr | fifo | off: real-time scheduling for the emulator's threads (needs root or an rtprio limit)
 # rt_priority = 5
 # jit = true                    # false = interpreter
 # quantum = 0                   # 0 = event-bound; 128 = melonDS lockstep
