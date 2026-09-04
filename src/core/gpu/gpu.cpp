@@ -289,6 +289,9 @@ void Gpu::catch_up(u32 mask) {
   if (!a && !b) return;
   render_ranges(a ? render_next_[0] : 1, a ? last : 0,
                 b ? render_next_[1] : 1, b ? last : 0);
+  // A catch-up exists to render lines before the bytes they read change: a
+  // run left in flight by lag mode must land before the caller's store does.
+  join_worker();
 }
 void Gpu::fall_back_per_line(u32 mask) {
   catch_up(mask);

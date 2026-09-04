@@ -399,8 +399,10 @@ private:
   // This is what moves the per-line 2D composite, capture and scaling of a
   // title like Golden Sun off the emulation thread: it is per line by nature
   // and reads its captured picture back at VBlank start, so the batched
-  // hand-off above can never overlap anything there.
-  bool lag_enabled_ = false;      // DS_2D_LAG=1
+  // hand-off above can never overlap anything there. On by default; while
+  // the compositor is hot the raster may drop to two band workers
+  // (Renderer3D::render).
+  bool lag_enabled_ = true;       // DS_2D_LAG=0 disables (default on since 2026-09-04: Golden Sun's title 34 % -> 10-13 % over budget with --cpu-oc)
   bool lag_frame_ = false;        // this frame's per-line lines may stay in flight
   u32  lag_trap_hits_ = 0;
   static constexpr u32 LAG_TRAP_LIMIT = 4096;   // GSDD traps ~55 stores a frame in capture frames; 64 dropped the lag every frame
