@@ -474,6 +474,7 @@ void Display::clear_margins(u32* px, u32 pitch, int w, int h) const {
 // side buffer for the rest.
 void Display::targets(u32* px, u32 stride, Target out[SCREENS]) {
   frame_px_ = px; frame_pitch_ = stride;
+  last_px_ = px; last_pitch_ = stride;
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (v.direct)
@@ -494,6 +495,27 @@ void Display::blit_insets() {
                   side_[v.screen].data() + static_cast<size_t>(y) * v.rect.w, static_cast<size_t>(v.rect.w) * sizeof(u32));
   }
   frame_px_ = nullptr;
+}
+
+bool Display::read_screen(int screen, u32* dst) const {
+  if (!scaled_ || !last_px_) return false;
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
+    if (v.screen != screen || !v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
+    // Direct views live in the frame at their rect; the rest in a side
+    // buffer of the rect's size. Nearest sample: the tier's grid, chunky
+    // and seam treatment come along, which a thumbnail can live with.
+    const u32* src = v.direct ? last_px_ + static_cast<size_t>(v.rect.y) * last_pitch_ + v.rect.x : side_[screen].data();
+    const u32 pitch = v.direct ? last_pitch_ : static_cast<u32>(v.rect.w);
+    for (u32 y = 0; y < SCREEN_H; ++y) {
+      const u32 sy = static_cast<u32>(static_cast<u64>(y) * static_cast<u32>(v.rect.h) / SCREEN_H);
+      const u32* row = src + static_cast<size_t>(sy) * pitch;
+      for (u32 x = 0; x < SCREEN_W; ++x)
+        dst[y * SCREEN_W + x] = row[static_cast<u64>(x) * static_cast<u32>(v.rect.w) / SCREEN_W];
+    }
+    return true;
+  }
+  return false;
 }
 
 bool Display::begin_frame(Target out[SCREENS]) {

@@ -175,18 +175,22 @@ void write_save(NDS& nds, const std::string& path) {
 // pair is sampled down). Whoever shows it scales as it likes. Read from the
 // emulator's framebuffers, not the panel: a screen grabber cannot see a
 // hardware scaler layer, and the one on the A30 read the composite back
-// through fb0 with the wrong stride. Straight RGBA, alpha forced opaque.
-bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
+// through fb0 with the wrong stride. On a scanline tier those framebuffers
+// are never filled (the lines go straight to the panel buffer), so there
+// the display reads its last frame back for us. Straight RGBA, alpha
+// forced opaque.
+bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout, const ds::sdl::Display* display) {
   using Disp = ds::sdl::Display;
   int w = 0, h = 0;
   Disp::natural_size(layout, 1.0, w, h);
   Disp::View views[Disp::SCREENS];
   Disp::place(layout, w, h, views);
   std::vector<u8> rgba(static_cast<size_t>(w) * h * 4, 0);
+  std::vector<u32> back(static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H);
   for (int i = 0; i < Disp::SCREENS; ++i) {
     const Disp::View& v = views[i];
     if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
-    const u32* fb = nds.gpu.framebuffer(v.screen);
+    const u32* fb = display && display->read_screen(v.screen, back.data()) ? back.data() : nds.gpu.framebuffer(v.screen);
     for (int y = 0; y < v.rect.h; ++y) {
       const int dy = v.rect.y + y;
       if (dy < 0 || dy >= h) continue;
@@ -217,13 +221,13 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
 }
 
 // The screenshot hotkey: <GAMECODE>-<timestamp>.png in the states directory.
-void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout) {
+void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout, const ds::sdl::Display* display) {
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
   std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
   const std::string path = dir + "/" + code + "-" + stamp + ".png";
-  if (write_png(nds, path, layout)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
+  if (write_png(nds, path, layout, display)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
 }
 
 std::string state_path(NDS& nds, const std::string& dir, int slot) {
@@ -1164,7 +1168,7 @@ sdl_ready:
     const bool beside = autosave_png_cfg == "true" || autosave_png_cfg == "1";
     std::string png = autosave_png_cfg;
     if (beside) { png = auto_state_path(nds, session.states_dir); png.replace(png.size() - 3, 3, "png"); }
-    if (write_png(nds, png, display.current_layout())) std::fprintf(stderr, "state: thumbnail %s\n", png.c_str());
+    if (write_png(nds, png, display.current_layout(), &display)) std::fprintf(stderr, "state: thumbnail %s\n", png.c_str());
   };
   // A loaded state's view, applied the way the layout hotkeys apply theirs.
   Disp::Layout loaded_layout; bool got_layout = false;
@@ -1235,7 +1239,7 @@ sdl_ready:
         if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.pip_corner", Disp::corner_name(l.corner));
         break;
       }
-      case A::Screenshot: screenshot(nds, session.states_dir, display.current_layout()); break;
+      case A::Screenshot: screenshot(nds, session.states_dir, display.current_layout(), &display); break;
       case A::Lid: input.set_lid(!input.lid()); VLOG("lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
       case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
       case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;

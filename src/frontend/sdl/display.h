@@ -111,6 +111,12 @@ public:
   // Locks the panel-sized texture and fills in one target per screen. False
   // if the lock failed, in which case the caller must fall back to draw().
   bool begin_frame(Target out[SCREENS]);
+  // `screen` as last presented, sampled back to 256x192 into `dst`, from the
+  // buffer the scanline path last drew into. On a scanline tier the core's
+  // own framebuffers are never written (the lines go straight to the panel),
+  // so a screenshot has to come from here. False on the renderer tier, or
+  // before the first frame: read the core's framebuffer instead.
+  bool read_screen(int screen, u32* dst) const;
   void end_frame();   // unlock and present
   void on_resize() { layout(); build_scale(); margins_dirty_ = true; }
   void toggle_fullscreen();
@@ -176,6 +182,8 @@ private:
   std::vector<u32>  side_[SCREENS];   // scaled pixels of a non-direct view
   u32*              frame_px_ = nullptr;   // the buffer begin_frame handed out, for end_frame's insets
   u32               frame_pitch_ = 0;
+  const u32*        last_px_ = nullptr;    // the last such buffer, for read_screen (still holds that frame)
+  u32               last_pitch_ = 0;
 };
 
 } // namespace ds::sdl
