@@ -24,6 +24,10 @@ namespace ds::gpu {
 //      latches and lazy-2D bookkeeping still run, so what is removed is the
 //      drawing and not the machinery that decides when to draw
 //   4  display capture
+//   8  engine A's 2D drawing only (bit 2 for one engine): the share of the
+//      2D work that runs on the emulation thread rather than the line worker
+//  16  engine A's scanline scaler only (emit_scaled), likewise the emulation
+//      thread's share of the frontend-buffer scaling
 unsigned ablate() { static const unsigned m = [] { const char* e = std::getenv("DS_ABLATE"); return e ? static_cast<unsigned>(std::atoi(e)) : 0u; }(); return m; }
 
 static void ev_scanline(NDS& nds, u32) { nds.gpu.on_scanline_start(); }
@@ -592,7 +596,7 @@ void Gpu::step_engine(int e, u32 line) {
   // Engine B on a screen the frontend hides (set_screen_visible) draws
   // nothing; the line it comes back on re-renders its own sprites, which the
   // skipped line before it would have drawn.
-  const bool draw = !(abl & 2) && !skip_frame_ && !(e == 1 && !screen_visible_[en.screen()]);
+  const bool draw = !(abl & 2) && !(e == 0 && (abl & 8)) && !skip_frame_ && !(e == 1 && !screen_visible_[en.screen()]);
   if (!draw) skipped_[e] = true; else if (skipped_[e]) { skipped_[e] = false; en.render_sprites(line); }
   // Reading the 3D line joins the raster bands, so a skipped frame (whose
   // raster never ran) must not ask for it; capture, which also reads it, is
@@ -634,7 +638,7 @@ void Gpu::output_engine(int e, u32 line) {
       else { output_b(dst); expand_colours(dst); }
     }
   } else { for (u32 i = 0; i < 256; ++i) dst[i] = 0xFF000000; }
-  if (scaled) emit_scaled(screen, line, dst);
+  if (scaled && !(e == 0 && (ablate() & 16))) emit_scaled(screen, line, dst);
   delete sc;
 }
 
