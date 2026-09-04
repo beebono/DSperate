@@ -8,28 +8,25 @@ on:
   workflow_dispatch:
 
 jobs:
-  # x86 host build: interpreter + portable kernels, plus the aarch64 cross
-  # build whose tests (JIT, NEON kernels) run under qemu-user.
-  host-and-cross:
+  # x86_64: the interpreter and the portable kernels -- there is no JIT backend
+  # or vector renderer for this host, so it is a correctness gate only and
+  # produces nothing to ship.  The AArch64 JIT/NEON paths are covered natively
+  # by the arm64 job below.
+  x86_64:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchains
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libsdl2-dev g++-aarch64-linux-gnu qemu-user-static
-      - name: Host build and test
+          sudo apt-get install -y ninja-build libsdl2-dev
+      - name: Build and test
         run: |
           cmake --preset host
           cmake --build --preset host
           ctest --preset host --output-on-failure
       - name: configs/default.ini matches the built-in defaults
         run: tools/gen_example_configs.sh && git diff --exit-code configs/default.ini
-      - name: Cross build and test (qemu-aarch64)
-        run: |
-          cmake --preset aarch64-cross -DDSPERATE_SDL=OFF
-          cmake --build --preset aarch64-cross
-          cd build/aarch64 && ctest --output-on-failure
 
   # Native arm64: the JIT and NEON paths on real silicon, and the binaries a
   # handheld runs. libstdc++/libgcc are linked statically so the artefact does
@@ -102,7 +99,7 @@ jobs:
   # meant to be edited on GitHub afterwards.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [host-and-cross, arm64, arm32]
+    needs: [x86_64, arm64, arm32]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
