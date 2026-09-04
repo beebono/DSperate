@@ -26,8 +26,8 @@ namespace ds::gpu {
 //   4  display capture
 //   8  engine A's 2D drawing only (bit 2 for one engine): the share of the
 //      2D work that runs on the emulation thread rather than the line worker
-//  16  engine A's scanline scaler only (emit_scaled), likewise the emulation
-//      thread's share of the frontend-buffer scaling
+//  16  engine A's scanline scaler only (emit_scaled)
+//  32  engine B's scanline scaler only
 unsigned ablate() { static const unsigned m = [] { const char* e = std::getenv("DS_ABLATE"); return e ? static_cast<unsigned>(std::atoi(e)) : 0u; }(); return m; }
 
 static void ev_scanline(NDS& nds, u32) { nds.gpu.on_scanline_start(); }
@@ -566,14 +566,15 @@ void Gpu::worker_job(void* self) {
   Gpu& g = *static_cast<Gpu*>(self);
   for (int e = 0; e < 2; ++e)
     for (u32 l = g.job_first_[e]; l <= g.job_last_[e]; ++l) g.step_engine(e, l);
+  for (u32 i = 0; i < g.bscale_n_; ++i) g.emit_scaled(g.bscale_[i].screen, g.bscale_[i].line, g.bscale_[i].px);
 }
 
 void Gpu::join_worker() {
-  if (!inflight_[0] && !inflight_[1]) return;
+  if (!inflight_[0] && !inflight_[1] && !scale_inflight_) return;
   static const bool dbg = std::getenv("DS_DEBUG_JOIN") != nullptr;
   if (dbg) std::fprintf(stderr, "[join] frame %llu line %u hblank %d a %u..%u b %u..%u deferred %d\n", (unsigned long long)nds_.frame_count, line_, hblank_done_ ? 1 : 0, job_first_[0], job_last_[0], job_first_[1], job_last_[1], a_deferred_ ? 1 : 0);
   worker_.wait();
-  inflight_[0] = inflight_[1] = false;
+  inflight_[0] = inflight_[1] = false; scale_inflight_ = false; bscale_n_ = 0;
   if (a_deferred_) { a_deferred_ = false; finish_a(); }
 }
 
@@ -613,9 +614,10 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
   capcnt_render_ = capcnt_; capture_render_ = capture_on_;
   static const bool dbg = std::getenv("DS_DEBUG_JOIN") != nullptr;
   auto hand = [&](bool a, bool b) {
-    if (dbg) std::fprintf(stderr, "[hand] frame %llu line %u a %u..%u b %u..%u lag %d\n", (unsigned long long)nds_.frame_count, line_, a ? af : 1, a ? al : 0, b ? bf : 1, b ? bl : 0, lag_frame_ ? 1 : 0);
+    if (dbg) std::fprintf(stderr, "[hand] frame %llu line %u a %u..%u b %u..%u lag %d stash %u\n", (unsigned long long)nds_.frame_count, line_, a ? af : 1, a ? al : 0, b ? bf : 1, b ? bl : 0, lag_frame_ ? 1 : 0, bscale_n_);
     job_first_[0] = a ? af : 1; job_last_[0] = a ? al : 0;
     job_first_[1] = b ? bf : 1; job_last_[1] = b ? bl : 0;
+    scale_inflight_ = bscale_n_ > 0;
     worker_.dispatch();
     inflight_[0] = a; inflight_[1] = b;
     // A capture in flight writes an LCDC bank the guest may read before the
@@ -634,13 +636,20 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
     // worker_), engine B's run drawn here meanwhile.
     hand(true, false);
     a_handed = true; a_deferred_ = true;
-  } else if (par_2d_ && lag_frame_ && a_has) {
+  } else if (par_2d_ && lag_frame_ && (a_has || (b_has && scaling()))) {
     // Lag mode: engine A's lines go and stay in flight until the next line's
     // HBlank (the join at the top) unless this is the last one; engine B's
     // are drawn here -- the cheap engine, and the one whose window a game
-    // streams into per line, which would join the lag on every store.
-    hand(true, false);
-    a_handed = true;
+    // streams into per line, which would join the lag on every store -- but
+    // their scaling is stashed and goes with the job (see bscale_).
+    if (b_has && scaling()) {
+      bscale_defer_ = true;
+      for (u32 x = bf; x <= bl; ++x) step_engine(1, x);
+      bscale_defer_ = false;
+      b_handed = true;                        // drawn, its scaling in flight
+    }
+    hand(a_has, false);
+    a_handed = a_has;
   } else if (b_has && par_2d_ && (b_len >= 24 || !worker_.parked())) {
     // A short run against a parked worker is drawn here: the wake-up costs
     // more than the lines do, and the trap-hit catch-ups of a batched frame
@@ -657,7 +666,7 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
   // stays in flight until the next line; the last display line always
   // joins, since writes after it apply directly.
   if (a_deferred_) { if (!defer_join_) join_worker(); }
-  else if ((a_handed || b_handed) && lag_frame_ && last < SCREEN_H - 1) prof::add(prof::C_2D_LAG_LINES, 1);
+  else if ((a_handed || b_handed || scale_inflight_) && lag_frame_ && last < SCREEN_H - 1) prof::add(prof::C_2D_LAG_LINES, 1);
   else join_worker();
   if (a_has) render_next_[0] = al + 1;
   if (b_has) render_next_[1] = bl + 1;
@@ -727,7 +736,13 @@ void Gpu::output_engine(int e, u32 line) {
       else { output_b(dst); expand_colours(dst); }
     }
   } else { for (u32 i = 0; i < 256; ++i) dst[i] = 0xFF000000; }
-  if (scaled && !(e == 0 && (ablate() & 16))) emit_scaled(screen, line, dst);
+  if (scaled && !(ablate() & (e == 0 ? 16u : 32u))) {
+    if (e == 1 && bscale_defer_ && bscale_n_ < SCREEN_H) {
+      StashedLine& st = bscale_[bscale_n_++];
+      st.line = line; st.screen = screen;
+      std::memcpy(st.px, dst, sizeof st.px);
+    } else emit_scaled(screen, line, dst);
+  }
   delete sc;
 }
 
@@ -967,8 +982,12 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   const u32 y0 = (first * t.h + SCREEN_H - 1) / SCREEN_H;
   const u32 y1 = ((last + 1) * t.h + SCREEN_H - 1) / SCREEN_H;
   if (y0 >= y1) return;                      // downscale: this line is dropped
-  u32* row = t.px + static_cast<size_t>(y0) * t.pitch;
+  u32* const dst_row = t.px + static_cast<size_t>(y0) * t.pitch;
   const size_t bytes = static_cast<size_t>(t.xrun[SCREEN_W]) * sizeof(u32);
+  // Rows are built in cached scratch and copied out, never read back from
+  // the target (see row_scratch_). A row wider than the scratch goes direct.
+  const bool stage = t.xrun[SCREEN_W] <= SCALED_ROW_MAX;
+  u32* row = stage ? row_scratch_[screen] : dst_row;
   if (t.blend && t.seam_w) {
     // Box-filter seams (sharp-shimmerless): a panel pixel or row that
     // straddles two source pixels or lines is their area-weighted blend,
@@ -980,7 +999,7 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
     const u32 ycrisp_end = straddle_below ? y1 - 1 : y1;
     if (ycrisp_end > y0) {
       emit_row_straddle(t, src, row);
-      for (u32 y = y0 + 1; y < ycrisp_end; ++y)
+      for (u32 y = stage ? y0 : y0 + 1; y < ycrisp_end; ++y)
         std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
     }
     // The row above this span straddles the previous line and this one.
@@ -999,7 +1018,7 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   }
   if (t.grid >= 256) {
     kern::active::scale_row(src, t.xrun, row);
-    for (u32 y = y0 + 1; y < y1; ++y)
+    for (u32 y = stage ? y0 : y0 + 1; y < y1; ++y)
       std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
     return;
   }
@@ -1023,9 +1042,9 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   const u32 min_run = (w + SCREEN_W - 1) / SCREEN_W, min_rows = (t.h + SCREEN_H - 1) / SCREEN_H;
   const bool seam = y1 - y0 >= std::max<u32>(2, min_rows);
   const u32 yfirst = seam ? y0 + 1 : y0;
-  row = t.px + static_cast<size_t>(yfirst) * t.pitch;
+  row = stage ? row_scratch_[screen] : t.px + static_cast<size_t>(yfirst) * t.pitch;
   kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, false, row);
-  for (u32 y = yfirst + 1; y < y1; ++y)
+  for (u32 y = stage ? yfirst : yfirst + 1; y < y1; ++y)
     std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
   if (seam) kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, true, t.px + static_cast<size_t>(y0) * t.pitch);
 }

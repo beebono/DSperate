@@ -148,7 +148,7 @@ public:
   // alternation, nothing to avoid). Watched: the POWCNT1 swap bit, each
   // engine's display mode and VRAM display bank, and the capture destination.
   u8 display_phase_period() const { return phase_period_; }
-  bool lines_in_flight() const { return inflight_[0] || inflight_[1]; }
+  bool lines_in_flight() const { return inflight_[0] || inflight_[1] || scale_inflight_; }
   // This frame hands display lines to the worker as they come (lag mode):
   // the worker is hot for the whole display period, i.e. a core is spoken
   // for, which the 3D band count allows for (Renderer3D::render).
@@ -276,6 +276,11 @@ private:
   // The output stage's line buffer when scaling: output_line writes here
   // instead of into fb_, at the same cost, and scale_row reads it back hot.
   alignas(16) std::array<std::array<u32, SCREEN_W>, 2> line_out_{};
+  // A scaled row, per screen, staged here before it goes to the target: the
+  // target is scanout memory (uncached CMA on the handhelds), and copying a
+  // row to its duplicates below straight out of it reads that memory back.
+  static constexpr u32 SCALED_ROW_MAX = 4096;
+  alignas(16) u32 row_scratch_[2][SCALED_ROW_MAX];
   const u32* line3d_ = nullptr;   // 3D output for the line being drawn (whichever thread draws engine A)
 
   // Lazy-2D state for the frame in progress.
@@ -384,6 +389,18 @@ private:
   u32  capcnt_render_ = 0;
   bool capture_render_ = false;
   int  read_trap_bank_ = -1;            // LCDC bank under the capture read trap, or -1
+  // Engine B's scaling, handed to the worker with engine A's lagged lines:
+  // the scaler reads only the finished output line, never the engines or
+  // VRAM, so nothing the guest does can observe it and the join is only
+  // for the buffer's reuse and the frame's end. Lines drawn here in lag
+  // mode stash their output instead of scaling it (output_engine); the
+  // worker scales the stash after engine A's lines. On Golden Sun's title
+  // that is ~1.1 ms a frame off the emulation thread with two panels.
+  struct StashedLine { u32 line; int screen; alignas(16) u32 px[SCREEN_W]; };
+  StashedLine bscale_[SCREEN_H];
+  u32  bscale_n_ = 0;                   // lines stashed for the job being built / in flight
+  bool bscale_defer_ = false;           // output_engine stashes engine B's line instead of scaling it
+  bool scale_inflight_ = false;         // the worker holds a stash to scale
   bool defer_join_ = true;              // DS_2D_DEFER=0: join engine A's batch at once (bisecting tool)
   Renderer3D::FrameRef ref3d_;          // the 3D frame these display lines read (begin_frame)
   // Lag mode (DS_2D_LAG): per-line frames (capture per line, a VRAM trap,
