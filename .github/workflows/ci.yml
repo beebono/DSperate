@@ -52,8 +52,7 @@ jobs:
           tar -C dist -czf dsperate-${GITHUB_REF_NAME}-linux-aarch64.tar.gz dsperate-${GITHUB_REF_NAME}-linux-aarch64
       - uses: actions/upload-artifact@v4
         with:
-          pattern: dsperate-linux-*
-          merge-multiple: true
+          name: dsperate-linux-aarch64
           path: dsperate-*-linux-aarch64.tar.gz
 
   # 32-bit ARM (armhf): the A32 JIT backend and the ARMv7 NEON subset, which no
@@ -111,6 +110,13 @@ jobs:
         with:
           pattern: dsperate-linux-*
           merge-multiple: true
+      # Fail here, with the listing, rather than in gh's glob error: an
+      # artefact uploaded under the wrong name is not downloaded at all.
+      - name: Check the tarballs arrived
+        run: |
+          ls -l
+          test -f dsperate-${GITHUB_REF_NAME}-linux-aarch64.tar.gz
+          test -f dsperate-${GITHUB_REF_NAME}-linux-armhf.tar.gz
       - name: Write release notes
         run: |
           prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
