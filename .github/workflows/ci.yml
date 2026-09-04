@@ -55,14 +55,54 @@ jobs:
           tar -C dist -czf dsperate-${GITHUB_REF_NAME}-linux-aarch64.tar.gz dsperate-${GITHUB_REF_NAME}-linux-aarch64
       - uses: actions/upload-artifact@v4
         with:
-          name: dsperate-linux-aarch64
+          pattern: dsperate-linux-*
+          merge-multiple: true
           path: dsperate-*-linux-aarch64.tar.gz
+
+  # 32-bit ARM (armhf): the A32 JIT backend and the ARMv7 NEON subset, which no
+  # other job covers.  Cross-built from x86 against multiarch armhf packages
+  # (which come from ports.ubuntu.com, not the amd64 mirror) and tested under
+  # qemu-arm-static.
+  arm32:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchains
+        run: |
+          sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64 i386/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo dpkg --add-architecture armhf
+          printf '%s\n' \
+            'Types: deb' \
+            'Architectures: armhf' \
+            'URIs: http://ports.ubuntu.com/ubuntu-ports' \
+            'Suites: noble noble-updates noble-security' \
+            'Components: main universe' \
+            'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+            | sudo tee /etc/apt/sources.list.d/ubuntu-ports.sources >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-arm-linux-gnueabihf qemu-user-static libsdl2-dev:armhf
+      - name: Cross build and test (qemu-arm)
+        run: |
+          cmake --preset arm32-cross -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --build --preset arm32-cross
+          cd build/arm32 && ctest --output-on-failure
+      - name: Package
+        run: |
+          test -x build/arm32/src/frontend/sdl/dsperate  # SDL2:armhf must have been found
+          mkdir -p dist/dsperate-${GITHUB_REF_NAME}-linux-armhf
+          cp build/arm32/src/frontend/sdl/dsperate build/arm32/src/frontend/headless/dsperate-headless \
+             LICENSE README.md dist/dsperate-${GITHUB_REF_NAME}-linux-armhf/
+          tar -C dist -czf dsperate-${GITHUB_REF_NAME}-linux-armhf.tar.gz dsperate-${GITHUB_REF_NAME}-linux-armhf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsperate-linux-armhf
+          path: dsperate-*-linux-armhf.tar.gz
 
   # Tag v* to publish. The notes are a stand-in (name, tag, changelog link)
   # meant to be edited on GitHub afterwards.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [host-and-cross, arm64]
+    needs: [host-and-cross, arm64, arm32]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -72,7 +112,8 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: dsperate-linux-aarch64
+          pattern: dsperate-linux-*
+          merge-multiple: true
       - name: Write release notes
         run: |
           prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
@@ -91,4 +132,4 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dsperate-*-linux-aarch64.tar.gz --title "DSperate ${GITHUB_REF_NAME}" --notes-file notes.md
+        run: gh release create "${GITHUB_REF_NAME}" dsperate-*-linux-aarch64.tar.gz dsperate-*-linux-armhf.tar.gz --title "DSperate ${GITHUB_REF_NAME}" --notes-file notes.md
