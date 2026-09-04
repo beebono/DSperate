@@ -34,6 +34,7 @@
 #include <sched.h>
 #include <cerrno>
 #include <cstring>
+#include <unistd.h>
 #include <algorithm>
 #include <cmath>
 #include <csignal>
@@ -88,6 +89,9 @@ const char* kUsage =
     "                  screen, 4 on a 640x480 panel = 160x120 cells) | pair (2x2 DS pixels) | N\n"
     "  --disp / --no-disp  present through the display engine's scaler layer (Miyoo A30 class\n"
     "                  devices; the default is auto: wherever /dev/disp answers). video.disp\n"
+    "  --fbdev / --no-fbdev  present straight through /dev/fb0 (the mali-fbdev SDL2 of the\n"
+    "                  H700 handhelds; the default is auto: when that SDL2 has a mali driver\n"
+    "                  and fb0 answers). video.fbdev\n"
     "  --accel         GPU renderer; the default is software, which measures faster\n"
     "                  on the handhelds (the GL driver's threads cost more than the scale)\n"
     "  --no-audio      run without sound (frames are paced by the clock)\n"
@@ -544,6 +548,8 @@ int main(int argc, char** argv) {
     else if (flag("--accel")) cli.set("video.accel", "true");
     else if (flag("--disp")) cli.set("video.disp", "true");
     else if (flag("--no-disp")) cli.set("video.disp", "false");
+    else if (flag("--fbdev")) cli.set("video.fbdev", "true");
+    else if (flag("--no-fbdev")) cli.set("video.fbdev", "false");
     else if (flag("--no-audio")) cli.set("audio.enabled", "false");
     else if (arg("--volume")) cli.set("audio.volume", argv[++i]);
     else if (flag("--no-mic")) cli.set("audio.mic", "false");
@@ -570,7 +576,7 @@ int main(int argc, char** argv) {
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
-                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.disp", "video.vsync", "audio.enabled", "audio.volume",
+                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
@@ -694,34 +700,69 @@ int main(int argc, char** argv) {
   // events and controllers and draws nothing. Decided before SDL_Init, which is
   // where the driver is chosen. auto (the default) takes it wherever the
   // device answers the disp ioctls; on/off force it.
+  // Whichever headless driver this SDL2 was built with: the handheld
+  // builds drop "dummy" but keep "offscreen".
+  auto go_headless = [](const char* tier) {
+    if (std::getenv("SDL_VIDEODRIVER")) return;
+    const char* pick = nullptr;
+    for (const char* want : {"dummy", "offscreen"}) {
+      for (int i = 0; i < SDL_GetNumVideoDrivers() && !pick; ++i) if (!std::strcmp(SDL_GetVideoDriver(i), want)) pick = want;
+      if (pick) break;
+    }
+    if (pick) {
+      setenv("SDL_VIDEODRIVER", pick, 1);
+      // A headless driver's window never takes keyboard focus, and SDL
+      // drops every joystick event while a window exists without focus
+      // (SDL_PrivateJoystickShouldIgnoreEvent). The pad is the only
+      // input on these devices, so let it through regardless.
+      SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    } else std::fprintf(stderr, "%s: this SDL2 has no headless video driver; its own driver will also open the panel\n", tier);
+  };
   const std::string disp_mode = cfg.str("video.disp");
   const bool disp_auto = disp_mode.empty() || disp_mode == "auto";
   bool use_disp = disp_mode == "true" || disp_mode == "on";
   if ((use_disp || disp_auto) && !dual_window) {
-    if (ds::sdl::DispOut::available()) {
-      use_disp = true;
-      // Whichever headless driver this SDL2 was built with: the handheld
-      // builds drop "dummy" but keep "offscreen".
-      if (!std::getenv("SDL_VIDEODRIVER")) {
-        const char* pick = nullptr;
-        for (const char* want : {"dummy", "offscreen"}) {
-          for (int i = 0; i < SDL_GetNumVideoDrivers() && !pick; ++i) if (!std::strcmp(SDL_GetVideoDriver(i), want)) pick = want;
-          if (pick) break;
-        }
-        if (pick) {
-          setenv("SDL_VIDEODRIVER", pick, 1);
-          // A headless driver's window never takes keyboard focus, and SDL
-          // drops every joystick event while a window exists without focus
-          // (SDL_PrivateJoystickShouldIgnoreEvent). The pad is the only
-          // input on these devices, so let it through regardless.
-          SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
-        } else std::fprintf(stderr, "video.disp: this SDL2 has no headless video driver; its own driver will also open the panel\n");
-      }
-    } else if (use_disp) {
+    if (ds::sdl::DispOut::available()) { use_disp = true; go_headless("video.disp"); }
+    else if (use_disp) {
       std::fprintf(stderr, "video.disp: /dev/disp not usable; using SDL\n");
       use_disp = false;
     }
   } else use_disp = false;
+
+  // The fbdev tier (display_fbdev.h) owns fb0 the same way. auto takes it
+  // only where SDL2 was built with the mali video driver -- the BaseOS
+  // handhelds -- since any desktop with a console has an fb0 too and its
+  // compositor, not us, should have it. on forces it wherever fb0 answers.
+  const std::string fbdev_mode = cfg.str("video.fbdev");
+  const bool fbdev_auto = fbdev_mode.empty() || fbdev_mode == "auto";
+  bool use_fbdev = fbdev_mode == "true" || fbdev_mode == "on";
+  if (!use_disp && (use_fbdev || fbdev_auto) && !dual_window) {
+    // The signals: the launcher named the mali driver, this SDL2 was built
+    // with one, the launcher named a headless driver outright, or nothing
+    // SDL could draw on exists -- no X or Wayland display, no DRM node --
+    // in which case SDL lands on its offscreen driver by itself (seen on
+    // the RG35XX SP through spruce's launcher: "software renderer,
+    // offscreen driver", a black panel with sound). A box like that with a
+    // writable fb0 is an fbdev box.
+    bool mali = false, headless = false;
+    if (const char* vd = std::getenv("SDL_VIDEODRIVER")) {
+      mali = !std::strcmp(vd, "mali");
+      headless = !std::strcmp(vd, "dummy") || !std::strcmp(vd, "offscreen");
+    } else {
+      for (int i = 0; i < SDL_GetNumVideoDrivers(); ++i) if (!std::strcmp(SDL_GetVideoDriver(i), "mali")) mali = true;
+      headless = !std::getenv("DISPLAY") && !std::getenv("WAYLAND_DISPLAY") && ::access("/dev/dri", F_OK) != 0;
+    }
+    if ((use_fbdev || mali || headless) && ds::sdl::FbdevOut::available()) {
+      use_fbdev = true;
+      // The mali driver named explicitly by the launcher would put an EGL
+      // surface on fb0 under us; a headless one named is kept as it is.
+      if (mali && std::getenv("SDL_VIDEODRIVER")) unsetenv("SDL_VIDEODRIVER");
+      go_headless("video.fbdev");
+    } else if (use_fbdev) {
+      std::fprintf(stderr, "video.fbdev: /dev/fb0 not usable; using SDL\n");
+      use_fbdev = false;
+    } else use_fbdev = false;
+  } else use_fbdev = false;
 
   u32 init = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
   if (audio_on || mic_on) init |= SDL_INIT_AUDIO;
@@ -759,7 +800,7 @@ sdl_ready:
     if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel, 0, 1 - bottom_display) ||
         !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
-  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; } }
+  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); display.set_fbdev(use_fbdev); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; } }
   // A single-screen layout shows one screen: the core skips the other's
   // engine (Gpu::set_screen_visible). Every other layout, and dual-window,
   // shows both.

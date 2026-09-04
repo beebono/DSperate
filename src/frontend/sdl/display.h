@@ -5,6 +5,7 @@
 #include "core/types.h"
 #include "display_disp.h"
 #include "display_drm.h"  // complete types for the unique_ptr
+#include "display_fbdev.h"
 #include "display_wl.h"
 
 #include <SDL2/SDL.h>
@@ -102,6 +103,9 @@ public:
   // Set before open(); draw() is then the way to the screen.
   void set_disp(bool on) { disp_wanted_ = on; }
   bool disp() const { return disp_ != nullptr; }
+  // Present straight through /dev/fb0 (display_fbdev.h): the scanline path
+  // writes panel-sized frames into fb0's own buffers. Set before open().
+  void set_fbdev(bool on) { fbdev_wanted_ = on; }
   // The cell map in use for `screen` (null when the pair path is), for the core.
   const void* cell_map(int screen) const { return cells_[screen].x.cells ? &cells_[screen] : nullptr; }
   // Locks the panel-sized texture and fills in one target per screen. False
@@ -156,6 +160,7 @@ private:
 
   bool              scaled_ = false;
   bool              disp_wanted_ = false;
+  bool              fbdev_wanted_ = false;
   std::unique_ptr<DispOut> disp_;       // display-engine tier; null otherwise
   bool              chunky_ = false;
   int               chunky_cell_ = 0;

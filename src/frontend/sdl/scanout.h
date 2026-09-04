@@ -34,6 +34,8 @@ public:
 
   virtual int width() const = 0;
   virtual int height() const = 0;
+  // Row pitch in pixels; the width unless the buffer is padded (fbdev).
+  virtual int stride() const { return width(); }
   // How many buffers rotate, so the caller knows how many need their
   // letterbox margins cleared after a layout change.
   virtual int bufs() const = 0;

@@ -69,6 +69,24 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     }
   }
 
+  // fbdev tier: the scanline path straight into fb0's buffers, for the SDL2s
+  // whose only video driver is Mali EGL over fbdev (the H700 handhelds under
+  // BaseOS). Sizes the window to the panel; nothing SDL draws reaches it.
+  if (fbdev_wanted_ && only_screen_ < 0) {
+    auto fo = std::make_unique<FbdevOut>();
+    if (fo->open(win_, vsync)) {
+      out_ = std::move(fo);
+      scaled_ = true;
+      if (accel || linear) std::fprintf(stderr, "video.fbdev renders on the CPU; --accel/--linear ignored\n");
+      layout();
+      build_scale();
+      std::fprintf(stderr, "video: fbdev scanout %dx%d, %s driver, scanline scaling, vsync %s\n",
+                   out_->width(), out_->height(), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off");
+      return true;
+    }
+    std::fprintf(stderr, "video.fbdev: /dev/fb0 not usable; using SDL\n");
+  }
+
   // Per-scanline scaling renders into the presented buffer directly, which
   // cannot coexist with an SDL_Renderer on the same window, so it is decided
   // here and the renderer is skipped entirely.
@@ -503,7 +521,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
   }
   if (out_) {
     if (u32* px = out_->begin_frame()) {
-      const u32 stride = static_cast<u32>(out_->width());
+      const u32 stride = static_cast<u32>(out_->stride());
       // Every buffer needs its margins cleared once, not just the one in
       // hand: a layout change restarts the count, or the other buffers keep
       // the old layout and flicker it back as they come round.
