@@ -208,14 +208,19 @@ void Display::layout() {
   if (disp_) { int cw = 0, ch = 0; natural_size(layout_, 1.0, cw, ch); disp_->set_canvas(cw, ch); }
   int w = 0, h = 0;
   if (!out_size(w, h)) return;
+  if (only_screen_ >= 0) {
+    const double sw = SCREEN_W, sh = SCREEN_H, s = std::min(w / sw, h / sh);
+    views_[0] = View{only_screen_, SDL_Rect{static_cast<int>((w - sw * s) / 2), static_cast<int>((h - sh * s) / 2), static_cast<int>(sw * s), static_cast<int>(sh * s)}, true, true};
+    return;
+  }
+  place(layout_, w, h, views_);
+  if (disp_) for (int i = 0; i < nviews_; ++i) disp_->set_view(i, views_[i].rect.x, views_[i].rect.y, views_[i].rect.w, views_[i].rect.h, views_[i].shown);
+}
+
+void Display::place(const Layout& layout_, int w, int h, View views_[SCREENS]) {
   const double sw = SCREEN_W, sh = SCREEN_H;
   auto fit = [&](double cols, double rows) { return std::min(w / (sw * cols), h / (sh * rows)); };
   auto rect = [&](double x, double y, double s) { return SDL_Rect{static_cast<int>(x), static_cast<int>(y), static_cast<int>(sw * s), static_cast<int>(sh * s)}; };
-  if (only_screen_ >= 0) {
-    const double s = fit(1, 1);
-    views_[0] = View{only_screen_, rect((w - sw * s) / 2, (h - sh * s) / 2, s), true, true};
-    return;
-  }
   const int p = layout_.primary, q = 1 - p;
   // Views are drawn in order, so the inset goes last; map_point() looks from
   // the end, so the inset also wins the touch.
@@ -268,7 +273,6 @@ void Display::layout() {
     }
     case Mode::Count: break;
   }
-  if (disp_) for (int i = 0; i < nviews_; ++i) disp_->set_view(i, views_[i].rect.x, views_[i].rect.y, views_[i].rect.w, views_[i].rect.h, views_[i].shown);
 }
 
 void Display::draw(const u32* const fb[SCREENS]) {

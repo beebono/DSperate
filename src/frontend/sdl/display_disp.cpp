@@ -226,6 +226,11 @@ void DispOut::set_canvas(int w, int h) {
 
 void DispOut::set_view(int i, int x, int y, int w, int h, bool shown) {
   if (i < 0 || i >= VIEWS) return;
+  const ViewRect& o = views_[i];
+  // A moved, resized or hidden view leaves its old pixels behind in every
+  // buffer: pip to single, a screen swap or a corner change keep the canvas
+  // size, so set_canvas() alone would not black them out.
+  if (o.x != x || o.y != y || o.w != w || o.h != h || o.shown != shown) dirty_ = (1u << BUFS) - 1;
   views_[i] = ViewRect{x, y, w, h, shown};
 }
 

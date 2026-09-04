@@ -198,7 +198,7 @@ Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,
 Enter = Start, Right Shift = Select; `Escape` quits, `P` opens the pause menu, `Tab` held
 fast-forwards, `F` toggles fullscreen, `F4`/`F10` cycle the screen layout forward/back, `F6` swaps
 which screen is alone/large/dominant and `F8` moves the PiP inset (all three
-remembered for the game), `F9` takes a screenshot (both screens, BMP, in the
+remembered for the game), `F9` takes a screenshot (both screens, PNG, in the
 states directory), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
 the state in the current slot and `F2`/`F3` change the slot, `L` closes and
 opens the lid, `M` held is the fake microphone. The `fps` hotkey toggles an
@@ -261,8 +261,11 @@ overlay -- and it redraws only when the picture would change.
 A state is the whole machine at a frame boundary (~5.5 MB, uncompressed: RAM, VRAM, both CPUs, every
 peripheral, the geometry engine's polygon RAM and the rasterised 3D frame)
 and loads only with the same ROM; the battery save is written alongside it so
-the two never disagree. The recompiler's translations are dropped on load and
-rebuilt as the game runs. `src/core/state/state.h` describes the chunked
+the two never disagree. The SDL frontend appends the screen layout (mode,
+primary screen, PiP corner and sizes) after the machine's chunks, so a state
+brings its view back with it; the headless build writes no such chunk and a
+state without one keeps the current layout. The recompiler's translations are
+dropped on load and rebuilt as the game runs. `src/core/state/state.h` describes the chunked
 format; each subsystem lists its own fields in one `sync_state` that both
 writes and reads, so a state saved straight after a load is byte-identical to
 the one loaded -- `tools/state_roundtrip.sh <dsperate-headless> <scene> <N> <M>`

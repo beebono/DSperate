@@ -126,13 +126,17 @@ public:
   SDL_Window* window() const { return win_; }
   u32 window_id() const { return win_ ? SDL_GetWindowID(win_) : 0; }
 
-private:
   // `direct`: the core scales straight into the window at `rect`. Otherwise
   // it scales into side_[screen] (an inset that would be overwritten by the
   // screen under it, or a hidden screen -- the core needs a target for
   // both), which end_frame() copies into place if `shown`.
   struct View { int screen; SDL_Rect rect; bool direct; bool shown; };
+  // Where the two screens go in a w x h output under `l`, in draw order
+  // (later views on top). Shared with the screenshot writer, so a picture
+  // of the layout is laid out exactly as the window is.
+  static void place(const Layout& l, int w, int h, View out[SCREENS]);
 
+private:
   void layout();
   void build_scale();          // pick up the window surface and rebuild the x-map
   bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode

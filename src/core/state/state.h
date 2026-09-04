@@ -87,6 +87,9 @@ public:
 
   // Bytes outside any chunk (the file magic and version).
   void blob_raw(void* p, size_t n) { if (!ok_) return; if (static_cast<size_t>(end_ - p_) < n) { fail("short file"); std::memset(p, 0, n); return; } std::memcpy(p, p_, n); p_ += n; }
+  // Whether anything follows the chunks read so far: the frontend appends a
+  // chunk of its own after the machine's, and an older file simply ends.
+  bool at_end() const { return !ok_ || p_ >= end_; }
   bool ok() const { return ok_; }
   const std::string& error() const { return err_; }
   void fail(const std::string& why) { if (ok_) { ok_ = false; err_ = why; } }

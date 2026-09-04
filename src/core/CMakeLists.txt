@@ -11,6 +11,8 @@ add_library(dsperate_core STATIC
   cart/zip.cpp
   cart/zip_cache.cpp
   cart/miniz/miniz_tinfl.c
+  cart/miniz/miniz_tdef.c
+  cart/miniz/miniz.c
   cheat/ar_engine.cpp
   cheat/database.cpp
   sched/scheduler.cpp
@@ -33,11 +35,19 @@ add_library(dsperate_core STATIC
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
-# The vendored miniz decompression core (cart/miniz/README.md). Only the
-# inflate half is compiled: the compressor and miniz's own ZIP reader are not
-# vendored, and the archive parsing in cart/zip.cpp is ours.
+# The vendored miniz DEFLATE cores (cart/miniz/README.md): inflate for the
+# ZIP reader (the archive parsing in cart/zip.cpp is ours) and deflate for the
+# PNG writer the frontend's auto-save thumbnail uses. miniz's own ZIP reader
+# is not vendored. miniz.c is compiled without its zlib-style API, which
+# leaves the CRC-32/Adler-32 and mz_free the PNG writer calls.
 set_source_files_properties(cart/miniz/miniz_tinfl.c PROPERTIES
   COMPILE_DEFINITIONS "MINIZ_NO_DEFLATE_APIS;MINIZ_NO_ARCHIVE_APIS;MINIZ_NO_STDIO;MINIZ_NO_TIME"
+  INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/cart/miniz")
+set_source_files_properties(cart/miniz/miniz.c PROPERTIES
+  COMPILE_DEFINITIONS "MINIZ_NO_ZLIB_APIS;MINIZ_NO_ARCHIVE_APIS;MINIZ_NO_STDIO;MINIZ_NO_TIME"
+  INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/cart/miniz")
+set_source_files_properties(cart/miniz/miniz_tdef.c PROPERTIES
+  COMPILE_DEFINITIONS "MINIZ_NO_INFLATE_APIS;MINIZ_NO_ARCHIVE_APIS;MINIZ_NO_STDIO;MINIZ_NO_TIME"
   INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/cart/miniz")
 
 if(DSPERATE_JIT)

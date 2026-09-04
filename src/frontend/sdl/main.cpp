@@ -14,6 +14,7 @@
 #include "core/input/input_log.h"
 #include "core/state/state.h"
 #include "core/cheat/database.h"
+#include "core/cart/miniz/miniz_tdef.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
@@ -115,6 +116,7 @@ const char* kUsage =
     "                  that reads the date no longer replays the same, but the firmware's own\n"
     "                  menu needs a real clock to appear at all)\n"
     "  --load-state F  start from a save state instead of booting the game\n"
+    "  --autosave-png F  with emu.autosave, write a PNG of both screens to F beside the auto state\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n"
     "  --clear-cache   delete every unpacked zipped game (the .dsperate directories beside the\n"
@@ -163,26 +165,61 @@ void write_save(NDS& nds, const std::string& path) {
   nds.cart->clear_sram_dirty();
 }
 
-// Both screens into one BMP, stacked or side by side like the window.
-void screenshot(NDS& nds, const std::string& dir, bool across) {
-  const int w = across ? 512 : 256, h = across ? 192 : 384;
-  SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
-  if (!s) return;
-  for (int i = 0; i < 2; ++i) {
-    const u32* fb = nds.gpu.framebuffer(i);
-    for (int y = 0; y < 192; ++y) {
-      u32* dst = reinterpret_cast<u32*>(static_cast<u8*>(s->pixels) + (across ? y : y + 192 * i) * s->pitch) + (across ? 256 * i : 0);
-      std::memcpy(dst, fb + y * 256, 256 * 4);
+// Both screens into one PNG laid out as the window shows them -- the same
+// placement the display uses, at the layout's natural size (one DS pixel per
+// pixel for the full-size screens; an inset or the smaller of a dominant
+// pair is sampled down). Whoever shows it scales as it likes. Read from the
+// emulator's framebuffers, not the panel: a screen grabber cannot see a
+// hardware scaler layer, and the one on the A30 read the composite back
+// through fb0 with the wrong stride. Straight RGBA, alpha forced opaque.
+bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
+  using Disp = ds::sdl::Display;
+  int w = 0, h = 0;
+  Disp::natural_size(layout, 1.0, w, h);
+  Disp::View views[Disp::SCREENS];
+  Disp::place(layout, w, h, views);
+  std::vector<u8> rgba(static_cast<size_t>(w) * h * 4, 0);
+  for (int i = 0; i < Disp::SCREENS; ++i) {
+    const Disp::View& v = views[i];
+    if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
+    const u32* fb = nds.gpu.framebuffer(v.screen);
+    for (int y = 0; y < v.rect.h; ++y) {
+      const int dy = v.rect.y + y;
+      if (dy < 0 || dy >= h) continue;
+      const int sy = static_cast<int>(static_cast<long>(y) * ds::SCREEN_H / v.rect.h);
+      u8* dst = rgba.data() + (static_cast<size_t>(dy) * w + v.rect.x) * 4;
+      for (int x = 0; x < v.rect.w; ++x) {
+        const int dx = v.rect.x + x;
+        if (dx < 0 || dx >= w) continue;
+        const int sx = static_cast<int>(static_cast<long>(x) * ds::SCREEN_W / v.rect.w);
+        const u32 c = fb[sy * ds::SCREEN_W + sx];    // ARGB8888
+        dst[x * 4 + 0] = (c >> 16) & 0xFF;
+        dst[x * 4 + 1] = (c >> 8) & 0xFF;
+        dst[x * 4 + 2] = c & 0xFF;
+        dst[x * 4 + 3] = 0xFF;
+      }
     }
   }
+  size_t len = 0;
+  void* png = tdefl_write_image_to_png_file_in_memory_ex(rgba.data(), w, h, 4, &len, 6 /* zlib default level */, MZ_FALSE);
+  if (!png) { std::fprintf(stderr, "png: cannot encode\n"); return false; }
+  const std::string tmp = path + ".tmp";
+  FILE* f = std::fopen(tmp.c_str(), "wb");
+  const bool ok = f && std::fwrite(png, 1, len, f) == len;
+  if (f) std::fclose(f);
+  std::free(png);   // miniz allocates with plain malloc (MZ_MALLOC is not overridden)
+  if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "png: cannot write %s\n", path.c_str()); std::remove(tmp.c_str()); return false; }
+  return true;
+}
+
+// The screenshot hotkey: <GAMECODE>-<timestamp>.png in the states directory.
+void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout) {
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
   std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
-  const std::string path = dir + "/" + code + "-" + stamp + ".bmp";
-  if (SDL_SaveBMP(s, path.c_str()) == 0) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
-  else std::fprintf(stderr, "screenshot: %s\n", SDL_GetError());
-  SDL_FreeSurface(s);
+  const std::string path = dir + "/" + code + "-" + stamp + ".png";
+  if (write_png(nds, path, layout)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
 }
 
 std::string state_path(NDS& nds, const std::string& dir, int slot) {
@@ -198,9 +235,37 @@ std::string auto_state_path(NDS& nds, const std::string& dir) {
   return dir + "/" + code + ".auto.dss";
 }
 
-bool save_state_file(NDS& nds, const std::string& path) {
+// The screen layout rides along after the machine's chunks, so a state
+// brings its view back with it -- the pause menu load, the hotkey, and the
+// launcher's --load-state of the auto slot all restore it. The chunk is the
+// frontend's, not the core's: the headless build never writes it, and an
+// older file simply ends where it would begin, so neither needs a format
+// version bump. Loading it is refused during --replay along with the
+// rest of the state; pip and dominant sizes are clamped as from the config.
+void write_layout_chunk(ds::state::Writer& w, const ds::sdl::Display::Layout& l) {
+  w.begin("VIEW");
+  w.put(static_cast<u8>(l.mode)); w.put(static_cast<u8>(l.primary)); w.put(static_cast<u8>(l.corner));
+  w.put(l.pip); w.put(l.dominant);
+  w.end();
+}
+
+bool read_layout_chunk(ds::state::Reader& r, ds::sdl::Display::Layout& l) {
+  using Disp = ds::sdl::Display;
+  if (r.at_end() || !r.begin("VIEW")) return false;
+  u8 mode = 0, primary = 0, corner = 0; double pip = l.pip, dominant = l.dominant;
+  r.fields(mode, primary, corner);
+  if (r.more()) r.fields(pip, dominant);
+  r.end();
+  if (!r.ok() || mode >= static_cast<u8>(Disp::Mode::Count) || primary > 1 || corner >= static_cast<u8>(Disp::Corner::Count)) return false;
+  l.mode = static_cast<Disp::Mode>(mode); l.primary = primary; l.corner = static_cast<Disp::Corner>(corner);
+  l.pip = std::clamp(pip, 0.1, 0.9); l.dominant = std::clamp(dominant, 0.1, 0.99);
+  return true;
+}
+
+bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
   ds::state::Writer w; std::string err;
   if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
+  write_layout_chunk(w, layout);
   const std::string tmp = path + ".tmp";
   FILE* f = std::fopen(tmp.c_str(), "wb");
   if (!f) { std::fprintf(stderr, "state: cannot write %s\n", tmp.c_str()); return false; }
@@ -213,8 +278,10 @@ bool save_state_file(NDS& nds, const std::string& path) {
 
 // False when the file is unusable and the machine was left alone; the
 // caller must reset the machine if this fails after the load began (the
-// error says so).
-bool load_state_file(NDS& nds, const std::string& path) {
+// error says so). `layout` is set to the view the state carries, when it
+// carries one (a headless or older file does not), and left alone otherwise.
+bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout& layout, bool& layout_loaded) {
+  layout_loaded = false;
   std::vector<u8> bytes;
   if (FILE* f = std::fopen(path.c_str(), "rb")) {
     std::fseek(f, 0, SEEK_END); const long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
@@ -225,7 +292,9 @@ bool load_state_file(NDS& nds, const std::string& path) {
   ds::state::Reader r(bytes.data(), bytes.size());
   std::string err;
   if (!nds.load_state(r, err)) { std::fprintf(stderr, "state: cannot load %s: %s\n", path.c_str(), err.c_str()); return false; }
-  std::fprintf(stderr, "state: loaded %s (frame %llu)\n", path.c_str(), static_cast<unsigned long long>(nds.frame_count));
+  layout_loaded = read_layout_chunk(r, layout);
+  std::fprintf(stderr, "state: loaded %s (frame %llu%s)\n", path.c_str(), static_cast<unsigned long long>(nds.frame_count),
+               layout_loaded ? (std::string(", layout ") + ds::sdl::Display::mode_name(layout.mode)).c_str() : "");
   return true;
 }
 
@@ -459,6 +528,7 @@ int main(int argc, char** argv) {
     else if (arg("--replay")) replay = argv[++i];
     else if (arg("--save")) save_arg = argv[++i];
     else if (arg("--load-state")) load_state = argv[++i];
+    else if (arg("--autosave-png")) cli.set("emu.autosave_png", argv[++i]);
     // A state load starts cold -- every translated block went with the old
     // run and the caches hold the loader's data -- so the first frames are
     // slow in a way the scene never is. Measured on the RG DS: ~13 ms on max
@@ -501,7 +571,7 @@ int main(int argc, char** argv) {
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.disp", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
   if (bios9.empty() || bios7.empty() || fw.empty()) { std::fprintf(stderr, "BIOS and firmware paths are needed (--bios9/--bios7/--firmware or [paths] in %s)\n", global_ini.c_str()); return 2; }
@@ -905,7 +975,11 @@ sdl_ready:
   // After the battery save, so a state's SRAM wins over <rom>.sav, and after
   // the replay log is open so it can be wound forward to the state's frame.
   if (load_state) {
-    if (!load_state_file(nds, load_state)) return 1;
+    bool got_layout = false;
+    if (!load_state_file(nds, load_state, layout, got_layout)) return 1;
+    // The state's view replaces the config's, dual-window aside (two panels
+    // show both screens, whatever the state says).
+    if (got_layout && !dual_window) { display.set_layout(layout); apply_visibility(); }
     // A replay continues from the state's frame, not from the log's start.
     if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
   }
@@ -994,6 +1068,11 @@ sdl_ready:
   // session ends, so a launcher's kill or a Ctrl-C can be resumed with
   // --load-state. Nothing is written while playing, so it costs no frame time.
   const bool autosave = cfg.flag("emu.autosave", false);
+  // Its thumbnail: "true" puts <GAMECODE>.auto.png beside the state, any
+  // other value is the file to write (a launcher names the picture its game
+  // switcher looks for). Only taken when the state is written.
+  const std::string autosave_png_cfg = cfg.str("emu.autosave_png", "false");
+  const bool autosave_png = autosave_png_cfg != "false" && autosave_png_cfg != "0" && !autosave_png_cfg.empty();
   bool ff_toggle = cfg.flag("emu.fast_forward", false);
   const int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
   bool was_fast = false;
@@ -1038,7 +1117,21 @@ sdl_ready:
   // the inputs from boot, so a state alongside it would only mislead.
   auto autosave_now = [&] {
     if (!autosave || save_readonly || log.writing()) return;
-    if (save_state_file(nds, auto_state_path(nds, session.states_dir))) flush_save();   // the .sav and the state never diverge
+    if (!save_state_file(nds, auto_state_path(nds, session.states_dir), display.current_layout())) return;
+    flush_save();   // the .sav and the state never diverge
+    if (!autosave_png) return;
+    const bool beside = autosave_png_cfg == "true" || autosave_png_cfg == "1";
+    std::string png = autosave_png_cfg;
+    if (beside) { png = auto_state_path(nds, session.states_dir); png.replace(png.size() - 3, 3, "png"); }
+    if (write_png(nds, png, display.current_layout())) std::fprintf(stderr, "state: thumbnail %s\n", png.c_str());
+  };
+  // A loaded state's view, applied the way the layout hotkeys apply theirs.
+  Disp::Layout loaded_layout; bool got_layout = false;
+  auto apply_loaded_layout = [&] {
+    if (!got_layout || dual_window) return;
+    display.set_layout(loaded_layout);
+    apply_visibility();
+    menu_dirty = true;
   };
   auto set_paused = [&](bool p) {
     if (p == paused) return;
@@ -1101,19 +1194,20 @@ sdl_ready:
         if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.pip_corner", Disp::corner_name(l.corner));
         break;
       }
-      case A::Screenshot: screenshot(nds, session.states_dir, display.across()); break;
+      case A::Screenshot: screenshot(nds, session.states_dir, display.current_layout()); break;
       case A::Lid: input.set_lid(!input.lid()); VLOG("lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
       case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
       case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
       case A::SaveState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
-        if (save_state_file(nds, state_path(nds, session.states_dir, state_slot))) flush_save();   // the .sav and the state never diverge
+        if (save_state_file(nds, state_path(nds, session.states_dir, state_slot), display.current_layout())) flush_save();   // the .sav and the state never diverge
         break;
       case A::LoadState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         // A recording is the inputs from boot; a load would leave it unreplayable.
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
-        if (load_state_file(nds, state_path(nds, session.states_dir, state_slot))) {
+        if (load_state_file(nds, state_path(nds, session.states_dir, state_slot), loaded_layout, got_layout)) {
+          apply_loaded_layout();
           audio.clear();
           next_frame = SDL_GetPerformanceCounter();
           fs_debt_ms = 0;
@@ -1154,7 +1248,7 @@ sdl_ready:
         // which a load would leave unreplayable.
         case Menu::Result::Save:
           if (save_readonly) std::fprintf(stderr, "state: not during a replay\n");
-          else if (save_state_file(nds, state_path(nds, session.states_dir, menu.slot()))) flush_save();
+          else if (save_state_file(nds, state_path(nds, session.states_dir, menu.slot()), display.current_layout())) flush_save();
           refresh_slots();
           break;
         case Menu::Result::Load:
@@ -1162,7 +1256,8 @@ sdl_ready:
           if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
           // A load replaces the picture the menu is drawn over, so it also
           // leaves the menu: the player wants to see where they landed.
-          if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()))) {
+          if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()), loaded_layout, got_layout)) {
+            apply_loaded_layout();
             state_slot = menu.slot();
             menu.set_open(false);
             set_paused(false);
