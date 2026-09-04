@@ -353,9 +353,10 @@ void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
   }
 }
 
-void Bus::set_vram_trap(bool on, bool lcdc) {
+void Bus::set_vram_trap(bool on, bool lcdc, bool a_only) {
   PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
-  pt9.set_write_trap(0x06000000, 0x00800000, on);              // the four engine windows
+  if (a_only) { pt9.set_write_trap(0x06000000, 0x00200000, on); pt9.set_write_trap(0x06400000, 0x00200000, on); }   // BG-A, OBJ-A
+  else pt9.set_write_trap(0x06000000, 0x00800000, on);         // the four engine windows
   if (lcdc) pt9.set_write_trap(0x06800000, 0x00800000, on);    // LCDC and its 1 MB mirrors
 }
 

@@ -2528,6 +2528,13 @@ void Renderer3D::render(const Gpu3D& gx) {
   // even when it renders nothing.
   sync_all();
   gx_ = &gx;
+  // The slowest band of the frame just synced, kept for two frames (the
+  // band-count choice below). The slots are read again by the profile after
+  // the dispatch, so they are left in place.
+  // The sum over workers, not the slowest: the sum is the serial raster
+  // cost and does not move when the worker count does, so the choice cannot
+  // oscillate with its own effect.
+  { u64 sum = 0; for (u32 w = 0; w < last_nb_ && w < 8; ++w) sum += band_ns_[w]; band_sum_ns_[1] = band_sum_ns_[0]; band_sum_ns_[0] = sum; }
   // DS_ABLATE bit 0: no rasterisation and no texture work at all. See the
   // comment on ablate() in gpu.cpp -- the picture is stale from here on.
   static const bool no_raster = [] { const char* e = std::getenv("DS_ABLATE"); return e && (std::atoi(e) & 1); }();
@@ -2579,7 +2586,23 @@ void Renderer3D::render(const Gpu3D& gx) {
   }
   texels_in_ = &poly_texels_;
 
-  const u32 maxb = band_count(live);
+  u32 maxb = band_count(live);
+  // A hot compositor thread (Gpu lag mode) takes the fourth core of the
+  // handhelds: three band workers beside it measured +9 % on Golden Sun's
+  // title, two measured -3 % in the mean but +18 % at p99 (RG DS,
+  // 2026-09-04) -- the heavy-3D frames of that title need the third worker
+  // (their raster is ~20 ms on two) while the light ones want the core for
+  // the compositor. The recent raster cost decides: its two workloads
+  // alternate frame by frame, so the previous frame of the same phase is
+  // two back -- hence the max over the last two frames. The threshold is
+  // what two workers can finish in the ~240 lines between the dispatch at
+  // line 215 and the last display line. The pin stays at three for frames
+  // whose compositing is batched and brief.
+  if (maxb > 2 && !threads_forced() && nds_.gpu.lag_active()) {
+    const u64 recent = band_sum_ns_[0] > band_sum_ns_[1] ? band_sum_ns_[0] : band_sum_ns_[1];
+    static const u64 threshold = [] { const char* e = std::getenv("DS_R3D_LAG_NS"); return e ? static_cast<u64>(std::atoll(e)) : kLagBandThresholdNs; }();
+    if (recent < threshold) maxb = 2;
+  }
   // The buffer the display is not reading; it becomes the displayed one once
   // the frame is dispatched (its lines are then waited for per band).
   u32* const dst = out_[display_ ^ 1].data();
@@ -2597,6 +2620,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   if (!pool_ || pool_->workers() < maxb) pool_ = std::make_unique<Pool>(maxb);
 
   const u32 nb = (adapt_enabled() && !threads_forced()) ? adaptive_workers(maxb) : maxb;
+  last_nb_ = nb;
   wait_ns_.store(0, std::memory_order_relaxed);   // consumed by adaptive_workers; start the next frame's tally
 
   // Bins are cut for the maximum, not for `nb`, so that a ramp changes one
@@ -2623,8 +2647,9 @@ void Renderer3D::render(const Gpu3D& gx) {
       pool_->mark_done(b);
     }
     // Per worker now, not per bin: what a thread spent on the frame. Each
-    // writes its own slot, so no synchronisation; measurement only.
-    if (prof::enabled && w < 8) band_ns_[w] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
+    // writes its own slot, so no synchronisation; read at the next frame's
+    // dispatch (after sync_all) for the band-count choice above.
+    if (w < 8) band_ns_[w] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   };
   pending_bands_ = nbins_;
   gen_ = pool_->dispatch(job_fn_, nb, nbins_);

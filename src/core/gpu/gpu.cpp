@@ -178,10 +178,8 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
   // join, see worker_): a store that can reach what it reads -- A's BG/OBJ
   // windows, or LCDC when A displays or captures from it -- joins it first,
   // which finishes the frame and lifts the trap. B's windows cannot.
-  if (inflight_[0]) {
-    const bool lcdc = addr >= 0x06800000;
-    const bool reaches_a = (addr >> 24) != 0x06 || (lcdc ? trap_lcdc_ : !((addr >> 21) & 1));
-    if (reaches_a) { prof::add(prof::C_2D_A_JOIN_STORES, 1); join_worker(); }
+  if (a_deferred_) {
+    if (reach_engines(addr) & 1) { prof::add(prof::C_2D_A_JOIN_STORES, 1); join_worker(); }
     return;
   }
   const u32 mask = store_engines(addr);
@@ -190,9 +188,9 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
   if ((per_line_[0] || !(mask & 1)) && (per_line_[1] || !(mask & 2))) {
     // Lag mode: the store may land on a line engine B is still drawing.
     prof::add(prof::C_2D_LAG_STORES, 1);
-    const bool b_joined = inflight_[1];
-    if (b_joined) prof::add(prof::C_2D_LAG_STORE_JOINS, 1);
-    join_worker();
+    const u32 reach = reach_engines(addr);
+    const bool b_joined = ((reach & 1) && inflight_[0]) || ((reach & 2) && inflight_[1]);
+    if (b_joined) { prof::add(prof::C_2D_LAG_STORE_JOINS, 1); join_worker(); }
     // Past the limit the lag is dropped and the trap lifted -- but the trap is
     // still the other engine's guard if it is batching, and lifting it there
     // would let a store into ITS vram land unseen before its batch renders.
@@ -256,12 +254,16 @@ void Gpu::arm_trap() {
   // 8-line bursts toggle ~31 times a frame. A quarter of a million page writes
   // to save early-returns that cost nothing (the DMA census shows the runs
   // stay on the fast path either way).
-  nds_.bus.set_vram_trap(true, trap_lcdc_);
+  // Lag frames that are not batching: only engine A's lines are ever in
+  // flight, so only its windows need guarding -- engine B's may stream (Golden
+  // Sun's per-scanline HDMA) without a slow-path store per word.
+  trap_a_only_ = lag_frame_ && !lazy_frame_;
+  nds_.bus.set_vram_trap(true, trap_lcdc_, trap_a_only_);
   trap_armed_ = true;
 }
 void Gpu::disarm_trap() {
   if (!trap_armed_) return;
-  nds_.bus.set_vram_trap(false, trap_lcdc_);
+  nds_.bus.set_vram_trap(false, trap_lcdc_, trap_a_only_);
   trap_armed_ = false;
 }
 
@@ -522,7 +524,7 @@ void Gpu::begin_frame() {
   // Lag mode for the per-line lines of this frame: the trap guards the line
   // in flight (capture writes only LCDC banks, which no engine reads, so
   // capture itself never needs a join).
-  lag_frame_ = lag_enabled_ && par_2d_;
+  lag_frame_ = lag_enabled_ && par_2d_ && !run_fifo_;
   lag_trap_hits_ = 0;
   if (lazy_frame_ || lag_frame_) arm_trap();
   if (lazy_frame_) prof::add(prof::C_2D_LAZY_FRAMES, 1);
@@ -559,17 +561,17 @@ void Gpu::on_display_fifo(u32 x) {
 // each engine's own screen and line buffer.
 void Gpu::worker_job(void* self) {
   Gpu& g = *static_cast<Gpu*>(self);
-  for (u32 l = g.job_first_; l <= g.job_last_; ++l) g.step_engine(g.job_e_, l);
+  for (int e = 0; e < 2; ++e)
+    for (u32 l = g.job_first_[e]; l <= g.job_last_[e]; ++l) g.step_engine(e, l);
 }
 
 void Gpu::join_worker() {
   if (!inflight_[0] && !inflight_[1]) return;
   static const bool dbg = std::getenv("DS_DEBUG_JOIN") != nullptr;
-  if (dbg) std::fprintf(stderr, "[join] frame %llu line %u hblank %d eng%d %u..%u inflight %d/%d\n", (unsigned long long)nds_.frame_count, line_, hblank_done_ ? 1 : 0, job_e_, job_first_, job_last_, inflight_[0] ? 1 : 0, inflight_[1] ? 1 : 0);
+  if (dbg) std::fprintf(stderr, "[join] frame %llu line %u hblank %d a %u..%u b %u..%u deferred %d\n", (unsigned long long)nds_.frame_count, line_, hblank_done_ ? 1 : 0, job_first_[0], job_last_[0], job_first_[1], job_last_[1], a_deferred_ ? 1 : 0);
   worker_.wait();
-  const bool a = inflight_[0];
   inflight_[0] = inflight_[1] = false;
-  if (a) finish_a();
+  if (a_deferred_) { a_deferred_ = false; finish_a(); }
 }
 
 // Engine A's deferred batch has been joined: what render_ranges does at the
@@ -588,8 +590,8 @@ void Gpu::finish_a() {
 }
 
 void Gpu::debug_dump(FILE* f) {
-  std::fprintf(f, "  gpu: line %u hblank_done %d render_next %u/%u lazy %d per_line %d/%d trap %d job eng%d %u..%u inflight %d/%d read_trap %d par_2d %d frame_ready %d\n", line_, hblank_done_ ? 1 : 0, render_next_[0], render_next_[1],
-               lazy_frame_ ? 1 : 0, per_line_[0] ? 1 : 0, per_line_[1] ? 1 : 0, trap_armed_ ? 1 : 0, job_e_, job_first_, job_last_, inflight_[0] ? 1 : 0, inflight_[1] ? 1 : 0, read_trap_bank_, par_2d_ ? 1 : 0, nds_.frame_ready ? 1 : 0);
+  std::fprintf(f, "  gpu: line %u hblank_done %d render_next %u/%u lazy %d per_line %d/%d trap %d job a %u..%u b %u..%u inflight %d/%d deferred %d read_trap %d lag %d par_2d %d frame_ready %d\n", line_, hblank_done_ ? 1 : 0, render_next_[0], render_next_[1],
+               lazy_frame_ ? 1 : 0, per_line_[0] ? 1 : 0, per_line_[1] ? 1 : 0, trap_armed_ ? 1 : 0, job_first_[0], job_last_[0], job_first_[1], job_last_[1], inflight_[0] ? 1 : 0, inflight_[1] ? 1 : 0, a_deferred_ ? 1 : 0, read_trap_bank_, lag_frame_ ? 1 : 0, par_2d_ ? 1 : 0, nds_.frame_ready ? 1 : 0);
   worker_.debug_dump(f);
   nds_.gpu3d.debug_dump(f);
 }
@@ -600,56 +602,70 @@ void Gpu::debug_dump(FILE* f) {
 void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
   const bool a_has = af <= al, b_has = bf <= bl;
   if (!a_has && !b_has) return;
+  // Whatever the worker still holds -- a lagged line, a previous run --
+  // before anything below reads or re-latches what it uses.
+  join_worker();
   // What the lines read of the frame-level capture state, as of now -- the
   // same for lines drawn here and for lines handed over.
   capcnt_render_ = capcnt_; capture_render_ = capture_on_;
-  // Engine A's run to the last display line goes to the worker with the
-  // deferred join (see worker_); otherwise engine B's run goes, as before.
-  // A short run against a parked worker is drawn here: the wake-up costs
-  // more than the lines do, and the trap-hit catch-ups of a batched frame
-  // (Golden Sun: ~16 a frame, 8-line bursts between them) would each pay it
-  // -- measured as the whole loss of batching on that title. The frame's
-  // main batch, or any run the worker is already hot for, is handed off.
   static const bool dbg = std::getenv("DS_DEBUG_JOIN") != nullptr;
-  auto hand = [&](int e, u32 f, u32 l) {
-    join_worker();                          // the previous run, if it was left in flight
-    if (dbg) std::fprintf(stderr, "[hand] frame %llu line %u eng%d %u..%u (a %u..%u b %u..%u)\n", (unsigned long long)nds_.frame_count, line_, e, f, l, af, al, bf, bl);
-    job_e_ = e; job_first_ = f; job_last_ = l;
+  auto hand = [&](bool a, bool b) {
+    if (dbg) std::fprintf(stderr, "[hand] frame %llu line %u a %u..%u b %u..%u lag %d\n", (unsigned long long)nds_.frame_count, line_, a ? af : 1, a ? al : 0, b ? bf : 1, b ? bl : 0, lag_frame_ ? 1 : 0);
+    job_first_[0] = a ? af : 1; job_last_[0] = a ? al : 0;
+    job_first_[1] = b ? bf : 1; job_last_[1] = b ? bl : 0;
     worker_.dispatch();
-    inflight_[e] = true;
-  };
-  bool a_handed = false, b_handed = false;
-  const u32 a_len = a_has ? al - af + 1 : 0, b_len = b_has ? bl - bf + 1 : 0;
-  if (a_has && par_2d_ && al == SCREEN_H - 1 && (a_len >= 24 || (!worker_.parked() && a_len >= b_len))) {
-    hand(0, af, al);
-    a_handed = true;
+    inflight_[0] = a; inflight_[1] = b;
     // A capture in flight writes an LCDC bank the guest may read before the
-    // join: trap reads of it until then (lifted in finish_a).
-    if (capture_render_ && !(ablate() & 4)) {
+    // join: trap reads of it until the frame's end.
+    if (a && capture_render_ && read_trap_bank_ < 0 && !(ablate() & 4)) {
       const int bank = static_cast<int>((capcnt_render_ >> 16) & 3);
       nds_.bus.set_lcdc_read_trap(bank, true);
       read_trap_bank_ = bank;
     }
+  };
+  const u32 a_len = a_has ? al - af + 1 : 0, b_len = b_has ? bl - bf + 1 : 0;
+  const u32 last = a_has && b_has ? (al > bl ? al : bl) : a_has ? al : bl;
+  bool a_handed = false, b_handed = false;
+  if (a_has && par_2d_ && al == SCREEN_H - 1 && (a_len >= 24 || (!worker_.parked() && a_len >= b_len))) {
+    // Engine A's run to the last display line: the deferred join (see
+    // worker_), engine B's run drawn here meanwhile.
+    hand(true, false);
+    a_handed = true; a_deferred_ = true;
+  } else if (par_2d_ && lag_frame_ && a_has) {
+    // Lag mode: engine A's lines go and stay in flight until the next line's
+    // HBlank (the join at the top) unless this is the last one; engine B's
+    // are drawn here -- the cheap engine, and the one whose window a game
+    // streams into per line, which would join the lag on every store.
+    hand(true, false);
+    a_handed = true;
   } else if (b_has && par_2d_ && (b_len >= 24 || !worker_.parked())) {
-    hand(1, bf, bl);
+    // A short run against a parked worker is drawn here: the wake-up costs
+    // more than the lines do, and the trap-hit catch-ups of a batched frame
+    // (Golden Sun: ~16 a frame, 8-line bursts between them) would each pay it
+    // -- measured as the whole loss of batching on that title.
+    hand(false, true);
     b_handed = true;
   }
   if (a_has) prof::add(prof::C_2D_RANGE_A, 1);
   if (b_has) prof::add(prof::C_2D_RANGE_B, 1);
   if (a_has && !a_handed) for (u32 x = af; x <= al; ++x) step_engine(0, x);
   if (b_has && !b_handed) for (u32 x = bf; x <= bl; ++x) step_engine(1, x);
-  // Engine A's batch stays in flight until line 0. A per-line engine-B run
-  // may stay in flight until the next line under DS_2D_LAG; the last display
-  // line always joins, since writes after it apply directly.
-  if (a_handed) { if (!defer_join_) join_worker(); }
-  else if (b_handed && lag_frame_ && per_line_[1] && bl < SCREEN_H - 1) prof::add(prof::C_2D_LAG_LINES, 1);
+  // Engine A's deferred batch stays in flight until line 0. A lagged run
+  // stays in flight until the next line; the last display line always
+  // joins, since writes after it apply directly.
+  if (a_deferred_) { if (!defer_join_) join_worker(); }
+  else if ((a_handed || b_handed) && lag_frame_ && last < SCREEN_H - 1) prof::add(prof::C_2D_LAG_LINES, 1);
   else join_worker();
   if (a_has) render_next_[0] = al + 1;
   if (b_has) render_next_[1] = bl + 1;
   if (!frame_finished_ && render_next_[0] >= SCREEN_H && render_next_[1] >= SCREEN_H) {
     frame_finished_ = true;
-    if (inflight_[0]) engine[1].frame_done();   // engine A's end, and the traps, at the join (finish_a)
-    else { join_worker(); engine[0].frame_done(); engine[1].frame_done(); disarm_trap(); }
+    if (a_deferred_) engine[1].frame_done();   // engine A's end, and the traps, at the join (finish_a)
+    else {
+      join_worker();
+      if (read_trap_bank_ >= 0) { nds_.bus.set_lcdc_read_trap(read_trap_bank_, false); read_trap_bank_ = -1; }
+      engine[0].frame_done(); engine[1].frame_done(); disarm_trap();
+    }
   }
 }
 
@@ -1101,6 +1117,7 @@ void Gpu::quiesce() {
 
 void Gpu::prepare_load() {
   join_worker();
+  if (read_trap_bank_ >= 0) { nds_.bus.set_lcdc_read_trap(read_trap_bank_, false); read_trap_bank_ = -1; }
   disarm_trap();
   lazy_frame_ = false; per_line_[0] = per_line_[1] = true;
   render_next_[0] = render_next_[1] = SCREEN_H; frame_finished_ = true;

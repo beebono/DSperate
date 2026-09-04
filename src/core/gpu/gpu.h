@@ -149,6 +149,10 @@ public:
   // engine's display mode and VRAM display bank, and the capture destination.
   u8 display_phase_period() const { return phase_period_; }
   bool lines_in_flight() const { return inflight_[0] || inflight_[1]; }
+  // This frame hands display lines to the worker as they come (lag mode):
+  // the worker is hot for the whole display period, i.e. a core is spoken
+  // for, which the 3D band count allows for (Renderer3D::render).
+  bool lag_active() const { return lag_frame_ && par_2d_ && !lazy_frame_; }
   // Bus::vram_read on an LCDC page under the capture read trap: join the
   // lines in flight if the read is of the bank the capture is writing.
   bool lcdc_read_trapped() const { return read_trap_bank_ >= 0; }
@@ -288,7 +292,15 @@ private:
   u32  render_next_[2] = {SCREEN_H, SCREEN_H};
   bool split_ = false;            // DS_2D_SPLIT=1
   bool frame_finished_ = false;   // frame_done() called for both engines
-  bool trap_armed_ = false, trap_lcdc_ = false;
+  bool trap_armed_ = false, trap_lcdc_ = false, trap_a_only_ = false;
+  // Which engines a store can change, by address alone: bit 0 engine A, bit
+  // 1 engine B; LCDC only engine A (VRAM display, capture), and only when
+  // the trap covers it; anything else both.
+  u32 reach_engines(u32 addr) const {
+    if ((addr >> 24) != 0x06) return 3;
+    if (addr >= 0x06800000) return trap_lcdc_ ? 1 : 0;
+    return ((addr >> 21) & 1) ? 2 : 1;
+  }
   // Capture frames batch too (DS_2D_LAZY_CAPTURE=0 keeps them per line; see
   // the class comment). A trapped store catches the frame up, lifts the trap and renders the
   // next LAZY_BURST_LINES lines per line (exact without any trap, and no
@@ -361,10 +373,11 @@ public:
   // DS_WATCHDOG: where the display pipeline stands when a frame stalls.
   void debug_dump(FILE* f);
 private:
-  int  job_e_ = 1;
-  u32  job_first_ = 0, job_last_ = 0;
+  // The job: per engine, a run of lines (first > last = nothing for it).
+  u32  job_first_[2] = {1, 1}, job_last_[2] = {0, 0};
   bool par_2d_ = false;
   bool inflight_[2] = {false, false};   // that engine's lines are on the worker
+  bool a_deferred_ = false;             // engine A's whole-frame batch is in flight past line 191 (finish_a at the join)
   // What the lines read of the frame-level capture state, latched at each
   // render_ranges: DISPCAPCNT's enable bit clears itself at line 192 while
   // a batched engine A is still drawing.
@@ -373,20 +386,20 @@ private:
   int  read_trap_bank_ = -1;            // LCDC bank under the capture read trap, or -1
   bool defer_join_ = true;              // DS_2D_DEFER=0: join engine A's batch at once (bisecting tool)
   Renderer3D::FrameRef ref3d_;          // the 3D frame these display lines read (begin_frame)
-  // Per-line frames (capture, the display FIFO, a VRAM trap) hand engine B
-  // one line at a time. Rather than wait for it at once -- which needs the
-  // worker hot, i.e. spinning through the whole frame on a core the raster
-  // workers want -- the line is left in flight and joined a line later
-  // (inflight_[1]), so the worker can park between lines with no cost to the
-  // emulation thread. What must join earlier: the last display line (writes
-  // after it apply directly), a VRAMCNT remap, and a guest store into VRAM
-  // the engines read (the trap stays armed in these frames for that; past
-  // LAG_TRAP_LIMIT hits in a frame the lag is dropped and the trap lifted,
-  // so a game streaming VRAM per line pays neither).
-  // Off by default: on GSDD the lag never pays -- its capture frames stream
-  // ~3,500 VRAM stores a frame, so the armed trap costs more than the core it
-  // frees (RG DS, 2026-08-29: +3.4 % with the lag, +1.3 % lag with the old
-  // spin budget, +1.7 % parking alone; replay scenes flat). DS_2D_LAG=1.
+  // Lag mode (DS_2D_LAG): per-line frames (capture per line, a VRAM trap,
+  // Golden Sun's per-scanline HDMA) hand BOTH engines' line to the worker at
+  // its HBlank and do not wait: the line is left in flight while the next
+  // one is emulated and joined at that line's HBlank (or earlier, by
+  // whatever could observe it: a trapped VRAM store, a VRAMCNT remap, a read
+  // of the bank a per-line capture writes, a full journal). The last display
+  // line always joins, since writes after it apply directly. The trap stays
+  // armed in these frames for that; past LAG_TRAP_LIMIT joining stores in a
+  // frame the lag is dropped and the trap lifted. Display FIFO frames stay on
+  // this thread (the FIFO is sampled per line into a shared buffer).
+  // This is what moves the per-line 2D composite, capture and scaling of a
+  // title like Golden Sun off the emulation thread: it is per line by nature
+  // and reads its captured picture back at VBlank start, so the batched
+  // hand-off above can never overlap anything there.
   bool lag_enabled_ = false;      // DS_2D_LAG=1
   bool lag_frame_ = false;        // this frame's per-line lines may stay in flight
   u32  lag_trap_hits_ = 0;

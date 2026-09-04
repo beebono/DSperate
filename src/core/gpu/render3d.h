@@ -501,7 +501,10 @@ private:
   u32  setup_poly_ = 0;                                 // polygon index during build_edges
   std::vector<const u32*> poly_texels_;
   std::vector<std::unique_ptr<Renderer3D>> bands_;      // workers 1..n-1 (band 0 is this)
-  u64 band_ns_[8] = {};                                 // DS_PROFILE: last frame's per-band wall time
+  u64 band_ns_[8] = {};                                 // last frame's per-band wall time (workers write their own slot)
+  u64 band_sum_ns_[2] = {0, 0};                         // summed band time (serial raster cost) of the last two frames
+  u32 last_nb_ = 0;                                     // workers given the last frame (slots of band_ns_ that are live)
+  static constexpr u64 kLagBandThresholdNs = 30'000'000; // serial raster cost two workers can still hide; below it a hot compositor gets the third core (DS_R3D_LAG_NS overrides)
   struct Pool;
 public:
   void debug_dump(FILE* f);   // DS_WATCHDOG: band hand-off state

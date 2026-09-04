@@ -40,7 +40,9 @@ public:
   // Lazy 2D (see gpu.h): trap ARM9 stores into the 2D engines' VRAM windows
   // (and, with `lcdc`, the LCDC window) so the first one in a frame can force
   // the deferred render to catch up before the bytes change.
-  void set_vram_trap(bool on, bool lcdc);
+  // `a_only`: engine A's BG/OBJ windows only (lag mode, where engine B's
+  // lines are drawn on the emulation thread and its window may stream).
+  void set_vram_trap(bool on, bool lcdc, bool a_only = false);
   // Read trap on one LCDC bank (A-D), all eight mirrors: ARM9 loads and DMA
   // reads of it take the slow path while a batched display capture that
   // writes the bank is still in flight on the compositor thread, so the
