@@ -1065,7 +1065,9 @@ sdl_ready:
       case A::VolumeUp: audio.set_volume(audio.volume() + 10); audio.set_muted(false); VLOG("volume %d%%\n", audio.volume()); break;
       case A::VolumeDown: audio.set_volume(audio.volume() - 10); VLOG("volume %d%%\n", audio.volume()); break;
       case A::Mute: audio.set_muted(!audio.muted()); VLOG("%s\n", audio.muted() ? "muted" : "unmuted"); break;
-      case A::Fullscreen: display.toggle_fullscreen(); if (dual_window) display2.toggle_fullscreen(); break;
+      // Anything that moves the screens around while the pause menu is up has
+      // to recomposite it: nothing else redraws until the menu itself changes.
+      case A::Fullscreen: display.toggle_fullscreen(); if (dual_window) display2.toggle_fullscreen(); menu_dirty = true; break;
       case A::LayoutNext: case A::LayoutPrev: {
         if (dual_window) break;
         Disp::Layout l = display.current_layout();
@@ -1075,6 +1077,7 @@ sdl_ready:
         l.mode = layout_cycle[static_cast<size_t>(at)];
         display.set_layout(l);
         apply_visibility();
+        menu_dirty = true;
         VLOG("layout: %s\n", Disp::mode_name(l.mode));
         if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.layout", Disp::mode_name(l.mode));
         break;
@@ -1085,6 +1088,7 @@ sdl_ready:
         l.primary = 1 - l.primary;
         display.set_layout(l);
         apply_visibility();
+        menu_dirty = true;
         if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.screen", l.primary ? "bottom" : "top");
         break;
       }
@@ -1093,6 +1097,7 @@ sdl_ready:
         Disp::Layout l = display.current_layout();
         l.corner = static_cast<Disp::Corner>((static_cast<int>(l.corner) + 1) % static_cast<int>(Disp::Corner::Count));
         display.set_layout(l);
+        menu_dirty = true;
         if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.pip_corner", Disp::corner_name(l.corner));
         break;
       }
