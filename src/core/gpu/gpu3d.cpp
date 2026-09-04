@@ -331,6 +331,8 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
 
 } // namespace
 
+Gpu3D::~Gpu3D() { renderer_.sync_all(); }
+
 Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) { reset(); }
 
 void Gpu3D::reset_render_state() {
@@ -377,7 +379,7 @@ void Gpu3D::reset() {
   reset_vptr();
   vertex_num_ = vertex_in_poly_ = consecutive_polys_ = 0;
   last_strip_poly_ = nullptr; num_opaque_ = 0;
-  bank_ = 0; num_vertices_ = num_polygons_ = 0;
+  bank_ = 0; render_bank_ = 1; raster_bank_ = 1; num_vertices_ = num_polygons_ = 0;
   flush_request_ = flush_attr_ = 0; render_identical_ = false; swapped_ = false; list_same_ = false;
   renderer_.reset();
 }
@@ -874,7 +876,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
       // list in the freed bank.
       if (rendering_on_) finalise_list();
       swapped_ = true;
-      bank_ ^= 1;
+      render_bank_ = bank_; bank_ = next_write_bank();
       num_vertices_ = num_polygons_ = num_opaque_ = 0;
       flush_request_ = 0;
     }
@@ -1391,8 +1393,8 @@ void Gpu3D::finalise_list() {
     // still checks its textures itself).
     list_same_ = rendered_before_
       && num_polygons_ == prev_swap_polys_ && num_vertices_ == prev_swap_verts_
-      && lists_equal(&pram_[bank_ * PRAM_BANK], &pram_[(bank_ ^ 1) * PRAM_BANK], num_polygons_,
-                     bank_ * VRAM_BANK, (bank_ ^ 1) * VRAM_BANK, vram_.data());
+      && lists_equal(&pram_[bank_ * PRAM_BANK], &pram_[render_bank_ * PRAM_BANK], num_polygons_,
+                     bank_ * VRAM_BANK, render_bank_ * VRAM_BANK, vram_.data());
     prev_swap_polys_ = num_polygons_; prev_swap_verts_ = num_vertices_; rendered_before_ = true;
     if (prof::enabled) {
       prof::add(prof::C_GX_SWAP, 1);
@@ -1416,7 +1418,7 @@ void Gpu3D::finalise_list() {
         census_prev_hash_ = h; census_have_prev_ = true;
         // The compare alternative, on the same frames.
         if (census_have_prev_counts_ && num_polygons_ == census_prev_polys_ && num_vertices_ == census_prev_verts_) {
-          const u32 other = bank_ ^ 1;
+          const u32 other = render_bank_;
           const CmpModel m = census_compare(&pram_[bank_ * PRAM_BANK], &pram_[other * PRAM_BANK], num_polygons_,
                                             bank_ * VRAM_BANK, other * VRAM_BANK, vram_.data(), vram_.data());
           prof::add(prof::C_GX_CMP_RUNS, 1);
@@ -1440,12 +1442,9 @@ void Gpu3D::vblank() {
                  dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_n_, gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
   if (!geometry_on_) return;
   if (no_fifo_) drain_all();
-  // The raster of the frame being displayed may still be running: with the
-  // display composited on the worker thread, nothing on this thread has
-  // waited for its bands by now (the compositor used to, at line 191). It
-  // reads rstate_ and the polygon bank swapped below, so it must be done
-  // first. Free when it already is.
-  renderer_.sync_all();
+  // The raster of the frame being displayed may still be running (nothing
+  // on this thread waits for it any more): it reads its own copy of the
+  // render state and a bank the swap below leaves alone (see raster_bank_).
   if (rendering_on_) {
     // The render registers this frame against the ones the last render used.
     // Both the no-swap path and the duplicate-list skip need this answer.
@@ -1488,14 +1487,14 @@ void Gpu3D::vblank() {
     rstate_.clear_attr1 = clear_attr1_; rstate_.clear_attr2 = clear_attr2_;
   }
   if (flush_request_) {
-    bank_ ^= 1;
+    render_bank_ = bank_; bank_ = next_write_bank();
     num_vertices_ = num_polygons_ = num_opaque_ = 0;
     flush_request_ = 0;
   }
   swapped_ = false;
 }
 
-void Gpu3D::render_frame() { renderer_.render(*this); }
+void Gpu3D::render_frame() { raster_bank_ = render_bank_; renderer_.render(*this); }
 
 void Gpu3D::set_render_xpos(u16 value, u16 mask) {
   if (!render_on_.load(std::memory_order_relaxed)) return;
@@ -1697,38 +1696,51 @@ template <class S> void Gpu3D::sync_state(S& s) {
   // The outcode is derived from pos and only read off temp_vtx_; rebuilt on
   // load rather than stored, so the state format is unchanged.
   if constexpr (S::reading) for (Vertex& v : temp_vtx_) v.oc = outcode(v.pos);
-  s.fields(vertex_num_, vertex_in_poly_, consecutive_polys_, num_opaque_, bank_, num_vertices_, num_polygons_,
+  // On disk the polygon RAM is the hardware's two banks: slot 0 the bank
+  // being written, slot 1 the finalised list. The third bank only ever holds
+  // a list the raster has finished with by now (sync_raster ran first), so
+  // it is not saved; indices are remapped into slots on the way out, and a
+  // file always loads back as bank 0 written, bank 1 finalised -- which is
+  // also how files from the two-bank format read.
+  u32 slot_of[BANKS]; for (u32 b = 0; b < BANKS; ++b) slot_of[b] = b == bank_ ? 0 : b == render_bank_ ? 1 : 2;
+  auto remap = [&](u32 idx, u32 per) -> u32 { return S::reading ? idx : slot_of[idx / per] * per + idx % per; };
+  u32 bank_disk = 0;
+  s.fields(vertex_num_, vertex_in_poly_, consecutive_polys_, num_opaque_, bank_disk, num_vertices_, num_polygons_,
            render_count_, render_identical_, flush_request_, flush_attr_, prev_swap_polys_, prev_swap_verts_, rendered_before_);
+  if constexpr (S::reading) { bank_ = bank_disk & 1; render_bank_ = bank_ ^ 1; raster_bank_ = render_bank_; }
   // Pointers into the polygon RAM travel as indices.
-  s32 strip = last_strip_poly_ ? static_cast<s32>(last_strip_poly_ - pram_.data()) : -1;
+  s32 strip = last_strip_poly_ ? static_cast<s32>(remap(static_cast<u32>(last_strip_poly_ - pram_.data()), PRAM_BANK)) : -1;
   s.put(strip);
-  if constexpr (S::reading) last_strip_poly_ = strip >= 0 && strip < static_cast<s32>(pram_.size()) ? &pram_[static_cast<size_t>(strip)] : nullptr;
+  if constexpr (S::reading) last_strip_poly_ = strip >= 0 && strip < static_cast<s32>(PRAM_BANK * 2) ? &pram_[static_cast<size_t>(strip)] : nullptr;
   if constexpr (S::reading) { if (render_count_ > PRAM_BANK) { s.fail("render list"); return; } }
   for (u32 i = 0; i < render_count_; ++i) {
-    u16 k = static_cast<u16>(S::reading ? 0 : render_polys_[i] - pram_.data());
+    u16 k = static_cast<u16>(S::reading ? 0 : remap(static_cast<u32>(render_polys_[i] - pram_.data()), PRAM_BANK));
     s.put(k);
     if constexpr (S::reading) render_polys_[i] = &pram_[k & (PRAM_BANK * 2 - 1)];
   }
-  // Vertex/polygon RAM: the current bank up to its counts, the other bank
-  // (the one being displayed, and compared against at the next swap) up to
-  // what the last swap left there or the render list references.
+  // Vertex/polygon RAM: the current bank up to its counts, the finalised
+  // bank (the one being displayed, and compared against at the next swap)
+  // up to what the last swap left there or the render list references.
   u32 nv[2] = {0, 0}, np[2] = {0, 0};
   if constexpr (!S::reading) {
-    nv[bank_] = num_vertices_; np[bank_] = num_polygons_;
-    const u32 rb = bank_ ^ 1;
-    nv[rb] = std::min(prev_swap_verts_, VRAM_BANK); np[rb] = std::min(prev_swap_polys_, PRAM_BANK);
+    nv[0] = num_vertices_; np[0] = num_polygons_;
+    nv[1] = std::min(prev_swap_verts_, VRAM_BANK); np[1] = std::min(prev_swap_polys_, PRAM_BANK);
     for (u32 i = 0; i < render_count_; ++i) {
-      const u32 k = static_cast<u32>(render_polys_[i] - pram_.data());
-      np[k / PRAM_BANK] = std::max(np[k / PRAM_BANK], k % PRAM_BANK + 1);
+      const u32 k = remap(static_cast<u32>(render_polys_[i] - pram_.data()), PRAM_BANK);
+      if (k < PRAM_BANK * 2) np[k / PRAM_BANK] = std::max(np[k / PRAM_BANK], k % PRAM_BANK + 1);
       const Polygon& p = *render_polys_[i];
-      for (u32 j = 0; j < p.nverts && j < 10; ++j) { const u32 vi = p.vtx[j]; if (vi < VRAM_BANK * 2) nv[vi / VRAM_BANK] = std::max(nv[vi / VRAM_BANK], vi % VRAM_BANK + 1); }
+      for (u32 j = 0; j < p.nverts && j < 10; ++j) { const u32 vi = remap(p.vtx[j], VRAM_BANK); if (vi < VRAM_BANK * 2) nv[vi / VRAM_BANK] = std::max(nv[vi / VRAM_BANK], vi % VRAM_BANK + 1); }
     }
   }
   s.fields(nv, np);
-  for (u32 b = 0; b < 2; ++b) {
-    if constexpr (S::reading) { if (nv[b] > VRAM_BANK || np[b] > PRAM_BANK) { s.fail("polygon RAM counts"); return; } }
-    for (u32 i = 0; i < nv[b]; ++i) sync_vertex(s, vram_[b * VRAM_BANK + i]);
-    for (u32 i = 0; i < np[b]; ++i) sync_polygon(s, pram_[b * PRAM_BANK + i]);
+  for (u32 slot = 0; slot < 2; ++slot) {
+    const u32 b = S::reading ? slot : (slot == 0 ? bank_ : render_bank_);
+    if constexpr (S::reading) { if (nv[slot] > VRAM_BANK || np[slot] > PRAM_BANK) { s.fail("polygon RAM counts"); return; } }
+    for (u32 i = 0; i < nv[slot]; ++i) sync_vertex(s, vram_[b * VRAM_BANK + i]);
+    for (u32 i = 0; i < np[slot]; ++i) {
+      if constexpr (S::reading) sync_polygon(s, pram_[b * PRAM_BANK + i]);
+      else { Polygon copy = pram_[b * PRAM_BANK + i]; for (u32 j = 0; j < 10; ++j) copy.vtx[j] = static_cast<u16>(remap(copy.vtx[j], VRAM_BANK)); sync_polygon(s, copy); }
+    }
   }
   s.end();
   renderer_.sync_output(s);

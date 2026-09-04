@@ -2539,7 +2539,8 @@ void Renderer3D::render(const Gpu3D& gx) {
   // comment on ablate() in gpu.cpp -- the picture is stale from here on.
   static const bool no_raster = [] { const char* e = std::getenv("DS_ABLATE"); return e && (std::atoi(e) & 1); }();
   if (no_raster) return;
-  rs_ = &gx.render_state();
+  rs_frame_ = gx.render_state();
+  rs_ = &rs_frame_;
   dispcnt_ = rs_->dispcnt & (aa_ ? ~0u : ~(1u << 4));
   expand_toon();
   vm_ = &nds_.bus.vram_map();
@@ -2637,7 +2638,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   job_fn_ = [this, &gxr, dst](u32 w) {
     const auto t0 = std::chrono::steady_clock::now();
     Renderer3D* r = this;
-    if (w != 0) { r = bands_[w - 1].get(); r->prepare_worker(gxr, &poly_texels_); }
+    if (w != 0) { r = bands_[w - 1].get(); r->prepare_worker(gxr, &poly_texels_, &rs_frame_); }
     else build_edges(gxr);   // this instance's render state is already latched
     for (;;) {
       const u32 b = pool_->claim();
@@ -2995,9 +2996,9 @@ u32 Renderer3D::band_count(u32 polygons) {
 }
 
 // Set up a worker to render a band of the frame the coordinator has latched.
-void Renderer3D::prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels) {
+void Renderer3D::prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels, const RenderState* rs) {
   gx_ = &gx;
-  rs_ = &gx.render_state();
+  rs_ = rs;
   dispcnt_ = rs_->dispcnt & (aa_ ? ~0u : ~(1u << 4));
   expand_toon();
   vm_ = &nds_.bus.vram_map();

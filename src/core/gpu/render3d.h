@@ -38,6 +38,18 @@ struct VramView;
 // rendered, then the final pass of line y-1 reads lines y-2..y, and the
 // finished line is copied to the output buffer. The whole working set
 // (colour, depth, attributes, two pixels deep) stays in L1.
+// The render registers latched at a swap (Gpu3D::vblank); the raster works
+// from a copy (Renderer3D::rs_frame_).
+struct RenderState {
+  u32 dispcnt = 0;
+  u8  alpha_ref = 0;
+  std::array<u16, 32> toon{};
+  std::array<u16, 8> edge{};
+  u32 fog_color = 0, fog_offset = 0, fog_shift = 0;
+  std::array<u8, 34> fog_density{};
+  u32 clear_attr1 = 0x3F000000, clear_attr2 = 0x00007FFF;
+};
+
 class Renderer3D {
 public:
   explicit Renderer3D(NDS& nds);
@@ -437,7 +449,11 @@ private:
   void build_edges(const Gpu3D& gx);
   void seed_active(s32 y);
   void render_band(s32 y0, s32 y1, u32* dst);
-  void prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels);
+  void prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels, const RenderState* rs);
+  // The coordinator's copy of the render registers for the frame: the
+  // engine's own are rewritten at the next VBlank while the raster may
+  // still be running (see Gpu3D::raster_bank_).
+  RenderState rs_frame_;
   static u32 band_count(u32 polygons);
   // Bin cut points. The frame is split into more bins than there are workers
   // and each worker takes the next unclaimed one, so a bin that turns out
@@ -504,7 +520,7 @@ private:
   u64 band_ns_[8] = {};                                 // last frame's per-band wall time (workers write their own slot)
   u64 band_sum_ns_[2] = {0, 0};                         // summed band time (serial raster cost) of the last two frames
   u32 last_nb_ = 0;                                     // workers given the last frame (slots of band_ns_ that are live)
-  static constexpr u64 kLagBandThresholdNs = 30'000'000; // serial raster cost two workers can still hide; below it a hot compositor gets the third core (DS_R3D_LAG_NS overrides)
+  static constexpr u64 kLagBandThresholdNs = 40'000'000; // serial raster cost two workers can still hide; below it a hot compositor gets the third core (DS_R3D_LAG_NS overrides; 40 ms puts Golden Sun's title on two, which wins unclocked and is even with three under --cpu-oc)
   struct Pool;
 public:
   void debug_dump(FILE* f);   // DS_WATCHDOG: band hand-off state

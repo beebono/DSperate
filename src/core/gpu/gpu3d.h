@@ -5,6 +5,7 @@
 #include "core/gpu/render3d.h"
 
 #include <array>
+#include <vector>
 #include <atomic>
 
 namespace ds { struct NDS; }
@@ -49,17 +50,6 @@ struct Polygon {
   u32 sort_key;
 };
 
-// Registers latched at VBlank for the rasteriser.
-struct RenderState {
-  u32 dispcnt = 0;
-  u8  alpha_ref = 0;
-  std::array<u16, 32> toon{};
-  std::array<u16, 8> edge{};
-  u32 fog_color = 0, fog_offset = 0, fog_shift = 0;
-  std::array<u8, 34> fog_density{};
-  u32 clear_attr1 = 0x3F000000, clear_attr2 = 0x00007FFF;
-};
-
 template <typename T, u32 N>
 class Fifo {
 public:
@@ -77,6 +67,9 @@ private:
 class Gpu3D {
 public:
   explicit Gpu3D(NDS& nds);
+  // The band workers may still be rasterising the last frame: they read the
+  // polygon RAM below, which is freed before the renderer (declared first).
+  ~Gpu3D();
   void reset();
   template <class S> void sync_state(S& s);   // after sync_raster()
 
@@ -287,11 +280,22 @@ private:
   Polygon* last_strip_poly_ = nullptr;
   u32 num_opaque_ = 0;
 
-  // Vertex/polygon RAM, two banks each.
-  static constexpr u32 VRAM_BANK = 6144, PRAM_BANK = 2048;
-  std::array<Vertex, VRAM_BANK * 2> vram_{};
-  std::array<Polygon, PRAM_BANK * 2> pram_{};
-  u32 bank_ = 0;
+  // Vertex/polygon RAM. The hardware has two banks; a third lets the
+  // rasteriser keep reading the list it was given while the geometry
+  // engine, after a swap, fills the bank the *previous* list occupied:
+  // bank_ is being written, render_bank_ holds the finalised list the next
+  // render() takes, raster_bank_ the one a raster in flight reads (set at
+  // render_frame). A swap retires bank_ into render_bank_ and picks the
+  // bank neither of the other two names. Without this vblank() had to wait
+  // for the raster before swapping, on the emulation thread, with nothing
+  // to hide the wait behind once the display composite moved off it.
+  static constexpr u32 VRAM_BANK = 6144, PRAM_BANK = 2048, BANKS = 3;
+  // On the heap: a third bank made an NDS too big for the stack the tests
+  // build one on.
+  std::vector<Vertex> vram_ = std::vector<Vertex>(VRAM_BANK * BANKS);
+  std::vector<Polygon> pram_ = std::vector<Polygon>(PRAM_BANK * BANKS);
+  u32 bank_ = 0, render_bank_ = 1, raster_bank_ = 1;
+  u32 next_write_bank() const { for (u32 b = 0; b < BANKS; ++b) if (b != render_bank_ && b != raster_bank_) return b; return 0; }
   u32 num_vertices_ = 0, num_polygons_ = 0;
   std::array<const Polygon*, PRAM_BANK> render_polys_{};
   u32 render_count_ = 0;
