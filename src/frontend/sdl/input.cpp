@@ -217,8 +217,15 @@ bool Input::pad_down(const Bind& b, bool down) {
 
 void Input::axis(Uint8 which, Sint16 value) {
   // Axis directions bound as buttons: edge detection with a threshold.
+  // A trigger is 0 at rest and 32767 pressed -- unless the pad's mapping
+  // binds it to a centred axis (the Miyoo A30's "Xbox 360" pad: L2/R2 are
+  // -256..256 evdev axes, idle 0), which SDL rescales to rest at 16384. A
+  // stick deadzone would then see the release as still pressed, and the
+  // hotkey fires exactly once. Triggers need three quarters of the travel.
+  const bool trigger = which == SDL_CONTROLLER_AXIS_TRIGGERLEFT || which == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
+  const int threshold = trigger ? std::max(deadzone_, 24576) : deadzone_;
   for (int dir = 0; dir < 2; ++dir) {
-    const bool past = dir ? value > deadzone_ : value < -deadzone_;
+    const bool past = dir ? value > threshold : value < -threshold;
     if (past != axis_state_[which][dir]) {
       axis_state_[which][dir] = past;
       Bind b; b.kind = Bind::PadAxis; b.code = which; b.neg = dir == 0;
