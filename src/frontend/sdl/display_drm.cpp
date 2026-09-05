@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "display_drm.h"
+#include "dmaheap.h"
 #include "drm_uapi.h"
 
 #include <SDL2/SDL.h>
@@ -21,16 +22,6 @@
 namespace ds::sdl {
 
 namespace {
-
-// From <linux/dma-heap.h>, declared here so the sysroot need not carry it --
-// the same reason display_wl.cpp declares it.
-struct dma_heap_allocation_data {
-  uint64_t len;
-  uint32_t fd;
-  uint32_t fd_flags;
-  uint64_t heap_flags;
-};
-#define DMA_HEAP_IOCTL_ALLOC _IOWR('H', 0x0, struct dma_heap_allocation_data)
 
 // Every DrmOut on the same DRM fd, so completions can be routed by owner.
 std::vector<DrmOut*> g_outs;
@@ -58,34 +49,35 @@ int sdl_drm_fd(SDL_Window* win) {
 } // namespace
 
 bool DrmOut::alloc_buf(Buf& b) {
-  int heap = ::open("/dev/dma_heap/linux,cma", O_RDWR | O_CLOEXEC);
-  if (heap < 0) { std::perror("drm: /dev/dma_heap/linux,cma"); return false; }
-  dma_heap_allocation_data a = {};
-  a.len = static_cast<uint64_t>(w_) * h_ * 4;
-  a.fd_flags = O_RDWR | O_CLOEXEC;
-  const int r = ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &a);
-  ::close(heap);
-  if (r < 0) { std::perror("drm: CMA alloc"); return false; }
-  b.fd = static_cast<int>(a.fd);
-  b.bytes = a.len;
+  // The import is the probe: a heap the kernel hands out but the display
+  // controller cannot scan (system memory without an IOMMU) fails ADDFB2,
+  // and dmaheap moves on to the next one.
+  const size_t bytes = static_cast<size_t>(w_) * h_ * 4;
+  b.fd = dmaheap::alloc(bytes, [&](int fd) {
+    drmu::prime_handle ph = {};
+    ph.fd = fd;
+    if (ioctl(fd_, drmu::IOCTL_PRIME_FD_TO_HANDLE, &ph) < 0) { std::perror("drm: PRIME_FD_TO_HANDLE"); return false; }
+    drmu::mode_fb_cmd2 f = {};
+    f.width = static_cast<u32>(w_);
+    f.height = static_cast<u32>(h_);
+    f.pixel_format = FMT_XRGB8888;
+    f.handles[0] = ph.handle;
+    f.pitches[0] = static_cast<u32>(w_) * 4;
+    if (ioctl(fd_, drmu::IOCTL_MODE_ADDFB2, &f) < 0) {
+      std::perror("drm: ADDFB2");
+      drmu::gem_close gc = {}; gc.handle = ph.handle; ioctl(fd_, drmu::IOCTL_GEM_CLOSE, &gc);
+      return false;
+    }
+    b.handle = ph.handle;
+    b.fb = f.fb_id;
+    return true;
+  }, "drm");
+  if (b.fd < 0) return false;
+  b.bytes = bytes;
   void* m = mmap(nullptr, b.bytes, PROT_READ | PROT_WRITE, MAP_SHARED, b.fd, 0);
   if (m == MAP_FAILED) { std::perror("drm: mmap"); return false; }
   b.px = static_cast<u32*>(m);
   std::memset(b.px, 0, b.bytes);
-
-  drmu::prime_handle ph = {};
-  ph.fd = b.fd;
-  if (ioctl(fd_, drmu::IOCTL_PRIME_FD_TO_HANDLE, &ph) < 0) { std::perror("drm: PRIME_FD_TO_HANDLE"); return false; }
-  b.handle = ph.handle;
-
-  drmu::mode_fb_cmd2 f = {};
-  f.width = static_cast<u32>(w_);
-  f.height = static_cast<u32>(h_);
-  f.pixel_format = FMT_XRGB8888;
-  f.handles[0] = b.handle;
-  f.pitches[0] = static_cast<u32>(w_) * 4;
-  if (ioctl(fd_, drmu::IOCTL_MODE_ADDFB2, &f) < 0) { std::perror("drm: ADDFB2"); return false; }
-  b.fb = f.fb_id;
   return true;
 }
 

@@ -481,7 +481,13 @@ screen shown alone, large or dominant; `F6` swaps it.
 The core scales each scanline straight into the buffer that is presented, as
 the line is produced (`DS_SCANLINE_SCALE=0/1` overrides the per-driver
 default), and that buffer is a CMA dma-heap allocation the display hardware
-can read directly (`DS_DMABUF=0` disables, `=1` requires). The scaling
+can read directly (`DS_DMABUF=0` disables, `=1` requires). That buffer
+comes from whichever allocator the kernel has: the heap named by
+`DS_DMA_HEAP` (a `/dev/dma_heap/` name or path, `ion`, or `ion:<mask>`),
+else every `/dev/dma_heap/*` contiguous-first (`linux,cma`, vendor
+`cma-uncached`/`reserved`, then the system heaps), else `/dev/ion`; each
+candidate is offered to the display and the first one it accepts is used
+(the `buffers from` log line says which). The scaling
 filters live on that path and cost the CPU, not a GPU: `--linear` is a
 bilinear filter (two NEON passes per line; about 0.2 ms a frame at 2.5x on
 an RG DS, free where the display engine scales, below); `--lcd-grid S`

@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "wl_dyn.h"             // must precede every wayland header
 #include "display_wl.h"
+#include "dmaheap.h"
 
 #include "wl/wayland-client.h"
 #include "wl/linux-dmabuf-v1.h"
@@ -16,15 +17,6 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
-// From <linux/dma-heap.h>, declared here so the sysroot need not carry it.
-struct dma_heap_allocation_data {
-  uint64_t len;
-  uint32_t fd;
-  uint32_t fd_flags;
-  uint64_t heap_flags;
-};
-#define DMA_HEAP_IOCTL_ALLOC _IOWR('H', 0x0, struct dma_heap_allocation_data)
 
 namespace ds::sdl {
 
@@ -95,27 +87,35 @@ void DmabufOut::on_release(void* data, wl_buffer*) { static_cast<Buf*>(data)->bu
 
 namespace { const wl_buffer_listener buf_listener = { DmabufOut::on_release }; }
 
+namespace {
+// The non-immediate create: create_immed answers a buffer the compositor
+// cannot import with a fatal protocol error, which is no way to probe heaps.
+struct Created { wl_buffer* wb = nullptr; bool done = false; };
+void on_created(void* d, zwp_linux_buffer_params_v1*, wl_buffer* wb) { auto* c = static_cast<Created*>(d); c->wb = wb; c->done = true; }
+void on_failed(void* d, zwp_linux_buffer_params_v1*) { static_cast<Created*>(d)->done = true; }
+const zwp_linux_buffer_params_v1_listener params_listener = { on_created, on_failed };
+} // namespace
+
 bool DmabufOut::alloc_buf(Buf& b) {
-  int heap = ::open("/dev/dma_heap/linux,cma", O_RDWR | O_CLOEXEC);
-  if (heap < 0) { std::perror("dmabuf: /dev/dma_heap/linux,cma"); return false; }
-  dma_heap_allocation_data a = {};
-  a.len = static_cast<uint64_t>(w_) * h_ * 4;
-  a.fd_flags = O_RDWR | O_CLOEXEC;
-  const int r = ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &a);
-  ::close(heap);
-  if (r < 0) { std::perror("dmabuf: CMA alloc"); return false; }
-  b.fd = static_cast<int>(a.fd);
-  b.bytes = a.len;
+  const size_t bytes = static_cast<size_t>(w_) * h_ * 4;
+  b.fd = dmaheap::alloc(bytes, [&](int fd) {
+    zwp_linux_buffer_params_v1* p = zwp_linux_dmabuf_v1_create_params(g_.dmabuf);
+    Created c;
+    zwp_linux_buffer_params_v1_add_listener(p, &params_listener, &c);
+    zwp_linux_buffer_params_v1_add(p, fd, 0, 0, w_ * 4, 0, 0);   // plane 0, LINEAR
+    zwp_linux_buffer_params_v1_create(p, w_, h_, FMT_XRGB8888, 0);
+    while (!c.done && wl_display_roundtrip_queue(dpy_, g_.q) >= 0) {}
+    zwp_linux_buffer_params_v1_destroy(p);
+    if (!c.wb) { std::fprintf(stderr, "dmabuf: compositor refused the buffer\n"); return false; }
+    b.wb = c.wb;
+    return true;
+  }, "dmabuf");
+  if (b.fd < 0) return false;
+  b.bytes = bytes;
   void* m = mmap(nullptr, b.bytes, PROT_READ | PROT_WRITE, MAP_SHARED, b.fd, 0);
   if (m == MAP_FAILED) { std::perror("dmabuf: mmap"); return false; }
   b.px = static_cast<u32*>(m);
   std::memset(b.px, 0, b.bytes);
-
-  zwp_linux_buffer_params_v1* p = zwp_linux_dmabuf_v1_create_params(g_.dmabuf);
-  zwp_linux_buffer_params_v1_add(p, b.fd, 0, 0, w_ * 4, 0, 0);   // plane 0, LINEAR
-  b.wb = zwp_linux_buffer_params_v1_create_immed(p, w_, h_, FMT_XRGB8888, 0);
-  zwp_linux_buffer_params_v1_destroy(p);
-  if (!b.wb) return false;
   wl_buffer_add_listener(b.wb, &buf_listener, &b);
   return true;
 }
