@@ -6,6 +6,7 @@
 #include "core/gpu/gpu.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <ctime>
@@ -32,6 +33,17 @@ constexpr unsigned CMD_GET_SCN_WIDTH = 0x07, CMD_GET_SCN_HEIGHT = 0x08;
 constexpr unsigned FBIOGET_LAYER_HDL_0 = 0x4700;
 constexpr unsigned LAYER_MODE_SCALER = 4;
 constexpr unsigned FORMAT_ARGB_8888 = 0;
+
+// ---- DE front end (the scaler) ---------------------------------------------------
+// Register layout per the sun4i/sun8i DEFE (linux: drivers/gpu/drm/sun4i/
+// sun4i_frontend.h; the A33 is "allwinner,sun8i-a33-display-frontend").
+// The base is the A33's DEFE0; another chip on this driver would need its own.
+constexpr off_t    FE_BASE = 0x01e00000;
+constexpr size_t   FE_MAP = 0x1000;
+constexpr unsigned FE_FRM_CTRL = 0x004 / 4, FE_STATUS = 0x068 / 4;
+constexpr u32      FE_COEF_ACCESS = 1u << 23, FE_COEF_ACCESS_OK = 1u << 11;
+constexpr unsigned FE_CH0_HORZCOEF0 = 0x400 / 4, FE_CH0_HORZCOEF1 = 0x480 / 4, FE_CH0_VERTCOEF = 0x500 / 4;
+constexpr unsigned FE_CH1_HORZCOEF0 = 0x600 / 4, FE_CH1_HORZCOEF1 = 0x680 / 4, FE_CH1_VERTCOEF = 0x700 / 4;
 
 struct DispWindow { int x, y; unsigned width, height; };
 struct DispSize { unsigned width, height; };
@@ -168,6 +180,7 @@ bool DispOut::open(int rot, bool vsync) {
   panel_h_ = static_cast<int>(ioctl(disp_, CMD_GET_SCN_HEIGHT, a));
   if (panel_w_ <= 0 || panel_h_ <= 0) { std::fprintf(stderr, "disp: no screen size\n"); close(); return false; }
   rot_ = rot; vsync_ = vsync;
+  timing_ = std::getenv("DS_DISP_TIMING") != nullptr;
   buf_bytes_ = static_cast<size_t>(W) * H * VIEWS * sizeof(u32);   // the largest canvas: two screens
   if (buf_bytes_ * BUFS > fix.smem_len) { std::fprintf(stderr, "disp: fb0 too small for %d composites\n", BUFS); close(); return false; }
   map_len_ = fix.smem_len;
@@ -198,10 +211,12 @@ bool DispOut::open(int rot, bool vsync) {
   const size_t n = buf_bytes_ / sizeof(u32);
   for (int b = 0; b < BUFS; ++b) { u32* p = buf_ptr(b); for (size_t i = 0; i < n; ++i) p[i] = 0xFF000000u; }
 
+  if (nearest_wanted_ && !open_frontend()) std::fprintf(stderr, "disp: cannot reach the scaler's coefficient RAM; the driver's filter shows\n");
+
   if (ui_layer_ >= 0) ui_was_enabled_ = layer_ioctl(disp_, CMD_LAYER_DISABLE, static_cast<unsigned>(ui_layer_), nullptr) == 0;
   cur_ = 0;
   next_ns_ = now_ns();
-  displayed_ = 0; latched_ = pending_ = -1; stop_ = false;
+  displayed_ = 0; latched_ = queued_ = pending_ = -1; stop_ = false;
   if (vsync_) thread_ = std::thread([this] { presenter(); });
   return true;
 #else
@@ -225,8 +240,10 @@ void DispOut::close() {
   }
   if (map_) munmap(map_, map_len_);
   if (fb_ >= 0) ::close(fb_);
+  if (fe_) munmap(const_cast<u32*>(fe_), FE_MAP);
+  if (mem_ >= 0) ::close(mem_);
 #endif
-  disp_ = fb_ = -1; map_ = nullptr; map_len_ = 0; layer_ = ui_layer_ = -1; ui_was_enabled_ = false; layer_enabled_ = false;
+  disp_ = fb_ = mem_ = -1; map_ = nullptr; fe_ = nullptr; map_len_ = 0; layer_ = ui_layer_ = -1; ui_was_enabled_ = false; layer_enabled_ = false;
   grid_layer_ = -1; grid_enabled_ = false;
 }
 
@@ -373,6 +390,7 @@ bool DispOut::set_layer(u32 addr, Dims d) {
   info.fb.format = FORMAT_ARGB_8888;
   info.fb.src_win = {0, 0, static_cast<unsigned>(d.w), static_cast<unsigned>(d.h)};
   if (layer_ioctl(disp_, CMD_LAYER_SET_INFO, static_cast<unsigned>(layer_), &info) != 0) { std::perror("disp: LAYER_SET_INFO"); return false; }
+  if (fe_) write_coefs();   // over the driver's own table
   if (!layer_enabled_) {
     if (layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(layer_), nullptr) != 0) { std::perror("disp: LAYER_ENABLE"); return false; }
     layer_enabled_ = true;
@@ -385,6 +403,60 @@ bool DispOut::set_layer(u32 addr, Dims d) {
 }
 
 void DispOut::flip(int buf) { set_layer(buf_addr(buf), dims_[buf]); }
+
+bool DispOut::open_frontend() {
+#if defined(__linux__)
+  mem_ = ::open("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC);
+  if (mem_ < 0) return false;
+  void* m = mmap(nullptr, FE_MAP, PROT_READ | PROT_WRITE, MAP_SHARED, mem_, FE_BASE);
+  if (m == MAP_FAILED) { ::close(mem_); mem_ = -1; return false; }
+  fe_ = static_cast<volatile u32*>(m);
+  return true;
+#else
+  return false;
+#endif
+}
+
+
+// Nearest neighbour as a polyphase table: phase p of 32 is the source
+// position (centre sample + p/32), so nearest is the whole weight (64) on
+// the centre sample for p < 16 and on the next one from p = 16. Where those
+// live was probed on the A30 with the emulator frozen (the RAM is
+// write-only): horizontally the centre is tap 4 -- the low byte of the
+// second coefficient register -- and the next sample tap 5; vertically the
+// centre is byte 1 of the one register and the next sample byte 2 (bytes 0
+// and 3 are two samples out). The first horizontal register's bytes carry
+// no weight on this chip, whatever the sun4i tables suggest.
+//
+// The RAM is behind an access control (frm_ctrl bit 23; status bit 11
+// grants it, within a few us): raised, the CPU owns it and the scaler is
+// locked out -- stores with it down are dropped, and while it is up the
+// picture keeps whatever the scaler last read (so a table left raised
+// never shows). So: raise, write, lower, as the driver does. The scaler
+// reads the RAM live, so the lines scanned during a lockout (the driver's
+// on every layer set, then ours) lose their table; presenter() puts the
+// swap right after the vsync return to keep that near the frame's top.
+// The ready bit is a sun4i thing the A33 does not have.
+//
+// An LCD grid in this table (the last panel pixel of each source pixel at
+// reduced weight) was tried: it works, and the swap's lockout band -- a
+// few lines without the filter, invisible with plain nearest -- shows
+// through it as a bright strip every few seconds, and timing the swap into
+// the blank from userspace (DSI line counter + real-time waits) still
+// missed under load because the layer ioctl itself stalls. The grid stays
+// on its layer.
+void DispOut::write_coefs() {
+#if defined(__linux__)
+  fe_[FE_FRM_CTRL] = fe_[FE_FRM_CTRL] | FE_COEF_ACCESS;
+  for (int spin = 0; spin < 100000 && !(fe_[FE_STATUS] & FE_COEF_ACCESS_OK); ++spin) {}
+  for (int i = 0; i < 32; ++i) {
+    const u32 h1 = i < 16 ? 64u : (64u << 8), v = i < 16 ? (64u << 8) : (64u << 16);
+    fe_[FE_CH0_HORZCOEF0 + i] = 0; fe_[FE_CH0_HORZCOEF1 + i] = h1; fe_[FE_CH0_VERTCOEF + i] = v;
+    fe_[FE_CH1_HORZCOEF0 + i] = 0; fe_[FE_CH1_HORZCOEF1 + i] = h1; fe_[FE_CH1_VERTCOEF + i] = v;
+  }
+  fe_[FE_FRM_CTRL] = fe_[FE_FRM_CTRL] & ~FE_COEF_ACCESS;
+#endif
+}
 
 // One view into the composite. A 1:1 view takes the NEON rotate; any other
 // size is a box downscale (area average over the source block each output
@@ -496,7 +568,7 @@ void DispOut::present(const u32* const fb[VIEWS]) {
   if (thread_.joinable()) {
     std::lock_guard<std::mutex> g(mu_);
     if (pending_ >= 0) { buf = pending_; pending_ = -1; }   // not yet flipped: take it back and overwrite it (the panel skips that frame)
-    else { buf = 0; while (buf == displayed_ || buf == latched_) ++buf; }
+    else { buf = 0; while (buf == displayed_ || buf == latched_ || buf == queued_) ++buf; }
   } else buf = cur_ = (cur_ + 1) % BUFS;
   const bool turned = rot_ == 90 || rot_ == 270;
   const Dims d{turned ? canvas_h_ : canvas_w_, turned ? canvas_w_ : canvas_h_};
@@ -522,19 +594,33 @@ void DispOut::present(const u32* const fb[VIEWS]) {
 
 void DispOut::presenter() {
 #if defined(__linux__)
-  // One flip per refresh: take the newest posted frame, flip to it, wait for
-  // the refresh, and only then is the buffer it replaced free again. The
-  // ioctls run outside the lock so a post never waits on them.
+  // One flip per refresh: take the newest posted frame, wait for the
+  // refresh, and flip to it right then. The layer registers take effect at
+  // the next frame start whenever they are set, but the scaler reads its
+  // coefficient RAM live and the driver's own table goes in, behind a
+  // lockout, inside every layer set before write_coefs() puts ours back --
+  // so the swap goes right after the vsync return, which on the A30 is a
+  // few lines into the frame: what it shows is a handful of lines at the
+  // top with the driver's filter, not a band mid-screen. The ioctls run
+  // outside the lock so a post never waits on them; the buffer taken for
+  // the flip is `queued_` meanwhile, so a post cannot draw into it.
   std::unique_lock<std::mutex> lk(mu_);
   for (;;) {
     cv_.wait(lk, [this] { return stop_ || pending_ >= 0; });
     if (stop_) return;
-    latched_ = pending_; pending_ = -1;
+    queued_ = pending_; pending_ = -1;
     lk.unlock();
-    flip(latched_);
-    wait_vsync();
+    wait_vsync();               // the previously flipped buffer is on the panel now
+    const u64 t0 = now_ns();
+    flip(queued_);
+    if (timing_) {              // DS_DISP_TIMING: how long the swap ran past the vsync return
+      const u64 dt = now_ns() - t0;
+      flip_ns_sum_ += dt; if (dt > flip_ns_max_) flip_ns_max_ = dt; ++flip_n_;
+      if ((flip_n_ & 255) == 0) std::fprintf(stderr, "disp: flip after vsync mean %.0f us, max %.0f us (%llu)\n", flip_ns_sum_ / 1000.0 / flip_n_, flip_ns_max_ / 1000.0, static_cast<unsigned long long>(flip_n_));
+    }
     lk.lock();
-    displayed_ = latched_; latched_ = -1;
+    if (latched_ >= 0) displayed_ = latched_;
+    latched_ = queued_; queued_ = -1;
   }
 #endif
 }

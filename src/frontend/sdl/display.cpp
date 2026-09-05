@@ -67,12 +67,13 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
     auto d = std::make_unique<DispOut>();
     d->set_grid(disp_grid_);
+    d->set_nearest(!linear);
     if (d->open(rot, vsync)) {
       disp_ = std::move(d);
       layout();
       if (chunky_) { scaled_ = true; build_source_scale(); }
-      std::fprintf(stderr, "video: display-engine scaler, rot %d, layout %s, %s driver, vsync %s%s%s\n",
-                   rot, mode_name(layout_.mode), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off", chunky_ ? ", chunky at source" : "",
+      std::fprintf(stderr, "video: display-engine scaler (%s), rot %d, layout %s, %s driver, vsync %s%s%s\n",
+                   disp_->nearest() ? "nearest" : "driver filter", rot, mode_name(layout_.mode), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off", chunky_ ? ", chunky at source" : "",
                    disp_->grid() ? ", grid layer" : "");
       return true;
     }

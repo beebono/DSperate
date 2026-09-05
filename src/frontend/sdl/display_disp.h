@@ -38,8 +38,18 @@
 // Effects: chunky is applied at DS resolution before the rotate (Display
 // runs the scanline scaler at 1:1 into a side buffer); the LCD grid is a
 // second DE layer, a static panel-sized ARGB image blended per pixel over
-// the scaled composite (set_grid). The seam blend modes and bilinear need
-// panel pixels and do not apply: the DE scaler's own filter is what shows.
+// the scaled composite (set_grid). The seam blend modes need panel pixels
+// and do not apply.
+//
+// Filter: the scaler is a polyphase FIR (32 phases, 8-bit weights summing
+// to 64) whose coefficient RAM the disp driver fills with its own smoothing
+// table on every layer set -- the ioctls offer no say in it. Nearest
+// neighbour (the default, as on every other tier) is a table with the whole
+// weight on one tap, written into that RAM through /dev/mem right after
+// each layer set: the driver's write happens inside the ioctl and the
+// scaler reads the RAM live, so ours is what shows from the next line on
+// (verified on the A30; the driver's vblank handler only sets reg_rdy).
+// With --linear the RAM is left to the driver and its filter is what shows.
 // No touch (the A30 has none).
 #pragma once
 
@@ -55,7 +65,7 @@ namespace ds::sdl {
 
 class DispOut {
 public:
-  static constexpr int BUFS = 3, VIEWS = 2;
+  static constexpr int BUFS = 4, VIEWS = 2;
 
   // True when /dev/disp and /dev/fb0 open and a layer query answers: the
   // device runs a disp-1.5 kernel. Cheap, cached; safe to call before SDL_Init.
@@ -97,6 +107,10 @@ public:
   // Set before open(); 0 = no grid.
   void set_grid(u8 alpha) { grid_alpha_ = alpha; }
   bool grid() const { return grid_layer_ >= 0; }
+  // Nearest-neighbour scaling (see the header comment); set before open().
+  // false leaves the driver's own filter in place (--linear).
+  void set_nearest(bool on) { nearest_wanted_ = on; }
+  bool nearest() const { return fe_ != nullptr; }
 
   // Draws each view's 256x192 framebuffer (null skips the view) into a free
   // composite and flips the layer to it. Without vsync the flip is
@@ -104,9 +118,9 @@ public:
   // presenter thread: this returns as soon as the composite is drawn, never
   // blocking the emulation on the panel. A frame posted before the previous
   // one reached the panel replaces it (the panel shows the newest; nothing
-  // waits), and the buffer being scanned out and the one latched for the
-  // next refresh are never written -- three buffers cover displayed +
-  // latched + the one being drawn.
+  // waits), and the buffer being scanned out, the one latched for the next
+  // refresh and the one waiting for the blank are never written -- four
+  // buffers cover displayed + latched + queued + the one being drawn.
   void present(const u32* const fb[VIEWS]);
 
 private:
@@ -121,6 +135,8 @@ private:
   bool set_grid_layer();
   void flip(int buf);
   void wait_vsync();
+  bool open_frontend();           // maps the DE front end's registers for write_coefs()
+  void write_coefs();             // the nearest table into the scaler's coefficient RAM
   void draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb, int index, const u32* const fbs[VIEWS]);
   // The canvas point a composite point came from (the inverse of draw_view's
   // rotation), and the 1:1 view under it drawn before `index`, if any.
@@ -130,7 +146,9 @@ private:
   u32  buf_addr(int buf) const { return phys_ + static_cast<u32>(buf * buf_bytes_); }
   u32* buf_ptr(int buf) const { return reinterpret_cast<u32*>(map_ + buf * buf_bytes_); }
 
-  int  disp_ = -1, fb_ = -1;
+  int  disp_ = -1, fb_ = -1, mem_ = -1;
+  volatile u32* fe_ = nullptr;      // DE front end registers (nearest only)
+  bool nearest_wanted_ = true;
   u8*  map_ = nullptr;
   size_t map_len_ = 0;
   u32  phys_ = 0;
@@ -155,6 +173,8 @@ private:
   std::vector<u32> tmp_, tmp2_, tmp3_;   // cached temporaries for the downscaled views (tmp3_: the row under a blended one)
   int  cur_ = 0;
   bool vsync_ = true;
+  bool timing_ = false;             // DS_DISP_TIMING: log the flip's distance from the blank
+  u64  flip_ns_sum_ = 0, flip_ns_max_ = 0, flip_n_ = 0, flip_miss_ = 0;
   bool pan_blocks_ = true;          // FBIOPAN_DISPLAY waits for the refresh (measured once)
   bool pan_measured_ = false;
   u64  next_ns_ = 0;                // fallback pacing when pan does not block
@@ -165,6 +185,7 @@ private:
   std::condition_variable cv_;
   int  displayed_ = 0;              // on the panel now
   int  latched_ = -1;               // flipped to, waiting for the refresh
+  int  queued_ = -1;                // taken by the presenter, waiting for the vsync to flip
   int  pending_ = -1;               // drawn into, not yet flipped
   bool stop_ = false;
 };

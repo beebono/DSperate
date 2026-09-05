@@ -191,7 +191,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # pip_touch_hold = 60           # frames the inset stays opaque after the bottom screen was touched; 0 = never fades
 # dominant_ratio = 0.5          # the smaller screen's size relative to the dominant one
 # dual_window = false           # one window per panel (dual-screen handhelds)
-# linear = false                # bilinear filter instead of nearest. Overrides lcd_grid, seam and chunky
+# linear = false                # bilinear filter instead of nearest (on the A30 display-engine tier: the
+                                # driver's own scaler filter). Overrides lcd_grid, seam and chunky
 # lcd_grid = 0                  # LCD pixel grid: one dark seam per DS pixel, strength 0 (off) .. 1 (black)
 # seam = dark                   # dark: the grid above | blend: only the panel pixel straddling two DS
                                 # pixels is blended ("sharp shimmerless") | blend_linear: the same in
