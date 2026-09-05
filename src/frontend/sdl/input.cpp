@@ -106,6 +106,74 @@ void Input::configure(const Config& cfg) {
   }
   stylus_chord_ = parse_pad(cfg.str("pad.stylus_dpad", "none"));
   deadzone_ = cfg.num("pad.stick_deadzone", 12000);
+  warn_collisions();
+}
+
+// A physical control feeds one binding per edge: the first match in
+// pad_down()'s / key_down()'s order wins and the rest never fire. Say so at
+// launch rather than letting the player discover a dead button.
+void Input::warn_collisions() const {
+  auto same = [](const Bind& x, const Bind& y) {
+    return x.kind != Bind::None && x.kind == y.kind && x.code == y.code && (x.kind != Bind::PadAxis || x.neg == y.neg);
+  };
+  auto exact = [&](const Bind& x, const Bind& y) { return same(x, y) && x.mod == y.mod && x.with == y.with; };
+  auto pad_name = [](const Bind& b) {
+    std::string s = b.mod ? "mod+" : "";
+    if (b.kind == Bind::PadAxis) s += (b.neg ? "-" : "+") + std::string(SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(b.code)));
+    else s += SDL_GameControllerGetStringForButton(static_cast<SDL_GameControllerButton>(b.code));
+    if (b.with >= 0) s += std::string("+") + SDL_GameControllerGetStringForButton(static_cast<SDL_GameControllerButton>(b.with));
+    return s;
+  };
+  auto key_name = [](const Bind& b) { return std::string(b.mod ? "mod+" : "") + SDL_GetKeyName(b.code); };
+  const int nb = static_cast<int>(B::BTN_COUNT), na = static_cast<int>(Action::Count);
+
+  // Keyboard.
+  for (int i = 0; i < nb; ++i) {
+    for (int j = 0; j < i; ++j)
+      if (exact(key_map_[i], key_map_[j]))
+        std::fprintf(stderr, "config: keys.%s = %s is already keys.%s; only %s will fire\n", kButtonNames[i], key_name(key_map_[i]).c_str(), kButtonNames[j], kButtonNames[j]);
+    for (int a = 0; a < na; ++a)
+      if (same(key_hot_[a], key_map_[i]) && !key_hot_[a].mod)
+        std::fprintf(stderr, "config: hotkeys.%s = %s shadows keys.%s; the game will never see it\n", kActionNames[a], key_name(key_hot_[a]).c_str(), kButtonNames[i]);
+    if (same(key_mod_, key_map_[i]))
+      std::fprintf(stderr, "config: hotkeys.modifier = %s shadows keys.%s\n", key_name(key_mod_).c_str(), kButtonNames[i]);
+  }
+  for (int a = 0; a < na; ++a)
+    for (int b = 0; b < a; ++b)
+      if (exact(key_hot_[a], key_hot_[b]))
+        std::fprintf(stderr, "config: hotkeys.%s = %s is already hotkeys.%s; only %s will fire\n", kActionNames[a], key_name(key_hot_[a]).c_str(), kActionNames[b], kActionNames[b]);
+
+  // Controller. The modifier doubling as a DS button is by design (a lone
+  // release delivers it as a tap), so that pair is not a collision.
+  for (int i = 0; i < nb; ++i) {
+    for (int j = 0; j < i; ++j)
+      if (exact(pad_map_[i], pad_map_[j]))
+        std::fprintf(stderr, "config: pad.%s = %s is already pad.%s; only %s will fire\n", kButtonNames[i], pad_name(pad_map_[i]).c_str(), kButtonNames[j], kButtonNames[j]);
+    for (int a = 0; a < na; ++a)
+      if (same(pad_hot_[a], pad_map_[i]) && !pad_hot_[a].mod && pad_hot_[a].with < 0)
+        std::fprintf(stderr, "config: padhotkeys.%s = %s shadows pad.%s; the game will never see it\n", kActionNames[a], pad_name(pad_hot_[a]).c_str(), kButtonNames[i]);
+    if (stylus_visible_binding() && same(stylus_button_, pad_map_[i]))
+      std::fprintf(stderr, "config: pad.stylus_button = %s shadows pad.%s; the game will never see it\n", pad_name(stylus_button_).c_str(), kButtonNames[i]);
+    if (same(stylus_chord_, pad_map_[i]))
+      std::fprintf(stderr, "config: pad.stylus_dpad = %s shadows pad.%s; the game will never see it\n", pad_name(stylus_chord_).c_str(), kButtonNames[i]);
+  }
+  for (int a = 0; a < na; ++a) {
+    for (int b = 0; b < a; ++b)
+      if (exact(pad_hot_[a], pad_hot_[b]))
+        std::fprintf(stderr, "config: padhotkeys.%s = %s is already padhotkeys.%s; only %s will fire\n", kActionNames[a], pad_name(pad_hot_[a]).c_str(), kActionNames[b], kActionNames[b]);
+    // The pen claims its button unless the modifier is held, so only an
+    // unmodified hotkey on it is dead.
+    if (!pad_hot_[a].mod) {
+      if (stylus_visible_binding() && same(pad_hot_[a], stylus_button_))
+        std::fprintf(stderr, "config: padhotkeys.%s = %s is pad.stylus_button; bind it as mod+%s or it will never fire\n", kActionNames[a], pad_name(pad_hot_[a]).c_str(), pad_name(pad_hot_[a]).c_str());
+      if (same(pad_hot_[a], stylus_chord_))
+        std::fprintf(stderr, "config: padhotkeys.%s = %s is pad.stylus_dpad; bind it as mod+%s or it will never fire\n", kActionNames[a], pad_name(pad_hot_[a]).c_str(), pad_name(pad_hot_[a]).c_str());
+    }
+    if (same(pad_hot_[a], pad_mod_) && pad_hot_[a].with < 0)
+      std::fprintf(stderr, "config: padhotkeys.%s = %s is the modifier; it will never fire\n", kActionNames[a], pad_name(pad_hot_[a]).c_str());
+  }
+  if (stylus_visible_binding() && same(stylus_button_, stylus_chord_))
+    std::fprintf(stderr, "config: pad.stylus_button and pad.stylus_dpad are both %s; the chord will never engage\n", pad_name(stylus_button_).c_str());
 }
 
 void Input::open_controllers() {
@@ -161,10 +229,16 @@ bool Input::key_down(SDL_Keycode k, bool down) {
 bool Input::pad_down(const Bind& b, bool down) {
   auto same = [&](const Bind& x) { return x.kind == b.kind && x.code == b.code && (x.kind != Bind::PadAxis || x.neg == b.neg); };
   if (b.kind == Bind::PadButton) { if (down) held_ |= 1u << b.code; else held_ &= ~(1u << b.code); }
-  if (stylus_visible_binding() && same(stylus_button_)) { stylus_down_ = down; if (down) touched_ = true; return true; }
+  // The pen's tap button and d-pad chord come first, but yield to the pad
+  // modifier: mod+<tap button> is free to be a hotkey, and plain presses
+  // still tap. A release always ends a tap or chord that is in progress,
+  // even if the modifier was pressed in between.
+  if (stylus_visible_binding() && same(stylus_button_) && (stylus_down_ || (down && !pad_mod_down_))) {
+    stylus_down_ = down; if (down) touched_ = true; return true;
+  }
   // The d-pad chord: the chord button itself is withheld from the game, and
   // while it is held the four directions move the pen instead.
-  if (same(stylus_chord_)) {
+  if (same(stylus_chord_) && (stylus_chord_down_ || (down && !pad_mod_down_))) {
     stylus_chord_down_ = down;
     if (!down) stylus_dpad_ = 0;
     return true;

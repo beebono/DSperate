@@ -311,7 +311,7 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # stylus_axis = right           # right | left | none: the stick that moves the pen over the
                                 # bottom screen (left takes the stick away from the d-pad)
 # stylus_dpad = none            # a button; while held the d-pad moves the pen (e.g. leftshoulder)
-# stylus_button = rightstick    # touches at the pen's position
+# stylus_button = rightstick    # touches at the pen's position; mod+<it> is free for a hotkey
 # stylus_speed = 4.0            # pen pixels per frame at full tilt
 # stylus_size = 2               # crosshair scale: arm width and centre dot, DS pixels (scaled up by the
                                 # view's reduction when the bottom screen is the PiP inset / dominant secondary)

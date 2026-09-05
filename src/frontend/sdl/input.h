@@ -94,6 +94,7 @@ private:
     if (down) { buttons_ |= 1u << b; pressed_ |= 1u << b; } else buttons_ &= ~(1u << b);
   }
   void touch_at(int wx, int wy, Display& display);
+  void warn_collisions() const;   // bindings that shadow one another, at configure time
   void fire(Action a, bool down);
   bool key_down(SDL_Keycode k, bool down);
   bool pad_down(const Bind& b, bool down);   // a button or axis edge; true if consumed
