@@ -206,21 +206,21 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # aa = false                    # 3D edge anti-aliasing as the hardware does it. Off is cheaper and is
                                 # what most emulators show
 # disp = auto                   # present through the display engine's hardware scaler (Miyoo A30 and
-#                               # other Allwinner boards): auto (wherever /dev/disp answers) | true | false
+                                # other Allwinner boards): auto (wherever /dev/disp answers) | true | false
 # fbdev = auto                  # present straight through /dev/fb0 (the H700 handhelds' mali-only SDL2):
-#                               # auto (when SDL has no display but fb0 answers) | true | false
+                                # auto (when SDL has no display but fb0 answers) | true | false
 # vsync = true
 # fps = false                   # frames-per-second counter in a corner of the primary screen. Counts
-#                               # presented frames, so frameskip and fast forward show. The fps hotkey
-#                               # toggles it (unbound by default)
+                                # presented frames, so frameskip and fast forward show. The fps hotkey
+                                # toggles it (unbound by default)
 
 [audio]
 # enabled = true
 # volume = 100                  # 0..100
 # driver = pipewire             # SDL audio backend tried first (pipewire, alsa, pulseaudio...); empty =
-#                               # SDL's choice; SDL_AUDIODRIVER overrides
+                                # SDL's choice; SDL_AUDIODRIVER overrides
 # native_rate = true            # open the device at its own rate and resample here (false: 32768 Hz,
-#                               # the sound daemon resamples)
+                                # the sound daemon resamples)
 # mic = true                    # open the microphone
 # mic_dev = plughw:0,0          # ALSA capture device
 # mic_gain = 0.25
@@ -228,9 +228,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 
 [cart]
 # cache_mb = 2048               # unpacked zipped games kept per directory, in MB; the least recently
-#                               # launched go first when a new one would not fit. 0 = keep all
+                                # launched go first when a new one would not fit. 0 = keep all
 # cache = keep                  # keep: unpacked games stay for the next launch | session: deleted at
-#                               # exit, for a card with no room to spare
+                                # exit, for a card with no room to spare
 
 [emu]
 # realtime = rr                 # rr | fifo | off: real-time scheduling for the emulator's threads
