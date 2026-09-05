@@ -10,6 +10,11 @@
 namespace ds::sdl {
 
 namespace {
+// The same DS_VERBOSE gate as main.cpp's VLOG.
+bool verbose() { static const bool v = std::getenv("DS_VERBOSE") != nullptr; return v; }
+} // namespace
+
+namespace {
 const char* const kModeNames[] = {"vertical", "horizontal", "single", "pip", "dominant_v", "dominant_h"};
 const char* const kCornerNames[] = {"tl", "tr", "bl", "br"};
 }
@@ -411,7 +416,10 @@ void Display::build_scale() {
       const u32 w = static_cast<u32>(v.rect.w), h = static_cast<u32>(v.rect.h);
       u32 P = 0;
       auto fits = [&](u32 p) { return p >= 2 && w % p == 0 && h % p == 0 && w / p <= SCREEN_W; };
-      if (chunky_cell_ > 0) { if (fits(static_cast<u32>(chunky_cell_))) P = static_cast<u32>(chunky_cell_); }
+      // An explicit cell that does not divide the screen steps down to the
+      // nearest one that does (5 on 640x480 -> 4), so a size chosen for one
+      // panel is still close on another.
+      if (chunky_cell_ > 0) for (u32 p = static_cast<u32>(chunky_cell_); p >= 2 && !P; --p) if (fits(p)) P = p;
       else if (chunky_cell_ < 0) for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p;
       ds::gpu::Gpu::CellMap m;
       if (P && ds::gpu::Gpu::build_cell_axis(SCREEN_W, w / P, P, m.x) && ds::gpu::Gpu::build_cell_axis(SCREEN_H, h / P, P, m.y)) {
@@ -420,7 +428,13 @@ void Display::build_scale() {
         // The cells' xrun: cell i covers [i*P, (i+1)*P); entries past the
         // last cell are empty runs.
         for (u32 x = 0; x <= SCREEN_W; ++x) xr[x] = static_cast<u16>(std::min(x, w / P) * P);
-        std::fprintf(stderr, "video: chunky cells %ux%u of %u px\n", w / P, h / P, P);
+        // The chosen cell is chatter unless it is not the one asked for;
+        // that is said once, with what was used instead.
+        static bool told = false;
+        if (chunky_cell_ > 0 && P != static_cast<u32>(chunky_cell_) && !told) {
+          told = true;
+          std::fprintf(stderr, "video: no %d px cell divides %ux%u; using %u\n", chunky_cell_, w, h, P);
+        } else if (verbose()) std::fprintf(stderr, "video: chunky cells %ux%u of %u px\n", w / P, h / P, P);
       } else if (chunky_cell_) std::fprintf(stderr, "video: no %s cell divides %ux%u; 2x2 pairs\n", chunky_cell_ > 0 ? "such" : "auto", w, h);
     }
     if (pair)
