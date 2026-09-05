@@ -71,9 +71,10 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     if (d->open(rot, vsync)) {
       disp_ = std::move(d);
       layout();
-      if (chunky_) { scaled_ = true; build_source_scale(); }
+      if (chunky_) build_source_scale();
       std::fprintf(stderr, "video: display-engine scaler (%s), rot %d, layout %s, %s driver, vsync %s%s%s\n",
-                   disp_->nearest() ? "nearest" : "driver filter", rot, mode_name(layout_.mode), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off", chunky_ ? ", chunky at source" : "",
+                   disp_->nearest() ? "nearest" : "driver filter", rot, mode_name(layout_.mode), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off",
+                   !chunky_ ? "" : disp_->divisor() > 1 ? ", chunky in the scaler" : ", chunky at source",
                    disp_->grid() ? ", grid layer" : "");
       return true;
     }
@@ -334,7 +335,7 @@ void Display::toggle_fullscreen() {
 
 void Display::set_layout(const Layout& l) {
   if (only_screen_ >= 0) return;
-  if (disp_) { layout_ = l; layout(); if (scaled_) build_source_scale(); return; }
+  if (disp_) { layout_ = l; layout(); if (chunky_) build_source_scale(); return; }
   const Mode was = layout_.mode;
   layout_ = l;
   if (!fullscreen_ && was != l.mode) {
@@ -381,17 +382,59 @@ bool Display::out_size(int& w, int& h) const {
   return true;
 }
 
-// Chunky at DS resolution (the display-engine tier): the scanline scaler
-// runs at 1:1 into src_side_, which end_frame hands to the layer in place
-// of the core's framebuffer. Pairs fold the odd pixel of each pair into the
-// even one's run. A panel cell (chunky_cell) is possible when it is a whole
-// number of DS pixels under the DE's fit: P panel pixels dividing the
+// Chunky on the display-engine tier. The panel cell is P panel pixels
+// that is a whole number D of DS pixels under the DE's fit: P dividing the
 // view's panel rect into a count that divides 256 x 192 -- on a 320x240
-// view 5 px is 4 DS pixels, 4 px would be 3.2 and cannot be drawn at source.
-// Auto takes the smallest such P in 4..16, as the panel tiers do; an
-// explicit P steps down. Otherwise pairs.
+// view 5 px is 4 DS pixels, 4 px would be 3.2 and cannot be. Auto takes the
+// smallest such P in 4..16, as the panel tiers do; an explicit P steps down.
+//
+// Two ways to draw it. In the scaler (DispOut::set_divisor): when every
+// shown view and the canvas divide by D, the composite is the canvas at
+// cell resolution -- each view box-downscaled by D, the cells' mean -- and
+// the DE's nearest table enlarges the cells whole. No work at DS
+// resolution and a rotate of a quarter the pixels; mean is the only mode.
+// Otherwise (the PiP inset does not divide; no whole cell exists; the pair
+// setting) at source: the scanline scaler runs at 1:1 into src_side_,
+// flattening cells (any mode) or pairs, which end_frame hands to the layer
+// in place of the core's framebuffer.
 void Display::build_source_scale() {
   const double s = disp_ ? disp_->fit_scale() : 0.0;
+  // First the cell each view would get, and whether the scaler can draw them.
+  u32 D_hw = 0;
+  bool hw = disp_ != nullptr && chunky_cell_ != 0 && s > 0.0;
+  int cw = 0, chh = 0;
+  natural_size(layout_, 1.0, cw, chh);
+  for (int i = 0; hw && i < nviews_; ++i) {
+    const View& v = views_[i];
+    if (!v.shown) continue;
+    const u32 pw = static_cast<u32>(std::lround(v.rect.w * s)), ph = static_cast<u32>(std::lround(v.rect.h * s));
+    u32 D = 0;
+    if (pw >= SCREEN_W && ph >= SCREEN_H) {
+      auto fits = [&](u32 p) {
+        if (p < 2 || pw % p || ph % p) return false;
+        const u32 cx = pw / p, cy = ph / p;
+        return SCREEN_W % cx == 0 && SCREEN_H % cy == 0 && SCREEN_W / cx == SCREEN_H / cy && SCREEN_W / cx <= ds::gpu::Gpu::CELL_TAPS;
+      };
+      u32 P = 0;
+      if (chunky_cell_ > 0) { for (u32 p = static_cast<u32>(chunky_cell_); p >= 2 && !P; --p) if (fits(p)) P = p; }
+      else { for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p; }
+      D = P ? SCREEN_W / (pw / P) : 0;
+      if (D < 2) hw = false;                       // no whole cell: pairs at source
+      else if (D_hw && D != D_hw) hw = false;      // views disagree
+      else D_hw = D;
+    }
+    // Every view (a downscaled one too) and the canvas must divide.
+    if (D_hw && (v.rect.w % D_hw || v.rect.h % D_hw || v.rect.x % D_hw || v.rect.y % D_hw)) hw = false;
+  }
+  if (hw && (!D_hw || cw % D_hw || chh % D_hw)) hw = false;
+  if (disp_) disp_->set_divisor(hw ? static_cast<int>(D_hw) : 1);
+  if (hw) {
+    scaled_ = false;   // the core's framebuffers go to the layer as they are
+    for (int i = 0; i < nviews_; ++i) { disp_->set_view_cell(i, 1); src_chunky_[views_[i].screen] = false; }
+    if (verbose()) std::fprintf(stderr, "video: chunky cells of %u DS pixels drawn by the scaler\n", D_hw);
+    return;
+  }
+  scaled_ = true;
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     std::vector<u16>& xr = xrun_[v.screen];

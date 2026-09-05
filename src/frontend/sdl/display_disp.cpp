@@ -265,6 +265,19 @@ void DispOut::set_view(int i, int x, int y, int w, int h, bool shown) {
   views_[i] = ViewRect{x, y, w, h, shown, o.cell};
 }
 
+void DispOut::set_divisor(int d) {
+  if (d < 1) d = 1;
+  if (d == div_) return;
+  div_ = d;
+  dirty_ = (1u << BUFS) - 1;
+  grid_dirty_ = true;
+}
+
+DispOut::Dims DispOut::comp_dims() const {
+  const bool turned = rot_ == 90 || rot_ == 270;
+  return Dims{(turned ? canvas_h_ : canvas_w_) / div_, (turned ? canvas_w_ : canvas_h_) / div_};
+}
+
 void DispOut::set_view_cell(int i, int cell) {
   if (i < 0 || i >= VIEWS || cell < 1) return;
   if (views_[i].cell != cell) grid_dirty_ = true;
@@ -273,7 +286,7 @@ void DispOut::set_view_cell(int i, int cell) {
 
 double DispOut::fit_scale() const {
   const bool turned = rot_ == 90 || rot_ == 270;
-  const Dims d{turned ? canvas_h_ : canvas_w_, turned ? canvas_w_ : canvas_h_};
+  const Dims d{turned ? canvas_h_ : canvas_w_, turned ? canvas_w_ : canvas_h_};   // in DS pixels, whatever the divisor
   if (d.w <= 0 || d.h <= 0) return 0.0;
   return std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h);
 }
@@ -285,12 +298,15 @@ void DispOut::fit(Dims d, int& x, int& y, unsigned& w, unsigned& h) const {
   x = static_cast<int>((panel_w_ - w) / 2); y = static_cast<int>((panel_h_ - h) / 2);
 }
 
-void DispOut::comp_rect(const ViewRect& r, int& cx, int& cy, int& cw, int& ch) const {
+void DispOut::comp_rect(const ViewRect& r0, int& cx, int& cy, int& cw, int& ch) const {
   const bool turned = rot_ == 90 || rot_ == 270;
+  // In composite pixels: the canvas over the divisor.
+  const ViewRect r{r0.x / div_, r0.y / div_, r0.w / div_, r0.h / div_, r0.shown, r0.cell};
+  const int cw_ = canvas_w_ / div_, ch_ = canvas_h_ / div_;
   switch (rot_) {
-    case 270: cx = r.y; cy = canvas_w_ - (r.x + r.w); break;
-    case 90:  cx = canvas_h_ - (r.y + r.h); cy = r.x; break;
-    case 180: cx = canvas_w_ - (r.x + r.w); cy = canvas_h_ - (r.y + r.h); break;
+    case 270: cx = r.y; cy = cw_ - (r.x + r.w); break;
+    case 90:  cx = ch_ - (r.y + r.h); cy = r.x; break;
+    case 180: cx = cw_ - (r.x + r.w); cy = ch_ - (r.y + r.h); break;
     default:  cx = r.x; cy = r.y; break;
   }
   cw = turned ? r.h : r.w; ch = turned ? r.w : r.h;
@@ -334,14 +350,13 @@ void DispOut::draw_grid(Dims d) {
     // gets none -- the scanline tiers' downscaled insets are plain too.
     for (int y = std::max(0, py0); y < std::min(panel_h_, py1); ++y)
       std::fill(grid_stage_.data() + static_cast<size_t>(y) * panel_w_ + std::max(0, px0), grid_stage_.data() + static_cast<size_t>(y) * panel_w_ + std::min(panel_w_, px1), 0u);
-    // The DS pixels along each composite axis: a view drawn smaller than the
-    // screen on the canvas (the inset, the dominant layouts' small screen)
-    // was downscaled before the DE enlarged it, so its cells are still DS
-    // pixels (or pairs) of the 256x192 source, not canvas pixels.
+    // The cells along each composite axis: composite pixels over the
+    // source-side cell (under a divisor a composite pixel is a cell, and
+    // Display passes cell 1). A view shown smaller than the screen itself
+    // gets no grid, whatever the cell.
     const bool turned = rot_ == 90 || rot_ == 270;
-    // Shown smaller than the screen itself: no grid, whatever the cell.
     if (px1 - px0 < (turned ? H : W) || py1 - py0 < (turned ? W : H)) continue;
-    const int nx = (turned ? H : W) / cell, ny = (turned ? W : H) / cell;
+    const int nx = cw / cell, ny = ch / cell;
     std::fill(col_seam.begin(), col_seam.end(), 0); std::fill(row_seam.begin(), row_seam.end(), 0);
     seams(std::max(0, px0), std::min(panel_w_, px1), nx, col_seam.data());
     seams(std::max(0, py0), std::min(panel_h_, py1), ny, row_seam.data());
@@ -418,15 +433,18 @@ bool DispOut::open_frontend() {
 }
 
 
-// Nearest neighbour as a polyphase table: phase p of 32 is the source
-// position (centre sample + p/32), so nearest is the whole weight (64) on
-// the centre sample for p < 16 and on the next one from p = 16. Where those
+// Nearest neighbour as a polyphase table: the whole weight (64) on the
+// centre sample in every phase, so panel pixel k shows source pixel
+// floor(k * n / pw) -- the same runs the scanline tiers' kern::scale_row
+// draws, and the runs the LCD grid layer (draw_grid) puts its seams on;
+// rounding to the nearer sample from phase 16 was tried and put the
+// scaler's cell edges two panel pixels past the seams. Where the taps
 // live was probed on the A30 with the emulator frozen (the RAM is
 // write-only): horizontally the centre is tap 4 -- the low byte of the
-// second coefficient register -- and the next sample tap 5; vertically the
-// centre is byte 1 of the one register and the next sample byte 2 (bytes 0
-// and 3 are two samples out). The first horizontal register's bytes carry
-// no weight on this chip, whatever the sun4i tables suggest.
+// second coefficient register -- with tap 5 the next sample; vertically
+// the centre is byte 1 of the one register, byte 2 the next (bytes 0 and 3
+// two samples out). The first horizontal register's bytes carry no weight
+// on this chip, whatever the sun4i tables suggest.
 //
 // The RAM is behind an access control (frm_ctrl bit 23; status bit 11
 // grants it, within a few us): raised, the CPU owns it and the scaler is
@@ -450,9 +468,8 @@ void DispOut::write_coefs() {
   fe_[FE_FRM_CTRL] = fe_[FE_FRM_CTRL] | FE_COEF_ACCESS;
   for (int spin = 0; spin < 100000 && !(fe_[FE_STATUS] & FE_COEF_ACCESS_OK); ++spin) {}
   for (int i = 0; i < 32; ++i) {
-    const u32 h1 = i < 16 ? 64u : (64u << 8), v = i < 16 ? (64u << 8) : (64u << 16);
-    fe_[FE_CH0_HORZCOEF0 + i] = 0; fe_[FE_CH0_HORZCOEF1 + i] = h1; fe_[FE_CH0_VERTCOEF + i] = v;
-    fe_[FE_CH1_HORZCOEF0 + i] = 0; fe_[FE_CH1_HORZCOEF1 + i] = h1; fe_[FE_CH1_VERTCOEF + i] = v;
+    fe_[FE_CH0_HORZCOEF0 + i] = 0; fe_[FE_CH0_HORZCOEF1 + i] = 64u; fe_[FE_CH0_VERTCOEF + i] = 64u << 8;
+    fe_[FE_CH1_HORZCOEF0 + i] = 0; fe_[FE_CH1_HORZCOEF1 + i] = 64u; fe_[FE_CH1_VERTCOEF + i] = 64u << 8;
   }
   fe_[FE_FRM_CTRL] = fe_[FE_FRM_CTRL] & ~FE_COEF_ACCESS;
 #endif
@@ -481,12 +498,15 @@ const u32* DispOut::under_pixel(int x, int y, int index, const u32* const fbs[VI
   return nullptr;
 }
 
-void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb, int index, const u32* const fbs[VIEWS]) {
+void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r0, const u32* fb, int index, const u32* const fbs[VIEWS]) {
   const bool turned = rot_ == 90 || rot_ == 270;
   // The view's top-left in the composite: the same rotation the pixels get.
   int cx, cy, cw, ch;
-  comp_rect(r, cx, cy, cw, ch);
+  comp_rect(r0, cx, cy, cw, ch);
   u32* dst = comp + static_cast<size_t>(cy) * comp_w + cx;
+  // The view in composite pixels: under a divisor a 1:1 view takes the
+  // downscale below -- the box average over each cell is the chunky mean.
+  const ViewRect r{r0.x / div_, r0.y / div_, r0.w / div_, r0.h / div_, r0.shown, r0.cell};
   if (r.w == W && r.h == H) {
     switch (rot_) {
       case 270: rot270(fb, dst, comp_w); break;
@@ -497,8 +517,43 @@ void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb,
     return;
   }
   if (r.w <= 0 || r.h <= 0 || r.w > W || r.h > H) return;
-  // Downscale, unrotated, into tmp_ (r.w x r.h).
+  // Downscale, unrotated, into tmp_ (r.w x r.h). A power-of-two factor (the
+  // chunky divisors 2 and 4, the dominant layouts' 128x96) is the common
+  // case and gets a NEON path: rounding halving adds over the pixel pairs of
+  // two rows, one pass per halving (a second pass reads the first's
+  // output from tmp4_).
   tmp_.resize(static_cast<size_t>(r.w) * r.h);
+#if DS_DISP_NEON
+  int halvings = 0;
+  for (int w = W, h = H; w > r.w && h > r.h && w == 2 * (w / 2) && h == 2 * (h / 2); w /= 2, h /= 2) ++halvings;
+  if (halvings > 0 && (W >> halvings) == r.w && (H >> halvings) == r.h) {
+    const u32* src = fb;
+    int sw = W, sh = H;
+    for (int pass = 0; pass < halvings; ++pass) {
+      const int ow = sw / 2, oh = sh / 2;
+      u32* out = pass == halvings - 1 ? tmp_.data() : (tmp4_.resize(static_cast<size_t>(ow) * oh), tmp4_.data());
+      for (int dy = 0; dy < oh; ++dy) {
+        const u32* s0 = src + static_cast<size_t>(dy * 2) * sw;
+        const u32* s1 = s0 + sw;
+        u32* o = out + static_cast<size_t>(dy) * ow;
+        int dx = 0;
+        for (; dx + 4 <= ow; dx += 4) {
+          const uint32x4x2_t a = vld2q_u32(s0 + dx * 2), b = vld2q_u32(s1 + dx * 2);   // even / odd pixels
+          const uint8x16_t ha = vrhaddq_u8(vreinterpretq_u8_u32(a.val[0]), vreinterpretq_u8_u32(a.val[1]));
+          const uint8x16_t hb = vrhaddq_u8(vreinterpretq_u8_u32(b.val[0]), vreinterpretq_u8_u32(b.val[1]));
+          vst1q_u32(o + dx, vorrq_u32(vreinterpretq_u32_u8(vrhaddq_u8(ha, hb)), vdupq_n_u32(0xFF000000u)));
+        }
+        for (; dx < ow; ++dx) {   // a width not a multiple of 8 source pixels
+          const u32 p00 = s0[dx * 2], p01 = s0[dx * 2 + 1], p10 = s1[dx * 2], p11 = s1[dx * 2 + 1];
+          u32 v = 0xFF000000u;
+          for (int sh8 = 0; sh8 < 24; sh8 += 8) v |= ((((p00 >> sh8) & 0xFF) + ((p01 >> sh8) & 0xFF) + ((p10 >> sh8) & 0xFF) + ((p11 >> sh8) & 0xFF) + 2) / 4) << sh8;
+          o[dx] = v;
+        }
+      }
+      src = out; sw = ow; sh = oh;
+    }
+  } else
+#endif
   for (int dy = 0; dy < r.h; ++dy) {
     const int sy0 = dy * H / r.h, sy1 = std::max(sy0 + 1, (dy + 1) * H / r.h);
     for (int dx = 0; dx < r.w; ++dx) {
@@ -531,7 +586,7 @@ void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb,
   // back through it cost 0.6 ms a frame on the A30. Where no 1:1 view lies
   // under a pixel (nothing does in the layouts we have) the composite is
   // read after all.
-  if (inset_alpha_ == 255) {
+  if (inset_alpha_ == 255 || div_ > 1) {
     for (int py = 0; py < th; ++py) std::memcpy(dst + static_cast<size_t>(py) * comp_w, tmp2_.data() + static_cast<size_t>(py) * tw, static_cast<size_t>(tw) * sizeof(u32));
     return;
   }
@@ -570,8 +625,7 @@ void DispOut::present(const u32* const fb[VIEWS]) {
     if (pending_ >= 0) { buf = pending_; pending_ = -1; }   // not yet flipped: take it back and overwrite it (the panel skips that frame)
     else { buf = 0; while (buf == displayed_ || buf == latched_ || buf == queued_) ++buf; }
   } else buf = cur_ = (cur_ + 1) % BUFS;
-  const bool turned = rot_ == 90 || rot_ == 270;
-  const Dims d{turned ? canvas_h_ : canvas_w_, turned ? canvas_w_ : canvas_h_};
+  const Dims d = comp_dims();
   u32* comp = buf_ptr(buf);
   if (dirty_ & (1u << buf)) {
     const size_t n = static_cast<size_t>(d.w) * d.h;

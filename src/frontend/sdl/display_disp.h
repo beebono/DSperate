@@ -35,8 +35,14 @@
 // second layer in scaler mode but shows its source unscaled (seen on the
 // unit), so per-view layers are not an option.
 //
-// Effects: chunky is applied at DS resolution before the rotate (Display
-// runs the scanline scaler at 1:1 into a side buffer); the LCD grid is a
+// Effects: chunky is the scaler's own doing wherever the cells come out
+// whole (set_divisor): the composite is the canvas at cell resolution --
+// each 1:1 view box-downscaled by the cell size, the same path the insets
+// take -- and the DE enlarges it with the nearest table, so a 2x2 DS block
+// is exactly one 5x5 panel cell in the single layout with no per-pixel
+// work at DS resolution. Where a view does not divide (the PiP inset)
+// Display falls back to flattening at DS resolution before the rotate (it
+// runs the scanline scaler at 1:1 into a side buffer). The LCD grid is a
 // second DE layer, a static panel-sized ARGB image blended per pixel over
 // the scaled composite (set_grid). The seam blend modes need panel pixels
 // and do not apply.
@@ -91,8 +97,16 @@ public:
   // The chunky cell drawn at source in view i, in canvas pixels (1 = none):
   // the grid puts one seam per cell there.
   void set_view_cell(int i, int cell);
-  // Panel pixels per canvas pixel under the current canvas: what the DE's
-  // fit gives (Display sizes its source-side cells by it).
+  // Hardware chunky: the composite is the canvas divided by d (1 = off);
+  // every view's rectangle and the canvas must divide by d. A 1:1 view is
+  // then box-downscaled by d (its cells' mean) and the DE enlarges the
+  // result -- with nearest, integer panel cells. Insets are drawn opaque
+  // under a divisor (the translucent path reads the 1:1 view's pixels).
+  void set_divisor(int d);
+  int  divisor() const { return div_; }
+  // Panel pixels per canvas (DS) pixel under the current canvas: what the
+  // DE's fit gives (Display sizes its chunky cells by it). Independent of
+  // the divisor.
   double fit_scale() const;
   // Opacity of the views drawn over another (the PiP inset), 0..255: below
   // 255 a downscaled view is blended over what is already in the composite.
@@ -125,7 +139,8 @@ public:
 
 private:
   struct ViewRect { int x = 0, y = 0, w = 0, h = 0; bool shown = false; int cell = 1; };
-  struct Dims { int w = 0, h = 0; };          // a composite's size (the canvas, rotated)
+  struct Dims { int w = 0, h = 0; };          // a composite's size (the canvas, rotated, over the divisor)
+  Dims comp_dims() const;
   bool set_layer(u32 addr, Dims d);
   // The panel window the composite is fitted into (aspect kept, centred).
   void fit(Dims d, int& x, int& y, unsigned& w, unsigned& h) const;
@@ -155,6 +170,7 @@ private:
   int  panel_w_ = 0, panel_h_ = 0;
   int  rot_ = 0;
   int  canvas_w_ = 0, canvas_h_ = 0;
+  int  div_ = 1;                    // set_divisor
   size_t buf_bytes_ = 0;            // one composite's allocation (the largest canvas)
   int  layer_ = -1, ui_layer_ = -1;
   u8   grid_alpha_ = 0;
@@ -170,7 +186,7 @@ private:
   u8   inset_alpha_ = 255;
   Dims dims_[BUFS];                 // what each buffer holds, set by present, read by flip
   unsigned dirty_ = 0;              // buffers to black out before the next draw (canvas changed)
-  std::vector<u32> tmp_, tmp2_, tmp3_;   // cached temporaries for the downscaled views (tmp3_: the row under a blended one)
+  std::vector<u32> tmp_, tmp2_, tmp3_, tmp4_;   // cached temporaries for the downscaled views (tmp3_: the row under a blended one; tmp4_: a halving pass)
   int  cur_ = 0;
   bool vsync_ = true;
   bool timing_ = false;             // DS_DISP_TIMING: log the flip's distance from the blank

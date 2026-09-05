@@ -198,7 +198,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # pixels is blended ("sharp shimmerless") | blend_linear: the same in
                                 # linear light
 # chunky = false                # draw blocks of DS pixels as one flat cell, for panels at odd scales:
-                                # mean (or true) | extreme | mode | tl | min | max | false
+                                # mean (or true) | extreme | mode | tl | min | max | false. The A30
+                                # display-engine tier draws the cells in its scaler: mean only
 # chunky_threshold = 180        # extreme only: luma distance (0..255) an outlier needs to win over the mean
 # chunky_cell = auto            # panel pixels per cell: auto (4..16, whatever divides the screen) | pair
                                 # (2x2 DS pixels) | N (or the nearest size below N that divides the screen)

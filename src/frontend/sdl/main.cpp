@@ -750,6 +750,10 @@ int main(int argc, char** argv) {
       use_disp = false;
     }
   } else use_disp = false;
+  if (use_disp && chunky != 0 && chunky != 2) {
+    std::fprintf(stderr, "chunky %s: the display-engine tier draws chunky cells in the scaler as their mean; using mean\n", cfg.str("video.chunky").c_str());
+    chunky = 2;
+  }
 
   // The fbdev tier (display_fbdev.h) owns fb0 the same way. auto takes it
   // only where SDL2 was built with the mali video driver -- the BaseOS
