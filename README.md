@@ -56,8 +56,10 @@ melonDS (frame dumps, instruction traces) and measured on the Anbernic RG DS
   register-level only, so PictoChat and Download Play do not work.
 - **Frontend.** SDL2: INI config with per-game overrides, keyboard and
   controller remapping, hotkeys, fast forward, screenshots, per-scanline
-  scaling straight into the window surface, zero-copy dmabuf presentation
-  under Wayland with direct scanout when the compositor allows it, and a
+  scaling straight into the presented buffer (nearest, bilinear, LCD grid,
+  box-filter seams or chunky), zero-copy dmabuf presentation under Wayland
+  with direct scanout when the compositor allows it, our own page flips under
+  KMSDRM, the display engine's hardware scaler on Allwinner handhelds, a
   dual-window mode for dual-panel handhelds, and a blitted pause menu --
   save states, the slot list and Action Replay cheats as well as the 
   usual Resume and Quit functions.
@@ -123,12 +125,17 @@ CPUs seeing each other's IPC writes and IRQs up to an event interval late.
 `--direct`), runs `--frames N`, and is what every measurement and comparison
 runs through.
 
-    dsperate --bios9 F --bios7 F --firmware F [--direct game.nds] [--frames N]
-             [--interp | --jit9 | --jit7] [--quantum N] [--save F] [--replay F]
+    dsperate-headless --bios9 F --bios7 F --firmware F [--direct game.nds] [--frames N]
+             [--stats-from N] [--interp | --jit9 | --jit7] [--quantum N] [--timing-oc] [--cpu-oc]
+             [--no-aa] [--frameskip N] [--frameskip-capture] [--hide-screen top|bottom]
+             [--save F] [--replay F]
              [--trace F [--max N]] [--dump-frames F [--dump-from N] [--dump-count N]]
              [--dump-audio F] [--save-state-at N:file] [--load-state F]
              [--cheats usrcheat.dat] [--list-cheats] [--cheat <name|#N>]
              [--rtc-host] [--firmware-override F]
+
+`--hide-screen` skips the drawing of one screen's engine, as a single-screen
+layout does in the frontend; that half of a frame dump goes stale.
 
 `--rtc-host` and `--firmware-override` are for driving the firmware menu from
 the harness and are off by default, because both break reproducibility: the
@@ -164,10 +171,22 @@ dependencies. Unpacking a 64--256 MB ROM costs roughly 0.5--2 s at launch on an
 A55, before the window appears.
 
     dsperate [game.nds|game.zip] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
-                 [--config F] [--scale N] [--fullscreen] [--layout L] [--screen top|bottom]
-                 [--dual-window] [--linear] [--lcd-grid S] [--chunky] [--no-vsync] [--no-audio]
-                 [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N] [--timing-oc]
-                 [--frames N] [--record F | --replay F] [--save F]
+                 [--config F] [--write-config F]
+                 [--scale N] [--fullscreen] [--layout L] [--screen top|bottom] [--dual-window]
+                 [--linear] [--lcd-grid S] [--seam dark|blend|blend_linear]
+                 [--chunky [M]] [--chunky-threshold N] [--chunky-cell C]
+                 [--disp | --no-disp] [--fbdev | --no-fbdev] [--no-vsync]
+                 [--no-audio] [--volume N] [--no-mic]
+                 [--interp] [--lockstep | --quantum N] [--timing-oc] [--cpu-oc] [--fast-load]
+                 [--aa | --no-aa] [--frameskip N] [--frameskip-mode adaptive|fixed] [--frameskip-capture]
+                 [--frames N] [--stats-from N] [--record F | --replay F] [--rtc-host]
+                 [--save F] [--load-state F] [--autosave-png F] [--clear-cache]
+
+`dsperate --help` describes each one; every option has a key in the settings
+file, and the command line overrides it. There is no renderer switch: the
+frontend picks the fastest way onto the panel it can find (see "Display and
+handhelds") and falls back to SDL's GPU renderer, then its software one, only
+where none applies.
 
 ### Settings and controls
 
@@ -180,7 +199,8 @@ as `game: ... [XXXX]` at start, shared by every dump of that title); the
 filename one wins, and is where a layout picked with the hotkey is
 remembered. The command line overrides all of them. `[paths]` holds the BIOS/firmware so they need not
 be passed every time, plus optional `saves` and `states` directories (default:
-next to the ROM), `cheats`, a `usrcheat.dat` database, and
+next to the ROM), `screenshots` (default: the states directory; the
+autosave's PNG stays with its state), `cheats`, a `usrcheat.dat` database, and
 `firmware_override`, where settings changed inside the firmware are kept
 (default `<firmware>.ovr`). `[keys]` and `[pad]` remap the DS buttons to SDL key and
 controller-button names (`x`, `Right Shift`, `dpup`, `+righttrigger`);
@@ -461,7 +481,23 @@ screen shown alone, large or dominant; `F6` swaps it.
 The core scales each scanline straight into the buffer that is presented, as
 the line is produced (`DS_SCANLINE_SCALE=0/1` overrides the per-driver
 default), and that buffer is a CMA dma-heap allocation the display hardware
-can read directly (`DS_DMABUF=0` disables, `=1` requires):
+can read directly (`DS_DMABUF=0` disables, `=1` requires). The scaling
+filters live on that path and cost the CPU, not a GPU: `--linear` is a
+bilinear filter (two NEON passes per line; about 0.2 ms a frame at 2.5x on
+an RG DS, free where the display engine scales, below); `--lcd-grid S`
+dims one seam per DS pixel; `--seam blend` blends only the panel pixel that
+straddles two DS pixels (sharp-shimmerless); `--chunky` draws 2x2 blocks as
+one cell. `--linear` takes precedence over the other three.
+
+The presentation tiers, tried in order at start-up:
+
+- **Display-engine scaler** (`--disp`, auto wherever `/dev/disp` answers:
+  the Miyoo A30 and other Allwinner "disp 1.5" boards). The core draws a
+  DS-resolution canvas, rotated for the panel, and the display engine scales
+  it in hardware; no GL, no driver threads, ~1.4 ms a present.
+- **fbdev** (`--fbdev`, auto when SDL's only driver is Mali-over-fbdev and
+  `/dev/fb0` answers: the H700 handhelds under BaseOS): the scanline path
+  straight into fb0's buffers.
 
 - Under **Wayland**, submitted through `zwp_linux_dmabuf`. The compositor
   composites it zero-copy, or -- for a fullscreen opaque window on an
@@ -472,6 +508,11 @@ can read directly (`DS_DMABUF=0` disables, `=1` requires):
   full-screen upload into a streaming texture, a textured quad, and a
   blocking swap, 13.4 ms per frame on the RG DS. Flipping our own buffer is
   0.15 ms, and takes emulation + present from 17.9 ms a frame to 6.4.
+- **SDL_Renderer**, only where none of the above applies (an X11 desktop,
+  `DS_SCANLINE_SCALE=0`): the GPU renderer, or SDL's software one where no
+  GPU renderer can be created. Not selectable; on the handhelds the scanline
+  tiers measured faster than GLES because the GL driver's threads compete
+  with the emulation and raster threads for four cores.
 
 `--dual-window` opens one fullscreen window per video display with one DS
 screen each, which is what a dual-panel handheld wants and what direct

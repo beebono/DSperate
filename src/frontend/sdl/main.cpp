@@ -114,6 +114,7 @@ const char* kUsage =
     "                  holds the last drawn frame). Without it a game that captures every\n"
     "                  frame -- Pokemon B/W, Golden Sun -- skips nothing; emu.frameskip_capture\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
+    "  --stats-from N  leave the first N frames out of the frame statistics (DS_FRAME_STATS)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
     "  --replay F      play the inputs in F instead of the controls; quits at its end\n"
     "  --rtc-host      run the clock from this machine even under --replay (INEXACT: a game\n"
