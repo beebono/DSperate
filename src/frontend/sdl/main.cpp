@@ -191,6 +191,8 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
     const Disp::View& v = views[i];
     if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
     const u32* fb = display && display->read_screen(v.screen, back.data()) ? back.data() : nds.gpu.framebuffer(v.screen);
+    // The inset at its resting opacity (the touch ramp is a live-only thing).
+    const u32 alpha = v.direct ? 255 : static_cast<u32>(std::clamp(layout.pip_alpha, 0.0, 1.0) * 255.0 + 0.5);
     for (int y = 0; y < v.rect.h; ++y) {
       const int dy = v.rect.y + y;
       if (dy < 0 || dy >= h) continue;
@@ -200,7 +202,12 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
         const int dx = v.rect.x + x;
         if (dx < 0 || dx >= w) continue;
         const int sx = static_cast<int>(static_cast<long>(x) * ds::SCREEN_W / v.rect.w);
-        const u32 c = fb[sy * ds::SCREEN_W + sx];    // ARGB8888
+        u32 c = fb[sy * ds::SCREEN_W + sx];    // ARGB8888
+        if (alpha < 255) {
+          u32 under = (static_cast<u32>(dst[x * 4 + 0]) << 16) | (static_cast<u32>(dst[x * 4 + 1]) << 8) | dst[x * 4 + 2];
+          Disp::blend_row(&under, &c, 1, alpha);
+          c = under;
+        }
         dst[x * 4 + 0] = (c >> 16) & 0xFF;
         dst[x * 4 + 1] = (c >> 8) & 0xFF;
         dst[x * 4 + 2] = c & 0xFF;
@@ -693,6 +700,7 @@ int main(int argc, char** argv) {
     }
     if (layout_cycle.empty()) layout_cycle.push_back(layout.mode);
     layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
+    layout.pip_alpha = std::clamp(cfg.real("video.pip_alpha", 1.0), 0.0, 1.0);
     layout.dominant = std::clamp(cfg.real("video.dominant_ratio", 0.5), 0.1, 0.99);
   }
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
@@ -1124,6 +1132,11 @@ sdl_ready:
   std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
   std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // the primary screen with the slot digit / FPS counter
   int slot_shown = 0;                                        // frames left to show the slot digit
+  // PiP inset opacity: where it is now (0..255), frames of opacity left
+  // after the last touch, and the hold length from the config.
+  const int pip_touch_hold = std::max(0, cfg.num("video.pip_touch_hold", 60));
+  constexpr int PIP_FADE_STEP = 24;                          // ~10 frames rest to opaque
+  int pip_alpha = static_cast<int>(layout.pip_alpha * 255.0 + 0.5), pip_hold = 0;
   // The pause menu (menu.h) and the two screen copies it is composited into.
   ds::sdl::Menu menu;
   menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
@@ -1171,7 +1184,7 @@ sdl_ready:
     if (write_png(nds, png, display.current_layout(), &display)) std::fprintf(stderr, "state: thumbnail %s\n", png.c_str());
   };
   // A loaded state's view, applied the way the layout hotkeys apply theirs.
-  Disp::Layout loaded_layout; bool got_layout = false;
+  Disp::Layout loaded_layout = layout; bool got_layout = false;   // from `layout`: a state carries no pip_alpha, the config's stays
   auto apply_loaded_layout = [&] {
     if (!got_layout || dual_window) return;
     display.set_layout(loaded_layout);
@@ -1496,6 +1509,23 @@ sdl_ready:
                            "           --frameskip-capture (or [emu] frameskip_capture) skips them anyway\n");
     const bool present = pause_pending ? !skipped
                                        : (!skipped && !fs_partial && (!fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0));
+    // A translucent PiP inset comes up to opaque while the bottom screen is
+    // in use -- the frame the console gets has a touch (finger, mouse, pen
+    // button, or a replayed one), or the pad-driven pen is showing -- and
+    // holds there for pip_touch_hold frames after the last touch before
+    // fading back. Ramped so neither edge pops. Only when the inset IS the
+    // bottom screen (top primary): with the bottom screen large, a touch
+    // says nothing about the top screen sitting in the corner.
+    {
+      const Disp::Layout& l = display.current_layout();
+      const int rest = static_cast<int>(l.pip_alpha * 255.0 + 0.5);
+      const bool inset_is_bottom = l.mode == Disp::Mode::Pip && l.primary == 0;
+      if (inset_is_bottom && (in.down || input.stylus_visible())) pip_hold = pip_touch_hold;
+      else if (pip_hold > 0) --pip_hold;
+      const int want = pip_hold > 0 && pip_touch_hold > 0 ? 255 : rest;
+      pip_alpha += std::clamp(want - pip_alpha, -PIP_FADE_STEP, PIP_FADE_STEP);
+      display.set_inset_alpha(static_cast<u8>(pip_alpha));
+    }
     ds::sdl::Display::Target target[2] = {};
     bool scaled = false;
     if (present && !pause_pending) {
@@ -1535,6 +1565,18 @@ sdl_ready:
     const Uint64 t1 = SDL_GetPerformanceCounter();
     if (present) {
       const bool cursor = input.stylus_visible() && !log.reading();
+      // The crosshair is drawn in DS pixels, so on a bottom screen shown
+      // small (the PiP inset, the dominant layouts' secondary) it shrinks
+      // with the view; scale it back up by the view's reduction so it stays
+      // the same size on the panel and findable in the corner.
+      int cursor_size = input.stylus_size();
+      {
+        const Disp::Layout& cl = display.current_layout();
+        double ratio = 1.0;
+        if (!dual_window && cl.mode == Disp::Mode::Pip && cl.primary == 0) ratio = cl.pip;
+        else if (!dual_window && (cl.mode == Disp::Mode::DominantV || cl.mode == Disp::Mode::DominantH) && cl.primary == 0) ratio = cl.dominant;
+        if (ratio < 1.0) cursor_size *= std::clamp(static_cast<int>(1.0 / ratio + 0.5), 1, 4);
+      }
       const bool slot_osd = slot_shown > 0;
       if (slot_shown > 0) --slot_shown;
       // Which screen the overlays land on. Layout::primary is the one shown
@@ -1556,7 +1598,7 @@ sdl_ready:
       const bool inset_left = osd_l.corner == Disp::Corner::TopLeft || osd_l.corner == Disp::Corner::BottomLeft;
       const bool slot_bottom = inset_top && inset_left, fps_bottom = inset_top && !inset_left;
       if (scaled) {
-        if (cursor) draw_cursor(CursorDst{target[1].px, target[1].pitch, target[1].h, target[1].xrun}, input.stylus_x(), input.stylus_y(), input.stylus_size());
+        if (cursor) draw_cursor(CursorDst{target[1].px, target[1].pitch, target[1].h, target[1].xrun}, input.stylus_x(), input.stylus_y(), cursor_size);
         const CursorDst od{target[osd_screen].px, target[osd_screen].pitch, target[osd_screen].h, target[osd_screen].xrun};
         if (slot_osd) draw_slot(od, state_slot, slot_bottom);
         if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
@@ -1566,7 +1608,7 @@ sdl_ready:
         const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
         if (cursor) {
           std::memcpy(cursor_fb.data(), fb[1], cursor_fb.size() * 4);
-          draw_cursor(CursorDst{cursor_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, input.stylus_x(), input.stylus_y(), input.stylus_size());
+          draw_cursor(CursorDst{cursor_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, input.stylus_x(), input.stylus_y(), cursor_size);
           fb[1] = cursor_fb.data();
         }
         // After the cursor: when the overlays are on the bottom screen this

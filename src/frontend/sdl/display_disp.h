@@ -75,6 +75,10 @@ public:
   // View i's rectangle on the canvas (Display::layout()'s views_, in order:
   // later views are drawn over earlier ones, so the PiP inset is last).
   void set_view(int i, int x, int y, int w, int h, bool shown);
+  // Opacity of the views drawn over another (the PiP inset), 0..255: below
+  // 255 a downscaled view is blended over what is already in the composite.
+  // A 1:1 view is always drawn opaque (nothing lies under one).
+  void set_inset_alpha(u8 a) { inset_alpha_ = a; }
 
   // Draws each view's 256x192 framebuffer (null skips the view) into a free
   // composite and flips the layer to it. Without vsync the flip is
@@ -93,7 +97,11 @@ private:
   bool set_layer(u32 addr, Dims d);
   void flip(int buf);
   void wait_vsync();
-  void draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb);
+  void draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb, int index, const u32* const fbs[VIEWS]);
+  // The canvas point a composite point came from (the inverse of draw_view's
+  // rotation), and the 1:1 view under it drawn before `index`, if any.
+  void canvas_point(int compx, int compy, int& x, int& y) const;
+  const u32* under_pixel(int x, int y, int index, const u32* const fbs[VIEWS]) const;
   void presenter();
   u32  buf_addr(int buf) const { return phys_ + static_cast<u32>(buf * buf_bytes_); }
   u32* buf_ptr(int buf) const { return reinterpret_cast<u32*>(map_ + buf * buf_bytes_); }
@@ -110,9 +118,10 @@ private:
   bool ui_was_enabled_ = false;
   bool layer_enabled_ = false;      // our layer is on (enabled on the first flip)
   ViewRect views_[VIEWS];
+  u8   inset_alpha_ = 255;
   Dims dims_[BUFS];                 // what each buffer holds, set by present, read by flip
   unsigned dirty_ = 0;              // buffers to black out before the next draw (canvas changed)
-  std::vector<u32> tmp_, tmp2_;     // cached temporaries for the downscaled views
+  std::vector<u32> tmp_, tmp2_, tmp3_;   // cached temporaries for the downscaled views (tmp3_: the row under a blended one)
   int  cur_ = 0;
   bool vsync_ = true;
   bool pan_blocks_ = true;          // FBIOPAN_DISPLAY waits for the refresh (measured once)

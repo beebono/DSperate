@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "display_disp.h"
+#include "display.h"
 
 #include "core/gpu/gpu.h"
 
@@ -265,7 +266,26 @@ void DispOut::flip(int buf) { set_layer(buf_addr(buf), dims_[buf]); }
 // size is a box downscale (area average over the source block each output
 // pixel covers) into a cached temporary, rotated there, and copied in by
 // rows so the uncached panel memory sees whole lines.
-void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb) {
+void DispOut::canvas_point(int compx, int compy, int& x, int& y) const {
+  switch (rot_) {
+    case 270: x = canvas_w_ - 1 - compy; y = compx; break;
+    case 90:  x = compy; y = canvas_h_ - 1 - compx; break;
+    case 180: x = canvas_w_ - 1 - compx; y = canvas_h_ - 1 - compy; break;
+    default:  x = compx; y = compy; break;
+  }
+}
+
+const u32* DispOut::under_pixel(int x, int y, int index, const u32* const fbs[VIEWS]) const {
+  for (int v = index - 1; v >= 0; --v) {
+    const ViewRect& u = views_[v];
+    if (!fbs[v] || !u.shown || u.w != W || u.h != H) continue;
+    if (x < u.x || x >= u.x + u.w || y < u.y || y >= u.y + u.h) continue;
+    return fbs[v] + static_cast<size_t>(y - u.y) * W + (x - u.x);
+  }
+  return nullptr;
+}
+
+void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb, int index, const u32* const fbs[VIEWS]) {
   const bool turned = rot_ == 90 || rot_ == 270;
   // The view's top-left in the composite: the same rotation the pixels get.
   int cx, cy;
@@ -313,7 +333,41 @@ void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb)
     }
     tmp2_[static_cast<size_t>(py) * tw + px] = tmp_[static_cast<size_t>(vy) * r.w + vx];
   }
-  for (int py = 0; py < th; ++py) std::memcpy(dst + static_cast<size_t>(py) * comp_w, tmp2_.data() + static_cast<size_t>(py) * tw, static_cast<size_t>(tw) * sizeof(u32));
+  // Into the composite by rows: copied, or blended over the view under it
+  // (drawn first: views go in order) when the inset is translucent. The
+  // pixels under it come from that view's own framebuffer, not the
+  // composite: the panel memory is uncached, and reading a small inset
+  // back through it cost 0.6 ms a frame on the A30. Where no 1:1 view lies
+  // under a pixel (nothing does in the layouts we have) the composite is
+  // read after all.
+  if (inset_alpha_ == 255) {
+    for (int py = 0; py < th; ++py) std::memcpy(dst + static_cast<size_t>(py) * comp_w, tmp2_.data() + static_cast<size_t>(py) * tw, static_cast<size_t>(tw) * sizeof(u32));
+    return;
+  }
+  tmp3_.resize(static_cast<size_t>(tw));
+  // A composite row is a straight line on the canvas: its step per pixel.
+  const int sx = rot_ == 0 ? 1 : rot_ == 180 ? -1 : 0, sy = rot_ == 270 ? 1 : rot_ == 90 ? -1 : 0;
+  for (int py = 0; py < th; ++py) {
+    u32* row = dst + static_cast<size_t>(py) * comp_w;
+    int x0, y0;
+    canvas_point(cx, cy + py, x0, y0);
+    // Usual case: the whole row lies in one 1:1 view -- a strided gather from
+    // its (cached) framebuffer. Otherwise pixel by pixel, the composite
+    // read back where nothing is under it.
+    const u32* u0 = under_pixel(x0, y0, index, fbs);
+    const u32* u1 = under_pixel(x0 + sx * (tw - 1), y0 + sy * (tw - 1), index, fbs);
+    if (u0 && u1 && (u1 - u0) == static_cast<std::ptrdiff_t>(sx + sy * static_cast<int>(W)) * (tw - 1)) {
+      const std::ptrdiff_t step = sx + sy * static_cast<int>(W);
+      for (int px = 0; px < tw; ++px) tmp3_[static_cast<size_t>(px)] = u0[step * px];
+    } else {
+      for (int px = 0; px < tw; ++px) {
+        const u32* u = under_pixel(x0 + sx * px, y0 + sy * px, index, fbs);
+        tmp3_[static_cast<size_t>(px)] = u ? *u : row[px];
+      }
+    }
+    Display::blend_row(tmp3_.data(), tmp2_.data() + static_cast<size_t>(py) * tw, static_cast<size_t>(tw), inset_alpha_);
+    std::memcpy(row, tmp3_.data(), static_cast<size_t>(tw) * sizeof(u32));
+  }
 }
 
 void DispOut::present(const u32* const fb[VIEWS]) {
@@ -333,7 +387,7 @@ void DispOut::present(const u32* const fb[VIEWS]) {
     for (size_t i = 0; i < n; ++i) comp[i] = 0xFF000000u;
     dirty_ &= ~(1u << buf);
   }
-  for (int v = 0; v < VIEWS; ++v) if (fb[v] && views_[v].shown) draw_view(comp, d.w, views_[v], fb[v]);
+  for (int v = 0; v < VIEWS; ++v) if (fb[v] && views_[v].shown) draw_view(comp, d.w, views_[v], fb[v], v, fb);
   dims_[buf] = d;
   if (thread_.joinable()) {
     { std::lock_guard<std::mutex> g(mu_); pending_ = buf; }

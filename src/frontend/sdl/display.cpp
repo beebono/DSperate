@@ -298,6 +298,7 @@ void Display::draw(const u32* const fb[SCREENS]) {
     // In view order: view i is layer i, later views on top.
     const u32* slots[DispOut::VIEWS] = {nullptr, nullptr};
     for (int i = 0; i < nviews_ && i < DispOut::VIEWS; ++i) slots[i] = views_[i].shown ? fb[views_[i].screen] : nullptr;
+    disp_->set_inset_alpha(inset_alpha_);
     disp_->present(slots);
     return;
   }
@@ -310,7 +311,13 @@ void Display::draw(const u32* const fb[SCREENS]) {
     const View& v = views_[i];
     if (!v.shown) continue;
     SDL_UpdateTexture(tex_[v.screen], nullptr, fb[v.screen], static_cast<int>(SCREEN_W) * 4);
+    // The GPU blends a translucent inset. Textures are per screen, not per
+    // view, so the mod is set around the inset's copy and cleared after it,
+    // or a screen swap would carry it to the large view.
+    const bool translucent = !v.direct && inset_alpha_ < 255;
+    if (translucent) { SDL_SetTextureBlendMode(tex_[v.screen], SDL_BLENDMODE_BLEND); SDL_SetTextureAlphaMod(tex_[v.screen], inset_alpha_); }
     SDL_RenderCopy(ren_, tex_[v.screen], nullptr, &v.rect);
+    if (translucent) { SDL_SetTextureAlphaMod(tex_[v.screen], 255); SDL_SetTextureBlendMode(tex_[v.screen], SDL_BLENDMODE_NONE); }
   }
   SDL_RenderPresent(ren_);
 }
@@ -484,15 +491,36 @@ void Display::targets(u32* px, u32 stride, Target out[SCREENS]) {
   }
 }
 
-// Copies the shown side-buffer views (the inset) into the frame.
+void Display::blend_row(u32* dst, const u32* src, size_t n, u32 alpha) {
+  // Per-channel lerp with the two channel pairs masked apart; the compiler
+  // vectorises the plain loop. 0..255 alpha scaled to 0..256 so 255 is exact.
+  const u32 a = alpha + (alpha >> 7), b = 256 - a;
+  for (size_t i = 0; i < n; ++i) {
+    const u32 d = dst[i], s = src[i];
+    // Each channel product is under 2^16, so the two packed channels of a
+    // pair never carry into each other.
+    const u32 rb = (((s & 0x00FF00FFu) * a + (d & 0x00FF00FFu) * b) >> 8) & 0x00FF00FFu;
+    const u32 g = (((s & 0x0000FF00u) * a + (d & 0x0000FF00u) * b) >> 8) & 0x0000FF00u;
+    dst[i] = 0xFF000000u | rb | g;
+  }
+}
+
+// Copies the shown side-buffer views (the inset) into the frame, or blends
+// them over it when the inset is translucent. The blend reads the frame
+// back, which on the scanout tiers is uncached memory: the inset is small
+// (a ninth of the large screen by default) and the rows are read
+// sequentially, so it stays cheap, but an opaque inset takes the copy.
 void Display::blit_insets() {
   if (!frame_px_) return;
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (v.direct || !v.shown) continue;
-    for (int y = 0; y < v.rect.h; ++y)
-      std::memcpy(frame_px_ + static_cast<size_t>(v.rect.y + y) * frame_pitch_ + v.rect.x,
-                  side_[v.screen].data() + static_cast<size_t>(y) * v.rect.w, static_cast<size_t>(v.rect.w) * sizeof(u32));
+    for (int y = 0; y < v.rect.h; ++y) {
+      u32* dst = frame_px_ + static_cast<size_t>(v.rect.y + y) * frame_pitch_ + v.rect.x;
+      const u32* src = side_[v.screen].data() + static_cast<size_t>(y) * v.rect.w;
+      if (inset_alpha_ == 255) std::memcpy(dst, src, static_cast<size_t>(v.rect.w) * sizeof(u32));
+      else blend_row(dst, src, static_cast<size_t>(v.rect.w), inset_alpha_);
+    }
   }
   frame_px_ = nullptr;
 }

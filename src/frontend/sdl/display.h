@@ -48,6 +48,7 @@ public:
     Corner corner = Corner::BottomRight;
     double pip = 1.0 / 3.0;      // inset size relative to the large screen
     double dominant = 0.5;       // secondary size relative to the dominant screen
+    double pip_alpha = 1.0;      // inset opacity at rest, 0..1 (see set_inset_alpha)
   };
   static const char* mode_name(Mode m);      // "vertical" ... "dominant_h"
   static bool parse_mode(const std::string& s, Mode& m);
@@ -125,6 +126,15 @@ public:
   // display.
   void set_layout(const Layout& l);
   const Layout& current_layout() const { return layout_; }
+  // The inset's opacity for the coming frame, 0..255: the frontend ramps it
+  // between Layout::pip_alpha and opaque while the bottom screen is touched.
+  // Below 255 the inset is blended over the large screen on every tier;
+  // at 255 it is copied, and the exact paths cost nothing extra.
+  void set_inset_alpha(u8 a) { inset_alpha_ = a; }
+  u8   inset_alpha() const { return inset_alpha_; }
+  // dst[i] = dst[i] + (src[i] - dst[i]) * alpha / 255 per channel, alpha
+  // forced opaque. Shared with the screenshot writer.
+  static void blend_row(u32* dst, const u32* src, size_t n, u32 alpha);
   bool across() const { return layout_.mode == Mode::Horizontal || layout_.mode == Mode::DominantH; }
 
   // Window point -> pixel in `screen`. False if the point is not on a screen.
@@ -163,6 +173,7 @@ private:
   int           display_index_ = 0;
   bool          fullscreen_ = false;
   Layout        layout_;
+  u8            inset_alpha_ = 255;
 
   bool              scaled_ = false;
   bool              disp_wanted_ = false;

@@ -196,6 +196,8 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 # screen = top                  # top | bottom: shown alone (single), large (pip) or dominant
 # pip_corner = br               # tl | tr | bl | br: where the pip inset sits
 # pip_scale = 0.33              # inset size relative to the large screen
+# pip_alpha = 1.0               # inset opacity at rest, 0..1: below 1 the inset is see-through over the large screen
+# pip_touch_hold = 60           # frames the inset stays opaque after the bottom screen was last touched (pen or finger); 0 = never fades up
 # dominant_ratio = 0.5          # the smaller screen's size relative to the dominant one
 # dual_window = false           # one window per panel (dual-screen handhelds)
 # linear = false                # smooth scaling
@@ -336,7 +338,8 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 # stylus_dpad = none            # a button; while held the d-pad moves the pen (e.g. leftshoulder)
 # stylus_button = rightstick    # touches at the pen's position
 # stylus_speed = 4.0            # pen pixels per frame at full tilt
-# stylus_size = 2               # crosshair scale: arm width and centre dot, pixels
+# stylus_size = 2               # crosshair scale: arm width and centre dot, DS pixels (scaled up by the
+                                # view's reduction when the bottom screen is the PiP inset / dominant secondary)
 # stylus_hide = 90              # frames idle before the crosshair hides (0 = never shown)
 
 # Hotkeys: quit pause fast_forward (held) fast_forward_toggle save_state
