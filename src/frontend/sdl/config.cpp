@@ -158,17 +158,17 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # bios7 = /path/to/bios7.bin
 # firmware = /path/to/firmware.bin
 # firmware_override = /path/to/firmware.bin.ovr
-#                               # settings changed inside the firmware's own menu (nickname, colour,
-#                               # language...) are kept here, never in the dump. Delete it to reset.
-#                               # Default: <firmware>.ovr
+                                # settings changed inside the firmware's own menu (nickname, colour,
+                                # language...) are kept here, never in the dump. Delete it to reset.
+                                # Default: <firmware>.ovr
 # games = /path/to/games        # the library the loader card lists on a firmware boot (.nds and .zip,
-#                               # one level). Unset, the picker says so.
+                                # one level). Unset, the picker says so.
 # saves = /path/to/saves        # battery saves. Default: next to the ROM
 # states = /path/to/states      # save states (and the autosave's PNG). Default: next to the ROM
 # screenshots = /path/to/shots  # the screenshot hotkey. Default: the states directory
 # cache = /path/to/cache        # where zipped games are unpacked when they cannot be unpacked beside
-#                               # the zip (a read-only card). Default: <zip dir>/.dsperate/. Kept
-#                               # between runs (see [cart]); never /tmp, which is RAM on a handheld
+                                # the zip (a read-only card). Default: <zip dir>/.dsperate/. Kept
+                                # between runs (see [cart]); never /tmp, which is RAM on a handheld
 # cheats = /path/to/usrcheat.dat # Action Replay database. Default: beside the ROM, then in this
                                 #   directory. Loading it lists the codes; none are on until enabled
 
@@ -237,27 +237,28 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # jit = true                    # false = interpreter (much slower; for comparison)
 # quantum = 0                   # CPU interleave: 0 = event-bound (fastest) | 128 = melonDS lockstep
 #
-# timing_oc, cpu_oc and fast_load trade accuracy for speed. They are off by
+# cpu_oc, timing_oc and fast_load trade accuracy for speed. They are off by
 # default and no game needs them; they exist to squeeze a slow device. If a
 # game misbehaves (hangs, desyncs, glitches), turn these off first.
-# timing_oc = false             # "Timing OC": drop the GX FIFO and geometry timing (DraStic's model).
-                                # A few percent faster on 3D-heavy games; games that pace on the FIFO
-                                # or the swap can desync (Dragon Ball Origins' intro does)
 # cpu_oc = false                # "CPU OC": the recompiler prices every memory access as main RAM
                                 # instead of by region. Less accurate than timing_oc: timer-race
-                                # titles drift
+                                # titles drift. Usually a sizable FPS increase.
+# timing_oc = false             # "Timing OC": drop the GX FIFO and geometry timing (DraStic's model).
+                                # A few percent faster on 3D-heavy games; USE WITH CAUTION! games that
+                                # pace on the FIFO or the swap WILL break. HARD. Turn THIS off first if
+                                # something breaks.
 # fast_load = false             # cart DMA reads ROM at full speed instead of on the card's clock.
                                 # Faster loading screens; games that race the card can misbehave
 # idle_skip = 1                 # skip a CPU busy-wait: 0 = never | 1 = only the GXSTAT swap poll |
                                 # all = every proven poll loop
 # autosave = false              # on quit, save a state to the hidden "auto" slot
-#                               # (<states>/<GAMECODE>.auto.dss). Covers Ctrl-C and a launcher's
-#                               # SIGTERM, not SIGKILL. Resume with --load-state <that path>; the slot
-#                               # never shows in the menu. Skipped during a replay or recording
+                                # (<states>/<GAMECODE>.auto.dss). Covers Ctrl-C and a launcher's
+                                # SIGTERM, not SIGKILL. Resume with --load-state <that path>; the slot
+                                # never shows in the menu. Skipped during a replay or recording
 # autosave_png = false          # a picture with the auto state, laid out as the window shows it:
-#                               # true = <states>/<GAMECODE>.auto.png | a path = that file (for a
-#                               # launcher's game switcher). Taken from the emulator's own frame, so
-#                               # it works on panels a screen grabber cannot read
+                                # true = <states>/<GAMECODE>.auto.png | a path = that file (for a
+                                # launcher's game switcher). Taken from the emulator's own frame, so
+                                # it works on panels a screen grabber cannot read
 # fast_forward = false          # start fast-forwarding (the hotkeys toggle it)
 # ff_speed = 0                  # fast-forward cap as a multiple of real time; 0 = unlimited
 # ff_skip = 3                   # while fast-forwarding, present one frame in ff_skip+1
@@ -308,7 +309,7 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # stick_dpad = true             # left stick also works the d-pad
 # stick_deadzone = 12000
 # stylus_axis = right           # right | left | none: the stick that moves the pen over the
-#                               # bottom screen (left takes the stick away from the d-pad)
+                                # bottom screen (left takes the stick away from the d-pad)
 # stylus_dpad = none            # a button; while held the d-pad moves the pen (e.g. leftshoulder)
 # stylus_button = rightstick    # touches at the pen's position
 # stylus_speed = 4.0            # pen pixels per frame at full tilt
