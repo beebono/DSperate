@@ -77,7 +77,6 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     if (fo->open(win_, vsync)) {
       out_ = std::move(fo);
       scaled_ = true;
-      if (linear) std::fprintf(stderr, "video.fbdev renders on the CPU; --linear ignored\n");
       layout();
       build_scale();
       std::fprintf(stderr, "video: fbdev scanout %dx%d, %s driver, scanline scaling, vsync %s\n",
@@ -107,14 +106,14 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   //    and before SDL's KMSDRM window surface was understood to be a hidden
   //    GLES renderer rather than a shadow blit -- see display_drm.h.)
   //
-  // --linear needs the renderer's smooth scaling, and so draw();
-  // DS_SCANLINE_SCALE=0/1 overrides either way.
+  // --linear is bilinear on this path (Gpu::emit_bilinear), and the
+  // renderer's own filter on the fallback. DS_SCANLINE_SCALE=0/1 overrides.
   const char* vd = SDL_GetCurrentVideoDriver();
   const bool wayland = vd && !std::strcmp(vd, "wayland");
   const bool kms = vd && !std::strcmp(vd, "KMSDRM");
   const char* sl = std::getenv("DS_SCANLINE_SCALE");
   scaled_ = sl && *sl ? std::strcmp(sl, "0") != 0
-                      : !linear && (wayland || kms);
+                      : (wayland || kms);
   if (scaled_) {
     const char* dmenv = std::getenv("DS_DMABUF");
     const bool dm_forbidden = dmenv && !std::strcmp(dmenv, "0");
@@ -438,6 +437,20 @@ void Display::build_scale() {
       const u32 frac = b % SCREEN_W;
       if (frac && xr[s + 1] > xr[s]) sw[s] = static_cast<u8>((frac * 256) / SCREEN_W);
     }
+    // Bilinear: destination column x samples source u = (x + 0.5) * 256 / w
+    // - 0.5, between pixels floor(u) and floor(u)+1. Clamped at both edges;
+    // the right edge leans on pixel 254 at weight 255 so that the kernel's
+    // pair load never reads past the row.
+    std::vector<u16>& lsx = lin_sx_[v.screen];
+    std::vector<u8>& lwx = lin_wx_[v.screen];
+    lsx.assign(static_cast<size_t>(v.rect.w), 0); lwx.assign(static_cast<size_t>(v.rect.w), 0);
+    for (u32 x = 0; x < static_cast<u32>(v.rect.w); ++x) {
+      const s32 u = static_cast<s32>(((2 * x + 1) * SCREEN_W * 128) / static_cast<u32>(v.rect.w)) - 128;  // u * 256
+      if (u <= 0) continue;
+      u32 s = static_cast<u32>(u) >> 8, f = static_cast<u32>(u) & 255;
+      if (s >= SCREEN_W - 1) { s = SCREEN_W - 2; f = 255; }
+      lsx[x] = static_cast<u16>(s); lwx[x] = static_cast<u8>(f);
+    }
     if (!v.direct) side_[v.screen].assign(static_cast<size_t>(v.rect.w) * v.rect.h, 0);
   }
 }
@@ -477,9 +490,9 @@ void Display::targets(u32* px, u32 stride, Target out[SCREENS]) {
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (v.direct)
-      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data()};
+      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data()};
     else
-      out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data()};
+      out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data()};
   }
 }
 

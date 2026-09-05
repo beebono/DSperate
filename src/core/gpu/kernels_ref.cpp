@@ -370,6 +370,23 @@ void blend_line_w(const u32* a, const u32* b, const u8* w, u32* out) {
   }
 }
 
+static inline u32 lerp_px(u32 x, u32 y, u32 f) {
+  u32 r = 0;
+  for (u32 sh = 0; sh < 32; sh += 8) {
+    const u32 xa = (x >> sh) & 255, ya = (y >> sh) & 255;
+    r |= ((xa * (256 - f) + ya * f + 128) >> 8) << sh;
+  }
+  return r;
+}
+
+void lerp_row_gather(const u32* src, const u16* sx, const u8* wx, u32 n, u32* out) {
+  for (u32 x = 0; x < n; ++x) out[x] = lerp_px(src[sx[x]], src[sx[x] + 1], wx[x]);
+}
+
+void lerp_rows(const u32* a, const u32* b, u32 w, u32 n, u32* out) {
+  for (u32 i = 0; i < n; ++i) out[i] = lerp_px(a[i], b[i], w);
+}
+
 void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool seam_row, u32* dst) {
   if (min_run < 2) min_run = 2;
   for (u32 s = 0; s < 256; ++s) {

@@ -333,6 +333,43 @@ static void test_scale_row_straddle() {
   }
 }
 
+// Bilinear passes against the reference and their definitions, at the
+// widths that matter and the odd ones.
+static void test_lerp() {
+  static const u32 widths[] = {1, 3, 255, 256, 257, 640, 721, 1440};
+  alignas(16) u32 src[256], b[1440];
+  for (u32 wd : widths) {
+    const u32 it = wd;
+    std::vector<u16> sx(wd); std::vector<u8> wx(wd);
+    for (u32 x = 0; x < wd; ++x) {
+      const s32 u = static_cast<s32>(((2 * x + 1) * 256 * 128) / wd) - 128;
+      u32 s = u <= 0 ? 0 : static_cast<u32>(u) >> 8, f = u <= 0 ? 0 : static_cast<u32>(u) & 255;
+      if (s >= 255) { s = 254; f = 255; }
+      sx[x] = static_cast<u16>(s); wx[x] = static_cast<u8>(f);
+    }
+    for (u32& v : src) v = rng();
+    std::vector<u32> da(wd, 0xDEADBEEF), db(wd, 0xDEADBEEF);
+    kern::ref::lerp_row_gather(src, sx.data(), wx.data(), wd, da.data());
+    N::lerp_row_gather(src, sx.data(), wx.data(), wd, db.data());
+    CHECK_SAME("lerp_row_gather", da.data(), db.data(), wd * sizeof(u32));
+    for (u32 x = 0; x < wd; ++x) for (u32 sh : {0u, 8u, 16u, 24u}) {
+      const u32 xa = (src[sx[x]] >> sh) & 255, ya = (src[sx[x] + 1] >> sh) & 255, f = wx[x];
+      if (((da[x] >> sh) & 255) != ((xa * (256 - f) + ya * f + 128) >> 8)) { std::printf("lerp_row_gather w=%u x=%u\n", wd, x); ++failures; x = wd; break; }
+    }
+    for (u32 i = 0; i < wd; ++i) b[i] = rng();
+    const u32 wy = rng() & 255;
+    std::vector<u32> ra(wd, 0), rb(wd, 0);
+    kern::ref::lerp_rows(da.data(), b, wy, wd, ra.data());
+    N::lerp_rows(da.data(), b, wy, wd, rb.data());
+    CHECK_SAME("lerp_rows", ra.data(), rb.data(), wd * sizeof(u32));
+    for (u32 i = 0; i < wd; ++i) for (u32 sh : {0u, 8u, 16u, 24u}) {
+      const u32 xa = (da[i] >> sh) & 255, ya = (b[i] >> sh) & 255;
+      if (((ra[i] >> sh) & 255) != ((xa * (256 - wy) + ya * wy + 128) >> 8)) { std::printf("lerp_rows w=%u i=%u\n", wd, i); ++failures; i = wd; break; }
+    }
+    (void)it;
+  }
+}
+
 // The vertical half of the same map, which lives in Gpu::emit_scaled: source
 // line L owns destination rows [ceil(L*h/192), ceil((L+1)*h/192)). Every row
 // of the destination must be claimed by exactly one source line, or the
@@ -547,6 +584,7 @@ int main() {
   test_scale_row();
   test_scale_row_grid();
   test_scale_row_straddle();
+  test_lerp();
   test_scale_rows_cover();
   test_span();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }

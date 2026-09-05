@@ -109,6 +109,12 @@ namespace ds::gpu::kern {
   /* out[i] = a[i] + (b[i] - a[i]) * w[i] / 256 per byte, rounded: the area-weighted blend of two pixels,  \
      256 of them. w[i] = 128 is the midpoint. */                                                            \
   void NS##blend_line_w(const u32* a, const u32* b, const u8* w, u32* out);                                 \
+  /* Bilinear, horizontal pass: out[x] = src[sx[x]] + (src[sx[x]+1] - src[sx[x]]) * wx[x] / 256 per byte,   \
+     rounded as blend_line_w, for n destination pixels. sx[x] <= 254 (the caller clamps the right edge). */ \
+  void NS##lerp_row_gather(const u32* src, const u16* sx, const u8* wx, u32 n, u32* out);                   \
+  /* Bilinear, vertical pass: out[i] = a[i] + (b[i] - a[i]) * w / 256 per byte, rounded, n pixels, one     \
+     weight (0..255) for the row. */                                                                        \
+  void NS##lerp_rows(const u32* a, const u32* b, u32 w, u32 n, u32* out);                                   \
   /* 3D span stages (render3d.cpp), `n` pixels from span offset `xv0`. Perspective factor with 8 fractional   \
      bits: num = (xv*w0n) << 8 (32-bit wrap), den = xv*w0d + (xdiff-xv)*w1d, 0 when den is 0. */             \
   void NS##span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac);                      \

@@ -75,7 +75,8 @@ const char* kUsage =
     "  --screen S      top (default) or bottom: the screen shown alone, large or dominant\n"
     "  --dual-window   one window per video display, one DS screen each (dual-panel\n"
     "                  handhelds; also what direct scanout needs on them)\n"
-    "  --linear        smooth scaling instead of nearest\n"
+    "  --linear        bilinear scaling instead of nearest (takes precedence over the grid, seams\n"
+    "                  and chunky)\n"
     "  --lcd-grid S    LCD pixel grid strength, 0 (off, default) .. 1 (software scaling only)\n"
     "  --seam S        dark (default): the LCD grid, dimmed by --lcd-grid | blend: box-filter seams\n"
     "                  (sharp-shimmerless): the one panel pixel/row that straddles two DS pixels is their\n"
@@ -655,6 +656,8 @@ int main(int argc, char** argv) {
     const std::string sm = cfg.str("video.seam", "dark");
     if (sm == "blend") seam_blend = 1; else if (sm == "blend_linear") seam_blend = 2;
     else if (sm != "dark") { std::fprintf(stderr, "unknown seam %s (dark | blend | blend_linear)\n", sm.c_str()); return 2; }
+    if (linear && (grid_s > 0.0 || seam_blend || cfg.flag("video.chunky", false) || cfg.str("video.chunky", "false") != "false"))
+      std::fprintf(stderr, "video.linear takes precedence over lcd_grid, seam and chunky\n");
   }
   u8 chunky = 0;
   int chunky_cell = -1;
@@ -866,7 +869,8 @@ sdl_ready:
   auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled) {
     for (int i = 0; i < 2; ++i)
       nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, grid, chunky, chunky_thresh, seam_blend, target[i].seam_w,
-                                                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i))}
+                                                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i)),
+                                                                       linear, target[i].lin_sx, target[i].lin_wx}
                                          : ds::gpu::Gpu::ScaleTarget{});
   };
   // Loads a ROM with the "unpacking" notice up if it takes more than a

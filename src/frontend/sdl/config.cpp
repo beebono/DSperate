@@ -200,7 +200,7 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 # pip_touch_hold = 60           # frames the inset stays opaque after the bottom screen was last touched (pen or finger); 0 = never fades up
 # dominant_ratio = 0.5          # the smaller screen's size relative to the dominant one
 # dual_window = false           # one window per panel (dual-screen handhelds)
-# linear = false                # smooth scaling
+# linear = false                # bilinear scaling (takes precedence over lcd_grid, seam and chunky)
 # lcd_grid = 0                  # LCD pixel grid strength, 0 (off) .. 1 (software scaling only)
 # seam = dark                   # dark: the LCD grid, dimmed by lcd_grid | blend: box-filter seams (sharp-shimmerless;
                                 # the one panel pixel/row straddling two DS pixels is their area-weighted blend, the

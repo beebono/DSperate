@@ -89,7 +89,7 @@ public:
   //  2. window surface: SDL's shm path under a compositor. On KMSDRM this is
   //     not a software path at all -- SDL has no window framebuffer there, so
   //     it is a hidden GLES renderer; see display_drm.h.
-  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; };
+  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; const u16* lin_sx; const u8* lin_wx; };
 
   bool scaling() const { return scaled_; }
   // Chunky: each 2x2 block of DS pixels is drawn as one cell from its top-left
@@ -189,6 +189,8 @@ private:
   int               scaled_w_ = 0, scaled_h_ = 0;
   std::vector<u16>  xrun_[SCREENS];   // per screen, 257 entries; see kern::scale_row
   std::vector<u8>   seam_w_[SCREENS]; // per screen, 256 entries: box-filter weight of pixel s+1 in run s's last pixel
+  std::vector<u16>  lin_sx_[SCREENS]; // per screen, rect.w entries: bilinear source column per destination column
+  std::vector<u8>   lin_wx_[SCREENS]; // per screen, rect.w entries: weight of column lin_sx+1, 0..255
   ds::gpu::Gpu::CellMap cells_[SCREENS];   // chunky cell tables; x.cells == 0 when the pair path is in use
   std::vector<u32>  side_[SCREENS];   // scaled pixels of a non-direct view
   u32*              frame_px_ = nullptr;   // the buffer begin_frame handed out, for end_frame's insets

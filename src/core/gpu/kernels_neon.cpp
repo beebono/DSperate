@@ -776,6 +776,65 @@ void blend_line_w(const u32* a, const u32* b, const u8* w, u32* out) {
   }
 }
 
+// Four pixels a step, a as va, b as vb, the four weights already spread over
+// their bytes in wlo/whi: the blend_line_w arithmetic.
+static inline uint32x4_t lerp4(uint8x16_t va, uint8x16_t vb, uint8x8_t wlo, uint8x8_t whi) {
+  const uint8x8_t k128 = vdup_n_u8(128);
+  uint16x8_t tlo = vshll_n_u8(vget_low_u8(va), 8), thi = vshll_n_u8(vget_high_u8(va), 8);
+  tlo = vmlal_u8(tlo, vget_low_u8(vb), wlo);  thi = vmlal_u8(thi, vget_high_u8(vb), whi);
+  tlo = vmlsl_u8(tlo, vget_low_u8(va), wlo);  thi = vmlsl_u8(thi, vget_high_u8(va), whi);
+  tlo = vaddw_u8(tlo, k128);                  thi = vaddw_u8(thi, k128);
+  return vreinterpretq_u32_u8(vcombine_u8(vshrn_n_u16(tlo, 8), vshrn_n_u16(thi, 8)));
+}
+
+static inline void spread_w4(uint8x8_t w4, uint8x8_t& wlo, uint8x8_t& whi) {
+  const uint8x8x2_t z1 = vzip_u8(w4, w4);
+  const uint8x8x2_t z2 = vzip_u8(z1.val[0], z1.val[0]);
+  wlo = z2.val[0]; whi = z2.val[1];
+}
+
+// The gather is four two-pixel loads (src[s], src[s+1] as one 64-bit lane
+// pair), zipped so that the four left pixels land in one register and the
+// four right ones in another.
+void lerp_row_gather(const u32* src, const u16* sx, const u8* wx, u32 n, u32* out) {
+  u32 x = 0;
+  for (; x + 4 <= n; x += 4) {
+    const uint32x2_t p0 = vld1_u32(src + sx[x]),     p1 = vld1_u32(src + sx[x + 1]);
+    const uint32x2_t p2 = vld1_u32(src + sx[x + 2]), p3 = vld1_u32(src + sx[x + 3]);
+    const uint32x2x2_t z01 = vzip_u32(p0, p1), z23 = vzip_u32(p2, p3);
+    const uint8x16_t va = vreinterpretq_u8_u32(vcombine_u32(z01.val[0], z23.val[0]));
+    const uint8x16_t vb = vreinterpretq_u8_u32(vcombine_u32(z01.val[1], z23.val[1]));
+    u32 w4u; std::memcpy(&w4u, wx + x, 4);
+    uint8x8_t wlo, whi;
+    spread_w4(vreinterpret_u8_u32(vdup_n_u32(w4u)), wlo, whi);
+    vst1q_u32(out + x, lerp4(va, vb, wlo, whi));
+  }
+  for (; x < n; ++x) {
+    const u32 a = src[sx[x]], b = src[sx[x] + 1], f = wx[x];
+    u32 r = 0;
+    for (u32 sh = 0; sh < 32; sh += 8) {
+      const u32 xa = (a >> sh) & 255, ya = (b >> sh) & 255;
+      r |= ((xa * (256 - f) + ya * f + 128) >> 8) << sh;
+    }
+    out[x] = r;
+  }
+}
+
+void lerp_rows(const u32* a, const u32* b, u32 w, u32 n, u32* out) {
+  const uint8x8_t wlo = vdup_n_u8(static_cast<u8>(w)), whi = wlo;
+  u32 i = 0;
+  for (; i + 4 <= n; i += 4)
+    vst1q_u32(out + i, lerp4(vreinterpretq_u8_u32(vld1q_u32(a + i)), vreinterpretq_u8_u32(vld1q_u32(b + i)), wlo, whi));
+  for (; i < n; ++i) {
+    u32 r = 0;
+    for (u32 sh = 0; sh < 32; sh += 8) {
+      const u32 xa = (a[i] >> sh) & 255, ya = (b[i] >> sh) & 255;
+      r |= ((xa * (256 - w) + ya * w + 128) >> 8) << sh;
+    }
+    out[i] = r;
+  }
+}
+
 // The dimmed copies of the 256 source pixels are made first, four at a time
 // (bytes widened to 16 bits, multiplied by f with alpha's lane at 256, and
 // narrowed back), then the runs are filled as scale_row does. Every

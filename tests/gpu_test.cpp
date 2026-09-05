@@ -343,6 +343,51 @@ static void test_lcd_grid() {
   CHECK_EQ(xrun[1] - xrun[0], 3u); CHECK_EQ(xrun[2] - xrun[1], 2u); CHECK_EQ(xrun[256], W);
 }
 
+// Bilinear (--linear): every panel pixel against the sample-point
+// definition: source u = (x+0.5)*256/W - 0.5, v = (y+0.5)*192/H - 0.5,
+// clamped to the picture, the 2x2 around (u,v) blended by the fractional
+// parts, horizontally first (each pass rounded as the kernels do). An
+// integer scale and a fractional, non-multiple one.
+static void test_bilinear() {
+  NDS ref; lazy_setup(ref); run_display_frame(ref, lazy_mid);
+  const u32* fb = ref.gpu.framebuffer(0);
+  auto lerp = [](u32 a, u32 b, u32 f) { u32 r = 0; for (u32 sh : {0u, 8u, 16u, 24u}) r |= ((((a >> sh) & 255) * (256 - f) + ((b >> sh) & 255) * f + 128) >> 8) << sh; return r; };
+  for (const auto [W, H] : {std::pair<u32, u32>{640, 480}, std::pair<u32, u32>{721, 541}, std::pair<u32, u32>{256, 192}}) {
+    std::vector<u16> xrun(257), sx(W); std::vector<u8> wx(W);
+    for (u32 x = 0; x <= 256; ++x) xrun[x] = static_cast<u16>((x * W + 255) / 256);
+    for (u32 x = 0; x < W; ++x) {
+      const s32 u = static_cast<s32>(((2 * x + 1) * 256 * 128) / W) - 128;
+      u32 s = u <= 0 ? 0 : static_cast<u32>(u) >> 8, f = u <= 0 ? 0 : static_cast<u32>(u) & 255;
+      if (s >= 255) { s = 254; f = 255; }
+      sx[x] = static_cast<u16>(s); wx[x] = static_cast<u8>(f);
+    }
+    NDS n; lazy_setup(n);
+    std::vector<u32> out(W * H, 0xDEADBEEF), other(W * H);
+    gpu::Gpu::ScaleTarget t{out.data(), W, H, xrun.data()};
+    t.bilinear = true; t.lin_sx = sx.data(); t.lin_wx = wx.data();
+    n.gpu.set_scale_target(0, t);
+    t.px = other.data();
+    n.gpu.set_scale_target(1, t);
+    run_display_frame(n, lazy_mid);
+    int bad = 0;
+    for (u32 y = 0; y < H && bad < 8; ++y) {
+      // Row sample: v*256 = ((2y+1)*192*128)/H - 128, floored.
+      const s32 v = static_cast<s32>(((2 * y + 1) * 192 * 128) / H) - 128;
+      u32 l0, fy;
+      if (v <= 0) { l0 = 0; fy = 0; }
+      else { l0 = static_cast<u32>(v) >> 8; fy = static_cast<u32>(v) & 255; if (l0 >= 191) { l0 = 191; fy = 0; } }
+      const u32 l1 = l0 + (fy ? 1 : 0);
+      for (u32 x = 0; x < W; ++x) {
+        const u32 a = lerp(fb[l0 * 256 + sx[x]], fb[l0 * 256 + sx[x] + 1], wx[x]);
+        const u32 b = lerp(fb[l1 * 256 + sx[x]], fb[l1 * 256 + sx[x] + 1], wx[x]);
+        const u32 exp = fy ? lerp(a, b, fy) : a;
+        if (out[y * W + x] != exp) { if (bad < 8) std::fprintf(stderr, "bilinear %ux%u (%u,%u) = %08x, expected %08x\n", W, H, x, y, out[y * W + x], exp); ++bad; }
+      }
+    }
+    CHECK_EQ(bad, 0);
+  }
+}
+
 int main() {
   test_vram_views();
   test_text_bg_and_backdrop();
@@ -350,6 +395,7 @@ int main() {
   test_register_access();
   test_lazy_journal();
   test_lcd_grid();
+  test_bilinear();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("gpu: ok");
   return 0;

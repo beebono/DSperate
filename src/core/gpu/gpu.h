@@ -200,6 +200,14 @@ public:
     u8 blend = 0;               // box-filter seams (sharp-shimmerless): 1 blend in sRGB, 2 in linear light
     const u8* seam_w = nullptr; // 256 entries: weight (0..255 = 0..1) of pixel s+1 in run s's last pixel; 0 = no straddle
     const CellMap* cells = nullptr; // chunky with a panel-sized cell (see CellMap); null = the 2x2 pair path
+    // Bilinear (--linear): every panel pixel is the weighted blend of the 2x2
+    // source pixels around its sample point. Takes precedence over the grid,
+    // seams and chunky. lin_sx/lin_wx have xrun[256] entries: destination
+    // column x samples between source pixels lin_sx[x] and lin_sx[x]+1 at
+    // weight lin_wx[x]/256 (lin_sx <= 254). The row map is computed here.
+    bool bilinear = false;
+    const u16* lin_sx = nullptr;
+    const u8* lin_wx = nullptr;
   };
   // Both screens or neither: pass a null `px` to go back to fb_.
   void set_scale_target(int screen, const ScaleTarget& t) { scale_[screen] = t; }
@@ -263,6 +271,7 @@ private:
   bool run_fifo_ = false;
   std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb_{};
   ScaleTarget scale_[2];
+  static constexpr u32 SCALED_ROW_MAX = 4096;
   alignas(16) u32 chunk_even_[2][SCREEN_W];   // chunky: the even line, held until the odd one completes the block
   alignas(16) u32 seam_prev_[2][SCREEN_W];    // blend: the previous source row, for the straddling row
   u32 seam_prev_line_[2] = {~0u, ~0u};
@@ -272,6 +281,12 @@ private:
   u32 cell_row_[2] = {0, 0};        // the cell row being gathered
   void emit_cells(int screen, u32 line, const u32* src);
   void emit_row_straddle(const ScaleTarget& t, const u32* src, u32* dst);
+  // Bilinear: the previous and current source lines widened horizontally,
+  // per screen; a destination row between two lines is a lerp of the pair.
+  alignas(16) u32 lin_row_[2][2][SCALED_ROW_MAX];
+  u32 lin_cur_[2] = {0, 0};              // which of lin_row_[screen] holds the current line
+  u32 lin_prev_line_[2] = {~0u, ~0u};
+  void emit_bilinear(int screen, u32 line, const u32* src);
   void blend_rows(const ScaleTarget& t, const u32* a, const u32* b, u32 w, u32* out);
   // The output stage's line buffer when scaling: output_line writes here
   // instead of into fb_, at the same cost, and scale_row reads it back hot.
@@ -279,7 +294,6 @@ private:
   // A scaled row, per screen, staged here before it goes to the target: the
   // target is scanout memory (uncached CMA on the handhelds), and copying a
   // row to its duplicates below straight out of it reads that memory back.
-  static constexpr u32 SCALED_ROW_MAX = 4096;
   alignas(16) u32 row_scratch_[2][SCALED_ROW_MAX];
   const u32* line3d_ = nullptr;   // 3D output for the line being drawn (whichever thread draws engine A)
 

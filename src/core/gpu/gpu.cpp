@@ -949,8 +949,58 @@ void Gpu::scale_image(int screen, const u32* src) {
   for (u32 line = 0; line < SCREEN_H; ++line) emit_scaled(screen, line, src + line * SCREEN_W);
 }
 
+// Bilinear. The sample point of destination row y is v = (y + 0.5) * 192 / h
+// - 0.5 in source lines, so the rows that blend lines L-1 and L are those
+// with v in [L-1, L): they are written when line L arrives, from the two
+// widened rows held here. Rows above line 0's centre and below line 191's
+// are that line alone (clamped), and go out at line 0 and line 191.
+// Source line L owns rows [ystart(L), ystart(L+1)) with ystart(L) the
+// smallest y with (2y+1)*192 >= (2L-1)*h; every row is claimed exactly once.
+void Gpu::emit_bilinear(int screen, u32 line, const u32* src) {
+  const ScaleTarget& t = scale_[screen];
+  const u32 w = t.xrun[SCREEN_W];
+  if (w > SCALED_ROW_MAX || w == 0 || t.h == 0) return;
+  const u32 h = t.h;
+  auto ystart = [h](u32 l) -> u32 {
+    if (l == 0) return 0;
+    const u32 k = ((2 * l - 1) * h + SCREEN_H - 1) / SCREEN_H;   // ceil((2L-1)h/192)
+    return std::min(h, k / 2);
+  };
+  // Widen this line; the previous line's row is kept if it is line-1.
+  const bool have_prev = line > 0 && lin_prev_line_[screen] + 1 == line;
+  const u32 cur = have_prev ? lin_cur_[screen] ^ 1u : 0u;
+  u32* const hcur = lin_row_[screen][cur];
+  const u32* const hprev = lin_row_[screen][cur ^ 1u];
+  kern::active::lerp_row_gather(src, t.lin_sx, t.lin_wx, w, hcur);
+  lin_cur_[screen] = cur;
+  lin_prev_line_[screen] = line;
+  const size_t bytes = static_cast<size_t>(w) * sizeof(u32);
+  auto out_row = [&](u32 y) { return t.px + static_cast<size_t>(y) * t.pitch; };
+  if (line == 0) {
+    for (u32 y = 0; y < ystart(1); ++y) std::memcpy(out_row(y), hcur, bytes);
+    if (line + 1 < SCREEN_H) return;
+  }
+  if (have_prev) {
+    const u32 y0 = ystart(line), y1 = ystart(line + 1);
+    for (u32 y = y0; y < y1; ++y) {
+      // Weight of this line: v - (line-1), in 1/256.
+      const s32 wf = static_cast<s32>(((2 * y + 1) * SCREEN_H * 128) / h) - 128 - static_cast<s32>((line - 1) * 256);
+      const u32 wy = static_cast<u32>(std::min(255, std::max(0, wf)));
+      if (wy == 0) std::memcpy(out_row(y), hprev, bytes);
+      else kern::active::lerp_rows(hprev, hcur, wy, w, out_row(y));
+    }
+  } else {
+    // A gap in the lines (a hidden span, or the first line after a
+    // reset): this line stands alone over its rows.
+    for (u32 y = ystart(line); y < ystart(line + 1); ++y) std::memcpy(out_row(y), hcur, bytes);
+  }
+  if (line + 1 == SCREEN_H)
+    for (u32 y = ystart(SCREEN_H); y < h; ++y) std::memcpy(out_row(y), hcur, bytes);
+}
+
 void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   const ScaleTarget& t = scale_[screen];
+  if (t.bilinear && t.lin_sx && t.lin_wx) { emit_bilinear(screen, line, src); return; }
   if (t.chunky && t.cells) {
     if (line == 0) cell_row_[screen] = 0;
     emit_cells(screen, line, src);
