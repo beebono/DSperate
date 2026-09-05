@@ -39,7 +39,7 @@ void Display::natural_size(const Layout& l, double scale, int& w, int& h) {
   w = static_cast<int>(fw); h = static_cast<int>(fh);
 }
 
-bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout_mode, bool accel, int only_screen, int display_index) {
+bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout_mode, int only_screen, int display_index) {
   layout_ = layout_mode;
   only_screen_ = only_screen;
   display_index_ = display_index;
@@ -77,7 +77,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     if (fo->open(win_, vsync)) {
       out_ = std::move(fo);
       scaled_ = true;
-      if (accel || linear) std::fprintf(stderr, "video.fbdev renders on the CPU; --accel/--linear ignored\n");
+      if (linear) std::fprintf(stderr, "video.fbdev renders on the CPU; --linear ignored\n");
       layout();
       build_scale();
       std::fprintf(stderr, "video: fbdev scanout %dx%d, %s driver, scanline scaling, vsync %s\n",
@@ -107,17 +107,15 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   //    and before SDL's KMSDRM window surface was understood to be a hidden
   //    GLES renderer rather than a shadow blit -- see display_drm.h.)
   //
-  // --accel keeps the GLES renderer and --linear the renderer's smooth
-  // scaling, both of which need draw(); DS_SCANLINE_SCALE=0/1 overrides
-  // either way.
+  // --linear needs the renderer's smooth scaling, and so draw();
+  // DS_SCANLINE_SCALE=0/1 overrides either way.
   const char* vd = SDL_GetCurrentVideoDriver();
   const bool wayland = vd && !std::strcmp(vd, "wayland");
   const bool kms = vd && !std::strcmp(vd, "KMSDRM");
   const char* sl = std::getenv("DS_SCANLINE_SCALE");
   scaled_ = sl && *sl ? std::strcmp(sl, "0") != 0
-                      : !accel && !linear && (wayland || kms);
+                      : !linear && (wayland || kms);
   if (scaled_) {
-    if (accel) std::fprintf(stderr, "DS_SCANLINE_SCALE renders on the CPU; --accel ignored\n");
     const char* dmenv = std::getenv("DS_DMABUF");
     const bool dm_forbidden = dmenv && !std::strcmp(dmenv, "0");
     const bool dm_required = dmenv && !std::strcmp(dmenv, "1");
@@ -160,29 +158,23 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     }
   }
 
-  // Software by default, which is not the obvious choice and was measured.
-  //
-  // Everything the emulator draws is already in a CPU buffer, so the only
-  // work the GPU does is scale 256x192 per screen up to the panel -- which a
-  // Mali does nearly for free, while the CPU does not. That reasoning is
-  // wrong on these handhelds: the GLES path also costs a texture upload per
-  // frame and, more to the point, the driver's own threads, on a four-core
-  // board where the emulation thread, the 2D engine-B worker and two or three
-  // raster workers already want every core.
-  //
-  // etody, 1800 frames, SDL fullscreen on two RG DS boards -- software
-  // against opengles2: 14173 ms and 14452 against 15426 and 15508, with
-  // over-budget frames 112 and 142 against 305 and 294, and p99 ~2.7 ms
-  // lower. The median is marginally *worse* (the CPU scale is a small fixed
-  // cost per frame) and the tail is much better (the driver is not competing
-  // for a core). --accel selects GLES, which is likely the better choice
-  // anywhere the GPU is not sharing a die with four A55s.
-  const u32 rflags = (accel ? static_cast<u32>(SDL_RENDERER_ACCELERATED) : static_cast<u32>(SDL_RENDERER_SOFTWARE))
-                   | (vsync ? static_cast<u32>(SDL_RENDERER_PRESENTVSYNC) : 0u);
-  ren_ = SDL_CreateRenderer(win_, -1, rflags);
-  if (!ren_ && accel) {   // KMSDRM without GLES, or a headless test box
+  // The SDL_Renderer fallback: reached only where none of the tiers above
+  // applies -- a video driver with no zero-copy destination (X11), --linear,
+  // or DS_SCANLINE_SCALE=0. The GPU renderer is tried first and software is
+  // taken when it cannot be created (KMSDRM without GLES, a headless test
+  // box). It is not selectable: on the handhelds the scanline tiers are the
+  // measured winners (the GL driver's threads cost more than the scale on a
+  // four-core board where the emulation thread, the engine-B worker and the
+  // raster workers already want every core -- etody, 1800 frames, two RG DS
+  // boards: software 14173/14452 ms against opengles2 15426/15508, with a
+  // third of the over-budget frames), and those tiers are what the
+  // handhelds now get; where this fallback is reached at all the GPU is
+  // unlikely to be sharing a die with four A55s.
+  const u32 vflag = vsync ? static_cast<u32>(SDL_RENDERER_PRESENTVSYNC) : 0u;
+  ren_ = SDL_CreateRenderer(win_, -1, static_cast<u32>(SDL_RENDERER_ACCELERATED) | vflag);
+  if (!ren_) {
     std::fprintf(stderr, "accelerated renderer unavailable (%s); falling back to software\n", SDL_GetError());
-    ren_ = SDL_CreateRenderer(win_, -1, SDL_RENDERER_SOFTWARE);
+    ren_ = SDL_CreateRenderer(win_, -1, static_cast<u32>(SDL_RENDERER_SOFTWARE) | vflag);
   }
   if (!ren_) { std::fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError()); return false; }
 

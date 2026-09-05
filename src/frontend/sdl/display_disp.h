@@ -7,7 +7,7 @@
 //
 // Why this tier exists: the A30's SDL2 has one video driver, Mali EGL over
 // fbdev, and every SDL path to the panel is a GLES upload and swap (3 ms per
-// frame with --accel, 97 ms through the window surface). The panel is also
+// frame through the GLES renderer, 97 ms through the window surface). The panel is also
 // mounted portrait, and rotating a panel-sized frame on the Cortex-A7 costs
 // 4.7 ms -- more than the GPU present it would replace. The display engine
 // removes both costs at once: a layer in scaler mode takes a source of any

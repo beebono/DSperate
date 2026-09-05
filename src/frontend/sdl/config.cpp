@@ -215,7 +215,6 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 # aa = false                    # 3D anti-aliasing (DISP3DCNT bit 4). Opt-in: off, the rasteriser draws
                                 # every frame as if the game had it off (no edge coverage, no pixel stack),
                                 # which is cheaper and looks like most emulators; true = hardware behaviour
-# accel = false                 # GPU renderer
 # disp = auto                   # display-engine scaler layer (Miyoo A30 class): auto | true | false
 # fbdev = auto                  # present straight through /dev/fb0 (the mali-fbdev SDL2 handhelds,
 #                               # e.g. the H700 line under BaseOS): auto | true | false. auto takes it

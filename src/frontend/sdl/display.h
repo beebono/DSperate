@@ -57,7 +57,7 @@ public:
   // The window size that shows the layout at `scale` window pixels per DS pixel.
   static void natural_size(const Layout& l, double scale, int& w, int& h);
 
-  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout, bool accel = false, int only_screen = -1, int display_index = 0);
+  bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout, int only_screen = -1, int display_index = 0);
   void close();
 
   void draw(const u32* const fb[SCREENS]);
@@ -78,7 +78,7 @@ public:
   // needs, with a dma-heap allocation in place of the shm buffer; doing it
   // here first measures the scaling win on its own, on the path that ships.
   //
-  // Renderer-based drawing (draw(), --accel) is unavailable while this is on.
+  // Renderer-based drawing (draw()) is unavailable while this is on.
   //
   // Destination tiers, tried in order at open():
   //  1. a scanout tier (scanout.h): CMA dma-heap buffers the display samples

@@ -92,8 +92,6 @@ const char* kUsage =
     "  --fbdev / --no-fbdev  present straight through /dev/fb0 (the mali-fbdev SDL2 of the\n"
     "                  H700 handhelds; the default is auto: when that SDL2 has a mali driver\n"
     "                  and fb0 answers). video.fbdev\n"
-    "  --accel         GPU renderer; the default is software, which measures faster\n"
-    "                  on the handhelds (the GL driver's threads cost more than the scale)\n"
     "  --no-audio      run without sound (frames are paced by the clock)\n"
     "  --volume N      0..100\n"
     "  --no-mic        do not open the microphone (M still fakes one)\n"
@@ -556,7 +554,6 @@ int main(int argc, char** argv) {
     else if (arg("--chunky-threshold")) cli.set("video.chunky_threshold", argv[++i]);
     else if (arg("--chunky-cell")) cli.set("video.chunky_cell", argv[++i]);
     else if (arg("--seam")) cli.set("video.seam", argv[++i]);
-    else if (flag("--accel")) cli.set("video.accel", "true");
     else if (flag("--disp")) cli.set("video.disp", "true");
     else if (flag("--no-disp")) cli.set("video.disp", "false");
     else if (flag("--fbdev")) cli.set("video.fbdev", "true");
@@ -587,7 +584,7 @@ int main(int argc, char** argv) {
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
-                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.accel", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
+                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
@@ -649,7 +646,7 @@ int main(int argc, char** argv) {
 
   int scale = cfg.num("video.scale", 2);
   if (scale < 1) scale = 1;
-  const bool fullscreen = cfg.flag("video.fullscreen", false), linear = cfg.flag("video.linear", false), accel = cfg.flag("video.accel", false);
+  const bool fullscreen = cfg.flag("video.fullscreen", false), linear = cfg.flag("video.linear", false);
   // Grid strength -> brightness kept on the seams, 0..256 (256 = off).
   const double grid_s = std::min(1.0, std::max(0.0, cfg.real("video.lcd_grid", 0.0)));
   const u32 grid = static_cast<u32>(std::lround((1.0 - grid_s) * 256.0));
@@ -809,10 +806,10 @@ sdl_ready:
     const char* vd = SDL_GetCurrentVideoDriver();
     bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
     display.set_chunky(chunky != 0, chunky_cell); display2.set_chunky(chunky != 0, chunky_cell);
-    if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel, 0, 1 - bottom_display) ||
-        !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, accel, 1, bottom_display)) { SDL_Quit(); return 1; }
+    if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, 0, 1 - bottom_display) ||
+        !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
-  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); display.set_fbdev(use_fbdev); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, accel)) { SDL_Quit(); return 1; } }
+  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); display.set_fbdev(use_fbdev); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout)) { SDL_Quit(); return 1; } }
   // A single-screen layout shows one screen: the core skips the other's
   // engine (Gpu::set_screen_visible). Every other layout, and dual-window,
   // shows both.

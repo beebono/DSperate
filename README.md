@@ -165,7 +165,7 @@ A55, before the window appears.
 
     dsperate [game.nds|game.zip] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
                  [--config F] [--scale N] [--fullscreen] [--layout L] [--screen top|bottom]
-                 [--dual-window] [--linear] [--lcd-grid S] [--chunky] [--accel] [--no-vsync] [--no-audio]
+                 [--dual-window] [--linear] [--lcd-grid S] [--chunky] [--no-vsync] [--no-audio]
                  [--volume N] [--no-mic] [--interp] [--lockstep | --quantum N] [--timing-oc]
                  [--frames N] [--record F | --replay F] [--save F]
 
