@@ -35,6 +35,7 @@
 #include <cerrno>
 #include <cstring>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <algorithm>
 #include <cmath>
 #include <csignal>
@@ -226,8 +227,12 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
   return true;
 }
 
-// The screenshot hotkey: <GAMECODE>-<timestamp>.png in the states directory.
+// The screenshot hotkey: <GAMECODE>-<timestamp>.png in the screenshots
+// directory (paths.screenshots; the states directory unless set). The
+// directory is made on demand, one level, so a fresh path in the config
+// works without a prior mkdir.
 void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout, const ds::sdl::Display* display) {
+  ::mkdir(dir.c_str(), 0755);
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
@@ -359,7 +364,8 @@ struct Session {
   std::string rom_path;         // what is in the slot
   std::string rom_dir;          // its directory: the default home for everything below
   std::string game_ini;         // per-game settings; empty when there is no cart
-  std::string states_dir;       // save states and screenshots
+  std::string states_dir;       // save states (and the autosave's PNG)
+  std::string shots_dir;        // manual screenshots (F9); paths.screenshots, else states_dir
   std::string sav;              // battery save
   std::string cheats_on_path;   // which cheats are on, one name per line
   ds::cheat::GameCheats cheats; // the database entry for this ROM; the menu points at its groups
@@ -375,6 +381,7 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   const size_t slash = rom_path.find_last_of('/');
   rom_dir = slash == std::string::npos ? "." : rom_path.substr(0, slash);
   states_dir = cfg.str("paths.states", rom_dir);
+  shots_dir = cfg.str("paths.screenshots", states_dir);
   sav = save_arg ? std::string(save_arg) : save_path(rom_path, cfg.str("paths.saves"));
   game_ini.clear();
   if (nds.cart) {
@@ -1253,7 +1260,7 @@ sdl_ready:
         if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.pip_corner", Disp::corner_name(l.corner));
         break;
       }
-      case A::Screenshot: screenshot(nds, session.states_dir, display.current_layout(), &display); break;
+      case A::Screenshot: screenshot(nds, session.shots_dir, display.current_layout(), &display); break;
       case A::Lid: input.set_lid(!input.lid()); VLOG("lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
       case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
       case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;

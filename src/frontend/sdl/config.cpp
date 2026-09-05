@@ -174,7 +174,8 @@ R"(# DSperate settings. Command-line flags override this file, and two files
 #                               # into <zip dir>/.dsperate/, and kept: on an SD card that is
 #                               # seconds to a minute per game. Never /tmp -- on a handheld that
 #                               # is RAM. See [cart] for how much is kept, and --clear-cache.
-# states = /path/to/states      # save states and screenshots; default next to the ROM
+# states = /path/to/states      # save states (and the autosave's PNG); default next to the ROM
+# screenshots = /path/to/shots  # where the screenshot hotkey writes; default: the states directory
 # cheats = /path/to/usrcheat.dat # Action Replay database; default: beside the ROM,
                                 #   then in this config directory. Loading it only
                                 #   lists the codes -- none are on until you say so.

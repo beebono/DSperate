@@ -198,8 +198,8 @@ Defaults -- keyboard: arrows, `X`/`Z` = A/B, `S`/`A` = X/Y, `Q`/`W` = L/R,
 Enter = Start, Right Shift = Select; `Escape` quits, `P` opens the pause menu, `Tab` held
 fast-forwards, `F` toggles fullscreen, `F4`/`F10` cycle the screen layout forward/back, `F6` swaps
 which screen is alone/large/dominant and `F8` moves the PiP inset (all three
-remembered for the game), `F9` takes a screenshot (both screens, PNG, in the
-states directory), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
+remembered for the game), `F9` takes a screenshot (both screens, PNG, in
+`paths.screenshots`, the states directory by default), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
 the state in the current slot and `F2`/`F3` change the slot, `L` closes and
 opens the lid, `M` held is the fake microphone. The `fps` hotkey toggles an
 on-screen frames-per-second counter and is unbound by default (`[video] fps =
