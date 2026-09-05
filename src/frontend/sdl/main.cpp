@@ -78,7 +78,8 @@ const char* kUsage =
     "                  handhelds; also what direct scanout needs on them)\n"
     "  --linear        bilinear scaling instead of nearest (takes precedence over the grid, seams\n"
     "                  and chunky)\n"
-    "  --lcd-grid S    LCD pixel grid strength, 0 (off, default) .. 1 (software scaling only)\n"
+    "  --lcd-grid S    LCD pixel grid strength, 0 (off, default) .. 1 (software scaling, or the\n"
+    "                  display engine's overlay layer on the A30)\n"
     "  --seam S        dark (default): the LCD grid, dimmed by --lcd-grid | blend: box-filter seams\n"
     "                  (sharp-shimmerless): the one panel pixel/row that straddles two DS pixels is their\n"
     "                  area-weighted blend, all others crisp | blend_linear: the same in linear light\n"
@@ -821,7 +822,8 @@ sdl_ready:
     if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, 0, 1 - bottom_display) ||
         !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
-  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); display.set_fbdev(use_fbdev); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout)) { SDL_Quit(); return 1; } }
+  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp);
+    if (!linear) display.set_disp_grid(static_cast<u8>(((256 - grid) * 255) / 256)); display.set_fbdev(use_fbdev); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout)) { SDL_Quit(); return 1; } }
   // A single-screen layout shows one screen: the core skips the other's
   // engine (Gpu::set_screen_visible). Every other layout, and dual-window,
   // shows both.
@@ -876,10 +878,14 @@ sdl_ready:
     std::fprintf(stderr, "cache: cleared %llu MB of unpacked games\n", static_cast<unsigned long long>(freed >> 20));
   }
   auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled) {
+    // At DS resolution (Display::effects_at_source) only chunky applies: the
+    // grid would dim every pixel, seams and bilinear are the identity.
+    const bool at_source = display.effects_at_source();
     for (int i = 0; i < 2; ++i)
-      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, grid, chunky, chunky_thresh, seam_blend, target[i].seam_w,
+      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
+                                                                       at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
                                                                        static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i)),
-                                                                       linear, target[i].lin_sx, target[i].lin_wx}
+                                                                       linear && !at_source, target[i].lin_sx, target[i].lin_wx}
                                          : ds::gpu::Gpu::ScaleTarget{});
   };
   // Loads a ROM with the "unpacking" notice up if it takes more than a

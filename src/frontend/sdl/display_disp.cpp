@@ -181,6 +181,16 @@ bool DispOut::open(int rot, bool vsync) {
   unsigned long hdl = 0;
   if (ioctl(fb_, FBIOGET_LAYER_HDL_0, &hdl) == 0) ui_layer_ = static_cast<int>(hdl);
   for (int l = 0; l < 4; ++l) if (l != ui_layer_) { layer_ = l; break; }
+  grid_layer_ = -1; grid_enabled_ = false; grid_dirty_ = false; grid_dims_ = Dims{};
+  if (grid_alpha_) {
+    grid_off_ = buf_bytes_ * BUFS;
+    const size_t need = static_cast<size_t>(panel_w_) * panel_h_ * sizeof(u32);
+    if (grid_off_ + need <= fix.smem_len) {
+      for (int l = 0; l < 4; ++l) if (l != ui_layer_ && l != layer_) { grid_layer_ = l; break; }
+      grid_dirty_ = true;
+    }
+    if (grid_layer_ < 0) std::fprintf(stderr, "disp: no room or layer for the LCD grid; grid off\n");
+  }
   for (auto& v : views_) v = ViewRect{};
   for (auto& d : dims_) d = Dims{};
   canvas_w_ = W; canvas_h_ = H;
@@ -209,6 +219,7 @@ void DispOut::close() {
   }
   if (disp_ >= 0) {
     if (layer_ >= 0) layer_ioctl(disp_, CMD_LAYER_DISABLE, static_cast<unsigned>(layer_), nullptr);
+    if (grid_layer_ >= 0 && grid_enabled_) layer_ioctl(disp_, CMD_LAYER_DISABLE, static_cast<unsigned>(grid_layer_), nullptr);
     if (ui_layer_ >= 0 && ui_was_enabled_) layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(ui_layer_), nullptr);
     ::close(disp_);
   }
@@ -216,6 +227,7 @@ void DispOut::close() {
   if (fb_ >= 0) ::close(fb_);
 #endif
   disp_ = fb_ = -1; map_ = nullptr; map_len_ = 0; layer_ = ui_layer_ = -1; ui_was_enabled_ = false; layer_enabled_ = false;
+  grid_layer_ = -1; grid_enabled_ = false;
 }
 
 void DispOut::set_canvas(int w, int h) {
@@ -223,6 +235,7 @@ void DispOut::set_canvas(int w, int h) {
   if (w == canvas_w_ && h == canvas_h_) return;
   canvas_w_ = w; canvas_h_ = h;
   dirty_ = (1u << BUFS) - 1;   // gaps between views must be black again
+  grid_dirty_ = true;
 }
 
 void DispOut::set_view(int i, int x, int y, int w, int h, bool shown) {
@@ -231,20 +244,130 @@ void DispOut::set_view(int i, int x, int y, int w, int h, bool shown) {
   // A moved, resized or hidden view leaves its old pixels behind in every
   // buffer: pip to single, a screen swap or a corner change keep the canvas
   // size, so set_canvas() alone would not black them out.
-  if (o.x != x || o.y != y || o.w != w || o.h != h || o.shown != shown) dirty_ = (1u << BUFS) - 1;
-  views_[i] = ViewRect{x, y, w, h, shown};
+  if (o.x != x || o.y != y || o.w != w || o.h != h || o.shown != shown) { dirty_ = (1u << BUFS) - 1; grid_dirty_ = true; }
+  views_[i] = ViewRect{x, y, w, h, shown, o.cell};
+}
+
+void DispOut::set_view_cell(int i, int cell) {
+  if (i < 0 || i >= VIEWS || cell < 1) return;
+  if (views_[i].cell != cell) grid_dirty_ = true;
+  views_[i].cell = cell;
+}
+
+double DispOut::fit_scale() const {
+  const bool turned = rot_ == 90 || rot_ == 270;
+  const Dims d{turned ? canvas_h_ : canvas_w_, turned ? canvas_w_ : canvas_h_};
+  if (d.w <= 0 || d.h <= 0) return 0.0;
+  return std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h);
+}
+
+void DispOut::fit(Dims d, int& x, int& y, unsigned& w, unsigned& h) const {
+  // Fit the composite to the panel, aspect kept, centred: the DE does the scale.
+  const double s = std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h);
+  w = static_cast<unsigned>(d.w * s); h = static_cast<unsigned>(d.h * s);
+  x = static_cast<int>((panel_w_ - w) / 2); y = static_cast<int>((panel_h_ - h) / 2);
+}
+
+void DispOut::comp_rect(const ViewRect& r, int& cx, int& cy, int& cw, int& ch) const {
+  const bool turned = rot_ == 90 || rot_ == 270;
+  switch (rot_) {
+    case 270: cx = r.y; cy = canvas_w_ - (r.x + r.w); break;
+    case 90:  cx = canvas_h_ - (r.y + r.h); cy = r.x; break;
+    case 180: cx = canvas_w_ - (r.x + r.w); cy = canvas_h_ - (r.y + r.h); break;
+    default:  cx = r.x; cy = r.y; break;
+  }
+  cw = turned ? r.h : r.w; ch = turned ? r.w : r.h;
+}
+
+// The grid image for a composite of size d. Each shown view's composite
+// rect lands on a panel rect through the same fit set_layer gives the DE;
+// within it composite pixel c (or chunky cell) covers panel run [ceil(c*pw/n),
+// ceil((c+1)*pw/n)), and the run's first pixel is a seam when the run is at
+// least ceil(pw/n) long -- kern::scale_row_grid's rule, so the seams sit
+// where the scanline tiers put them. Seam rows the same way. Composed in
+// cached memory and copied to fb0 in bulk (uncached; small stores are slow).
+void DispOut::draw_grid(Dims d) {
+  if (grid_layer_ < 0 || d.w <= 0 || d.h <= 0) return;
+  const size_t n = static_cast<size_t>(panel_w_) * panel_h_;
+  grid_stage_.assign(n, 0u);
+  int fx, fy; unsigned fw, fh;
+  fit(d, fx, fy, fw, fh);
+  const u32 seam = static_cast<u32>(grid_alpha_) << 24;
+  std::vector<u8> col_seam(static_cast<size_t>(panel_w_)), row_seam(static_cast<size_t>(panel_h_));
+  auto seams = [&](int p0, int p1, int cells, u8* out) {
+    // Panel range [p0, p1) shows `cells` composite pixels (or pairs).
+    const int pw = p1 - p0;
+    if (pw <= 0 || cells <= 0) return;
+    const int min_run = (pw + cells - 1) / cells;
+    for (int c = 0; c < cells; ++c) {
+      const int a = (c * pw + cells - 1) / cells, b = ((c + 1) * pw + cells - 1) / cells;
+      if (b - a >= min_run && p0 + a < p1) out[p0 + a] = 1;
+    }
+  };
+  for (const ViewRect& r : views_) {
+    if (!r.shown || r.w <= 0 || r.h <= 0) continue;
+    int cx, cy, cw, ch;
+    comp_rect(r, cx, cy, cw, ch);
+    const int px0 = fx + static_cast<int>(static_cast<u64>(cx) * fw / d.w), px1 = fx + static_cast<int>(static_cast<u64>(cx + cw) * fw / d.w);
+    const int py0 = fy + static_cast<int>(static_cast<u64>(cy) * fh / d.h), py1 = fy + static_cast<int>(static_cast<u64>(cy + ch) * fh / d.h);
+    const int cell = (W % r.cell == 0 && H % r.cell == 0) ? r.cell : 1;
+    // A later view (the PiP inset) covers the seams of the one under it, as
+    // its pixels do in the composite; and a view shown smaller than its
+    // source has no run to lead (every panel pixel would be a seam), so it
+    // gets none -- the scanline tiers' downscaled insets are plain too.
+    for (int y = std::max(0, py0); y < std::min(panel_h_, py1); ++y)
+      std::fill(grid_stage_.data() + static_cast<size_t>(y) * panel_w_ + std::max(0, px0), grid_stage_.data() + static_cast<size_t>(y) * panel_w_ + std::min(panel_w_, px1), 0u);
+    // The DS pixels along each composite axis: a view drawn smaller than the
+    // screen on the canvas (the inset, the dominant layouts' small screen)
+    // was downscaled before the DE enlarged it, so its cells are still DS
+    // pixels (or pairs) of the 256x192 source, not canvas pixels.
+    const bool turned = rot_ == 90 || rot_ == 270;
+    // Shown smaller than the screen itself: no grid, whatever the cell.
+    if (px1 - px0 < (turned ? H : W) || py1 - py0 < (turned ? W : H)) continue;
+    const int nx = (turned ? H : W) / cell, ny = (turned ? W : H) / cell;
+    std::fill(col_seam.begin(), col_seam.end(), 0); std::fill(row_seam.begin(), row_seam.end(), 0);
+    seams(std::max(0, px0), std::min(panel_w_, px1), nx, col_seam.data());
+    seams(std::max(0, py0), std::min(panel_h_, py1), ny, row_seam.data());
+    for (int y = std::max(0, py0); y < std::min(panel_h_, py1); ++y) {
+      u32* row = grid_stage_.data() + static_cast<size_t>(y) * panel_w_;
+      if (row_seam[y]) { for (int x = std::max(0, px0); x < std::min(panel_w_, px1); ++x) row[x] = seam; continue; }
+      for (int x = std::max(0, px0); x < std::min(panel_w_, px1); ++x) if (col_seam[x]) row[x] = seam;
+    }
+  }
+  std::memcpy(map_ + grid_off_, grid_stage_.data(), n * sizeof(u32));
+  grid_dims_ = d;
+  grid_dirty_ = false;
+}
+
+bool DispOut::set_grid_layer() {
+#if defined(__linux__)
+  if (grid_layer_ < 0) return false;
+  DispLayerInfo info{};
+  info.mode = 0;   // normal: 1:1, the panel's own pixels
+  info.pipe = 0; info.zorder = 1; info.alpha_mode = 0; info.alpha_value = 255; info.ck_enable = 0;
+  info.screen_win = {0, 0, static_cast<unsigned>(panel_w_), static_cast<unsigned>(panel_h_)};
+  info.fb.addr[0] = phys_ + static_cast<u32>(grid_off_);
+  info.fb.size = {static_cast<unsigned>(panel_w_), static_cast<unsigned>(panel_h_)};
+  info.fb.format = FORMAT_ARGB_8888;
+  info.fb.src_win = {0, 0, static_cast<unsigned>(panel_w_), static_cast<unsigned>(panel_h_)};
+  if (layer_ioctl(disp_, CMD_LAYER_SET_INFO, static_cast<unsigned>(grid_layer_), &info) != 0) { std::perror("disp: grid LAYER_SET_INFO"); grid_layer_ = -1; return false; }
+  if (layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(grid_layer_), nullptr) != 0) { std::perror("disp: grid LAYER_ENABLE"); grid_layer_ = -1; return false; }
+  grid_enabled_ = true;
+  return true;
+#else
+  return false;
+#endif
 }
 
 bool DispOut::set_layer(u32 addr, Dims d) {
 #if defined(__linux__)
   if (d.w <= 0 || d.h <= 0) return false;
-  // Fit the composite to the panel, aspect kept, centred: the DE does the scale.
-  const double s = std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h);
-  const unsigned ww = static_cast<unsigned>(d.w * s), wh = static_cast<unsigned>(d.h * s);
+  int fx, fy; unsigned ww, wh;
+  fit(d, fx, fy, ww, wh);
   DispLayerInfo info{};
   info.mode = LAYER_MODE_SCALER;
   info.pipe = 1; info.zorder = 0; info.alpha_mode = 1; info.alpha_value = 255; info.ck_enable = 0;
-  info.screen_win = {static_cast<int>((panel_w_ - ww) / 2), static_cast<int>((panel_h_ - wh) / 2), ww, wh};
+  info.screen_win = {fx, fy, ww, wh};
   info.fb.addr[0] = addr;
   info.fb.size = {static_cast<unsigned>(d.w), static_cast<unsigned>(d.h)};
   info.fb.format = FORMAT_ARGB_8888;
@@ -253,6 +376,7 @@ bool DispOut::set_layer(u32 addr, Dims d) {
   if (!layer_enabled_) {
     if (layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(layer_), nullptr) != 0) { std::perror("disp: LAYER_ENABLE"); return false; }
     layer_enabled_ = true;
+    if (grid_layer_ >= 0 && !grid_enabled_) set_grid_layer();   // over the composite, once it shows
   }
   return true;
 #else
@@ -288,13 +412,8 @@ const u32* DispOut::under_pixel(int x, int y, int index, const u32* const fbs[VI
 void DispOut::draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb, int index, const u32* const fbs[VIEWS]) {
   const bool turned = rot_ == 90 || rot_ == 270;
   // The view's top-left in the composite: the same rotation the pixels get.
-  int cx, cy;
-  switch (rot_) {
-    case 270: cx = r.y; cy = canvas_w_ - (r.x + r.w); break;
-    case 90:  cx = canvas_h_ - (r.y + r.h); cy = r.x; break;
-    case 180: cx = canvas_w_ - (r.x + r.w); cy = canvas_h_ - (r.y + r.h); break;
-    default:  cx = r.x; cy = r.y; break;
-  }
+  int cx, cy, cw, ch;
+  comp_rect(r, cx, cy, cw, ch);
   u32* dst = comp + static_cast<size_t>(cy) * comp_w + cx;
   if (r.w == W && r.h == H) {
     switch (rot_) {
@@ -389,6 +508,9 @@ void DispOut::present(const u32* const fb[VIEWS]) {
   }
   for (int v = 0; v < VIEWS; ++v) if (fb[v] && views_[v].shown) draw_view(comp, d.w, views_[v], fb[v], v, fb);
   dims_[buf] = d;
+  // The grid follows the layout: redrawn in place (it is scanned out live,
+  // so a layout change may show one torn refresh of it).
+  if (grid_layer_ >= 0 && (grid_dirty_ || d.w != grid_dims_.w || d.h != grid_dims_.h)) draw_grid(d);
   if (thread_.joinable()) {
     { std::lock_guard<std::mutex> g(mu_); pending_ = buf; }
     cv_.notify_one();

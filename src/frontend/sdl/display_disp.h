@@ -35,9 +35,12 @@
 // second layer in scaler mode but shows its source unscaled (seen on the
 // unit), so per-view layers are not an option.
 //
-// What it does not do: the DE scaler filters, so the LCD grid, chunky and
-// seam modes (CPU scanline features) do not apply; and there is no touch
-// (the A30 has none).
+// Effects: chunky is applied at DS resolution before the rotate (Display
+// runs the scanline scaler at 1:1 into a side buffer); the LCD grid is a
+// second DE layer, a static panel-sized ARGB image blended per pixel over
+// the scaled composite (set_grid). The seam blend modes and bilinear need
+// panel pixels and do not apply: the DE scaler's own filter is what shows.
+// No touch (the A30 has none).
 #pragma once
 
 #include "core/types.h"
@@ -75,10 +78,25 @@ public:
   // View i's rectangle on the canvas (Display::layout()'s views_, in order:
   // later views are drawn over earlier ones, so the PiP inset is last).
   void set_view(int i, int x, int y, int w, int h, bool shown);
+  // The chunky cell drawn at source in view i, in canvas pixels (1 = none):
+  // the grid puts one seam per cell there.
+  void set_view_cell(int i, int cell);
+  // Panel pixels per canvas pixel under the current canvas: what the DE's
+  // fit gives (Display sizes its source-side cells by it).
+  double fit_scale() const;
   // Opacity of the views drawn over another (the PiP inset), 0..255: below
   // 255 a downscaled view is blended over what is already in the composite.
   // A 1:1 view is always drawn opaque (nothing lies under one).
   void set_inset_alpha(u8 a) { inset_alpha_ = a; }
+  // The LCD grid as a second layer: a panel-sized ARGB image, transparent
+  // but for one black pixel at `alpha` leading each DS pixel's run of panel
+  // pixels (a chunky cell's, per set_view_cell), the
+  // seam rule of kern::scale_row_grid. The DE blends it per pixel over the
+  // scaled composite (pipe 0 over pipe 1, alpha_mode 0 -- probed on the A30),
+  // so it costs nothing per frame; it is redrawn when the layout changes.
+  // Set before open(); 0 = no grid.
+  void set_grid(u8 alpha) { grid_alpha_ = alpha; }
+  bool grid() const { return grid_layer_ >= 0; }
 
   // Draws each view's 256x192 framebuffer (null skips the view) into a free
   // composite and flips the layer to it. Without vsync the flip is
@@ -92,9 +110,15 @@ public:
   void present(const u32* const fb[VIEWS]);
 
 private:
-  struct ViewRect { int x = 0, y = 0, w = 0, h = 0; bool shown = false; };
+  struct ViewRect { int x = 0, y = 0, w = 0, h = 0; bool shown = false; int cell = 1; };
   struct Dims { int w = 0, h = 0; };          // a composite's size (the canvas, rotated)
   bool set_layer(u32 addr, Dims d);
+  // The panel window the composite is fitted into (aspect kept, centred).
+  void fit(Dims d, int& x, int& y, unsigned& w, unsigned& h) const;
+  // View r's rectangle in the composite (rotated), as draw_view places it.
+  void comp_rect(const ViewRect& r, int& cx, int& cy, int& cw, int& ch) const;
+  void draw_grid(Dims d);
+  bool set_grid_layer();
   void flip(int buf);
   void wait_vsync();
   void draw_view(u32* comp, int comp_w, const ViewRect& r, const u32* fb, int index, const u32* const fbs[VIEWS]);
@@ -115,6 +139,13 @@ private:
   int  canvas_w_ = 0, canvas_h_ = 0;
   size_t buf_bytes_ = 0;            // one composite's allocation (the largest canvas)
   int  layer_ = -1, ui_layer_ = -1;
+  u8   grid_alpha_ = 0;
+  int  grid_layer_ = -1;            // the grid's layer; -1 = no grid
+  bool grid_enabled_ = false;
+  bool grid_dirty_ = false;         // redraw the grid image before the next flip
+  size_t grid_off_ = 0;             // the grid image's offset in fb0 memory (after the composites)
+  Dims grid_dims_;                  // the composite size the image was drawn for
+  std::vector<u32> grid_stage_;     // the image is composed here, then copied to fb0 in bulk
   bool ui_was_enabled_ = false;
   bool layer_enabled_ = false;      // our layer is on (enabled on the first flip)
   ViewRect views_[VIEWS];

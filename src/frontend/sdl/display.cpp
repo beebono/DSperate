@@ -3,6 +3,7 @@
 #include "display_wl.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,11 +66,14 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     int rot = 0;
     if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
     auto d = std::make_unique<DispOut>();
+    d->set_grid(disp_grid_);
     if (d->open(rot, vsync)) {
       disp_ = std::move(d);
       layout();
-      std::fprintf(stderr, "video: display-engine scaler, rot %d, layout %s, %s driver, vsync %s\n",
-                   rot, mode_name(layout_.mode), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off");
+      if (chunky_) { scaled_ = true; build_source_scale(); }
+      std::fprintf(stderr, "video: display-engine scaler, rot %d, layout %s, %s driver, vsync %s%s%s\n",
+                   rot, mode_name(layout_.mode), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off", chunky_ ? ", chunky at source" : "",
+                   disp_->grid() ? ", grid layer" : "");
       return true;
     }
   }
@@ -329,7 +333,7 @@ void Display::toggle_fullscreen() {
 
 void Display::set_layout(const Layout& l) {
   if (only_screen_ >= 0) return;
-  if (disp_) { layout_ = l; layout(); return; }
+  if (disp_) { layout_ = l; layout(); if (scaled_) build_source_scale(); return; }
   const Mode was = layout_.mode;
   layout_ = l;
   if (!fullscreen_ && was != l.mode) {
@@ -376,8 +380,59 @@ bool Display::out_size(int& w, int& h) const {
   return true;
 }
 
+// Chunky at DS resolution (the display-engine tier): the scanline scaler
+// runs at 1:1 into src_side_, which end_frame hands to the layer in place
+// of the core's framebuffer. Pairs fold the odd pixel of each pair into the
+// even one's run. A panel cell (chunky_cell) is possible when it is a whole
+// number of DS pixels under the DE's fit: P panel pixels dividing the
+// view's panel rect into a count that divides 256 x 192 -- on a 320x240
+// view 5 px is 4 DS pixels, 4 px would be 3.2 and cannot be drawn at source.
+// Auto takes the smallest such P in 4..16, as the panel tiers do; an
+// explicit P steps down. Otherwise pairs.
+void Display::build_source_scale() {
+  const double s = disp_ ? disp_->fit_scale() : 0.0;
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
+    std::vector<u16>& xr = xrun_[v.screen];
+    xr.resize(static_cast<size_t>(SCREEN_W) + 1);
+    for (u32 x = 0; x <= SCREEN_W; ++x) xr[x] = static_cast<u16>(x);
+    seam_w_[v.screen].assign(SCREEN_W, 0);
+    cells_[v.screen] = {};
+    src_side_[v.screen].assign(static_cast<size_t>(SCREEN_W) * SCREEN_H, 0xFF000000u);
+    int cell = 2;
+    const u32 pw = static_cast<u32>(std::lround(v.rect.w * s)), ph = static_cast<u32>(std::lround(v.rect.h * s));
+    // Shown smaller than the screen: flattening blocks before a downscale
+    // is only blur, so the view stays plain (the grid skips it too).
+    src_chunky_[v.screen] = s > 0.0 && pw >= SCREEN_W && ph >= SCREEN_H;
+    if (!src_chunky_[v.screen]) { if (disp_) disp_->set_view_cell(i, 1); continue; }
+    if (chunky_cell_ != 0) {
+      u32 P = 0;
+      auto fits = [&](u32 p) {
+        if (p < 2 || pw % p || ph % p) return false;
+        const u32 cx = pw / p, cy = ph / p;
+        return SCREEN_W % cx == 0 && SCREEN_H % cy == 0 && SCREEN_W / cx == SCREEN_H / cy && SCREEN_W / cx <= ds::gpu::Gpu::CELL_TAPS;
+      };
+      if (chunky_cell_ > 0) { for (u32 p = static_cast<u32>(chunky_cell_); p >= 2 && !P; --p) if (fits(p)) P = p; }
+      else { for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p; }
+      ds::gpu::Gpu::CellMap m;
+      const u32 D = P ? SCREEN_W / (pw / P) : 0;
+      if (P && D > 1 && ds::gpu::Gpu::build_cell_axis(SCREEN_W, SCREEN_W / D, D, m.x) && ds::gpu::Gpu::build_cell_axis(SCREEN_H, SCREEN_H / D, D, m.y)) {
+        cells_[v.screen] = std::move(m);
+        cell = static_cast<int>(D);
+        for (u32 x = 0; x <= SCREEN_W; ++x) xr[x] = static_cast<u16>(std::min(x, SCREEN_W / D) * D);
+        if (verbose() || (chunky_cell_ > 0 && P != static_cast<u32>(chunky_cell_)))
+          std::fprintf(stderr, "video: chunky cells of %u px on %ux%u = %u DS pixels at source\n", P, pw, ph, D);
+      } else {
+        std::fprintf(stderr, "video: no %s cell is whole DS pixels on %ux%u; 2x2 pairs at source\n", chunky_cell_ > 0 ? "such" : "auto", pw, ph);
+      }
+    }
+    if (cell == 2) for (u32 x = 1; x < SCREEN_W; x += 2) xr[x] = xr[x + 1];
+    if (disp_) disp_->set_view_cell(i, cell);
+  }
+}
+
 void Display::build_scale() {
-  if (!scaled_ || !win_) return;
+  if (!scaled_ || !win_ || disp_) return;   // the display-engine tier's tables are fixed at open()
   if (out_) {
     // The scanout buffer is the destination; there may be no window surface
     // to fetch (KMSDRM), and asking for one there would build a renderer.
@@ -419,8 +474,8 @@ void Display::build_scale() {
       // An explicit cell that does not divide the screen steps down to the
       // nearest one that does (5 on 640x480 -> 4), so a size chosen for one
       // panel is still close on another.
-      if (chunky_cell_ > 0) for (u32 p = static_cast<u32>(chunky_cell_); p >= 2 && !P; --p) if (fits(p)) P = p;
-      else if (chunky_cell_ < 0) for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p;
+      if (chunky_cell_ > 0) { for (u32 p = static_cast<u32>(chunky_cell_); p >= 2 && !P; --p) if (fits(p)) P = p; }
+      else if (chunky_cell_ < 0) { for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p; }
       ds::gpu::Gpu::CellMap m;
       if (P && ds::gpu::Gpu::build_cell_axis(SCREEN_W, w / P, P, m.x) && ds::gpu::Gpu::build_cell_axis(SCREEN_H, h / P, P, m.y)) {
         cells_[v.screen] = std::move(m);
@@ -545,6 +600,7 @@ void Display::blit_insets() {
 }
 
 bool Display::read_screen(int screen, u32* dst) const {
+  if (disp_ && scaled_) { std::memcpy(dst, src_side_[screen].data(), sizeof(u32) * SCREEN_W * SCREEN_H); return true; }
   if (!scaled_ || !last_px_) return false;
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
@@ -567,6 +623,11 @@ bool Display::read_screen(int screen, u32* dst) const {
 
 bool Display::begin_frame(Target out[SCREENS]) {
   if (!scaled_) return false;
+  if (disp_) {
+    for (int i = 0; i < SCREENS; ++i)
+      out[i] = Target{src_side_[i].data(), SCREEN_W, SCREEN_H, xrun_[i].data(), seam_w_[i].data(), nullptr, nullptr};
+    return true;
+  }
   if (out_) {
     // A configure (fullscreen granted, output reconfigured) resizes the
     // window under us; the buffers must follow before anything writes at the
@@ -630,6 +691,12 @@ bool Display::begin_frame(Target out[SCREENS]) {
 }
 
 void Display::end_frame() {
+  if (disp_) {
+    const u32* fb[SCREENS];
+    for (int i = 0; i < SCREENS; ++i) fb[i] = src_side_[i].data();
+    draw(fb);
+    return;
+  }
   blit_insets();
   if (out_frame_) { out_frame_ = false; out_->end_frame(); return; }
   if (SDL_MUSTLOCK(surf_)) SDL_UnlockSurface(surf_);

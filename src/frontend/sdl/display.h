@@ -103,7 +103,19 @@ public:
   // the device has one; the DS_ROTATE environment gives the panel rotation.
   // Set before open(); draw() is then the way to the screen.
   void set_disp(bool on) { disp_wanted_ = on; }
+  // The LCD grid on the display-engine tier, as the DE's own overlay layer
+  // (DispOut::set_grid): alpha 0..255 of the seams. Set before open().
+  void set_disp_grid(u8 alpha) { disp_grid_ = alpha; }
   bool disp() const { return disp_ != nullptr; }
+  // On the display-engine tier the effects that survive at DS resolution
+  // (chunky) are applied by the scanline scaler at 1:1 into a DS-sized
+  // buffer that is then rotated as the core's framebuffer would be; the
+  // grid, seams and bilinear need panel pixels and are off there.
+  bool effects_at_source() const { return disp_ != nullptr && scaled_; }
+  // Whether chunky applies to `screen`: on the display-engine tier a view
+  // shown smaller than the screen (the PiP inset) is left plain, as the
+  // grid leaves it; elsewhere always.
+  bool chunky_on(int screen) const { return !effects_at_source() || src_chunky_[screen]; }
   // Present straight through /dev/fb0 (display_fbdev.h): the scanline path
   // writes panel-sized frames into fb0's own buffers. Set before open().
   void set_fbdev(bool on) { fbdev_wanted_ = on; }
@@ -158,6 +170,9 @@ public:
 
 private:
   void layout();
+  // Display-engine tier with chunky: the 1:1 run tables and, when a panel
+  // cell fits, the source-side cell maps (see build_source_scale).
+  void build_source_scale();
   void build_scale();          // pick up the window surface and rebuild the x-map
   bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode
   void clear_margins(u32* px, u32 pitch, int w, int h) const;
@@ -177,6 +192,7 @@ private:
 
   bool              scaled_ = false;
   bool              disp_wanted_ = false;
+  u8                disp_grid_ = 0;
   bool              fbdev_wanted_ = false;
   std::unique_ptr<DispOut> disp_;       // display-engine tier; null otherwise
   bool              chunky_ = false;
@@ -193,6 +209,8 @@ private:
   std::vector<u8>   lin_wx_[SCREENS]; // per screen, rect.w entries: weight of column lin_sx+1, 0..255
   ds::gpu::Gpu::CellMap cells_[SCREENS];   // chunky cell tables; x.cells == 0 when the pair path is in use
   std::vector<u32>  side_[SCREENS];   // scaled pixels of a non-direct view
+  std::vector<u32>  src_side_[SCREENS];  // display-engine tier: the 1:1 scaler output per screen (effects_at_source)
+  bool              src_chunky_[SCREENS] = {true, true};   // chunky applies to this screen's view there
   u32*              frame_px_ = nullptr;   // the buffer begin_frame handed out, for end_frame's insets
   u32               frame_pitch_ = 0;
   const u32*        last_px_ = nullptr;    // the last such buffer, for read_screen (still holds that frame)
