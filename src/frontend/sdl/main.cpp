@@ -32,6 +32,7 @@
 
 #include <SDL2/SDL.h>
 #include <sched.h>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <unistd.h>
@@ -143,6 +144,13 @@ std::string rom_stem(const std::string& rom) {
 std::string base_name(const std::string& path) {
   const size_t slash = path.find_last_of('/');
   return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+// The extension, lower-cased ("" if none): the command line's test for a game.
+std::string rom_ext(const std::string& rom) {
+  const std::string stem = rom_stem(rom);
+  std::string ext = rom.substr(stem.size());
+  for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return ext;
 }
 
 // Battery save: next to the ROM, or under [paths] saves.
@@ -541,11 +549,29 @@ int main(int argc, char** argv) {
   bool rtc_host = false;              // --rtc-host: a real clock even under a replay (the firmware menu needs one)
   long stats_from = 0;   // frames run but left out of the timing statistics
 
+  // The game is found before the options are read. A flag whose value is
+  // optional (--chunky [M]) takes the next word unless it is another option,
+  // so `--chunky game.nds` used to swallow the game as its mode and boot the
+  // firmware instead. A word that looks like a game -- a .nds or .zip, or a
+  // path to a file that exists -- is the ROM wherever it sits, and is never
+  // read as a value by such a flag.
+  const char* rom_word = nullptr;
+  auto looks_like_rom = [](const char* w) {
+    if (w[0] == '-') return false;
+    const std::string ext = rom_ext(w);
+    if (ext == ".nds" || ext == ".zip") return true;
+    struct stat st;
+    return ::stat(w, &st) == 0 && S_ISREG(st.st_mode);
+  };
+  for (int i = 1; i < argc && !rom_word; ++i) if (looks_like_rom(argv[i])) rom_word = argv[i];
   // The command line is one more settings layer, applied after the files.
   ds::sdl::Config cli;
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
     auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };
+    // The value of a flag that need not have one: the next word, unless it
+    // is an option or the game.
+    auto optional = [&](const char* fallback) { return i + 1 < argc && argv[i + 1][0] != '-' && argv[i + 1] != rom_word ? argv[++i] : fallback; };
     if (arg("--bios9")) cli.set("paths.bios9", argv[++i]);
     else if (arg("--bios7")) cli.set("paths.bios7", argv[++i]);
     else if (arg("--firmware")) cli.set("paths.firmware", argv[++i]);
@@ -571,7 +597,7 @@ int main(int argc, char** argv) {
     else if (flag("--fullscreen")) cli.set("video.fullscreen", "true");
     else if (flag("--linear")) cli.set("video.linear", "true");
     else if (arg("--lcd-grid")) cli.set("video.lcd_grid", argv[++i]);
-    else if (flag("--chunky")) cli.set("video.chunky", i + 1 < argc && argv[i + 1][0] != '-' ? argv[++i] : "mean");
+    else if (flag("--chunky")) cli.set("video.chunky", optional("mean"));
     else if (arg("--chunky-threshold")) cli.set("video.chunky_threshold", argv[++i]);
     else if (arg("--chunky-cell")) cli.set("video.chunky_cell", argv[++i]);
     else if (arg("--seam")) cli.set("video.seam", argv[++i]);
