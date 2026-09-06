@@ -55,6 +55,7 @@ public:
   int width() const override { return w_; }
   int height() const override { return h_; }
   int bufs() const override { return BUFS; }
+  int current() const override { return cur_; }
 
   // Waits for the outstanding flip to retire -- that wait is the display's
   // pacing, and it is taken here rather than in end_frame() so it overlaps

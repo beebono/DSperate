@@ -200,7 +200,7 @@ private:
   std::unique_ptr<ScanoutOut> out_;     // tier 1; null on the surface tier
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL
   bool              margins_dirty_ = true;
-  int               out_margins_ = 0;     // scanout buffers whose letterbox is cleared
+  u32               out_clean_ = 0;       // scanout buffers (by index) whose letterbox is cleared
   bool              out_frame_ = false;   // current begin_frame targeted the scanout tier
   int               scaled_w_ = 0, scaled_h_ = 0;
   std::vector<u16>  xrun_[SCREENS];   // per screen, 257 entries; see kern::scale_row

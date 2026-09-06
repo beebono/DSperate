@@ -689,7 +689,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
       } else {
         layout();
         build_scale();
-        out_margins_ = 0;
+        out_clean_ = 0;
       }
     }
   }
@@ -697,10 +697,16 @@ bool Display::begin_frame(Target out[SCREENS]) {
     if (u32* px = out_->begin_frame()) {
       const u32 stride = static_cast<u32>(out_->stride());
       // Every buffer needs its margins cleared once, not just the one in
-      // hand: a layout change restarts the count, or the other buffers keep
-      // the old layout and flicker it back as they come round.
-      if (margins_dirty_) { out_margins_ = 0; margins_dirty_ = false; }
-      if (out_margins_ < out_->bufs()) { clear_margins(px, stride, out_->width(), out_->height()); ++out_margins_; }
+      // hand, or the others keep the old layout and flash it back as they
+      // come round. Tracked per buffer index, not as a count of frames:
+      // the tiers hand out the lowest free buffer, so the same one can
+      // come back three frames running while another holds the old layout
+      // until a hiccup brings it round -- the stale frame seen after a
+      // layout switch.
+      if (margins_dirty_) { out_clean_ = 0; margins_dirty_ = false; }
+      const int idx = out_->current();
+      const u32 bit = idx >= 0 && idx < 32 ? 1u << idx : 0u;
+      if (!(out_clean_ & bit)) { clear_margins(px, stride, out_->width(), out_->height()); out_clean_ |= bit; }
       targets(px, stride, out);
       out_frame_ = true;
       return true;

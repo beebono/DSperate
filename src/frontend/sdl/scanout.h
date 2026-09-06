@@ -36,9 +36,13 @@ public:
   virtual int height() const = 0;
   // Row pitch in pixels; the width unless the buffer is padded (fbdev).
   virtual int stride() const { return width(); }
-  // How many buffers rotate, so the caller knows how many need their
-  // letterbox margins cleared after a layout change.
+  // How many buffers rotate, and which one begin_frame() last handed out
+  // (0..bufs()-1; -1 outside a frame). No tier rotates round-robin -- each
+  // takes the lowest free buffer -- so a caller that must touch every
+  // buffer once (the letterbox clear after a layout change) keys off the
+  // index, never off a count of frames.
   virtual int bufs() const = 0;
+  virtual int current() const = 0;
 
   // Pixels of a free buffer to render the next frame into, or null on a
   // protocol/driver error, after which the caller falls back.

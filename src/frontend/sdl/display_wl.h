@@ -63,6 +63,7 @@ public:
   int width() const override { return w_; }
   int height() const override { return h_; }
   int bufs() const override { return BUFS; }
+  int current() const override { return cur_; }
 
   // Pixels of a free buffer to render the next frame into (blocks on the
   // compositor if all are pending, which is the vsync). Null on protocol

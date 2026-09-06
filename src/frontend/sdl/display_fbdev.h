@@ -68,6 +68,7 @@ public:
   int height() const override { return h_; }
   int stride() const override { return stride_; }
   int bufs() const override { return bufs_; }
+  int current() const override { return cur_; }
 
   u32* begin_frame() override;
   void end_frame() override;
