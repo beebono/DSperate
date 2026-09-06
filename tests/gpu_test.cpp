@@ -270,6 +270,40 @@ static void test_lcd_grid() {
     }
     CHECK_EQ(bad, 0);
   }
+  // Seam direction at 3.75x (960x720), where the fractions are not halves:
+  // run 0 is panel columns [0, 4) and the boundary to pixel 1 falls at 3.75,
+  // so column 3 is three quarters pixel 0 and one quarter pixel 1; rows the
+  // same with lines. The weight table stores pixel s+1's share, 1 - frac.
+  // And below 1x (213x160, the PiP inset on a 640x480 panel) seams are off
+  // and every row is written: the blend path used to leave the straddling
+  // rows of lines whose successor was dropped unwritten.
+  {
+    auto lerp = [](u32 a, u32 b, u32 f) { u32 r = 0; for (u32 sh : {0u, 8u, 16u, 24u}) r |= (((((a >> sh) & 255) * (256 - f) + ((b >> sh) & 255) * f) + 128) >> 8) << sh; return r; };
+    auto table = [](u32 w, std::vector<u16>& xr, std::vector<u8>& sw) {
+      xr.assign(257, 0); sw.assign(256, 0);
+      for (u32 x = 0; x <= 256; ++x) xr[x] = static_cast<u16>((x * w + 255) / 256);
+      for (u32 s = 0; s + 1 < 256; ++s) { const u32 f = ((s + 1) * w) % 256; if (f && xr[s + 1] > xr[s]) sw[s] = static_cast<u8>(256 - f * 256 / 256); }
+    };
+    const u32 red = 0xFFFF0000, blue = 0xFF0000FF;
+    std::vector<u32> img(256 * 192, 0xFF00FF00);
+    for (u32 y = 0; y < 192; ++y) { img[y * 256 + 0] = y == 0 ? red : blue; img[y * 256 + 1] = blue; }
+    std::vector<u16> xr; std::vector<u8> sw;
+    table(960, xr, sw);
+    NDS n; lazy_setup(n);
+    std::vector<u32> out(960 * 720, 0xDEADBEEF);
+    n.gpu.set_scale_target(0, gpu::Gpu::ScaleTarget{out.data(), 960, 720, xr.data(), 256, 0, 0, 1, sw.data()});
+    n.gpu.scale_image(0, img.data());
+    CHECK_EQ(out[0], red);                          // column 0, row 0: crisp
+    CHECK_EQ(out[3], lerp(red, blue, 64));          // column 3 straddles pixels 0|1 at 0.75
+    CHECK_EQ(out[3 * 960], lerp(red, blue, 64));    // row 3 straddles lines 0|1 at 0.75
+    CHECK_EQ(out[3 * 960 + 3], lerp(lerp(red, blue, 64), blue, 64));   // the corner: both
+    table(213, xr, sw);
+    std::vector<u32> small(213 * 160, 0xDEADBEEF);
+    n.gpu.set_scale_target(0, gpu::Gpu::ScaleTarget{small.data(), 213, 160, xr.data(), 256, 0, 0, 1, sw.data()});
+    n.gpu.scale_image(0, img.data());
+    size_t unwritten = 0; for (u32 v : small) unwritten += v == 0xDEADBEEF;
+    CHECK_EQ(unwritten, static_cast<size_t>(0));
+  }
   // Cell chunky at 2.5x with 4-px cells (160x120): each cell the 2D box of
   // the DS pixels it covers (1.6 per axis), weights from build_cell_axis;
   // drawn as a seam row/column and 3x3 of the colour.

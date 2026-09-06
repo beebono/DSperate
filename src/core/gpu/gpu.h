@@ -198,7 +198,8 @@ public:
                                 // than chunky_thresh (else the mean)
     u32 chunky_thresh = 180 * 256;  // luma units (0..255 * 256); mode 6 only
     u8 blend = 0;               // box-filter seams (sharp-shimmerless): 1 blend in sRGB, 2 in linear light
-    const u8* seam_w = nullptr; // 256 entries: weight (0..255 = 0..1) of pixel s+1 in run s's last pixel; 0 = no straddle
+    const u8* seam_w = nullptr; // 256 entries: weight (0..255 = 0..1) of pixel s+1 in run s's last pixel -- the part of
+                                // that pixel past the s|s+1 boundary, 1 - frac((s+1)*w/256); 0 = no straddle
     const CellMap* cells = nullptr; // chunky with a panel-sized cell (see CellMap); null = the 2x2 pair path
     // Bilinear (--linear): every panel pixel is the weighted blend of the 2x2
     // source pixels around its sample point. Takes precedence over the grid,

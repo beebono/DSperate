@@ -1038,12 +1038,17 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   // the target (see row_scratch_). A row wider than the scratch goes direct.
   const bool stage = t.xrun[SCREEN_W] <= SCALED_ROW_MAX;
   u32* row = stage ? row_scratch_[screen] : dst_row;
-  if (t.blend && t.seam_w) {
+  if (t.blend && t.seam_w && t.h >= SCREEN_H) {
     // Box-filter seams (sharp-shimmerless): a panel pixel or row that
     // straddles two source pixels or lines is their area-weighted blend,
     // every other one is nearest. The straddling row of this span is its
     // last, and needs the next line, so it is written when that arrives;
     // the crisp rows go out now.
+    //
+    // Upscales only: a downscaled view (the PiP inset on a small panel)
+    // drops lines, and a dropped line never came back to write the
+    // straddling row the line before it left for it -- a fifth of the
+    // inset's rows were never written at 213x160. Nearest below 1x.
     const u32 hb = (last + 1) * t.h;                 // this span's lower boundary, in 1/192 rows
     const bool straddle_below = (hb % SCREEN_H) != 0 && last + 1 < SCREEN_H;
     const u32 ycrisp_end = straddle_below ? y1 - 1 : y1;
@@ -1052,13 +1057,15 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
       for (u32 y = stage ? y0 : y0 + 1; y < ycrisp_end; ++y)
         std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
     }
-    // The row above this span straddles the previous line and this one.
+    // The row above this span straddles the previous line and this one: the
+    // boundary falls frac/192 of the way down it, so the previous line owns
+    // that much of the row and this line the rest.
     if (first > 0 && seam_prev_line_[screen] + 1 == first) {
       const u32 tb = first * t.h;                    // this span's upper boundary
       const u32 frac = tb % SCREEN_H;
       if (frac) {
         alignas(16) u32 mid[SCREEN_W];
-        blend_rows(t, seam_prev_[screen], src, (frac * 256) / SCREEN_H, mid);   // weight of this line
+        blend_rows(t, seam_prev_[screen], src, ((SCREEN_H - frac) * 256) / SCREEN_H, mid);   // weight of this line
         emit_row_straddle(t, mid, t.px + static_cast<size_t>(y0 - 1) * t.pitch);
       }
     }

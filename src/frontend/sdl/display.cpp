@@ -518,8 +518,11 @@ void Display::build_scale() {
       auto fits = [&](u32 p) { return p >= 2 && w % p == 0 && h % p == 0 && w / p <= SCREEN_W; };
       // An explicit cell that does not divide the screen steps down to the
       // nearest one that does (5 on 640x480 -> 4), so a size chosen for one
-      // panel is still close on another.
-      if (chunky_cell_ > 0) { for (u32 p = static_cast<u32>(chunky_cell_); p >= 2 && !P; --p) if (fits(p)) P = p; }
+      // panel is still close on another -- but no further than auto's
+      // floor of 4: a view like the dominant layouts' 426x320 divides by
+      // nothing but 2, and a 2-px cell there is 1.2 DS pixels, no chunky
+      // at all. Below the floor the 2x2 pairs take over, as with auto.
+      if (chunky_cell_ > 0) { for (u32 p = static_cast<u32>(chunky_cell_); p >= 4 && !P; --p) if (fits(p)) P = p; }
       else if (chunky_cell_ < 0) { for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p; }
       ds::gpu::Gpu::CellMap m;
       if (P && ds::gpu::Gpu::build_cell_axis(SCREEN_W, w / P, P, m.x) && ds::gpu::Gpu::build_cell_axis(SCREEN_H, h / P, P, m.y)) {
