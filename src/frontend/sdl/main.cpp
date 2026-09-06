@@ -534,6 +534,19 @@ void draw_number(const CursorDst& d, int value, int digits, bool right, bool bot
 // The state slot, shown briefly after a slot hotkey.
 void draw_slot(const CursorDst& d, int digit, bool bottom) { draw_number(d, digit, 1, false, bottom); }
 
+// The screenshot flash: white blended over a whole screen at `alpha`, the
+// frame after the picture is taken and fading over FLASH_FRAMES. It is drawn
+// where the other overlays are -- into the presented buffer, never into the
+// GPU's framebuffers the screenshot reads -- so it is never in the picture.
+constexpr int FLASH_FRAMES = 12;
+void draw_flash(const CursorDst& d, u32 alpha) {
+  const ds::sdl::BlitRect r0 = ds::sdl::blit_rect(d, 0, 0), r1 = ds::sdl::blit_rect(d, ds::SCREEN_W - 1, ds::SCREEN_H - 1);
+  const u32 w = r1.x1 - r0.x0;
+  if (!w || r1.y1 <= r0.y0) return;
+  std::vector<u32> white(w, 0xFFFFFFFFu);
+  for (u32 y = r0.y0; y < r1.y1; ++y) ds::sdl::Display::blend_row(d.px + y * d.pitch + r0.x0, white.data(), w, alpha);
+}
+
 // A launcher's SIGTERM (or Ctrl-C) must still flush the battery save.
 volatile std::sig_atomic_t g_signalled = 0;
 void on_signal(int) { g_signalled = 1; }
@@ -1194,6 +1207,8 @@ sdl_ready:
   bool was_fast = false;
   std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
   std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // the primary screen with the slot digit / FPS counter
+  std::vector<u32> flash_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};   // both screens under the screenshot flash
+  int flash_left = 0;                                        // frames of screenshot flash still to show
   int slot_shown = 0;                                        // frames left to show the slot digit
   // PiP inset opacity: where it is now (0..255), frames of opacity left
   // after the last touch, and the hold length from the config.
@@ -1664,6 +1679,9 @@ sdl_ready:
       }
       const bool slot_osd = slot_shown > 0;
       if (slot_shown > 0) --slot_shown;
+      // The flash's alpha this frame: full white first, then straight down.
+      const u32 flash_alpha = flash_left > 0 ? static_cast<u32>(255 * flash_left / FLASH_FRAMES) : 0;
+      if (flash_left > 0) --flash_left;
       // Which screen the overlays land on. Layout::primary is the one shown
       // alone (Single), large (PiP) or dominant, so following it keeps them
       // where the player is looking -- and, in Single with screen = bottom,
@@ -1687,6 +1705,7 @@ sdl_ready:
         const CursorDst od{target[osd_screen].px, target[osd_screen].pitch, target[osd_screen].h, target[osd_screen].xrun};
         if (slot_osd) draw_slot(od, state_slot, slot_bottom);
         if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
+        if (flash_alpha) for (int i = 0; i < 2; ++i) if (target[i].px) draw_flash(CursorDst{target[i].px, target[i].pitch, target[i].h, target[i].xrun}, flash_alpha);
         display.end_frame();
         if (dual_window) display2.end_frame();
       } else {
@@ -1705,6 +1724,12 @@ sdl_ready:
           if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
           fb[osd_screen] = osd_fb.data();
         }
+        // Last, over whatever the cursor and the overlays left: a screen
+        // still pointing at the GPU's own buffer is copied out first.
+        if (flash_alpha) for (int i = 0; i < 2; ++i) {
+          if (fb[i] == nds.gpu.framebuffer(i)) { std::memcpy(flash_fb[i].data(), fb[i], flash_fb[i].size() * 4); fb[i] = flash_fb[i].data(); }
+          draw_flash(CursorDst{const_cast<u32*>(fb[i]), ds::SCREEN_W, ds::SCREEN_H, nullptr}, flash_alpha);
+        }
         display.draw(fb);
         if (dual_window) display2.draw(fb);
       }
@@ -1714,6 +1739,7 @@ sdl_ready:
     if (shot_pending && present) {
       shot_pending = false;
       screenshot(nds, session.shots_dir, display.current_layout());
+      flash_left = FLASH_FRAMES;   // from the next frame: this one is already on the panel and in the file
     }
     // The frame the menu will sit on is presented and, because it went down
     // the unscaled path, is in fb_ as well. Now it is safe to stop.
