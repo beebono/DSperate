@@ -173,6 +173,7 @@ A55, before the window appears.
     dsperate [game.nds|game.zip] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
                  [--config F] [--write-config F]
                  [--scale N] [--fullscreen] [--layout L] [--screen top|bottom] [--pip-alpha X] [--dual-window]
+                 [--integer-scale [under|over|off]]
                  [--linear] [--lcd-grid S] [--seam dark|blend|blend_linear]
                  [--chunky [M]] [--chunky-threshold N] [--chunky-cell C]
                  [--disp | --no-disp] [--fbdev | --no-fbdev] [--no-vsync]
@@ -477,6 +478,17 @@ other `dominant_ratio` its size, both centred) and `dominant_h` (side by
 side in DS order, fitted to the height, bottoms aligned). Every mode keeps
 the 4:3 screen aspect. `--screen top|bottom` (`[video] screen`) is the
 screen shown alone, large or dominant; `F6` swaps it.
+
+`--integer-scale under|over` (`[video] integer_scale`) forces a whole number
+of panel pixels per DS pixel on the full-size screens: `under` takes the
+largest that fits and letterboxes, `over` the smallest that covers and crops.
+The crop is centred on a stacked or side-by-side pair, so the edge between
+the screens is kept; in dual window the top screen keeps its bottom row and
+the bottom screen its top. The PiP inset and the dominant layouts' secondary
+keep their ratio to the screen they belong to. The LCD grid and chunky cells
+come out exact at a whole scale (one seam or cell per DS pixel, evenly).
+Works on every tier, the display-engine scaler included, where `over` is a
+source-window crop.
 
 The core scales each scanline straight into the buffer that is presented, as
 the line is produced (`DS_SCANLINE_SCALE=0/1` overrides the per-driver

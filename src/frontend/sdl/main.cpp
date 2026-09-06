@@ -77,6 +77,9 @@ const char* kUsage =
     "  --screen S      top (default) or bottom: the screen shown alone, large or dominant\n"
     "  --pip-alpha X   opacity of the PiP inset at rest, 0..1 (default 1; it comes up to opaque\n"
     "                  while the bottom screen is touched)\n"
+    "  --integer-scale [M]  whole panel pixels per DS pixel: under (default when bare; the largest\n"
+    "                  that fits, letterboxed) | over (the smallest that covers, cropped, keeping the\n"
+    "                  edge between the screens) | off\n"
     "  --dual-window   one window per video display, one DS screen each (dual-panel\n"
     "                  handhelds; also what direct scanout needs on them)\n"
     "  --linear        bilinear scaling instead of nearest (takes precedence over the grid, seams\n"
@@ -603,6 +606,7 @@ int main(int argc, char** argv) {
     else if (arg("--layout")) cli.set("video.layout", argv[++i]);
     else if (arg("--screen")) cli.set("video.screen", argv[++i]);
     else if (arg("--pip-alpha")) cli.set("video.pip_alpha", argv[++i]);
+    else if (flag("--integer-scale")) cli.set("video.integer_scale", optional("under"));
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (flag("--rtc-host")) rtc_host = true;
     else if (flag("--clear-cache")) clear_cache = true;
@@ -652,7 +656,7 @@ int main(int argc, char** argv) {
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
-  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha",
+  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
@@ -716,6 +720,8 @@ int main(int argc, char** argv) {
   int scale = cfg.num("video.scale", 2);
   if (scale < 1) scale = 1;
   const bool fullscreen = cfg.flag("video.fullscreen", false), linear = cfg.flag("video.linear", false);
+  ds::sdl::Display::IntScale int_scale = ds::sdl::Display::IntScale::Off;
+  if (!ds::sdl::Display::parse_int_scale(cfg.str("video.integer_scale", "off"), int_scale)) { std::fprintf(stderr, "integer_scale must be off, under or over\n"); return 2; }
   // Grid strength -> brightness kept on the seams, 0..256 (256 = off).
   const double grid_s = std::min(1.0, std::max(0.0, cfg.real("video.lcd_grid", 0.0)));
   const u32 grid = static_cast<u32>(std::lround((1.0 - grid_s) * 256.0));
@@ -881,10 +887,11 @@ sdl_ready:
     const char* vd = SDL_GetCurrentVideoDriver();
     bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
     display.set_chunky(chunky != 0, chunky_cell); display2.set_chunky(chunky != 0, chunky_cell);
+    display.set_integer_scale(int_scale); display2.set_integer_scale(int_scale);
     if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, 0, 1 - bottom_display) ||
         !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
-  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp);
+  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); display.set_integer_scale(int_scale);
     if (!linear) display.set_disp_grid(static_cast<u8>(((256 - grid) * 255) / 256)); display.set_fbdev(use_fbdev); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout)) { SDL_Quit(); return 1; } }
   // A single-screen layout shows one screen: the core skips the other's
   // engine (Gpu::set_screen_visible). Every other layout, and dual-window,

@@ -50,6 +50,20 @@ public:
     double dominant = 0.5;       // secondary size relative to the dominant screen
     double pip_alpha = 1.0;      // inset opacity at rest, 0..1 (see set_inset_alpha)
   };
+  // Forced integer scaling of the full-size views (the ones drawn at the
+  // layout's fit; the PiP inset and the dominant layouts' secondary keep
+  // their ratio to the view they belong to). Under: the largest whole
+  // number of panel pixels per DS pixel that fits, letterboxed. Over: the
+  // smallest that covers, cropped -- centred, so a stacked pair keeps the
+  // edge between the screens; a dual-window screen anchors that edge too
+  // (the top screen its bottom row, the bottom screen its top). A fit that
+  // is already whole is left alone by both.
+  enum class IntScale : u8 { Off, Under, Over };
+  static const char* int_scale_name(IntScale m);
+  static bool parse_int_scale(const std::string& s, IntScale& m);
+  static double snap_scale(double s, IntScale m);
+  void set_integer_scale(IntScale m) { int_scale_ = m; }
+  IntScale integer_scale() const { return int_scale_; }
   static const char* mode_name(Mode m);      // "vertical" ... "dominant_h"
   static bool parse_mode(const std::string& s, Mode& m);
   static const char* corner_name(Corner c);  // "tl" "tr" "bl" "br"
@@ -182,7 +196,7 @@ public:
   // Where the two screens go in a w x h output under `l`, in draw order
   // (later views on top). Shared with the screenshot writer, so a picture
   // of the layout is laid out exactly as the window is.
-  static void place(const Layout& l, int w, int h, View out[SCREENS]);
+  static void place(const Layout& l, int w, int h, View out[SCREENS], IntScale snap = IntScale::Off);
 
 private:
   void layout();
@@ -201,6 +215,7 @@ private:
   View          views_[SCREENS] = {};
   int           nviews_ = SCREENS;
   int           only_screen_ = -1;
+  IntScale      int_scale_ = IntScale::Off;
   int           display_index_ = 0;
   bool          fullscreen_ = false;
   Layout        layout_;

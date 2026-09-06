@@ -6,6 +6,7 @@
 
 #include "core/gpu/gpu.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -290,12 +291,24 @@ double DispOut::fit_scale() const {
   const bool turned = rot_ == 90 || rot_ == 270;
   const Dims d{turned ? canvas_h_ : canvas_w_, turned ? canvas_w_ : canvas_h_};   // in DS pixels, whatever the divisor
   if (d.w <= 0 || d.h <= 0) return 0.0;
-  return std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h);
+  return snap(std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h));
+}
+
+// Whole panel pixels per DS pixel when asked for (see Display::IntScale).
+// `s` is a DS-pixel factor: the composite's own factor is s times the
+// divisor, and the snap is on the DS pixel, not the cell.
+double DispOut::snap(double s) const {
+  if (int_scale_ == 0 || s <= 0.0) return s;
+  const double f = std::floor(s + 1e-9);
+  if (s - f < 1e-9) return f;
+  return int_scale_ == 1 ? std::max(1.0, f) : f + 1.0;
 }
 
 void DispOut::fit(Dims d, int& x, int& y, unsigned& w, unsigned& h) const {
   // Fit the composite to the panel, aspect kept, centred: the DE does the scale.
-  const double s = std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h);
+  // `d` is in composite pixels (DS pixels over the divisor), so the snap is
+  // taken on the DS factor and put back.
+  const double s = snap(std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h) / div_) * div_;
   w = static_cast<unsigned>(d.w * s); h = static_cast<unsigned>(d.h * s);
   x = static_cast<int>((panel_w_ - w) / 2); y = static_cast<int>((panel_h_ - h) / 2);
 }

@@ -124,6 +124,9 @@ public:
   // Nearest-neighbour scaling (see the header comment); set before open().
   // false leaves the driver's own filter in place (--linear).
   void set_nearest(bool on) { nearest_wanted_ = on; }
+  // Display::IntScale as an int (0 off, 1 under, 2 over): the DE fit is
+  // snapped to whole panel pixels per DS pixel; over crops the source window.
+  void set_integer_scale(int m) { int_scale_ = m; }
   bool nearest() const { return fe_ != nullptr; }
 
   // Draws each view's 256x192 framebuffer (null skips the view) into a free
@@ -144,6 +147,7 @@ private:
   bool set_layer(u32 addr, Dims d);
   // The panel window the composite is fitted into (aspect kept, centred).
   void fit(Dims d, int& x, int& y, unsigned& w, unsigned& h) const;
+  double snap(double s) const;
   // View r's rectangle in the composite (rotated), as draw_view places it.
   void comp_rect(const ViewRect& r, int& cx, int& cy, int& cw, int& ch) const;
   void draw_grid(Dims d);
@@ -164,6 +168,7 @@ private:
   int  disp_ = -1, fb_ = -1, mem_ = -1;
   volatile u32* fe_ = nullptr;      // DE front end registers (nearest only)
   bool nearest_wanted_ = true;
+  int  int_scale_ = 0;
   u8*  map_ = nullptr;
   size_t map_len_ = 0;
   u32  phys_ = 0;

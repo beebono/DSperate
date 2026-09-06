@@ -31,6 +31,22 @@ bool Display::parse_corner(const std::string& s, Corner& c) {
   return false;
 }
 
+const char* Display::int_scale_name(IntScale m) {
+  switch (m) { case IntScale::Under: return "under"; case IntScale::Over: return "over"; default: return "off"; }
+}
+bool Display::parse_int_scale(const std::string& s, IntScale& m) {
+  if (s == "off" || s == "false" || s == "0") { m = IntScale::Off; return true; }
+  if (s == "under" || s == "true" || s == "1") { m = IntScale::Under; return true; }
+  if (s == "over") { std::fprintf(stderr, "integer_scale over is not available on this build (no crop support yet)\n"); return false; }
+  return false;
+}
+double Display::snap_scale(double s, IntScale m) {
+  if (m == IntScale::Off || s <= 0.0) return s;
+  const double f = std::floor(s + 1e-9);          // 2.9999 from a division is 3
+  if (f == s || (s - f) < 1e-9) return f;
+  return m == IntScale::Under ? std::max(1.0, f) : f + 1.0;
+}
+
 void Display::natural_size(const Layout& l, double scale, int& w, int& h) {
   const double sw = SCREEN_W * scale, sh = SCREEN_H * scale;
   double fw = sw, fh = sh;
@@ -68,6 +84,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     auto d = std::make_unique<DispOut>();
     d->set_grid(disp_grid_);
     d->set_nearest(!linear);
+    d->set_integer_scale(static_cast<int>(int_scale_));
     if (d->open(rot, vsync)) {
       disp_ = std::move(d);
       layout();
@@ -230,17 +247,30 @@ void Display::layout() {
   int w = 0, h = 0;
   if (!out_size(w, h)) return;
   if (only_screen_ >= 0) {
-    const double sw = SCREEN_W, sh = SCREEN_H, s = std::min(w / sw, h / sh);
-    views_[0] = View{only_screen_, SDL_Rect{static_cast<int>((w - sw * s) / 2), static_cast<int>((h - sh * s) / 2), static_cast<int>(sw * s), static_cast<int>(sh * s)}, true, true};
+    const double sw = SCREEN_W, sh = SCREEN_H, s = snap_scale(std::min(w / sw, h / sh), int_scale_);
+    const int dw = static_cast<int>(sw * s), dh = static_cast<int>(sh * s);
+    // Overscale on a dual-window screen crops away from the edge it shares
+    // with the other panel: the top screen keeps its bottom row and loses
+    // rows at the top, the bottom screen the reverse. Columns are centred.
+    int y = (h - dh) / 2;
+    if (dh > h) y = only_screen_ == 0 ? h - dh : 0;
+    views_[0] = View{only_screen_, SDL_Rect{(w - dw) / 2, y, dw, dh}, true, true};
     return;
   }
-  place(layout_, w, h, views_);
+  place(layout_, w, h, views_, int_scale_);
+  if (verbose()) for (int i = 0; i < nviews_; ++i)
+    std::fprintf(stderr, "video: view %d screen %d at %d,%d %dx%d%s (%dx%d, integer %s)\n", i, views_[i].screen, views_[i].rect.x, views_[i].rect.y, views_[i].rect.w, views_[i].rect.h,
+                 views_[i].shown ? "" : " hidden", w, h, int_scale_name(int_scale_));
   if (disp_) for (int i = 0; i < nviews_; ++i) disp_->set_view(i, views_[i].rect.x, views_[i].rect.y, views_[i].rect.w, views_[i].rect.h, views_[i].shown);
 }
 
-void Display::place(const Layout& layout_, int w, int h, View views_[SCREENS]) {
+void Display::place(const Layout& layout_, int w, int h, View views_[SCREENS], IntScale snap) {
   const double sw = SCREEN_W, sh = SCREEN_H;
-  auto fit = [&](double cols, double rows) { return std::min(w / (sw * cols), h / (sh * rows)); };
+  // The fit is snapped whole here, so every rect below -- and the scale
+  // tables, touch map and margins built from them -- follows. The pair and
+  // dominant layouts stay centred as a whole, so an overscale crop takes
+  // equally from the outer edges and the edge between the screens is kept.
+  auto fit = [&](double cols, double rows) { return snap_scale(std::min(w / (sw * cols), h / (sh * rows)), snap); };
   auto rect = [&](double x, double y, double s) { return SDL_Rect{static_cast<int>(x), static_cast<int>(y), static_cast<int>(sw * s), static_cast<int>(sh * s)}; };
   const int p = layout_.primary, q = 1 - p;
   // Views are drawn in order, so the inset goes last; map_point() looks from
