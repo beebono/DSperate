@@ -884,7 +884,7 @@ sdl_ready:
     // grid would dim every pixel, seams and bilinear are the identity.
     const bool at_source = display.effects_at_source();
     for (int i = 0; i < 2; ++i)
-      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
+      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source || !target[i].grid ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
                                                                        at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
                                                                        static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i)),
                                                                        linear && !at_source, target[i].lin_sx, target[i].lin_wx}

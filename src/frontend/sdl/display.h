@@ -89,7 +89,14 @@ public:
   //  2. window surface: SDL's shm path under a compositor. On KMSDRM this is
   //     not a software path at all -- SDL has no window framebuffer there, so
   //     it is a hidden GLES renderer; see display_drm.h.
-  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; const u16* lin_sx; const u8* lin_wx; };
+  // `grid`: whether the LCD grid applies to this view. A view scaled below
+  // 2x has no room for a lit pixel beside a seam: the seams the fractional
+  // rule still lands there (one run in four at 1.25x) read as noise, not a
+  // grid, and a view under 1x gets none anyway. So the small screens -- the
+  // PiP inset, the dominant layouts' secondary -- go plain, as they do on
+  // the display-engine tier, unless a whole panel cell (chunky, >= 4 px)
+  // carries the grid per cell. See grid_on().
+  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; const u16* lin_sx; const u8* lin_wx; bool grid; };
 
   bool scaling() const { return scaled_; }
   // Chunky: each 2x2 block of DS pixels is drawn as one cell from its top-left
@@ -116,6 +123,13 @@ public:
   // shown smaller than the screen (the PiP inset) is left plain, as the
   // grid leaves it; elsewhere always.
   bool chunky_on(int screen) const { return !effects_at_source() || src_chunky_[screen]; }
+  // Whether the LCD grid applies to `screen`'s view on the scanline tiers:
+  // at least 2x, or drawn as panel cells (see Target::grid).
+  bool grid_on(int screen) const {
+    if (cells_[screen].x.cells) return true;
+    for (int i = 0; i < nviews_; ++i) if (views_[i].screen == screen) return views_[i].rect.w >= 2 * static_cast<int>(SCREEN_W);
+    return true;
+  }
   // Present straight through /dev/fb0 (display_fbdev.h): the scanline path
   // writes panel-sized frames into fb0's own buffers. Set before open().
   void set_fbdev(bool on) { fbdev_wanted_ = on; }
