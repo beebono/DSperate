@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "display_disp.h"
+#include "rt_thread.h"
 #include "display.h"
 
 #include "core/gpu/gpu.h"
@@ -181,6 +182,7 @@ bool DispOut::open(int rot, bool vsync) {
   if (panel_w_ <= 0 || panel_h_ <= 0) { std::fprintf(stderr, "disp: no screen size\n"); close(); return false; }
   rot_ = rot; vsync_ = vsync;
   timing_ = std::getenv("DS_DISP_TIMING") != nullptr;
+  diag_ = std::getenv("DS_DISP_DIAG") != nullptr; diag_mark_ = now_ns();
   buf_bytes_ = static_cast<size_t>(W) * H * VIEWS * sizeof(u32);   // the largest canvas: two screens
   if (buf_bytes_ * BUFS > fix.smem_len) { std::fprintf(stderr, "disp: fb0 too small for %d composites\n", BUFS); close(); return false; }
   map_len_ = fix.smem_len;
@@ -466,7 +468,9 @@ bool DispOut::open_frontend() {
 void DispOut::write_coefs() {
 #if defined(__linux__)
   fe_[FE_FRM_CTRL] = fe_[FE_FRM_CTRL] | FE_COEF_ACCESS;
-  for (int spin = 0; spin < 100000 && !(fe_[FE_STATUS] & FE_COEF_ACCESS_OK); ++spin) {}
+  int spin = 0;
+  for (; spin < 100000 && !(fe_[FE_STATUS] & FE_COEF_ACCESS_OK); ++spin) {}
+  if (diag_ && spin == 100000) std::fprintf(stderr, "disp: coef access never granted (frm_ctrl %08x status %08x)\n", fe_[FE_FRM_CTRL], fe_[FE_STATUS]);
   for (int i = 0; i < 32; ++i) {
     fe_[FE_CH0_HORZCOEF0 + i] = 0; fe_[FE_CH0_HORZCOEF1 + i] = 64u; fe_[FE_CH0_VERTCOEF + i] = 64u << 8;
     fe_[FE_CH1_HORZCOEF0 + i] = 0; fe_[FE_CH1_HORZCOEF1 + i] = 64u; fe_[FE_CH1_VERTCOEF + i] = 64u << 8;
@@ -637,6 +641,7 @@ void DispOut::present(const u32* const fb[VIEWS]) {
   // The grid follows the layout: redrawn in place (it is scanned out live,
   // so a layout change may show one torn refresh of it).
   if (grid_layer_ >= 0 && (grid_dirty_ || d.w != grid_dims_.w || d.h != grid_dims_.h)) draw_grid(d);
+  if (diag_) ++diag_posts_;
   if (thread_.joinable()) {
     { std::lock_guard<std::mutex> g(mu_); pending_ = buf; }
     cv_.notify_one();
@@ -658,15 +663,28 @@ void DispOut::presenter() {
   // top with the driver's filter, not a band mid-screen. The ioctls run
   // outside the lock so a post never waits on them; the buffer taken for
   // the flip is `queued_` meanwhile, so a post cannot draw into it.
+  raise_presenter_priority("disp: presenter priority");
   std::unique_lock<std::mutex> lk(mu_);
   for (;;) {
     cv_.wait(lk, [this] { return stop_ || pending_ >= 0; });
     if (stop_) return;
     queued_ = pending_; pending_ = -1;
     lk.unlock();
+    const u64 tw = now_ns();
     wait_vsync();               // the previously flipped buffer is on the panel now
     const u64 t0 = now_ns();
     flip(queued_);
+    if (diag_) {                // DS_DISP_DIAG: a refresh wait or a flip that ran long, and the presented frame rate
+      const u64 t1 = now_ns();
+      ++diag_flips_;
+      if (t0 - tw > 40000000ull || t1 - t0 > 8000000ull)
+        std::fprintf(stderr, "disp: STALL vsync wait %.1f ms, flip %.1f ms (flip #%llu, posts %llu)\n", (t0 - tw) / 1e6, (t1 - t0) / 1e6, (unsigned long long)diag_flips_, (unsigned long long)diag_posts_);
+      if (t1 - diag_mark_ > 5000000000ull) {
+        std::fprintf(stderr, "disp: %llu flips, %llu posts in %.1f s; frm_ctrl %08x status %08x\n", (unsigned long long)diag_flips_, (unsigned long long)diag_posts_, (t1 - diag_mark_) / 1e9,
+                     fe_ ? fe_[FE_FRM_CTRL] : 0u, fe_ ? fe_[FE_STATUS] : 0u);
+        diag_mark_ = t1; diag_flips_ = diag_posts_ = 0;
+      }
+    }
     if (timing_) {              // DS_DISP_TIMING: how long the swap ran past the vsync return
       const u64 dt = now_ns() - t0;
       flip_ns_sum_ += dt; if (dt > flip_ns_max_) flip_ns_max_ = dt; ++flip_n_;

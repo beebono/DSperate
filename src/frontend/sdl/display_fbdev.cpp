@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "display_fbdev.h"
+#include "rt_thread.h"
 
 #include <SDL2/SDL.h>
 
@@ -205,6 +206,7 @@ void FbdevOut::presenter() {
   // One pan per refresh: take the newest drawn frame, pan to it, wait for
   // the refresh, and only then is the buffer it replaced free again. The
   // ioctls run outside the lock so a post never waits on them.
+  raise_presenter_priority("fbdev: presenter priority");
   std::unique_lock<std::mutex> lk(mu_);
   for (;;) {
     cv_.wait(lk, [this] { return stop_ || pending_ >= 0; });

@@ -190,6 +190,8 @@ private:
   int  cur_ = 0;
   bool vsync_ = true;
   bool timing_ = false;             // DS_DISP_TIMING: log the flip's distance from the blank
+  bool diag_ = false;               // DS_DISP_DIAG: stall and rate diagnostics from the presenter
+  u64  diag_flips_ = 0, diag_posts_ = 0, diag_mark_ = 0;
   u64  flip_ns_sum_ = 0, flip_ns_max_ = 0, flip_n_ = 0, flip_miss_ = 0;
   bool pan_blocks_ = true;          // FBIOPAN_DISPLAY waits for the refresh (measured once)
   bool pan_measured_ = false;
