@@ -38,7 +38,10 @@ namespace ds::sdl {
 
 class DrmOut : public ScanoutOut {
 public:
-  static constexpr int BUFS = 3;   // one on screen, one flipping, one being drawn
+  // Two: begin_frame() waits for the outstanding flip to retire before
+  // handing a buffer out, so at most one buffer is ever busy (on screen)
+  // and a third could never be reached -- it only cost a panel of CMA.
+  static constexpr int BUFS = 2;   // one on screen, one being drawn
 
   // False if any precondition is missing (not the KMSDRM video driver, no
   // usable connector for this display, the window is not the size of the
