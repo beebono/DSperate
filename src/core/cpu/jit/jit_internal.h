@@ -209,9 +209,10 @@ struct Runtime {
   bool hist = false;      // DS_JIT_HIST: histogram of fallback executions by pc
   bool fastcost = false;  // DS_JIT_FASTCOST: measurement knob (inexact data-cost arithmetic)
   // --cpu-oc (jit::set_cpu_oc): INEXACT opt-in tier. No per-access timing
-  // lookup at all: every data access is priced at translate time as if it hit
-  // main RAM (the ARM9 CPU-table entry / ARM7 bus entry of 0x02000000 for its
-  // width), and the whole CD/CDI charge folds into the block's static cycles.
+  // lookup at all: every data access is priced at translate time at one
+  // constant (ARM9: main RAM's cached load cost, for stores too; ARM7: its
+  // WRAM cost -- see Translator::oc_data_cost), and the whole CD/CDI charge
+  // folds into the block's static cycles.
   bool cpu_oc = false;
   // DS_JIT_RETIME_ALL: a timing-table rebuild kills every ARM9 block (the old
   // rule) instead of only the blocks that baked a changed byte. A/B knob.

@@ -487,11 +487,16 @@ private:
     const s32 ncx = nc + (cdi ? 1 : 0);
     return max3(ncx, d, d + ncx - 3);
   }
-  // --cpu-oc: the data cost of a main-RAM access of this width, from the
-  // tables as they stand at translate time (see Runtime::cpu_oc).
+  // --cpu-oc: the translate-time price of a data access of this width.
+  // ARM9: main RAM's LOAD entry for loads and stores alike (3 with the data
+  // cache on) -- pricing stores at the 8/9-cycle bus cost, as the first cut
+  // did, made every DTCM/IO/VRAM store cost 9x its real 1 and left marginal
+  // titles missing VBlank (screen swaps a frame off, IPC/timer hangs on
+  // overlay loads). ARM7: its WRAM entry (1), where its code and data live.
   u32 oc_data_cost(bool word, bool seq, bool store) const {
-    if (a9_) return cpu_.timing9[0x02000000u >> 12][(store ? 4 : 0) + (seq ? 3 : (word ? 2 : 1))];
-    return cpu_.timing7[0x02000000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
+    (void)store;
+    if (a9_) return cpu_.timing9[0x02000000u >> 12][seq ? 3 : (word ? 2 : 1)];
+    return cpu_.timing7[0x03800000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
   }
   u32 numC_nonseq7() const { return t7_[thumb_ ? 0 : 2]; }
   u32 numC_internal() const { return a9_ ? numC(pc_) : numC_nonseq7(); }   // base cost of a CI instruction

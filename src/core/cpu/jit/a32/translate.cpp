@@ -457,9 +457,13 @@ private:
     const s32 ncx = nc + (cdi ? 1 : 0);
     return max3(ncx, d, d + ncx - 3);
   }
+  // --cpu-oc: the translate-time price of a data access of this width
+  // (a9_: main RAM's cached LOAD entry for loads and stores alike; ARM7: its
+  // WRAM entry). Same rule as the A64 backend; the reasoning is there.
   u32 oc_data_cost(bool word, bool seq, bool store) const {
-    if (a9_) return cpu_.timing9[0x02000000u >> 12][(store ? 4 : 0) + (seq ? 3 : (word ? 2 : 1))];
-    return cpu_.timing7[0x02000000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
+    (void)store;
+    if (a9_) return cpu_.timing9[0x02000000u >> 12][seq ? 3 : (word ? 2 : 1)];
+    return cpu_.timing7[0x03800000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
   }
   // Slot in mem::Timing's precomputed ARM7 cost table for a single access
   // with these translate-time constants, or -1 when the table does not cover
@@ -824,7 +828,7 @@ private:
       // The interpreter charges the CDI cost after the jump: the stub does
       // it from the new pc/state (numD, data address).
       const u32 c = cache_.temp(), t = cache_.temp();
-      if (rt().cpu_oc) e().mov_imm(c, oc_data_cost(true, false, true) + (n - 1) * oc_data_cost(true, true, true));
+      if (rt().cpu_oc) e().mov_imm(c, oc_data_cost(true, false, false) + (n - 1) * oc_data_cost(true, true, false));
       else {
         emit_data_cost(a, c, t, true, false, false);
         if (n > 1) {
