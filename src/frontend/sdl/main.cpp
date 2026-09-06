@@ -926,6 +926,7 @@ sdl_ready:
         if (now - last_step >= 250) { dots = (dots + 1) % 4; last_step = now; }
       }
       if (!shown && now - start < 300) { SDL_Delay(10); continue; }   // a loose or cached game never shows it
+      if (!shown) display.set_page(true);
       shown = true;
       const int menu_screen = dual_window ? 0 : display.current_layout().primary;
       const u32* fb[2];
@@ -956,6 +957,7 @@ sdl_ready:
       SDL_Delay(50);
     }
     worker.join();
+    if (shown) display.set_page(false);
     nds.rom_cancel = nullptr; nds.rom_progress = nullptr; nds.rom_progress_user = nullptr;
     if (!ok && cancel) VLOG("unpacking cancelled\n");
     return ok;
@@ -1236,6 +1238,7 @@ sdl_ready:
     if (p == paused) return;
     paused = p;
     audio.pause(p);
+    display.set_page(p);
     if (p) flush_save(); else { next_frame = SDL_GetPerformanceCounter(); fs_debt_ms = 0; }
     VLOG("%s\n", p ? "paused" : "resumed");
   };

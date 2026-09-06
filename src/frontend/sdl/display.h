@@ -116,6 +116,12 @@ public:
   // (DispOut::set_grid): alpha 0..255 of the seams. Set before open().
   void set_disp_grid(u8 alpha) { disp_grid_ = alpha; }
   bool disp() const { return disp_ != nullptr; }
+  // Display-engine tier: suspend the scaler's chunky (the divisor) while a
+  // text page -- the pause menu, the loader's notice -- is on the panel, and
+  // put it back after. The page is drawn at canvas resolution and a chunky
+  // divisor would merge its glyphs the way it merges DS pixels. No-op on
+  // the other tiers, where the plain scaling of the page already does this.
+  void set_page(bool on);
   // On the display-engine tier the effects that survive at DS resolution
   // (chunky) are applied by the scanline scaler at 1:1 into a DS-sized
   // buffer that is then rotated as the core's framebuffer would be; the
@@ -207,6 +213,8 @@ private:
   std::unique_ptr<DispOut> disp_;       // display-engine tier; null otherwise
   bool              chunky_ = false;
   int               chunky_cell_ = 0;
+  int               disp_divisor_ = 1;   // the divisor build_source_scale chose, restored after a page
+  bool              page_ = false;
   std::unique_ptr<ScanoutOut> out_;     // tier 1; null on the surface tier
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL
   bool              margins_dirty_ = true;

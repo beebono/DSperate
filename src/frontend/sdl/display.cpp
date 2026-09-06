@@ -325,6 +325,11 @@ void Display::draw(const u32* const fb[SCREENS]) {
   SDL_RenderPresent(ren_);
 }
 
+void Display::set_page(bool on) {
+  page_ = on;
+  if (disp_) disp_->set_divisor(on ? 1 : disp_divisor_);
+}
+
 void Display::toggle_fullscreen() {
   if (disp_) return;   // the panel is the window
   fullscreen_ = !fullscreen_;
@@ -428,7 +433,8 @@ void Display::build_source_scale() {
     if (D_hw && (v.rect.w % D_hw || v.rect.h % D_hw || v.rect.x % D_hw || v.rect.y % D_hw)) hw = false;
   }
   if (hw && (!D_hw || cw % D_hw || chh % D_hw)) hw = false;
-  if (disp_) disp_->set_divisor(hw ? static_cast<int>(D_hw) : 1);
+  disp_divisor_ = hw ? static_cast<int>(D_hw) : 1;
+  if (disp_) disp_->set_divisor(page_ ? 1 : disp_divisor_);
   if (hw) {
     scaled_ = false;   // the core's framebuffers go to the layer as they are
     for (int i = 0; i < nviews_; ++i) { disp_->set_view_cell(i, 1); src_chunky_[views_[i].screen] = false; }
