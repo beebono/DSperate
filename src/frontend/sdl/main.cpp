@@ -398,6 +398,20 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   nds.cheats.codes.clear();
   cheats_on_path.clear();
   std::string db = cfg.str("paths.cheats");
+  // The configured path may name the file itself or the directory holding it;
+  // a directory that already ends in usrcheat.dat must not get a second one.
+  if (!db.empty()) {
+    auto ends_with_db = [](const std::string& s) {
+      static const std::string tail = "usrcheat.dat";
+      return s.size() >= tail.size() &&
+             s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
+    };
+    while (db.size() > 1 && (db.back() == '/' || db.back() == '\\')) db.pop_back();
+    if (!ends_with_db(db)) {
+      std::string joined = db + "/usrcheat.dat";
+      if (FILE* f = std::fopen(joined.c_str(), "rb")) { std::fclose(f); db = joined; }
+    }
+  }
   if (db.empty()) {
     for (const std::string& candidate : {rom_dir + "/usrcheat.dat", ds::sdl::Config::dir() + "/usrcheat.dat"}) {
       if (FILE* f = std::fopen(candidate.c_str(), "rb")) { std::fclose(f); db = candidate; break; }

@@ -169,8 +169,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # cache = /path/to/cache        # where zipped games are unpacked when they cannot be unpacked beside
                                 # the zip (a read-only card). Default: <zip dir>/.dsperate/. Kept
                                 # between runs (see [cart]); never /tmp, which is RAM on a handheld
-# cheats = /path/to/usrcheat.dat # Action Replay database. Default: beside the ROM, then in this
-                                #   directory. Loading it lists the codes; none are on until enabled
+# cheats = /path/to/usrcheat.dat # Action Replay database (the file, or a directory holding
+                                #   one). Default: beside the ROM, then in this directory.
+                                #   Loading it lists the codes; none are on until enabled
 
 [loader]
 # The card the DS menu shows on a firmware boot. Built in; a BootMenu.nds next
