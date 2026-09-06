@@ -14,6 +14,19 @@ namespace ds::sdl {
 // is the destination height, so the same drawing code serves the scaled
 // buffer the GPU produces and a plain copy of a framebuffer.
 struct Blit { u32* px; u32 pitch; u32 h; const u16* xrun; };
+// DS pixel (x, y) -> the panel pixels it covers in `d`. Columns go by the
+// view's width (xrun's last entry), the way rows go by its height, not
+// through the run table itself: under chunky that table is the cell map
+// (pairs merged, or one run per panel cell with the rest empty), and an
+// overlay routed through it lost every other column, or landed on the
+// empty runs past the last cell and vanished -- the FPS counter, anchored
+// at the right edge, did exactly that whenever a panel cell was in use.
+struct BlitRect { u32 x0, x1, y0, y1; };
+inline BlitRect blit_rect(const Blit& d, int x, int y) {
+  const u32 w = d.xrun ? d.xrun[ds::SCREEN_W] : ds::SCREEN_W;
+  return BlitRect{w * static_cast<u32>(x) / ds::SCREEN_W, w * static_cast<u32>(x + 1) / ds::SCREEN_W,
+                  d.h * static_cast<u32>(y) / ds::SCREEN_H, d.h * static_cast<u32>(y + 1) / ds::SCREEN_H};
+}
 
 // A 3x5 uppercase font, `scale` times. Lowercase is folded to uppercase and
 // anything outside the table draws as a space. Returns the x past the string.

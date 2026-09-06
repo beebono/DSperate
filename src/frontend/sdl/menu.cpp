@@ -71,10 +71,9 @@ int g_clip_x0 = 0, g_clip_x1 = static_cast<int>(ds::SCREEN_W);
 void put(const Blit& d, int x, int y, u32 colour) {
   if (x < g_clip_x0 || x >= g_clip_x1) return;
   if (x < 0 || x >= static_cast<int>(ds::SCREEN_W) || y < 0 || y >= static_cast<int>(ds::SCREEN_H)) return;
-  const u32 x0 = d.xrun ? d.xrun[x] : static_cast<u32>(x), x1 = d.xrun ? d.xrun[x + 1] : static_cast<u32>(x + 1);
-  const u32 y0 = d.h * static_cast<u32>(y) / ds::SCREEN_H, y1 = d.h * static_cast<u32>(y + 1) / ds::SCREEN_H;
-  for (u32 yy = y0; yy < y1; ++yy)
-    for (u32 xx = x0; xx < x1; ++xx) d.px[yy * d.pitch + xx] = colour;
+  const BlitRect r = blit_rect(d, x, y);
+  for (u32 yy = r.y0; yy < r.y1; ++yy)
+    for (u32 xx = r.x0; xx < r.x1; ++xx) d.px[yy * d.pitch + xx] = colour;
 }
 
 void fill_rect(const Blit& d, int x, int y, int w, int h, u32 colour) {

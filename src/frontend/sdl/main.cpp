@@ -454,9 +454,8 @@ using CursorDst = ds::sdl::Blit;   // px/pitch/h and the DS-column map; xrun nul
 void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
   auto fill = [&](int x, int y, u32 colour) {
     if (x < 0 || x > 255 || y < 0 || y > 191) return;
-    const u32 x0 = d.xrun ? d.xrun[x] : static_cast<u32>(x), x1 = d.xrun ? d.xrun[x + 1] : static_cast<u32>(x + 1);
-    const u32 y0 = d.h * static_cast<u32>(y) / 192, y1 = d.h * static_cast<u32>(y + 1) / 192;
-    for (u32 yy = y0; yy < y1; ++yy) for (u32 xx = x0; xx < x1; ++xx) d.px[yy * d.pitch + xx] = colour;
+    const ds::sdl::BlitRect r = ds::sdl::blit_rect(d, x, y);
+    for (u32 yy = r.y0; yy < r.y1; ++yy) for (u32 xx = r.x0; xx < r.x1; ++xx) d.px[yy * d.pitch + xx] = colour;
   };
   // `size` scales the whole shape: arms `size` wide and 3*size long, a
   // size x size red centre where they meet, a one-pixel black outline.
@@ -485,9 +484,8 @@ void draw_number(const CursorDst& d, int value, int digits, bool right, bool bot
     {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
     {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7}};
   auto fill = [&](int x, int y, u32 colour) {
-    const u32 x0 = d.xrun ? d.xrun[x] : static_cast<u32>(x), x1 = d.xrun ? d.xrun[x + 1] : static_cast<u32>(x + 1);
-    const u32 y0 = d.h * static_cast<u32>(y) / 192, y1 = d.h * static_cast<u32>(y + 1) / 192;
-    for (u32 yy = y0; yy < y1; ++yy) for (u32 xx = x0; xx < x1; ++xx) d.px[yy * d.pitch + xx] = colour;
+    const ds::sdl::BlitRect r = ds::sdl::blit_rect(d, x, y);
+    for (u32 yy = r.y0; yy < r.y1; ++yy) for (u32 xx = r.x0; xx < r.x1; ++xx) d.px[yy * d.pitch + xx] = colour;
   };
   if (value < 0) value = 0;
   if (digits < 1) digits = 1;
