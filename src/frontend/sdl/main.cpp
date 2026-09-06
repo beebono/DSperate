@@ -493,48 +493,65 @@ void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
   box(cx + c0, cy + c0, c1 - c0, c1 - c0, centre);
 }
 
-// A small white number (3x5 font, doubled) on a black box, in DS screen
-// coordinates so it lands the same whether the frame was scaled straight into
-// the window (the xrun path) or copied first. `right` anchors the box to the
-// right edge instead of the left, which is how the two callers -- the state
-// slot in the top-left, the FPS counter in the top-right -- stay clear of
-// each other. A value too wide for the field saturates to all nines.
-// `bottom` anchors to the bottom edge instead of the top, which is how an
-// overlay steps out of the way of the PiP inset sharing its corner.
-void draw_number(const CursorDst& d, int value, int digits, bool right, bool bottom) {
-  static const u8 font[10][5] = {
+// A small white label (3x5 font, doubled: digits, capitals and spaces;
+// anything else draws as a space) on a black box, in DS screen coordinates so
+// it lands the same whether the frame was scaled straight into the window
+// (the xrun path) or copied first. `right` anchors the box to the right edge
+// instead of the left, which is how the two callers -- the state slot field
+// in the top-left, the FPS counter in the top-right -- stay clear of each
+// other. `bottom` anchors to the bottom edge instead of the top, which is how
+// an overlay steps out of the way of the PiP inset sharing its corner.
+void draw_label(const CursorDst& d, const char* text, bool right, bool bottom) {
+  static const u8 digits[10][5] = {
     {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
     {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7}};
+  static const u8 letters[26][5] = {
+    {2,5,7,5,5}, {6,5,6,5,6}, {3,4,4,4,3}, {6,5,5,5,6}, {7,4,6,4,7}, {7,4,6,4,4}, {3,4,5,5,3},
+    {5,5,7,5,5}, {7,2,2,2,7}, {1,1,1,5,2}, {5,5,6,5,5}, {4,4,4,4,7}, {5,7,7,5,5}, {6,5,5,5,5},
+    {2,5,5,5,2}, {6,5,6,4,4}, {2,5,5,6,3}, {6,5,6,5,5}, {3,4,2,1,6}, {7,2,2,2,2}, {5,5,5,5,7},
+    {5,5,5,5,2}, {5,5,7,7,5}, {5,5,2,5,5}, {5,5,2,2,2}, {7,1,2,4,7}};
+  static const u8 blank[5] = {0,0,0,0,0};
+  auto glyph = [&](char c) -> const u8* {
+    if (c >= '0' && c <= '9') return digits[c - '0'];
+    if (c >= 'A' && c <= 'Z') return letters[c - 'A'];
+    if (c >= 'a' && c <= 'z') return letters[c - 'a'];
+    return blank;
+  };
   auto fill = [&](int x, int y, u32 colour) {
     const ds::sdl::BlitRect r = ds::sdl::blit_rect(d, x, y);
     for (u32 yy = r.y0; yy < r.y1; ++yy) for (u32 xx = r.x0; xx < r.x1; ++xx) d.px[yy * d.pitch + xx] = colour;
   };
-  if (value < 0) value = 0;
-  if (digits < 1) digits = 1;
-  if (digits > 8) digits = 8;
-  // Saturate rather than let the loop below keep the low digits: 1234 in a
-  // 3-digit field reads as 999, never as 234.
-  int cap = 1; for (int i = 0; i < digits; ++i) cap *= 10;
-  if (value >= cap) value = cap - 1;
-  int glyph[8];                                      // most significant first
-  int n = 0;
-  do { glyph[n++] = value % 10; value /= 10; } while (value != 0 && n < digits);
-  for (int i = 0; i < n / 2; ++i) { const int t = glyph[i]; glyph[i] = glyph[n - 1 - i]; glyph[n - 1 - i] = t; }
+  int n = 0; while (text[n]) ++n;
+  if (n == 0) return;
   const int S = 2;                                   // glyph scale
   const int w = n * 3 * S + (n - 1) * S + 4;         // glyphs, one S-wide gap between each, 2px border
   const int h = 5 * S + 4;
   const int X = right ? static_cast<int>(ds::SCREEN_W) - 4 - w : 4;
   const int Y = bottom ? static_cast<int>(ds::SCREEN_H) - 4 - h : 4;
   for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) fill(X + x, Y + y, 0xFF000000);
-  for (int g = 0; g < n; ++g)
+  for (int g = 0; g < n; ++g) {
+    const u8* f = glyph(text[g]);
     for (int r = 0; r < 5; ++r) for (int c = 0; c < 3; ++c)
-      if ((font[glyph[g]][r] >> (2 - c)) & 1)
+      if ((f[r] >> (2 - c)) & 1)
         for (int y = 0; y < S; ++y) for (int x = 0; x < S; ++x)
           fill(X + 2 + g * 4 * S + c * S + x, Y + 2 + r * S + y, 0xFFFFFFFF);
+  }
 }
 
-// The state slot, shown briefly after a slot hotkey.
-void draw_slot(const CursorDst& d, int digit, bool bottom) { draw_number(d, digit, 1, false, bottom); }
+// A number in that box. A value too wide for the field saturates to all
+// nines: 1234 in a 3-digit field reads as 999, never as 234.
+void draw_number(const CursorDst& d, int value, int digits, bool right, bool bottom) {
+  if (value < 0) value = 0;
+  if (digits < 1) digits = 1;
+  if (digits > 8) digits = 8;
+  int cap = 1; for (int i = 0; i < digits; ++i) cap *= 10;
+  if (value >= cap) value = cap - 1;
+  draw_label(d, std::to_string(value).c_str(), right, bottom);
+}
+
+// The state slot field: the slot's digit after a slot hotkey, or what just
+// happened to the slot ("STATE 3 SAVED") after a state hotkey.
+constexpr int SLOT_OSD_FRAMES = 90;
 
 // The screenshot flash: white blended over a whole screen at `alpha`, the
 // frame after the picture is taken and fading over FLASH_FRAMES. It is drawn
@@ -1212,7 +1229,9 @@ sdl_ready:
   std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // the primary screen with the slot digit / FPS counter
   std::vector<u32> flash_fb[2] = {std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H), std::vector<u32>(ds::SCREEN_W * ds::SCREEN_H)};   // both screens under the screenshot flash
   int flash_left = 0;                                        // frames of screenshot flash still to show
-  int slot_shown = 0;                                        // frames left to show the slot digit
+  int slot_shown = 0;                                        // frames left to show the slot field
+  std::string slot_text;                                     // ... and what it says
+  auto show_slot = [&](const std::string& text) { slot_text = text; slot_shown = SLOT_OSD_FRAMES; };
   // PiP inset opacity: where it is now (0..255), frames of opacity left
   // after the last touch, and the hold length from the config.
   const int pip_touch_hold = std::max(0, cfg.num("video.pip_touch_hold", 60));
@@ -1356,11 +1375,14 @@ sdl_ready:
       }
       case A::Screenshot: if (paused) screenshot(nds, session.shots_dir, display.current_layout()); else shot_pending = true; break;
       case A::Lid: input.set_lid(!input.lid()); VLOG("lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
-      case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
-      case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
+      case A::SlotNext: state_slot = (state_slot + 1) % 10; show_slot(std::to_string(state_slot)); VLOG("state slot %d\n", state_slot); break;
+      case A::SlotPrev: state_slot = (state_slot + 9) % 10; show_slot(std::to_string(state_slot)); VLOG("state slot %d\n", state_slot); break;
       case A::SaveState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
-        if (save_state_file(nds, state_path(nds, session.states_dir, state_slot), display.current_layout())) flush_save();   // the .sav and the state never diverge
+        if (save_state_file(nds, state_path(nds, session.states_dir, state_slot), display.current_layout())) {
+          flush_save();   // the .sav and the state never diverge
+          show_slot("STATE " + std::to_string(state_slot) + " SAVED");
+        }
         break;
       case A::LoadState:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
@@ -1372,6 +1394,7 @@ sdl_ready:
           next_frame = SDL_GetPerformanceCounter();
           fs_debt_ms = 0;
           flush_save();
+          show_slot("STATE " + std::to_string(state_slot) + " LOADED");
         }
         break;
       // Without DS_FPS the measurement only runs while the counter is on, so
@@ -1706,7 +1729,7 @@ sdl_ready:
       if (scaled) {
         if (cursor) draw_cursor(CursorDst{target[1].px, target[1].pitch, target[1].h, target[1].xrun}, input.stylus_x(), input.stylus_y(), cursor_size);
         const CursorDst od{target[osd_screen].px, target[osd_screen].pitch, target[osd_screen].h, target[osd_screen].xrun};
-        if (slot_osd) draw_slot(od, state_slot, slot_bottom);
+        if (slot_osd) draw_label(od, slot_text.c_str(), false, slot_bottom);
         if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
         if (flash_alpha) for (int i = 0; i < 2; ++i) if (target[i].px) draw_flash(CursorDst{target[i].px, target[i].pitch, target[i].h, target[i].xrun}, flash_alpha);
         display.end_frame();
@@ -1723,7 +1746,7 @@ sdl_ready:
         if (slot_osd || fps_osd) {
           std::memcpy(osd_fb.data(), fb[osd_screen], osd_fb.size() * 4);
           const CursorDst od{osd_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr};
-          if (slot_osd) draw_slot(od, state_slot, slot_bottom);
+          if (slot_osd) draw_label(od, slot_text.c_str(), false, slot_bottom);
           if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
           fb[osd_screen] = osd_fb.data();
         }
