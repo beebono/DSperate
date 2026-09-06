@@ -1475,6 +1475,13 @@ void Gpu3D::vblank() {
         }
       }
     }
+    // A raster frameskip left out (Gpu: skip_next_) never produced the
+    // picture rstate_ and list_same_ describe: with a game that swaps every
+    // other frame and a skip of one, every drawn frame would otherwise be a
+    // no-swap frame that reads as identical and re-shows the frame before
+    // the skipped one -- Four Heroes of Light's exit from a door showed the
+    // camera at a spot the player had left.
+    if (render_stale_) render_identical_ = false;
     rstate_.dispcnt = dispcnt_;
     rstate_.alpha_ref = alpha_ref_;
     rstate_.edge = edge_; rstate_.toon = toon_;
@@ -1494,7 +1501,7 @@ void Gpu3D::vblank() {
   swapped_ = false;
 }
 
-void Gpu3D::render_frame() { raster_bank_ = render_bank_; renderer_.render(*this); }
+void Gpu3D::render_frame() { raster_bank_ = render_bank_; render_stale_ = false; renderer_.render(*this); }
 
 void Gpu3D::set_render_xpos(u16 value, u16 mask) {
   if (!render_on_.load(std::memory_order_relaxed)) return;

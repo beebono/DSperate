@@ -345,7 +345,7 @@ void Gpu::on_hblank() {
       // previous 3D picture, which is the only inexactness frameskip adds
       // beyond the skipped frames themselves.
       skip_next_ = skip_req_ && skippable();
-      if (!skip_next_) nds_.gpu3d.render_frame();
+      if (!skip_next_) nds_.gpu3d.render_frame(); else nds_.gpu3d.note_raster_skipped();
       if (probe_enabled_) async_probe_start();
     } else if (line_ == 262) {
       engine[0].latch(Engine2D::L_SPRITES, 0, false); engine[1].latch(Engine2D::L_SPRITES, 0, false);

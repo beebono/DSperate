@@ -144,6 +144,10 @@ public:
   // Display timing hooks.
   void vblank();            // VCount 192: latch registers, sort, swap buffers
   void render_frame();      // VCount 215: rasterise the latched frame
+  // Frameskip skipped the raster at VCount 215: the picture the renderer
+  // holds is not the frame the bookkeeping below describes, so the next
+  // frame must be rasterised even if its list and registers are unchanged.
+  void note_raster_skipped() { render_stale_ = true; }
   // The frame the display reads now (see Renderer3D::FrameRef): taken on the
   // emulation thread at the start of a display frame, used by whichever
   // thread composites its lines.
@@ -300,6 +304,7 @@ private:
   std::array<const Polygon*, PRAM_BANK> render_polys_{};
   u32 render_count_ = 0;
   bool render_identical_ = false;
+  bool render_stale_ = false;      // note_raster_skipped: the last render is older than rstate_ says
   u32 flush_request_ = 0, flush_attr_ = 0;
   u64 census_prev_hash_ = 0;          // DS_CENSUS_GX: hash of the last submitted list
   bool census_have_prev_ = false;
