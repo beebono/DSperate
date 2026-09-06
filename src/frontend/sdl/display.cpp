@@ -214,6 +214,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
 void Display::close() {
   if (disp_) { disp_->close(); disp_.reset(); }
   if (out_) { out_->close(); out_.reset(); }
+  last_px_ = nullptr; frame_px_ = nullptr;
   surf_ = nullptr;   // owned by SDL, freed with the window
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
@@ -682,6 +683,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
       if (!out_->reopen(win_, w, h)) {
         std::fprintf(stderr, "video: scanout resize failed; window surface from here\n");
         out_.reset();
+        last_px_ = nullptr;
         margins_dirty_ = true;
         layout();
         build_scale();
@@ -691,6 +693,10 @@ bool Display::begin_frame(Target out[SCREENS]) {
         build_scale();
         out_clean_ = 0;
       }
+      // The buffers behind the pointer read_screen would use are gone (or,
+      // on fbdev, re-asserted); a screenshot before the next frame takes
+      // the core's framebuffer instead.
+      last_px_ = nullptr;
     }
   }
   if (out_) {
@@ -715,6 +721,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
     std::fprintf(stderr, "video: scanout path lost; window surface from here\n");
     out_->close();
     out_.reset();
+    last_px_ = nullptr;
     margins_dirty_ = true;
     build_scale();
     if (!scaled_) return false;
