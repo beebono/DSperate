@@ -1038,7 +1038,8 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   // the target (see row_scratch_). A row wider than the scratch goes direct.
   const bool stage = t.xrun[SCREEN_W] <= SCALED_ROW_MAX;
   u32* row = stage ? row_scratch_[screen] : dst_row;
-  if (t.blend && t.seam_w && t.h >= SCREEN_H) {
+  const bool blend = t.blend && t.seam_w;   // --seam blend: box-filter seams stand in for the grid
+  if (blend && t.h >= SCREEN_H) {
     // Box-filter seams (sharp-shimmerless): a panel pixel or row that
     // straddles two source pixels or lines is their area-weighted blend,
     // every other one is nearest. The straddling row of this span is its
@@ -1073,7 +1074,9 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
     seam_prev_line_[screen] = last;
     return;
   }
-  if (t.grid >= 256) {
+  // Plain nearest: no grid asked for, or seam blend on a view too small for
+  // its seams (the grid is the other seam treatment, not a fallback for it).
+  if (t.grid >= 256 || blend) {
     kern::active::scale_row(src, t.xrun, row);
     for (u32 y = stage ? y0 : y0 + 1; y < y1; ++y)
       std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);

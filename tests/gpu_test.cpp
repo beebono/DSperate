@@ -303,6 +303,13 @@ static void test_lcd_grid() {
     n.gpu.scale_image(0, img.data());
     size_t unwritten = 0; for (u32 v : small) unwritten += v == 0xDEADBEEF;
     CHECK_EQ(unwritten, static_cast<size_t>(0));
+    // ... and with a grid strength passed alongside blend (the frontend
+    // always passes it), the small view is plain nearest, not gridded.
+    std::fill(small.begin(), small.end(), 0xDEADBEEF);
+    n.gpu.set_scale_target(0, gpu::Gpu::ScaleTarget{small.data(), 213, 160, xr.data(), 128, 0, 0, 1, sw.data()});
+    n.gpu.scale_image(0, img.data());
+    size_t dimmed = 0; for (u32 v : small) dimmed += v != 0xFF00FF00 && v != red && v != blue;
+    CHECK_EQ(dimmed, static_cast<size_t>(0));
   }
   // Cell chunky at 2.5x with 4-px cells (160x120): each cell the 2D box of
   // the DS pixels it covers (1.6 per axis), weights from build_cell_axis;
