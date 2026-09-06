@@ -543,16 +543,22 @@ void Display::build_scale() {
     if (pair)
       for (u32 x = 1; x < SCREEN_W; x += 2) xr[x] = xr[x + 1];
     // Box-filter weights: the boundary between source pixels s and s+1 lies
-    // at (s+1) * w / 256; when that is fractional the panel pixel it falls in
-    // (the last of run s) covers pixel s+1 by the fractional part. Chunky
-    // pairs share a boundary at s+2's, so the odd boundaries are not seams.
+    // at b = (s+1) * w / 256; when that is fractional the panel pixel it
+    // falls in (the last of run s, index floor(b)) covers pixel s from its
+    // left edge up to the boundary -- frac(b) of it -- and pixel s+1 for the
+    // rest, 1 - frac(b). The weight stored is s+1's. (An earlier version
+    // stored frac(b) itself, which leaned every seam pixel the wrong way:
+    // invisible at 2.5x where every fraction is a half, plain at 3.75x, and
+    // on a view near 1x it left each seam pixel showing the pixel before it,
+    // so the small screens looked scaled like the large one.) Chunky pairs
+    // share a boundary at s+2's, so the odd boundaries are not seams.
     std::vector<u8>& sw = seam_w_[v.screen];
     sw.assign(SCREEN_W, 0);
     for (u32 s = 0; s + 1 < SCREEN_W; ++s) {
       if (pair && !(s & 1)) continue;
       const u32 b = (s + 1) * static_cast<u32>(v.rect.w);
       const u32 frac = b % SCREEN_W;
-      if (frac && xr[s + 1] > xr[s]) sw[s] = static_cast<u8>((frac * 256) / SCREEN_W);
+      if (frac && xr[s + 1] > xr[s]) sw[s] = static_cast<u8>(256 - (frac * 256) / SCREEN_W);
     }
     // Bilinear: destination column x samples source u = (x + 0.5) * 256 / w
     // - 0.5, between pixels floor(u) and floor(u)+1. Clamped at both edges;
