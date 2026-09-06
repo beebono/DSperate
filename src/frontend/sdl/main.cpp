@@ -177,23 +177,21 @@ void write_save(NDS& nds, const std::string& path) {
 // pixel for the full-size screens; an inset or the smaller of a dominant
 // pair is sampled down). Whoever shows it scales as it likes. Read from the
 // emulator's framebuffers, not the panel: a screen grabber cannot see a
-// hardware scaler layer, and the one on the A30 read the composite back
-// through fb0 with the wrong stride. On a scanline tier those framebuffers
-// are never filled (the lines go straight to the panel buffer), so there
-// the display reads its last frame back for us. Straight RGBA, alpha
-// forced opaque.
-bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout, const ds::sdl::Display* display) {
+// hardware scaler layer, and the panel buffers carry the grid, chunky and
+// seams, which a screenshot of the game does not want. On a scanline tier
+// those framebuffers are only filled by an unscaled frame, which is why the
+// hotkey defers a frame (shot_pending). Straight RGBA, alpha forced opaque.
+bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
   using Disp = ds::sdl::Display;
   int w = 0, h = 0;
   Disp::natural_size(layout, 1.0, w, h);
   Disp::View views[Disp::SCREENS];
   Disp::place(layout, w, h, views);
   std::vector<u8> rgba(static_cast<size_t>(w) * h * 4, 0);
-  std::vector<u32> back(static_cast<size_t>(ds::SCREEN_W) * ds::SCREEN_H);
   for (int i = 0; i < Disp::SCREENS; ++i) {
     const Disp::View& v = views[i];
     if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
-    const u32* fb = display && display->read_screen(v.screen, back.data()) ? back.data() : nds.gpu.framebuffer(v.screen);
+    const u32* fb = nds.gpu.framebuffer(v.screen);
     // The inset at its resting opacity (the touch ramp is a live-only thing).
     const u32 alpha = v.direct ? 255 : static_cast<u32>(std::clamp(layout.pip_alpha, 0.0, 1.0) * 255.0 + 0.5);
     for (int y = 0; y < v.rect.h; ++y) {
@@ -234,14 +232,14 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
 // directory (paths.screenshots; the states directory unless set). The
 // directory is made on demand, one level, so a fresh path in the config
 // works without a prior mkdir.
-void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout, const ds::sdl::Display* display) {
+void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout) {
   ::mkdir(dir.c_str(), 0755);
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
   std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
   const std::string path = dir + "/" + code + "-" + stamp + ".png";
-  if (write_png(nds, path, layout, display)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
+  if (write_png(nds, path, layout)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
 }
 
 std::string state_path(NDS& nds, const std::string& dir, int slot) {
@@ -879,16 +877,21 @@ sdl_ready:
     for (const std::string& d : dirs) freed += ds::cart::clear_cache(d, keep);
     std::fprintf(stderr, "cache: cleared %llu MB of unpacked games\n", static_cast<unsigned long long>(freed >> 20));
   }
-  auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled) {
+  // `plain`: nearest scaling with none of the picture effects -- the pause
+  // menu and the loader's notice are text pages, not a DS picture: the grid
+  // dimmed their lines, chunky merged their glyphs and the seams blurred them.
+  auto set_scale_targets = [&](const ds::sdl::Display::Target target[2], bool scaled, bool plain = false) {
     // At DS resolution (Display::effects_at_source) only chunky applies: the
     // grid would dim every pixel, seams and bilinear are the identity.
     const bool at_source = display.effects_at_source();
-    for (int i = 0; i < 2; ++i)
-      nds.gpu.set_scale_target(i, scaled ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source || !target[i].grid ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
-                                                                       at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
-                                                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i)),
-                                                                       linear && !at_source, target[i].lin_sx, target[i].lin_wx}
-                                         : ds::gpu::Gpu::ScaleTarget{});
+    for (int i = 0; i < 2; ++i) {
+      if (!scaled) { nds.gpu.set_scale_target(i, ds::gpu::Gpu::ScaleTarget{}); continue; }
+      if (plain) { nds.gpu.set_scale_target(i, ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun_plain}); continue; }
+      nds.gpu.set_scale_target(i, ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source || !target[i].grid ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
+                                                            at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
+                                                            static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i)),
+                                                            linear && !at_source, target[i].lin_sx, target[i].lin_wx});
+    }
   };
   // Loads a ROM with the "unpacking" notice up if it takes more than a
   // moment -- a zipped game's first launch writes the whole image to the
@@ -941,7 +944,7 @@ sdl_ready:
       bool scaled = display.begin_frame(target);
       if (dual_window) scaled = display2.begin_frame(target) && scaled;
       if (scaled) {
-        set_scale_targets(target, true);
+        set_scale_targets(target, true, true);
         for (int i = 0; i < 2; ++i) nds.gpu.scale_image(i, menu_fb[i].data());
         display.end_frame();
         if (dual_window) display2.end_frame();
@@ -1178,6 +1181,12 @@ sdl_ready:
   // arrives would leave the menu with nothing current to draw over. Deferring
   // costs a frame nobody can see and guarantees a real picture underneath.
   bool pause_pending = false;
+  // The screenshot hotkey works the same way, for the opposite reason: the
+  // scanline tiers' buffers carry the grid, chunky and seams, and a
+  // screenshot wants the game's own picture, laid out but unadorned. So it
+  // is taken from fb_ after one deliberately unscaled frame, not read back
+  // from the panel.
+  bool shot_pending = false;
   auto refresh_slots = [&] { for (int i = 0; i < 10; ++i) {
     FILE* f = std::fopen(state_path(nds, session.states_dir, i).c_str(), "rb");
     menu.set_slot_used(i, f != nullptr);
@@ -1191,15 +1200,29 @@ sdl_ready:
   // The session is ending: leave a state behind. The same two guards the
   // save-state hotkey carries -- a replay must not write, and a recording is
   // the inputs from boot, so a state alongside it would only mislead.
+  // Whether fb_ holds the picture of the last frame run: it does after an
+  // unscaled frame (the pause stop, a screenshot frame, the renderer tier)
+  // and not after a scanline-tier frame, whose lines went to the panel.
+  bool fb_current = false;
   auto autosave_now = [&] {
     if (!autosave || save_readonly || log.writing()) return;
+    // The thumbnail is the game's picture without the panel effects, like a
+    // screenshot, so it comes from fb_. When the last frame went to the
+    // panel instead, run one more, unscaled, before the state is taken, so
+    // the two agree: a frame nobody sees, at a moment the session is ending.
+    if (autosave_png && !fb_current) {
+      ds::sdl::Display::Target none[2] = {};
+      set_scale_targets(none, false);
+      nds.run_frame();
+      fb_current = true;
+    }
     if (!save_state_file(nds, auto_state_path(nds, session.states_dir), display.current_layout())) return;
     flush_save();   // the .sav and the state never diverge
     if (!autosave_png) return;
     const bool beside = autosave_png_cfg == "true" || autosave_png_cfg == "1";
     std::string png = autosave_png_cfg;
     if (beside) { png = auto_state_path(nds, session.states_dir); png.replace(png.size() - 3, 3, "png"); }
-    if (write_png(nds, png, display.current_layout(), &display)) std::fprintf(stderr, "state: thumbnail %s\n", png.c_str());
+    if (write_png(nds, png, display.current_layout())) std::fprintf(stderr, "state: thumbnail %s\n", png.c_str());
   };
   // A loaded state's view, applied the way the layout hotkeys apply theirs.
   Disp::Layout loaded_layout = layout; bool got_layout = false;   // from `layout`: a state carries no pip_alpha, the config's stays
@@ -1270,7 +1293,7 @@ sdl_ready:
         if (!session.game_ini.empty()) ds::sdl::Config::store(session.game_ini, "video.pip_corner", Disp::corner_name(l.corner));
         break;
       }
-      case A::Screenshot: screenshot(nds, session.shots_dir, display.current_layout(), &display); break;
+      case A::Screenshot: if (paused) screenshot(nds, session.shots_dir, display.current_layout()); else shot_pending = true; break;
       case A::Lid: input.set_lid(!input.lid()); VLOG("lid: %s\n", input.lid() ? "closed" : "open"); if (input.lid()) flush_save(); break;
       case A::SlotNext: state_slot = (state_slot + 1) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
       case A::SlotPrev: state_slot = (state_slot + 9) % 10; slot_shown = 90; VLOG("state slot %d\n", state_slot); break;
@@ -1412,7 +1435,7 @@ sdl_ready:
         bool scaled = display.begin_frame(target);
         if (dual_window) scaled = display2.begin_frame(target) && scaled;
         if (scaled) {
-          set_scale_targets(target, true);
+          set_scale_targets(target, true, true);
           for (int i = 0; i < 2; ++i) nds.gpu.scale_image(i, menu_fb[i].data());
           display.end_frame();
           if (dual_window) display2.end_frame();
@@ -1525,7 +1548,7 @@ sdl_ready:
     if (!skipped && fs_in_skip && ++fs_refused == 120 && !fs_capture)
       std::fprintf(stderr, "frameskip: this game display-captures its frames, which cannot be skipped exactly;\n"
                            "           --frameskip-capture (or [emu] frameskip_capture) skips them anyway\n");
-    const bool present = pause_pending ? !skipped
+    const bool present = pause_pending || shot_pending ? !skipped
                                        : (!skipped && !fs_partial && (!fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0));
     // A translucent PiP inset comes up to opaque while the bottom screen is
     // in use -- the frame the console gets has a touch (finger, mouse, pen
@@ -1546,11 +1569,12 @@ sdl_ready:
     }
     ds::sdl::Display::Target target[2] = {};
     bool scaled = false;
-    if (present && !pause_pending) {
+    if (present && !pause_pending && !shot_pending) {
       scaled = display.begin_frame(target);
       if (dual_window) scaled = display2.begin_frame(target) && scaled;
     }
     set_scale_targets(target, scaled);
+    fb_current = present && !scaled;   // a skipped frame renders nothing
 
     const Uint64 t0 = SDL_GetPerformanceCounter();
     nds.run_frame();
@@ -1643,6 +1667,11 @@ sdl_ready:
       }
     }
     audio.push(nds, fast);
+    // An unscaled frame is in fb_: the picture the screenshot wants.
+    if (shot_pending && present) {
+      shot_pending = false;
+      screenshot(nds, session.shots_dir, display.current_layout());
+    }
     // The frame the menu will sit on is presented and, because it went down
     // the unscaled path, is in fb_ as well. Now it is safe to stop.
     if (pause_pending && present) {

@@ -96,7 +96,9 @@ public:
   // PiP inset, the dominant layouts' secondary -- go plain, as they do on
   // the display-engine tier, unless a whole panel cell (chunky, >= 4 px)
   // carries the grid per cell. See grid_on().
-  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; const u16* lin_sx; const u8* lin_wx; bool grid; };
+  // `xrun_plain`: the nearest map before chunky rewrote it into pairs or
+  // cells, for a page that wants the view's geometry without the effect.
+  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; const u16* lin_sx; const u8* lin_wx; bool grid; const u16* xrun_plain; };
 
   bool scaling() const { return scaled_; }
   // Chunky: each 2x2 block of DS pixels is drawn as one cell from its top-left
@@ -138,12 +140,6 @@ public:
   // Locks the panel-sized texture and fills in one target per screen. False
   // if the lock failed, in which case the caller must fall back to draw().
   bool begin_frame(Target out[SCREENS]);
-  // `screen` as last presented, sampled back to 256x192 into `dst`, from the
-  // buffer the scanline path last drew into. On a scanline tier the core's
-  // own framebuffers are never written (the lines go straight to the panel),
-  // so a screenshot has to come from here. False on the renderer tier, or
-  // before the first frame: read the core's framebuffer instead.
-  bool read_screen(int screen, u32* dst) const;
   void end_frame();   // unlock and present
   void on_resize() { layout(); build_scale(); margins_dirty_ = true; }
   void toggle_fullscreen();
@@ -218,6 +214,7 @@ private:
   bool              out_frame_ = false;   // current begin_frame targeted the scanout tier
   int               scaled_w_ = 0, scaled_h_ = 0;
   std::vector<u16>  xrun_[SCREENS];   // per screen, 257 entries; see kern::scale_row
+  std::vector<u16>  xrun_plain_[SCREENS];   // the same before chunky's pair/cell rewrite
   std::vector<u8>   seam_w_[SCREENS]; // per screen, 256 entries: box-filter weight of pixel s+1 in run s's last pixel
   std::vector<u16>  lin_sx_[SCREENS]; // per screen, rect.w entries: bilinear source column per destination column
   std::vector<u8>   lin_wx_[SCREENS]; // per screen, rect.w entries: weight of column lin_sx+1, 0..255
@@ -227,8 +224,6 @@ private:
   bool              src_chunky_[SCREENS] = {true, true};   // chunky applies to this screen's view there
   u32*              frame_px_ = nullptr;   // the buffer begin_frame handed out, for end_frame's insets
   u32               frame_pitch_ = 0;
-  const u32*        last_px_ = nullptr;    // the last such buffer, for read_screen (still holds that frame)
-  u32               last_pitch_ = 0;
 };
 
 } // namespace ds::sdl

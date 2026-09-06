@@ -214,7 +214,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
 void Display::close() {
   if (disp_) { disp_->close(); disp_.reset(); }
   if (out_) { out_->close(); out_.reset(); }
-  last_px_ = nullptr; frame_px_ = nullptr;
+  frame_px_ = nullptr;
   surf_ = nullptr;   // owned by SDL, freed with the window
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
@@ -441,6 +441,7 @@ void Display::build_source_scale() {
     std::vector<u16>& xr = xrun_[v.screen];
     xr.resize(static_cast<size_t>(SCREEN_W) + 1);
     for (u32 x = 0; x <= SCREEN_W; ++x) xr[x] = static_cast<u16>(x);
+    xrun_plain_[v.screen] = xr;
     seam_w_[v.screen].assign(SCREEN_W, 0);
     cells_[v.screen] = {};
     src_side_[v.screen].assign(static_cast<size_t>(SCREEN_W) * SCREEN_H, 0xFF000000u);
@@ -505,6 +506,7 @@ void Display::build_scale() {
     xr.resize(static_cast<size_t>(SCREEN_W) + 1);
     for (u32 x = 0; x <= SCREEN_W; ++x)
       xr[x] = static_cast<u16>((x * static_cast<u32>(v.rect.w) + SCREEN_W - 1) / SCREEN_W);
+    xrun_plain_[v.screen] = xr;
     // Chunky: the even pixel's run is widened over the odd one's, which is
     // left empty (a zero-length run, which scale_row skips). The destination
     // coverage is unchanged, so map_point still agrees.
@@ -609,13 +611,12 @@ void Display::clear_margins(u32* px, u32 pitch, int w, int h) const {
 // side buffer for the rest.
 void Display::targets(u32* px, u32 stride, Target out[SCREENS]) {
   frame_px_ = px; frame_pitch_ = stride;
-  last_px_ = px; last_pitch_ = stride;
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (v.direct)
-      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data(), grid_on(v.screen)};
+      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data(), grid_on(v.screen), xrun_plain_[v.screen].data()};
     else
-      out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data(), grid_on(v.screen)};
+      out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data(), grid_on(v.screen), xrun_plain_[v.screen].data()};
   }
 }
 
@@ -653,33 +654,11 @@ void Display::blit_insets() {
   frame_px_ = nullptr;
 }
 
-bool Display::read_screen(int screen, u32* dst) const {
-  if (disp_ && scaled_) { std::memcpy(dst, src_side_[screen].data(), sizeof(u32) * SCREEN_W * SCREEN_H); return true; }
-  if (!scaled_ || !last_px_) return false;
-  for (int i = 0; i < nviews_; ++i) {
-    const View& v = views_[i];
-    if (v.screen != screen || !v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
-    // Direct views live in the frame at their rect; the rest in a side
-    // buffer of the rect's size. Nearest sample: the tier's grid, chunky
-    // and seam treatment come along, which a thumbnail can live with.
-    const u32* src = v.direct ? last_px_ + static_cast<size_t>(v.rect.y) * last_pitch_ + v.rect.x : side_[screen].data();
-    const u32 pitch = v.direct ? last_pitch_ : static_cast<u32>(v.rect.w);
-    for (u32 y = 0; y < SCREEN_H; ++y) {
-      const u32 sy = static_cast<u32>(static_cast<u64>(y) * static_cast<u32>(v.rect.h) / SCREEN_H);
-      const u32* row = src + static_cast<size_t>(sy) * pitch;
-      for (u32 x = 0; x < SCREEN_W; ++x)
-        dst[y * SCREEN_W + x] = row[static_cast<u64>(x) * static_cast<u32>(v.rect.w) / SCREEN_W];
-    }
-    return true;
-  }
-  return false;
-}
-
 bool Display::begin_frame(Target out[SCREENS]) {
   if (!scaled_) return false;
   if (disp_) {
     for (int i = 0; i < SCREENS; ++i)
-      out[i] = Target{src_side_[i].data(), SCREEN_W, SCREEN_H, xrun_[i].data(), seam_w_[i].data(), nullptr, nullptr, false};
+      out[i] = Target{src_side_[i].data(), SCREEN_W, SCREEN_H, xrun_[i].data(), seam_w_[i].data(), nullptr, nullptr, false, xrun_plain_[i].data()};
     return true;
   }
   if (out_) {
@@ -692,7 +671,6 @@ bool Display::begin_frame(Target out[SCREENS]) {
       if (!out_->reopen(win_, w, h)) {
         std::fprintf(stderr, "video: scanout resize failed; window surface from here\n");
         out_.reset();
-        last_px_ = nullptr;
         margins_dirty_ = true;
         layout();
         build_scale();
@@ -702,10 +680,6 @@ bool Display::begin_frame(Target out[SCREENS]) {
         build_scale();
         out_clean_ = 0;
       }
-      // The buffers behind the pointer read_screen would use are gone (or,
-      // on fbdev, re-asserted); a screenshot before the next frame takes
-      // the core's framebuffer instead.
-      last_px_ = nullptr;
     }
   }
   if (out_) {
@@ -730,7 +704,6 @@ bool Display::begin_frame(Target out[SCREENS]) {
     std::fprintf(stderr, "video: scanout path lost; window surface from here\n");
     out_->close();
     out_.reset();
-    last_px_ = nullptr;
     margins_dirty_ = true;
     build_scale();
     if (!scaled_) return false;
