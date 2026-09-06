@@ -75,6 +75,8 @@ const char* kUsage =
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) | horizontal | single | pip | dominant_v | dominant_h\n"
     "  --screen S      top (default) or bottom: the screen shown alone, large or dominant\n"
+    "  --pip-alpha X   opacity of the PiP inset at rest, 0..1 (default 1; it comes up to opaque\n"
+    "                  while the bottom screen is touched)\n"
     "  --dual-window   one window per video display, one DS screen each (dual-panel\n"
     "                  handhelds; also what direct scanout needs on them)\n"
     "  --linear        bilinear scaling instead of nearest (takes precedence over the grid, seams\n"
@@ -594,6 +596,7 @@ int main(int argc, char** argv) {
     else if (flag("--dual-window")) cli.set("video.dual_window", "true");
     else if (arg("--layout")) cli.set("video.layout", argv[++i]);
     else if (arg("--screen")) cli.set("video.screen", argv[++i]);
+    else if (arg("--pip-alpha")) cli.set("video.pip_alpha", argv[++i]);
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (flag("--rtc-host")) rtc_host = true;
     else if (flag("--clear-cache")) clear_cache = true;
@@ -643,7 +646,7 @@ int main(int argc, char** argv) {
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
-  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen",
+  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
