@@ -538,17 +538,6 @@ void draw_label(const CursorDst& d, const char* text, bool right, bool bottom) {
   }
 }
 
-// A number in that box. A value too wide for the field saturates to all
-// nines: 1234 in a 3-digit field reads as 999, never as 234.
-void draw_number(const CursorDst& d, int value, int digits, bool right, bool bottom) {
-  if (value < 0) value = 0;
-  if (digits < 1) digits = 1;
-  if (digits > 8) digits = 8;
-  int cap = 1; for (int i = 0; i < digits; ++i) cap *= 10;
-  if (value >= cap) value = cap - 1;
-  draw_label(d, std::to_string(value).c_str(), right, bottom);
-}
-
 // The state slot field: the slot's digit after a slot hotkey, or what just
 // happened to the slot ("STATE 3 SAVED") after a state hotkey.
 constexpr int SLOT_OSD_FRAMES = 90;
@@ -1705,6 +1694,12 @@ sdl_ready:
       }
       const bool slot_osd = slot_shown > 0;
       if (slot_shown > 0) --slot_shown;
+      // The top-right field: the FPS counter when it is on, FF while fast
+      // forward is, and both together ("FF 120") when both are.
+      std::string fps_text;
+      if (fast) fps_text = "FF";
+      if (fps_osd) fps_text += (fast ? " " : "") + std::to_string(std::clamp(fps_value, 0, 999));
+      const bool fps_field = !fps_text.empty();
       // The flash's alpha this frame: full white first, then straight down.
       const u32 flash_alpha = flash_left > 0 ? static_cast<u32>(255 * flash_left / FLASH_FRAMES) : 0;
       if (flash_left > 0) --flash_left;
@@ -1730,7 +1725,7 @@ sdl_ready:
         if (cursor) draw_cursor(CursorDst{target[1].px, target[1].pitch, target[1].h, target[1].xrun}, input.stylus_x(), input.stylus_y(), cursor_size);
         const CursorDst od{target[osd_screen].px, target[osd_screen].pitch, target[osd_screen].h, target[osd_screen].xrun};
         if (slot_osd) draw_label(od, slot_text.c_str(), false, slot_bottom);
-        if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
+        if (fps_field) draw_label(od, fps_text.c_str(), true, fps_bottom);
         if (flash_alpha) for (int i = 0; i < 2; ++i) if (target[i].px) draw_flash(CursorDst{target[i].px, target[i].pitch, target[i].h, target[i].xrun}, flash_alpha);
         display.end_frame();
         if (dual_window) display2.end_frame();
@@ -1743,11 +1738,11 @@ sdl_ready:
         }
         // After the cursor: when the overlays are on the bottom screen this
         // copies the frame that already has the crosshair in it, so both show.
-        if (slot_osd || fps_osd) {
+        if (slot_osd || fps_field) {
           std::memcpy(osd_fb.data(), fb[osd_screen], osd_fb.size() * 4);
           const CursorDst od{osd_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr};
           if (slot_osd) draw_label(od, slot_text.c_str(), false, slot_bottom);
-          if (fps_osd) draw_number(od, fps_value, 3, true, fps_bottom);
+          if (fps_field) draw_label(od, fps_text.c_str(), true, fps_bottom);
           fb[osd_screen] = osd_fb.data();
         }
         // Last, over whatever the cursor and the overlays left: a screen

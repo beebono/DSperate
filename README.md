@@ -222,7 +222,7 @@ remembered for the game), `F9` takes a screenshot (both screens, PNG, with a bri
 `paths.screenshots`, the states directory by default), `-`/`=`/`0` are volume down/up/mute, `F5`/`F7` save/load
 the state in the current slot and `F2`/`F3` change the slot, `L` closes and
 opens the lid, `M` held is the fake microphone. The `fps` hotkey toggles an
-on-screen frames-per-second counter and is unbound by default (`[video] fps =
+on-screen frames-per-second counter (`FF` shows in the same corner while fast-forwarding, beside the number when both are on) and is unbound by default (`[video] fps =
 true` starts it on). It and the save-state slot number are drawn in the corners
 of the primary screen -- the one shown alone, large or dominant -- so they
 follow `screen` and the screen-swap hotkey rather than sitting on a panel the
