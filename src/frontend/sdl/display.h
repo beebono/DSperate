@@ -112,7 +112,10 @@ public:
   // carries the grid per cell. See grid_on().
   // `xrun_plain`: the nearest map before chunky rewrote it into pairs or
   // cells, for a page that wants the view's geometry without the effect.
-  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; const u16* lin_sx; const u8* lin_wx; bool grid; const u16* xrun_plain; };
+  // `y_lo`/`y_hi`: the rect rows inside the buffer (see Gpu::ScaleTarget);
+  // px is at row y_lo. Only a view scaled past the panel (integer
+  // overscale) is cropped; then xrun's runs outside the buffer are empty.
+  struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; const u16* lin_sx; const u8* lin_wx; bool grid; const u16* xrun_plain; u32 y_lo = 0, y_hi = 0; };
 
   bool scaling() const { return scaled_; }
   // Chunky: each 2x2 block of DS pixels is drawn as one cell from its top-left
@@ -206,7 +209,7 @@ private:
   void build_scale();          // pick up the window surface and rebuild the x-map
   bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode
   void clear_margins(u32* px, u32 pitch, int w, int h) const;
-  void targets(u32* px, u32 stride, Target out[SCREENS]);
+  void targets(u32* px, u32 stride, int w, int h, Target out[SCREENS]);
   void blit_insets();
 
   SDL_Window*   win_ = nullptr;
@@ -246,6 +249,7 @@ private:
   std::vector<u32>  src_side_[SCREENS];  // display-engine tier: the 1:1 scaler output per screen (effects_at_source)
   bool              src_chunky_[SCREENS] = {true, true};   // chunky applies to this screen's view there
   u32*              frame_px_ = nullptr;   // the buffer begin_frame handed out, for end_frame's insets
+  int               frame_w_ = 0, frame_h_ = 0;   // ... and its size, for clipping an inset at the edge
   u32               frame_pitch_ = 0;
 };
 

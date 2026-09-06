@@ -869,6 +869,11 @@ bool Gpu::build_cell_axis(u32 src_n, u32 cells, u32 cell_px, CellAxis& a) {
 // One cell row: every cell's colour from its taps in the held lines, then
 // the row of cells drawn as `cell_px` panel rows (the first the seam row
 // when the grid is on) through the grid kernel with the cells' xrun.
+// A rect row's pixels in the frontend's buffer, valid only for rows the
+// crop window keeps (see ScaleTarget::y_lo).
+static inline bool row_kept(const Gpu::ScaleTarget& t, u32 y) { return y >= t.y_lo && y < t.y_hi; }
+static inline u32* row_at(const Gpu::ScaleTarget& t, u32 y) { return t.px + (static_cast<size_t>(y) - t.y_lo) * t.pitch; }
+
 void Gpu::emit_cells(int screen, u32 line, const u32* src) {
   const ScaleTarget& t = scale_[screen];
   const CellMap& m = *t.cells;
@@ -935,12 +940,13 @@ void Gpu::emit_cells(int screen, u32 line, const u32* src) {
   const u32 y0 = j * P;
   const size_t bytes = static_cast<size_t>(t.xrun[SCREEN_W]) * sizeof(u32);
   const bool grid = t.grid < 256;
-  u32* row = t.px + static_cast<size_t>(y0 + (grid ? 1 : 0)) * t.pitch;
+  if (t.xrun[SCREEN_W] > SCALED_ROW_MAX) return;
+  u32* row = row_scratch_[screen];
   if (grid) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, false, row);
   else      kern::active::scale_row(cells, t.xrun, row);
-  for (u32 y = y0 + (grid ? 2 : 1); y < y0 + P; ++y)
-    std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
-  if (grid) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, true, t.px + static_cast<size_t>(y0) * t.pitch);
+  for (u32 y = y0 + (grid ? 1 : 0); y < y0 + P; ++y)
+    if (row_kept(t, y)) std::memcpy(row_at(t, y), row, bytes);
+  if (grid && row_kept(t, y0)) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, true, row_at(t, y0));
   cell_row_[screen] = j + 1;
 }
 
@@ -975,9 +981,9 @@ void Gpu::emit_bilinear(int screen, u32 line, const u32* src) {
   lin_cur_[screen] = cur;
   lin_prev_line_[screen] = line;
   const size_t bytes = static_cast<size_t>(w) * sizeof(u32);
-  auto out_row = [&](u32 y) { return t.px + static_cast<size_t>(y) * t.pitch; };
+  auto out_row = [&](u32 y) -> u32* { return row_kept(t, y) ? row_at(t, y) : nullptr; };   // null: cropped away
   if (line == 0) {
-    for (u32 y = 0; y < ystart(1); ++y) std::memcpy(out_row(y), hcur, bytes);
+    for (u32 y = 0; y < ystart(1); ++y) if (u32* o = out_row(y)) std::memcpy(o, hcur, bytes);
     if (line + 1 < SCREEN_H) return;
   }
   if (have_prev) {
@@ -986,16 +992,18 @@ void Gpu::emit_bilinear(int screen, u32 line, const u32* src) {
       // Weight of this line: v - (line-1), in 1/256.
       const s32 wf = static_cast<s32>(((2 * y + 1) * SCREEN_H * 128) / h) - 128 - static_cast<s32>((line - 1) * 256);
       const u32 wy = static_cast<u32>(std::min(255, std::max(0, wf)));
-      if (wy == 0) std::memcpy(out_row(y), hprev, bytes);
-      else kern::active::lerp_rows(hprev, hcur, wy, w, out_row(y));
+      u32* const o = out_row(y);
+      if (!o) continue;
+      if (wy == 0) std::memcpy(o, hprev, bytes);
+      else kern::active::lerp_rows(hprev, hcur, wy, w, o);
     }
   } else {
     // A gap in the lines (a hidden span, or the first line after a
     // reset): this line stands alone over its rows.
-    for (u32 y = ystart(line); y < ystart(line + 1); ++y) std::memcpy(out_row(y), hcur, bytes);
+    for (u32 y = ystart(line); y < ystart(line + 1); ++y) if (u32* o = out_row(y)) std::memcpy(o, hcur, bytes);
   }
   if (line + 1 == SCREEN_H)
-    for (u32 y = ystart(SCREEN_H); y < h; ++y) std::memcpy(out_row(y), hcur, bytes);
+    for (u32 y = ystart(SCREEN_H); y < h; ++y) if (u32* o = out_row(y)) std::memcpy(o, hcur, bytes);
 }
 
 void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
@@ -1032,12 +1040,14 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   const u32 y0 = (first * t.h + SCREEN_H - 1) / SCREEN_H;
   const u32 y1 = ((last + 1) * t.h + SCREEN_H - 1) / SCREEN_H;
   if (y0 >= y1) return;                      // downscale: this line is dropped
-  u32* const dst_row = t.px + static_cast<size_t>(y0) * t.pitch;
   const size_t bytes = static_cast<size_t>(t.xrun[SCREEN_W]) * sizeof(u32);
   // Rows are built in cached scratch and copied out, never read back from
-  // the target (see row_scratch_). A row wider than the scratch goes direct.
+  // the target (see row_scratch_). A row wider than the scratch goes direct,
+  // which a cropped view cannot (its first row may be outside the buffer).
   const bool stage = t.xrun[SCREEN_W] <= SCALED_ROW_MAX;
-  u32* row = stage ? row_scratch_[screen] : dst_row;
+  const bool cropped = t.y_lo != 0 || t.y_hi != t.h;
+  if (!stage && cropped) return;
+  u32* row = stage ? row_scratch_[screen] : row_at(t, y0);
   const bool blend = t.blend && t.seam_w;   // --seam blend: box-filter seams stand in for the grid
   if (blend && t.h >= SCREEN_H) {
     // Box-filter seams (sharp-shimmerless): a panel pixel or row that
@@ -1056,7 +1066,7 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
     if (ycrisp_end > y0) {
       emit_row_straddle(t, src, row);
       for (u32 y = stage ? y0 : y0 + 1; y < ycrisp_end; ++y)
-        std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
+        if (row_kept(t, y)) std::memcpy(row_at(t, y), row, bytes);
     }
     // The row above this span straddles the previous line and this one: the
     // boundary falls frac/192 of the way down it, so the previous line owns
@@ -1067,7 +1077,7 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
       if (frac) {
         alignas(16) u32 mid[SCREEN_W];
         blend_rows(t, seam_prev_[screen], src, ((SCREEN_H - frac) * 256) / SCREEN_H, mid);   // weight of this line
-        emit_row_straddle(t, mid, t.px + static_cast<size_t>(y0 - 1) * t.pitch);
+        if (row_kept(t, y0 - 1)) emit_row_straddle(t, mid, row_at(t, y0 - 1));
       }
     }
     std::memcpy(seam_prev_[screen], src, sizeof seam_prev_[screen]);
@@ -1079,7 +1089,7 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   if (t.grid >= 256 || blend) {
     kern::active::scale_row(src, t.xrun, row);
     for (u32 y = stage ? y0 : y0 + 1; y < y1; ++y)
-      std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
+      if (row_kept(t, y)) std::memcpy(row_at(t, y), row, bytes);
     return;
   }
   // LCD grid: the last output column of every source pixel's run and the last
@@ -1102,11 +1112,11 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   const u32 min_run = (w + SCREEN_W - 1) / SCREEN_W, min_rows = (t.h + SCREEN_H - 1) / SCREEN_H;
   const bool seam = y1 - y0 >= std::max<u32>(2, min_rows);
   const u32 yfirst = seam ? y0 + 1 : y0;
-  row = stage ? row_scratch_[screen] : t.px + static_cast<size_t>(yfirst) * t.pitch;
+  row = stage ? row_scratch_[screen] : row_at(t, yfirst);
   kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, false, row);
   for (u32 y = stage ? yfirst : yfirst + 1; y < y1; ++y)
-    std::memcpy(t.px + static_cast<size_t>(y) * t.pitch, row, bytes);
-  if (seam) kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, true, t.px + static_cast<size_t>(y0) * t.pitch);
+    if (row_kept(t, y)) std::memcpy(row_at(t, y), row, bytes);
+  if (seam && row_kept(t, y0)) kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, true, row_at(t, y0));
 }
 
 static inline u32 rgb15_to_18_plain(u16 c) {

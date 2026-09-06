@@ -145,8 +145,11 @@ private:
   struct Dims { int w = 0, h = 0; };          // a composite's size (the canvas, rotated, over the divisor)
   Dims comp_dims() const;
   bool set_layer(u32 addr, Dims d);
-  // The panel window the composite is fitted into (aspect kept, centred).
-  void fit(Dims d, int& x, int& y, unsigned& w, unsigned& h) const;
+  // The panel window the composite is fitted into (aspect kept, centred),
+  // and the part of the composite shown in it: all of it, unless integer
+  // overscale crops it (then a centred window of whole composite pixels).
+  struct Fit { int x = 0, y = 0; unsigned w = 0, h = 0; int sx = 0, sy = 0; unsigned sw = 0, sh = 0; };
+  Fit fit(Dims d) const;
   double snap(double s) const;
   // View r's rectangle in the composite (rotated), as draw_view places it.
   void comp_rect(const ViewRect& r, int& cx, int& cy, int& cw, int& ch) const;

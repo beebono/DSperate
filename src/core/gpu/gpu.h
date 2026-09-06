@@ -209,9 +209,15 @@ public:
     bool bilinear = false;
     const u16* lin_sx = nullptr;
     const u8* lin_wx = nullptr;
+    // The rows of the rect that are inside the frontend's buffer, [y_lo,
+    // y_hi) in rect rows (y_hi 0 = h: no crop); px points at row y_lo. A
+    // view scaled past the panel (integer overscale) is cropped this way:
+    // the row map is still over the whole rect, rows outside are skipped.
+    // Columns are cropped in xrun (runs outside the buffer are empty).
+    u32 y_lo = 0, y_hi = 0;
   };
   // Both screens or neither: pass a null `px` to go back to fb_.
-  void set_scale_target(int screen, const ScaleTarget& t) { scale_[screen] = t; }
+  void set_scale_target(int screen, const ScaleTarget& t) { scale_[screen] = t; if (scale_[screen].y_hi == 0) scale_[screen].y_hi = t.h; }
   // Run a whole DS-resolution image through the scanline scaler, for a
   // picture the emulator did not produce: the frontend's pause menu, which is
   // composited while nothing is running and so has no display lines of its

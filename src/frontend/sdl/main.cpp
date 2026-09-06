@@ -955,11 +955,14 @@ sdl_ready:
     const bool at_source = display.effects_at_source();
     for (int i = 0; i < 2; ++i) {
       if (!scaled) { nds.gpu.set_scale_target(i, ds::gpu::Gpu::ScaleTarget{}); continue; }
-      if (plain) { nds.gpu.set_scale_target(i, ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun_plain}); continue; }
-      nds.gpu.set_scale_target(i, ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source || !target[i].grid ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
-                                                            at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
-                                                            static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i)),
-                                                            linear && !at_source, target[i].lin_sx, target[i].lin_wx});
+      ds::gpu::Gpu::ScaleTarget st = plain
+          ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun_plain}
+          : ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source || !target[i].grid ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
+                                      at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
+                                      static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i)),
+                                      linear && !at_source, target[i].lin_sx, target[i].lin_wx};
+      st.y_lo = target[i].y_lo; st.y_hi = target[i].y_hi;   // the crop window (integer overscale)
+      nds.gpu.set_scale_target(i, st);
     }
   };
   // Loads a ROM with the "unpacking" notice up if it takes more than a

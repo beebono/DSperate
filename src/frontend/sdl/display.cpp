@@ -37,7 +37,7 @@ const char* Display::int_scale_name(IntScale m) {
 bool Display::parse_int_scale(const std::string& s, IntScale& m) {
   if (s == "off" || s == "false" || s == "0") { m = IntScale::Off; return true; }
   if (s == "under" || s == "true" || s == "1") { m = IntScale::Under; return true; }
-  if (s == "over") { std::fprintf(stderr, "integer_scale over is not available on this build (no crop support yet)\n"); return false; }
+  if (s == "over") { m = IntScale::Over; return true; }
   return false;
 }
 double Display::snap_scale(double s, IntScale m) {
@@ -540,8 +540,18 @@ void Display::build_scale() {
     const View& v = views_[i];
     std::vector<u16>& xr = xrun_[v.screen];
     xr.resize(static_cast<size_t>(SCREEN_W) + 1);
-    for (u32 x = 0; x <= SCREEN_W; ++x)
-      xr[x] = static_cast<u16>((x * static_cast<u32>(v.rect.w) + SCREEN_W - 1) / SCREEN_W);
+    // A direct view scaled past the buffer (integer overscale) is cropped to
+    // it: runs outside [x0, x1) collapse to empty ones, which scale_row
+    // skips, and the rest are relative to x0, where the target's px points.
+    // Rows are cropped the same way by targets(). An inset (a side buffer)
+    // is never cropped here; blit_insets clips it at the edge.
+    const u32 x0 = v.direct ? static_cast<u32>(std::max(0, -v.rect.x)) : 0u;
+    const u32 x1 = v.direct ? static_cast<u32>(std::clamp(scaled_w_ - v.rect.x, 0, v.rect.w)) : static_cast<u32>(v.rect.w);
+    const bool cropped = v.direct && (x0 > 0 || x1 < static_cast<u32>(v.rect.w) || v.rect.y < 0 || v.rect.y + v.rect.h > scaled_h_);
+    for (u32 x = 0; x <= SCREEN_W; ++x) {
+      const u32 raw = (x * static_cast<u32>(v.rect.w) + SCREEN_W - 1) / SCREEN_W;
+      xr[x] = static_cast<u16>(std::clamp(raw, x0, x1) - x0);
+    }
     xrun_plain_[v.screen] = xr;
     // Chunky: the even pixel's run is widened over the odd one's, which is
     // left empty (a zero-length run, which scale_row skips). The destination
@@ -553,7 +563,9 @@ void Display::build_scale() {
       // more than 256 cells across; auto takes the smallest P >= 4.
       const u32 w = static_cast<u32>(v.rect.w), h = static_cast<u32>(v.rect.h);
       u32 P = 0;
-      auto fits = [&](u32 p) { return p >= 2 && w % p == 0 && h % p == 0 && w / p <= SCREEN_W; };
+      // The cell map is laid over the whole view; a cropped one takes the
+      // pairs (at a whole scale the pairs are exact cells anyway).
+      auto fits = [&](u32 p) { return !cropped && p >= 2 && w % p == 0 && h % p == 0 && w / p <= SCREEN_W; };
       // An explicit cell that does not divide the screen steps down to the
       // nearest one that does (5 on 640x480 -> 4), so a size chosen for one
       // panel is still close on another -- but no further than auto's
@@ -576,7 +588,8 @@ void Display::build_scale() {
           told = true;
           std::fprintf(stderr, "video: no %d px cell divides %ux%u; using %u\n", chunky_cell_, w, h, P);
         } else if (verbose()) std::fprintf(stderr, "video: chunky cells %ux%u of %u px\n", w / P, h / P, P);
-      } else if (chunky_cell_) std::fprintf(stderr, "video: no %s cell divides %ux%u; 2x2 pairs\n", chunky_cell_ > 0 ? "such" : "auto", w, h);
+      } else if (chunky_cell_ && cropped) { if (verbose()) std::fprintf(stderr, "video: view cropped by the overscale; 2x2 pairs\n"); }
+      else if (chunky_cell_) std::fprintf(stderr, "video: no %s cell divides %ux%u; 2x2 pairs\n", chunky_cell_ > 0 ? "such" : "auto", w, h);
     }
     if (pair)
       for (u32 x = 1; x < SCREEN_W; x += 2) xr[x] = xr[x + 1];
@@ -602,15 +615,17 @@ void Display::build_scale() {
     // - 0.5, between pixels floor(u) and floor(u)+1. Clamped at both edges;
     // the right edge leans on pixel 254 at weight 255 so that the kernel's
     // pair load never reads past the row.
+    // Indexed by the kept destination column, so a cropped view's tables
+    // start at x0.
     std::vector<u16>& lsx = lin_sx_[v.screen];
     std::vector<u8>& lwx = lin_wx_[v.screen];
-    lsx.assign(static_cast<size_t>(v.rect.w), 0); lwx.assign(static_cast<size_t>(v.rect.w), 0);
-    for (u32 x = 0; x < static_cast<u32>(v.rect.w); ++x) {
+    lsx.assign(static_cast<size_t>(x1 - x0), 0); lwx.assign(static_cast<size_t>(x1 - x0), 0);
+    for (u32 x = x0; x < x1; ++x) {
       const s32 u = static_cast<s32>(((2 * x + 1) * SCREEN_W * 128) / static_cast<u32>(v.rect.w)) - 128;  // u * 256
       if (u <= 0) continue;
       u32 s = static_cast<u32>(u) >> 8, f = static_cast<u32>(u) & 255;
       if (s >= SCREEN_W - 1) { s = SCREEN_W - 2; f = 255; }
-      lsx[x] = static_cast<u16>(s); lwx[x] = static_cast<u8>(f);
+      lsx[x - x0] = static_cast<u16>(s); lwx[x - x0] = static_cast<u8>(f);
     }
     if (!v.direct) side_[v.screen].assign(static_cast<size_t>(v.rect.w) * v.rect.h, 0);
   }
@@ -645,13 +660,18 @@ void Display::clear_margins(u32* px, u32 pitch, int w, int h) const {
 
 // Hands out one target per screen: the window buffer for direct views, the
 // side buffer for the rest.
-void Display::targets(u32* px, u32 stride, Target out[SCREENS]) {
-  frame_px_ = px; frame_pitch_ = stride;
+void Display::targets(u32* px, u32 stride, int w, int h, Target out[SCREENS]) {
+  frame_px_ = px; frame_pitch_ = stride; frame_w_ = w; frame_h_ = h;
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
-    if (v.direct)
-      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y) * stride + v.rect.x, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data(), grid_on(v.screen), xrun_plain_[v.screen].data()};
-    else
+    if (v.direct) {
+      // The part of the rect inside the buffer: px at its first kept row
+      // and column (the runs are relative to that column, see build_scale).
+      const int x0 = std::max(0, -v.rect.x), y0 = std::max(0, -v.rect.y);
+      const int y1 = std::clamp(h - v.rect.y, 0, v.rect.h);
+      out[v.screen] = Target{px + static_cast<size_t>(v.rect.y + y0) * stride + v.rect.x + x0, stride, static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data(), grid_on(v.screen), xrun_plain_[v.screen].data(),
+                             static_cast<u32>(y0), static_cast<u32>(std::max(y0, y1))};
+    } else
       out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data(), grid_on(v.screen), xrun_plain_[v.screen].data()};
   }
 }
@@ -680,11 +700,15 @@ void Display::blit_insets() {
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (v.direct || !v.shown) continue;
-    for (int y = 0; y < v.rect.h; ++y) {
-      u32* dst = frame_px_ + static_cast<size_t>(v.rect.y + y) * frame_pitch_ + v.rect.x;
-      const u32* src = side_[v.screen].data() + static_cast<size_t>(y) * v.rect.w;
-      if (inset_alpha_ == 255) std::memcpy(dst, src, static_cast<size_t>(v.rect.w) * sizeof(u32));
-      else blend_row(dst, src, static_cast<size_t>(v.rect.w), inset_alpha_);
+    // Clipped to the buffer: with the large screen overscaled the inset's
+    // corner can sit past the panel.
+    const int x0 = std::max(0, -v.rect.x), x1 = std::min(v.rect.w, frame_w_ - v.rect.x);
+    if (x1 <= x0) continue;
+    for (int y = std::max(0, -v.rect.y); y < std::min(v.rect.h, frame_h_ - v.rect.y); ++y) {
+      u32* dst = frame_px_ + static_cast<size_t>(v.rect.y + y) * frame_pitch_ + v.rect.x + x0;
+      const u32* src = side_[v.screen].data() + static_cast<size_t>(y) * v.rect.w + x0;
+      if (inset_alpha_ == 255) std::memcpy(dst, src, static_cast<size_t>(x1 - x0) * sizeof(u32));
+      else blend_row(dst, src, static_cast<size_t>(x1 - x0), inset_alpha_);
     }
   }
   frame_px_ = nullptr;
@@ -732,7 +756,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
       const int idx = out_->current();
       const u32 bit = idx >= 0 && idx < 32 ? 1u << idx : 0u;
       if (!(out_clean_ & bit)) { clear_margins(px, stride, out_->width(), out_->height()); out_clean_ |= bit; }
-      targets(px, stride, out);
+      targets(px, stride, out_->width(), out_->height(), out);
       out_frame_ = true;
       return true;
     }
@@ -761,7 +785,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
   u32* base = static_cast<u32*>(s->pixels);
   const u32 stride = static_cast<u32>(s->pitch) / sizeof(u32);
   if (margins_dirty_) { clear_margins(base, stride, s->w, s->h); margins_dirty_ = false; }
-  targets(base, stride, out);
+  targets(base, stride, s->w, s->h, out);
   return true;
 }
 

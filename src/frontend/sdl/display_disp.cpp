@@ -304,13 +304,22 @@ double DispOut::snap(double s) const {
   return int_scale_ == 1 ? std::max(1.0, f) : f + 1.0;
 }
 
-void DispOut::fit(Dims d, int& x, int& y, unsigned& w, unsigned& h) const {
+DispOut::Fit DispOut::fit(Dims d) const {
   // Fit the composite to the panel, aspect kept, centred: the DE does the scale.
   // `d` is in composite pixels (DS pixels over the divisor), so the snap is
   // taken on the DS factor and put back.
+  Fit f;
   const double s = snap(std::min(static_cast<double>(panel_w_) / d.w, static_cast<double>(panel_h_) / d.h) / div_) * div_;
-  w = static_cast<unsigned>(d.w * s); h = static_cast<unsigned>(d.h * s);
-  x = static_cast<int>((panel_w_ - w) / 2); y = static_cast<int>((panel_h_ - h) / 2);
+  f.sx = 0; f.sy = 0; f.sw = static_cast<unsigned>(d.w); f.sh = static_cast<unsigned>(d.h);
+  f.w = static_cast<unsigned>(d.w * s); f.h = static_cast<unsigned>(d.h * s);
+  // Overscale: the composite is larger than the panel, so the layer shows a
+  // centred window of it -- whole composite pixels, so the window's edge is
+  // a pixel edge and the scale stays exactly s -- and the outer edges are
+  // what is lost, keeping the edge between a stacked pair's screens.
+  if (f.w > static_cast<unsigned>(panel_w_)) { f.sw = static_cast<unsigned>(panel_w_ / s); f.w = static_cast<unsigned>(f.sw * s); f.sx = static_cast<int>((d.w - static_cast<int>(f.sw)) / 2); }
+  if (f.h > static_cast<unsigned>(panel_h_)) { f.sh = static_cast<unsigned>(panel_h_ / s); f.h = static_cast<unsigned>(f.sh * s); f.sy = static_cast<int>((d.h - static_cast<int>(f.sh)) / 2); }
+  f.x = static_cast<int>((panel_w_ - static_cast<int>(f.w)) / 2); f.y = static_cast<int>((panel_h_ - static_cast<int>(f.h)) / 2);
+  return f;
 }
 
 void DispOut::comp_rect(const ViewRect& r0, int& cx, int& cy, int& cw, int& ch) const {
@@ -338,8 +347,7 @@ void DispOut::draw_grid(Dims d) {
   if (grid_layer_ < 0 || d.w <= 0 || d.h <= 0) return;
   const size_t n = static_cast<size_t>(panel_w_) * panel_h_;
   grid_stage_.assign(n, 0u);
-  int fx, fy; unsigned fw, fh;
-  fit(d, fx, fy, fw, fh);
+  const Fit f = fit(d);
   const u32 seam = static_cast<u32>(grid_alpha_) << 24;
   std::vector<u8> col_seam(static_cast<size_t>(panel_w_)), row_seam(static_cast<size_t>(panel_h_));
   auto seams = [&](int p0, int p1, int cells, u8* out) {
@@ -356,8 +364,13 @@ void DispOut::draw_grid(Dims d) {
     if (!r.shown || r.w <= 0 || r.h <= 0) continue;
     int cx, cy, cw, ch;
     comp_rect(r, cx, cy, cw, ch);
-    const int px0 = fx + static_cast<int>(static_cast<u64>(cx) * fw / d.w), px1 = fx + static_cast<int>(static_cast<u64>(cx + cw) * fw / d.w);
-    const int py0 = fy + static_cast<int>(static_cast<u64>(cy) * fh / d.h), py1 = fy + static_cast<int>(static_cast<u64>(cy + ch) * fh / d.h);
+    // Composite x lands on the panel at f.x + (x - f.sx) * f.w / f.sw: the
+    // shown window's own mapping, so a cropped composite's views can start
+    // before the panel's edge (clamped below, as before).
+    auto pxof = [&](int x) { return f.x + static_cast<int>(static_cast<s64>(x - f.sx) * static_cast<s64>(f.w) / static_cast<s64>(f.sw)); };
+    auto pyof = [&](int y) { return f.y + static_cast<int>(static_cast<s64>(y - f.sy) * static_cast<s64>(f.h) / static_cast<s64>(f.sh)); };
+    const int px0 = pxof(cx), px1 = pxof(cx + cw);
+    const int py0 = pyof(cy), py1 = pyof(cy + ch);
     const int cell = (W % r.cell == 0 && H % r.cell == 0) ? r.cell : 1;
     // A later view (the PiP inset) covers the seams of the one under it, as
     // its pixels do in the composite; and a view shown smaller than its
@@ -409,16 +422,15 @@ bool DispOut::set_grid_layer() {
 bool DispOut::set_layer(u32 addr, Dims d) {
 #if defined(__linux__)
   if (d.w <= 0 || d.h <= 0) return false;
-  int fx, fy; unsigned ww, wh;
-  fit(d, fx, fy, ww, wh);
+  const Fit f = fit(d);
   DispLayerInfo info{};
   info.mode = LAYER_MODE_SCALER;
   info.pipe = 1; info.zorder = 0; info.alpha_mode = 1; info.alpha_value = 255; info.ck_enable = 0;
-  info.screen_win = {fx, fy, ww, wh};
+  info.screen_win = {f.x, f.y, f.w, f.h};
   info.fb.addr[0] = addr;
   info.fb.size = {static_cast<unsigned>(d.w), static_cast<unsigned>(d.h)};
   info.fb.format = FORMAT_ARGB_8888;
-  info.fb.src_win = {0, 0, static_cast<unsigned>(d.w), static_cast<unsigned>(d.h)};
+  info.fb.src_win = {f.sx, f.sy, f.sw, f.sh};   // a window of the composite under overscale, else all of it
   if (layer_ioctl(disp_, CMD_LAYER_SET_INFO, static_cast<unsigned>(layer_), &info) != 0) { std::perror("disp: LAYER_SET_INFO"); return false; }
   if (fe_) write_coefs();   // over the driver's own table
   if (!layer_enabled_) {
