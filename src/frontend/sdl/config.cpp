@@ -153,10 +153,22 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # picked with the hotkey is remembered.
 # Every line is a comment showing the default; delete the # to change one.
 
+[user]                          # what games see as the console's owner when no firmware dump is
+                                # given (with a dump, its own settings apply)
+# nickname = DSperate           # up to 10 characters
+# message =                     # up to 26 characters
+# birthday_month = 1
+# birthday_day = 1
+# colour = 0                    # 0 grey, 1 brown, 2 red, 3 pink, 4 orange, 5 yellow, 6 lime,
+                                # 7 green, 8 dark green, 9 turquoise, 10 blue, 11 dark blue,
+                                # 12 purple, 13 violet, 14 magenta, 15 dark pink
+# language = 1                  # 0 Japanese, 1 English, 2 French, 3 German, 4 Italian, 5 Spanish
+
 [paths]
-# bios9 = /path/to/bios9.bin
-# bios7 = /path/to/bios7.bin
-# firmware = /path/to/firmware.bin
+# bios9 = /path/to/bios9.bin   # unset, a built-in replacement BIOS (FreeBIOS) runs games,
+# bios7 = /path/to/bios7.bin   #   with a note at start; it cannot boot the DS menu and its
+                                #   timing is not Nintendo's
+# firmware = /path/to/firmware.bin  # unset, a generated firmware carrying [user] below
 # firmware_override = /path/to/firmware.bin.ovr
                                 # settings changed inside the firmware's own menu (nickname, colour,
                                 # language...) are kept here, never in the dump. Delete it to reset.

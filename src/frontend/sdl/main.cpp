@@ -67,6 +67,8 @@ const char* kUsage =
     "usage: dsperate [rom.nds|rom.zip] [--bios9 F --bios7 F --firmware F] [options]\n"
     "  With no ROM (or a file named BootMenu.nds) the console boots its own\n"
     "  firmware: the DS menu, with the clock set from this machine and PictoChat.\n"
+    "  Without dumps a built-in replacement BIOS and a generated firmware run games\n"
+    "  (direct boot only; the DS menu and exact timing need the real files).\n"
     "  --config F      settings file (default ~/.config/dsperate/dsperate.ini; every\n"
     "                  option below has a key there; games/<rom name>.ini and games/<CODE>.ini\n"
     "                  override it per game, the filename one winning)\n"
@@ -668,7 +670,9 @@ int main(int argc, char** argv) {
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
-  if (bios9.empty() || bios7.empty() || fw.empty()) { std::fprintf(stderr, "BIOS and firmware paths are needed (--bios9/--bios7/--firmware or [paths] in %s)\n", global_ini.c_str()); return 2; }
+  // One BIOS dump without the other is a configuration slip, not a request
+  // for the replacement; say so rather than mixing.
+  if (bios9.empty() != bios7.empty()) { std::fprintf(stderr, "both --bios9 and --bios7 are needed (or neither, for the built-in FreeBIOS); see [paths] in %s\n", global_ini.c_str()); return 2; }
 
   // No ROM boots the firmware's own menu. A file called BootMenu.nds selects
   // the same thing without a command line -- a launcher that only knows how to
@@ -704,14 +708,29 @@ int main(int argc, char** argv) {
     }
   }
   NDS nds;
-  if (!nds.load_bios(bios9.c_str(), bios7.c_str(), fw.c_str())) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
+  ds::bios::UserSettings user;
+  user.nickname = cfg.str("user.nickname", user.nickname);
+  user.message = cfg.str("user.message", user.message);
+  user.birthday_month = static_cast<ds::u8>(cfg.num("user.birthday_month", user.birthday_month));
+  user.birthday_day = static_cast<ds::u8>(cfg.num("user.birthday_day", user.birthday_day));
+  user.favourite_colour = static_cast<ds::u8>(cfg.num("user.colour", user.favourite_colour));
+  user.language = static_cast<ds::u8>(cfg.num("user.language", user.language));
+  if (!nds.load_bios(bios9, bios7, fw, user)) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
+  if (!nds.bios_native) std::fprintf(stderr, "bios: no dumps given, using the built-in FreeBIOS (direct boot only; timing is not Nintendo's)\n");
+  if (nds.firmware_synthetic) std::fprintf(stderr, "firmware: no dump given, using a generated one ([user] in %s)\n", global_ini.c_str());
+  if (boot_firmware && !nds.can_boot_firmware()) {
+    std::fprintf(stderr, "the DS menu needs real dumps: %s%s%s (--bios9/--bios7/--firmware or [paths] in %s)\n",
+                 nds.bios_native ? "" : "bios9 and bios7", (!nds.bios_native && nds.firmware_synthetic) ? " and " : "",
+                 nds.firmware_synthetic ? "firmware" : "", global_ini.c_str());
+    return 2;
+  }
   nds.reset();
   // The firmware writes its settings pages to flash over SPI. Those go to a
   // sidecar beside the firmware rather than into the dump itself, so a rename
   // in the DS menu survives a restart without the emulator ever writing to a
   // file the user cannot regenerate. See NDS::load_firmware_override.
   const std::string fw_override = cfg.str("paths.firmware_override", fw + ".ovr");
-  {
+  if (!nds.firmware_synthetic) {
     std::string err;
     if (!nds.load_firmware_override(fw_override, err)) {
       if (err != "cannot open") std::fprintf(stderr, "firmware settings: %s: %s\n", fw_override.c_str(), err.c_str());

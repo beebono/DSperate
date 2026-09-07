@@ -449,6 +449,40 @@ static u8 read_status1(NDS& nds) {
   return rtc_recv(nds);
 }
 
+static void test_generated_firmware() {
+  // A generated firmware: valid checksums, the settings asked for, and no
+  // persistence (nothing on disk to persist against).
+  ds::bios::UserSettings user;
+  user.nickname = "Player"; user.birthday_month = 7; user.birthday_day = 23; user.favourite_colour = 10; user.language = 2;
+  auto nds = std::make_unique<NDS>();
+  CHECK_EQ(nds->load_bios("", "", "", user), true);
+  CHECK_EQ(nds->bios_native, false);
+  CHECK_EQ(nds->firmware_synthetic, true);
+  CHECK_EQ(nds->can_boot_firmware(), false);
+  CHECK_EQ(nds->firmware.size(), 0x40000u);
+  const u32 off = static_cast<u32>(nds->firmware[0x20] | (nds->firmware[0x21] << 8)) << 3;
+  CHECK_EQ(off, 0x3FE00u);
+  const u8* u = nds->firmware.data() + off;
+  CHECK_EQ(u[0x03], 7u); CHECK_EQ(u[0x04], 23u); CHECK_EQ(u[0x02], 10u);
+  CHECK_EQ(u[0x06], 'P'); CHECK_EQ(u[0x08], 'l'); CHECK_EQ(u[0x1A], 6u);
+  CHECK_EQ(u[0x64] & 7, 2u);
+  CHECK_EQ(static_cast<u32>(u[0x72] | (u[0x73] << 8)), static_cast<u32>(ds::bios::crc16(u, 0x70, 0xFFFF)));
+  CHECK_EQ(std::memcmp(u, u + 0x100, 0x100), 0);
+  // The FreeBIOS vectors are in place: the SWI vector at 8 is a branch.
+  CHECK_EQ(nds->bus.bios9.get()[0x0B], 0xEAu);
+  CHECK_EQ(nds->bus.bios7.get()[0x0B], 0xEAu);
+  // A page write lands but marks nothing dirty.
+  fw_spi(*nds, 0x06, false);
+  const u8 seq[] = {0x0A, 0x03, 0xFE, 0x06, 'Q'};
+  for (size_t i = 0; i < sizeof seq; ++i) fw_spi(*nds, seq[i], i + 1 < sizeof seq);
+  CHECK_EQ(nds->firmware[0x3FE06], 'Q');
+  CHECK_EQ(nds->firmware_override_dirty(), false);
+  std::string err;
+  CHECK_EQ(nds->load_firmware_override("nonexistent.ovr", err), false);
+  // Real dumps are still checked: a wrong-sized file fails rather than falling back.
+  CHECK_EQ(nds->load_bios("/dev/null", "/dev/null", "", user), false);
+}
+
 static void test_power_off() {
   auto nds = std::make_unique<NDS>();
   CHECK_EQ(nds->power_off, false);
@@ -484,6 +518,7 @@ int main() {
   test_input_log();
   test_rtc_clock();
   test_firmware_override();
+  test_generated_firmware();
   test_power_off();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("io: ok");

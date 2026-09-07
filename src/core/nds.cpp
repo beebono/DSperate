@@ -64,22 +64,6 @@ void NDS::reset() {
   power_off = false;
 }
 
-// DS firmware CRC16 (GBATEK "Firmware Header"; the polynomial table and the
-// bit order follow melonDS's SPI.cpp).
-static u16 fw_crc16(const u8* data, u32 len, u16 start) {
-  static const u16 poly[8] = {0xC0C1, 0xC181, 0xC301, 0xC601, 0xCC01, 0xD801, 0xF001, 0xA001};
-  u32 crc = start;
-  for (u32 i = 0; i < len; ++i) {
-    crc ^= data[i];
-    for (int j = 0; j < 8; ++j) {
-      const bool carry = crc & 1;
-      crc >>= 1;
-      if (carry) crc ^= static_cast<u32>(poly[j]) << (7 - j);
-    }
-  }
-  return static_cast<u16>(crc);
-}
-
 // Normalise the touchscreen calibration in both user-settings blocks so that
 // an ADC reading is exactly the screen pixel << 4, and fix their checksums.
 // The frontend then reports plain pixel coordinates instead of inverting
@@ -99,16 +83,26 @@ void NDS::normalise_touch_calibration() {
     w16(u + 0x5E, 255 << 4); // ADC x2
     w16(u + 0x60, 191 << 4); // ADC y2
     u[0x62] = 255; u[0x63] = 191;                // pixel x2, y2
-    w16(u + 0x72, fw_crc16(u, 0x70, 0xFFFF));    // user settings CRC16
+    w16(u + 0x72, bios::crc16(u, 0x70, 0xFFFF));    // user settings CRC16
   }
 }
 
-bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::string& pfw) {
-  auto b9 = slurp(p9), b7 = slurp(p7), fw = slurp(pfw);
-  if (b9.size() != mem::Bus::BIOS9_SIZE || b7.size() != mem::Bus::BIOS7_SIZE || fw.empty()) return false;
-  std::memcpy(bus.bios9.get(), b9.data(), b9.size());
-  std::memcpy(bus.bios7.get(), b7.data(), b7.size());
-  firmware = std::move(fw);
+bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::string& pfw,
+                    const bios::UserSettings& user) {
+  std::vector<u8> b9, b7, fw;
+  if (!p9.empty()) { b9 = slurp(p9); if (b9.size() != mem::Bus::BIOS9_SIZE) return false; }
+  if (!p7.empty()) { b7 = slurp(p7); if (b7.size() != mem::Bus::BIOS7_SIZE) return false; }
+  if (!pfw.empty()) { fw = slurp(pfw); if (fw.empty()) return false; }
+  // A FreeBIOS image is smaller than its region; the rest stays zero.
+  std::memset(bus.bios9.get(), 0, mem::Bus::BIOS9_SIZE);
+  std::memset(bus.bios7.get(), 0, mem::Bus::BIOS7_SIZE);
+  if (b9.empty()) std::memcpy(bus.bios9.get(), bios::kFreeBios9, bios::kFreeBios9_len);
+  else std::memcpy(bus.bios9.get(), b9.data(), b9.size());
+  if (b7.empty()) std::memcpy(bus.bios7.get(), bios::kFreeBios7, bios::kFreeBios7_len);
+  else std::memcpy(bus.bios7.get(), b7.data(), b7.size());
+  bios_native = !b9.empty() && !b7.empty();
+  firmware_synthetic = fw.empty();
+  firmware = firmware_synthetic ? bios::generate_firmware(user) : std::move(fw);
   firmware_id = 1469598103934665603ull;
   for (u8 b : firmware) firmware_id = (firmware_id ^ b) * 1099511628211ull;
   fw_page_dirty.assign((firmware.size() + FW_PAGE - 1) / FW_PAGE, 0);
@@ -118,6 +112,7 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
 }
 
 void NDS::firmware_written(u32 offset) {
+  if (firmware_synthetic) return;   // nothing on disk to persist against
   const u32 page = offset / FW_PAGE;
   if (page >= fw_page_dirty.size() || fw_page_dirty[page]) return;
   fw_page_dirty[page] = 1;
@@ -132,6 +127,7 @@ constexpr char kFwOvrMagic[8] = {'D', 'S', 'F', 'W', 'O', 'V', 'R', '1'};
 } // namespace
 
 bool NDS::load_firmware_override(const std::string& path, std::string& err) {
+  if (firmware_synthetic) { err = "generated firmware has no settings to override"; return false; }
   std::ifstream f(path, std::ios::binary);
   if (!f) { err = "cannot open"; return false; }
   char magic[8]; u32 head[4];
@@ -162,6 +158,7 @@ bool NDS::load_firmware_override(const std::string& path, std::string& err) {
 
 bool NDS::save_firmware_override(const std::string& path, std::string& err) {
   if (!fw_dirty_pages) return true;
+  if (firmware_synthetic) { err = "generated firmware is not persisted"; return false; }
   const std::string tmp = path + ".tmp";
   {
     std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
@@ -269,6 +266,10 @@ void NDS::setup_direct_boot() {
   auto rom32 = [&](u32 off) { return cart->rom_read32_at(off); };
 
   io.wramcnt = 3; bus.update_wram();
+  // FreeBIOS leaves the Nintendo logo area (ARM9 BIOS 0x20, 0x9C bytes) blank;
+  // games compare it against the header for DS-GBA comms, so take the
+  // header's copy (as melonDS does).
+  if (!bios_native) for (u32 i = 0; i < 0x9C; ++i) bus.bios9.get()[0x20 + i] = cart->header().nintendo_logo[i];
   for (u32 i = 0; i < 0x170; i += 4) w32(0x027FFE00 + i, rom32(i));
   const u32 id = cart->chip_id();
   w32(0x027FF800, id); w32(0x027FF804, id); w16(0x027FF808, h.header_crc16); w16(0x027FF80A, h.secure_area_crc16);

@@ -195,19 +195,23 @@ int main(int argc, char** argv) {
   ds::NDS nds;
   if (frameskip_capture) nds.gpu.set_frameskip_capture(true);
   if (hide_screen) nds.gpu.set_screen_visible(!std::strcmp(hide_screen, "bottom") ? 1 : 0, false);
-  if (bios9 && bios7 && fw) {
-    if (!nds.load_bios(bios9, bios7, fw)) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
-    if (fw_override) {
-      std::string err;
-      if (!nds.load_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware override: %s\n", err.c_str());
-      else if (!err.empty()) std::fprintf(stderr, "firmware override: warning: %s\n", err.c_str());
-    }
-    nds.reset();
-    // After reset(), which clears the RTC.
-    if (rtc_host) nds.io.start_rtc_clock();
-  } else {
-    std::fprintf(stderr, "note: no --bios9/--bios7/--firmware given; running with empty BIOS\n");
+  if ((bios9 == nullptr) != (bios7 == nullptr)) { std::fprintf(stderr, "both --bios9 and --bios7 are needed (or neither, for the built-in FreeBIOS)\n"); return 1; }
+  if (!nds.load_bios(bios9 ? bios9 : "", bios7 ? bios7 : "", fw ? fw : "")) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
+  if (!nds.bios_native) std::fprintf(stderr, "note: no --bios9/--bios7 given; using the built-in FreeBIOS (direct boot only, timing is not Nintendo's)\n");
+  if (nds.firmware_synthetic) std::fprintf(stderr, "note: no --firmware given; using a generated firmware\n");
+  if (!direct && !nds.can_boot_firmware()) {
+    // FreeBIOS's reset vector is an idle loop, so a firmware boot draws nothing.
+    if (rom) { std::fprintf(stderr, "booting the firmware needs real BIOS and firmware dumps; pass --direct to run the ROM\n"); return 1; }
+    std::fprintf(stderr, "warning: no ROM and no real dumps: nothing boots (FreeBIOS has no boot code)\n");
   }
+  if (fw_override && !nds.firmware_synthetic) {
+    std::string err;
+    if (!nds.load_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware override: %s\n", err.c_str());
+    else if (!err.empty()) std::fprintf(stderr, "firmware override: warning: %s\n", err.c_str());
+  }
+  nds.reset();
+  // After reset(), which clears the RTC.
+  if (rtc_host) nds.io.start_rtc_clock();
   // A zipped ROM may be inflated to disk on first use; say so, since on an
   // SD card that is seconds to a minute.
   nds.rom_progress = [](void*, ds::u64 done, ds::u64 total) {

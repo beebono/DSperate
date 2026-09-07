@@ -84,12 +84,21 @@ any form, is in this tree.
 
 Requires CMake ≥ 3.16, Ninja, and a C++17 compiler; SDL2 for the SDL frontend.
 
-Running it also requires a DS BIOS pair and firmware image (`bios9.bin`,
-`bios7.bin`, `firmware.bin`), dumped from your own console. **None are
-provided by this repository**, and DSperate has only been tested against an
-official dump: no open-source replacement BIOS or firmware has been tried,
-and the direct-boot path, KEY1 key table, touchscreen calibration and
-firmware settings all read the real ones.
+Games run without any dumps: with no `--bios9`/`--bios7` the built-in
+[FreeBIOS](src/core/bios/LICENSE.freebios) (Gilead Kutnick's clean-room SWI
+table, as shipped by DraStic and melonDS) fills the BIOS regions, and with no
+`--firmware` a generated firmware carries the owner settings from `[user]` in
+the config. Both are announced at start. They only support booting a game
+directly: FreeBIOS has no boot code and the generated firmware has no DS
+menu, so the firmware boot below needs the real pair. The FreeBIOS SWI
+routines are also not cycle-matched to Nintendo's, so replays and frame
+hashes recorded against a real BIOS drift after a few dozen frames under it;
+benchmarks and the scene tools use the dumps. A DS BIOS pair and firmware
+image (`bios9.bin`, `bios7.bin`, `firmware.bin`) dumped from your own console
+unlock everything; **none are provided by this repository**. A real BIOS pair
+with a generated firmware is also fine. Dumps with a still-encrypted secure
+area need the real ARM7 BIOS for its KEY1 table; the usual decrypted dumps do
+not.
 
     cmake --preset host && cmake --build --preset host && ctest --preset host
     ./build/host/src/frontend/headless/dsperate-headless --bios9 bios9.bin --bios7 bios7.bin \
@@ -310,7 +319,7 @@ Started with no ROM -- or with one named `BootMenu.nds`, so a launcher that
 only knows how to start games can reach it -- `dsperate` boots the
 console's own firmware instead of a game. That is the DS menu: the clock and
 calendar, the owner's nickname, the settings pages and the card panel. It needs
-the real BIOS pair and firmware dump like everything else does.
+the real BIOS pair and firmware dump; the built-in replacements refuse it.
 
 A card goes in the slot either way, still under a firmware boot, so the menu
 has a banner to draw and something to launch. It is built into the emulator --
