@@ -10,6 +10,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1595,7 +1596,7 @@ void Gpu3D::set_geometry_worker(bool on) {
     if (!no_fifo_) { std::fprintf(stderr, "[gx] geometry worker needs the no-FIFO model (--timing-oc); not enabled\n"); return; }
     if (no_fifo_) drain_all();   // hand over an empty ring
     sh_.mode = matrix_mode_; sh_.proj_sp = proj_sp_; sh_.pos_sp = pos_sp_; sh_.tex_sp = tex_sp_; sh_.err = stack_err_;
-    q_wr_local_ = q_rd_local_ = 0; q_pending_ = false;
+    q_wr_local_ = q_rd_local_ = q_rd_seen_ = 0; q_pending_ = false;
     q_wr_.store(0, std::memory_order_relaxed); q_rd_.store(0, std::memory_order_relaxed);
     q_stop_ = false;
     worker_thread_ = std::thread([this] { worker_loop(); });
@@ -1632,9 +1633,22 @@ void Gpu3D::q_publish() {
 
 // The producer is a whole queue ahead: publish what it has and wait for room.
 void Gpu3D::q_wait_room() {
+  q_rd_seen_ = q_rd_.load(std::memory_order_acquire);
+  if (q_wr_local_ - q_rd_seen_ < QN) return;
   q_publish();
   prof::add(prof::C_GX_WORKER_FULL, 1);
-  while (q_wr_local_ - q_rd_.load(std::memory_order_acquire) >= QN) std::this_thread::yield();
+  while (q_wr_local_ - (q_rd_seen_ = q_rd_.load(std::memory_order_acquire)) >= QN) std::this_thread::yield();
+}
+
+// Spin for about `us` microseconds waiting for `done`, before either side
+// pays a futex sleep and the wake-up latency that follows it (tens of us on
+// the handhelds' kernels, against DMA bursts a few us apart).
+template <class F> static bool spin_for(u32 us, F done) {
+  const auto t0 = std::chrono::steady_clock::now();
+  for (;;) {
+    for (int i = 0; i < 64; ++i) if (done()) return true;
+    if (std::chrono::steady_clock::now() - t0 > std::chrono::microseconds(us)) return done();
+  }
 }
 
 void Gpu3D::worker_join() {
@@ -1642,11 +1656,9 @@ void Gpu3D::worker_join() {
   const u32 target = q_wr_local_;
   if (q_rd_.load(std::memory_order_acquire) == target) return;
   prof::Scope sc(prof::GX_JOIN);
-  // A short spin first: the common join (VBlank) finds the worker on its
-  // last few commands.
-  for (int i = 0; i < 2000; ++i) {
-    if (q_rd_.load(std::memory_order_acquire) == target) return;
-  }
+  // A spin first: the common join (VBlank) finds the worker on its last few
+  // commands, and a sleep here costs the wake-up latency on top of the wait.
+  if (spin_for(200, [&] { return q_rd_.load(std::memory_order_acquire) == target; })) return;
   std::unique_lock<std::mutex> lk(q_mu_);
   joiner_waiting_.store(true, std::memory_order_seq_cst);
   std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -1659,6 +1671,10 @@ void Gpu3D::worker_loop() {
   for (;;) {
     u32 wr = q_wr_.load(std::memory_order_acquire);
     if (rd == wr) {
+      // Feeds arrive per CPU slice and per DMA burst, a few microseconds
+      // apart while a list is being built: spin through those gaps and
+      // sleep only through a real idle (the rest of the frame).
+      if (spin_for(50, [&] { return q_wr_.load(std::memory_order_acquire) != rd; })) continue;
       std::unique_lock<std::mutex> lk(q_mu_);
       worker_asleep_.store(true, std::memory_order_seq_cst);
       std::atomic_thread_fence(std::memory_order_seq_cst);

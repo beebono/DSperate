@@ -275,6 +275,7 @@ private:
   static constexpr u32 QN = 1u << 16;
   std::unique_ptr<Entry[]> q_ = std::unique_ptr<Entry[]>(new Entry[QN]);
   u32 q_wr_local_ = 0;
+  u32 q_rd_seen_ = 0;                  // the worker's cursor as last read: the room check reloads it only when this says full
   bool q_pending_ = false;             // entries written since the last publish
   alignas(64) std::atomic<u32> q_wr_{0};
   alignas(64) std::atomic<u32> q_rd_{0};
@@ -291,7 +292,10 @@ private:
   std::thread worker_thread_;
   u32 q_rd_local_ = 0;                  // worker's cursor
   void q_push(const Entry& e) {
-    if (q_wr_local_ - q_rd_.load(std::memory_order_acquire) >= QN) q_wait_room();
+    // No cross-core load per entry: q_rd_ is a line the worker keeps dirty,
+    // so the producer reads it only when its last reading says the queue is
+    // full (q_wait_room refreshes q_rd_seen_).
+    if (q_wr_local_ - q_rd_seen_ >= QN) q_wait_room();
     q_[q_wr_local_ & (QN - 1)] = e; ++q_wr_local_; q_pending_ = true;
     shadow_exec(e.cmd, e.param);
   }
