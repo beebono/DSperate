@@ -336,7 +336,7 @@ Gpu3D::~Gpu3D() { renderer_.sync_all(); }
 Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) { reset(); }
 
 void Gpu3D::reset_render_state() {
-  render_count_ = 0;
+  render_count_.fill(0);
   rstate_ = RenderState{};
 }
 
@@ -1383,11 +1383,12 @@ void Gpu3D::finalise_list() {
       // translucent ordering.
       u32 io = 0, it = num_opaque_;
       const Polygon* pr = cur_pram();
-      for (u32 i = 0; i < num_polygons_; ++i) { const Polygon* p = &pr[i]; if (p->translucent) render_polys_[it++] = p; else render_polys_[io++] = p; }
-      std::stable_sort(render_polys_.begin(), render_polys_.begin() + ((flush_attr_ & 1) ? num_opaque_ : num_polygons_),
+      auto& rp = render_polys_[bank_];
+      for (u32 i = 0; i < num_polygons_; ++i) { const Polygon* p = &pr[i]; if (p->translucent) rp[it++] = p; else rp[io++] = p; }
+      std::stable_sort(rp.begin(), rp.begin() + ((flush_attr_ & 1) ? num_opaque_ : num_polygons_),
                        [](const Polygon* a, const Polygon* b) { return a->sort_key < b->sort_key; });
     }
-    render_count_ = num_polygons_;
+    render_count_[bank_] = num_polygons_;
     // A swap that resubmits the same geometry with the same render state
     // produces the same picture: keep the previous output (the rasteriser
     // still checks its textures itself).
@@ -1407,7 +1408,7 @@ void Gpu3D::finalise_list() {
       if (num_vertices_ > prof::count(prof::C_GX_SWAP_MAXVERTS))
         prof::add(prof::C_GX_SWAP_MAXVERTS, num_vertices_ - prof::count(prof::C_GX_SWAP_MAXVERTS));
       if (census_gx()) {
-        const u64 h = census_list_hash(render_polys_.data(), render_count_, vram_.data());
+        const u64 h = census_list_hash(render_polys_[bank_].data(), render_count_[bank_], vram_.data());
         prof::census_same_list = census_have_prev_ && h == census_prev_hash_;
         if (prof::census_same_list) {
           prof::add(prof::C_GX_SWAP_SAME_CONTENT, 1);
@@ -1712,18 +1713,22 @@ template <class S> void Gpu3D::sync_state(S& s) {
   u32 slot_of[BANKS]; for (u32 b = 0; b < BANKS; ++b) slot_of[b] = b == bank_ ? 0 : b == render_bank_ ? 1 : 2;
   auto remap = [&](u32 idx, u32 per) -> u32 { return S::reading ? idx : slot_of[idx / per] * per + idx % per; };
   u32 bank_disk = 0;
+  // The finalised list on disk is the render bank's (slot 1); it reads back
+  // into bank 1's list below.
+  u32 rcount = S::reading ? 0 : render_count_[render_bank_];
   s.fields(vertex_num_, vertex_in_poly_, consecutive_polys_, num_opaque_, bank_disk, num_vertices_, num_polygons_,
-           render_count_, render_identical_, flush_request_, flush_attr_, prev_swap_polys_, prev_swap_verts_, rendered_before_);
+           rcount, render_identical_, flush_request_, flush_attr_, prev_swap_polys_, prev_swap_verts_, rendered_before_);
   if constexpr (S::reading) { bank_ = bank_disk & 1; render_bank_ = bank_ ^ 1; raster_bank_ = render_bank_; }
+  const Polygon** rlist = render_polys_[render_bank_].data();
   // Pointers into the polygon RAM travel as indices.
   s32 strip = last_strip_poly_ ? static_cast<s32>(remap(static_cast<u32>(last_strip_poly_ - pram_.data()), PRAM_BANK)) : -1;
   s.put(strip);
   if constexpr (S::reading) last_strip_poly_ = strip >= 0 && strip < static_cast<s32>(PRAM_BANK * 2) ? &pram_[static_cast<size_t>(strip)] : nullptr;
-  if constexpr (S::reading) { if (render_count_ > PRAM_BANK) { s.fail("render list"); return; } }
-  for (u32 i = 0; i < render_count_; ++i) {
-    u16 k = static_cast<u16>(S::reading ? 0 : remap(static_cast<u32>(render_polys_[i] - pram_.data()), PRAM_BANK));
+  if constexpr (S::reading) { if (rcount > PRAM_BANK) { s.fail("render list"); return; } render_count_[render_bank_] = rcount; }
+  for (u32 i = 0; i < rcount; ++i) {
+    u16 k = static_cast<u16>(S::reading ? 0 : remap(static_cast<u32>(rlist[i] - pram_.data()), PRAM_BANK));
     s.put(k);
-    if constexpr (S::reading) render_polys_[i] = &pram_[k & (PRAM_BANK * 2 - 1)];
+    if constexpr (S::reading) rlist[i] = &pram_[k & (PRAM_BANK * 2 - 1)];
   }
   // Vertex/polygon RAM: the current bank up to its counts, the finalised
   // bank (the one being displayed, and compared against at the next swap)
@@ -1732,10 +1737,10 @@ template <class S> void Gpu3D::sync_state(S& s) {
   if constexpr (!S::reading) {
     nv[0] = num_vertices_; np[0] = num_polygons_;
     nv[1] = std::min(prev_swap_verts_, VRAM_BANK); np[1] = std::min(prev_swap_polys_, PRAM_BANK);
-    for (u32 i = 0; i < render_count_; ++i) {
-      const u32 k = remap(static_cast<u32>(render_polys_[i] - pram_.data()), PRAM_BANK);
+    for (u32 i = 0; i < rcount; ++i) {
+      const u32 k = remap(static_cast<u32>(rlist[i] - pram_.data()), PRAM_BANK);
       if (k < PRAM_BANK * 2) np[k / PRAM_BANK] = std::max(np[k / PRAM_BANK], k % PRAM_BANK + 1);
-      const Polygon& p = *render_polys_[i];
+      const Polygon& p = *rlist[i];
       for (u32 j = 0; j < p.nverts && j < 10; ++j) { const u32 vi = remap(p.vtx[j], VRAM_BANK); if (vi < VRAM_BANK * 2) nv[vi / VRAM_BANK] = std::max(nv[vi / VRAM_BANK], vi % VRAM_BANK + 1); }
     }
   }

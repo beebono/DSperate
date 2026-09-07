@@ -446,10 +446,10 @@ private:
   //
   // Band boundaries are fixed for a given band count, so the split is
   // deterministic and the output does not depend on thread scheduling.
-  void build_edges(const Gpu3D& gx);
+  void build_edges();   // from list_polys_ / list_count_, latched by render() or prepare_worker
   void seed_active(s32 y);
   void render_band(s32 y0, s32 y1, u32* dst);
-  void prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels, const RenderState* rs);
+  void prepare_worker(const Gpu3D& gx, const Polygon* const* polys, u32 npoly, const std::vector<const u32*>* texels, const RenderState* rs);
   // The coordinator's copy of the render registers for the frame: the
   // engine's own are rewritten at the next VBlank while the raster may
   // still be running (see Gpu3D::raster_bank_).
@@ -513,6 +513,14 @@ private:
   u32  edge_count_ = 0;
   u32* out_dst_ = nullptr;                              // where final_pass writes
   const std::vector<const u32*>* texels_in_ = nullptr;  // decoded textures per polygon (render() records them)
+  // The polygon list this frame draws, latched once by the coordinator after
+  // sync_all and handed to every band. Workers never read it off the engine:
+  // in the no-FIFO model the SWAP command finalises the next list while this
+  // raster is still in flight, and a late-starting band reading the engine's
+  // live list drew the new list's polygons against the old bank (etody
+  // segfault in texture_sample under --timing-oc, 2026-09-07).
+  const Polygon* const* list_polys_ = nullptr;
+  u32 list_count_ = 0;
   s32  rendered_upto_ = 0;    // lines this instance has already rasterised this frame
   u32  setup_poly_ = 0;                                 // polygon index during build_edges
   std::vector<const u32*> poly_texels_;

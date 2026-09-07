@@ -170,8 +170,9 @@ public:
   u32 dispcnt() const { return dispcnt_; }
   const RenderState& render_state() const { return rstate_; }
   const Vertex& vertex(u32 idx) const { return vram_[idx]; }
-  const Polygon* const* render_polygons() const { return render_polys_.data(); }
-  u32 render_polygon_count() const { return render_count_; }
+  // The finalised list of the bank the raster reads (render_frame sets it).
+  const Polygon* const* render_polygons() const { return render_polys_[raster_bank_].data(); }
+  u32 render_polygon_count() const { return render_count_[raster_bank_]; }
   // No SWAP_BUFFERS since the last render and the render registers are
   // unchanged: the rasteriser may keep its previous output if the textures
   // it used are unchanged too (it checks those itself).
@@ -301,8 +302,12 @@ private:
   u32 bank_ = 0, render_bank_ = 1, raster_bank_ = 1;
   u32 next_write_bank() const { for (u32 b = 0; b < BANKS; ++b) if (b != render_bank_ && b != raster_bank_) return b; return 0; }
   u32 num_vertices_ = 0, num_polygons_ = 0;
-  std::array<const Polygon*, PRAM_BANK> render_polys_{};
-  u32 render_count_ = 0;
+  // The sorted list per bank, written by finalise_list into the bank it
+  // finalises. Per bank, not one array: in the no-FIFO model a SWAP command
+  // finalises the next list while the raster of the previous one may still be
+  // starting its bands (the etody --timing-oc segfault, 2026-09-07).
+  std::array<std::array<const Polygon*, PRAM_BANK>, BANKS> render_polys_{};
+  std::array<u32, BANKS> render_count_{};
   bool render_identical_ = false;
   bool render_stale_ = false;      // note_raster_skipped: the last render is older than rstate_ says
   u32 flush_request_ = 0, flush_attr_ = 0;

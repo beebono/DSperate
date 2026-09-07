@@ -2556,6 +2556,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   if (no_cache) texcache_.set_enabled(false);
   texcache_.begin_frame(nds_.frame_count);
   const Polygon* const* polys = gx.render_polygons();
+  list_polys_ = polys; list_count_ = gx.render_polygon_count();
   // A frame with no new polygon list and the same render registers draws
   // the same picture as the last one — unless a texture or palette it reads
   // changed underneath. Validating every texture it uses through the cache
@@ -2613,7 +2614,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   // The buffer the display is not reading; it becomes the displayed one once
   // the frame is dispatched (its lines are then waited for per band).
   u32* const dst = out_[display_ ^ 1].data();
-  if (maxb <= 1) { pending_bands_ = 0; wait_ns_.store(0, std::memory_order_relaxed); build_edges(gx); render_band(0, 192, dst); display_ ^= 1; return; }
+  if (maxb <= 1) { pending_bands_ = 0; wait_ns_.store(0, std::memory_order_relaxed); build_edges(); render_band(0, 192, dst); display_ ^= 1; return; }
 
   // The pool is always the maximum size and only `nb` of it is given work, so
   // ramping the thread count costs a dispatch flag rather than creating and
@@ -2644,8 +2645,8 @@ void Renderer3D::render(const Gpu3D& gx) {
   job_fn_ = [this, &gxr, dst](u32 w) {
     const auto t0 = std::chrono::steady_clock::now();
     Renderer3D* r = this;
-    if (w != 0) { r = bands_[w - 1].get(); r->prepare_worker(gxr, &poly_texels_, &rs_frame_); }
-    else build_edges(gxr);   // this instance's render state is already latched
+    if (w != 0) { r = bands_[w - 1].get(); r->prepare_worker(gxr, list_polys_, list_count_, &poly_texels_, &rs_frame_); }
+    else build_edges();   // this instance's render state is already latched
     for (;;) {
       const u32 b = pool_->claim();
       if (b >= nbins_) break;
@@ -2760,8 +2761,8 @@ Renderer3D::Split Renderer3D::split_mode() {
 // entries and needs no edge setup first.
 void Renderer3D::compute_bins(u32 nbins, u32 workers) {
   std::array<s32, 194> delta{};
-  const Polygon* const* polys = gx_->render_polygons();
-  for (u32 i = 0; i < gx_->render_polygon_count(); ++i) {
+  const Polygon* const* polys = list_polys_;
+  for (u32 i = 0; i < list_count_; ++i) {
     const Polygon& p = *polys[i];
     if (p.degenerate) continue;
     const s32 y0 = p.ytop < 0 ? 0 : p.ytop;
@@ -3002,8 +3003,9 @@ u32 Renderer3D::band_count(u32 polygons) {
 }
 
 // Set up a worker to render a band of the frame the coordinator has latched.
-void Renderer3D::prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* texels, const RenderState* rs) {
+void Renderer3D::prepare_worker(const Gpu3D& gx, const Polygon* const* polys, u32 npoly, const std::vector<const u32*>* texels, const RenderState* rs) {
   gx_ = &gx;
+  list_polys_ = polys; list_count_ = npoly;
   rs_ = rs;
   dispcnt_ = rs_->dispcnt & (aa_ ? ~0u : ~(1u << 4));
   expand_toon();
@@ -3011,15 +3013,15 @@ void Renderer3D::prepare_worker(const Gpu3D& gx, const std::vector<const u32*>* 
   texv_ = &vm_->texture;
   palv_ = &vm_->texpal;
   texels_in_ = texels;
-  build_edges(gx);
+  build_edges();
 }
 
 // Decode the polygon list into edges and bucket them by top line. Every band
 // repeats this: the edge cursors are walked per line and so cannot be shared.
-void Renderer3D::build_edges(const Gpu3D& gx) {
-  const Polygon* const* polys = gx.render_polygons();
+void Renderer3D::build_edges() {
+  const Polygon* const* polys = list_polys_;
   u32 n = 0;
-  for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
+  for (u32 i = 0; i < list_count_; ++i) {
     if (polys[i]->degenerate) continue;
     setup_poly_ = i;
     setup_polygon(edges_[n++], *polys[i]);
