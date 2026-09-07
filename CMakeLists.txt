@@ -66,7 +66,27 @@ foreach(cfg RELEASE RELWITHDEBINFO)
   string(REPLACE "-O2" "-O3" CMAKE_CXX_FLAGS_${cfg} "${CMAKE_CXX_FLAGS_${cfg}}")
 endforeach()
 
-add_compile_options(-fstack-protector)
+# Distro-style hardening. Ubuntu's GCC also injects _FORTIFY_SOURCE=3 at -O2+,
+# which turns short fixed-size memcpys in the pixel loops into __memcpy_chk
+# calls; OFF removes both. Measured on the RG DS 2026-09-07: etody median -17 %,
+# dbori p99 -6 %, nothing worse (docs/perf-audit-2026-09-07-flags-ab.txt).
+option(DSPERATE_HARDEN "Build with -fstack-protector and _FORTIFY_SOURCE" OFF)
+if(DSPERATE_HARDEN)
+  add_compile_options(-fstack-protector)
+else()
+  add_compile_options(-fno-stack-protector -D_FORTIFY_SOURCE=0)
+endif()
+
+# Target-core tuning, e.g. "-mtune=cortex-a55" (scheduling only, binary stays
+# ARMv8.0) or "-mcpu=cortex-a55" (also raises the ISA baseline to v8.2).
+# Applied at link too so the LTO code generation sees it. Measured flat on the
+# A55 (-mtune, -mcpu and -march alone all within noise); left empty on purpose.
+set(DSPERATE_TUNE "" CACHE STRING "Extra -mcpu/-mtune options for the target core")
+if(DSPERATE_TUNE)
+  separate_arguments(_ds_tune NATIVE_COMMAND "${DSPERATE_TUNE}")
+  add_compile_options(${_ds_tune})
+  add_link_options(${_ds_tune})
+endif()
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 

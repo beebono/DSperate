@@ -1,0 +1,54 @@
+2636f17c62d3d3d856f01abad24b799a  dsperate-headless.base
+47b69bb52143e959b14dcb7739a36a3d  dsperate-headless.march
+955de4d235a4d3972b2b8f23331c25dc  dsperate-headless.mcpu
+84aafb66f0ca2134fa55a576a0b279bd  dsperate-headless.mtune
+43ad9714cf4e97d886d0701bccfbac5e  dsperate-headless.noharden
+warm-up
+base      dbori  fwd1 median   7.449 p99  13.916 max  24.809 over 1
+noharden  dbori  fwd1 median   7.415 p99  14.056 max  24.596 over 1
+march     dbori  fwd1 median   7.404 p99  15.257 max  24.961 over 1
+march     dbori  rev1 median   7.528 p99  14.657 max  26.300 over 1
+noharden  dbori  rev1 median   7.450 p99  13.834 max  24.652 over 2
+base      dbori  rev1 median   7.506 p99  14.012 max  24.426 over 1
+base      dbori  fwd2 median   7.489 p99  14.099 max  25.129 over 1
+noharden  dbori  fwd2 median   7.427 p99  14.860 max  25.248 over 1
+march     dbori  fwd2 median   7.473 p99  13.870 max  25.107 over 1
+march     dbori  rev2 median   7.470 p99  13.839 max  25.113 over 1
+noharden  dbori  rev2 median   7.436 p99  13.797 max  24.325 over 1
+base      dbori  rev2 median   7.511 p99  13.667 max  24.288 over 1
+base      etody  fwd1 median   3.631 p99  14.981 max  23.599 over 1
+noharden  etody  fwd1 median   3.068 p99  14.686 max  23.026 over 1
+march     etody  fwd1 median   3.050 p99  14.490 max  23.323 over 1
+march     etody  rev1 median   3.078 p99  14.518 max  24.907 over 1
+noharden  etody  rev1 median   3.040 p99  14.405 max  23.137 over 1
+base      etody  rev1 median   3.705 p99  14.748 max  23.737 over 1
+base      etody  fwd2 median   3.557 p99  14.808 max  23.266 over 1
+noharden  etody  fwd2 median   3.059 p99  14.825 max  23.162 over 1
+march     etody  fwd2 median   3.045 p99  14.528 max  23.108 over 1
+march     etody  rev2 median   3.032 p99  14.768 max  22.944 over 1
+noharden  etody  rev2 median   3.090 p99  14.720 max  23.356 over 1
+base      etody  rev2 median   3.585 p99  14.794 max  23.392 over 1
+base      sm64   fwd1 median   3.935 p99  11.423 max  14.315 over 0
+noharden  sm64   fwd1 median   3.874 p99  11.181 max  13.489 over 0
+march     sm64   fwd1 median   3.994 p99  11.193 max  13.627 over 0
+march     sm64   rev1 median   3.920 p99  11.420 max  14.232 over 0
+noharden  sm64   rev1 median   3.861 p99  10.856 max  13.553 over 0
+base      sm64   rev1 median   3.878 p99  11.744 max  13.635 over 0
+base      sm64   fwd2 median   3.944 p99  11.237 max  14.050 over 0
+noharden  sm64   fwd2 median   3.909 p99  11.210 max  13.598 over 0
+march     sm64   fwd2 median   3.924 p99  11.779 max  19.481 over 1
+march     sm64   rev2 median   3.915 p99  11.196 max  13.517 over 0
+noharden  sm64   rev2 median   3.937 p99  11.208 max  13.591 over 0
+base      sm64   rev2 median   3.908 p99  11.459 max  13.719 over 0
+base      gsdd   fwd1 median  17.626 p99  24.185 max  24.937 over 214
+noharden  gsdd   fwd1 median  17.899 p99  26.110 max  30.891 over 220
+march     gsdd   fwd1 median  17.608 p99  27.133 max  28.262 over 209
+march     gsdd   rev1 median  17.813 p99  28.805 max  29.804 over 221
+noharden  gsdd   rev1 median  17.606 p99  24.970 max  30.327 over 207
+base      gsdd   rev1 median  17.839 p99  26.521 max  27.249 over 217
+base      gsdd   fwd2 median  17.942 p99  26.946 max  30.180 over 219
+noharden  gsdd   fwd2 median  17.678 p99  25.167 max  32.947 over 209
+march     gsdd   fwd2 median  17.805 p99  25.268 max  31.769 over 217
+march     gsdd   rev2 median  17.717 p99  24.135 max  39.993 over 213
+noharden  gsdd   rev2 median  17.689 p99  26.950 max  31.030 over 213
+base      gsdd   rev2 median  17.662 p99  28.187 max  31.488 over 212
