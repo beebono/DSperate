@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <thread>
 #include <memory>
 #include <vector>
 
@@ -534,6 +535,37 @@ public:
   void debug_dump(FILE* f);   // DS_WATCHDOG: band hand-off state
 private:
   std::unique_ptr<Pool> pool_;
+  // Steal-on-wait. When a thread would block for a band (sync_line on the
+  // compositing thread, sync_all on the emulation thread) and an unclaimed
+  // bin exists, it renders that bin itself instead: a bin nobody has taken
+  // would only start when a worker frees up, so drawing it now is never later
+  // than waiting for it, and the waiting core does the work. Any thread may
+  // steal: what a bin needs is snapshotted per dispatch (ctx_, two slots by
+  // generation parity -- the compositor of frame N may still be reading N's
+  // while the emulation thread dispatches N+1), each thief draws through a
+  // band of its own, and wait_idle waits for thieves as it does for workers,
+  // so a VRAM remap never overtakes a stolen bin.
+  struct DispatchCtx {
+    const Gpu3D* gx = nullptr;
+    const Polygon* const* polys = nullptr;
+    u32 npoly = 0;
+    std::vector<const u32*> texels;
+    RenderState rs;
+    std::array<s32, MAX_BINS + 1> bin_y{};
+    u32 nbins = 0;
+    u32* dst = nullptr;
+    bool aa = false;
+  };
+  DispatchCtx ctx_[2];
+  struct StealBand { std::unique_ptr<Renderer3D> band; std::atomic<bool> busy{false}; u64 gen = ~u64{0}; };
+  StealBand steal_[2];
+  std::thread::id owner_;                // the thread render() dispatched from
+  bool steal_bins(u64 gen, u32 upto);    // claim and draw unclaimed bins until bin `upto` is done; true if it is
+  // DS_R3D_STEAL: 0 off, 1 (default) the dispatching thread only, 2 any
+  // thread. The compositor stealing measured flat-to-worse on Golden Sun (RG
+  // DS, 2026-09-07): it is the critical path there, and a bin it takes is two
+  // ahead of the one it needs, so a short wait became a full render.
+  static int steal_mode();
 
   u32  fog_density(u32 addr) const;
   void final_pass(s32 y);

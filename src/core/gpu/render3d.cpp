@@ -294,13 +294,30 @@ struct Renderer3D::Pool {
   // to reassign job_fn_, destroying the std::function under it. Bin bits are
   // what a display line waits for; this is what the frame boundary waits for.
   u64 wait_idle() {
-    if (remaining_.load(std::memory_order_acquire) == 0) return 0;
+    if (remaining_.load(std::memory_order_acquire) == 0 && thieves_.load(std::memory_order_acquire) == 0) return 0;
     const auto t0 = std::chrono::steady_clock::now();
     {
       std::unique_lock<std::mutex> lk(m_);
-      done_.wait(lk, [this] { return remaining_.load(std::memory_order_relaxed) == 0; });
+      done_.wait(lk, [this] { return remaining_.load(std::memory_order_relaxed) == 0 && thieves_.load(std::memory_order_relaxed) == 0; });
     }
     return static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
+  }
+  // A thief's claim: only if `gen` is still the dispatch in flight, atomically
+  // with that check (dispatch resets the cursor under the lock), and counted
+  // as in flight until thief_done so wait_idle covers it.
+  u32 claim_if(u64 gen) {
+    std::lock_guard<std::mutex> lk(m_);
+    if (generation_.load(std::memory_order_relaxed) != gen) return ~0u;
+    const u32 b = next_bin_.fetch_add(1, std::memory_order_acq_rel);
+    if (b < nbins_) thieves_.fetch_add(1, std::memory_order_acq_rel);
+    return b;
+  }
+  void thief_done(u32 bin) {
+    { std::lock_guard<std::mutex> lk(m_); done_bits_.fetch_or(u64{1} << bin, std::memory_order_release); thieves_.fetch_sub(1, std::memory_order_acq_rel); }
+    done_.notify_all();
+  }
+  bool done(u64 gen, u64 mask) const {
+    return generation_.load(std::memory_order_acquire) != gen || (done_bits_.load(std::memory_order_acquire) & mask) == mask;
   }
 
 private:
@@ -333,6 +350,7 @@ public:
   std::atomic<u64> generation_{0};   // bumped under m_; read lock-free by wait_bits
   std::atomic<u64> done_bits_{0};
   std::atomic<u32> next_bin_{0};
+  std::atomic<u32> thieves_{0};      // bins claimed by waiting threads and not yet done
   std::atomic<u32> remaining_{0};
   u32 jobs_ = 0, nbins_ = 0;
   bool stop_ = false;
@@ -2660,6 +2678,14 @@ void Renderer3D::render(const Gpu3D& gx) {
     if (w < 8) band_ns_[w] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   };
   pending_bands_ = nbins_;
+  owner_ = std::this_thread::get_id();
+  {
+    // The next generation's slot: sync_all above guarantees no thief of the
+    // generation two back is still reading it.
+    DispatchCtx& c = ctx_[(gen_ + 1) & 1];
+    c.gx = &gx; c.polys = list_polys_; c.npoly = list_count_; c.texels = poly_texels_; c.rs = rs_frame_;
+    c.bin_y = bin_y_; c.nbins = nbins_; c.dst = dst; c.aa = aa_;
+  }
   gen_ = pool_->dispatch(job_fn_, nb, nbins_);
   display_ ^= 1;
   if (!async_) sync_all();
@@ -2847,6 +2873,7 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
   if (!f.nbins || !pool_) return;
   u32 b = 0;
   while (b + 1 < f.nbins && y >= f.bin_y[b + 1]) ++b;
+  if (steal_bins(f.gen, b)) return;
   DS_PROF(R3D_WAIT);
   const u64 ns = pool_->wait_bits(f.gen, u64{1} << b);
   if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed);
@@ -2861,10 +2888,51 @@ void Renderer3D::sync_all() {
   // be inside the job at that point -- it marks its last bin done from in
   // there. Waiting on an idle pool costs one uncontended lock.
   u64 ns = 0;
+  if (pool_ && pending_bands_) steal_bins(gen_, nbins_ - 1);
   if (pool_) { DS_PROF(R3D_WAIT); ns = pool_->wait_idle(); if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed); }
   if (!pending_bands_) return;
   if (ns) prof::add(prof::C_R3D_SYNC_ALL, 1);   // bands were still running: something waited for the whole raster
   pending_bands_ = 0;
+}
+
+int Renderer3D::steal_mode() {
+  static const int m = [] { const char* e = std::getenv("DS_R3D_STEAL"); return e ? std::atoi(e) : 1; }();
+  return m;
+}
+
+// Draw unclaimed bins on the calling thread until bin `upto` is done. Bins
+// are handed out in ascending Y, so an unclaimed bin is never below one a
+// worker still has to reach; whatever is claimed here is on the display's
+// path anyway. Returns true if `upto` is done -- without having waited.
+bool Renderer3D::steal_bins(u64 gen, u32 upto) {
+  const int mode = steal_mode();
+  if (mode == 0 || (mode == 1 && std::this_thread::get_id() != owner_)) return false;
+  const u64 mask = u64{1} << upto;
+  if (pool_->done(gen, mask)) return true;
+  // A band of this thread's own for the duration; none free means two
+  // thieves are already at it, and this one waits like before.
+  StealBand* sb = nullptr;
+  for (StealBand& c : steal_) if (!c.busy.exchange(true, std::memory_order_acq_rel)) { sb = &c; break; }
+  if (!sb) return false;
+  const DispatchCtx& cx = ctx_[gen & 1];
+  bool result = false;
+  for (;;) {
+    if (pool_->done(gen, mask)) { result = true; break; }
+    const u32 c = pool_->claim_if(gen);
+    if (c >= cx.nbins) { result = pool_->done(gen, mask); break; }
+    if (sb->gen != gen) {
+      if (!sb->band) sb->band = std::make_unique<Renderer3D>(nds_);
+      sb->band->aa_ = cx.aa;
+      sb->band->prepare_worker(*cx.gx, cx.polys, cx.npoly, &cx.texels, &cx.rs);
+      sb->gen = gen;
+    }
+    const s32 y0 = cx.bin_y[c], y1 = cx.bin_y[c + 1];
+    if (y0 < y1) sb->band->render_band(y0, y1, cx.dst);
+    pool_->thief_done(c);
+    prof::add(prof::C_R3D_STOLEN, 1);
+  }
+  sb->busy.store(false, std::memory_order_release);
+  return result;
 }
 
 // How many workers to run this frame, from how long the emulation thread
