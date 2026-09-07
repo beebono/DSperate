@@ -1,0 +1,41 @@
+# Zero-code device measurements 2026-09-07 (RG DS .20, dsperate.noharden build)
+
+## E1: DS_2D_SPLIT / DS_2D_LAZY (headless --quantum 0, 300 frames, two rounds)
+gsdd  X=0            median 17.739 p99 24.978 | 17.545 p99 27.680
+gsdd  DS_2D_SPLIT=1  median 17.467 p99 26.017 | 17.704 p99 25.324
+gsdd  DS_2D_LAZY=0   median 17.680 p99 24.909 | 17.703 p99 27.803
+gsdd  SPLIT+LAZY=0   median 17.469 p99 25.249 | 17.656 p99 25.985
+etody X=0            median 3.104 p99 14.551 | 3.076 p99 14.710
+etody DS_2D_SPLIT=1  median 3.067 p99 20.578 | 3.056 p99 21.189
+dbori X=0            median 7.458 p99 13.860 | 7.488 p99 14.331
+dbori DS_2D_SPLIT=1  median 7.491 p99 14.306 | 7.434 p99 13.970
+
+## A4: stub histogram (perf -F 4000, whole process incl. workers, DS_PERF_MAP=1)
+sm64 600 fr: block bodies 22.2 %; branch_indirect 1.34+0.22, dispatch 0.92+0.70, call_pure 0.71, merge_keep_cv 0.37, merge_set_c 0.35, call_full 0.19, poll 0.18, enter_light 0.18, fallback7 0.15, run_loop 0.13, slow_load32 0.12
+gsdd 300 fr: block bodies 4.2 %; dispatch 0.37+0.21, branch_indirect 0.25+0.04, call_pure 0.15, call_full 0.11, fallback9 0.09, bi_cdi 0.09
+
+## B2: thread priorities (SDL fullscreen dual-window Wayland, audio+vsync on, 1800 frames stats from 600, chrt at 8 s; 'work' series)
+rr5      etody  median 5.442 p90 7.606 p99 11.653 max 16.022 
+off      etody  median 6.948 p90 10.705 p99 14.787 max 22.520 
+audio6   etody  median 5.500 p90 7.633 p99 11.677 max 15.564 
+bwother  etody  median 5.887 p90 8.260 p99 13.456 max 16.543 
+both     etody  median 5.876 p90 8.793 p99 13.786 max 15.388 
+emu6     etody  median 5.599 p90 7.667 p99 11.526 max 15.657 
+rr5      gsdd   median 16.364 p90 18.837 p99 31.616 max 41.684 
+off      gsdd   median 16.736 p90 19.807 p99 25.407 max 31.801 
+audio6   gsdd   median 16.330 p90 18.820 p99 20.935 max 30.056 
+bwother  gsdd   median 16.595 p90 20.219 p99 27.236 max 39.210 
+both     gsdd   median 16.368 p90 19.918 p99 25.348 max 43.800 
+emu6     gsdd   median 16.547 p90 19.136 p99 21.066 max 29.853 
+rr5      etody  median 5.573 p90 7.859 p99 11.697 max 15.750 
+off      etody  median 6.840 p90 10.187 p99 14.550 max 21.087 
+audio6   etody  median 5.488 p90 7.590 p99 11.576 max 15.832 
+bwother  etody  median 5.648 p90 8.152 p99 13.052 max 17.997 
+both     etody  median 5.475 p90 8.318 p99 13.140 max 17.947 
+emu6     etody  median 5.468 p90 7.615 p99 11.788 max 16.817 
+rr5      gsdd   median 16.345 p90 18.933 p99 21.246 max 29.547 
+off      gsdd   median 17.025 p90 20.124 p99 24.684 max 33.859 
+audio6   gsdd   median 16.425 p90 19.128 p99 21.115 max 29.822 
+bwother  gsdd   median 16.524 p90 19.931 p99 25.045 max 43.765 
+both     gsdd   median 16.835 p90 19.754 p99 23.576 max 32.203 
+emu6     gsdd   median 16.709 p90 19.299 p99 21.259 max 29.785 
