@@ -942,11 +942,11 @@ void Gpu::emit_cells(int screen, u32 line, const u32* src) {
   const bool grid = t.grid < 256;
   if (t.xrun[SCREEN_W] > SCALED_ROW_MAX) return;
   u32* row = row_scratch_[screen];
-  if (grid) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, false, row);
+  if (grid) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, 1, false, row);
   else      kern::active::scale_row(cells, t.xrun, row);
   for (u32 y = y0 + (grid ? 1 : 0); y < y0 + P; ++y)
     if (row_kept(t, y)) std::memcpy(row_at(t, y), row, bytes);
-  if (grid && row_kept(t, y0)) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, true, row_at(t, y0));
+  if (grid && row_kept(t, y0)) kern::active::scale_row_grid(cells, t.xrun, t.grid, 2, 1, true, row_at(t, y0));
   cell_row_[screen] = j + 1;
 }
 
@@ -1108,15 +1108,21 @@ void Gpu::emit_scaled(int screen, u32 line, const u32* src) {
   // scale_row_grid), so the seam row is the span's first row and the plain
   // row is built below it. At an integer scale every run qualifies. Rows
   // follow the same rule as columns.
+  //
+  // At exactly 2x a seam per DS pixel leaves one lit panel pixel in four,
+  // which reads as a dim wash, not a grid; there the seam goes on every
+  // other DS pixel (a 4-pixel pitch, nine lit in sixteen), still on the
+  // pixel boundaries. Each axis decides for itself.
   const u32 w = t.xrun[SCREEN_W];
   const u32 min_run = (w + SCREEN_W - 1) / SCREEN_W, min_rows = (t.h + SCREEN_H - 1) / SCREEN_H;
-  const bool seam = y1 - y0 >= std::max<u32>(2, min_rows);
+  const u32 pitch_x = w == 2 * SCREEN_W ? 2 : 1, pitch_y = t.h == 2 * SCREEN_H ? 2 : 1;
+  const bool seam = y1 - y0 >= std::max<u32>(2, min_rows) && first % pitch_y == 0;
   const u32 yfirst = seam ? y0 + 1 : y0;
   row = stage ? row_scratch_[screen] : row_at(t, yfirst);
-  kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, false, row);
+  kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, pitch_x, false, row);
   for (u32 y = stage ? yfirst : yfirst + 1; y < y1; ++y)
     if (row_kept(t, y)) std::memcpy(row_at(t, y), row, bytes);
-  if (seam && row_kept(t, y0)) kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, true, row_at(t, y0));
+  if (seam && row_kept(t, y0)) kern::active::scale_row_grid(src, t.xrun, t.grid, min_run, pitch_x, true, row_at(t, y0));
 }
 
 static inline u32 rgb15_to_18_plain(u16 c) {

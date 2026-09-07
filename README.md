@@ -517,7 +517,9 @@ one cell. `--linear` takes precedence over the other three. On the small
 screens (the PiP inset, the dominant layouts' secondary) the full grid
 (strength 1) needs at least 2x to show, a dimmed one is an overlay and
 applies from 1x, and a view shown below 1x gets neither the grid nor
-chunky. The largest screen chooses the chunky cell (`--chunky-cell`), and
+chunky. At exactly 2x a seam per DS pixel would leave one lit panel pixel
+in four, a dim wash rather than a grid, so there the seam goes on every
+other DS pixel (a 4-pixel pitch); every other scale seams each DS pixel. The largest screen chooses the chunky cell (`--chunky-cell`), and
 the other one matches it in DS pixels rather than panel pixels, so a
 half-size secondary gets cells half as many panel pixels across.
 

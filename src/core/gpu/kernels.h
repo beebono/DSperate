@@ -99,9 +99,11 @@ namespace ds::gpu::kern {
      runs the fractional part of the scale widened carry a seam, so every lit cell keeps the integer      \
      width; the seam leads its run so that at 2.5x (runs 3,2,3,2,...) the cells between seams are always  \
      a pair of DS pixels (a trailing seam would leave a lone pixel at each edge). At an integer scale      \
-     every run qualifies. `seam_row` writes every pixel dimmed instead (the row a source line's first     \
-     destination row becomes). f in 0..255; 0 writes opaque black (0xFF000000) rather than scaling. */   \
-  void NS##scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool seam_row, u32* dst);    \
+     every run qualifies. `pitch` seams every pitch-th source pixel only (2 at exactly 2x, where a seam   \
+     per pixel would leave one lit pixel in four). `seam_row` writes every pixel dimmed instead (the row \
+     a source line's first destination row becomes). f in 0..255; 0 writes opaque black (0xFF000000)     \
+     rather than scaling. */                                                                             \
+  void NS##scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, u32 pitch, bool seam_row, u32* dst); \
   /* Box-filter seams for a fractional scale: the last pixel of run s straddles source pixels s and s+1  \
      when w[s] != 0, and is written as seam[s] instead of src[s]; the other pixels are src[s] as in       \
      scale_row. (w is the same table blend_line_w takes; only its zero/non-zero pattern matters here.) */   \

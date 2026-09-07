@@ -355,7 +355,10 @@ void DispOut::draw_grid(Dims d) {
     const int pw = p1 - p0;
     if (pw <= 0 || cells <= 0) return;
     const int min_run = (pw + cells - 1) / cells;
-    for (int c = 0; c < cells; ++c) {
+    // At exactly 2x a seam per cell leaves one lit pixel in four; every
+    // other cell gets one instead (Gpu::scale_screen_line does the same).
+    const int pitch = pw == 2 * cells ? 2 : 1;
+    for (int c = 0; c < cells; c += pitch) {
       const int a = (c * pw + cells - 1) / cells, b = ((c + 1) * pw + cells - 1) / cells;
       if (b - a >= min_run && p0 + a < p1) out[p0 + a] = 1;
     }

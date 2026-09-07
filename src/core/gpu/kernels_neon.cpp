@@ -842,8 +842,9 @@ void lerp_rows(const u32* a, const u32* b, u32 w, u32 n, u32* out) {
 // write-combined dmabuf, where a scalar store landing on top of a vector
 // store's last lane costs a second bus write. Runs of two and three (every
 // scale the handhelds use) are one or two stores each.
-void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool seam_row, u32* dst) {
+void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, u32 pitch, bool seam_row, u32* dst) {
   if (min_run < 2) min_run = 2;
+  if (pitch < 1) pitch = 1;
   alignas(16) u32 dimmed[256];
   // f == 0 (black seams: the "integer scale, leave the spare pixels dark"
   // look) needs no dimmed copies at all: every seam is the one constant.
@@ -872,7 +873,7 @@ void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool se
     u32 x = xrun[s];
     const u32 end = xrun[s + 1];
     const u32 n = end - x;
-    if (n < min_run) {                                   // plain run, as scale_row
+    if (n < min_run || s % pitch != 0) {                 // plain run, as scale_row
       const uint32x4_t v = vdupq_n_u32(c);
       for (; x + 4 <= end; x += 4) vst1q_u32(dst + x, v);
       for (; x < end; ++x) dst[x] = c;

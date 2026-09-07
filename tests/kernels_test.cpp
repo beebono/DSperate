@@ -282,21 +282,21 @@ static void test_scale_row() {
 static void test_scale_row_grid() {
   static const u32 widths[] = {1, 100, 255, 256, 257, 320, 512, 640, 720, 721, 1280, 1440};
   alignas(16) u32 src[256];
-  for (u32 w : widths) for (u32 f : {0u, 128u, 255u}) for (bool seam : {false, true}) for (u32 mr : {2u, (w + 255) / 256}) {
+  for (u32 w : widths) for (u32 f : {0u, 128u, 255u}) for (bool seam : {false, true}) for (u32 mr : {2u, (w + 255) / 256}) for (u32 pitch : {1u, 2u}) {
     const u32 it = w * 8 + f / 64 * 2 + seam;
     std::vector<u16> xrun(257);
     for (u32 i = 0; i <= 256; ++i) xrun[i] = static_cast<u16>((i * w + 255) / 256);
     std::vector<u32> da(w, 0xDEADBEEF), db(w, 0xDEADBEEF), plain(w);
     for (u32& v : src) v = rng();
-    kern::ref::scale_row_grid(src, xrun.data(), f, mr, seam, da.data());
-    N::scale_row_grid(src, xrun.data(), f, mr, seam, db.data());
+    kern::ref::scale_row_grid(src, xrun.data(), f, mr, pitch, seam, da.data());
+    N::scale_row_grid(src, xrun.data(), f, mr, pitch, seam, db.data());
     CHECK_SAME("scale_row_grid", da.data(), db.data(), w * sizeof(u32));
     kern::ref::scale_row(src, xrun.data(), plain.data());
     for (u32 x = 0; x < w; ++x) {                       // alpha kept; non-seam pixels untouched
       const u32 s_ = x * 256 / w;
-      const bool dimmed = seam || (xrun[s_ + 1] - xrun[s_] >= std::max(2u, mr) && x == xrun[s_]);
+      const bool dimmed = seam || (xrun[s_ + 1] - xrun[s_] >= std::max(2u, mr) && x == xrun[s_] && s_ % pitch == 0);
       if ((!dimmed && da[x] != plain[x]) || (dimmed && f == 0 && da[x] != 0xFF000000u) || (dimmed && f && (da[x] >> 24) != (plain[x] >> 24))) {
-        std::printf("scale_row_grid w=%u f=%u mr=%u seam=%d x=%u: %08x vs %08x\n", w, f, mr, seam, x, da[x], plain[x]); ++failures; break;
+        std::printf("scale_row_grid w=%u f=%u mr=%u pitch=%u seam=%d x=%u: %08x vs %08x\n", w, f, mr, pitch, seam, x, da[x], plain[x]); ++failures; break;
       }
     }
     (void)it;

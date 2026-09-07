@@ -387,14 +387,15 @@ void lerp_rows(const u32* a, const u32* b, u32 w, u32 n, u32* out) {
   for (u32 i = 0; i < n; ++i) out[i] = lerp_px(a[i], b[i], w);
 }
 
-void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, bool seam_row, u32* dst) {
+void scale_row_grid(const u32* src, const u16* xrun, u32 f, u32 min_run, u32 pitch, bool seam_row, u32* dst) {
   if (min_run < 2) min_run = 2;
+  if (pitch < 1) pitch = 1;
   for (u32 s = 0; s < 256; ++s) {
     const u32 c = src[s], cd = f ? dim_px(c, f) : 0xFF000000u;   // f == 0: opaque black, whatever the source alpha
     const u32 x0 = xrun[s], x1 = xrun[s + 1];
     if (seam_row) { for (u32 x = x0; x < x1; ++x) dst[x] = cd; continue; }
     for (u32 x = x0; x < x1; ++x) dst[x] = c;
-    if (x1 - x0 >= min_run) dst[x0] = cd;
+    if (x1 - x0 >= min_run && s % pitch == 0) dst[x0] = cd;
   }
 }
 
