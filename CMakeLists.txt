@@ -88,6 +88,22 @@ if(DSPERATE_TUNE)
   add_link_options(${_ds_tune})
 endif()
 
+# Profile-guided optimisation. "generate" instruments the build (atomic
+# counters: the renderer is threaded); "use" reads the .gcda files the
+# instrumented run left next to the objects in THIS build directory, so both
+# steps must target the same tree -- tools/pgo_build.sh does exactly that.
+# Measured on the RG DS 2026-09-07 (headless, --quantum 0): Spirit Tracks
+# median -7 % / p99 -6 %, Golden Sun -8 % / -9 %, sm64 -9 %, dbori -11 %,
+# and half as many over-budget frames on both save-state scenes; bit-exact.
+set(DSPERATE_PGO "OFF" CACHE STRING "Profile-guided optimisation: OFF | generate | use")
+set_property(CACHE DSPERATE_PGO PROPERTY STRINGS OFF generate use)
+if(DSPERATE_PGO STREQUAL "generate")
+  add_compile_options(-fprofile-generate -fprofile-update=atomic)
+  add_link_options(-fprofile-generate)
+elseif(DSPERATE_PGO STREQUAL "use")
+  add_compile_options(-fprofile-use -fprofile-correction -Wno-missing-profile)
+endif()
+
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)

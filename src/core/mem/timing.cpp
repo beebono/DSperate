@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/mem/timing.h"
+#include "core/profile.h"
 #include "core/cpu/cpu.h"
 
 #include <cstdio>
@@ -155,6 +156,7 @@ void Timing::set_region7(u32 start, u32 end, Region r, int bus_width, int nonseq
 // and data, a DTCM page 1 for data. Both engines then cost an access with one
 // table lookup and the recompiler inherits the interpreter's model exactly.
 void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify) {
+  prof::add(prof::C_TIMING_UPDATE_CPU9, 1);
   // DS_DEBUG_TIMING=1: log every rebuild (each one also drops every translated block).
   static const bool debug = std::getenv("DS_DEBUG_TIMING") != nullptr;
   if (debug) std::fprintf(stderr, "[timing] update_cpu9 %08x-%08x ctl %08x dtcm %08x itcm %08x pu %08x/%08x\n", start, end, cpu.cp15_control, cpu.cp15_dtcm, cpu.cp15_itcm, cpu.pu_data_cacheable, cpu.pu_code_cacheable);

@@ -839,7 +839,10 @@ extern "C" void jit_h_st32(CpuContext* cpu, u32 addr, u32 v) {
   addr &= ~3u;
   bool code = false;
   if (u8* p = cpu->page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 4); else std::memcpy(p, &v, 4); }
-  else if ((addr & 0xFF000000) == 0x04000000) cpu->nds->io.write(cpu->which, addr, 32, v);
+  // Through the bus, not Io::write directly: Bus::io_write has the ARM9
+  // GXFIFO / command-port fast path (straight to the geometry engine), which
+  // this helper used to skip -- Spirit Tracks makes 3.8 k such stores a frame.
+  else if ((addr & 0xFF000000) == 0x04000000) cpu->nds->bus.io_write(cpu->which, addr, 32, v);
   else cpu->nds->bus.write32(cpu->which, addr, v);
   if (cpu->halted) cpu->hot.alerts |= ALERT_HALTED;
 }

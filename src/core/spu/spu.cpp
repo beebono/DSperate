@@ -360,7 +360,12 @@ void Spu::mix() {
     pan_out(ch_[0], ch0); pan_out(ch_[2], ch2);
     if (!(cnt_ & 0x1000)) pan_out(ch_[1], ch1);     // bit 12/13: channel 1/3 bypass the mixer
     if (!(cnt_ & 0x2000)) pan_out(ch_[3], ch3);
-    for (int i = 4; i < 16; ++i) pan_out(ch_[i], run_channel(ch_[i], TIMER_STEP));
+    // A channel with bit 31 clear contributes exactly 0 (run_channel returns
+    // 0 and 0 * pan >> 10 is 0), so it is skipped before the call: Spirit
+    // Tracks runs 4-5 voices and paid the call and two 64-bit multiplies for
+    // each of the other eleven, 32 k times a second.
+    for (int i = 4; i < 16; ++i)
+      if (ch_[i].cnt & 0x80000000u) pan_out(ch_[i], run_channel(ch_[i], TIMER_STEP));
 
     for (int k = 0; k < 2; ++k) {
       if (!(cap_[k].cnt & 0x80)) continue;

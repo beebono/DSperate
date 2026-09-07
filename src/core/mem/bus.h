@@ -85,7 +85,9 @@ public:
   static constexpr u32 BIOS9_SIZE       = 4 * 1024;
   static constexpr u32 BIOS7_SIZE       = 16 * 1024;
   static constexpr u32 VRAM_PAGES = 0x01000000 / PAGE_SIZE;   // the 0x06000000 region, per CPU
-  std::unique_ptr<u8*[]> vram_hosts_[2] = {std::make_unique<u8*[]>(VRAM_PAGES), std::make_unique<u8*[]>(VRAM_PAGES)};   // update_vram scratch
+  std::unique_ptr<u8*[]> vram_hosts_[2] = {std::make_unique<u8*[]>(VRAM_PAGES), std::make_unique<u8*[]>(VRAM_PAGES)};   // update_vram scratch (next)
+  std::unique_ptr<u8*[]> vram_hosts_prev_[2] = {std::make_unique<u8*[]>(VRAM_PAGES), std::make_unique<u8*[]>(VRAM_PAGES)};   // what the page tables hold now
+  bool vram_hosts_valid_ = false;   // prev arrays describe the tables (false after reset / a table rebuild)
   static constexpr u32 VRAM_BANK_SIZES[9] = {0x20000, 0x20000, 0x20000, 0x20000, 0x10000, 0x4000, 0x4000, 0x8000, 0x4000};
   static constexpr u32 VRAM_TOTAL = 0x20000 * 4 + 0x10000 + 0x4000 * 2 + 0x8000 + 0x4000;
 
@@ -102,6 +104,9 @@ private:
   void vram_write(Cpu cpu, u32 addr, u32 width, u32 v);
   void map_fixed_regions();
   void map_page_aligned(PageTable& pt, u32 guest, u32 size, u8* host, u32 flags, u32 mirror_end);
+public:
+  // The non-RAM access path (I/O, VRAM slow blocks, GBA slot). The JIT's
+  // slow-store helper enters here for I/O so it gets the GXFIFO fast path.
   u32 io_read(Cpu cpu, u32 addr, u32 width);
   void io_write(Cpu cpu, u32 addr, u32 width, u32 v);
 };

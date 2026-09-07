@@ -1478,6 +1478,11 @@ void Renderer3D::rk_census(u64 kinds, u64 p8) {
 
 template <int mode, bool textured, bool aa, bool opq>
 [[gnu::always_inline]] inline void Renderer3D::resolve_span_vec(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa, s32 xb, int part, int edge, s32 l_cov, s32 r_cov, s32& xcov) {
+  // The profiling flag is read once per span, not once per eight-pixel
+  // group: prof::add tests the global inside the innermost loop otherwise
+  // (two loads and a branch per group, as stage_line already hoists).
+  const bool pe = prof::enabled;
+  u32 resolved_px = 0;
   const u32 polyattr = sh.polyattr;
   const uint32x4_t lane = {0, 1, 2, 3};
   const uint32x4_t v_alpha_ref = vdupq_n_u32(sh.alpha_ref), v31 = vdupq_n_u32(31), v0 = vdupq_n_u32(0);
@@ -1596,7 +1601,7 @@ template <int mode, bool textured, bool aa, bool opq>
     auto group = [&](auto two_c, const uint32x4_t* m2) __attribute__((always_inline)) {
       constexpr bool two = decltype(two_c)::value;
       uint32x4_t colour[2], mo[2] = {v0, v0}, mo1[2] = {v0, v0}, mt1[2] = {v0, v0}, mo2[2] = {v0, v0}, mt2[2] = {v0, v0}, dstattr[2], mb[2] = {v0, v0}, kv[2] = {v0, v0};
-      prof::add(prof::C_RESOLVED_PIXELS, NH * 4);
+      resolved_px += NH * 4;
       for (u32 k = 0; k < NH; ++k) {
         colour[k] = vld1q_u32(sb.col + i + k * 4);
         dstattr[k] = vld1q_u32(&attr_[addr + k * 4]);
@@ -1628,7 +1633,7 @@ template <int mode, bool textured, bool aa, bool opq>
         }
       }
       const u64 kinds = lanes8(kv[0], kv[1]);
-      if (prof::enabled) rk_census(kinds, p8);
+      if (pe) rk_census(kinds, p8);
       if (!kinds) return;
       if (opq || (kinds & 0x0909090909090909ull)) {
         // One attribute word for both layers: coverage accumulates in x order
@@ -1708,6 +1713,7 @@ template <int mode, bool textured, bool aa, bool opq>
     if (rem <= 4) { step(std::integral_constant<u32, 1>{}, x, rem); x += 4; }
     else { step(std::integral_constant<u32, 2>{}, x, rem); x += 8; }
   }
+  if (pe) prof::add(prof::C_RESOLVED_PIXELS, resolved_px);
 }
 #endif
 // Derive scanlines [y0, y1) of the polygon on `e` into lines_[].

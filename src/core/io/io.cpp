@@ -964,54 +964,54 @@ void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
 
 Io::Special Io::read32_special(Cpu cpu, u32 addr) {
   CpuIo& c = cpu_io[ci(cpu)];
-  switch (addr) {
-  case 0x04000208: return {c.ime, true};
-  case 0x04000210: return {c.ie, true};
-  case 0x04000214: return {c.if_, true};
-  case 0x04100000: return {ipc_fifo_recv(cpu), true};
-  case 0x04100010: return {cart_read_data(), true};
-  case 0x040001A4: cart_catch_up(); return {cart.romctrl, true};
-  case 0x04000280: return {divcnt_read(), true};
-  case 0x04000290: return {static_cast<u32>(math.div_num), true};
-  case 0x04000294: return {static_cast<u32>(math.div_num >> 32), true};
-  case 0x04000298: return {static_cast<u32>(math.div_den), true};
-  case 0x0400029C: return {static_cast<u32>(math.div_den >> 32), true};
-  case 0x040002A0: div_settle(); return {static_cast<u32>(math.div_quot), true};
-  case 0x040002A4: div_settle(); return {static_cast<u32>(math.div_quot >> 32), true};
-  case 0x040002A8: div_settle(); return {static_cast<u32>(math.div_rem), true};
-  case 0x040002AC: div_settle(); return {static_cast<u32>(math.div_rem >> 32), true};
-  case 0x040002B0: return {sqrtcnt_read(), true};
-  case 0x040002B4: sqrt_settle(); return {math.sqrt_res, true};
-  case 0x040002B8: return {static_cast<u32>(math.sqrt_val), true};
-  case 0x040002BC: return {static_cast<u32>(math.sqrt_val >> 32), true};
-  case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: return {nds_.dma.read_src(cpu, (addr - 0x040000B0) / 12), true};
-  case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: return {nds_.dma.read_dst(cpu, (addr - 0x040000B4) / 12), true};
-  case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: return {nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12), true};
-  case 0x040000E0: case 0x040000E4: case 0x040000E8: case 0x040000EC: return {c.dma_fill[(addr - 0x040000E0) / 4], true};
+  if (addr == 0x04100000) return {ipc_fifo_recv(cpu), true};   // the two 0x0410xxxx ports, kept out of the dense index below
+  if (addr == 0x04100010) return {cart_read_data(), true};
+  switch ((addr - 0x04000000u) >> 2) {   // dense halfword/word index: GCC emits a jump table (a switch on the full address was a compare tree)
+  case 0x82: return {c.ime, true};
+  case 0x84: return {c.ie, true};
+  case 0x85: return {c.if_, true};
+  case 0x69: cart_catch_up(); return {cart.romctrl, true};
+  case 0xa0: return {divcnt_read(), true};
+  case 0xa4: return {static_cast<u32>(math.div_num), true};
+  case 0xa5: return {static_cast<u32>(math.div_num >> 32), true};
+  case 0xa6: return {static_cast<u32>(math.div_den), true};
+  case 0xa7: return {static_cast<u32>(math.div_den >> 32), true};
+  case 0xa8: div_settle(); return {static_cast<u32>(math.div_quot), true};
+  case 0xa9: div_settle(); return {static_cast<u32>(math.div_quot >> 32), true};
+  case 0xaa: div_settle(); return {static_cast<u32>(math.div_rem), true};
+  case 0xab: div_settle(); return {static_cast<u32>(math.div_rem >> 32), true};
+  case 0xac: return {sqrtcnt_read(), true};
+  case 0xad: sqrt_settle(); return {math.sqrt_res, true};
+  case 0xae: return {static_cast<u32>(math.sqrt_val), true};
+  case 0xaf: return {static_cast<u32>(math.sqrt_val >> 32), true};
+  case 0x2c: case 0x2f: case 0x32: case 0x35: return {nds_.dma.read_src(cpu, (addr - 0x040000B0) / 12), true};
+  case 0x2d: case 0x30: case 0x33: case 0x36: return {nds_.dma.read_dst(cpu, (addr - 0x040000B4) / 12), true};
+  case 0x2e: case 0x31: case 0x34: case 0x37: return {nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12), true};
+  case 0x38: case 0x39: case 0x3a: case 0x3b: return {c.dma_fill[(addr - 0x040000E0) / 4], true};
   }
   return {0, false};
 }
 
 Io::Special Io::write32_special(Cpu cpu, u32 addr, u32 value) {
   CpuIo& c = cpu_io[ci(cpu)];
-  switch (addr) {
-  case 0x04000208: c.ime = value & 1; update_irq(cpu); return {0, true};
-  case 0x04000210: c.ie = value; update_irq(cpu); return {0, true};
-  case 0x04000214: c.if_ &= ~value; update_irq(cpu); if (cpu == Cpu::ARM9) nds_.gpu3d.check_fifo_irq_fast(); return {0, true};
-  case 0x04000188: ipc_fifo_send(cpu, value); return {0, true};
-  case 0x040001A4: cart_write_romctrl(value); return {0, true};
-  case 0x04000280: math.divcnt = value & 0x3; div_start(); return {0, true};
-  case 0x04000290: math.div_num = (math.div_num & 0xFFFFFFFF00000000ull) | value; div_start(); return {0, true};
-  case 0x04000294: math.div_num = (math.div_num & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return {0, true};
-  case 0x04000298: math.div_den = (math.div_den & 0xFFFFFFFF00000000ull) | value; div_start(); return {0, true};
-  case 0x0400029C: math.div_den = (math.div_den & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return {0, true};
-  case 0x040002B0: math.sqrtcnt = value & 0x1; sqrt_start(); return {0, true};
-  case 0x040002B8: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFF00000000ull) | value; sqrt_start(); return {0, true};
-  case 0x040002BC: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); sqrt_start(); return {0, true};
-  case 0x040000B0: case 0x040000BC: case 0x040000C8: case 0x040000D4: nds_.dma.write_src(cpu, (addr - 0x040000B0) / 12, value); return {0, true};
-  case 0x040000B4: case 0x040000C0: case 0x040000CC: case 0x040000D8: nds_.dma.write_dst(cpu, (addr - 0x040000B4) / 12, value); return {0, true};
-  case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: nds_.dma.write_cnt(cpu, (addr - 0x040000B8) / 12, value); return {0, true};
-  case 0x040000E0: case 0x040000E4: case 0x040000E8: case 0x040000EC: c.dma_fill[(addr - 0x040000E0) / 4] = value; return {0, true};
+  switch ((addr - 0x04000000u) >> 2) {   // dense halfword/word index: GCC emits a jump table (a switch on the full address was a compare tree)
+  case 0x82: c.ime = value & 1; update_irq(cpu); return {0, true};
+  case 0x84: c.ie = value; update_irq(cpu); return {0, true};
+  case 0x85: c.if_ &= ~value; update_irq(cpu); if (cpu == Cpu::ARM9) nds_.gpu3d.check_fifo_irq_fast(); return {0, true};
+  case 0x62: ipc_fifo_send(cpu, value); return {0, true};
+  case 0x69: cart_write_romctrl(value); return {0, true};
+  case 0xa0: math.divcnt = value & 0x3; div_start(); return {0, true};
+  case 0xa4: math.div_num = (math.div_num & 0xFFFFFFFF00000000ull) | value; div_start(); return {0, true};
+  case 0xa5: math.div_num = (math.div_num & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return {0, true};
+  case 0xa6: math.div_den = (math.div_den & 0xFFFFFFFF00000000ull) | value; div_start(); return {0, true};
+  case 0xa7: math.div_den = (math.div_den & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); div_start(); return {0, true};
+  case 0xac: math.sqrtcnt = value & 0x1; sqrt_start(); return {0, true};
+  case 0xae: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFF00000000ull) | value; sqrt_start(); return {0, true};
+  case 0xaf: math.sqrt_val = (math.sqrt_val & 0xFFFFFFFFull) | (static_cast<u64>(value) << 32); sqrt_start(); return {0, true};
+  case 0x2c: case 0x2f: case 0x32: case 0x35: nds_.dma.write_src(cpu, (addr - 0x040000B0) / 12, value); return {0, true};
+  case 0x2d: case 0x30: case 0x33: case 0x36: nds_.dma.write_dst(cpu, (addr - 0x040000B4) / 12, value); return {0, true};
+  case 0x2e: case 0x31: case 0x34: case 0x37: nds_.dma.write_cnt(cpu, (addr - 0x040000B8) / 12, value); return {0, true};
+  case 0x38: case 0x39: case 0x3a: case 0x3b: c.dma_fill[(addr - 0x040000E0) / 4] = value; return {0, true};
   }
   return {0, false};
 }
@@ -1020,37 +1020,37 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   CpuIo& c = cpu_io[ci(cpu)];
   const bool a9 = cpu == Cpu::ARM9;
   if (!a9 && addr >= 0x04800000 && addr < 0x04810000) return wifi_read16(addr);
-  switch (addr) {
-  case 0x04000004: return dispstat[ci(cpu)];
-  case 0x04000006: return vcount;
-  case 0x04000100: case 0x04000104: case 0x04000108: case 0x0400010C: return timer_value(cpu, (addr - 0x04000100) / 4);
-  case 0x04000102: case 0x04000106: case 0x0400010A: case 0x0400010E: return c.timers[(addr - 0x04000102) / 4].control;
-  case 0x04000130: return keyinput;
-  case 0x04000132: return keycnt[ci(cpu)];
-  case 0x04000136: return a9 ? 0 : extkeyin;
-  case 0x04000138: return a9 ? 0 : rtc_read();
-  case 0x04000180: return c.ipc_sync;
-  case 0x04000184: return ipc_fifo_cnt_read(cpu);
-  case 0x040001A0: return cart.auxspicnt;
-  case 0x040001A2: return cart.auxspidata;
-  case 0x040001A8: case 0x040001AA: case 0x040001AC: case 0x040001AE: {
+  switch ((addr - 0x04000000u) >> 1) {   // dense halfword/word index: GCC emits a jump table (a switch on the full address was a compare tree)
+  case 0x2: return dispstat[ci(cpu)];
+  case 0x3: return vcount;
+  case 0x80: case 0x82: case 0x84: case 0x86: return timer_value(cpu, (addr - 0x04000100) / 4);
+  case 0x81: case 0x83: case 0x85: case 0x87: return c.timers[(addr - 0x04000102) / 4].control;
+  case 0x98: return keyinput;
+  case 0x99: return keycnt[ci(cpu)];
+  case 0x9b: return a9 ? 0 : extkeyin;
+  case 0x9c: return a9 ? 0 : rtc_read();
+  case 0xc0: return c.ipc_sync;
+  case 0xc2: return ipc_fifo_cnt_read(cpu);
+  case 0xd0: return cart.auxspicnt;
+  case 0xd1: return cart.auxspidata;
+  case 0xd4: case 0xd5: case 0xd6: case 0xd7: {
     const u32 i = addr - 0x040001A8; return static_cast<u16>(cart.cmd[i] | (cart.cmd[i + 1] << 8));
   }
-  case 0x040001C0: return a9 ? 0 : spicnt_read();
-  case 0x040001C2: return a9 ? 0 : spidata;
-  case 0x04000204: return exmemcnt;
-  case 0x040000BA: case 0x040000C6: case 0x040000D2: case 0x040000DE: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000BA) / 12) >> 16);
-  case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12));
-  case 0x04000208: return static_cast<u16>(c.ime);
-  case 0x04000210: return static_cast<u16>(c.ie);
-  case 0x04000212: return static_cast<u16>(c.ie >> 16);
-  case 0x04000214: return static_cast<u16>(c.if_);
-  case 0x04000216: return static_cast<u16>(c.if_ >> 16);
-  case 0x04000240: return a9 ? static_cast<u16>(vramcnt[0] | (vramcnt[1] << 8)) : static_cast<u16>(((vramcnt[2] >> 0) & 7) == 2 ? 1 : 0) | ((((vramcnt[3] >> 0) & 7) == 2 ? 2 : 0)) | (wramcnt << 8);
-  case 0x04000300: return c.postflg;
-  case 0x04000304: return a9 ? powcnt1 : powcnt2;
-  case 0x04000280: return divcnt_read();
-  case 0x040002B0: return sqrtcnt_read();
+  case 0xe0: return a9 ? 0 : spicnt_read();
+  case 0xe1: return a9 ? 0 : spidata;
+  case 0x102: return exmemcnt;
+  case 0x5d: case 0x63: case 0x69: case 0x6f: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000BA) / 12) >> 16);
+  case 0x5c: case 0x62: case 0x68: case 0x6e: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12));
+  case 0x104: return static_cast<u16>(c.ime);
+  case 0x108: return static_cast<u16>(c.ie);
+  case 0x109: return static_cast<u16>(c.ie >> 16);
+  case 0x10a: return static_cast<u16>(c.if_);
+  case 0x10b: return static_cast<u16>(c.if_ >> 16);
+  case 0x120: return a9 ? static_cast<u16>(vramcnt[0] | (vramcnt[1] << 8)) : static_cast<u16>(((vramcnt[2] >> 0) & 7) == 2 ? 1 : 0) | ((((vramcnt[3] >> 0) & 7) == 2 ? 2 : 0)) | (wramcnt << 8);
+  case 0x180: return c.postflg;
+  case 0x182: return a9 ? powcnt1 : powcnt2;
+  case 0x140: return divcnt_read();
+  case 0x158: return sqrtcnt_read();
   default: break;
   }
   if (a9 && addr >= 0x04000290 && addr < 0x040002C0) { const u32 v = read32_special(cpu, addr & ~3u).value; return static_cast<u16>((addr & 2) ? v >> 16 : v); }
@@ -1067,72 +1067,72 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   CpuIo& c = cpu_io[ci(cpu)];
   const bool a9 = cpu == Cpu::ARM9;
   if (!a9 && addr >= 0x04800000 && addr < 0x04810000) { wifi_write16(addr, value); return; }
-  switch (addr) {
-  case 0x04000004: dispstat[ci(cpu)] = (dispstat[ci(cpu)] & 0x0007) | (value & 0xFFB8); return;
-  case 0x04000100: case 0x04000104: case 0x04000108: case 0x0400010C: c.timers[(addr - 0x04000100) / 4].reload = value; return;
-  case 0x04000102: case 0x04000106: case 0x0400010A: case 0x0400010E: timer_write_control(cpu, (addr - 0x04000102) / 4, value); return;
-  case 0x04000132: keycnt[ci(cpu)] = value; update_key_irq(); return;
-  case 0x04000134: return;                                   // RCNT
-  case 0x04000138: if (!a9) rtc_write(value, false); return;
-  case 0x04000180: ipc_sync_write(cpu, value); return;
-  case 0x04000184: ipc_fifo_cnt_write(cpu, value); return;
-  case 0x040001A0:
+  switch ((addr - 0x04000000u) >> 1) {   // dense halfword/word index: GCC emits a jump table (a switch on the full address was a compare tree)
+  case 0x2: dispstat[ci(cpu)] = (dispstat[ci(cpu)] & 0x0007) | (value & 0xFFB8); return;
+  case 0x80: case 0x82: case 0x84: case 0x86: c.timers[(addr - 0x04000100) / 4].reload = value; return;
+  case 0x81: case 0x83: case 0x85: case 0x87: timer_write_control(cpu, (addr - 0x04000102) / 4, value); return;
+  case 0x99: keycnt[ci(cpu)] = value; update_key_irq(); return;
+  case 0x9a: return;                                   // RCNT
+  case 0x9c: if (!a9) rtc_write(value, false); return;
+  case 0xc0: ipc_sync_write(cpu, value); return;
+  case 0xc2: ipc_fifo_cnt_write(cpu, value); return;
+  case 0xd0:
     if (nds_.cart) {
       if (cart.auxspicnt & ~value & 0x2000) nds_.cart->spi_release();
       else if (~cart.auxspicnt & value & 0x2000) nds_.cart->spi_select();
     }
     cart.auxspicnt = (cart.auxspicnt & 0x0080) | (value & 0xE043);
     return;
-  case 0x040001A2: {
+  case 0xd1: {
     if (!(cart.auxspicnt & 0x8000) || !(cart.auxspicnt & 0x2000)) return;
     const bool hold = cart.auxspicnt & 0x0040;
     if (nds_.cart) { cart.auxspidata = nds_.cart->spi_transfer(static_cast<u8>(value)); if (!hold) nds_.cart->spi_release(); }
     else cart.auxspidata = 0;
     return;
   }
-  case 0x040001C0:
+  case 0xe0:
     if (a9) return;
     if ((spicnt & 0x8000) && !(value & 0x8000)) spi_release();
     spicnt = value & 0xCF03;
     if ((spicnt & 0x4000) && spi_busy()) nds_.sched.schedule(EventId::Spi, spi_ready_at, spi_event, 0);   // IRQ enabled mid-transfer
     return;
-  case 0x040001C2: if (!a9) spi_write_data(static_cast<u8>(value)); return;
-  case 0x04000204: {
+  case 0xe1: if (!a9) spi_write_data(static_cast<u8>(value)); return;
+  case 0x102: {
     const u16 old = exmemcnt;
     exmemcnt = a9 ? ((exmemcnt & 0x6000) | (value & 0x88FF)) : ((exmemcnt & 0xFF80) | (value & 0x007F));
     if ((old ^ exmemcnt) & 0xFF) nds_.bus.update_gba_slot_timings();
     return;
   }
-  case 0x040001A8: case 0x040001AA: case 0x040001AC: case 0x040001AE: {
+  case 0xd4: case 0xd5: case 0xd6: case 0xd7: {
     const u32 i = addr - 0x040001A8; cart.cmd[i] = static_cast<u8>(value); cart.cmd[i + 1] = static_cast<u8>(value >> 8); return;
   }
-  case 0x04000206: return;                                   // WIFIWAITCNT
-  case 0x04000280: if (a9) { math.divcnt = value & 3; div_start(); } return;
-  case 0x040002B0: if (a9) { math.sqrtcnt = value & 1; sqrt_start(); } return;
-  case 0x040000B8: case 0x040000C4: case 0x040000D0: case 0x040000DC: {
+  case 0x103: return;                                   // WIFIWAITCNT
+  case 0x140: if (a9) { math.divcnt = value & 3; div_start(); } return;
+  case 0x158: if (a9) { math.sqrtcnt = value & 1; sqrt_start(); } return;
+  case 0x5c: case 0x62: case 0x68: case 0x6e: {
     const int i = (addr - 0x040000B8) / 12; nds_.dma.write_cnt(cpu, i, (nds_.dma.read_cnt(cpu, i) & 0xFFFF0000) | value); return;
   }
-  case 0x040000BA: case 0x040000C6: case 0x040000D2: case 0x040000DE: {
+  case 0x5d: case 0x63: case 0x69: case 0x6f: {
     const int i = (addr - 0x040000BA) / 12; nds_.dma.write_cnt(cpu, i, (nds_.dma.read_cnt(cpu, i) & 0x0000FFFF) | (static_cast<u32>(value) << 16)); return;
   }
-  case 0x040000B0: case 0x040000B2: case 0x040000BC: case 0x040000BE: case 0x040000C8: case 0x040000CA: case 0x040000D4: case 0x040000D6: {
+  case 0x58: case 0x59: case 0x5e: case 0x5f: case 0x64: case 0x65: case 0x6a: case 0x6b: {
     const int i = (addr - 0x040000B0) / 12; const u32 old = nds_.dma.read_src(cpu, i);
     nds_.dma.write_src(cpu, i, ((addr - 0x040000B0) % 12) ? ((old & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((old & 0xFFFF0000) | value)); return;
   }
-  case 0x040000B4: case 0x040000B6: case 0x040000C0: case 0x040000C2: case 0x040000CC: case 0x040000CE: case 0x040000D8: case 0x040000DA: {
+  case 0x5a: case 0x5b: case 0x60: case 0x61: case 0x66: case 0x67: case 0x6c: case 0x6d: {
     const int i = (addr - 0x040000B4) / 12; const u32 old = nds_.dma.read_dst(cpu, i);
     nds_.dma.write_dst(cpu, i, ((addr - 0x040000B4) % 12) ? ((old & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((old & 0xFFFF0000) | value)); return;
   }
-  case 0x04000208: c.ime = value & 1; update_irq(cpu); return;
-  case 0x04000210: c.ie = (c.ie & 0xFFFF0000) | value; update_irq(cpu); return;
-  case 0x04000212: c.ie = (c.ie & 0x0000FFFF) | (static_cast<u32>(value) << 16); update_irq(cpu); return;
-  case 0x04000214: c.if_ &= ~static_cast<u32>(value); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq_fast(); return;
-  case 0x04000216: c.if_ &= ~(static_cast<u32>(value) << 16); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq_fast(); return;
-  case 0x04000300:
+  case 0x104: c.ime = value & 1; update_irq(cpu); return;
+  case 0x108: c.ie = (c.ie & 0xFFFF0000) | value; update_irq(cpu); return;
+  case 0x109: c.ie = (c.ie & 0x0000FFFF) | (static_cast<u32>(value) << 16); update_irq(cpu); return;
+  case 0x10a: c.if_ &= ~static_cast<u32>(value); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq_fast(); return;
+  case 0x10b: c.if_ &= ~(static_cast<u32>(value) << 16); update_irq(cpu); if (a9) nds_.gpu3d.check_fifo_irq_fast(); return;
+  case 0x180:
     c.postflg |= value & 1; if (a9) c.postflg = (c.postflg & 1) | (value & 2);
     if (!a9 && (value >> 8)) write8(cpu, 0x04000301, static_cast<u8>(value >> 8));
     return;
-  case 0x04000304: if (a9) { powcnt1 = value & 0x820F; nds_.gpu.set_powcnt(powcnt1); } else { powcnt2 = value & 0x0003; nds_.spu.set_powcnt2(powcnt2); } return;
+  case 0x182: if (a9) { powcnt1 = value & 0x820F; nds_.gpu.set_powcnt(powcnt1); } else { powcnt2 = value & 0x0003; nds_.spu.set_powcnt2(powcnt2); } return;
   default: break;
   }
   if (addr >= 0x04000240 && addr < 0x0400024A && a9) { write8(cpu, addr, static_cast<u8>(value)); write8(cpu, addr + 1, static_cast<u8>(value >> 8)); return; }
@@ -1219,6 +1219,7 @@ template <class S> void Io::sync_state(S& s) {
     // start one there. Whatever this run was set up with keeps going, rebased
     // onto the restored timeline.
     if (rtc.ticking) { rtc.next_tick = nds_.sched.now() + ARM9_CLOCK_HZ; nds_.sched.schedule(EventId::Rtc, rtc.next_tick, rtc_ev, 0); }
+    else nds_.sched.cancel(EventId::Rtc);   // the saving session's clock event, armed in the state but with no handler here
   }
 }
 template void Io::sync_state<state::Writer>(state::Writer&);

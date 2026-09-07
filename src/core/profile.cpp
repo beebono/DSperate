@@ -64,7 +64,8 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "3d resolve empty groups: under-layer candidates only", "3d resolve empty groups: a top lane passed depth",
   "3d resolve groups: every lane opaque and drawing", "3d resolve pixels in every-lane-opaque groups",
   "jit retime invalidations", "jit blocks killed by retimes",
-  "slices arm9 gx-stalled"};
+  "slices arm9 gx-stalled",
+  "bus vram remaps", "bus tcm updates", "bus gba slot retimes", "timing cpu9 range rebuilds"};
 
 static_assert(sizeof(count_names) / sizeof(*count_names) == C_COUNT,
               "count_names must have exactly one entry per Counter enumerator");

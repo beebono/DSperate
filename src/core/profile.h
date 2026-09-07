@@ -122,6 +122,10 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   C_JIT_INVALIDATE_CPU, C_JIT_INVALIDATE_CPU_KILLED,
   // Slices the ARM9 sat out with the geometry FIFO full (the 128-cycle drain poll).
   C_SLICES_GX_STALLED,
+  // Memory-map and timing-table rebuilds (each is a page-table or 1 MB
+  // table walk): VRAMCNT remaps, TCM/PU window updates, EXMEMCNT slot
+  // retimes, and ARM9 timing-range rebuilds from any of them.
+  C_BUS_UPDATE_VRAM, C_BUS_UPDATE_TCM, C_BUS_GBA_TIMING, C_TIMING_UPDATE_CPU9,
   C_COUNT };
 // Unbounded on purpose: profile.cpp defines it with a deduced size and
 // static_asserts that size against C_COUNT. Declared as [C_COUNT] instead, a

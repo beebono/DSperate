@@ -46,6 +46,7 @@ void Bus::reset() {
   std::memset(palette.get(), 0, PALETTE_SIZE);
   std::memset(oam.get(), 0, OAM_SIZE);
   timing_.reset();
+  vram_hosts_valid_ = false;
   nds_.cpu(Cpu::ARM9).timing9 = timing_.cpu9();
   nds_.cpu(Cpu::ARM9).timing7 = timing_.cpu7();
   nds_.cpu(Cpu::ARM9).cost7 = timing_.cost7();
@@ -60,6 +61,7 @@ void Bus::reset() {
 }
 
 void Bus::update_gba_slot_timings() {
+  prof::add(prof::C_BUS_GBA_TIMING, 1);
   const u16 ex = nds_.io.exmemcnt;
   static const int rom_n[4] = {10, 8, 6, 18};
   const int rn = rom_n[(ex >> 2) & 3], rs = (ex & 0x10) ? 4 : 6;
@@ -142,17 +144,27 @@ void Bus::update_wram() {
 }
 
 void Bus::update_vram() {
+  prof::add(prof::C_BUS_UPDATE_VRAM, 1);
   // The escape hatch. A band worker reads texture and texture-palette VRAM
   // directly, and this is the only place either can move: neither view is
   // ever mapped into a CPU's address space, so a game that wants to write a
   // texture bank must first switch it out of texture mode, through here.
-  nds_.gpu3d.sync_raster();
-  // The probe counts only remaps that actually change the views a band worker
-  // indexes: most VRAMCNT traffic moves capture or BG banks and would not
-  // disturb an async raster at all.
-  const bool probing = prof::enabled && prof::async_window;
-  gpu::VramView tex_before, pal_before;
-  if (probing) { tex_before = vram_map_.texture; pal_before = vram_map_.texpal; }
+  // Rebuild into a copy first: whether the band workers must be joined
+  // depends on whether the two views they index actually move, and most
+  // VRAMCNT traffic (capture and BG bank swaps -- Spirit Tracks does two a
+  // frame) leaves them alone. The copy is a few KB of plain arrays.
+  u8* banks[9];
+  for (int i = 0; i < 9; ++i) banks[i] = vram_bank(i);
+  gpu::VramMap next = vram_map_;
+  next.rebuild(nds_.io.vramcnt, banks);
+  const auto differs = [](const gpu::VramView& a, const gpu::VramView& b) {
+    return a.size != b.size || a.ptr != b.ptr || a.mask != b.mask;
+  };
+  const bool tex_moved = differs(next.texture, vram_map_.texture) || differs(next.texpal, vram_map_.texpal);
+  if (tex_moved) {
+    nds_.gpu3d.sync_raster();
+    if (prof::enabled && prof::async_window) prof::add(prof::C_ASYNC_VRAMCNT_SWAP, 1);
+  }
   PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
   PageTable& pt7 = nds_.cpu(Cpu::ARM7).page_table;
   const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
@@ -161,9 +173,7 @@ void Bus::update_vram() {
   // anything is rebuilt; the write trap (which the remap below would drop)
   // is re-armed after it.
   const bool trapped = nds_.gpu.vram_remap_begin();
-  u8* banks[9];
-  for (int i = 0; i < 9; ++i) banks[i] = vram_bank(i);
-  vram_map_.rebuild(nds_.io.vramcnt, banks);
+  vram_map_ = next;
   // The whole 16 MB region is described as one host pointer per page and
   // applied as a diff: games that rewrite VRAMCNT every few frames (bank
   // swaps for capture) would otherwise unmap and remap 8 K pages per CPU.
@@ -193,17 +203,24 @@ void Bus::update_vram() {
     if (!(vram_map_.lcdc_mask & (1u << i))) continue;
     for (u32 mirror = 0x06800000; mirror < 0x07000000; mirror += 0x100000) set_pages(h9, mirror + lcdc_base[i], VRAM_BANK_SIZES[i], banks[i]);
   }
-  pt9.remap(0x06000000, 0x01000000, h9, RW);
-  pt7.remap(0x06000000, 0x01000000, h7, RW);
+  // Only the runs of pages whose host changed go through the page table:
+  // the previous host arrays are kept and compared in 2 KB chunks, so a
+  // one-bank swap costs one bank's worth of entries, not 16 K per CPU.
+  auto apply = [&](PageTable& pt, u8** cur, u8** prev) {
+    constexpr u32 CHUNK = 256;   // entries (512 KB of guest space)
+    u32 run = 0; bool in_run = false;
+    for (u32 i = 0; i <= VRAM_PAGES; i += CHUNK) {
+      const bool d = i < VRAM_PAGES && std::memcmp(cur + i, prev + i, CHUNK * sizeof(u8*)) != 0;
+      if (d) { if (!in_run) { run = i; in_run = true; } }
+      else if (in_run) { pt.remap(0x06000000 + (run << PAGE_SHIFT), (i - run) << PAGE_SHIFT, cur + run, RW); in_run = false; }
+    }
+  };
+  if (!vram_hosts_valid_) { pt9.remap(0x06000000, 0x01000000, h9, RW); pt7.remap(0x06000000, 0x01000000, h7, RW); vram_hosts_valid_ = true; }
+  else { apply(pt9, h9, vram_hosts_prev_[0].get()); apply(pt7, h7, vram_hosts_prev_[1].get()); }
+  std::swap(vram_hosts_[0], vram_hosts_prev_[0]);
+  std::swap(vram_hosts_[1], vram_hosts_prev_[1]);
   nds_.gpu.vram_remap_end(trapped);
   if (watch_on && (watch_addr >> 24) == 0x06) { pt9.map_mmio(watch_addr & ~0x7FFu, 0x800); pt7.map_mmio(watch_addr & ~0x7FFu, 0x800); }
-  if (probing) {
-    const auto differs = [](const gpu::VramView& a, const gpu::VramView& b) {
-      return a.size != b.size || a.ptr != b.ptr || a.mask != b.mask;
-    };
-    if (differs(tex_before, vram_map_.texture) || differs(pal_before, vram_map_.texpal))
-      prof::add(prof::C_ASYNC_VRAMCNT_SWAP, 1);
-  }
 }
 
 // Slow-path VRAM access for blocks with overlapping banks (and LCDC gaps).
@@ -247,6 +264,7 @@ void Bus::vram_write(Cpu cpu, u32 addr, u32 width, u32 val) {
 }
 
 void Bus::update_tcm(CpuContext& cpu, bool force) {
+  prof::add(prof::C_BUS_UPDATE_TCM, 1);
   // Rebuild the ARM9 map from scratch so a moved/shrunk TCM window releases
   // its old pages, then overlay TCM. TODO: track the previous window instead.
   // Nothing happens when the effective windows are unchanged: the full remap
@@ -261,6 +279,7 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
   // that do not change are skipped by PageTable::map, so this costs only
   // the windows themselves rather than a 256 MB remap.
   if (force) pt.unmap(0x00000000, 0x10000000);
+  vram_hosts_valid_ = false;   // the unmaps above may have touched VRAM pages: update_vram below re-applies in full
   if (tcm_prev_itcm_) pt.unmap(0, std::min(tcm_prev_itcm_, 0x02000000u));
   if (tcm_prev_dtcm_size_) pt.unmap(tcm_prev_dtcm_base_, tcm_prev_dtcm_size_);
   tcm_prev_itcm_ = 0; tcm_prev_dtcm_size_ = 0;
