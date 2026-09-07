@@ -473,17 +473,18 @@ Layouts (`--layout` / `[video] layout`; `F4`/`F10` step through
 (stacked) and `horizontal` (side by side; `--screen` picks which comes
 first), `single` (one screen fills the window), `pip` (one fills it, the
 other is an inset of `pip_scale` in `pip_corner` = `tl|tr|bl|br`),
-`dominant_v` (stacked in DS order, one screen fitted to the width and the
-other `dominant_ratio` its size, both centred) and `dominant_h` (side by
-side in DS order, fitted to the height, bottoms aligned). `dominant_ratio =
-auto` (`--dominant-ratio auto`) turns that round: the dominant screen takes
-the largest whole number of panel pixels per DS pixel that leaves the other
-at least `dominant_threshold` (`--dominant-threshold`, default 0.25) of its
-size, and the other grows into whatever room is left, up to the same size.
-The grid and chunky cells then come out exact on the dominant screen. On a
-1280x720 window `dominant_v` gives a 3x top screen over a 192x144 bottom one
-at the default threshold and a 2x top over a 448x336 bottom at 0.33;
-`dominant_h` gives 3x beside 512x384 either way. Every mode keeps
+`dominant_v` (stacked in DS order, both centred) and `dominant_h` (side by
+side in DS order, bottoms aligned). By default (`dominant_ratio = auto`)
+the dominant screen takes the largest whole number of panel pixels per DS
+pixel that leaves the other at least `dominant_threshold`
+(`--dominant-threshold`, default 0.25) of its size, and the other grows
+into whatever room is left, up to the same size; the grid and chunky cells
+then come out exact on the dominant screen. On a 640x480 panel `dominant_v`
+gives a 2x top screen over a 128x96 bottom; on a 1280x720 window a 3x top
+over 192x144 at the default threshold and a 2x top over 448x336 at 0.33,
+and `dominant_h` 3x beside 512x384 either way. A number instead
+(`--dominant-ratio 0.5`) fits the dominant screen to the width/height with
+the other that fraction of its size. Every mode keeps
 the 4:3 screen aspect. `--screen top|bottom` (`[video] screen`) is the
 screen shown alone, large or dominant; `F6` swaps it.
 

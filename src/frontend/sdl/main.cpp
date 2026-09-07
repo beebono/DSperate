@@ -77,9 +77,10 @@ const char* kUsage =
     "  --screen S      top (default) or bottom: the screen shown alone, large or dominant\n"
     "  --pip-alpha X   opacity of the PiP inset at rest, 0..1 (default 1; it comes up to opaque\n"
     "                  while the bottom screen is touched)\n"
-    "  --dominant-ratio R  the dominant layouts' secondary, relative to the dominant screen (default\n"
-    "                  0.5) | auto: the dominant screen takes the largest whole scale that leaves the\n"
-    "                  secondary at least --dominant-threshold of it, and the secondary the room left\n"
+    "  --dominant-ratio R  the dominant layouts' secondary, relative to the dominant screen: auto\n"
+    "                  (default: the dominant screen takes the largest whole scale that leaves the\n"
+    "                  secondary at least --dominant-threshold of it, and the secondary the room left)\n"
+    "                  or a ratio such as 0.5\n"
     "  --dominant-threshold T  the smallest secondary auto accepts, 0.1..0.99 (default 0.25)\n"
     "  --integer-scale [M]  whole panel pixels per DS pixel: under (default when bare; the largest\n"
     "                  that fits, letterboxed) | over (the smallest that covers, cropped, keeping the\n"
@@ -781,7 +782,7 @@ int main(int argc, char** argv) {
     if (layout_cycle.empty()) layout_cycle.push_back(layout.mode);
     layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
     layout.pip_alpha = std::clamp(cfg.real("video.pip_alpha", 1.0), 0.0, 1.0);
-    const std::string dr = cfg.str("video.dominant_ratio", "0.5");
+    const std::string dr = cfg.str("video.dominant_ratio", "auto");
     layout.dominant_auto = dr == "auto";
     if (!layout.dominant_auto) {
       char* end = nullptr; const double v = std::strtod(dr.c_str(), &end);

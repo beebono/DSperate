@@ -190,9 +190,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # pip_scale = 0.33              # inset size relative to the large screen
 # pip_alpha = 1.0               # inset opacity at rest, 0..1
 # pip_touch_hold = 60           # frames the inset stays opaque after the bottom screen was touched; 0 = never fades
-# dominant_ratio = 0.5          # the smaller screen's size relative to the dominant one, or auto: the dominant
-                                # screen takes the largest whole scale that leaves the other at least
-                                # dominant_threshold of it, and the other grows into the room left
+# dominant_ratio = auto         # auto: the dominant screen takes the largest whole scale that leaves the other
+                                # at least dominant_threshold of it, and the other grows into the room left;
+                                # or a number, the smaller screen's size relative to the dominant one (0.5)
+# dominant_threshold of it, and the other grows into the room left
 # dominant_threshold = 0.25     # auto: the smallest secondary it accepts, 0.1..0.99
 # dual_window = false           # one window per panel (dual-screen handhelds)
 # integer_scale = off           # off | under | over: whole panel pixels per DS pixel -- under letterboxes at the

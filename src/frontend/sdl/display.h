@@ -53,7 +53,7 @@ public:
     Corner corner = Corner::BottomRight;
     double pip = 1.0 / 3.0;      // inset size relative to the large screen
     double dominant = 0.5;       // secondary size relative to the dominant screen
-    bool   dominant_auto = false; // pick the primary's whole scale instead (see above)
+    bool   dominant_auto = true; // pick the primary's whole scale instead (see above); a ratio when false
     double dominant_min = 0.25;  // auto: the smallest secondary the primary may leave
     double pip_alpha = 1.0;      // inset opacity at rest, 0..1 (see set_inset_alpha)
   };
