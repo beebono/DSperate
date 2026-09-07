@@ -54,11 +54,20 @@ void Display::natural_size(const Layout& l, double scale, int& w, int& h) {
     case Mode::Vertical:   fh = sh * 2; break;
     case Mode::Horizontal: fw = sw * 2; break;
     case Mode::Single: case Mode::Pip: break;
-    case Mode::DominantV:  fh = sh * (1 + l.dominant); break;
-    case Mode::DominantH:  fw = sw * (1 + l.dominant); break;
+    // Auto has no ratio until there is a window to fit; the smallest it
+    // would accept sizes the window.
+    case Mode::DominantV:  fh = sh * (1 + (l.dominant_auto ? l.dominant_min : l.dominant)); break;
+    case Mode::DominantH:  fw = sw * (1 + (l.dominant_auto ? l.dominant_min : l.dominant)); break;
     case Mode::Count: break;
   }
   w = static_cast<int>(fw); h = static_cast<int>(fh);
+}
+
+double Display::dominant_ratio() const {
+  if (layout_.mode != Mode::DominantV && layout_.mode != Mode::DominantH) return 1.0;
+  if (!layout_.dominant_auto) return layout_.dominant;
+  const int p = layout_.primary, q = 1 - p;
+  return views_[p].rect.w > 0 ? static_cast<double>(views_[q].rect.w) / views_[p].rect.w : layout_.dominant_min;
 }
 
 bool Display::open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout_mode, int only_screen, int display_index) {
@@ -259,9 +268,32 @@ void Display::layout() {
   }
   place(layout_, w, h, views_, int_scale_);
   if (verbose()) for (int i = 0; i < nviews_; ++i)
-    std::fprintf(stderr, "video: view %d screen %d at %d,%d %dx%d%s (%dx%d, integer %s)\n", i, views_[i].screen, views_[i].rect.x, views_[i].rect.y, views_[i].rect.w, views_[i].rect.h,
-                 views_[i].shown ? "" : " hidden", w, h, int_scale_name(int_scale_));
+    std::fprintf(stderr, "video: view %d screen %d at %d,%d %dx%d%s (%dx%d, integer %s%s)\n", i, views_[i].screen, views_[i].rect.x, views_[i].rect.y, views_[i].rect.w, views_[i].rect.h,
+                 views_[i].shown ? "" : " hidden", w, h, int_scale_name(int_scale_), layout_.dominant_auto && (layout_.mode == Mode::DominantV || layout_.mode == Mode::DominantH) ? ", dominant auto" : "");
   if (disp_) for (int i = 0; i < nviews_; ++i) disp_->set_view(i, views_[i].rect.x, views_[i].rect.y, views_[i].rect.w, views_[i].rect.h, views_[i].shown);
+}
+
+// Auto dominant: the primary's scale `s` is the largest whole number that
+// leaves the secondary at least `dominant_min` of it; the secondary `s2`
+// is then the largest that fits the room left beside it (the whole
+// width/height, not a ratio of the primary -- the point is a crisp primary,
+// the secondary takes what remains), capped at the primary's size. Under
+// an integer-scale setting the secondary is floored too, when that leaves
+// it at least one panel pixel per DS pixel. When no whole scale leaves
+// room enough the fractional fit at `dominant_min` is what is left.
+void Display::dominant_auto(const Layout& l, int w, int h, bool across, IntScale snap, double& s, double& s2) {
+  const double sw = SCREEN_W, sh = SCREEN_H;
+  const double along = across ? w / sw : h / sh;      // room along the pair, in screens
+  const double side  = across ? h / sh : w / sw;      // room across it
+  for (int k = static_cast<int>(std::floor(std::min(along, side) + 1e-9)); k >= 1; --k) {
+    double rest = std::min(along - k, side);          // the secondary's fit in the leftover
+    rest = std::min(rest, static_cast<double>(k));
+    if (snap != IntScale::Off && rest >= 1.0) rest = std::floor(rest + 1e-9);
+    if (rest + 1e-9 >= k * l.dominant_min) { s = k; s2 = rest; return; }
+  }
+  const double r = l.dominant_min;
+  s = snap_scale(std::min(across ? w / (sw * (1 + r)) : w / sw, across ? h / sh : h / (sh * (1 + r))), snap);
+  s2 = s * r;
 }
 
 void Display::place(const Layout& layout_, int w, int h, View views_[SCREENS], IntScale snap) {
@@ -302,24 +334,22 @@ void Display::place(const Layout& layout_, int w, int h, View views_[SCREENS], I
       }
       break;
     }
-    case Mode::DominantV: {
-      // DS order (top above bottom), the pair centred, each centred across.
-      const double r = layout_.dominant, s = fit(1, 1 + r);
-      const double bh = sh * s, lh = sh * s * r;
-      const double y0 = (h - (bh + lh)) / 2;
-      const double sc[2] = {p == 0 ? s : s * r, p == 1 ? s : s * r};
-      double y = y0;
-      for (int i = 0; i < SCREENS; ++i) { views_[i] = View{i, rect((w - sw * sc[i]) / 2, y, sc[i]), true, true}; y += sh * sc[i]; }
-      break;
-    }
-    case Mode::DominantH: {
-      // DS order (top left of bottom), the pair centred, bottoms aligned.
-      const double r = layout_.dominant, s = fit(1 + r, 1);
-      const double bw = sw * s, lw = sw * s * r, bh = sh * s;
-      const double x0 = (w - (bw + lw)) / 2, bottom = (h - bh) / 2 + bh;
-      const double sc[2] = {p == 0 ? s : s * r, p == 1 ? s : s * r};
-      double x = x0;
-      for (int i = 0; i < SCREENS; ++i) { views_[i] = View{i, rect(x, bottom - sh * sc[i], sc[i]), true, true}; x += sw * sc[i]; }
+    case Mode::DominantV: case Mode::DominantH: {
+      // DS order (top above / left of bottom), the pair centred; across the
+      // stack each screen is centred, along the row bottoms are aligned.
+      const bool across = layout_.mode == Mode::DominantH;
+      double s = 0, s2 = 0;    // the primary's and the secondary's scale
+      if (!layout_.dominant_auto) { s = across ? fit(1 + layout_.dominant, 1) : fit(1, 1 + layout_.dominant); s2 = s * layout_.dominant; }
+      else dominant_auto(layout_, w, h, across, snap, s, s2);
+      const double sc[2] = {p == 0 ? s : s2, p == 1 ? s : s2};
+      if (!across) {
+        double y = (h - sh * (s + s2)) / 2;
+        for (int i = 0; i < SCREENS; ++i) { views_[i] = View{i, rect((w - sw * sc[i]) / 2, y, sc[i]), true, true}; y += sh * sc[i]; }
+      } else {
+        double x = (w - sw * (s + s2)) / 2;
+        const double bottom = (h - sh * s) / 2 + sh * s;
+        for (int i = 0; i < SCREENS; ++i) { views_[i] = View{i, rect(x, bottom - sh * sc[i], sc[i]), true, true}; x += sw * sc[i]; }
+      }
       break;
     }
     case Mode::Count: break;

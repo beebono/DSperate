@@ -40,6 +40,11 @@ public:
   //               the other `dominant` times its size, both centred
   //   DominantH   side by side in DS order, the primary fitted to the
   //               height, the other `dominant` times its size, bottoms aligned
+  // With `dominant_auto` the dominant layouts solve the other way round:
+  // the primary takes the largest whole scale that leaves the secondary
+  // at least `dominant_min` of its size, and the secondary grows into
+  // whatever room is left (up to the primary's size). The screen effects
+  // (grid, chunky cells) come out exact on the primary that way.
   enum class Mode : u8 { Vertical, Horizontal, Single, Pip, DominantV, DominantH, Count };
   enum class Corner : u8 { TopLeft, TopRight, BottomLeft, BottomRight, Count };
   struct Layout {
@@ -48,6 +53,8 @@ public:
     Corner corner = Corner::BottomRight;
     double pip = 1.0 / 3.0;      // inset size relative to the large screen
     double dominant = 0.5;       // secondary size relative to the dominant screen
+    bool   dominant_auto = false; // pick the primary's whole scale instead (see above)
+    double dominant_min = 0.25;  // auto: the smallest secondary the primary may leave
     double pip_alpha = 1.0;      // inset opacity at rest, 0..1 (see set_inset_alpha)
   };
   // Forced integer scaling of the full-size views (the ones drawn at the
@@ -171,6 +178,9 @@ public:
   // display.
   void set_layout(const Layout& l);
   const Layout& current_layout() const { return layout_; }
+  // The secondary's size relative to the primary as placed: Layout::dominant
+  // unless auto chose it. 1 outside the dominant layouts.
+  double dominant_ratio() const;
   // The inset's opacity for the coming frame, 0..255: the frontend ramps it
   // between Layout::pip_alpha and opaque while the bottom screen is touched.
   // Below 255 the inset is blended over the large screen on every tier;
@@ -200,6 +210,7 @@ public:
   // (later views on top). Shared with the screenshot writer, so a picture
   // of the layout is laid out exactly as the window is.
   static void place(const Layout& l, int w, int h, View out[SCREENS], IntScale snap = IntScale::Off);
+  static void dominant_auto(const Layout& l, int w, int h, bool across, IntScale snap, double& s, double& s2);
 
 private:
   void layout();

@@ -77,6 +77,10 @@ const char* kUsage =
     "  --screen S      top (default) or bottom: the screen shown alone, large or dominant\n"
     "  --pip-alpha X   opacity of the PiP inset at rest, 0..1 (default 1; it comes up to opaque\n"
     "                  while the bottom screen is touched)\n"
+    "  --dominant-ratio R  the dominant layouts' secondary, relative to the dominant screen (default\n"
+    "                  0.5) | auto: the dominant screen takes the largest whole scale that leaves the\n"
+    "                  secondary at least --dominant-threshold of it, and the secondary the room left\n"
+    "  --dominant-threshold T  the smallest secondary auto accepts, 0.1..0.99 (default 0.25)\n"
     "  --integer-scale [M]  whole panel pixels per DS pixel: under (default when bare; the largest\n"
     "                  that fits, letterboxed) | over (the smallest that covers, cropped, keeping the\n"
     "                  edge between the screens) | off\n"
@@ -606,6 +610,8 @@ int main(int argc, char** argv) {
     else if (arg("--layout")) cli.set("video.layout", argv[++i]);
     else if (arg("--screen")) cli.set("video.screen", argv[++i]);
     else if (arg("--pip-alpha")) cli.set("video.pip_alpha", argv[++i]);
+    else if (arg("--dominant-ratio")) cli.set("video.dominant_ratio", argv[++i]);
+    else if (arg("--dominant-threshold")) cli.set("video.dominant_threshold", argv[++i]);
     else if (flag("--integer-scale")) cli.set("video.integer_scale", optional("under"));
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (flag("--rtc-host")) rtc_host = true;
@@ -656,7 +662,7 @@ int main(int argc, char** argv) {
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
-  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.integer_scale",
+  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
@@ -775,7 +781,14 @@ int main(int argc, char** argv) {
     if (layout_cycle.empty()) layout_cycle.push_back(layout.mode);
     layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
     layout.pip_alpha = std::clamp(cfg.real("video.pip_alpha", 1.0), 0.0, 1.0);
-    layout.dominant = std::clamp(cfg.real("video.dominant_ratio", 0.5), 0.1, 0.99);
+    const std::string dr = cfg.str("video.dominant_ratio", "0.5");
+    layout.dominant_auto = dr == "auto";
+    if (!layout.dominant_auto) {
+      char* end = nullptr; const double v = std::strtod(dr.c_str(), &end);
+      if (end == dr.c_str() || *end) { std::fprintf(stderr, "dominant_ratio must be a number or auto\n"); return 2; }
+      layout.dominant = std::clamp(v, 0.1, 0.99);
+    }
+    layout.dominant_min = std::clamp(cfg.real("video.dominant_threshold", 0.25), 0.1, 0.99);
   }
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
   std::signal(SIGINT, on_signal);
@@ -1699,7 +1712,7 @@ sdl_ready:
         const Disp::Layout& cl = display.current_layout();
         double ratio = 1.0;
         if (!dual_window && cl.mode == Disp::Mode::Pip && cl.primary == 0) ratio = cl.pip;
-        else if (!dual_window && (cl.mode == Disp::Mode::DominantV || cl.mode == Disp::Mode::DominantH) && cl.primary == 0) ratio = cl.dominant;
+        else if (!dual_window && (cl.mode == Disp::Mode::DominantV || cl.mode == Disp::Mode::DominantH) && cl.primary == 0) ratio = display.dominant_ratio();
         if (ratio < 1.0) cursor_size *= std::clamp(static_cast<int>(1.0 / ratio + 0.5), 1, 4);
       }
       const bool slot_osd = slot_shown > 0;
