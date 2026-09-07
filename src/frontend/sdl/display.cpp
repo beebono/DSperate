@@ -566,7 +566,13 @@ void Display::build_scale() {
   // draw() and map_point(), so the two paths land pixels in the same places:
   // source pixel s covers [xrun[s], xrun[s+1]). One table per view, since
   // the views differ in size in the inset and dominant modes.
-  for (int i = 0; i < nviews_; ++i) {
+  // The largest shown view sets the chunky cell (in DS pixels) the others follow.
+  int ref_view = 0;
+  for (int i = 1; i < nviews_; ++i) if (views_[i].shown && (!views_[ref_view].shown || views_[i].rect.w > views_[ref_view].rect.w)) ref_view = i;
+  const int order[SCREENS] = {ref_view, 1 - ref_view};   // the reference first, so ref_D is set
+  double ref_D = 2.0;
+  for (int oi = 0; oi < nviews_; ++oi) {
+    const int i = order[oi];
     const View& v = views_[i];
     std::vector<u16>& xr = xrun_[v.screen];
     xr.resize(static_cast<size_t>(SCREEN_W) + 1);
@@ -587,6 +593,7 @@ void Display::build_scale() {
     // left empty (a zero-length run, which scale_row skips). The destination
     // coverage is unchanged, so map_point still agrees.
     cells_[v.screen] = {};
+    src_chunky_[v.screen] = chunky_;
     bool pair = chunky_;
     if (chunky_) {
       // A cell of P panel pixels needs P to divide both dimensions and no
@@ -596,14 +603,35 @@ void Display::build_scale() {
       // The cell map is laid over the whole view; a cropped one takes the
       // pairs (at a whole scale the pairs are exact cells anyway).
       auto fits = [&](u32 p) { return !cropped && p >= 2 && w % p == 0 && h % p == 0 && w / p <= SCREEN_W; };
-      // An explicit cell that does not divide the screen steps down to the
-      // nearest one that does (5 on 640x480 -> 4), so a size chosen for one
-      // panel is still close on another -- but no further than auto's
-      // floor of 4: a view like the dominant layouts' 426x320 divides by
-      // nothing but 2, and a 2-px cell there is 1.2 DS pixels, no chunky
-      // at all. Below the floor the 2x2 pairs take over, as with auto.
-      if (chunky_cell_ > 0) { for (u32 p = static_cast<u32>(chunky_cell_); p >= 4 && !P; --p) if (fits(p)) P = p; }
-      else if (chunky_cell_ < 0) { for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p; }
+      // The largest view chooses the cell. An explicit cell that does not
+      // divide the screen steps down to the nearest one that does (5 on
+      // 640x480 -> 4), so a size chosen for one panel is still close on
+      // another -- but no further than auto's floor of 4: a view like the
+      // dominant layouts' 426x320 divides by nothing but 2, and a 2-px cell
+      // there is 1.2 DS pixels, no chunky at all. Below the floor the 2x2
+      // pairs take over, as with auto.
+      // The other views (the PiP inset, the dominant layouts' secondary)
+      // match its cell in DS pixels, not panel pixels: the same 4 px that
+      // is 2 DS pixels on a 512-wide view is 8 on a 128-wide one, and the
+      // smaller screen would come out the coarsest. So they take the P
+      // whose DS pixels per cell is nearest the large view's; and a view
+      // shown smaller than the screen goes plain, as it does on the
+      // display-engine tier -- flattening cells before a downscale is only
+      // blur.
+      if (i == ref_view) {
+        if (chunky_cell_ > 0) { for (u32 p = static_cast<u32>(chunky_cell_); p >= 4 && !P; --p) if (fits(p)) P = p; }
+        else if (chunky_cell_ < 0) { for (u32 p = 4; p <= 16 && !P; ++p) if (fits(p)) P = p; }
+        ref_D = P ? static_cast<double>(SCREEN_W) * P / w : 2.0;
+      } else if (w < SCREEN_W || h < SCREEN_H) {
+        src_chunky_[v.screen] = false; pair = false;
+        if (verbose()) std::fprintf(stderr, "video: view %ux%u is below the screen; no chunky\n", w, h);
+      } else if (chunky_cell_ != 0) {
+        double best = 1e9;
+        for (u32 p = 2; p <= 64; ++p) if (fits(p)) {
+          const double d = std::fabs(static_cast<double>(SCREEN_W) * p / w - ref_D);
+          if (d < best - 1e-9) { best = d; P = p; }
+        }
+      }
       ds::gpu::Gpu::CellMap m;
       if (P && ds::gpu::Gpu::build_cell_axis(SCREEN_W, w / P, P, m.x) && ds::gpu::Gpu::build_cell_axis(SCREEN_H, h / P, P, m.y)) {
         cells_[v.screen] = std::move(m);
@@ -614,11 +642,12 @@ void Display::build_scale() {
         // The chosen cell is chatter unless it is not the one asked for;
         // that is said once, with what was used instead.
         static bool told = false;
-        if (chunky_cell_ > 0 && P != static_cast<u32>(chunky_cell_) && !told) {
+        if (i == ref_view && chunky_cell_ > 0 && P != static_cast<u32>(chunky_cell_) && !told) {
           told = true;
           std::fprintf(stderr, "video: no %d px cell divides %ux%u; using %u\n", chunky_cell_, w, h, P);
-        } else if (verbose()) std::fprintf(stderr, "video: chunky cells %ux%u of %u px\n", w / P, h / P, P);
-      } else if (chunky_cell_ && cropped) { if (verbose()) std::fprintf(stderr, "video: view cropped by the overscale; 2x2 pairs\n"); }
+        } else if (verbose()) std::fprintf(stderr, "video: chunky cells %ux%u of %u px (%.2f DS pixels)\n", w / P, h / P, P, static_cast<double>(SCREEN_W) * P / w);
+      } else if (!src_chunky_[v.screen]) {}
+      else if (chunky_cell_ && cropped) { if (verbose()) std::fprintf(stderr, "video: view cropped by the overscale; 2x2 pairs\n"); }
       else if (chunky_cell_) std::fprintf(stderr, "video: no %s cell divides %ux%u; 2x2 pairs\n", chunky_cell_ > 0 ? "such" : "auto", w, h);
     }
     if (pair)

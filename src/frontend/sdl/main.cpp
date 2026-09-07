@@ -900,11 +900,12 @@ sdl_ready:
     const char* vd = SDL_GetCurrentVideoDriver();
     bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
     display.set_chunky(chunky != 0, chunky_cell); display2.set_chunky(chunky != 0, chunky_cell);
+    display.set_grid_strength(linear ? 0.0 : grid_s); display2.set_grid_strength(linear ? 0.0 : grid_s);
     display.set_integer_scale(int_scale); display2.set_integer_scale(int_scale);
     if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, 0, 1 - bottom_display) ||
         !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, 1, bottom_display)) { SDL_Quit(); return 1; }
     if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
-  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); display.set_integer_scale(int_scale);
+  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); display.set_integer_scale(int_scale); display.set_grid_strength(linear ? 0.0 : grid_s);
     if (!linear) display.set_disp_grid(static_cast<u8>(((256 - grid) * 255) / 256)); display.set_fbdev(use_fbdev); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout)) { SDL_Quit(); return 1; } }
   // A single-screen layout shows one screen: the core skips the other's
   // engine (Gpu::set_screen_visible). Every other layout, and dual-window,

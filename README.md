@@ -513,7 +513,13 @@ bilinear filter (two NEON passes per line; about 0.2 ms a frame at 2.5x on
 an RG DS, free where the display engine scales, below); `--lcd-grid S`
 dims one seam per DS pixel; `--seam blend` blends only the panel pixel that
 straddles two DS pixels (sharp-shimmerless); `--chunky` draws 2x2 blocks as
-one cell. `--linear` takes precedence over the other three.
+one cell. `--linear` takes precedence over the other three. On the small
+screens (the PiP inset, the dominant layouts' secondary) the full grid
+(strength 1) needs at least 2x to show, a dimmed one is an overlay and
+applies from 1x, and a view shown below 1x gets neither the grid nor
+chunky. The largest screen chooses the chunky cell (`--chunky-cell`), and
+the other one matches it in DS pixels rather than panel pixels, so a
+half-size secondary gets cells half as many panel pixels across.
 
 The presentation tiers, tried in order at start-up:
 

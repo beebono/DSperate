@@ -111,12 +111,14 @@ public:
   //     not a software path at all -- SDL has no window framebuffer there, so
   //     it is a hidden GLES renderer; see display_drm.h.
   // `grid`: whether the LCD grid applies to this view. A view scaled below
-  // 2x has no room for a lit pixel beside a seam: the seams the fractional
-  // rule still lands there (one run in four at 1.25x) read as noise, not a
-  // grid, and a view under 1x gets none anyway. So the small screens -- the
-  // PiP inset, the dominant layouts' secondary -- go plain, as they do on
-  // the display-engine tier, unless a whole panel cell (chunky, >= 4 px)
-  // carries the grid per cell. See grid_on().
+  // 2x has no room for a lit pixel beside a black seam: the seams the
+  // fractional rule still lands there (one run in four at 1.25x) read as
+  // noise, not a grid. So under the full grid the small screens -- the PiP
+  // inset, the dominant layouts' secondary -- go plain unless a whole panel
+  // cell (chunky, >= 4 px) carries the grid per cell. A dimmed grid is an
+  // overlay rather than a grid and applies from 1x, as it does on the
+  // display-engine tier; under 1x every run would be a seam and the whole
+  // view would only darken, so none gets it. See grid_on().
   // `xrun_plain`: the nearest map before chunky rewrote it into pairs or
   // cells, for a page that wants the view's geometry without the effect.
   // `y_lo`/`y_hi`: the rect rows inside the buffer (see Gpu::ScaleTarget);
@@ -151,15 +153,20 @@ public:
   // buffer that is then rotated as the core's framebuffer would be; the
   // grid, seams and bilinear need panel pixels and are off there.
   bool effects_at_source() const { return disp_ != nullptr && scaled_; }
-  // Whether chunky applies to `screen`: on the display-engine tier a view
-  // shown smaller than the screen (the PiP inset) is left plain, as the
-  // grid leaves it; elsewhere always.
-  bool chunky_on(int screen) const { return !effects_at_source() || src_chunky_[screen]; }
+  // Whether chunky applies to `screen`: a view shown smaller than the
+  // screen (the PiP inset, a dominant secondary) is left plain on every
+  // tier, as the grid leaves it.
+  bool chunky_on(int screen) const { return src_chunky_[screen]; }
+  // The LCD grid's strength, 0..1; the full (black) grid needs room for a
+  // lit pixel beside each seam, a dimmed one is an overlay and does not.
+  void set_grid_strength(double s) { grid_strength_ = s; }
   // Whether the LCD grid applies to `screen`'s view on the scanline tiers:
-  // at least 2x, or drawn as panel cells (see Target::grid).
+  // drawn as panel cells, or at least 2x for the full grid and 1x for a
+  // dimmed one (see Target::grid).
   bool grid_on(int screen) const {
     if (cells_[screen].x.cells) return true;
-    for (int i = 0; i < nviews_; ++i) if (views_[i].screen == screen) return views_[i].rect.w >= 2 * static_cast<int>(SCREEN_W);
+    const int need = grid_strength_ >= 1.0 ? 2 : 1;
+    for (int i = 0; i < nviews_; ++i) if (views_[i].screen == screen) return views_[i].rect.w >= need * static_cast<int>(SCREEN_W);
     return true;
   }
   // Present straight through /dev/fb0 (display_fbdev.h): the scanline path
@@ -241,6 +248,7 @@ private:
   bool              fbdev_wanted_ = false;
   std::unique_ptr<DispOut> disp_;       // display-engine tier; null otherwise
   bool              chunky_ = false;
+  double            grid_strength_ = 0.0;
   int               chunky_cell_ = 0;
   int               disp_divisor_ = 1;   // the divisor build_source_scale chose, restored after a page
   bool              page_ = false;
