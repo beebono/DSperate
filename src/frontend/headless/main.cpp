@@ -195,10 +195,12 @@ int main(int argc, char** argv) {
   ds::NDS nds;
   if (frameskip_capture) nds.gpu.set_frameskip_capture(true);
   if (hide_screen) nds.gpu.set_screen_visible(!std::strcmp(hide_screen, "bottom") ? 1 : 0, false);
-  if ((bios9 == nullptr) != (bios7 == nullptr)) { std::fprintf(stderr, "both --bios9 and --bios7 are needed (or neither, for the built-in FreeBIOS)\n"); return 1; }
-  if (!nds.load_bios(bios9 ? bios9 : "", bios7 ? bios7 : "", fw ? fw : "")) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
-  if (!nds.bios_native) std::fprintf(stderr, "note: no --bios9/--bios7 given; using the built-in FreeBIOS (direct boot only, timing is not Nintendo's)\n");
-  if (nds.firmware_synthetic) std::fprintf(stderr, "note: no --firmware given; using a generated firmware\n");
+  {
+    std::string err;
+    if (!nds.load_bios(bios9 ? bios9 : "", bios7 ? bios7 : "", fw ? fw : "", {}, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
+  }
+  if (!nds.bios_native) std::fprintf(stderr, "note: --bios9/--bios7 %s; using the built-in FreeBIOS (direct boot only, timing is not Nintendo's)\n", bios9 ? "not found" : "not given");
+  if (nds.firmware_synthetic) std::fprintf(stderr, "note: --firmware %s; using a generated firmware\n", fw ? "not found" : "not given");
   if (!direct && !nds.can_boot_firmware()) {
     // FreeBIOS's reset vector is an idle loop, so a firmware boot draws nothing.
     if (rom) { std::fprintf(stderr, "booting the firmware needs real BIOS and firmware dumps; pass --direct to run the ROM\n"); return 1; }

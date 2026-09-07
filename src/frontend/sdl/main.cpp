@@ -670,9 +670,6 @@ int main(int argc, char** argv) {
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
-  // One BIOS dump without the other is a configuration slip, not a request
-  // for the replacement; say so rather than mixing.
-  if (bios9.empty() != bios7.empty()) { std::fprintf(stderr, "both --bios9 and --bios7 are needed (or neither, for the built-in FreeBIOS); see [paths] in %s\n", global_ini.c_str()); return 2; }
 
   // No ROM boots the firmware's own menu. A file called BootMenu.nds selects
   // the same thing without a command line -- a launcher that only knows how to
@@ -715,9 +712,14 @@ int main(int argc, char** argv) {
   user.birthday_day = static_cast<ds::u8>(cfg.num("user.birthday_day", user.birthday_day));
   user.favourite_colour = static_cast<ds::u8>(cfg.num("user.colour", user.favourite_colour));
   user.language = static_cast<ds::u8>(cfg.num("user.language", user.language));
-  if (!nds.load_bios(bios9, bios7, fw, user)) { std::fprintf(stderr, "could not load BIOS/firmware\n"); return 1; }
-  if (!nds.bios_native) std::fprintf(stderr, "bios: no dumps given, using the built-in FreeBIOS (direct boot only; timing is not Nintendo's)\n");
-  if (nds.firmware_synthetic) std::fprintf(stderr, "firmware: no dump given, using a generated one ([user] in %s)\n", global_ini.c_str());
+  {
+    std::string err;
+    if (!nds.load_bios(bios9, bios7, fw, user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
+  }
+  // A configured path that names no file falls back the same as none: the
+  // stock ini on a handheld points at files the user may never add.
+  if (!nds.bios_native) std::fprintf(stderr, "bios: %s, using the built-in FreeBIOS (direct boot only; timing is not Nintendo's)\n", bios9.empty() ? "no dumps given" : "dumps not found");
+  if (nds.firmware_synthetic) std::fprintf(stderr, "firmware: %s, using a generated one ([user] in %s)\n", fw.empty() ? "no dump given" : "dump not found", global_ini.c_str());
   if (boot_firmware && !nds.can_boot_firmware()) {
     std::fprintf(stderr, "the DS menu needs real dumps: %s%s%s (--bios9/--bios7/--firmware or [paths] in %s)\n",
                  nds.bios_native ? "" : "bios9 and bios7", (!nds.bios_native && nds.firmware_synthetic) ? " and " : "",

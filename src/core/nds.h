@@ -32,14 +32,16 @@ struct NDS {
   ~NDS();
 
   void reset();
-  // Load the boot images. Any path may be empty: an empty BIOS path takes the
-  // built-in FreeBIOS, an empty firmware path a generated firmware carrying
-  // `user` (core/bios/freebios.h). Fails when a given path cannot be read or
-  // has the wrong size. What was substituted is reported by bios_native /
-  // firmware_synthetic below; the frontends say so, since the substitutes
-  // only support direct boot and do not match Nintendo's timing.
+  // Load the boot images. A path that is empty or names no file is
+  // substituted: the BIOS pair by the built-in FreeBIOS, the firmware by a
+  // generated one carrying `user` (core/bios/freebios.h). A file that exists
+  // but cannot be read or has the wrong size is an error (`err` says which),
+  // as is one BIOS present without the other. What was substituted is
+  // reported by bios_native / firmware_synthetic below; the frontends say so,
+  // since the substitutes only support direct boot and do not match
+  // Nintendo's timing.
   bool load_bios(const std::string& bios9, const std::string& bios7, const std::string& firmware,
-                 const bios::UserSettings& user = {});
+                 const bios::UserSettings& user = {}, std::string* err = nullptr);
   bool bios_native = false;          // both BIOS images came from dumps
   bool firmware_synthetic = false;   // the firmware was generated, not dumped (set by load_bios)
   // Direct boot is the only boot the substitutes support: FreeBIOS has no

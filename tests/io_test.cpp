@@ -479,8 +479,12 @@ static void test_generated_firmware() {
   CHECK_EQ(nds->firmware_override_dirty(), false);
   std::string err;
   CHECK_EQ(nds->load_firmware_override("nonexistent.ovr", err), false);
-  // Real dumps are still checked: a wrong-sized file fails rather than falling back.
-  CHECK_EQ(nds->load_bios("/dev/null", "/dev/null", "", user), false);
+  // A path naming no file falls back; a file that exists but is wrong fails.
+  CHECK_EQ(nds->load_bios("/nonexistent/bios9.bin", "/nonexistent/bios7.bin", "/nonexistent/firmware.bin", user), true);
+  CHECK_EQ(nds->bios_native, false);
+  CHECK_EQ(nds->load_bios("/dev/null", "/dev/null", "", user, &err), false);
+  CHECK_EQ(err.empty(), false);
+  CHECK_EQ(nds->load_bios("/dev/null", "/nonexistent/bios7.bin", "", user, &err), false);   // one half only
 }
 
 static void test_power_off() {

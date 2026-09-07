@@ -88,11 +88,15 @@ void NDS::normalise_touch_calibration() {
 }
 
 bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::string& pfw,
-                    const bios::UserSettings& user) {
+                    const bios::UserSettings& user, std::string* err) {
+  auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
+  auto exists = [](const std::string& p) { return !p.empty() && std::ifstream(p).good(); };
   std::vector<u8> b9, b7, fw;
-  if (!p9.empty()) { b9 = slurp(p9); if (b9.size() != mem::Bus::BIOS9_SIZE) return false; }
-  if (!p7.empty()) { b7 = slurp(p7); if (b7.size() != mem::Bus::BIOS7_SIZE) return false; }
-  if (!pfw.empty()) { fw = slurp(pfw); if (fw.empty()) return false; }
+  const bool have9 = exists(p9), have7 = exists(p7);
+  if (have9 != have7) return fail(std::string(have9 ? p7 : p9) + ": the other BIOS half is present; both or neither");
+  if (have9) { b9 = slurp(p9); if (b9.size() != mem::Bus::BIOS9_SIZE) return fail(p9 + ": not a 4 KB ARM9 BIOS"); }
+  if (have7) { b7 = slurp(p7); if (b7.size() != mem::Bus::BIOS7_SIZE) return fail(p7 + ": not a 16 KB ARM7 BIOS"); }
+  if (exists(pfw)) { fw = slurp(pfw); if (fw.empty()) return fail(pfw + ": empty firmware"); }
   // A FreeBIOS image is smaller than its region; the rest stays zero.
   std::memset(bus.bios9.get(), 0, mem::Bus::BIOS9_SIZE);
   std::memset(bus.bios7.get(), 0, mem::Bus::BIOS7_SIZE);
