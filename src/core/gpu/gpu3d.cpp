@@ -1119,6 +1119,7 @@ void Gpu3D::submit_polygon() {
   // Submitting a polygon starts the polygon pipeline; one vertex slot is
   // reserved now, more once it survives culling and clipping.
   if (exec_timed_) tm_polygon_start();
+  ++w_polys_submitted_;
 
   // Strips share two unclipped vertices with the previous polygon. Decided
   // first because it decides which vertices the reject test covers; it
@@ -1198,6 +1199,7 @@ void Gpu3D::emit_polygon_unclipped(const Vertex* const* src, int nverts, int cli
   }
 
   if (exec_timed_) tm_polygon_kept(nverts, poly_mode_);
+  ++w_polys_kept_;
 
   Polygon* poly = new_polygon(facing);
   for (int i = 0; i < clipstart; ++i) poly->vtx[i] = reused_idx[i];
@@ -1238,6 +1240,7 @@ void Gpu3D::emit_polygon_clipped(const Vertex* const* src, int nverts, int clips
   }
 
   if (exec_timed_) tm_polygon_kept(nverts, poly_mode_);
+  ++w_polys_kept_;
 
   Polygon* poly = new_polygon(facing);
   Vertex* vr = cur_vram();
@@ -1460,7 +1463,14 @@ void Gpu3D::vblank() {
                  static_cast<unsigned long long>(nds_.frame_count), geometry_on_, rendering_on_, flush_request_, flush_attr_, num_polygons_, num_vertices_,
                  dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_n_, gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
   if (!geometry_on_) return;
-  if (worker_on_) worker_join(); else if (no_fifo_) drain_all();
+  if (worker_on_) {
+    worker_join();
+    if (!no_fifo_ && w_polys_submitted_) {   // the pricer's cull ratio for the next frame
+      pr_kept_num_ = w_polys_kept_; pr_kept_den_ = w_polys_submitted_;
+      if (pr_kept_acc_ >= pr_kept_den_) pr_kept_acc_ = 0;
+    }
+    w_polys_submitted_ = w_polys_kept_ = 0;
+  } else if (no_fifo_) drain_all();
   // The raster of the frame being displayed may still be running (nothing
   // on this thread waits for it any more): it reads its own copy of the
   // render state and a bank the swap below leaves alone (see raster_bank_).
@@ -1617,6 +1627,8 @@ void Gpu3D::pricer_resync() {
   sh_.mode = matrix_mode_; sh_.proj_sp = proj_sp_; sh_.pos_sp = pos_sp_; sh_.tex_sp = tex_sp_; sh_.err = stack_err_; sh_.box_pending = false;
   pr_poly_mode_ = poly_mode_; pr_vertex_in_poly_ = vertex_in_poly_; pr_consecutive_polys_ = consecutive_polys_;
   pr_polygon_attr_ = polygon_attr_; pr_cur_polygon_attr_ = cur_polygon_attr_; pr_count_ = exec_count_;
+  w_polys_submitted_ = w_polys_kept_ = 0;
+  pr_kept_num_ = pr_kept_den_ = 1; pr_kept_acc_ = 0;   // no frame seen: kept
 }
 
 // ---- the pricer: exec_single's cycle model without its work -----------------
@@ -1709,7 +1721,12 @@ void Gpu3D::price_accum(u8 cmd) {
 // always priced as kept.
 void Gpu3D::price_vertex() {
   ++pr_vertex_in_poly_;
-  const auto poly = [&](int nverts) { tm_polygon_kept(nverts, pr_poly_mode_); ++pr_consecutive_polys_; };
+  const auto poly = [&](int nverts) {
+    pr_kept_acc_ += pr_kept_num_;
+    if (pr_kept_acc_ >= pr_kept_den_) { pr_kept_acc_ -= pr_kept_den_; tm_polygon_kept(nverts, pr_poly_mode_); }
+    else tm_polygon_start();   // culled: the 8-cycle start is all the hardware spends
+    ++pr_consecutive_polys_;
+  };
   switch (pr_poly_mode_) {
   case 0: if (pr_vertex_in_poly_ == 3) { pr_vertex_in_poly_ = 0; poly(3); } break;
   case 1: if (pr_vertex_in_poly_ == 4) { pr_vertex_in_poly_ = 0; poly(4); } break;

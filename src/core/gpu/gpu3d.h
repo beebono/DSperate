@@ -141,10 +141,9 @@ public:
   // stall and the whole cycle model, and prices each command as it pops it
   // (price_single) before handing it over. The one price it cannot know --
   // whether a polygon survives the cull (8 cycles) or not (26/35 more) -- is
-  // taken as KEPT every time: the engine drains a little slower than
-  // hardware, the FIFO sits a little fuller, and a game pacing itself on the
-  // level or the busy bits sees the same mechanism at a slightly lower clock,
-  // the same direction --cpu-oc already takes with data accesses.
+  // taken from the previous frame's kept ratio (see pr_kept_num_): the
+  // mechanism a game paces itself on (level, stall, busy bits) is intact, at
+  // a throughput that follows the scene a frame late.
   void set_geometry_worker(bool on);
   bool geometry_worker() const { return worker_on_; }
 
@@ -287,6 +286,15 @@ private:
   // model reads, mirrored from the execute path's own copies.
   u32 pr_poly_mode_ = 0, pr_vertex_in_poly_ = 0, pr_consecutive_polys_ = 0;
   u32 pr_polygon_attr_ = 0, pr_cur_polygon_attr_ = 0, pr_count_ = 0;
+  // The cull price. The worker counts the polygons it was given and the ones
+  // that survived; the emulation thread reads both at the VBlank join -- a
+  // fixed point in the command stream, so the ratio is a function of the
+  // inputs alone -- and prices the next frame's polygons kept or culled in
+  // that proportion, dithered by an integer accumulator. Always-kept measured
+  // as a 3x over-price on Golden Sun (91 % culled): the FIFO drained so slowly
+  // that its half-empty DMA trigger fired in four times as many pieces.
+  u32 w_polys_submitted_ = 0, w_polys_kept_ = 0;   // worker's, reset by the emulation thread at the join
+  u32 pr_kept_num_ = 1, pr_kept_den_ = 1, pr_kept_acc_ = 0;
   void price_single(u8 cmd, u32 param);
   void price_accum(u8 cmd);
   void price_vertex();
