@@ -172,7 +172,7 @@ A55, before the window appears.
 
     dsperate [game.nds|game.zip] [--bios9 bios9.bin --bios7 bios7.bin --firmware firmware.bin]
                  [--config F] [--write-config F]
-                 [--scale N] [--fullscreen] [--layout L] [--screen top|bottom] [--pip-alpha X] [--dual-window]
+                 [--scale N] [--fullscreen] [--layout L] [--screen top|bottom] [--pip-alpha X] [ --dominant-ratio auto|N] [--dominant-threshold N] [--dual-window]
                  [--integer-scale [under|over|off]]
                  [--linear] [--lcd-grid S] [--seam dark|blend|blend_linear]
                  [--chunky [M]] [--chunky-threshold N] [--chunky-cell C]
