@@ -120,7 +120,7 @@ public:
   // stay exact (an untimed DMA measured worse everywhere: it overclocks the
   // guest). Games that pace themselves on the FIFO level, the stall or the
   // swap wait see different timing; Dragon Ball Origins' intro desyncs.
-  void set_timing_oc(bool on) { no_fifo_ = on; untimed_ = on; }
+  void set_timing_oc(bool on) { no_fifo_ = on; untimed_ = on; exec_timed_ = !untimed_ && !worker_on_; }
   bool no_fifo() const { return no_fifo_; }
   // Geometry worker (no-FIFO only): the command stream is parsed on the
   // emulation thread and executed -- matrices, transform, clip, polygon
@@ -135,6 +135,16 @@ public:
   // GXSTAT is answered from a shadow of its command-derived bits (matrix
   // mode, stack pointers, overflow) kept by the parser, so a poll never
   // waits. See set_geometry_worker.
+  //
+  // With the FIFO kept (--cpu-oc, the "race-preserving" tier) the worker
+  // still runs; the emulation thread keeps the ring, the FIFO level, the
+  // stall and the whole cycle model, and prices each command as it pops it
+  // (price_single) before handing it over. The one price it cannot know --
+  // whether a polygon survives the cull (8 cycles) or not (26/35 more) -- is
+  // taken as KEPT every time: the engine drains a little slower than
+  // hardware, the FIFO sits a little fuller, and a game pacing itself on the
+  // level or the busy bits sees the same mechanism at a slightly lower clock,
+  // the same direction --cpu-oc already takes with data accesses.
   void set_geometry_worker(bool on);
   bool geometry_worker() const { return worker_on_; }
 
@@ -255,6 +265,12 @@ private:
 
   // Status.
   u32 gxstat_ = 0;
+  // Timing helpers act only when this thread owns the cycle model: false in
+  // the no-FIFO model (nothing observes it) and whenever the worker executes
+  // (the emulation thread prices instead). Bodies are the tm_ functions.
+  bool exec_timed_ = true;
+  // GXSTAT bit 1 (box test result), written by the execute path -- see stack_err_.
+  u32 box_result_ = 0;
   // GXSTAT bit 15 (matrix stack over/underflow), kept apart from gxstat_
   // because the execute path sets it -- on the worker, with the worker on --
   // while gxstat_ belongs to the emulation thread. read() ORs it in.
@@ -265,8 +281,16 @@ private:
   // The parser's shadow of the command-derived GXSTAT fields: matrix mode,
   // the three stack pointers and the overflow flag, advanced per command as
   // it is queued, exactly as exec_single will advance the real ones later.
-  struct Shadow { u32 mode = 0; s32 proj_sp = 0, pos_sp = 0, tex_sp = 0; u32 err = 0; };
+  struct Shadow { u32 mode = 0; s32 proj_sp = 0, pos_sp = 0, tex_sp = 0; u32 err = 0; bool box_pending = false; };
   Shadow sh_;
+  // Pricer state (FIFO kept + worker): the command-derived pieces the cycle
+  // model reads, mirrored from the execute path's own copies.
+  u32 pr_poly_mode_ = 0, pr_vertex_in_poly_ = 0, pr_consecutive_polys_ = 0;
+  u32 pr_polygon_attr_ = 0, pr_cur_polygon_attr_ = 0, pr_count_ = 0;
+  void price_single(u8 cmd, u32 param);
+  void price_accum(u8 cmd);
+  void price_vertex();
+  void pricer_resync();                 // mirror the executed state (queue empty)
   __attribute__((always_inline)) void shadow_exec(u8 cmd, u32 param);
   // Single-producer single-consumer queue of entries. The producer (parser)
   // writes at q_wr_local_ and publishes to q_wr_ at feed points (run_to per
@@ -439,13 +463,25 @@ private:
   // Per-command timing helpers: called once per command from the execute
   // loop, so they are forced inline (LTO left them as calls: ~15 insn of
   // call overhead each at 15 k+ calls a frame).
-  __attribute__((always_inline)) void add_cycles(s32 n);
+  __attribute__((always_inline)) void add_cycles(s32 n) { if (exec_timed_) tm_add_cycles(n); }
   void next_vertex_slot();
-  void stall_polygon_pipeline(s32 delay, s32 nonstall_delay);
-  __attribute__((always_inline)) void vtx_cmd_submit();
-  __attribute__((always_inline)) void vtx_cmd_delayed6();
-  __attribute__((always_inline)) void vtx_cmd_delayed8();
-  __attribute__((always_inline)) void vtx_cmd_delayed4();
+  void stall_polygon_pipeline(s32 delay, s32 nonstall_delay) { if (exec_timed_) tm_stall_polygon_pipeline(delay, nonstall_delay); }
+  __attribute__((always_inline)) void vtx_cmd_submit() { if (exec_timed_) tm_vtx_cmd_submit(); }
+  __attribute__((always_inline)) void vtx_cmd_delayed6() { if (exec_timed_) tm_vtx_cmd_delayed6(); }
+  __attribute__((always_inline)) void vtx_cmd_delayed8() { if (exec_timed_) tm_vtx_cmd_delayed8(); }
+  __attribute__((always_inline)) void vtx_cmd_delayed4() { if (exec_timed_) tm_vtx_cmd_delayed4(); }
+  __attribute__((always_inline)) void tm_add_cycles(s32 n);
+  void tm_stall_polygon_pipeline(s32 delay, s32 nonstall_delay);
+  __attribute__((always_inline)) void tm_vtx_cmd_submit();
+  __attribute__((always_inline)) void tm_vtx_cmd_delayed6();
+  __attribute__((always_inline)) void tm_vtx_cmd_delayed8();
+  __attribute__((always_inline)) void tm_vtx_cmd_delayed4();
+  // Polygon pipeline start / survival prices, shared by submit_polygon and the pricer.
+  void tm_polygon_start() { polygon_pipeline_ = 8; vertex_slot_counter_ = 1; vertex_slots_free_ = 0b11110; }
+  void tm_polygon_kept(int nverts, u32 mode) {
+    if (nverts == 4) { polygon_pipeline_ = 35; vertex_slot_counter_ = 1; vertex_slots_free_ = (mode & 2) ? 0b11100 : 0b11110; }
+    else { polygon_pipeline_ = 26; vertex_slot_counter_ = 1; vertex_slots_free_ = (mode & 2) ? 0b1000 : 0b1110; }
+  }
   void finish_work(s32 cycles);
 
   // Geometry.

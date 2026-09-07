@@ -343,7 +343,8 @@ void Gpu3D::reset_render_state() {
 
 void Gpu3D::reset() {
   if (worker_on_) worker_join();
-  sh_ = Shadow{}; stack_err_ = 0;
+  sh_ = Shadow{}; stack_err_ = 0; box_result_ = 0;
+  pr_poly_mode_ = pr_vertex_in_poly_ = pr_consecutive_polys_ = pr_polygon_attr_ = pr_cur_polygon_attr_ = pr_count_ = 0;
   ring_rd_ = ring_wr_ = pipe_n_ = fifo_n_ = stall_n_ = 0; stalled_ = false;
   parse_ = GxParse{};
   exec_params_.fill(0); exec_count_ = 0;
@@ -396,8 +397,7 @@ void Gpu3D::set_powcnt(u16 value) {
 
 // ---- timing -------------------------------------------------------------------
 
-void Gpu3D::add_cycles(s32 n) {
-  if (untimed_) return;   // Timing OC: nothing observes the engine's time or its pipelines
+void Gpu3D::tm_add_cycles(s32 n) {
   cycle_count_ += n;
   if (vertex_pipeline_ > 0) vertex_pipeline_ = vertex_pipeline_ > n ? vertex_pipeline_ - n : 0;
   if (polygon_pipeline_ > 0) {
@@ -433,34 +433,29 @@ void Gpu3D::next_vertex_slot() {
   }
 }
 
-void Gpu3D::stall_polygon_pipeline(s32 delay, s32 nonstall_delay) {
-  if (untimed_) return;
+void Gpu3D::tm_stall_polygon_pipeline(s32 delay, s32 nonstall_delay) {
   if (polygon_pipeline_ > 0) {
     cycle_count_ += polygon_pipeline_ + delay;
     vertex_pipeline_ = 0; normal_pipeline_ = 0;
     polygon_pipeline_ = 0; vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
-  } else if (vertex_pipeline_ > nonstall_delay) add_cycles((vertex_pipeline_ - nonstall_delay) + 1);
-  else add_cycles(normal_pipeline_ + 1);
+  } else if (vertex_pipeline_ > nonstall_delay) tm_add_cycles((vertex_pipeline_ - nonstall_delay) + 1);
+  else tm_add_cycles(normal_pipeline_ + 1);
 }
 
-void Gpu3D::vtx_cmd_submit() {          // vertex commands
-  if (untimed_) return;
-  if (!(vertex_slots_free_ & 1)) next_vertex_slot(); else add_cycles(1);
+void Gpu3D::tm_vtx_cmd_submit() {          // vertex commands
+  if (!(vertex_slots_free_ & 1)) next_vertex_slot(); else tm_add_cycles(1);
   normal_pipeline_ = 0;
 }
-void Gpu3D::vtx_cmd_delayed6() {        // may run 6 cycles after a vertex
-  if (untimed_) return;
-  if (vertex_pipeline_ > 2) add_cycles((vertex_pipeline_ - 2) + 1); else add_cycles(normal_pipeline_ + 1);
+void Gpu3D::tm_vtx_cmd_delayed6() {        // may run 6 cycles after a vertex
+  if (vertex_pipeline_ > 2) tm_add_cycles((vertex_pipeline_ - 2) + 1); else tm_add_cycles(normal_pipeline_ + 1);
   normal_pipeline_ = 0;
 }
-void Gpu3D::vtx_cmd_delayed8() {        // may run 8 cycles after a vertex
-  if (untimed_) return;
-  if (vertex_pipeline_ > 0) add_cycles(vertex_pipeline_ + 1); else add_cycles(normal_pipeline_ + 1);
+void Gpu3D::tm_vtx_cmd_delayed8() {        // may run 8 cycles after a vertex
+  if (vertex_pipeline_ > 0) tm_add_cycles(vertex_pipeline_ + 1); else tm_add_cycles(normal_pipeline_ + 1);
   normal_pipeline_ = 0;
 }
-void Gpu3D::vtx_cmd_delayed4() {        // everything else: 4 cycles after a vertex
-  if (untimed_) return;
-  add_cycles(normal_pipeline_ + 1);
+void Gpu3D::tm_vtx_cmd_delayed4() {        // everything else: 4 cycles after a vertex
+  tm_add_cycles(normal_pipeline_ + 1);
   normal_pipeline_ = 0;
 }
 
@@ -527,10 +522,12 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
         // per pop would have.
         settle = true;
       }
-      exec_single(e.cmd, e.param);
+      if (worker_on_) { price_single(e.cmd, e.param); q_push(e); }
+      else exec_single(e.cmd, e.param);
     } while (cycle_count_ <= 0 && pipe);
     ring_rd_ = rd; pipe_n_ = pipe; fifo_n_ = fifo; drain_settle_ = settle;
   }
+  if (worker_on_ && q_pending_) q_publish();
   if (cycle_count_ <= 0 && pipe_n_ == 0) {
     if (gxstat_ & (1u << 27)) finish_work(-cycle_count_); else cycle_count_ = 0;
     if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
@@ -542,7 +539,7 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
 // ---- FIFO ---------------------------------------------------------------------
 
 void Gpu3D::fifo_write(const Entry& e) {
-  if (worker_on_) { q_push(e); return; }
+  if (worker_on_ && no_fifo_) { q_push(e); return; }
   // Order of tests follows frequency: a frame is tens of thousands of words
   // into a FIFO that is neither empty nor full.
   if (no_fifo_ && pipe_n_ + fifo_n_ >= RING - 8) drain_all();   // no level: the ring is the only bound
@@ -672,7 +669,7 @@ void Gpu3D::gxfifo_write(u32 value) {
 // in registers across the whole run instead of reloaded per word.
 void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
   if (!geometry_on_) return;
-  if (worker_on_) {
+  if (worker_on_ && no_fifo_) {
     // Same walk, the queue as its sink; the shadow advances per entry inside
     // q_push. Published at the end of the burst, not per word.
     GxParse p = parse_;
@@ -742,7 +739,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
   switch (cmd) {
   case 0x10: vtx_cmd_delayed4(); matrix_mode_ = param & 3; break;
   case 0x11:   // push
-    vtx_cmd_delayed4(); --num_pushpop_;
+    vtx_cmd_delayed4(); if (!worker_on_) --num_pushpop_;
     if (matrix_mode_ == 0) {
       if (proj_sp_ > 0) stack_err_ = 1u << 15;
       proj_stack_ = proj_; proj_sp_ = (proj_sp_ + 1) & 1;
@@ -757,7 +754,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
     add_cycles(16);
     break;
   case 0x12:   // pop
-    vtx_cmd_delayed4(); --num_pushpop_;
+    vtx_cmd_delayed4(); if (!worker_on_) --num_pushpop_;
     if (matrix_mode_ == 0) {
       if (proj_sp_ == 0) stack_err_ = 1u << 15;
       proj_sp_ = (proj_sp_ - 1) & 1; proj_ = proj_stack_; clip_dirty_ = true;
@@ -882,11 +879,18 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
     break;
   case 0x41: vtx_cmd_delayed8(); break;   // end: no effect
   case 0x50:   // swap buffers
+    // FIFO kept + worker: the pricer set flush_request_ when it popped this
+    // entry and VBlank finalises and flips on the emulation thread after the
+    // join; the worker has nothing to do here.
+    if (worker_on_ && !no_fifo_) break;
     vtx_cmd_delayed4();
-    flush_request_ = 1; flush_attr_ = param & 3;
-    cycle_count_ = untimed_ ? 0 : 325;
-    vertex_pipeline_ = normal_pipeline_ = polygon_pipeline_ = 0;
-    vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
+    flush_attr_ = param & 3;   // finalise_list's sort mode; the worker's own in the no-FIFO model
+    if (!worker_on_) {
+      flush_request_ = 1;
+      cycle_count_ = untimed_ ? 0 : 325;
+      vertex_pipeline_ = normal_pipeline_ = polygon_pipeline_ = 0;
+      vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
+    }
     if (no_fifo_) {
       // Take effect now rather than parking the engine until VBlank: the
       // list is finalised and the bank flips, the render happens at VBlank
@@ -908,7 +912,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
     viewport_[4] = (viewport_[2] - viewport_[0] + 1) & 0x1FF;
     viewport_[5] = (viewport_[1] - viewport_[3] + 1) & 0xFF;
     break;
-  case 0x72: vtx_cmd_delayed6(); --num_tests_; vec_test(param); break;
+  case 0x72: vtx_cmd_delayed6(); if (!worker_on_) --num_tests_; vec_test(param); break;
   // The commands that take more than one parameter. They sit in the same
   // switch so that a popped entry needs no CMD_PARAMS lookup to be dispatched.
   case 0x16: case 0x17: case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C:
@@ -953,12 +957,12 @@ void Gpu3D::exec_multi(u8 cmd) {
     }
     break;
   case 0x71:   // position test
-    num_tests_ -= 2;
+    if (!worker_on_) num_tests_ -= 2;
     cur_vertex_[0] = static_cast<s16>(exec_params_[0] & 0xFFFF); cur_vertex_[1] = static_cast<s16>(exec_params_[0] >> 16);
     cur_vertex_[2] = static_cast<s16>(exec_params_[1] & 0xFFFF);
     pos_test();
     break;
-  case 0x70: num_tests_ -= 3; box_test(exec_params_.data()); break;
+  case 0x70: if (!worker_on_) num_tests_ -= 3; box_test(exec_params_.data()); break;
   default: break;
   }
 }
@@ -1052,8 +1056,7 @@ void Gpu3D::submit_vertex() {
     }
     break;
   }
-  vertex_pipeline_ = 7;
-  add_cycles(3);
+  if (exec_timed_) { vertex_pipeline_ = 7; tm_add_cycles(3); }
 }
 
 namespace {
@@ -1115,7 +1118,7 @@ void Gpu3D::submit_polygon() {
 
   // Submitting a polygon starts the polygon pipeline; one vertex slot is
   // reserved now, more once it survives culling and clipping.
-  polygon_pipeline_ = 8; vertex_slot_counter_ = 1; vertex_slots_free_ = 0b11110;
+  if (exec_timed_) tm_polygon_start();
 
   // Strips share two unclipped vertices with the previous polygon. Decided
   // first because it decides which vertices the reject test covers; it
@@ -1194,8 +1197,7 @@ void Gpu3D::emit_polygon_unclipped(const Vertex* const* src, int nverts, int cli
     if (zerodot && allbehind) { last_strip_poly_ = nullptr; return; }
   }
 
-  if (nverts == 4) { polygon_pipeline_ = 35; vertex_slot_counter_ = 1; vertex_slots_free_ = (poly_mode_ & 2) ? 0b11100 : 0b11110; }
-  else { polygon_pipeline_ = 26; vertex_slot_counter_ = 1; vertex_slots_free_ = (poly_mode_ & 2) ? 0b1000 : 0b1110; }
+  if (exec_timed_) tm_polygon_kept(nverts, poly_mode_);
 
   Polygon* poly = new_polygon(facing);
   for (int i = 0; i < clipstart; ++i) poly->vtx[i] = reused_idx[i];
@@ -1235,8 +1237,7 @@ void Gpu3D::emit_polygon_clipped(const Vertex* const* src, int nverts, int clips
     if (zerodot && allbehind) { last_strip_poly_ = nullptr; return; }
   }
 
-  if (nverts == 4) { polygon_pipeline_ = 35; vertex_slot_counter_ = 1; vertex_slots_free_ = (poly_mode_ & 2) ? 0b11100 : 0b11110; }
-  else { polygon_pipeline_ = 26; vertex_slot_counter_ = 1; vertex_slots_free_ = (poly_mode_ & 2) ? 0b1000 : 0b1110; }
+  if (exec_timed_) tm_polygon_kept(nverts, poly_mode_);
 
   Polygon* poly = new_polygon(facing);
   Vertex* vr = cur_vram();
@@ -1347,13 +1348,12 @@ void Gpu3D::calculate_lighting() {
   }
   for (int c = 0; c < 3; ++c) vertex_color_[c] = (acc[c] >> 14) > 31 ? 31 : static_cast<u8>(acc[c] >> 14);
   if (count < 1) count = 1;
-  normal_pipeline_ = 7;
-  add_cycles(count);
+  if (exec_timed_) { normal_pipeline_ = 7; tm_add_cycles(count); }
 }
 
 void Gpu3D::box_test(const u32* params) {
   add_cycles(254);
-  gxstat_ &= ~(1u << 1);
+  box_result_ = 0;
   const s16 x0 = static_cast<s16>(params[0] & 0xFFFF), y0 = static_cast<s16>(static_cast<s32>(params[0]) >> 16);
   const s16 z0 = static_cast<s16>(params[1] & 0xFFFF);
   const s16 x1 = static_cast<s16>(x0 + static_cast<s16>(static_cast<s32>(params[1]) >> 16));
@@ -1371,7 +1371,7 @@ void Gpu3D::box_test(const u32* params) {
   for (const auto& f : faces) {
     Vertex face[10];
     for (int i = 0; i < 4; ++i) face[i] = cube[f[i]];
-    if (clip_polygon<false>(face, 4, 0, cur_polygon_attr_ & (1 << 12)) > 0) { gxstat_ |= (1u << 1); return; }
+    if (clip_polygon<false>(face, 4, 0, cur_polygon_attr_ & (1 << 12)) > 0) { box_result_ = 1u << 1; return; }
   }
 }
 
@@ -1570,6 +1570,7 @@ void Gpu3D::stack_reset() {
 // The shadow advances exactly the stack-pointer and overflow arithmetic of
 // exec_single's 0x10-0x14, nothing else; keep the two in step.
 void Gpu3D::shadow_exec(u8 cmd, u32 param) {
+  if (cmd == 0x70) { sh_.box_pending = true; return; }
   if (static_cast<u8>(cmd - 0x10) > 4) return;
   switch (cmd) {
   case 0x10: sh_.mode = param & 3; break;
@@ -1593,21 +1594,132 @@ void Gpu3D::shadow_exec(u8 cmd, u32 param) {
 void Gpu3D::set_geometry_worker(bool on) {
   if (on == worker_on_) return;
   if (on) {
-    if (!no_fifo_) { std::fprintf(stderr, "[gx] geometry worker needs the no-FIFO model (--timing-oc); not enabled\n"); return; }
-    if (no_fifo_) drain_all();   // hand over an empty ring
-    sh_.mode = matrix_mode_; sh_.proj_sp = proj_sp_; sh_.pos_sp = pos_sp_; sh_.tex_sp = tex_sp_; sh_.err = stack_err_;
+    if (no_fifo_) drain_all();   // hand over an empty ring (with the FIFO kept the ring stays the emulation thread's)
     q_wr_local_ = q_rd_local_ = q_rd_seen_ = 0; q_pending_ = false;
     q_wr_.store(0, std::memory_order_relaxed); q_rd_.store(0, std::memory_order_relaxed);
     q_stop_ = false;
-    worker_thread_ = std::thread([this] { worker_loop(); });
     worker_on_ = true;
+    exec_timed_ = false;
+    pricer_resync();
+    worker_thread_ = std::thread([this] { worker_loop(); });
     renderer_.set_band_cap(2);   // the worker takes the third band worker's core
   } else {
     worker_join();
     worker_stop();
     worker_on_ = false;
+    exec_timed_ = !untimed_;
     renderer_.set_band_cap(0);
   }
+}
+
+// The queue is empty: the shadow and the pricer are functions of the executed state.
+void Gpu3D::pricer_resync() {
+  sh_.mode = matrix_mode_; sh_.proj_sp = proj_sp_; sh_.pos_sp = pos_sp_; sh_.tex_sp = tex_sp_; sh_.err = stack_err_; sh_.box_pending = false;
+  pr_poly_mode_ = poly_mode_; pr_vertex_in_poly_ = vertex_in_poly_; pr_consecutive_polys_ = consecutive_polys_;
+  pr_polygon_attr_ = polygon_attr_; pr_cur_polygon_attr_ = cur_polygon_attr_; pr_count_ = exec_count_;
+}
+
+// ---- the pricer: exec_single's cycle model without its work -----------------
+//
+// One entry per command, in exec_single's order, mirroring only what the cycle
+// model reads: the matrix mode (from the shadow, which q_push advances after
+// this runs -- so for 0x10 itself it still holds the mode the command was
+// issued under, as exec_single's own switch does), the polygon mode and
+// vertex count, the polygon attribute's light bits. Every polygon is priced
+// as kept. Keep in step with exec_single / exec_accum / exec_multi.
+void Gpu3D::price_single(u8 cmd, u32 param) {
+  switch (cmd) {
+  case 0x10: tm_vtx_cmd_delayed4(); break;
+  case 0x11: tm_vtx_cmd_delayed4(); --num_pushpop_; tm_add_cycles(16); break;
+  case 0x12: tm_vtx_cmd_delayed4(); --num_pushpop_; tm_add_cycles(sh_.mode == 3 ? 17 : 35); break;
+  case 0x13: tm_vtx_cmd_delayed4(); tm_add_cycles(16); break;
+  case 0x14: tm_vtx_cmd_delayed4(); tm_add_cycles(sh_.mode == 3 ? 17 : 35); break;
+  case 0x15: tm_vtx_cmd_delayed4(); if (sh_.mode != 3) tm_add_cycles(18); break;
+  case 0x20: tm_vtx_cmd_delayed6(); break;
+  case 0x21: {   // normal: lighting costs one cycle per enabled light (at least one)
+    tm_vtx_cmd_delayed4();
+    s32 count = __builtin_popcount(pr_cur_polygon_attr_ & 0xF);
+    if (count < 1) count = 1;
+    normal_pipeline_ = 7; tm_add_cycles(count);
+    break;
+  }
+  case 0x22: tm_vtx_cmd_delayed4(); break;
+  case 0x24: case 0x25: case 0x26: case 0x27: case 0x28: tm_vtx_cmd_submit(); price_vertex(); break;
+  case 0x29: tm_vtx_cmd_delayed8(); pr_polygon_attr_ = param; break;
+  case 0x2A: case 0x2B: tm_vtx_cmd_delayed8(); break;
+  case 0x30: case 0x31: tm_vtx_cmd_delayed6(); tm_add_cycles(3); break;
+  case 0x32: tm_stall_polygon_pipeline(8 + 1, 2); tm_add_cycles(5); break;
+  case 0x33: tm_vtx_cmd_delayed8(); tm_add_cycles(1); break;
+  case 0x40:
+    tm_stall_polygon_pipeline(1, 0);
+    pr_poly_mode_ = param & 3; pr_vertex_in_poly_ = 0; pr_consecutive_polys_ = 0;
+    pr_cur_polygon_attr_ = pr_polygon_attr_;
+    break;
+  case 0x41: tm_vtx_cmd_delayed8(); break;
+  case 0x50:
+    tm_vtx_cmd_delayed4();
+    flush_request_ = 1; flush_attr_ = param & 3;
+    cycle_count_ = 325;
+    vertex_pipeline_ = normal_pipeline_ = polygon_pipeline_ = 0;
+    vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
+    break;
+  case 0x60: tm_vtx_cmd_delayed8(); break;
+  case 0x72: tm_vtx_cmd_delayed6(); --num_tests_; tm_add_cycles(4); break;
+  case 0x16: case 0x17: case 0x18: case 0x19: case 0x1A: case 0x1B: case 0x1C:
+  case 0x23: case 0x34: case 0x70: case 0x71:
+    price_accum(cmd); break;
+  default: tm_vtx_cmd_delayed4(); break;
+  }
+}
+
+void Gpu3D::price_accum(u8 cmd) {
+  if (++pr_count_ == 1) {
+    switch (cmd) {
+    case 0x23: tm_vtx_cmd_submit(); break;
+    case 0x34: case 0x71: tm_vtx_cmd_delayed8(); break;
+    case 0x70: tm_stall_polygon_pipeline(10 + 1, 0); break;
+    default: tm_vtx_cmd_delayed4(); break;
+    }
+    return;
+  }
+  tm_add_cycles(1);
+  if (pr_count_ < CMD_PARAMS[cmd]) return;
+  pr_count_ = 0;
+  // exec_multi's costs: proj / tex / pos / pos+vec.
+  auto mtx = [&](s32 proj, s32 tex, s32 pos, s32 posvec) {
+    tm_add_cycles(sh_.mode == 0 ? proj : sh_.mode == 3 ? tex : sh_.mode == 2 ? posvec : pos);
+  };
+  switch (cmd) {
+  case 0x16: mtx(18, 10, 18, 18); break;
+  case 0x17: mtx(18, 7, 18, 18); break;
+  case 0x18: mtx(35 - 16, 33 - 16, 35 - 16, 35 + 30 - 16); break;
+  case 0x19: mtx(35 - 12, 33 - 12, 35 - 12, 35 + 30 - 12); break;
+  case 0x1A: mtx(35 - 9, 33 - 9, 35 - 9, 35 + 30 - 9); break;
+  case 0x1B: tm_add_cycles(sh_.mode == 3 ? 33 - 3 : 35 - 3); break;   // scale never touches the vector matrix
+  case 0x1C: mtx(35 - 3, 33 - 3, 35 - 3, 35 + 30 - 3); break;
+  case 0x23: price_vertex(); break;
+  case 0x34: break;
+  case 0x71: num_tests_ -= 2; tm_add_cycles(5); break;
+  case 0x70: num_tests_ -= 3; tm_add_cycles(254); break;
+  default: break;
+  }
+}
+
+// submit_vertex's completion rule, and its price: a completed polygon is
+// always priced as kept.
+void Gpu3D::price_vertex() {
+  ++pr_vertex_in_poly_;
+  const auto poly = [&](int nverts) { tm_polygon_kept(nverts, pr_poly_mode_); ++pr_consecutive_polys_; };
+  switch (pr_poly_mode_) {
+  case 0: if (pr_vertex_in_poly_ == 3) { pr_vertex_in_poly_ = 0; poly(3); } break;
+  case 1: if (pr_vertex_in_poly_ == 4) { pr_vertex_in_poly_ = 0; poly(4); } break;
+  case 2:
+    if (pr_consecutive_polys_ & 1) { pr_vertex_in_poly_ = 2; poly(3); }
+    else if (pr_vertex_in_poly_ == 3) { pr_vertex_in_poly_ = 2; poly(3); }
+    break;
+  case 3: if (pr_vertex_in_poly_ == 4) { pr_vertex_in_poly_ = 2; poly(4); } break;
+  }
+  vertex_pipeline_ = 7; tm_add_cycles(3);
 }
 
 void Gpu3D::worker_stop() {
@@ -1728,12 +1840,13 @@ u32 Gpu3D::read(u32 addr, u32 width) {
     }
     run_to(nds_.sched.now());
     const u32 level = no_fifo_ ? 0 : fifo_n_;
-    // Both busy bits, the stack level and the overflow flag are command-derived,
-    // so the shadow's copy is the executed state's future exactly.
-    const u32 v = worker_on_
-      ? gxstat_ | sh_.err | ((sh_.pos_sp & 0x1F) << 8) | ((sh_.proj_sp & 1) << 13) | (1u << 25) | (1u << 26)
-      : gxstat_ | stack_err_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13) | (level << 16) |
-        (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
+    // The stack level and the overflow flag are command-derived, so with the
+    // worker on the shadow's copy is the executed state's future exactly. The
+    // box test result is not: a read after a queued test waits for it.
+    if (worker_on_ && sh_.box_pending) { worker_join(); sh_.box_pending = false; }
+    const u32 sp = worker_on_ ? sh_.err | ((sh_.pos_sp & 0x1F) << 8) | ((sh_.proj_sp & 1) << 13)
+                              : stack_err_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13);
+    const u32 v = gxstat_ | box_result_ | sp | (level << 16) | (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
     return width == 32 ? v : width == 16 ? (v >> ((addr & 2) * 8)) & 0xFFFF : (v >> ((addr & 3) * 8)) & 0xFF;
   }
   if (width == 8) { const u32 v = read(addr & ~3u, 32); return (v >> ((addr & 3) * 8)) & 0xFF; }
@@ -1866,9 +1979,9 @@ template <class S> void sync_polygon(S& s, Polygon& p) {
 } // namespace
 
 template <class S> void Gpu3D::sync_state(S& s) {
-  if (worker_on_) { worker_join(); num_pushpop_ = num_tests_ = 0; }
-  // On disk the overflow flag is GXSTAT bit 15, as it always was.
-  if constexpr (!S::reading) gxstat_ |= stack_err_;
+  if (worker_on_) { worker_join(); if (no_fifo_) num_pushpop_ = num_tests_ = 0; }
+  // On disk the overflow flag is GXSTAT bit 15 and the box result bit 1, as they always were.
+  if constexpr (!S::reading) gxstat_ |= stack_err_ | box_result_;
   s.begin("GX3D");
   for (Entry& e : ring_) s.fields(e.param, e.cmd);
   s.fields(ring_rd_, ring_wr_, pipe_n_, fifo_n_, stall_n_, stalled_, parse_.num_cmds, parse_.cur_cmd, parse_.param_count, parse_.total_params, exec_params_, exec_count_,
@@ -1941,9 +2054,8 @@ template <class S> void Gpu3D::sync_state(S& s) {
   }
   s.end();
   renderer_.sync_output(s);
-  stack_err_ = gxstat_ & 0x8000u; gxstat_ &= ~0x8000u;
-  // The shadow is a function of the executed state once the queue is empty.
-  sh_.mode = matrix_mode_; sh_.proj_sp = proj_sp_; sh_.pos_sp = pos_sp_; sh_.tex_sp = tex_sp_; sh_.err = stack_err_;
+  stack_err_ = gxstat_ & 0x8000u; box_result_ = gxstat_ & 2u; gxstat_ &= ~0x8002u;
+  if (worker_on_) pricer_resync();
 }
 template void Gpu3D::sync_state<state::Writer>(state::Writer&);
 template void Gpu3D::sync_state<state::Reader>(state::Reader&);

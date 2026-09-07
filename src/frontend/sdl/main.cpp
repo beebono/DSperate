@@ -116,7 +116,7 @@ const char* kUsage =
     "  --interp        interpreter instead of the recompiler\n"
     "  --timing-oc     Timing OC: no GX FIFO, untimed geometry (faster, less accurate; DraStic's model).\n"
     "                  emu.timing_oc in the config\n"
-    "  --cpu-oc        CPU OC: recompiled data accesses priced as main RAM (less accurate); emu.cpu_oc\n"
+    "  --cpu-oc        CPU OC: recompiled data accesses priced as main RAM, geometry on its own thread\n                  with every polygon priced as drawn (less accurate); emu.cpu_oc\n"
     "  --fast-load     cart DMA reads the card without its clock (may affect accuracy); emu.fast_load\n"
     "  --aa / --no-aa  3D anti-aliasing on (hardware behaviour) or off; video.aa, off by default\n"
     "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
@@ -1115,8 +1115,10 @@ sdl_ready:
 
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
-  // Geometry worker, on by default with the no-FIFO model; DS_GX_THREAD=0 for the A/B.
-  { const char* e = std::getenv("DS_GX_THREAD"); nds.gpu3d.set_geometry_worker(cfg.flag("emu.timing_oc", false) && !(e && std::atoi(e) == 0)); }
+  // Geometry worker, on by default with either inexact tier (no-FIFO, or the
+  // FIFO kept with polygons priced as kept under --cpu-oc); DS_GX_THREAD=0 for the A/B.
+  { const char* e = std::getenv("DS_GX_THREAD");
+    nds.gpu3d.set_geometry_worker((cfg.flag("emu.timing_oc", false) || cfg.flag("emu.cpu_oc", false)) && !(e && std::atoi(e) == 0)); }
   nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
   nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
   if (!boot_firmware) nds.setup_direct_boot();
