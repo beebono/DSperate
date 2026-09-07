@@ -422,6 +422,10 @@ int main(int argc, char** argv) {
 #endif
     if (i >= stats_from)
       frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+      // DS_FRAME_SERIES=<path>: the run-order series ("ms polygons" per line),
+      // for the shape of a tail -- alternation, bursts -- rather than its size.
+      static FILE* series = [] { const char* p = std::getenv("DS_FRAME_SERIES"); return p ? std::fopen(p, "w") : nullptr; }();
+      if (series) std::fprintf(series, "%.3f %u\n", frame_ms.back(), nds.gpu3d.render_polygon_count());
     // The console has switched itself off. On a firmware boot that is the
     // firmware leaving its settings pages, with the pages it wrote already in
     // the image, so this is the moment to put them on disk -- and then to

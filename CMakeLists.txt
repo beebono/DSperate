@@ -101,7 +101,7 @@ if(DSPERATE_PGO STREQUAL "generate")
   add_compile_options(-fprofile-generate -fprofile-update=atomic)
   add_link_options(-fprofile-generate)
 elseif(DSPERATE_PGO STREQUAL "use")
-  add_compile_options(-fprofile-use -fprofile-correction -Wno-missing-profile)
+  add_compile_options(-fprofile-use -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch)   # an edited function loses its profile instead of failing the build
 endif()
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
