@@ -43,7 +43,7 @@ namespace ds::sdl {
 
 class DmabufOut : public ScanoutOut {
 public:
-  static constexpr int BUFS = 3;   // one on screen, one queued, one being drawn
+  static constexpr int BUFS = 4;   // one on screen, two queued, one being drawn: two frames of run-ahead, so a heavy/light pair (Spirit Tracks, Golden Sun) is served from two vblank slots
 
   // False if any precondition is missing (no libwayland, not the wayland
   // video driver, no dmabuf global, CMA allocation failed); the caller logs

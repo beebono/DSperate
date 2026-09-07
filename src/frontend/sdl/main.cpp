@@ -1198,7 +1198,7 @@ sdl_ready:
   bool fps_osd = cfg.flag("video.fps", false);
   int fps_value = 0;                        // last measured, 0..999
   Uint64 fps_mark = SDL_GetPerformanceCounter();
-  Uint64 emu_ticks = 0, draw_ticks = 0;
+  Uint64 emu_ticks = 0, draw_ticks = 0, wait_ticks = 0, fps_pace_ticks = 0;   // wait: blocked in begin_frame for a free scanout buffer
   u64 frames = 0;
   // Per-frame emulation time, for the same report the headless frontend prints. Only the
   // run_frame() slice goes in: the present blocks on vsync and audio.pace()
@@ -1437,7 +1437,7 @@ sdl_ready:
       // the first number shown would average over that whole gap.
       case A::FpsToggle:
         fps_osd = !fps_osd;
-        if (fps_osd && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = 0; }
+        if (fps_osd && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; }
         break;
       case A::FastForwardToggle: ff_toggle = !ff_toggle; VLOG("fast forward %s\n", ff_toggle ? "on" : "off"); break;
       default: break;
@@ -1689,8 +1689,13 @@ sdl_ready:
     ds::sdl::Display::Target target[2] = {};
     bool scaled = false;
     if (present && !pause_pending && !shot_pending) {
+      // The scanout tiers block here until a buffer is free: this wait is
+      // where the display's pacing is felt, and it is outside every timed
+      // series below, so it is counted on its own (DS_FPS "wait").
+      const Uint64 tw = SDL_GetPerformanceCounter();
       scaled = display.begin_frame(target);
       if (dual_window) scaled = display2.begin_frame(target) && scaled;
+      wait_ticks += SDL_GetPerformanceCounter() - tw;
     }
     set_scale_targets(target, scaled);
     fb_current = present && !scaled;   // a skipped frame renders nothing
@@ -1894,11 +1899,18 @@ sdl_ready:
         const double wait_ms = (next_frame - now) / (ticks_per_ns * 1e6);
         if (wait_ms > 1.0) SDL_Delay(static_cast<Uint32>(wait_ms));
       } else {
-        next_frame = now;      // running behind: do not build up a debt
+        // Running behind. Keep at most one frame of debt rather than none:
+        // a title that alternates heavy and light frames (Spirit Tracks'
+        // intro, Golden Sun's title: 18 ms then 12 ms) is on time over the
+        // pair, and dropping the debt after the heavy frame made the light
+        // one sleep the difference away -- 57.6 fps from 15 ms of work.
+        const Uint64 budget = static_cast<Uint64>(frame_ns * ticks_per_ns);
+        if (now - next_frame > budget) next_frame = now - budget;
       }
     }
 
     pace_ticks += SDL_GetPerformanceCounter() - t3;
+    fps_pace_ticks += SDL_GetPerformanceCounter() - t3;
 
     ++frames;
     if (nds.cart && nds.cart->sram_dirty()) {
@@ -1913,14 +1925,16 @@ sdl_ready:
       const double fps = secs > 0 ? 60.0 / secs : 0.0;
       fps_value = fps >= 999.0 ? 999 : static_cast<int>(fps + 0.5);
       if (show_fps) {
-        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, audio queued %.1f frames\n",
+        const double wall_ms = static_cast<double>(now - fps_mark) * to_ms;   // per frame, same unit as the rest
+        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, wait %.1f ms, pace %.1f ms, other %.1f ms, audio queued %.1f frames\n",
                      fps, 100.0 * fps / (ds::ARM9_CLOCK_HZ / double(ds::CYCLES_PER_FRAME)),
-                     emu_ticks * to_ms, draw_ticks * to_ms, audio.queued_frames());
+                     emu_ticks * to_ms, draw_ticks * to_ms, wait_ticks * to_ms, fps_pace_ticks * to_ms,
+                     wall_ms - (emu_ticks + draw_ticks + wait_ticks + fps_pace_ticks) * to_ms, audio.queued_frames());
         if (fs_limit > 0) std::fprintf(stderr, "  frameskip: %llu frames skipped (%s, limit %d)\n",
                                        static_cast<unsigned long long>(fs_skipped), fs_adaptive ? "adaptive" : "fixed", fs_limit);
       }
       fps_mark = now;
-      emu_ticks = draw_ticks = 0;
+      emu_ticks = draw_ticks = wait_ticks = fps_pace_ticks = 0;
     }
   }
 
