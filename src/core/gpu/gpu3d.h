@@ -7,6 +7,10 @@
 #include <array>
 #include <vector>
 #include <atomic>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 namespace ds { struct NDS; }
 
@@ -118,6 +122,21 @@ public:
   // swap wait see different timing; Dragon Ball Origins' intro desyncs.
   void set_timing_oc(bool on) { no_fifo_ = on; untimed_ = on; }
   bool no_fifo() const { return no_fifo_; }
+  // Geometry worker (no-FIFO only): the command stream is parsed on the
+  // emulation thread and executed -- matrices, transform, clip, polygon
+  // writes -- on a thread of its own, a frame at most behind. Only possible
+  // in the no-FIFO model: with the FIFO, the cycle cost of a polygon (8, then
+  // 26/35 if it survives the cull) needs the transformed vertices, and the
+  // FIFO level, the busy bits and the DMA trigger times the CPU observes all
+  // depend on it. Without the FIFO nothing observes execution except through
+  // the joins: VBlank (before the raster is dispatched), RAM_COUNT, the
+  // test results, the clip/vector matrix ports, save states, and the rare
+  // writes that touch engine state (stack reset, zero-dot limit, POWCNT).
+  // GXSTAT is answered from a shadow of its command-derived bits (matrix
+  // mode, stack pointers, overflow) kept by the parser, so a poll never
+  // waits. See set_geometry_worker.
+  void set_geometry_worker(bool on);
+  bool geometry_worker() const { return worker_on_; }
 
   // POWCNT1 bit 3 (geometry) and bit 2 (rendering).
   void set_powcnt(u16 value);
@@ -125,7 +144,13 @@ public:
   // Advance the engine to `arm9_time` (scheduler time, ARM9 cycles). The
   // idle check is inline: the scheduler calls this after every ARM9 slice.
   void run_to(u64 arm9_time) {
-    if (no_fifo_ || !geometry_on_ || flush_request_ || (pipe_n_ == 0 && !(gxstat_ & (1u << 27)))) { timestamp_ = arm9_time >> 1; return; }
+    if (no_fifo_ || !geometry_on_ || flush_request_ || (pipe_n_ == 0 && !(gxstat_ & (1u << 27)))) {
+      timestamp_ = arm9_time >> 1;
+      // The worker's feed point: what the slice parsed becomes visible to it
+      // here, once per slice rather than per word.
+      if (worker_on_ && q_pending_) q_publish();
+      return;
+    }
     run_to_slow(arm9_time);
   }
   bool stalled() const { return stalled_; }
@@ -230,6 +255,52 @@ private:
 
   // Status.
   u32 gxstat_ = 0;
+  // GXSTAT bit 15 (matrix stack over/underflow), kept apart from gxstat_
+  // because the execute path sets it -- on the worker, with the worker on --
+  // while gxstat_ belongs to the emulation thread. read() ORs it in.
+  u32 stack_err_ = 0;
+
+  // ---- geometry worker ----------------------------------------------------
+  bool worker_on_ = false;
+  // The parser's shadow of the command-derived GXSTAT fields: matrix mode,
+  // the three stack pointers and the overflow flag, advanced per command as
+  // it is queued, exactly as exec_single will advance the real ones later.
+  struct Shadow { u32 mode = 0; s32 proj_sp = 0, pos_sp = 0, tex_sp = 0; u32 err = 0; };
+  Shadow sh_;
+  __attribute__((always_inline)) void shadow_exec(u8 cmd, u32 param);
+  // Single-producer single-consumer queue of entries. The producer (parser)
+  // writes at q_wr_local_ and publishes to q_wr_ at feed points (run_to per
+  // slice, the end of a DMA burst, every join); the worker publishes q_rd_
+  // after each batch it executes. Power-of-two ring, cursors free-running.
+  static constexpr u32 QN = 1u << 16;
+  std::unique_ptr<Entry[]> q_ = std::unique_ptr<Entry[]>(new Entry[QN]);
+  u32 q_wr_local_ = 0;
+  bool q_pending_ = false;             // entries written since the last publish
+  alignas(64) std::atomic<u32> q_wr_{0};
+  alignas(64) std::atomic<u32> q_rd_{0};
+  alignas(64) std::mutex q_mu_;
+  std::condition_variable q_cv_;        // worker sleeps here when the queue is empty
+  std::condition_variable q_done_cv_;   // a joiner sleeps here
+  bool q_stop_ = false;
+  // Sleep flags, each raised under q_mu_ by its sleeper and read lock-free by
+  // the other side after it publishes its cursor (seq_cst both ways, so one
+  // of the pair always sees the other); the notifier then takes the lock, so
+  // a wake cannot fall between the sleeper's predicate check and its wait.
+  std::atomic<bool> worker_asleep_{false};
+  std::atomic<bool> joiner_waiting_{false};
+  std::thread worker_thread_;
+  u32 q_rd_local_ = 0;                  // worker's cursor
+  void q_push(const Entry& e) {
+    if (q_wr_local_ - q_rd_.load(std::memory_order_acquire) >= QN) q_wait_room();
+    q_[q_wr_local_ & (QN - 1)] = e; ++q_wr_local_; q_pending_ = true;
+    shadow_exec(e.cmd, e.param);
+  }
+  void q_publish();
+  void q_wait_room();
+  void worker_join();                   // everything queued has executed
+  void worker_loop();
+  void worker_stop();
+  void stack_reset();                   // GXSTAT bit 15 written: clear the flag, reset proj/tex stacks
   bool geometry_on_ = false, rendering_on_ = false;
   u32 dispcnt_ = 0;
   u8  alpha_ref_val_ = 0, alpha_ref_ = 0;
@@ -294,13 +365,27 @@ private:
   // bank neither of the other two names. Without this vblank() had to wait
   // for the raster before swapping, on the emulation thread, with nothing
   // to hide the wait behind once the display composite moved off it.
-  static constexpr u32 VRAM_BANK = 6144, PRAM_BANK = 2048, BANKS = 3;
+  // A fourth bank for the geometry worker: between VBlank (where the list to
+  // render is fixed) and VCount 215 (where the raster takes it) the worker
+  // may execute the next SWAP, so a finalised-but-unconsumed list, the
+  // pending one, the one being rasterised and the one being written can all
+  // be live at once. See pending_bank_.
+  static constexpr u32 VRAM_BANK = 6144, PRAM_BANK = 2048, BANKS = 4;
   // On the heap: a third bank made an NDS too big for the stack the tests
   // build one on.
   std::vector<Vertex> vram_ = std::vector<Vertex>(VRAM_BANK * BANKS);
   std::vector<Polygon> pram_ = std::vector<Polygon>(PRAM_BANK * BANKS);
   u32 bank_ = 0, render_bank_ = 1, raster_bank_ = 1;
-  u32 next_write_bank() const { for (u32 b = 0; b < BANKS; ++b) if (b != render_bank_ && b != raster_bank_) return b; return 0; }
+  // The bank VBlank chose for the render at VCount 215 (render_bank_ at the
+  // VBlank join). With the worker a SWAP between the two would otherwise move
+  // render_bank_ under render_frame; without it the two are the same bank.
+  u32 pending_bank_ = 1;
+  // Bank roles change on two threads with the worker on: the worker's SWAP
+  // (render_bank_, bank_) and the emulation thread's render_frame
+  // (raster_bank_) and VBlank (pending_bank_). One uncontended lock per
+  // frame each side.
+  std::mutex bank_mu_;
+  u32 next_write_bank() const { for (u32 b = 0; b < BANKS; ++b) if (b != render_bank_ && b != raster_bank_ && b != pending_bank_) return b; return 0; }
   u32 num_vertices_ = 0, num_polygons_ = 0;
   // The sorted list per bank, written by finalise_list into the bank it
   // finalises. Per bank, not one array: in the no-FIFO model a SWAP command

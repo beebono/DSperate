@@ -18,6 +18,8 @@ enum Stage : u32 {
   // Nested inside CPU9/CPU7 (translation runs mid-slice), so it is an
   // "of which" column: never add it to the others against wall time.
   JIT_TX,
+  // The emulation thread waiting for the geometry worker (Gpu3D::worker_join).
+  GX_JOIN,
   COUNT
 };
 extern bool enabled;
@@ -78,7 +80,7 @@ enum Counter : u32 { C_POLY_LINES, C_SPAN_PIXELS, C_RESOLVED_PIXELS, C_TEX_FAST,
   // wireframe force the scalar resolve_span. The labels used to call
   // toon/highlight scalar, which stopped being true when it was vectorised.
   // Census: geometry-engine register reads (the ARM9 polling GXSTAT).
-  C_GX_READ, C_GX_READ_GXSTAT, C_GX_READ_GXSTAT_BUSY, C_GX_READ_GXSTAT_PIPE, C_GX_READ_GXSTAT_FIFO, C_GX_RUN_SLOW, C_GX_RUN_SLOW_EXEC,
+  C_GX_READ, C_GX_READ_GXSTAT, C_GX_READ_GXSTAT_BUSY, C_GX_READ_GXSTAT_PIPE, C_GX_READ_GXSTAT_FIFO, C_GX_RUN_SLOW, C_GX_RUN_SLOW_EXEC, C_GX_WORKER_FULL,
   C_RES_VEC_SPANS, C_RES_VEC_PX, C_RES_TOON_SPANS, C_RES_TOON_PX, C_RES_SHADOW_SPANS, C_RES_SHADOW_PX, C_RES_WIRE_SPANS, C_RES_WIRE_PX,
   // Census: the per-scanline change-detection compares in engine2d.
   C_2D_CMP_BGPAL, C_2D_CMP_BGEXT, C_2D_CMP_OBJPAL, C_2D_CMP_OBJEXT, C_2D_CMP_OAM,

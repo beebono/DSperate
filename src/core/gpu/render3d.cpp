@@ -3058,6 +3058,9 @@ bool Renderer3D::threads_forced() {
 // polygon *count* says nothing about raster cost (a skybox or a full-screen
 // quad is a full frame of spans), and skipping banding below 24 polygons
 // cost 12 % of the whole win on SM64DS.
+static u32 g_band_cap = 0;
+void Renderer3D::set_band_cap(u32 cap) { g_band_cap = cap; }
+
 u32 Renderer3D::band_count(u32 polygons) {
   static const int forced = [] {
     const char* e = std::getenv("DS_R3D_THREADS");
@@ -3065,6 +3068,7 @@ u32 Renderer3D::band_count(u32 polygons) {
   }();
   if (forced >= 0) return forced < 1 ? 1u : static_cast<u32>(forced);
   if (polygons < 2) return 1;
+  if (g_band_cap) return g_band_cap;
   // Pinned at three since 2026-08-29 (RG DS knob sweep against the CPU cuts
   // of 2026-08-28: mlbis -6.8 %, etody -2.6 %, sm64 -1.4 %, meteos/dbori flat;
   // GSDD +5.8 %, whose main thread is the critical path). Before the pin a

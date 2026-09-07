@@ -20,6 +20,7 @@ const char* const names[COUNT] = {
   "2d bg draw", "2d obj draw", "2d window", "2d select", "2d effects", "output", "capture",
   "3d clear", "3d spans", "3d final pass", "3d band wait", "spu",
   "jit translate",
+  "gx worker join",
 };
 
 const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d resolved pixels",
@@ -45,7 +46,7 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "3d resolve kernel calls", "3d resolve parts entered",
   "3d polygon-chunk entries",
   "3d spans empty (no pixels)", "3d spans fully occluded by depth", "3d spans that draw",
-  "gx reg reads", "gx reads of GXSTAT", "gx GXSTAT reads while busy (bit27)", "gx GXSTAT reads with pipe non-empty", "gx GXSTAT reads with fifo non-empty", "gx run_to_slow calls", "gx run_to_slow calls that executed",
+  "gx reg reads", "gx reads of GXSTAT", "gx GXSTAT reads while busy (bit27)", "gx GXSTAT reads with pipe non-empty", "gx GXSTAT reads with fifo non-empty", "gx run_to_slow calls", "gx run_to_slow calls that executed", "gx worker queue full (producer waited)",
   "3d drawn spans: plain", "3d drawn pixels: plain", "3d drawn spans: toon/highlight", "3d drawn pixels: toon/highlight", "3d drawn spans: shadow (scalar)", "3d drawn pixels: shadow (scalar)", "3d drawn spans: wireframe (scalar)", "3d drawn pixels: wireframe (scalar)",
   "2d compares: bg palette (512B)", "2d compares: bg ext palette (512B)", "2d compares: obj palette (512B)", "2d compares: obj ext palette (512B)", "2d compares: oam (1024B)",
   "2d compares that differed: bg palette", "2d compares that differed: bg ext palette", "2d compares that differed: obj palette", "2d compares that differed: obj ext palette", "2d compares that differed: oam",

@@ -331,7 +331,7 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
 
 } // namespace
 
-Gpu3D::~Gpu3D() { renderer_.sync_all(); }
+Gpu3D::~Gpu3D() { worker_stop(); renderer_.sync_all(); }
 
 Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) { reset(); }
 
@@ -341,6 +341,8 @@ void Gpu3D::reset_render_state() {
 }
 
 void Gpu3D::reset() {
+  if (worker_on_) worker_join();
+  sh_ = Shadow{}; stack_err_ = 0;
   ring_rd_ = ring_wr_ = pipe_n_ = fifo_n_ = stall_n_ = 0; stalled_ = false;
   parse_ = GxParse{};
   exec_params_.fill(0); exec_count_ = 0;
@@ -379,12 +381,13 @@ void Gpu3D::reset() {
   reset_vptr();
   vertex_num_ = vertex_in_poly_ = consecutive_polys_ = 0;
   last_strip_poly_ = nullptr; num_opaque_ = 0;
-  bank_ = 0; render_bank_ = 1; raster_bank_ = 1; num_vertices_ = num_polygons_ = 0;
+  bank_ = 0; render_bank_ = 1; raster_bank_ = 1; pending_bank_ = 1; num_vertices_ = num_polygons_ = 0;
   flush_request_ = flush_attr_ = 0; render_identical_ = false; swapped_ = false; list_same_ = false;
   renderer_.reset();
 }
 
 void Gpu3D::set_powcnt(u16 value) {
+  if (worker_on_) worker_join();   // the worker reads rendering_on_ at a SWAP
   geometry_on_ = value & (1 << 3);
   rendering_on_ = value & (1 << 2); render_on_.store(rendering_on_, std::memory_order_relaxed);
   if (!rendering_on_) reset_render_state();
@@ -538,6 +541,7 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
 // ---- FIFO ---------------------------------------------------------------------
 
 void Gpu3D::fifo_write(const Entry& e) {
+  if (worker_on_) { q_push(e); return; }
   // Order of tests follows frequency: a frame is tens of thousands of words
   // into a FIFO that is neither empty nor full.
   if (no_fifo_ && pipe_n_ + fifo_n_ >= RING - 8) drain_all();   // no level: the ring is the only bound
@@ -667,6 +671,19 @@ void Gpu3D::gxfifo_write(u32 value) {
 // in registers across the whole run instead of reloaded per word.
 void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
   if (!geometry_on_) return;
+  if (worker_on_) {
+    // Same walk, the queue as its sink; the shadow advances per entry inside
+    // q_push. Published at the end of the burst, not per word.
+    GxParse p = parse_;
+    for (u32 i = 0; i < n; ++i) {
+      u32 v;
+      std::memcpy(&v, src + i * 4, 4);
+      gxfifo_word(v, p, [this](const Entry& e) { q_push(e); });
+    }
+    parse_ = p;
+    if (q_pending_) q_publish();
+    return;
+  }
   u32 wr = ring_wr_, pushed = 0, pushpop = 0, tests = 0;
   Entry* const ring = ring_.data();
   const auto sink = [&](const Entry& e) {
@@ -726,13 +743,13 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
   case 0x11:   // push
     vtx_cmd_delayed4(); --num_pushpop_;
     if (matrix_mode_ == 0) {
-      if (proj_sp_ > 0) gxstat_ |= (1u << 15);
+      if (proj_sp_ > 0) stack_err_ = 1u << 15;
       proj_stack_ = proj_; proj_sp_ = (proj_sp_ + 1) & 1;
     } else if (matrix_mode_ == 3) {
-      if (tex_sp_ > 0) gxstat_ |= (1u << 15);
+      if (tex_sp_ > 0) stack_err_ = 1u << 15;
       tex_stack_ = tex_; tex_sp_ = (tex_sp_ + 1) & 1;
     } else {
-      if (pos_sp_ > 30) gxstat_ |= (1u << 15);
+      if (pos_sp_ > 30) stack_err_ = 1u << 15;
       pos_stack_[pos_sp_ & 0x1F] = pos_; vec_stack_[pos_sp_ & 0x1F] = vec_;
       pos_sp_ = (pos_sp_ + 1) & 0x3F;
     }
@@ -741,17 +758,17 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
   case 0x12:   // pop
     vtx_cmd_delayed4(); --num_pushpop_;
     if (matrix_mode_ == 0) {
-      if (proj_sp_ == 0) gxstat_ |= (1u << 15);
+      if (proj_sp_ == 0) stack_err_ = 1u << 15;
       proj_sp_ = (proj_sp_ - 1) & 1; proj_ = proj_stack_; clip_dirty_ = true;
       add_cycles(35);
     } else if (matrix_mode_ == 3) {
-      if (tex_sp_ == 0) gxstat_ |= (1u << 15);
+      if (tex_sp_ == 0) stack_err_ = 1u << 15;
       tex_sp_ = (tex_sp_ - 1) & 1; tex_ = tex_stack_;
       add_cycles(17);
     } else {
       const s32 off = static_cast<s32>(param << 26) >> 26;
       pos_sp_ = (pos_sp_ - off) & 0x3F;
-      if (pos_sp_ > 30) gxstat_ |= (1u << 15);
+      if (pos_sp_ > 30) stack_err_ = 1u << 15;
       pos_ = pos_stack_[pos_sp_ & 0x1F]; vec_ = vec_stack_[pos_sp_ & 0x1F]; clip_dirty_ = true;
       add_cycles(35);
     }
@@ -762,7 +779,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
     else if (matrix_mode_ == 3) tex_stack_ = tex_;
     else {
       const u32 a = param & 0x1F;
-      if (a > 30) gxstat_ |= (1u << 15);
+      if (a > 30) stack_err_ = 1u << 15;
       pos_stack_[a] = pos_; vec_stack_[a] = vec_;
     }
     add_cycles(16);
@@ -773,7 +790,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
     else if (matrix_mode_ == 3) { tex_ = tex_stack_; add_cycles(17); }
     else {
       const u32 a = param & 0x1F;
-      if (a > 30) gxstat_ |= (1u << 15);
+      if (a > 30) stack_err_ = 1u << 15;
       pos_ = pos_stack_[a]; vec_ = vec_stack_[a]; clip_dirty_ = true;
       add_cycles(35);
     }
@@ -876,7 +893,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
       // list in the freed bank.
       if (rendering_on_) finalise_list();
       swapped_ = true;
-      render_bank_ = bank_; bank_ = next_write_bank();
+      { std::lock_guard<std::mutex> lk(bank_mu_); render_bank_ = bank_; bank_ = next_write_bank(); }
       num_vertices_ = num_polygons_ = num_opaque_ = 0;
       flush_request_ = 0;
     }
@@ -1442,7 +1459,7 @@ void Gpu3D::vblank() {
                  static_cast<unsigned long long>(nds_.frame_count), geometry_on_, rendering_on_, flush_request_, flush_attr_, num_polygons_, num_vertices_,
                  dispcnt_, alpha_ref_, clear_attr1_, clear_attr2_, fifo_n_, gxstat_, nds_.io.cpu_io[0].ie, nds_.io.cpu_io[0].if_);
   if (!geometry_on_) return;
-  if (no_fifo_) drain_all();
+  if (worker_on_) worker_join(); else if (no_fifo_) drain_all();
   // The raster of the frame being displayed may still be running (nothing
   // on this thread waits for it any more): it reads its own copy of the
   // render state and a bank the swap below leaves alone (see raster_bank_).
@@ -1500,9 +1517,20 @@ void Gpu3D::vblank() {
     flush_request_ = 0;
   }
   swapped_ = false;
+  // The list VCount 215 renders is fixed here. The worker is idle after the
+  // join and nothing feeds it inside this call, so no lock is needed; it is
+  // taken anyway so that every write to a bank role is under it.
+  { std::lock_guard<std::mutex> lk(bank_mu_); pending_bank_ = render_bank_; }
 }
 
-void Gpu3D::render_frame() { raster_bank_ = render_bank_; render_stale_ = false; renderer_.render(*this); }
+void Gpu3D::render_frame() {
+  // The previous raster must be done before its bank is released: the
+  // worker's next SWAP may take any bank that is not raster/pending/render.
+  renderer_.sync_all();
+  { std::lock_guard<std::mutex> lk(bank_mu_); raster_bank_ = pending_bank_; }
+  render_stale_ = false;
+  renderer_.render(*this);
+}
 
 void Gpu3D::set_render_xpos(u16 value, u16 mask) {
   if (!render_on_.load(std::memory_order_relaxed)) return;
@@ -1529,11 +1557,145 @@ const u32* Gpu3D::line(const Renderer3D::FrameRef& f, u32 y) {
   return scrolled;
 }
 
+// ---- geometry worker ----------------------------------------------------------
+
+void Gpu3D::stack_reset() {
+  // Applied at once, ahead of anything queued -- what the sequential models
+  // do too (the write does not drain first). Rare: once at init.
+  if (worker_on_) { worker_join(); sh_.proj_sp = sh_.tex_sp = 0; sh_.err = 0; }
+  stack_err_ = 0; proj_sp_ = 0; tex_sp_ = 0;
+}
+
+// The shadow advances exactly the stack-pointer and overflow arithmetic of
+// exec_single's 0x10-0x14, nothing else; keep the two in step.
+void Gpu3D::shadow_exec(u8 cmd, u32 param) {
+  if (static_cast<u8>(cmd - 0x10) > 4) return;
+  switch (cmd) {
+  case 0x10: sh_.mode = param & 3; break;
+  case 0x11:
+    if (sh_.mode == 0) { if (sh_.proj_sp > 0) sh_.err = 1u << 15; sh_.proj_sp = (sh_.proj_sp + 1) & 1; }
+    else if (sh_.mode == 3) { if (sh_.tex_sp > 0) sh_.err = 1u << 15; sh_.tex_sp = (sh_.tex_sp + 1) & 1; }
+    else { if (sh_.pos_sp > 30) sh_.err = 1u << 15; sh_.pos_sp = (sh_.pos_sp + 1) & 0x3F; }
+    break;
+  case 0x12:
+    if (sh_.mode == 0) { if (sh_.proj_sp == 0) sh_.err = 1u << 15; sh_.proj_sp = (sh_.proj_sp - 1) & 1; }
+    else if (sh_.mode == 3) { if (sh_.tex_sp == 0) sh_.err = 1u << 15; sh_.tex_sp = (sh_.tex_sp - 1) & 1; }
+    else { const s32 off = static_cast<s32>(param << 26) >> 26; sh_.pos_sp = (sh_.pos_sp - off) & 0x3F; if (sh_.pos_sp > 30) sh_.err = 1u << 15; }
+    break;
+  case 0x13: case 0x14:
+    if (sh_.mode != 0 && sh_.mode != 3 && (param & 0x1F) > 30) sh_.err = 1u << 15;
+    break;
+  default: break;
+  }
+}
+
+void Gpu3D::set_geometry_worker(bool on) {
+  if (on == worker_on_) return;
+  if (on) {
+    if (!no_fifo_) { std::fprintf(stderr, "[gx] geometry worker needs the no-FIFO model (--timing-oc); not enabled\n"); return; }
+    if (no_fifo_) drain_all();   // hand over an empty ring
+    sh_.mode = matrix_mode_; sh_.proj_sp = proj_sp_; sh_.pos_sp = pos_sp_; sh_.tex_sp = tex_sp_; sh_.err = stack_err_;
+    q_wr_local_ = q_rd_local_ = 0; q_pending_ = false;
+    q_wr_.store(0, std::memory_order_relaxed); q_rd_.store(0, std::memory_order_relaxed);
+    q_stop_ = false;
+    worker_thread_ = std::thread([this] { worker_loop(); });
+    worker_on_ = true;
+    renderer_.set_band_cap(2);   // the worker takes the third band worker's core
+  } else {
+    worker_join();
+    worker_stop();
+    worker_on_ = false;
+    renderer_.set_band_cap(0);
+  }
+}
+
+void Gpu3D::worker_stop() {
+  if (!worker_thread_.joinable()) return;
+  { std::lock_guard<std::mutex> lk(q_mu_); q_stop_ = true; }
+  q_cv_.notify_all();
+  worker_thread_.join();
+}
+
+// Make the entries written since the last publish visible, and wake the
+// worker if it went to sleep on an empty queue. The sleep flag is checked
+// after the cursor is published and the worker re-checks the cursor under the
+// lock after raising the flag, so one of the two always sees the other.
+void Gpu3D::q_publish() {
+  q_pending_ = false;
+  q_wr_.store(q_wr_local_, std::memory_order_seq_cst);
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+  if (worker_asleep_.load(std::memory_order_seq_cst)) {
+    { std::lock_guard<std::mutex> lk(q_mu_); }
+    q_cv_.notify_one();
+  }
+}
+
+// The producer is a whole queue ahead: publish what it has and wait for room.
+void Gpu3D::q_wait_room() {
+  q_publish();
+  prof::add(prof::C_GX_WORKER_FULL, 1);
+  while (q_wr_local_ - q_rd_.load(std::memory_order_acquire) >= QN) std::this_thread::yield();
+}
+
+void Gpu3D::worker_join() {
+  if (q_pending_) q_publish();
+  const u32 target = q_wr_local_;
+  if (q_rd_.load(std::memory_order_acquire) == target) return;
+  prof::Scope sc(prof::GX_JOIN);
+  // A short spin first: the common join (VBlank) finds the worker on its
+  // last few commands.
+  for (int i = 0; i < 2000; ++i) {
+    if (q_rd_.load(std::memory_order_acquire) == target) return;
+  }
+  std::unique_lock<std::mutex> lk(q_mu_);
+  joiner_waiting_.store(true, std::memory_order_seq_cst);
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+  q_done_cv_.wait(lk, [&] { return q_rd_.load(std::memory_order_seq_cst) == target; });
+  joiner_waiting_.store(false, std::memory_order_relaxed);
+}
+
+void Gpu3D::worker_loop() {
+  u32 rd = q_rd_local_;
+  for (;;) {
+    u32 wr = q_wr_.load(std::memory_order_acquire);
+    if (rd == wr) {
+      std::unique_lock<std::mutex> lk(q_mu_);
+      worker_asleep_.store(true, std::memory_order_seq_cst);
+      std::atomic_thread_fence(std::memory_order_seq_cst);
+      q_cv_.wait(lk, [&] { return q_stop_ || q_wr_.load(std::memory_order_seq_cst) != rd; });
+      worker_asleep_.store(false, std::memory_order_relaxed);
+      if (q_stop_) return;
+      continue;
+    }
+    // Execute the batch; the cursor is published once at its end -- a
+    // joiner only needs to know when everything is done, and per-command
+    // publication would put a release store in the hottest loop.
+    while (rd != wr) {
+      const Entry e = q_[rd & (QN - 1)];
+      ++rd;
+      exec_single(e.cmd, e.param);
+    }
+    q_rd_.store(rd, std::memory_order_seq_cst);
+    q_rd_local_ = rd;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    if (joiner_waiting_.load(std::memory_order_seq_cst)) {
+      { std::lock_guard<std::mutex> lk(q_mu_); }
+      q_done_cv_.notify_all();
+    }
+  }
+}
+
 // ---- registers ----------------------------------------------------------------
 
 u32 Gpu3D::read(u32 addr, u32 width) {
   const u32 r = addr - 0x04000000;
-  if (no_fifo_) drain_all();   // sync on observation: whatever is read reflects everything queued
+  if (worker_on_) {
+    // Sync on observation, but only where the value depends on execution:
+    // GXSTAT comes from the parser's shadow, DISP3DCNT and RDLINES_COUNT
+    // never touch the engine. The rest (RAM_COUNT, the test results, the
+    // clip and vector matrices) waits for the worker.
+    if ((r & ~3u) != 0x600 && r != 0x60 && r != 0x320) worker_join();
+  } else if (no_fifo_) drain_all();   // sync on observation: whatever is read reflects everything queued
   if ((r & ~3u) == 0x600) {
     // GXSTAT first, ahead of the width split and the switch: a game waiting
     // for a swap polls it tens of thousands of times a frame (Dragon Ball
@@ -1550,8 +1712,12 @@ u32 Gpu3D::read(u32 addr, u32 width) {
     }
     run_to(nds_.sched.now());
     const u32 level = no_fifo_ ? 0 : fifo_n_;
-    const u32 v = gxstat_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13) | (level << 16) |
-                  (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
+    // Both busy bits, the stack level and the overflow flag are command-derived,
+    // so the shadow's copy is the executed state's future exactly.
+    const u32 v = worker_on_
+      ? gxstat_ | sh_.err | ((sh_.pos_sp & 0x1F) << 8) | ((sh_.proj_sp & 1) << 13) | (1u << 25) | (1u << 26)
+      : gxstat_ | stack_err_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13) | (level << 16) |
+        (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
     return width == 32 ? v : width == 16 ? (v >> ((addr & 2) * 8)) & 0xFFFF : (v >> ((addr & 3) * 8)) & 0xFF;
   }
   if (width == 8) { const u32 v = read(addr & ~3u, 32); return (v >> ((addr & 3) * 8)) & 0xFF; }
@@ -1604,7 +1770,7 @@ void Gpu3D::write(u32 addr, u32 width, u32 value) {
       return;
     case 0x62: case 0x63: return;
     case 0x340: alpha_ref_val_ = value & 0x1F; alpha_ref_ = (dispcnt_ & 4) ? alpha_ref_val_ : 0; return;
-    case 0x601: if (value & 0x80) { gxstat_ &= ~0x8000u; proj_sp_ = 0; tex_sp_ = 0; } return;
+    case 0x601: if (value & 0x80) stack_reset(); return;
     case 0x603: gxstat_ = (gxstat_ & 0x3FFFFFFF) | ((value & 0xC0) << 24); check_fifo_irq(); return;
     default: break;
     }
@@ -1636,9 +1802,9 @@ void Gpu3D::write(u32 addr, u32 width, u32 value) {
     case 0x358: fog_color_ = (fog_color_ & 0xFFFF0000) | (value & 0xFFFF); return;
     case 0x35A: fog_color_ = (fog_color_ & 0x0000FFFF) | ((value & 0xFFFF) << 16); return;
     case 0x35C: fog_offset_ = value & 0x7FFF; return;
-    case 0x600: if (value & 0x8000) { gxstat_ &= ~0x8000u; proj_sp_ = 0; tex_sp_ = 0; } return;
+    case 0x600: if (value & 0x8000) stack_reset(); return;
     case 0x602: gxstat_ = (gxstat_ & 0x3FFFFFFF) | ((value & 0xC000) << 16); check_fifo_irq(); return;
-    case 0x610: zero_dot_w_limit_ = ((value & 0x7FFF) * 0x200) + 0x1FF; return;
+    case 0x610: if (worker_on_) worker_join(); zero_dot_w_limit_ = ((value & 0x7FFF) * 0x200) + 0x1FF; return;
     default: break;
     }
     if (r >= 0x330 && r < 0x340) { edge_[(r - 0x330) >> 1] = static_cast<u16>(value); return; }
@@ -1660,11 +1826,11 @@ void Gpu3D::write(u32 addr, u32 width, u32 value) {
   case 0x358: fog_color_ = value; return;
   case 0x35C: fog_offset_ = value & 0x7FFF; return;
   case 0x600:
-    if (value & 0x8000) { gxstat_ &= ~0x8000u; proj_sp_ = 0; tex_sp_ = 0; }
+    if (value & 0x8000) stack_reset();
     gxstat_ = (gxstat_ & 0x3FFFFFFF) | (value & 0xC0000000);
     check_fifo_irq();
     return;
-  case 0x610: zero_dot_w_limit_ = ((value & 0x7FFF) * 0x200) + 0x1FF; return;
+  case 0x610: if (worker_on_) worker_join(); zero_dot_w_limit_ = ((value & 0x7FFF) * 0x200) + 0x1FF; return;
   default: break;
   }
   if (r >= 0x400 && r < 0x440) { gxfifo_write(value); return; }
@@ -1684,6 +1850,9 @@ template <class S> void sync_polygon(S& s, Polygon& p) {
 } // namespace
 
 template <class S> void Gpu3D::sync_state(S& s) {
+  if (worker_on_) { worker_join(); num_pushpop_ = num_tests_ = 0; }
+  // On disk the overflow flag is GXSTAT bit 15, as it always was.
+  if constexpr (!S::reading) gxstat_ |= stack_err_;
   s.begin("GX3D");
   for (Entry& e : ring_) s.fields(e.param, e.cmd);
   s.fields(ring_rd_, ring_wr_, pipe_n_, fifo_n_, stall_n_, stalled_, parse_.num_cmds, parse_.cur_cmd, parse_.param_count, parse_.total_params, exec_params_, exec_count_,
@@ -1718,7 +1887,7 @@ template <class S> void Gpu3D::sync_state(S& s) {
   u32 rcount = S::reading ? 0 : render_count_[render_bank_];
   s.fields(vertex_num_, vertex_in_poly_, consecutive_polys_, num_opaque_, bank_disk, num_vertices_, num_polygons_,
            rcount, render_identical_, flush_request_, flush_attr_, prev_swap_polys_, prev_swap_verts_, rendered_before_);
-  if constexpr (S::reading) { bank_ = bank_disk & 1; render_bank_ = bank_ ^ 1; raster_bank_ = render_bank_; }
+  if constexpr (S::reading) { bank_ = bank_disk & 1; render_bank_ = bank_ ^ 1; raster_bank_ = pending_bank_ = render_bank_; }
   const Polygon** rlist = render_polys_[render_bank_].data();
   // Pointers into the polygon RAM travel as indices.
   s32 strip = last_strip_poly_ ? static_cast<s32>(remap(static_cast<u32>(last_strip_poly_ - pram_.data()), PRAM_BANK)) : -1;
@@ -1756,6 +1925,9 @@ template <class S> void Gpu3D::sync_state(S& s) {
   }
   s.end();
   renderer_.sync_output(s);
+  stack_err_ = gxstat_ & 0x8000u; gxstat_ &= ~0x8000u;
+  // The shadow is a function of the executed state once the queue is empty.
+  sh_.mode = matrix_mode_; sh_.proj_sp = proj_sp_; sh_.pos_sp = pos_sp_; sh_.tex_sp = tex_sp_; sh_.err = stack_err_;
 }
 template void Gpu3D::sync_state<state::Writer>(state::Writer&);
 template void Gpu3D::sync_state<state::Reader>(state::Reader&);

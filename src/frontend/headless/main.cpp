@@ -225,6 +225,8 @@ int main(int argc, char** argv) {
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(timing_oc);
+  // Geometry worker, on by default with the no-FIFO model; DS_GX_THREAD=0 for the A/B.
+  { const char* e = std::getenv("DS_GX_THREAD"); nds.gpu3d.set_geometry_worker(timing_oc && !(e && std::atoi(e) == 0)); }
   nds.gpu3d.renderer().set_aa(!no_aa);
 
   if (rom && cheat_db) {

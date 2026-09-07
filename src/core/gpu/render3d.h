@@ -79,6 +79,10 @@ public:
   // what the hardware draws, so the core default is on; the SDL frontend
   // makes it opt-in (video.aa), the headless frontend has --no-aa for measurement.
   void set_aa(bool on) { aa_ = on; }
+  // Upper bound on band workers (0 = none): the geometry worker sets 2 so the
+  // two together take the cores the three band workers had. DS_R3D_THREADS
+  // still overrides.
+  static void set_band_cap(u32 cap);
   bool aa() const { return aa_; }
 
 private:
