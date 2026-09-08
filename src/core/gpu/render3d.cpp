@@ -316,6 +316,7 @@ struct Renderer3D::Pool {
     { std::lock_guard<std::mutex> lk(m_); done_bits_.fetch_or(u64{1} << bin, std::memory_order_release); thieves_.fetch_sub(1, std::memory_order_acq_rel); }
     done_.notify_all();
   }
+  bool idle() const { return remaining_.load(std::memory_order_acquire) == 0 && thieves_.load(std::memory_order_acquire) == 0; }
   bool done(u64 gen, u64 mask) const {
     return generation_.load(std::memory_order_acquire) != gen || (done_bits_.load(std::memory_order_acquire) & mask) == mask;
   }
@@ -2876,6 +2877,9 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
   if (!f.nbins || !pool_) return;
   u32 b = 0;
   while (b + 1 < f.nbins && y >= f.bin_y[b + 1]) ++b;
+  // The common line finds its band drawn: one atomic load, no clock, no
+  // thread-id lookup -- the fast path is what it was before stealing.
+  if (pool_->done(f.gen, u64{1} << b)) return;
   const auto t0 = std::chrono::steady_clock::now();
   const bool owner = std::this_thread::get_id() == owner_;
   if (!steal_bins(f.gen, b)) {
@@ -2895,10 +2899,12 @@ void Renderer3D::sync_all() {
   // be inside the job at that point -- it marks its last bin done from in
   // there. Waiting on an idle pool costs one uncontended lock.
   u64 ns = 0;
-  const auto t0 = std::chrono::steady_clock::now();
-  if (pool_ && pending_bands_) steal_bins(gen_, nbins_ - 1);
-  if (pool_) { DS_PROF(R3D_WAIT); ns = pool_->wait_idle(); if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed); }
-  if (pool_ && std::this_thread::get_id() == owner_) owner_wait_ns_.fetch_add(static_cast<u64>((std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+  if (pool_ && (pending_bands_ || !pool_->idle())) {
+    const auto t0 = std::chrono::steady_clock::now();
+    if (pending_bands_) steal_bins(gen_, nbins_ - 1);
+    { DS_PROF(R3D_WAIT); ns = pool_->wait_idle(); if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed); }
+    if (std::this_thread::get_id() == owner_) owner_wait_ns_.fetch_add(static_cast<u64>((std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+  }
   if (!pending_bands_) return;
   if (ns) prof::add(prof::C_R3D_SYNC_ALL, 1);   // bands were still running: something waited for the whole raster
   pending_bands_ = 0;

@@ -476,7 +476,10 @@ void Gpu3D::finish_work(s32 cycles) {
 
 void Gpu3D::run_to_slow(u64 arm9_time) {
   prof::add(prof::C_GX_RUN_SLOW, 1);
-  const auto t0 = std::chrono::steady_clock::now();
+  // The inline execution time is the shape controller's input; the clock is
+  // read only while the controller is live (~40 ns a call otherwise).
+  const bool timed = worker_started_ && !worker_on_;
+  const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   const u64 now = arm9_time >> 1;
   cycle_count_ -= static_cast<s32>(now - timestamp_);
   timestamp_ = now;
@@ -496,6 +499,9 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
     // there are none here. So the state of the two bits is carried in a
     // register instead of re-read from gxstat_ once per command.
     bool busy = (gxstat_ & ((1u << 14) | (1u << 0))) != 0;
+    // One drain loop per route, so the per-entry test is hoisted: the exact
+    // model's loop is what it was before the worker existed.
+    auto drain = [&](auto&& sink) {
     do {
       // A bit clears one command *later* than the command that emptied its
       // counter: a GXSTAT read landing between the two must still see it set.
@@ -523,13 +529,15 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
         // per pop would have.
         settle = true;
       }
-      if (worker_on_) { price_single(e.cmd, e.param); q_push(e); }
-      else exec_single(e.cmd, e.param);
+      sink(e);
     } while (cycle_count_ <= 0 && pipe);
+    };
+    if (worker_on_) drain([this](const Entry& e) { price_single(e.cmd, e.param); q_push(e); });
+    else drain([this](const Entry& e) { exec_single(e.cmd, e.param); });
     ring_rd_ = rd; pipe_n_ = pipe; fifo_n_ = fifo; drain_settle_ = settle;
   }
-  if (worker_on_ && q_pending_) q_publish();
-  else if (worker_started_) gx_inline_ns_ += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
+  if (worker_on_) { if (q_pending_) q_publish(); }
+  else if (timed) gx_inline_ns_ += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   if (cycle_count_ <= 0 && pipe_n_ == 0) {
     if (gxstat_ & (1u << 27)) finish_work(-cycle_count_); else cycle_count_ = 0;
     if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
@@ -574,7 +582,8 @@ void Gpu3D::promote_stalled() {
 
 void Gpu3D::drain_all() {
   if (!geometry_on_) return;
-  const auto t0 = std::chrono::steady_clock::now();
+  const bool timed = worker_started_;
+  const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   const u64 now = nds_.sched.now();
   // run_to_slow drains while its cycle deficit is non-positive; give it one
   // it cannot exhaust and it runs the ring dry. A SWAP_BUFFERS ends a pass
@@ -597,7 +606,7 @@ void Gpu3D::drain_all() {
   }
   cycle_count_ = 0;
   timestamp_ = now >> 1;
-  if (worker_started_) gx_inline_ns_ += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
+  if (timed) gx_inline_ns_ += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
 }
 
 void Gpu3D::check_fifo_irq() {
