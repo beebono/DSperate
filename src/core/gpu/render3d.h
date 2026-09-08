@@ -240,6 +240,19 @@ private:
     bool next_sx_differ;    // vnl->sx != vnr->sx (symmetric, so swap-safe)
   };
   std::array<Edge, 2048> edges_{};
+  // Edges are built on first use, not for the whole list: with the frame cut
+  // into bins each instance draws a fraction of the lines, and a full
+  // setup_polygon per polygon per instance (~500 B of Shade, slopes and
+  // cursors) was most of a megabyte of stores a frame that touched nothing.
+  // build_edges records the polygon and its list index (the recorded
+  // texture-cache pointers are per list index); built_edge does the rest.
+  std::array<u16, 2048> edge_list_{};    // edge index -> polygon list index
+  std::array<u64, 32> edge_built_{};     // one bit per edge
+  bool edge_is_built(u32 i) const { return (edge_built_[i >> 6] >> (i & 63)) & 1; }
+  Edge& built_edge(u32 i) {
+    if (!edge_is_built(i)) { edge_built_[i >> 6] |= u64{1} << (i & 63); setup_poly_ = edge_list_[i]; setup_polygon(edges_[i], *edges_[i].poly); }
+    return edges_[i];
+  }
   // Per-line active polygon set: polygons enter at their top line (buckets
   // by ytop, in list order) and leave after their last line; the active list
   // is kept in list order, which the blending rules depend on.

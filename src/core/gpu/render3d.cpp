@@ -2115,7 +2115,7 @@ void Renderer3D::render_chunk(s32 ya, s32 yb) {
   }
   u32 keep = 0;
   for (u32 k = 0; k < active_count_; ++k) {
-    Edge& e = edges_[active_[k]];
+    Edge& e = built_edge(active_[k]);
     const Polygon& p = *e.poly;
     const s32 lo = p.ytop > ya ? p.ytop : ya;
     const s32 hi = p.ybot < yb ? p.ybot : yb;
@@ -3088,16 +3088,18 @@ void Renderer3D::prepare_worker(const Gpu3D& gx, const Polygon* const* polys, u3
   build_edges();
 }
 
-// Decode the polygon list into edges and bucket them by top line. Every band
-// repeats this: the edge cursors are walked per line and so cannot be shared.
+// List the live polygons and bucket them by top line. Every instance repeats
+// this: the edge cursors are walked per line and so cannot be shared. The
+// edges themselves are built on first use (built_edge).
 void Renderer3D::build_edges() {
   const Polygon* const* polys = list_polys_;
   u32 n = 0;
   for (u32 i = 0; i < list_count_; ++i) {
     if (polys[i]->degenerate) continue;
-    setup_poly_ = i;
-    setup_polygon(edges_[n++], *polys[i]);
+    edges_[n].poly = polys[i];
+    edge_list_[n++] = static_cast<u16>(i);
   }
+  edge_built_.fill(0);
   edge_count_ = n;
   rendered_upto_ = 0;   // cursors are fresh at ytop again; nothing re-entered yet
   // Bucket the polygons by their top line (counting sort, list order kept).
@@ -3121,11 +3123,11 @@ void Renderer3D::seed_active(s32 y) {
   active_count_ = 0;
   if (y <= 0) return;
   for (u32 i = 0; i < edge_count_; ++i) {
-    Edge& e = edges_[i];
-    const Polygon& p = *e.poly;
+    const Polygon& p = *edges_[i].poly;
     const s32 t = p.ytop < 0 ? 0 : p.ytop;
     if (t >= y || y >= p.ybot) continue;
     active_[active_count_++] = static_cast<u16>(i);
+    Edge& e = built_edge(i);
     if (p.ytop != p.ybot) { setup_left_edge(e, y); setup_right_edge(e, y); }
   }
 }
@@ -3145,7 +3147,8 @@ void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
   // them back. order_ is bucketed by ytop, so this is exactly that slice.
   if (rendered_upto_ > first) {
     const s32 hi = rendered_upto_ < last ? rendered_upto_ : last;
-    for (u32 i = bucket_[first]; i < bucket_[hi]; ++i) rewind_edge(edges_[order_[i]]);
+    for (u32 i = bucket_[first]; i < bucket_[hi]; ++i)
+      if (edge_is_built(order_[i])) rewind_edge(edges_[order_[i]]);   // an unbuilt edge is built at ytop when entered
   }
   if (last > rendered_upto_) rendered_upto_ = last;
   seed_active(first);
