@@ -38,10 +38,12 @@ namespace ds::sdl {
 
 class DrmOut : public ScanoutOut {
 public:
-  // Two: begin_frame() waits for the outstanding flip to retire before
-  // handing a buffer out, so at most one buffer is ever busy (on screen)
-  // and a third could never be reached -- it only cost a panel of CMA.
-  static constexpr int BUFS = 2;   // one on screen, one being drawn
+  // Three: one on screen, one whose flip is pending (only one may be
+  // outstanding per CRTC), and one queued -- drawn, waiting for that flip
+  // to retire before its own can be issued. begin_frame() blocks only when
+  // all three are taken, so an emulation frame longer than a refresh
+  // borrows from the next one instead of presenting a whole refresh late.
+  static constexpr int BUFS = 3;
 
   // False if any precondition is missing (not the KMSDRM video driver, no
   // usable connector for this display, the window is not the size of the
@@ -60,11 +62,12 @@ public:
   int bufs() const override { return BUFS; }
   int current() const override { return cur_; }
 
-  // Waits for the outstanding flip to retire -- that wait is the display's
-  // pacing, and it is taken here rather than in end_frame() so it overlaps
-  // the frame's emulation instead of extending its present.
+  // Hands out a free buffer, waiting for a flip to retire only when none
+  // is -- that wait is the display's pacing, and it is taken here rather
+  // than in end_frame() so it overlaps the frame's emulation instead of
+  // extending its present.
   u32* begin_frame() override;
-  void end_frame() override;      // queue the flip; does not wait
+  void end_frame() override;      // flip now, or queue behind the pending flip; does not wait
 
 private:
   struct Buf {
@@ -73,8 +76,9 @@ private:
     size_t bytes = 0;
     u32 handle = 0;               // GEM handle from the PRIME import
     u32 fb = 0;                   // DRM framebuffer id
-    bool busy = false;            // on screen, or queued to be
+    bool busy = false;            // on screen, flip pending, or queued
   };
+  bool flip(int i);               // issue the page flip for bufs_[i]; false = driver error
   bool alloc_buf(Buf& b);
   void drop_buf(Buf& b);
   // Reads whatever the DRM fd has queued and hands each completion to the
@@ -93,6 +97,7 @@ private:
   int cur_ = -1;                  // buffer handed out by begin_frame()
   int on_screen_ = -1;            // buffer the CRTC is scanning out
   int pending_ = -1;              // buffer whose flip has not completed
+  int queued_ = -1;               // buffer drawn while a flip was pending; flipped on its retire
   bool dead_ = false;             // driver error; stop submitting
 };
 

@@ -159,6 +159,7 @@ bool DrmOut::open(SDL_Window* win, int w, int h, int display_index) {
   bufs_[0].busy = true;
   on_screen_ = 0;
   pending_ = -1;
+  queued_ = -1;
   dead_ = false;
   g_outs.push_back(this);
   std::fprintf(stderr, "drm: display %d on connector %u crtc %u, %dx%d@%u\n",
@@ -168,14 +169,15 @@ bool DrmOut::open(SDL_Window* win, int w, int h, int display_index) {
 
 void DrmOut::close() {
   if (fd_ >= 0) {
-    // Let an outstanding flip retire before its buffer is unmapped.
+    // Let an outstanding flip retire before its buffer is unmapped; a
+    // queued one is flipped on that retire and drained in turn.
     while (pending_ >= 0 && !dead_)
       if (!pump(fd_, true)) break;
     for (Buf& b : bufs_) drop_buf(b);
   }
   g_outs.erase(std::remove(g_outs.begin(), g_outs.end(), this), g_outs.end());
   fd_ = -1; crtc_ = 0; conn_ = 0;
-  cur_ = on_screen_ = pending_ = -1;
+  cur_ = on_screen_ = pending_ = queued_ = -1;
   w_ = h_ = 0;
   dead_ = false;
 }
@@ -185,6 +187,19 @@ void DrmOut::retire() {
   if (on_screen_ >= 0) bufs_[on_screen_].busy = false;
   on_screen_ = pending_;
   pending_ = -1;
+  // The CRTC is free for one flip again: the frame that waited goes now.
+  if (queued_ >= 0) { const int q = queued_; queued_ = -1; if (!flip(q)) dead_ = true; }
+}
+
+bool DrmOut::flip(int i) {
+  drmu::mode_crtc_page_flip pf = {};
+  pf.crtc_id = crtc_;
+  pf.fb_id = bufs_[i].fb;
+  pf.flags = drmu::PAGE_FLIP_EVENT;
+  pf.user_data = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this));
+  if (ioctl(fd_, drmu::IOCTL_MODE_PAGE_FLIP, &pf) < 0) { std::perror("drm: PAGE_FLIP"); bufs_[i].busy = false; return false; }
+  pending_ = i;
+  return true;
 }
 
 // One read drains whatever is queued; each flip-complete carries the
@@ -219,37 +234,24 @@ bool DrmOut::pump(int fd, bool block) {
 
 u32* DrmOut::begin_frame() {
   if (dead_ || fd_ < 0) return nullptr;
-  // Only one flip may be outstanding per CRTC, so end_frame() can only queue
-  // once this one has retired. Waiting for it here is the vsync.
   pump(fd_, false);
-  while (pending_ >= 0)
-    if (!pump(fd_, true)) { dead_ = true; return nullptr; }
-  for (int i = 0; i < BUFS; ++i)
-    if (!bufs_[i].busy) { cur_ = i; return bufs_[i].px; }
-  // BUFS >= 2 and at most one buffer is on screen with none pending, so this
-  // is unreachable; treat it as a driver bug rather than looping forever.
-  std::fprintf(stderr, "drm: no free buffer\n");
-  dead_ = true;
-  return nullptr;
+  for (;;) {
+    for (int i = 0; i < BUFS; ++i)
+      if (!bufs_[i].busy) { cur_ = i; return bufs_[i].px; }
+    // On screen, pending and queued: the emulation is a frame ahead of the
+    // panel, and this wait is the vsync.
+    if (pending_ < 0) { std::fprintf(stderr, "drm: no free buffer\n"); dead_ = true; return nullptr; }
+    if (!pump(fd_, true) || dead_) { dead_ = true; return nullptr; }
+  }
 }
 
 void DrmOut::end_frame() {
   if (dead_ || cur_ < 0) return;
-  Buf& b = bufs_[cur_];
-  drmu::mode_crtc_page_flip pf = {};
-  pf.crtc_id = crtc_;
-  pf.fb_id = b.fb;
-  pf.flags = drmu::PAGE_FLIP_EVENT;
-  pf.user_data = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this));
-  if (ioctl(fd_, drmu::IOCTL_MODE_PAGE_FLIP, &pf) < 0) {
-    std::perror("drm: PAGE_FLIP");
-    dead_ = true;
-    cur_ = -1;
-    return;
-  }
-  b.busy = true;
-  pending_ = cur_;
+  const int i = cur_;
   cur_ = -1;
+  bufs_[i].busy = true;
+  if (pending_ >= 0) { queued_ = i; return; }   // one flip per CRTC at a time; retire() issues this one
+  if (!flip(i)) dead_ = true;
 }
 
 } // namespace ds::sdl
