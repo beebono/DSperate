@@ -1704,6 +1704,10 @@ sdl_ready:
     fb_current = present && !scaled;   // a skipped frame renders nothing
 
     const Uint64 t0 = SDL_GetPerformanceCounter();
+    // Everything since the last slice ended (present, buffer wait, pacing) is
+    // the frontend's, not the frame's: the 3D shape controller subtracts it.
+    static Uint64 last_slice_end = 0;
+    if (last_slice_end) nds.gpu3d.note_external_ns(static_cast<u64>((t0 - last_slice_end) / ticks_per_ns));
     nds.run_frame();
 
     // The console has switched itself off. On a firmware boot that is the
@@ -1732,6 +1736,7 @@ sdl_ready:
     }
 
     const Uint64 t1 = SDL_GetPerformanceCounter();
+    last_slice_end = t1;
     if (present) {
       const bool cursor = input.stylus_visible() && !log.reading();
       // The crosshair is drawn in DS pixels, so on a bottom screen shown

@@ -192,6 +192,12 @@ public:
   // Instrumentation: the worker's execution time (ns) accumulated since the
   // last take_worker_busy_ns, and the raster's serial cost of the last frame.
   u64 take_worker_busy_ns() { return worker_busy_ns_.exchange(0, std::memory_order_relaxed); }
+  // A frontend that paces, presents or waits for a scanout buffer between
+  // emulation slices reports that time here: the shape controller measures
+  // frames VBlank to VBlank on the wall clock, and a pacer's sleep is longest
+  // exactly when the frame was fastest -- it inverted the choice in the SDL
+  // frontend until this was subtracted.
+  void note_external_ns(u64 ns) { external_ns_ += ns; }
   u64 last_raster_ns() const { return renderer_.last_band_sum_ns(); }
   const u32* line(const Renderer3D::FrameRef& f, u32 y);   // 3D output for display line y, X-scrolled (RGB666 + 5-bit alpha at 24-28)
   // Force the asynchronous raster to finish. Called wherever something is
@@ -360,16 +366,23 @@ private:
   // plan; what runs is empirical, see shape_step.
   int shape_mode_ = 1;
   bool worker_started_ = false;
-  struct Phase {
-    u64 wall_ns[2] = {0, 0};         // frame wall time last seen in shape A / B (lightly averaged)
-    u32 age[2] = {~0u, ~0u};         // frames since each was measured (~0 = never)
-    bool shape_b = true;             // the shape this phase runs in now
-  };
-  Phase phase_[2];
+  // The shapes of a frame pair are one decision. Measured per phase alone the
+  // choice went wrong in the SDL frontend: a three-band raster dispatched at
+  // line 215 spills into the next interval, so a worker frame after a
+  // three-band frame cost 1.7 ms more than after a worker frame, and the
+  // per-phase memory charged that to the wrong shape. Four arms -- the shape
+  // of the even interval and of the odd one -- and the pair's summed wall
+  // time is what is remembered and compared.
+  struct Arm { u64 wall_ns = 0; u32 age = ~0u; };   // age in pairs (~0 = never measured)
+  Arm arms_[4];                        // bit 0: even interval uses the worker; bit 1: odd interval does
+  u32 arm_now_ = 3;  // the arm the current pair runs under / the one decided for the next
+  u64 pair_even_ns_ = 0;               // the even interval's wall, waiting for the odd one
+  bool pair_clean_ = true;             // both intervals of the pair ran their planned shapes
   std::chrono::steady_clock::time_point frame_t0_{};
   bool frame_t0_valid_ = false;
   u32 frame_idx_ = 0;
   u64 gx_inline_ns_ = 0;               // inline execution time this interval (shape A)
+  u64 external_ns_ = 0;                // frontend time outside emulation this interval (note_external_ns)
   void shape_step();
   void worker_loop();
   void worker_stop();

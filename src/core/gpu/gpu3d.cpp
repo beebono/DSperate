@@ -1650,54 +1650,68 @@ void Gpu3D::worker_activate(bool on) {
 // was tried first and was off by 3 ms either way -- it overestimated the
 // two-band raster path on Spirit Tracks (band sums carry per-band setup) and
 // underestimated it on Golden Sun (the compositor tail follows the raster).
-// Both shapes get run anyway, so the controller remembers the wall time each
-// phase measured in each shape and picks the shorter; the other shape is
-// probed again after a while, soon when the two are close and rarely when
-// one is clearly better, so a probe frame costs little where it matters.
+// Frames are measured in pairs (see Arm): each arm is the pair of shapes for
+// the even and the odd interval, the pair's summed wall time is remembered,
+// the shortest arm is run and the others are probed again now and then.
 void Gpu3D::shape_step() {
   static const bool log = std::getenv("DS_GX_SHAPE_LOG") != nullptr;
   const auto now = std::chrono::steady_clock::now();
   const u64 waits = nds_.gpu.take_join_wait_ns() + renderer_.take_owner_wait_ns() + join_wait_ns_.exchange(0, std::memory_order_relaxed);
   const u64 gx_worker = take_worker_busy_ns();
   const u64 gx_inline = gx_inline_ns_; gx_inline_ns_ = 0;
-  const u64 wall = frame_t0_valid_ ? static_cast<u64>((now - frame_t0_).count()) : 0;
+  u64 wall = frame_t0_valid_ ? static_cast<u64>((now - frame_t0_).count()) : 0;
+  const u64 external = external_ns_; external_ns_ = 0;
+  wall = wall > external ? wall - external : 0;
   frame_t0_ = now; frame_t0_valid_ = true;
   const u32 k = frame_idx_++;
-  Phase& ended = phase_[k & 1];
-  for (Phase& p : phase_) for (u32& a : p.age) if (a != ~0u) ++a;
-  const u32 ran = worker_on_ ? 1 : 0;
-  // The first frames after a start or a load are translation bursts, not the
-  // scene: a 36 ms first measurement of one shape locked the other in for the
-  // whole run. Skipped, and a stale memory is replaced rather than blended
-  // (a probe's job is to re-measure); a fresh one blends 1:3 so a single odd
-  // frame does not flip the choice.
-  constexpr u32 kSettleFrames = 16, kStale = 32;
-  if (k >= kSettleFrames && wall && wall < 200000000) {
-    ended.wall_ns[ran] = (ended.age[ran] == ~0u || ended.age[ran] > kStale) ? wall : (ended.wall_ns[ran] * 3 + wall) / 4;
-    ended.age[ran] = 0;
-  }
+  const bool ran_b = worker_on_;
   if (shape_mode_ != 1) return;    // 2: always the worker
-  // Decide for the next interval: its phase is the one two back.
-  Phase& next = phase_[(k + 1) & 1];
-  constexpr u64 kMargin = 300000;            // 0.3 ms: do not flap on noise
-  bool b = next.shape_b;
-  const char* why = "";
-  if (next.age[0] == ~0u || next.age[1] == ~0u) { b = next.age[1] == ~0u; why = " (first)"; }   // measure B first, then A
-  else {
-    const u64 wa = next.wall_ns[0], wb = next.wall_ns[1];
-    if (b && wa + kMargin < wb) b = false;
-    else if (!b && wb + kMargin < wa) b = true;
-    // Re-probe the other shape about once a second: one frame in 64 in the
-    // shape not chosen, so a measurement that has gone stale (or was wrong)
-    // cannot hold for more than that.
-    constexpr u32 kProbeAfter = 64;
-    if (next.age[b ? 0 : 1] > kProbeAfter) { b = !b; why = " (probe)"; }
+  // The first frames after a start or a load are translation bursts, not the
+  // scene (a 36 ms first measurement once locked a shape in for a whole run).
+  constexpr u32 kSettleFrames = 16;
+  const bool plausible = k >= kSettleFrames && wall && wall < 200000000;
+  if (ran_b != (((arm_now_ >> (k & 1)) & 1) != 0)) pair_clean_ = false;   // a mid-pair change (state load, reset)
+  if ((k & 1) == 0) {
+    // Even interval ended: half the pair. Plan nothing; the odd interval's
+    // shape is the arm's.
+    pair_even_ns_ = plausible ? wall : 0;
+    if (!plausible) pair_clean_ = false;
+    worker_activate((arm_now_ >> 1) & 1);
+    if (log) std::fprintf(stderr, "[shape] f%u ran %c wall %.2f waits %.2f gxw %.2f gxi %.2f list %u | arm %u, odd half -> %c\n",
+                          k, ran_b ? 'B' : 'A', wall / 1e6, waits / 1e6, gx_worker / 1e6, gx_inline / 1e6, render_count_[render_bank_], arm_now_, ((arm_now_ >> 1) & 1) ? 'B' : 'A');
+    return;
   }
-  if (log) std::fprintf(stderr, "[shape] ended f%u ran %c wall %.2f waits %.2f gxw %.2f gxi %.2f list %u polys | next f%u: A %.2f (age %u) B %.2f (age %u) -> %c%s\n",
-                        k, ran ? 'B' : 'A', wall / 1e6, waits / 1e6, gx_worker / 1e6, gx_inline / 1e6, render_count_[render_bank_],
-                        k + 1, next.wall_ns[0] / 1e6, next.age[0], next.wall_ns[1] / 1e6, next.age[1], b ? 'B' : 'A', why);
-  next.shape_b = b;
-  worker_activate(b);
+  // Odd interval ended: the pair is complete. Record it, choose the next arm.
+  for (Arm& a : arms_) if (a.age != ~0u) ++a.age;
+  constexpr u32 kStale = 16;   // pairs
+  if (plausible && pair_clean_ && pair_even_ns_) {
+    Arm& a = arms_[arm_now_];
+    const u64 pair = pair_even_ns_ + wall;
+    a.wall_ns = (a.age == ~0u || a.age > kStale) ? pair : (a.wall_ns * 3 + pair) / 4;   // a probe re-measures; a fresh memory blends 1:3
+    a.age = 0;
+  }
+  pair_clean_ = true;
+  constexpr u64 kMargin = 500000;   // 0.5 ms per pair: do not flap on noise
+  constexpr u32 kProbeAfter = 96;   // pairs (~3 s) before an arm is re-measured
+  u32 best = arm_now_;
+  const char* why = "";
+  // Anything never measured comes first, BB (3) before the rest: the worker's
+  // own cost is the least predictable.
+  u32 unmeasured = ~0u;
+  for (u32 i = 4; i-- > 0;) if (arms_[i].age == ~0u) { unmeasured = i; break; }
+  if (unmeasured != ~0u) { best = unmeasured; why = " (first)"; }
+  else {
+    for (u32 i = 0; i < 4; ++i) if (arms_[i].wall_ns + kMargin < arms_[best].wall_ns) best = i;
+    // The stalest arm is probed once its memory is old enough.
+    u32 stalest = best; for (u32 i = 0; i < 4; ++i) if (arms_[i].age > arms_[stalest].age) stalest = i;
+    if (stalest != best && arms_[stalest].age > kProbeAfter) { best = stalest; why = " (probe)"; }
+  }
+  if (log) std::fprintf(stderr, "[shape] f%u ran %c wall %.2f waits %.2f gxw %.2f gxi %.2f list %u | pair %.2f under arm %u | AA %.2f AB %.2f BA %.2f BB %.2f -> arm %u (%c%c)%s\n",
+                        k, ran_b ? 'B' : 'A', wall / 1e6, waits / 1e6, gx_worker / 1e6, gx_inline / 1e6, render_count_[render_bank_],
+                        (pair_even_ns_ + wall) / 1e6, arm_now_, arms_[0].wall_ns / 1e6, arms_[2].wall_ns / 1e6, arms_[1].wall_ns / 1e6, arms_[3].wall_ns / 1e6,
+                        best, (best & 1) ? 'B' : 'A', (best & 2) ? 'B' : 'A', why);
+  arm_now_ = best;
+  worker_activate(best & 1);
 }
 
 // The queue is empty: the shadow and the pricer are functions of the executed state.
