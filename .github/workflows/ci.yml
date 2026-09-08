@@ -47,8 +47,11 @@ jobs:
       - name: Build and test
         run: |
           cmake --preset host -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" -DDSPERATE_PGO=use -DDSPERATE_PGO_STRICT=ON
-          cmake --build --preset host 2>&1 | tee build.log
-          echo "PGO: $(grep -c 'coverage mismatch' build.log || true) functions changed since the profile ($(sed -n 's/^commit //p' pgo/aarch64/MANIFEST | cut -c1-9), $(sed -n 's/^date //p' pgo/aarch64/MANIFEST)); $(grep -c 'data file not found' build.log || true) objects without one"
+          # "source locations ... have changed" is benign (the checkout path is
+          # in the checksum; the counts still apply) and one per function, so it
+          # is filtered; "control flow ... does not match" is a dropped profile.
+          cmake --build --preset host 2>&1 | grep -v "source locations for function" | tee build.log
+          echo "PGO: $(grep -c 'control flow of function' build.log || true) functions changed since the profile ($(sed -n 's/^commit //p' pgo/aarch64/MANIFEST | cut -c1-9), $(sed -n 's/^date //p' pgo/aarch64/MANIFEST)); $(grep -c 'data file not found' build.log || true) objects without one"
           ctest --preset host --output-on-failure
       - name: Package
         run: |

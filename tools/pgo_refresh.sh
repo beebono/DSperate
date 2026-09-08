@@ -87,7 +87,7 @@ ninja -C "$VBUILD" > "$VBUILD/pgo-warnings.log" 2>&1 || { tail -20 "$VBUILD/pgo-
 # objects never run in the training, so their missing profiles are expected.
 core_missing=$(grep -c "data file not found" <(grep -v "src/frontend/sdl/" "$VBUILD/pgo-warnings.log") || true)
 sdl_missing=$(grep "src/frontend/sdl/" "$VBUILD/pgo-warnings.log" | grep -c "data file not found" || true)
-mismatch=$(grep -c "coverage mismatch\|profile data may be corrupted\|number of counters" "$VBUILD/pgo-warnings.log" || true)
+mismatch=$(grep -c "control flow of function" "$VBUILD/pgo-warnings.log" || true)   # "source locations ... changed" is benign: the counts still apply
 echo "  objects without a profile: core/headless $core_missing (miniz and kernels_ref never run: 3 expected), sdl frontend $sdl_missing (untrained, expected)"
 [ "$core_missing" -le 3 ] || grep -v "src/frontend/sdl/" "$VBUILD/pgo-warnings.log" | grep "data file not found" | sed -E 's/.*dir#(.*)\.gcda.*/    \1/'
 echo "  functions whose profile no longer matches: $mismatch (should be 0 straight after a refresh)"

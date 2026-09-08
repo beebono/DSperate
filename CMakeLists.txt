@@ -115,6 +115,14 @@ string(SHA1 _ds_pgo_fingerprint
   "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR} ${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_ds_build_type_uc}} harden=${DSPERATE_HARDEN} tune=${DSPERATE_TUNE} jit=${DSPERATE_JIT} neon=${DSPERATE_NEON} a32sub=${DSPERATE_A32_SUBSET}")
 set(DSPERATE_PGO_FINGERPRINT "${_ds_pgo_fingerprint}" CACHE INTERNAL "")
 file(WRITE "${CMAKE_BINARY_DIR}/pgo-fingerprint" "${_ds_pgo_fingerprint}\n")
+# A profile made under one checkout still applies under another (the CI
+# runner's /home/runner/work/...): GCC folds the source path into a
+# function's *location* checksum, and a location mismatch is a warning only
+# ("source locations ... have changed") -- the counts are still used. What
+# drops a function's profile is a *control flow* mismatch, the one the
+# refresh script and CI count. (-fprofile-prefix-map does not reach the
+# location checksum in GCC 13; measured: an other-path build performs the
+# same as the in-tree one.)
 if(DSPERATE_PGO STREQUAL "generate")
   add_compile_options(-fprofile-generate=${DSPERATE_PGO_DIR} -fprofile-prefix-path=${CMAKE_BINARY_DIR} -fprofile-update=atomic)
   add_link_options(-fprofile-generate=${DSPERATE_PGO_DIR})
@@ -128,7 +136,9 @@ elseif(DSPERATE_PGO STREQUAL "use")
     message(FATAL_ERROR "PGO profile in ${DSPERATE_PGO_DIR} was made for a different compiler or flags (fingerprint ${_ds_pgo_manifest}, this build ${_ds_pgo_fingerprint}); run tools/pgo_refresh.sh, or build with -DDSPERATE_PGO=OFF")
   endif()
   add_compile_options(-fprofile-use=${DSPERATE_PGO_DIR} -fprofile-prefix-path=${CMAKE_BINARY_DIR} -fprofile-correction)
-  if(NOT DSPERATE_PGO_STRICT)
+  if(DSPERATE_PGO_STRICT)
+    add_compile_options(-Wno-error=coverage-mismatch)   # an error by default in GCC; here a warning to count
+  else()
     add_compile_options(-Wno-missing-profile -Wno-coverage-mismatch)   # an edited function loses its profile instead of failing the build
   endif()
 endif()
