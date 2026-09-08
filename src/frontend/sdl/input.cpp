@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <string>
 
 namespace ds::sdl {
@@ -338,12 +339,101 @@ void Input::update_stylus() {
   if (stylus_down_) { touch_x_ = stylus_x(); touch_y_ = stylus_y(); }
 }
 
+const char* Input::button_name(int i) { return kButtonNames[i]; }
+int Input::button_count() { return static_cast<int>(B::BTN_COUNT); }
+const char* Input::key_default(int i) { return kKeyDefaults[i]; }
+const char* Input::pad_default(int i) { return kPadDefaults[i]; }
+int Input::action_count() { return static_cast<int>(Action::Count); }
+const char* Input::key_hot_default(int i) { return kKeyHotDefaults[i]; }
+const char* Input::pad_hot_default(int i) { return kPadHotDefaults[i]; }
+
+void Input::begin_capture(bool pad) {
+  capturing_ = true;
+  capture_pad_ = pad;
+  captured_.clear();
+  capture_swallow_ = false;
+}
+
+std::string Input::take_capture() {
+  if (captured_.empty()) return "";
+  std::string out;
+  out.swap(captured_);
+  capturing_ = false;
+  return out;
+}
+
+// True when the event was swallowed. Only the device being listened to is
+// taken, so pressing a key while the pad column is open does nothing rather
+// than writing a key name into [pad].
+bool Input::capture_event(const SDL_Event& e) {
+  // The release of whatever was just captured, and the release of the button
+  // that opened the capture, are swallowed rather than acted on.
+  if (e.type == SDL_KEYUP || e.type == SDL_CONTROLLERBUTTONUP) return true;
+  if (!captured_.empty()) return true;   // waiting to be collected
+  if (!capture_pad_) {
+    if (e.type != SDL_KEYDOWN || e.key.repeat) return e.type == SDL_KEYDOWN;
+    // Escape cancels rather than binding itself: a page that can only be left
+    // by binding something is a trap, and Escape is the quit hotkey's default.
+    if (e.key.keysym.sym == SDLK_ESCAPE) { capturing_ = false; return true; }
+    const char* n = SDL_GetKeyName(e.key.keysym.sym);
+    captured_ = n && *n ? n : "none";
+    return true;
+  }
+  if (e.type == SDL_CONTROLLERBUTTONDOWN) {
+    const char* n = SDL_GameControllerGetStringForButton(static_cast<SDL_GameControllerButton>(e.cbutton.button));
+    if (n) captured_ = n;
+    return true;
+  }
+  if (e.type == SDL_CONTROLLERAXISMOTION) {
+    // A trigger rests at its minimum on some pads and centred on others, so
+    // the threshold is the raised one the rest of the code uses for them.
+    const int axis = e.caxis.axis;
+    const bool trigger = axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
+    const int threshold = trigger ? std::max(deadzone_, 24576) : std::max(deadzone_, 16384);
+    if (std::abs(static_cast<int>(e.caxis.value)) < threshold) return true;
+    if (const char* n = SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(axis)))
+      captured_ = (e.caxis.value < 0 ? "-" : "+") + std::string(n);
+    return true;
+  }
+  // Everything else (mouse, touch, window) still goes through: closing the
+  // window while a capture is open must still close it.
+  return false;
+}
+
+// Every binding that shadows another, as one line each. warn_collisions()
+// prints the same at startup; this is for the player who is making one.
+std::vector<std::string> Input::collisions() const {
+  std::vector<std::string> out;
+  const auto same = [](const Bind& a, const Bind& b) {
+    return a.kind != Bind::None && a.kind == b.kind && a.code == b.code &&
+           a.neg == b.neg && a.mod == b.mod && a.with == b.with;
+  };
+  // Two DS buttons on one control: the second never fires.
+  for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
+    for (int j = i + 1; j < static_cast<int>(B::BTN_COUNT); ++j) {
+      if (same(key_map_[i], key_map_[j])) out.push_back(std::string(kButtonNames[i]) + " AND " + kButtonNames[j] + " SHARE A KEY");
+      if (same(pad_map_[i], pad_map_[j])) out.push_back(std::string(kButtonNames[i]) + " AND " + kButtonNames[j] + " SHARE A BUTTON");
+    }
+  // A hotkey on the same control as a DS button: the hotkey is tried first,
+  // so the button is dead.
+  for (int a = 0; a < static_cast<int>(Action::Count); ++a)
+    for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i) {
+      if (same(key_hot_[a], key_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES KEY " + kButtonNames[i]);
+      if (same(pad_hot_[a], pad_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES PAD " + kButtonNames[i]);
+    }
+  return out;
+}
+
 void Input::handle(const SDL_Event& e, Display& display, Display* second) {
   // Route window-addressed events to the window they happened on; keyboard
   // and controller input is global.
   auto owner = [&](u32 wid) -> Display& {
     return (second && wid == second->window_id()) ? *second : display;
   };
+  // Rebinding: the next thing pressed is a name to write down, not a control
+  // to act on. It has to be taken before anything else looks at it, or
+  // rebinding the quit hotkey would quit and rebinding A would press A.
+  if (capturing_ && capture_event(e)) return;
   switch (e.type) {
   case SDL_QUIT: quit_ = true; break;
 

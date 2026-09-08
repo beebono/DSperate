@@ -141,7 +141,7 @@ private:
   // and a page three deep needs no special case. Games is the exception it
   // always was: it is raised as the launcher's own modal page with nothing
   // behind it, so it is pushed onto an empty stack and B does not leave it.
-  enum class Page : u8 { Root, Slot, Cheats, Games, Options, Emulation, VisualFx, Layout };
+  enum class Page : u8 { Root, Slot, Cheats, Games, Options, Emulation, VisualFx, Layout, Controls };
   static constexpr int kMaxDepth = 6;
   Page stack_[kMaxDepth] = {Page::Root};
   int  depth_ = 1;
@@ -223,16 +223,25 @@ private:
   void draw_games(const Canvas& d) const;
   void draw_options(const Canvas& d) const;
   void draw_settings(const Canvas& d) const;
+  void draw_controls(const Canvas& d) const;
   Result handle_options(u32 presses);
   Result handle_settings(u32 presses);
+  Result handle_controls(u32 presses);
+  // The Controls page: which column (keyboard or pad), where in it, and how
+  // far it is scrolled. `bind_row_` is an index into the host's binding list.
+  bool bind_pad_ = false;
+  int  bind_row_ = 0;
+  mutable int bind_top_ = 0;
+  void move_bind_row(int delta);
   void build_lines();
   void move_cheat_row(int delta);
   void move_game_row(int delta);
   // The two scrolling pages share the repeat and marquee timing, which both
   // key off "has the selection moved"; this is the selection they mean.
   int  list_row() const;
-  bool list_page() const { return page() == Page::Cheats || page() == Page::Games || settings_page(); }
+  bool list_page() const { return page() == Page::Cheats || page() == Page::Games || settings_page() || controls_page(); }
   bool settings_page() const { return page() == Page::Emulation || page() == Page::VisualFx || page() == Page::Layout; }
+  bool controls_page() const { return page() == Page::Controls; }
   void toggle_cheat();
 };
 

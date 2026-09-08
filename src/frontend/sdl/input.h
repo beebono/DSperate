@@ -5,6 +5,7 @@
 #include "core/input/input_log.h"
 
 #include <SDL2/SDL.h>
+#include <string>
 #include <vector>
 
 namespace ds { struct NDS; }
@@ -81,6 +82,35 @@ public:
   bool quit() const { return quit_; }
   void request_quit() { quit_ = true; }
 
+  // Rebinding, for the Controls page.
+  bool has_pad() const { return pad_ != nullptr; }
+  // While capturing, the next physical key or pad control is taken as a name
+  // instead of being fed to the game or matched against a hotkey -- otherwise
+  // rebinding Quit would quit. `pad` picks which device is listened to, so
+  // pressing a key does not land in the pad column.
+  void begin_capture(bool pad);
+  void cancel_capture() { capturing_ = false; }
+  bool capturing() const { return capturing_; }
+  // The name of what was pressed, once. Empty until then; taking it ends the
+  // capture, so a caller polls this and stops when it gets something.
+  std::string take_capture();
+  // Every binding that would shadow another, as one line per clash, for the
+  // page to show. Empty when there are none. The same rules warn_collisions()
+  // prints at startup -- the player who is doing the rebinding is the one who
+  // needs to be told.
+  std::vector<std::string> collisions() const;
+  // What the config calls each DS button and each hotkey action, and what it
+  // falls back to when unset. The Controls page shows the config string
+  // itself -- it is already the name of the control, and showing it means the
+  // page and the file can never disagree about what a button is bound to.
+  static const char* button_name(int i);
+  static int button_count();
+  static const char* key_default(int i);
+  static const char* pad_default(int i);
+  static int action_count();
+  static const char* key_hot_default(int i);
+  static const char* pad_hot_default(int i);
+
 private:
   // One binding: a keyboard key, a pad button or a pad axis direction, with
   // or without the modifier.
@@ -99,6 +129,7 @@ private:
   bool key_down(SDL_Keycode k, bool down);
   bool pad_down(const Bind& b, bool down);   // a button or axis edge; true if consumed
   void axis(Uint8 which, Sint16 value);
+  bool capture_event(const SDL_Event& e);
 
   u32  buttons_ = 0, pressed_ = 0, stick_ = 0;   // held now; pressed since the last frame; stick as d-pad
   u32  stick_prev_ = 0, stick_pressed_ = 0;      // stick-as-d-pad edges, for the pause menu
@@ -132,6 +163,11 @@ private:
   int  stylus_size_ = 2;
   int  stylus_hide_ = 90, stylus_idle_ = 1 << 30;   // frames without movement or a touch; starts hidden
   std::vector<Action> actions_;
+  bool capturing_ = false, capture_pad_ = false;
+  std::string captured_;
+  // Swallows the release of whatever was captured, so letting go of the key
+  // does not immediately register as the next thing the page asked for.
+  bool capture_swallow_ = false;
 };
 
 } // namespace ds::sdl

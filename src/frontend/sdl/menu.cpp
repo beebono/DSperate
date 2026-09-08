@@ -144,6 +144,8 @@ void scroll_bar(const Canvas& d, const Metrics& m, int px0, int py0, int panel_w
 constexpr int kSlotRow = 2;
 constexpr int kCheatRow = 3;   // hidden when no database matched this ROM
 constexpr int kOptionsRow = 4; // hidden when the frontend gave no settings host
+// The Options page's own entries, and which of them has no page yet.
+constexpr int kOptionPages = 5, kDsOptionsRow = 4;
 constexpr struct RootItem { const char* label; Menu::Result result; } kRoot[] = {
   {"SAVE STATE", Menu::Result::Save},
   {"LOAD STATE", Menu::Result::Load},
@@ -327,6 +329,7 @@ void Menu::move_game_row(int delta) {
 int Menu::list_row() const {
   if (page() == Page::Games) return game_row_;
   if (settings_page()) return set_row_[table_slot()];
+  if (controls_page()) return bind_row_;
   return cheat_row_;
 }
 
@@ -360,6 +363,7 @@ Menu::Result Menu::update(u32 presses, u32 held, u32 ms) {
         repeating_ = true;
         if (page() == Page::Games) move_game_row(dir);
         else if (settings_page()) move_setting_row(dir);
+        else if (controls_page()) move_bind_row(dir);
         else move_cheat_row(dir);
         dirty_ = true;
       }
@@ -408,6 +412,7 @@ Menu::Result Menu::handle(u32 presses) {
   }
   if (page() == Page::Options) return handle_options(presses);
   if (settings_page()) return handle_settings(presses);
+  if (controls_page()) return handle_controls(presses);
   if (page() == Page::Cheats) {
     // Up/down step, the shoulders page: a list of thousands is not one to
     // walk a row at a time.
@@ -663,19 +668,27 @@ void Menu::step_setting(int dir) {
 Menu::Result Menu::handle_options(u32 presses) {
   using B = io::Io::Button;
   const auto hit = [&](B b) { return (presses >> b) & 1; };
-  const int rows = 4 + (host_->has_game() ? 1 : 0);
+  const int rows = kOptionPages + (host_->has_game() ? 1 : 0);
   if (hit(B::BTN_UP))   opt_row_ = (opt_row_ + rows - 1) % rows;
   if (hit(B::BTN_DOWN)) opt_row_ = (opt_row_ + 1) % rows;
-  const bool save_row = host_->has_game() && opt_row_ == 4;
+  const bool save_row = host_->has_game() && opt_row_ == kOptionPages;
   // Left/right work the save-to switch in place, the way they work the slot
   // on the root page: it is a two-way choice, not a page to enter.
   if (save_row && (hit(B::BTN_LEFT) || hit(B::BTN_RIGHT) || hit(B::BTN_A) || hit(B::BTN_START)))
     host_->set_save_per_game(!host_->save_per_game());
   if (hit(B::BTN_B)) { pop(); return Result::None; }
   if (save_row || (!hit(B::BTN_A) && !hit(B::BTN_START))) return Result::None;
-  static constexpr Page kPages[4] = {Page::Emulation, Page::VisualFx, Page::Layout, Page::Emulation};
-  if (opt_row_ == 3) return Result::None;   // DS OPTIONS: not built yet
+  if (opt_row_ == kDsOptionsRow) return Result::None;   // DS OPTIONS: not built yet
+  static constexpr Page kPages[kOptionPages] = {Page::Emulation, Page::VisualFx, Page::Layout, Page::Controls, Page::Options};
   push(kPages[opt_row_]);
+  if (page() == Page::Controls) {
+    // A handheld's only input is its pad, so open on that column when one is
+    // plugged in; a desktop with no pad opens on the keyboard.
+    bind_pad_ = host_->has_pad();
+    bind_row_ = 0;
+    bind_top_ = 0;
+    return Result::None;
+  }
   // Land on something selectable: the first row of a page can be switched off
   // (the layout page's pip rows in a stacked layout, say).
   const int slot = table_slot();
@@ -699,9 +712,9 @@ Menu::Result Menu::handle_settings(u32 presses) {
 }
 
 void Menu::draw_options(const Canvas& d) const {
-  static constexpr const char* kItems[4] = {"EMULATION", "VISUAL FX", "LAYOUT", "DS OPTIONS"};
+  static constexpr const char* kItems[kOptionPages] = {"EMULATION", "VISUAL FX", "LAYOUT", "CONTROLS", "DS OPTIONS"};
   Metrics m = metrics(d);
-  const int rows = 4 + (host_ && host_->has_game() ? 1 : 0);
+  const int rows = kOptionPages + (host_ && host_->has_game() ? 1 : 0);
   const bool per_game = host_ && host_->save_per_game();
   char save_row[40];
   std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL");
@@ -710,14 +723,14 @@ void Menu::draw_options(const Canvas& d) const {
   // save-to switch changes width as it is toggled, and a panel sized for the
   // shorter one clips the other.
   int widest = 0;
-  for (int i = 0; i < 4; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
-  if (rows > 4) widest = std::max(widest, text_width(m.s, save_row));
+  for (int i = 0; i < kOptionPages; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
+  if (rows > kOptionPages) widest = std::max(widest, text_width(m.s, save_row));
   // Step the scale down rather than clip, as the root page does.
   while (m.s > 2 && (widest + 8 * m.s > d.w || panel_height(m, rows) > d.h)) {
     m = metrics(Canvas{d.px, d.pitch, d.w * (m.s - 1) / m.s, d.h * (m.s - 1) / m.s});
     widest = 0;
-    for (int i = 0; i < 4; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
-    if (rows > 4) { std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL"); widest = std::max(widest, text_width(m.s, save_row)); }
+    for (int i = 0; i < kOptionPages; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
+    if (rows > kOptionPages) { std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL"); widest = std::max(widest, text_width(m.s, save_row)); }
   }
   const int panel_w = std::min(d.w - 2 * m.pad, widest + 8 * m.s);
   const int panel_h = panel_height(m, rows);
@@ -728,10 +741,10 @@ void Menu::draw_options(const Canvas& d) const {
   for (int i = 0; i < rows; ++i) {
     const int ry = py0 + m.rows_y + i * m.row_h;
     if (i == opt_row_) fill_rect(d, px0 + m.pad, ry - m.s, panel_w - 2 * m.pad, m.row_h, kSel);
-    if (i < 4) {
+    if (i < kOptionPages) {
       // DS OPTIONS has no page behind it yet; it reads dim so that pressing A
       // on it and getting nothing is not a surprise.
-      const bool ready = i != 3;
+      const bool ready = i != kDsOptionsRow;
       draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, ready || i == opt_row_ ? kInk : kDim, kItems[i]);
       continue;
     }
@@ -821,11 +834,108 @@ void Menu::draw_settings(const Canvas& d) const {
   if (when) draw_text(d, f.text_x, note_y + 2 * m.list_s + (note_rows - 1) * m.list_row_h, m.list_s, kEdgeText, when);
 }
 
+// The Controls page. Two columns of bindings -- keyboard and pad -- with the
+// shoulders switching between them, because they are the same list twice and
+// a player only ever cares about the one their device has.
+void Menu::move_bind_row(int delta) {
+  const int n = host_->binding_count(bind_pad_);
+  if (n <= 0) return;
+  const int at = bind_row_ + delta;
+  bind_row_ = at < 0 ? 0 : at >= n ? n - 1 : at;
+}
+
+Menu::Result Menu::handle_controls(u32 presses) {
+  using B = io::Io::Button;
+  const auto hit = [&](B b) { return (presses >> b) & 1; };
+  // While listening, the frontend is swallowing the real device, so none of
+  // it reaches the switch below. The press is collected here instead, on the
+  // idle tick after it happened, and bound to the row that asked for it.
+  if (host_->capturing()) {
+    const std::string got = host_->take_capture();
+    if (!got.empty()) {
+      const SettingsHost::Binding b = host_->binding(bind_pad_, bind_row_);
+      if (!b.key.empty()) host_->bind(b.key, got);
+      dirty_ = true;
+    }
+    return Result::None;
+  }
+  if (hit(B::BTN_UP))   move_bind_row(-1);
+  if (hit(B::BTN_DOWN)) move_bind_row(+1);
+  // The shoulders swap columns rather than paging: there are two columns and
+  // paging a list this short is worth less than reaching the other one.
+  if (hit(B::BTN_L) || hit(B::BTN_R)) {
+    bind_pad_ = !bind_pad_;
+    bind_row_ = 0;
+    bind_top_ = 0;
+  }
+  if (hit(B::BTN_A) || hit(B::BTN_START)) host_->begin_capture(bind_pad_);
+  // Y clears a binding, which is the only way to get back to "none" -- there
+  // is no key to press that means "no key".
+  if (hit(B::BTN_Y)) {
+    const SettingsHost::Binding b = host_->binding(bind_pad_, bind_row_);
+    if (!b.key.empty()) host_->bind(b.key, "none");
+  }
+  // X puts the whole column back to the built-in layout, for the player who
+  // has bound themselves into a corner.
+  if (hit(B::BTN_X)) host_->reset_bindings(bind_pad_);
+  if (hit(B::BTN_B)) pop();
+  return Result::None;
+}
+
+void Menu::draw_controls(const Canvas& d) const {
+  char title[32];
+  std::snprintf(title, sizeof title, "CONTROLS  %s", bind_pad_ ? "PAD" : "KEYBOARD");
+  const ListFrame f = list_frame(d, title);
+  const Metrics& m = f.m;
+  visible_ = f.visible;
+
+  const int n = host_->binding_count(bind_pad_);
+  // Two rows at the foot: what the buttons do, and any clash the bindings
+  // have made. A clash is the thing most worth saying, so it wins the line.
+  const int foot_rows = 2;
+  const int visible = std::max(1, f.visible - foot_rows);
+  int top = bind_top_;
+  if (bind_row_ < top) top = bind_row_;
+  if (bind_row_ >= top + visible) top = bind_row_ - visible + 1;
+  if (top > n - visible) top = n - visible;
+  if (top < 0) top = 0;
+  bind_top_ = top;
+
+  const bool listening = host_->capturing();
+  const int value_w = f.avail / 2;
+  for (int i = 0; i < visible && top + i < n; ++i) {
+    const SettingsHost::Binding b = host_->binding(bind_pad_, top + i);
+    const int ry = f.py0 + m.list_rows_y + i * m.list_row_h;
+    const bool is_sel = top + i == bind_row_;
+    if (is_sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
+    draw_text(d, f.text_x, ry, m.list_s, kInk, fit(b.label, m.list_s, f.avail - value_w).c_str());
+    // The row being rebound says so where its value was, so it is obvious
+    // which one the next press will land on.
+    const std::string v = is_sel && listening ? "PRESS ANY..." : (b.value.empty() || b.value == "none" ? "--" : b.value);
+    const u32 ink = is_sel && listening ? kEdgeText : (v == "--" ? kDim : kInk);
+    draw_text(d, f.text_x + f.avail - std::min(value_w, text_width(m.list_s, v.c_str())),
+              ry, m.list_s, ink, fit(v, m.list_s, value_w).c_str());
+  }
+  scroll_bar(d, m, f.px0, f.py0, f.w, visible, n, top);
+
+  const int foot_y = f.py0 + m.list_rows_y + visible * m.list_row_h + m.list_s;
+  fill_rect(d, f.px0 + m.pad, foot_y, f.w - 2 * m.pad, std::max(1, m.list_s), kPanelEdgeDim);
+  const char* help = listening ? "PRESS THE CONTROL TO BIND, OR ESCAPE TO CANCEL"
+                   : host_->has_pad() ? "A BIND   Y CLEAR   X DEFAULTS   L/R KEYBOARD OR PAD"
+                                      : "A BIND   Y CLEAR   X DEFAULTS   L/R SWAP COLUMN";
+  draw_text(d, f.text_x, foot_y + 2 * m.list_s, m.list_s, kDim, fit(help, m.list_s, f.avail).c_str());
+  const std::vector<std::string> clash = host_->collisions();
+  if (!clash.empty())
+    draw_text(d, f.text_x, foot_y + 2 * m.list_s + m.list_row_h, m.list_s, kEdgeText,
+              fit(clash[0], m.list_s, f.avail).c_str());
+}
+
 void Menu::draw(const Canvas& d) const {
   if (page() == Page::Games) { draw_games(d); return; }
   if (page() == Page::Cheats) { draw_cheats(d); return; }
   if (page() == Page::Options) { draw_options(d); return; }
   if (settings_page()) { draw_settings(d); return; }
+  if (controls_page()) { draw_controls(d); return; }
   const bool slots = page() == Page::Slot;
   Metrics m = metrics(d);
   const int rows = slots ? kSlotRows : root_rows();   // the slot page stacks its ten in two columns

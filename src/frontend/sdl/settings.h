@@ -4,6 +4,7 @@
 #include "core/types.h"
 
 #include <string>
+#include <vector>
 
 namespace ds::sdl {
 
@@ -95,6 +96,31 @@ struct SettingsHost {
   // False when there is no game in the slot, so there is no per-game file to
   // save to and the toggle is not offered.
   virtual bool has_game() const = 0;
+
+  // The Controls page. Bindings are not Settings: they have no range and no
+  // list of choices, and the value comes from the player pressing the thing
+  // they want rather than from stepping through possibilities.
+  //
+  // A row is a config key ("keys.a", "padhotkeys.pause") and the label the
+  // page shows for it. `pad` picks the column: the page defaults to it when a
+  // controller is plugged in, because on a handheld that is the only input.
+  struct Binding { std::string key, label, value; };
+  virtual int binding_count(bool pad) const = 0;
+  virtual Binding binding(bool pad, int i) const = 0;
+  virtual bool has_pad() const = 0;
+  // Start listening for the next thing pressed. The frontend swallows it
+  // rather than acting on it -- otherwise rebinding Quit would quit.
+  virtual void begin_capture(bool pad) = 0;
+  virtual void cancel_capture() = 0;
+  virtual bool capturing() const = 0;
+  // Non-empty once something was pressed: the caller binds it to `key` and
+  // the capture ends.
+  virtual std::string take_capture() = 0;
+  virtual void bind(const std::string& key, const std::string& value) = 0;
+  // Put a whole column back to the built-in layout.
+  virtual void reset_bindings(bool pad) = 0;
+  // Bindings that shadow one another, one line each; empty when there are none.
+  virtual std::vector<std::string> collisions() const = 0;
 };
 
 // The pages. Each is terminated by a row with a null key.

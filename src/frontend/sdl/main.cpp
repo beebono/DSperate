@@ -1524,8 +1524,8 @@ sdl_ready:
     std::function<void()> reopen;
     bool per_game = false;
 
-    Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi)
-        : cfg(c), nds(n), display(d), vs(v), global_ini(gi), game_ini(pi) {}
+    Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi, ds::sdl::Input& in)
+        : cfg(c), nds(n), display(d), vs(v), global_ini(gi), game_ini(pi), input(in) {}
 
     std::string get(const char* key) const override { return cfg.str(key, ""); }
 
@@ -1549,6 +1549,82 @@ sdl_ready:
     }
 
     bool has_game() const override { return !game_ini.empty(); }
+
+    // --- Controls ---------------------------------------------------------
+    // The rows are the twelve DS buttons and then the hotkey actions, in the
+    // order the config file lists them, so the page and the file read the
+    // same way down.
+    ds::sdl::Input& input;
+    std::function<void()> reconfigure_input;
+
+    int binding_count(bool) const override { return ds::sdl::Input::button_count() + ds::sdl::Input::action_count(); }
+
+    Binding binding(bool pad, int i) const override {
+      const int nb = ds::sdl::Input::button_count();
+      Binding out;
+      if (i < nb) {
+        const char* name = ds::sdl::Input::button_name(i);
+        out.key = (pad ? "pad." : "keys.") + std::string(name);
+        out.label = upper(name);
+        out.value = cfg.str(out.key, pad ? ds::sdl::Input::pad_default(i) : ds::sdl::Input::key_default(i));
+      } else {
+        const int a = i - nb;
+        const char* name = ds::sdl::action_name(static_cast<ds::sdl::Action>(a));
+        out.key = (pad ? "padhotkeys." : "hotkeys.") + std::string(name);
+        out.label = upper(name);
+        out.value = cfg.str(out.key, pad ? ds::sdl::Input::pad_hot_default(a) : ds::sdl::Input::key_hot_default(a));
+      }
+      // The file writes key names with underscores and lower case; the page
+      // reads better in the font it has, which has no lower case anyway.
+      out.value = upper(out.value);
+      return out;
+    }
+
+    bool has_pad() const override { return input.has_pad(); }
+    void begin_capture(bool pad) override { input.begin_capture(pad); }
+    void cancel_capture() override { input.cancel_capture(); }
+    bool capturing() const override { return input.capturing(); }
+    std::string take_capture() override { return input.take_capture(); }
+
+    void bind(const std::string& key, const std::string& value) override {
+      cfg.set(key, value);
+      const std::string& path = per_game && !game_ini.empty() ? game_ini : global_ini;
+      if (!ds::sdl::Config::store(path, key, value))
+        std::fprintf(stderr, "settings: cannot write %s\n", path.c_str());
+      // Re-read the lot rather than poking one binding: configure() is what
+      // resolves the modifier, the stylus chords and the collision warnings,
+      // and half-applying a change would leave those stale.
+      reconfigure_input();
+    }
+
+    void reset_bindings(bool pad) override {
+      const int nb = ds::sdl::Input::button_count();
+      const std::string& path = per_game && !game_ini.empty() ? game_ini : global_ini;
+      for (int i = 0; i < nb; ++i) {
+        const std::string k = (pad ? "pad." : "keys.") + std::string(ds::sdl::Input::button_name(i));
+        const char* v = pad ? ds::sdl::Input::pad_default(i) : ds::sdl::Input::key_default(i);
+        cfg.set(k, v);
+        ds::sdl::Config::store(path, k, v);
+      }
+      for (int a = 0; a < ds::sdl::Input::action_count(); ++a) {
+        const std::string k = (pad ? "padhotkeys." : "hotkeys.") + std::string(ds::sdl::action_name(static_cast<ds::sdl::Action>(a)));
+        const char* v = pad ? ds::sdl::Input::pad_hot_default(a) : ds::sdl::Input::key_hot_default(a);
+        cfg.set(k, v);
+        ds::sdl::Config::store(path, k, v);
+      }
+      reconfigure_input();
+    }
+
+    std::vector<std::string> collisions() const override { return input.collisions(); }
+
+    static std::string upper(const std::string& s) {
+      std::string out = s;
+      for (char& c : out) {
+        if (c == '_') c = ' ';
+        else c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      }
+      return out;
+    }
     bool save_per_game() const override { return per_game && has_game(); }
     void set_save_per_game(bool on) override { per_game = on && has_game(); }
 
@@ -1603,7 +1679,8 @@ sdl_ready:
     }
   };
 
-  Host host(cfg, nds, display, vs, global_ini, session.game_ini);
+  Host host(cfg, nds, display, vs, global_ini, session.game_ini, input);
+  host.reconfigure_input = [&] { input.configure(cfg); };
   host.reopen = [&] { reopen_display(); };
   // Push one changed key into the running machine. Anything not named here
   // either needs the display reopened (the picture settings, handled below)
@@ -1772,6 +1849,10 @@ sdl_ready:
         const Uint32 now_ms = SDL_GetTicks();
         const u32 elapsed = static_cast<u32>(now_ms - menu_ms);
         menu_ms = now_ms;
+        // A rebinding in progress repaints every tick: the page is showing
+        // "PRESS ANY..." and has to come back to the new value the moment the
+        // menu collects it (Menu::handle_controls).
+        if (host.capturing()) menu_dirty = true;
         switch (menu.update(input.take_menu_presses(), input.menu_held(), elapsed)) {
         case Menu::Result::None: break;
         case Menu::Result::Resume:
