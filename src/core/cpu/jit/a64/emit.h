@@ -37,22 +37,25 @@ inline bool encode_logical_imm32(u32 v, u32& n, u32& immr, u32& imms) {
   const u32 elem = v & emask;
   const u32 ones = static_cast<u32>(__builtin_popcount(elem));
   if (ones == 0 || ones == e) return false;
-  const u32 run = (ones == 32) ? 0xFFFFFFFFu : ((1u << ones) - 1);
-  auto rotr_e = [&](u32 x, u32 r) { r %= e; return r ? ((x >> r) | (x << (e - r))) & emask : x; };
-  for (u32 r = 0; r < e; ++r) {
-    if (rotr_e(run, r) != elem) continue;
-    immr = r;
-    switch (e) {
-    case 32: imms = (ones - 1) & 0x1F; break;
-    case 16: imms = 0x20 | ((ones - 1) & 0xF); break;
-    case 8:  imms = 0x30 | ((ones - 1) & 0x7); break;
-    case 4:  imms = 0x38 | ((ones - 1) & 0x3); break;
-    default: imms = 0x3C | ((ones - 1) & 0x1); break;
-    }
-    n = 0;
-    return true;
+  // A rotated run of ones has exactly one 0->1 transition around the
+  // element; its position is where the run starts, and the rotation is
+  // what moves a run starting at bit 0 there. (The previous form tried all
+  // e rotations, and most values asked about are not encodable, so it ran
+  // the whole search to say no -- 9 % of translation time.)
+  const u32 below = ((elem << 1) | (elem >> (e - 1))) & emask;   // each bit's lower neighbour
+  const u32 starts = elem & ~below;
+  if (__builtin_popcount(starts) != 1) return false;
+  const u32 s = static_cast<u32>(__builtin_ctz(starts));
+  immr = (e - s) % e;
+  switch (e) {
+  case 32: imms = (ones - 1) & 0x1F; break;
+  case 16: imms = 0x20 | ((ones - 1) & 0xF); break;
+  case 8:  imms = 0x30 | ((ones - 1) & 0x7); break;
+  case 4:  imms = 0x38 | ((ones - 1) & 0x3); break;
+  default: imms = 0x3C | ((ones - 1) & 0x1); break;
   }
-  return false;
+  n = 0;
+  return true;
 }
 
 class Emitter {

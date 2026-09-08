@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <initializer_list>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -349,7 +350,9 @@ public:
   }
   Translator(JitCpu& jc, u32 key, Emitter& e, Block& b)
       : jc_(jc), cpu_(*jc.ctx), hot_(e), blk_(b), key_(key), thumb_(key_thumb(key)), a9_(jc.arm9),
-        cold_buf_(cold_scratch()), cold_(cold_buf_, COLD_CAP), cur_(&hot_) {}
+        instrs_(scratch_instrs()), cold_buf_(cold_scratch()), cold_(cold_buf_, COLD_CAP), cur_(&hot_), fixes_(scratch_fixes()) {
+    instrs_.clear(); fixes_.clear();   // capacity kept across blocks, like the cold buffer
+  }
 
   bool run();
 
@@ -360,7 +363,7 @@ private:
   Block& blk_;
   const u32 key_;
   const bool thumb_, a9_;
-  std::vector<Instr> instrs_;
+  std::vector<Instr>& instrs_;   // thread-reused (scratch_instrs)
   u32 pc_ = 0;
   u32 live_ = F_ALL;
   u32 pending_ = 0;          // static cycles not yet subtracted from the budget
@@ -383,7 +386,10 @@ private:
   Emitter cold_;
   Emitter* cur_;
   struct Fix { size_t at; bool at_cold; size_t target; bool target_cold; const void* abs; };
-  std::vector<Fix> fixes_;
+  // Per-block lists that kept reallocating from empty on every translation.
+  static std::vector<Instr>& scratch_instrs() { static thread_local std::vector<Instr> v; return v; }
+  static std::vector<Fix>& scratch_fixes() { static thread_local std::vector<Fix> v; return v; }
+  std::vector<Fix>& fixes_;      // thread-reused (scratch_fixes)
 
   Emitter& e() { return *cur_; }
   bool in_cold() const { return cur_ == &cold_; }
@@ -399,7 +405,19 @@ private:
     fixes_.push_back({cold_.b_fwd(), true, 0, false, stub});
   }
   // Start a cold path reached by the given hot forward branches.
-  void cold_begin(const std::vector<size_t>& hot_fixups) {
+  // The forward-branch sites a fast path collects for its cold path: a
+  // handful per instruction, so a fixed array rather than a heap vector
+  // allocated per load/store (which was ~7 % of translation time).
+  struct FailList {
+    size_t v[8]; u32 n = 0;
+    FailList() = default;
+    FailList(std::initializer_list<size_t> l) { for (size_t x : l) push_back(x); }   // cold_begin({t})
+    void push_back(size_t x) { assert(n < 8); v[n++] = x; }
+    const size_t* begin() const { return v; }
+    const size_t* end() const { return v + n; }
+    bool empty() const { return n == 0; }
+  };
+  void cold_begin(const FailList& hot_fixups) {
     assert(!in_cold());
     for (size_t f : hot_fixups) fixes_.push_back({f, false, cold_.size(), true, nullptr});
     cur_ = &cold_;
@@ -755,7 +773,7 @@ private:
 
   // Page-table lookup for `waddr` (hot). On success x3 = pre-biased host
   // base. Failure branches are collected in `fail`. Clobbers x2, x3.
-  void emit_page_lookup(u32 waddr, bool store, std::vector<size_t>& fail) {
+  void emit_page_lookup(u32 waddr, bool store, FailList& fail) {
     assert(!in_cold());
     emit_walk_probe(waddr);
     e().lsr_imm(SCRATCH2, waddr, mem::PAGE_SHIFT);
@@ -924,7 +942,7 @@ private:
       flush_pending();
       e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH6);
     };
-    std::vector<size_t> fail;
+    FailList fail;
     emit_walk_probe(SCRATCH1);
     e().lsr_imm(SCRATCH2, SCRATCH1, mem::PAGE_SHIFT);
     e().ldr_x_reg(SCRATCH2, R_PT, SCRATCH2, true, true);
@@ -986,7 +1004,7 @@ private:
   void emit_block_transfer(u32 instr, u32 list, bool load, bool writeback, u32 rn, bool interwork_pc, u32 pc_store_value) {
     const u32 n = static_cast<u32>(__builtin_popcount(list));
     flush_pending();
-    std::vector<size_t> fail;
+    FailList fail;
     e().add_imm(SCRATCH2, SCRATCH1, n * 4 - 1);
     e().eor_reg(SCRATCH2, SCRATCH2, SCRATCH1);
     e().lsr_imm(SCRATCH2, SCRATCH2, mem::PAGE_SHIFT);
@@ -1315,7 +1333,7 @@ void Translator::arm_msr(u32 instr, AOp op) {
   u32 wv;
   if (op == AOp::MsrImm) { e().mov_imm(SCRATCH4, rotr(instr & 0xFF, ((instr >> 8) & 0xF) * 2)); wv = SCRATCH4; }
   else wv = host_reg(instr & 0xF);
-  std::vector<size_t> fail;
+  FailList fail;
   const u32 mem_mask = ((fields & 1) ? 0xC0u : 0) | ((fields & 2) ? 0xFF00u : 0) | ((fields & 4) ? 0xFF0000u : 0) | ((fields & 8) ? 0x0F000000u : 0);
   const bool touch_mem = mem_mask != 0 || (fields & 7);
   if (touch_mem) e().ldr_w(SCRATCH2, R_CTX, OFF_CPSR);
