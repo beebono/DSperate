@@ -233,7 +233,11 @@ int main(int argc, char** argv) {
   if (rom && cheat_db) {
     ds::cheat::GameCheats found;
     std::string err;
-    if (!ds::cheat::load_for_rom(cheat_db, rom, found, err)) {
+    // From the loaded cart, so a zipped ROM is looked up by the game's header
+    // rather than the archive's first 512 bytes.
+    ds::u8 header[512] = {};
+    if (nds.cart) nds.cart->rom_read(0, header, sizeof header);
+    if (!ds::cheat::load_for_header(cheat_db, header, found, err)) {
       if (!err.empty()) { std::fprintf(stderr, "cheats: %s\n", err.c_str()); return 1; }
       std::fprintf(stderr, "cheats: this ROM is not in %s\n", cheat_db);
       if (list_cheats) return 0;

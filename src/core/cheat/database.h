@@ -57,6 +57,12 @@ u32 header_checksum(const u8* header, size_t n = 512);
 // which is the common case and not an error worth showing.
 bool load_for_rom(const std::string& db_path, const std::string& rom_path, GameCheats& out, std::string& err);
 
+// The same from a header already in hand -- 512 bytes at offset 0 of the ROM
+// image. This is the form a frontend should use once the cart is loaded: the
+// path may name a zip, whose first 512 bytes are the archive's, not the
+// game's, and every ROM would then miss the database.
+bool load_for_header(const std::string& db_path, const u8 header[512], GameCheats& out, std::string& err);
+
 class Database {
 public:
   // Reads and indexes the file. False (with `err` set) if it is missing, too

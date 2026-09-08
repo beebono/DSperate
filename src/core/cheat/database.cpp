@@ -113,6 +113,10 @@ bool load_for_rom(const std::string& db_path, const std::string& rom_path, GameC
   std::fclose(rom);
   if (!got) { err = rom_path + " is too short to be a DS ROM"; return false; }
 
+  return load_for_header(db_path, header, out, err);
+}
+
+bool load_for_header(const std::string& db_path, const u8 header[512], GameCheats& out, std::string& err) {
   u32 game_code = 0;
   for (int i = 3; i >= 0; --i) game_code = (game_code << 8) | header[0x0C + static_cast<size_t>(i)];
 

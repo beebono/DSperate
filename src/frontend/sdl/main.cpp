@@ -462,7 +462,12 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   }
   if (!db.empty()) {
     std::string err;
-    if (ds::cheat::load_for_rom(db, rom_path, cheats, err)) {
+    // The header comes from the loaded cart, not from the file at rom_path:
+    // for a zipped game that file starts with the archive's own header and
+    // every lookup would miss.
+    u8 header[512] = {};
+    if (nds.cart) nds.cart->rom_read(0, header, sizeof header);
+    if (nds.cart && ds::cheat::load_for_header(db, header, cheats, err)) {
       VLOG("cheats: %s -- %zu codes in %zu groups\n", cheats.name.c_str(), cheats.codes.size(), cheats.groups.size());
       nds.cheats.codes = cheats.codes;
     } else if (!err.empty()) {

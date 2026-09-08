@@ -308,6 +308,40 @@ void test_header_checksum() {
   CHECK(cheat::header_checksum(ramp.data()) == 0xE39ECA89u);
 }
 
+// A zipped game is looked up by the header inside the archive, which is what
+// load_for_header takes: pointing the path form at the .zip reads the
+// archive's own first 512 bytes and misses every entry.
+void test_zipped_lookup() {
+  Builder b;
+  const size_t off = b.begin_game("Zipped Game", 1);
+  b.code_item("Code", "", false, {0x02000000, 1});
+  std::vector<u8> header(512, 0);
+  std::memcpy(&header[0x0C], "ZIPD", 4);
+  b.entry(game("ZIPD"), cheat::header_checksum(header.data()), off);
+  b.write();
+
+  cheat::GameCheats g;
+  std::string err;
+  CHECK(cheat::load_for_header(kPath, header.data(), g, err));
+  CHECK(g.name == "Zipped Game");
+  CHECK(g.codes.size() == 1);
+
+  // The same game inside a zip: the file starts "PK\3\4" and its bytes at
+  // 0x0C are the archive's, not the game's.
+  const char* kZip = "cheat_db_test_zip.tmp";
+  std::vector<u8> archive(512, 0);
+  const u8 magic[4] = {'P', 'K', 3, 4};
+  std::memcpy(archive.data(), magic, 4);
+  FILE* f = std::fopen(kZip, "wb");
+  CHECK(f != nullptr);
+  CHECK(std::fwrite(archive.data(), 1, archive.size(), f) == archive.size());
+  std::fclose(f);
+  cheat::GameCheats miss;
+  err.clear();
+  CHECK(!cheat::load_for_rom(kPath, kZip, miss, err));
+  std::remove(kZip);
+}
+
 } // namespace
 
 int main() {
@@ -321,6 +355,7 @@ int main() {
   test_bad_offsets();
   test_revisions();
   test_header_checksum();
+  test_zipped_lookup();
   std::remove(kPath);
   std::printf("cheat db: ok\n");
   return 0;
