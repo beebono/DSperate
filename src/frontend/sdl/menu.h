@@ -141,7 +141,7 @@ private:
   // and a page three deep needs no special case. Games is the exception it
   // always was: it is raised as the launcher's own modal page with nothing
   // behind it, so it is pushed onto an empty stack and B does not leave it.
-  enum class Page : u8 { Root, Slot, Cheats, Games, Options, Emulation, VisualFx, Layout, Controls };
+  enum class Page : u8 { Root, Slot, Cheats, Games, Options, Emulation, VisualFx, Layout, Controls, DsOptions, TextEdit };
   static constexpr int kMaxDepth = 6;
   Page stack_[kMaxDepth] = {Page::Root};
   int  depth_ = 1;
@@ -205,10 +205,10 @@ private:
   // One row per page, kept while the menu is open so backing out of a page
   // and into it again lands where it was left.
   int  opt_row_ = 0;
-  int  set_row_[3] = {};         // Emulation, VisualFx, Layout
+  int  set_row_[4] = {};         // Emulation, VisualFx, Layout, DsOptions
   // Written by draw: how far a page is scrolled depends on how many rows the
   // canvas fits, which only draw knows -- the same reason visible_ is mutable.
-  mutable int set_top_[3] = {};
+  mutable int set_top_[4] = {};
   bool have_options() const { return host_ != nullptr; }
   // The table a settings page shows, and where its row state lives.
   const Setting* table() const;
@@ -227,6 +227,18 @@ private:
   Result handle_options(u32 presses);
   Result handle_settings(u32 presses);
   Result handle_controls(u32 presses);
+  void draw_text_edit(const Canvas& d) const;
+  Result handle_text_edit(u32 presses);
+  // The character editor, for the two free-text [user] fields. A handheld has
+  // no keyboard, so a character is chosen by cycling rather than typed: up
+  // and down walk the current table, the shoulders change table, left and
+  // right move along the field.
+  void open_text_edit();
+  // The label is kept with the buffer, not looked up when drawing: by then
+  // TextEdit is the page on top and table() no longer names the row that
+  // opened it.
+  std::string edit_key_, edit_label_, edit_buf_;
+  int  edit_pos_ = 0, edit_table_ = 0, edit_max_ = 0;
   // The Controls page: which column (keyboard or pad), where in it, and how
   // far it is scrolled. `bind_row_` is an index into the host's binding list.
   bool bind_pad_ = false;
@@ -240,7 +252,7 @@ private:
   // key off "has the selection moved"; this is the selection they mean.
   int  list_row() const;
   bool list_page() const { return page() == Page::Cheats || page() == Page::Games || settings_page() || controls_page(); }
-  bool settings_page() const { return page() == Page::Emulation || page() == Page::VisualFx || page() == Page::Layout; }
+  bool settings_page() const { return page() == Page::Emulation || page() == Page::VisualFx || page() == Page::Layout || page() == Page::DsOptions; }
   bool controls_page() const { return page() == Page::Controls; }
   void toggle_cheat();
 };

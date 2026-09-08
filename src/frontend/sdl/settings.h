@@ -48,7 +48,8 @@ enum class Dep : u8 {
 struct Setting {
   const char* key;                 // "video.linear"
   const char* label;               // "BILINEAR"
-  enum class Type : u8 { Bool, Pick, Int, Percent } type;
+  // Text is free-form: `lo` is how many characters the firmware keeps.
+  enum class Type : u8 { Bool, Pick, Int, Percent, Text } type;
   const Choice* choices; u8 nchoices;
   // Int and Percent. These are the menu's bounds, not the file's: the file
   // accepts more, and a value already in it outside this range is shown and
@@ -121,12 +122,18 @@ struct SettingsHost {
   virtual void reset_bindings(bool pad) = 0;
   // Bindings that shadow one another, one line each; empty when there are none.
   virtual std::vector<std::string> collisions() const = 0;
+
+  // False when a real firmware dump is in use, in which case [user] is not
+  // read at all -- the dump's own pages win and the DS menu edits them. The
+  // page says so rather than accepting changes that would do nothing.
+  virtual bool user_settings_used() const = 0;
 };
 
 // The pages. Each is terminated by a row with a null key.
 extern const Setting kEmuSettings[];
 extern const Setting kVideoSettings[];
 extern const Setting kLayoutSettings[];
+extern const Setting kUserSettings[];
 int settings_count(const Setting* table);
 
 // What the row shows on the right: the label for a choice, "50%", "UNLIMITED".

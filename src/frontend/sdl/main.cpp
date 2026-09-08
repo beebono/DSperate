@@ -1617,6 +1617,12 @@ sdl_ready:
 
     std::vector<std::string> collisions() const override { return input.collisions(); }
 
+    // [user] is only read when the firmware is generated. With a real dump
+    // the dump's own settings pages win and the DS menu edits those (they go
+    // to the .ovr sidecar), so the page says so rather than taking changes
+    // that would do nothing.
+    bool user_settings_used() const override { return nds.firmware_synthetic; }
+
     static std::string upper(const std::string& s) {
       std::string out = s;
       for (char& c : out) {

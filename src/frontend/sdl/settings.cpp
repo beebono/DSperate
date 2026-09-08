@@ -22,6 +22,18 @@ const Choice kSeam[]     = {{"dark", "DARK"}, {"blend", "BLEND"}, {"blend_linear
 const Choice kChunky[]   = {{"false", "OFF"}, {"mean", "DEFAULT"}, {"extreme", "ADAPTIVE"},
                             {"mode", "COMMON"}, {"tl", "FIRST"}, {"min", "DARKEST"}, {"max", "LIGHTEST"}};
 const Choice kScreen[]   = {{"top", "TOP"}, {"bottom", "BOTTOM"}};
+// GBATEK's order, which is what the firmware stores.
+const Choice kColour[]   = {{"0", "GREY"}, {"1", "BROWN"}, {"2", "RED"}, {"3", "PINK"},
+                            {"4", "ORANGE"}, {"5", "YELLOW"}, {"6", "LIME"}, {"7", "GREEN"},
+                            {"8", "DARK GREEN"}, {"9", "TURQUOISE"}, {"10", "BLUE"}, {"11", "DARK BLUE"},
+                            {"12", "PURPLE"}, {"13", "VIOLET"}, {"14", "MAGENTA"}, {"15", "DARK PINK"}};
+// The firmware stores the month as a number; the menu names it, because
+// "BIRTHDAY MONTH 11" takes a moment to read and "NOVEMBER" does not.
+const Choice kMonth[]    = {{"1", "JANUARY"}, {"2", "FEBRUARY"}, {"3", "MARCH"}, {"4", "APRIL"},
+                            {"5", "MAY"}, {"6", "JUNE"}, {"7", "JULY"}, {"8", "AUGUST"},
+                            {"9", "SEPTEMBER"}, {"10", "OCTOBER"}, {"11", "NOVEMBER"}, {"12", "DECEMBER"}};
+const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
+                            {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
 const Choice kCorner[]   = {{"tl", "TOP LEFT"}, {"tr", "TOP RIGHT"}, {"bl", "BOTTOM LEFT"}, {"br", "BOTTOM RIGHT"}};
 
 // Shorthand for the common shapes, so a table row reads as its own contents.
@@ -38,6 +50,9 @@ constexpr Setting number(const char* k, const char* l, int lo, int hi, int st, c
 constexpr Setting percent(const char* k, const char* l, int lo, int hi, int st, const char* def, u8 f, Dep d, const char* n,
                           const char* sv = nullptr, const char* sl = nullptr) {
   return Setting{k, l, T::Percent, nullptr, 0, lo, hi, st, sv, sl, def, f, d, n};
+}
+constexpr Setting text(const char* k, const char* l, int maxlen, const char* def, u8 f, const char* n) {
+  return Setting{k, l, T::Text, nullptr, 0, maxlen, maxlen, 0, nullptr, nullptr, def, f, Dep::None, n};
 }
 constexpr Setting end() { return Setting{nullptr, nullptr, T::Bool, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr, 0, Dep::None, nullptr}; }
 
@@ -102,6 +117,25 @@ const Setting kLayoutSettings[] = {
   end(),
 };
 
+// [user]: what a game sees as the console's owner. Every row is restart-only,
+// because these are baked into the generated firmware when it is built at
+// boot -- and with a real dump none of them are read at all.
+const Setting kUserSettings[] = {
+  text("user.nickname", "NICKNAME", 10, "DSperate", FlagRestart,
+       "WHAT GAMES CALL YOU"),
+  text("user.message", "MESSAGE", 26, "", FlagRestart,
+       "THE GREETING THE DS MENU SHOWS"),
+  pick("user.colour", "FAVOURITE COLOUR", kColour, 16, "0", FlagRestart, Dep::None,
+       "SOME GAMES COLOUR THEMSELVES WITH IT"),
+  pick("user.birthday_month", "BIRTHDAY MONTH", kMonth, 12, "1", FlagRestart, Dep::None,
+       "GAMES THAT WISH YOU A HAPPY BIRTHDAY USE THIS"),
+  number("user.birthday_day", "BIRTHDAY DAY", 1, 31, 1, "1", FlagRestart, Dep::None,
+         "NOT CHECKED AGAINST THE MONTH, AS THE CONSOLE DOES NOT EITHER"),
+  pick("user.language", "LANGUAGE", kLanguage, 6, "1", FlagRestart, Dep::None,
+       "THE LANGUAGE MULTI-LANGUAGE GAMES START IN"),
+  end(),
+};
+
 int settings_count(const Setting* table) {
   int n = 0;
   while (table[n].key) ++n;
@@ -151,11 +185,19 @@ std::string default_value(const Setting& s) {
   case T::Pick:    return s.choices[0].value;
   case T::Int:
   case T::Percent: return s.sentinel_value ? s.sentinel_value : std::to_string(s.lo);
+  case T::Text:    return "";
   }
   return "";
 }
 
 std::string display_value(const Setting& s, const std::string& value) {
+  // An unset text field shows the default the firmware would be built with,
+  // not "--": the console does have a name, and "--" would suggest otherwise.
+  // Only a field the player has actually emptied reads as empty.
+  if (s.type == T::Text) {
+    const std::string v = value.empty() ? default_value(s) : value;
+    return v.empty() ? "--" : v;
+  }
   const std::string v = value.empty() ? default_value(s) : value;
   switch (s.type) {
   case T::Bool:
@@ -178,6 +220,7 @@ std::string display_value(const Setting& s, const std::string& value) {
 }
 
 std::string step_value(const Setting& s, const std::string& value, int dir, const SettingsHost& host) {
+  if (s.type == T::Text) return value;   // stepped a character at a time, not as a whole
   const std::string v = value.empty() ? default_value(s) : value;
   if (s.type == T::Bool || s.type == T::Pick) {
     int i = choice_index(s, v);

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <iterator>
 
@@ -413,6 +414,7 @@ Menu::Result Menu::handle(u32 presses) {
   if (page() == Page::Options) return handle_options(presses);
   if (settings_page()) return handle_settings(presses);
   if (controls_page()) return handle_controls(presses);
+  if (page() == Page::TextEdit) return handle_text_edit(presses);
   if (page() == Page::Cheats) {
     // Up/down step, the shoulders page: a list of thousands is not one to
     // walk a row at a time.
@@ -623,15 +625,17 @@ const Setting* Menu::table() const {
   case Page::Emulation: return kEmuSettings;
   case Page::VisualFx:  return kVideoSettings;
   case Page::Layout:    return kLayoutSettings;
+  case Page::DsOptions: return kUserSettings;
   default:              return kEmuSettings;
   }
 }
 
 int Menu::table_slot() const {
   switch (page()) {
-  case Page::VisualFx: return 1;
-  case Page::Layout:   return 2;
-  default:             return 0;
+  case Page::VisualFx:  return 1;
+  case Page::Layout:    return 2;
+  case Page::DsOptions: return 3;
+  default:              return 0;
   }
 }
 
@@ -659,6 +663,7 @@ void Menu::step_setting(int dir) {
   const Setting* t = table();
   const Setting& s = t[set_row_[table_slot()]];
   if (!host_->enabled(s)) return;
+  if (s.type == Setting::Type::Text) return;   // A opens the editor instead
   const std::string cur = host_->get(s.key);
   const std::string next = step_value(s, cur, dir, *host_);
   if (next == cur) return;
@@ -678,9 +683,11 @@ Menu::Result Menu::handle_options(u32 presses) {
     host_->set_save_per_game(!host_->save_per_game());
   if (hit(B::BTN_B)) { pop(); return Result::None; }
   if (save_row || (!hit(B::BTN_A) && !hit(B::BTN_START))) return Result::None;
-  if (opt_row_ == kDsOptionsRow) return Result::None;   // DS OPTIONS: not built yet
-  static constexpr Page kPages[kOptionPages] = {Page::Emulation, Page::VisualFx, Page::Layout, Page::Controls, Page::Options};
+  static constexpr Page kPages[kOptionPages] = {Page::Emulation, Page::VisualFx, Page::Layout, Page::Controls, Page::DsOptions};
   push(kPages[opt_row_]);
+  // The DS Options page can be opened with a dump in use -- it explains
+  // itself there -- but there is nothing on it to select.
+  if (page() == Page::DsOptions && !host_->user_settings_used()) { set_row_[table_slot()] = 0; return Result::None; }
   if (page() == Page::Controls) {
     // A handheld's only input is its pad, so open on that column when one is
     // plugged in; a desktop with no pad opens on the keyboard.
@@ -706,7 +713,11 @@ Menu::Result Menu::handle_settings(u32 presses) {
   if (hit(B::BTN_RIGHT)) step_setting(+1);
   // A steps a setting forward as well, so the whole page can be worked with
   // one button on a handheld whose d-pad the player is already holding.
-  if (hit(B::BTN_A))     step_setting(+1);
+  if (hit(B::BTN_A)) {
+    const Setting& cur = table()[set_row_[table_slot()]];
+    if (cur.type == Setting::Type::Text && host_->enabled(cur)) open_text_edit();
+    else step_setting(+1);
+  }
   if (hit(B::BTN_B))   { host_->commit(); pop(); }
   return Result::None;
 }
@@ -742,9 +753,9 @@ void Menu::draw_options(const Canvas& d) const {
     const int ry = py0 + m.rows_y + i * m.row_h;
     if (i == opt_row_) fill_rect(d, px0 + m.pad, ry - m.s, panel_w - 2 * m.pad, m.row_h, kSel);
     if (i < kOptionPages) {
-      // DS OPTIONS has no page behind it yet; it reads dim so that pressing A
-      // on it and getting nothing is not a surprise.
-      const bool ready = i != kDsOptionsRow;
+      // DS OPTIONS reads dim when a real firmware dump is in use: [user] is
+      // not consulted then, and the page says so when it is opened.
+      const bool ready = i != kDsOptionsRow || !host_ || host_->user_settings_used();
       draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, ready || i == opt_row_ ? kInk : kDim, kItems[i]);
       continue;
     }
@@ -757,13 +768,22 @@ void Menu::draw_options(const Canvas& d) const {
 // A settings page: one scrolling list of label-and-value rows, laid out like
 // the cheats page because it is the same problem -- more rows than fit.
 void Menu::draw_settings(const Canvas& d) const {
-  static constexpr const char* kTitles[3] = {"EMULATION", "VISUAL FX", "LAYOUT"};
+  static constexpr const char* kTitles[4] = {"EMULATION", "VISUAL FX", "LAYOUT", "DS OPTIONS"};
   const ListFrame f = list_frame(d, kTitles[table_slot()]);
   const Metrics& m = f.m;
   visible_ = f.visible;
   const Setting* t = table();
   const int n = settings_count(t);
   const int sel = set_row_[table_slot()];
+  // A real firmware dump keeps its own settings, so nothing on the DS Options
+  // page would be read. Say it instead of drawing rows that do nothing.
+  if (page() == Page::DsOptions && !host_->user_settings_used()) {
+    const char* why[] = {"A FIRMWARE DUMP IS IN USE, SO", "THE CONSOLE'S OWN SETTINGS APPLY.",
+                         "CHANGE THEM IN THE DS MENU:", "THEY ARE KEPT BESIDE THE DUMP."};
+    for (int i = 0; i < 4; ++i)
+      draw_text(d, f.text_x, f.py0 + m.list_rows_y + i * m.list_row_h, m.list_s, kDim, why[i]);
+    return;
+  }
 
   // A note under the list explains the selected row. It costs two rows of
   // list, and is worth them: these settings are not self-explanatory, and the
@@ -791,7 +811,10 @@ void Menu::draw_settings(const Canvas& d) const {
     else if (!is_sel && (s.flags & FlagInexact)) ink = kEdgeText;
     draw_text(d, f.text_x, ry, m.list_s, ink, fit(s.label, m.list_s, f.avail - value_w).c_str());
     const std::string v = on ? display_value(s, host_->get(s.key)) : "--";
-    const std::string shown = on && is_sel ? "< " + v + " >" : v;
+    // A text field is opened, not stepped, so it gets no arrows: they would
+    // promise that left and right do something there.
+    const bool steps = s.type != Setting::Type::Text;
+    const std::string shown = on && is_sel && steps ? "< " + v + " >" : v;
     draw_text(d, f.text_x + f.avail - std::min(value_w, text_width(m.list_s, shown.c_str())),
               ry, m.list_s, ink, fit(shown, m.list_s, value_w).c_str());
   }
@@ -930,12 +953,136 @@ void Menu::draw_controls(const Canvas& d) const {
               fit(clash[0], m.list_s, f.avail).c_str());
 }
 
+// The character editor. The firmware stores each byte as one UTF-16 unit
+// (firmware_gen.cpp put_utf16), so the tables are ASCII: anything above it
+// would be written as the wrong character rather than refused.
+namespace {
+const char* const kCharTables[] = {
+  " ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  " abcdefghijklmnopqrstuvwxyz",
+  " 0123456789.,!?'-&+()/:@",
+};
+const char* const kCharTableNames[] = {"CAPITALS", "LOWER CASE", "NUMBERS"};
+constexpr int kCharTableCount = 3;
+
+// Which table a character belongs to, so opening the editor on an existing
+// name lands on the right one rather than always on capitals.
+int table_of(char c) {
+  for (int t = 0; t < kCharTableCount; ++t)
+    if (std::strchr(kCharTables[t], c)) return t;
+  return 0;
+}
+} // namespace
+
+void Menu::open_text_edit() {
+  const Setting& s = table()[set_row_[table_slot()]];
+  edit_key_ = s.key;
+  edit_label_ = s.label;
+  edit_max_ = s.lo;
+  const std::string cur = host_->get(s.key);
+  edit_buf_ = cur.empty() ? default_value(s) : cur;
+  if (static_cast<int>(edit_buf_.size()) > edit_max_) edit_buf_.resize(static_cast<size_t>(edit_max_));
+  // An empty field starts as one space, so there is a character to cycle.
+  if (edit_buf_.empty()) edit_buf_ = " ";
+  edit_pos_ = 0;
+  edit_table_ = table_of(edit_buf_[0]);
+  push(Page::TextEdit);
+}
+
+Menu::Result Menu::handle_text_edit(u32 presses) {
+  using B = io::Io::Button;
+  const auto hit = [&](B b) { return (presses >> b) & 1; };
+  const char* tab = kCharTables[edit_table_];
+  const int n = static_cast<int>(std::strlen(tab));
+  if (hit(B::BTN_UP) || hit(B::BTN_DOWN)) {
+    // Where in this table the character is now; a character from another
+    // table starts the walk at its beginning rather than jumping.
+    const char* at = std::strchr(tab, edit_buf_[static_cast<size_t>(edit_pos_)]);
+    int i = at ? static_cast<int>(at - tab) : 0;
+    i = (i + (hit(B::BTN_UP) ? n - 1 : 1)) % n;
+    edit_buf_[static_cast<size_t>(edit_pos_)] = tab[i];
+  }
+  if (hit(B::BTN_L) || hit(B::BTN_R)) {
+    edit_table_ = (edit_table_ + (hit(B::BTN_L) ? kCharTableCount - 1 : 1)) % kCharTableCount;
+    // Move the character under the cursor into the new table, so the change
+    // is visible: switching to lower case should lower the letter you are on.
+    const char c = edit_buf_[static_cast<size_t>(edit_pos_)];
+    const char* from = kCharTables[table_of(c)];
+    if (const char* at = std::strchr(from, c)) {
+      const int i = static_cast<int>(at - from);
+      const char* to = kCharTables[edit_table_];
+      if (i < static_cast<int>(std::strlen(to))) edit_buf_[static_cast<size_t>(edit_pos_)] = to[i];
+    }
+  }
+  if (hit(B::BTN_LEFT) && edit_pos_ > 0) {
+    --edit_pos_;
+    edit_table_ = table_of(edit_buf_[static_cast<size_t>(edit_pos_)]);
+  }
+  if (hit(B::BTN_RIGHT)) {
+    // Past the end grows the field, up to what the firmware keeps.
+    if (edit_pos_ + 1 < static_cast<int>(edit_buf_.size())) {
+      ++edit_pos_;
+      edit_table_ = table_of(edit_buf_[static_cast<size_t>(edit_pos_)]);
+    } else if (static_cast<int>(edit_buf_.size()) < edit_max_) {
+      edit_buf_ += ' ';
+      ++edit_pos_;
+    }
+  }
+  if (hit(B::BTN_A) || hit(B::BTN_START)) {
+    // Trailing spaces are an artefact of moving right, not part of the name.
+    std::string out = edit_buf_;
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    host_->set(edit_key_.c_str(), out);
+    pop();
+    return Result::None;
+  }
+  if (hit(B::BTN_B)) pop();   // B abandons: nothing was written until A
+  return Result::None;
+}
+
+void Menu::draw_text_edit(const Canvas& d) const {
+  static constexpr const char* kHelp = "UP/DOWN LETTER   L/R TABLE   A DONE   B CANCEL";
+  Metrics m = metrics(d);
+  // Wide enough for the field at the page scale and for the help line at the
+  // list scale, whichever is wider; the scale steps down rather than clip.
+  const auto want = [&](const Metrics& mm) {
+    return std::max({edit_max_ * kAdvance * mm.s, text_width(mm.s, edit_label_.c_str()),
+                     text_width(mm.list_s, kHelp)}) + 8 * mm.s;
+  };
+  while (m.s > 2 && want(m) > d.w)
+    m = metrics(Canvas{d.px, d.pitch, d.w * (m.s - 1) / m.s, d.h * (m.s - 1) / m.s});
+  const int panel_w = std::min(d.w - 2 * m.pad, want(m));
+  const int panel_h = m.rows_y + m.row_h * 3 + m.pad;
+  const int px0 = (d.w - panel_w) / 2, py0 = (d.h - panel_h) / 2;
+  panel(d, px0, py0, panel_w, panel_h);
+
+  // The label of the row being edited, as the title.
+  draw_text(d, px0 + (panel_w - text_width(m.s, edit_label_.c_str())) / 2, py0 + m.title_y, m.s, kInk, edit_label_.c_str());
+  fill_rect(d, px0 + m.pad, py0 + m.rule_y, panel_w - 2 * m.pad, std::max(1, m.s / 2), kEdge);
+
+  const int fx = px0 + m.pad + 2 * m.s, fy = py0 + m.rows_y;
+  // The character under the cursor is highlighted rather than underlined: the
+  // font has no descender room, and a filled cell reads at any scale.
+  for (int i = 0; i < static_cast<int>(edit_buf_.size()); ++i) {
+    const int cx = fx + i * kAdvance * m.s;
+    if (i == edit_pos_) fill_rect(d, cx - m.s, fy - m.s, kAdvance * m.s, m.glyph_px + 2 * m.s, kSel);
+    const char one[2] = {edit_buf_[static_cast<size_t>(i)], 0};
+    draw_text(d, cx, fy, m.s, kInk, one);
+  }
+  // The font is uppercase-only, so a lower-case letter draws as a capital:
+  // the table's name is the only way to tell which case is being written.
+  draw_text(d, fx, fy + m.row_h + m.s, m.list_s, kEdgeText, kCharTableNames[edit_table_]);
+  draw_text(d, fx, fy + m.row_h + m.s + m.list_row_h, m.list_s, kDim,
+            fit(kHelp, m.list_s, panel_w - 6 * m.s).c_str());
+}
+
 void Menu::draw(const Canvas& d) const {
   if (page() == Page::Games) { draw_games(d); return; }
   if (page() == Page::Cheats) { draw_cheats(d); return; }
   if (page() == Page::Options) { draw_options(d); return; }
   if (settings_page()) { draw_settings(d); return; }
   if (controls_page()) { draw_controls(d); return; }
+  if (page() == Page::TextEdit) { draw_text_edit(d); return; }
   const bool slots = page() == Page::Slot;
   Metrics m = metrics(d);
   const int rows = slots ? kSlotRows : root_rows();   // the slot page stacks its ten in two columns
