@@ -89,19 +89,48 @@ if(DSPERATE_TUNE)
 endif()
 
 # Profile-guided optimisation. "generate" instruments the build (atomic
-# counters: the renderer is threaded); "use" reads the .gcda files the
-# instrumented run left next to the objects in THIS build directory, so both
-# steps must target the same tree -- tools/pgo_build.sh does exactly that.
+# counters: the renderer is threaded) and writes the .gcda profile straight
+# into DSPERATE_PGO_DIR -- by default pgo/<arch>/ in the source tree, which is
+# committed, so CI can build with "use" without the ROMs the training needs.
+# -fprofile-prefix-path makes the profile file names relative to the build
+# directory, so the training build and the "use" build need not share one.
+# A profile applies function by function: an edited function loses its
+# profile (a warning suppressed below) and the rest keep theirs, so the
+# committed profile decays gracefully; tools/pgo_refresh.sh regenerates it and
+# checks for the drift that would silently void it -- a different compiler
+# version (the .gcda format is version-checked) or different compile flags
+# (the per-function checksums cover them). Both are recorded in the profile's
+# MANIFEST and compared here in "use" mode.
 # Measured on the RG DS 2026-09-07 (headless, --quantum 0): Spirit Tracks
 # median -7 % / p99 -6 %, Golden Sun -8 % / -9 %, sm64 -9 %, dbori -11 %,
 # and half as many over-budget frames on both save-state scenes; bit-exact.
 set(DSPERATE_PGO "OFF" CACHE STRING "Profile-guided optimisation: OFF | generate | use")
 set_property(CACHE DSPERATE_PGO PROPERTY STRINGS OFF generate use)
+set(DSPERATE_PGO_DIR "${CMAKE_SOURCE_DIR}/pgo/${CMAKE_SYSTEM_PROCESSOR}" CACHE PATH "Where the PGO profile (.gcda files and MANIFEST) lives")
+option(DSPERATE_PGO_STRICT "PGO use: warn about every function without a matching profile" OFF)
+# What the profile is valid for. The flags below are the ones that reach the
+# compiler for every object; anything added per target would have to join.
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _ds_build_type_uc)
+string(SHA1 _ds_pgo_fingerprint
+  "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR} ${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_ds_build_type_uc}} harden=${DSPERATE_HARDEN} tune=${DSPERATE_TUNE} jit=${DSPERATE_JIT} neon=${DSPERATE_NEON} a32sub=${DSPERATE_A32_SUBSET}")
+set(DSPERATE_PGO_FINGERPRINT "${_ds_pgo_fingerprint}" CACHE INTERNAL "")
+file(WRITE "${CMAKE_BINARY_DIR}/pgo-fingerprint" "${_ds_pgo_fingerprint}\n")
 if(DSPERATE_PGO STREQUAL "generate")
-  add_compile_options(-fprofile-generate -fprofile-update=atomic)
-  add_link_options(-fprofile-generate)
+  add_compile_options(-fprofile-generate=${DSPERATE_PGO_DIR} -fprofile-prefix-path=${CMAKE_BINARY_DIR} -fprofile-update=atomic)
+  add_link_options(-fprofile-generate=${DSPERATE_PGO_DIR})
 elseif(DSPERATE_PGO STREQUAL "use")
-  add_compile_options(-fprofile-use -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch)   # an edited function loses its profile instead of failing the build
+  if(NOT EXISTS "${DSPERATE_PGO_DIR}/MANIFEST")
+    message(FATAL_ERROR "DSPERATE_PGO=use but ${DSPERATE_PGO_DIR}/MANIFEST does not exist; run tools/pgo_refresh.sh")
+  endif()
+  file(STRINGS "${DSPERATE_PGO_DIR}/MANIFEST" _ds_pgo_manifest REGEX "^fingerprint ")
+  string(REGEX REPLACE "^fingerprint " "" _ds_pgo_manifest "${_ds_pgo_manifest}")
+  if(NOT _ds_pgo_manifest STREQUAL _ds_pgo_fingerprint)
+    message(FATAL_ERROR "PGO profile in ${DSPERATE_PGO_DIR} was made for a different compiler or flags (fingerprint ${_ds_pgo_manifest}, this build ${_ds_pgo_fingerprint}); run tools/pgo_refresh.sh, or build with -DDSPERATE_PGO=OFF")
+  endif()
+  add_compile_options(-fprofile-use=${DSPERATE_PGO_DIR} -fprofile-prefix-path=${CMAKE_BINARY_DIR} -fprofile-correction)
+  if(NOT DSPERATE_PGO_STRICT)
+    add_compile_options(-Wno-missing-profile -Wno-coverage-mismatch)   # an edited function loses its profile instead of failing the build
+  endif()
 endif()
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
