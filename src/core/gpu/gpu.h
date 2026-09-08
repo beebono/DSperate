@@ -345,8 +345,13 @@ private:
   // picked back up. Golden Sun's title is the case: an HBlank DMA rewrites
   // engine B's BG VRAM every scanline, so it is per line by nature, and the
   // trap cost 5.8 % of its frame to discover that 192 times a frame.
-  static constexpr u32 LAZY_FUTILE_LIMIT = 4, LAZY_PROBE_PERIOD = 64;
+  // The probe itself is not free -- on Golden Sun's title it is ~3.5 ms, a
+  // frame over budget once a second -- so while probes keep failing the
+  // period doubles up to LAZY_PROBE_MAX, and drops back to LAZY_PROBE_PERIOD
+  // when one succeeds or VRAM is remapped (the usual sign of a scene change).
+  static constexpr u32 LAZY_FUTILE_LIMIT = 4, LAZY_PROBE_PERIOD = 64, LAZY_PROBE_MAX = 1024;
   u32  lazy_futile_ = 0;
+  u32  lazy_probe_period_ = LAZY_PROBE_PERIOD, lazy_probe_in_ = LAZY_PROBE_PERIOD;   // frames until the next probe
   bool lazy_tried_ = false;
   // A frame that spent its burst budget is futile whatever the engines'
   // state at line 191 (with DS_2D_SPLIT the other engine may still be

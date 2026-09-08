@@ -253,6 +253,8 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
 }
 
 bool Gpu::vram_remap_begin() {
+  lazy_probe_period_ = LAZY_PROBE_PERIOD;   // a remap is how scenes change: probe soon
+  if (lazy_probe_in_ > LAZY_PROBE_PERIOD) lazy_probe_in_ = LAZY_PROBE_PERIOD;
   catch_up(3);
   join_worker();
   engine[0].vram_remapped(); engine[1].vram_remapped();
@@ -535,10 +537,18 @@ void Gpu::begin_frame() {
   per_line_[0] = per_line_[1] = false; frame_finished_ = false;
   // Was last frame's trap worth arming? Both engines per line at the end means
   // no batch survived, so nothing it guarded was ever batched.
-  if (lazy_tried_) { if ((per_line_prev_[0] && per_line_prev_[1]) || lazy_limit_hit_) ++lazy_futile_; else lazy_futile_ = 0; }
+  if (lazy_tried_) {
+    const bool wasted = (per_line_prev_[0] && per_line_prev_[1]) || lazy_limit_hit_;
+    if (wasted) {
+      ++lazy_futile_;
+      if (lazy_probe_ && lazy_probe_period_ < LAZY_PROBE_MAX) lazy_probe_period_ *= 2;   // a failed probe: wait longer
+    } else { lazy_futile_ = 0; lazy_probe_period_ = LAZY_PROBE_PERIOD; }
+  }
   lazy_limit_hit_ = false;
   const bool skipping = lazy_futile_ >= LAZY_FUTILE_LIMIT;
-  lazy_probe_ = skipping && (nds_.frame_count % LAZY_PROBE_PERIOD) == 0;
+  lazy_probe_ = false;
+  if (skipping && --lazy_probe_in_ == 0) { lazy_probe_ = true; lazy_probe_in_ = lazy_probe_period_; if (g_dbg_skip) std::fprintf(stderr, "[lazy] probe at frame %llu period %u futile %u\n", (unsigned long long)nds_.frame_count, lazy_probe_period_, lazy_futile_); }
+  else if (!skipping) lazy_probe_in_ = lazy_probe_period_;
   const bool futile = skipping && !lazy_probe_;
   lazy_frame_ = lazy_enabled_ && !run_fifo_ && (!capture_on_ || lazy_capture_) && !futile;
   lazy_tried_ = lazy_frame_;

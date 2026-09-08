@@ -1868,6 +1868,10 @@ sdl_ready:
     if (static_cast<long>(frames) >= stats_from) {
       frame_ms.push_back(static_cast<double>(t1 - t0) * ticks_to_ms);
       work_ms.push_back(static_cast<double>(t2 - t0) * ticks_to_ms);
+      // DS_FRAME_SERIES=<path>: "emu work" ms per frame in run order, as the
+      // headless frontend writes it -- for the shape of a tail, not its size.
+      static FILE* series = [] { const char* p = std::getenv("DS_FRAME_SERIES"); return p ? std::fopen(p, "w") : nullptr; }();
+      if (series) std::fprintf(series, "%.3f %.3f\n", frame_ms.back(), work_ms.back());
     }
     if (fs_adaptive && fs_limit > 0) {
       // Only real-time play has a budget to fall behind: unthrottled fast
