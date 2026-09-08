@@ -3,6 +3,8 @@
 #include "frontend/sdl/menu.h"
 #include "core/io/io.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <iterator>
@@ -37,23 +39,48 @@ constexpr u8 kFont[62][7] = {
 
 constexpr int kGlyphW = 5, kGlyphH = 7, kAdvance = 6;   // advance includes the one-pixel gap
 
-// Panel geometry. Rows are `kRowH` tall around a `kGlyphH * kScale` glyph, so
-// a selected row's bar sits evenly above and below its text -- derive it, do
-// not hand-tune it, or the bar drifts off the text the next time either
-// changes. The header keeps its own scale; rows share kScale.
-constexpr int kScale = 2, kGlyphPx = kGlyphH * kScale, kRowH = kGlyphPx + 4;
-constexpr int kTitleY = 8, kRuleY = kTitleY + kGlyphPx + 6, kRowsY = kRuleY + 8;
-constexpr int panel_height(int rows) { return kRowsY + rows * kRowH + 8; }
+// Panel geometry, derived at draw time from the canvas rather than fixed for a
+// 256x192 one. Rows are `row_h` tall around a `glyph_px` glyph, so a selected
+// row's bar sits evenly above and below its text -- derive it, do not
+// hand-tune it, or the bar drifts off the text the next time either changes.
+//
+// Every measure is a multiple of the glyph scale, so at scale 2 -- which is
+// what a 256x192 canvas gives, the size the menu had when it was drawn into a
+// DS framebuffer -- these come out at exactly the old constants. That is
+// deliberate: the DS-space fallback path draws the same pixels it always did.
+struct Metrics {
+  int s;            // glyph scale for ordinary rows
+  int list_s;       // ... and for the scrolling list pages
+  int glyph_px, row_h, title_y, rule_y, rows_y, pad;
+  int list_row_h, list_rows_y;
+};
 
-// Cheat names are sentences ("Press L+R+SELECT For 7 Red Coins") and a game
-// can have thousands of them, so that page drops to single-scale rows: about
-// thirty characters across and twelve of them at a time, against fifteen and
-// five. The heading keeps the larger size.
-constexpr int kCheatScale = 1, kCheatGlyphPx = kGlyphH * kCheatScale, kCheatRowH = kCheatGlyphPx + 4;
-constexpr int kCheatPanelW = 240, kCheatPanelH = 178;
-constexpr int kCheatRowsY = kRuleY + 6;
-constexpr int kCheatVisible = (kCheatPanelH - kCheatRowsY - 8) / kCheatRowH;
-static_assert(kCheatVisible >= 8, "the cheats page should show a useful number of rows");
+Metrics metrics(const Canvas& d) {
+  Metrics m{};
+  m.s = ui_scale(d);
+  // Cheat names are sentences ("Press L+R+SELECT For 7 Red Coins") and a game
+  // can have thousands of them, so the list pages drop to half scale: about
+  // thirty characters across and twelve at a time, against fifteen and five.
+  m.list_s = std::max(1, m.s / 2);
+  m.glyph_px = kGlyphH * m.s;
+  m.row_h    = m.glyph_px + 2 * m.s;
+  m.title_y  = 4 * m.s;
+  m.rule_y   = m.title_y + m.glyph_px + 3 * m.s;
+  m.rows_y   = m.rule_y + 4 * m.s;
+  m.pad      = 4 * m.s;
+  m.list_row_h  = kGlyphH * m.list_s + 4 * m.list_s;
+  m.list_rows_y = m.rule_y + 3 * m.s;
+  return m;
+}
+
+int panel_height(const Metrics& m, int rows) { return m.rows_y + rows * m.row_h + m.pad; }
+// The list pages take most of the canvas: they are the ones with thousands of
+// entries, and rows they cannot show are rows the player has to scroll to.
+int list_panel_w(const Canvas& d, const Metrics& m) { return std::min(d.w - m.pad, 120 * m.s); }
+int list_panel_h(const Canvas& d, const Metrics& m) { return std::min(d.h - m.pad, 89 * m.s); }
+int list_visible(const Metrics& m, int panel_h) {
+  return std::max(1, (panel_h - m.list_rows_y - m.pad) / m.list_row_h);
+}
 
 int glyph(char c) {
   if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
@@ -61,31 +88,34 @@ int glyph(char c) {
   return (i >= 0 && i < 62) ? i : 0;
 }
 
-// One DS pixel, mapped onto the destination. Clipped to the DS screen so a
-// caller may lay out past the edges without checking.
-// Columns outside [clip_x0, clip_x1) are dropped, which is what lets a name
-// scroll under the panel edge instead of over it. The default admits the
-// whole screen.
-int g_clip_x0 = 0, g_clip_x1 = static_cast<int>(ds::SCREEN_W);
+// One pixel. Clipped to the canvas so a caller may lay out past the edges
+// without checking. Columns outside [clip_x0, clip_x1) are dropped, which is
+// what lets a name scroll under the panel edge instead of over it; the
+// default admits everything, and draw sets it around a scrolling row.
+int g_clip_x0 = 0, g_clip_x1 = 1 << 30;
 
-void put(const Blit& d, int x, int y, u32 colour) {
+void put(const Canvas& d, int x, int y, u32 colour) {
   if (x < g_clip_x0 || x >= g_clip_x1) return;
-  if (x < 0 || x >= static_cast<int>(ds::SCREEN_W) || y < 0 || y >= static_cast<int>(ds::SCREEN_H)) return;
-  const BlitRect r = blit_rect(d, x, y);
-  for (u32 yy = r.y0; yy < r.y1; ++yy)
-    for (u32 xx = r.x0; xx < r.x1; ++xx) d.px[yy * d.pitch + xx] = colour;
+  if (x < 0 || x >= d.w || y < 0 || y >= d.h) return;
+  d.px[static_cast<size_t>(y) * d.pitch + static_cast<size_t>(x)] = colour;
 }
 
-void fill_rect(const Blit& d, int x, int y, int w, int h, u32 colour) {
-  for (int yy = y; yy < y + h; ++yy)
-    for (int xx = x; xx < x + w; ++xx) put(d, xx, yy, colour);
+// Clipped once around the whole span rather than per pixel: a filled row is
+// the commonest thing drawn and the panel is mostly fill.
+void fill_rect(const Canvas& d, int x, int y, int w, int h, u32 colour) {
+  const int x0 = std::max({x, 0, g_clip_x0}), x1 = std::min({x + w, d.w, g_clip_x1});
+  const int y0 = std::max(y, 0), y1 = std::min(y + h, d.h);
+  for (int yy = y0; yy < y1; ++yy) {
+    u32* row = d.px + static_cast<size_t>(yy) * d.pitch;
+    for (int xx = x0; xx < x1; ++xx) row[xx] = colour;
+  }
 }
 
 constexpr u32 kInk = 0xFFFFFFFF, kDim = 0xFF909090, kPanel = 0xFF101018, kEdge = 0xFF5060A0, kSel = 0xFF3050A0;
 constexpr u32 kEdgeText = 0xFFA0B0E0, kPanelEdgeDim = 0xFF303040;   // group headings; the scroll-bar track
 
 // The panel every page sits in: a filled box with a one-pixel edge.
-void panel(const Blit& d, int x, int y, int w, int h) {
+void panel(const Canvas& d, int x, int y, int w, int h) {
   fill_rect(d, x, y, w, h, kPanel);
   fill_rect(d, x, y, w, 1, kEdge);
   fill_rect(d, x, y + h - 1, w, 1, kEdge);
@@ -96,15 +126,16 @@ void panel(const Blit& d, int x, int y, int w, int h) {
 // A scroll bar for a list page, because the list gives no other clue how long
 // it is: some games have five thousand cheats, and a library can be as long.
 // Drawn only when there is something off screen.
-void scroll_bar(const Blit& d, int px0, int py0, int n, int top) {
-  if (n <= kCheatVisible) return;
-  const int track_x = px0 + kCheatPanelW - 5, track_y = py0 + kCheatRowsY - 2;
-  const int track_h = kCheatVisible * kCheatRowH;
-  fill_rect(d, track_x, track_y, 2, track_h, kPanelEdgeDim);
-  int bar = track_h * kCheatVisible / n;
-  if (bar < 4) bar = 4;
+void scroll_bar(const Canvas& d, const Metrics& m, int px0, int py0, int panel_w, int visible, int n, int top) {
+  if (n <= visible) return;
+  const int w = std::max(2, m.list_s * 2);
+  const int track_x = px0 + panel_w - w - m.list_s * 3, track_y = py0 + m.list_rows_y - m.list_s * 2;
+  const int track_h = visible * m.list_row_h;
+  fill_rect(d, track_x, track_y, w, track_h, kPanelEdgeDim);
+  int bar = track_h * visible / n;
+  if (bar < 4 * m.list_s) bar = 4 * m.list_s;
   const int span = track_h - bar;
-  fill_rect(d, track_x, track_y + (span > 0 ? span * top / (n - kCheatVisible) : 0), 2, bar, kEdge);
+  fill_rect(d, track_x, track_y + (span > 0 ? span * top / (n - visible) : 0), w, bar, kEdge);
 }
 
 // The root page, in order. A null label is the slot row: it is formatted from
@@ -123,11 +154,9 @@ constexpr struct RootItem { const char* label; Menu::Result result; } kRoot[] = 
 static_assert(static_cast<int>(std::size(kRoot)) == Menu::kRootRows, "kRootRows must match the table");
 static_assert(kRoot[kSlotRow].label == nullptr, "kSlotRow must name the slot row");
 static_assert(kRoot[kCheatRow].result == Menu::Result::None, "kCheatRow must name the cheats row");
-// Rows are cheap to add (one entry above) right up until the panel leaves the
-// screen; at this size the root page holds eight. Past that, shrink the row
-// text or paginate -- do not let it clip, which `put` would do in silence.
-static_assert(panel_height(Menu::kRootRows) <= static_cast<int>(ds::SCREEN_H), "the root page no longer fits the screen");
-static_assert(panel_height(Menu::kSlotRows) <= static_cast<int>(ds::SCREEN_H), "the slot page no longer fits the screen");
+// Rows are cheap to add (one entry above). The panel is sized from the canvas
+// at draw time and the glyph scale steps down if it would not fit, so a new
+// row costs height rather than clipping in silence the way `put` would.
 
 } // namespace
 
@@ -137,7 +166,7 @@ int text_width(int scale, const char* s) {
   return n > 0 ? n * kAdvance * scale - scale : 0;   // no gap after the last glyph
 }
 
-int draw_text(const Blit& d, int x, int y, int scale, u32 colour, const char* s) {
+int draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s) {
   for (const char* p = s; *p; ++p) {
     const u8* g = kFont[glyph(*p)];
     for (int r = 0; r < kGlyphH; ++r)
@@ -147,6 +176,16 @@ int draw_text(const Blit& d, int x, int y, int scale, u32 colour, const char* s)
     x += kAdvance * scale;
   }
   return x - scale;
+}
+
+int ui_scale(const Canvas& d) {
+  // Twice the canvas's reduction against a DS screen: the menu used to draw at
+  // scale 2 into a 256x192 buffer that was then upscaled to the panel, so this
+  // is the same size on the glass. A 256x192 canvas -- the DS-space fallback --
+  // therefore lands back on exactly 2.
+  const double r = std::min(static_cast<double>(d.w) / ds::SCREEN_W, static_cast<double>(d.h) / ds::SCREEN_H);
+  const int s = static_cast<int>(std::lround(2.0 * r));
+  return std::clamp(s, 2, 10);
 }
 
 void dim_framebuffer(u32* px, u32 n) {
@@ -208,8 +247,8 @@ void Menu::move_cheat_row(int delta) {
       // Scroll only as far as it takes to bring the selection back into view,
       // so paging through a long list does not reset it to the top edge.
       if (cheat_row_ < cheat_top_) cheat_top_ = cheat_row_;
-      if (cheat_row_ >= cheat_top_ + kCheatVisible) cheat_top_ = cheat_row_ - kCheatVisible + 1;
-      if (cheat_top_ > n - kCheatVisible) cheat_top_ = n - kCheatVisible;
+      if (cheat_row_ >= cheat_top_ + visible_) cheat_top_ = cheat_row_ - visible_ + 1;
+      if (cheat_top_ > n - visible_) cheat_top_ = n - visible_;
       if (cheat_top_ < 0) cheat_top_ = 0;
       return;
     }
@@ -253,8 +292,8 @@ void Menu::move_game_row(int delta) {
   const int at = game_row_ + delta;
   game_row_ = at < 0 ? 0 : at >= n ? n - 1 : at;
   if (game_row_ < game_top_) game_top_ = game_row_;
-  if (game_row_ >= game_top_ + kCheatVisible) game_top_ = game_row_ - kCheatVisible + 1;
-  if (game_top_ > n - kCheatVisible) game_top_ = n - kCheatVisible;
+  if (game_row_ >= game_top_ + visible_) game_top_ = game_row_ - visible_ + 1;
+  if (game_top_ > n - visible_) game_top_ = n - visible_;
   if (game_top_ < 0) game_top_ = 0;
 }
 
@@ -323,8 +362,8 @@ Menu::Result Menu::handle(u32 presses) {
     // A is the only way off it -- see open_games() on why B is inert.
     if (hit(B::BTN_UP))   move_game_row(-1);
     if (hit(B::BTN_DOWN)) move_game_row(+1);
-    if (hit(B::BTN_L)) move_game_row(-kCheatVisible);
-    if (hit(B::BTN_R)) move_game_row(+kCheatVisible);
+    if (hit(B::BTN_L)) move_game_row(-visible_);
+    if (hit(B::BTN_R)) move_game_row(+visible_);
     if ((hit(B::BTN_A) || hit(B::BTN_START)) && games_ && !games_->empty()) {
       chosen_ = (*games_)[static_cast<size_t>(game_row_)].path;
       return Result::Launch;
@@ -336,8 +375,8 @@ Menu::Result Menu::handle(u32 presses) {
     // walk a row at a time.
     if (hit(B::BTN_UP))   move_cheat_row(-1);
     if (hit(B::BTN_DOWN)) move_cheat_row(+1);
-    if (hit(B::BTN_L)) for (int i = 0; i < kCheatVisible; ++i) move_cheat_row(-1);
-    if (hit(B::BTN_R)) for (int i = 0; i < kCheatVisible; ++i) move_cheat_row(+1);
+    if (hit(B::BTN_L)) for (int i = 0; i < visible_; ++i) move_cheat_row(-1);
+    if (hit(B::BTN_R)) for (int i = 0; i < visible_; ++i) move_cheat_row(+1);
     if (hit(B::BTN_A)) toggle_cheat();
     if (hit(B::BTN_B)) { page_ = Page::Root; row_ = kCheatRow; }
     return Result::None;
@@ -377,37 +416,60 @@ std::string fit(const std::string& text, int scale, int width_px) {
 }
 } // namespace
 
-void draw_notice(const Blit& d, const char* title, const char* line2, const char* line3) {
-  constexpr int w = 232, h = kTitleY + kGlyphPx * 2 + 6 + kGlyphH + 22;
-  const int x0 = (SCREEN_W - w) / 2, y0 = (static_cast<int>(d.h) - h) / 2;
+void draw_notice(const Canvas& d, const char* title, const char* line2, const char* line3) {
+  const Metrics m = metrics(d);
+  const int w = std::min(d.w - 2 * m.pad, 116 * m.s);
+  const int h = m.title_y + m.glyph_px * 2 + 3 * m.s + kGlyphH * m.list_s + 11 * m.s;
+  const int x0 = (d.w - w) / 2, y0 = (d.h - h) / 2;
   panel(d, x0, y0, w, h);
   const auto centred = [&](int y, int scale, u32 ink, const char* s) {
     draw_text(d, x0 + (w - text_width(scale, s)) / 2, y, scale, ink, s);
   };
   // Titles run long ("Mario & Luigi - Bowser's Inside Story"): cut to the
   // panel with an ellipsis, as the game list does.
-  centred(y0 + kTitleY, kScale, kInk, fit(title, kScale, w - 16).c_str());
-  centred(y0 + kTitleY + kGlyphPx + 6, kScale, kInk, line2);
-  centred(y0 + kTitleY + kGlyphPx * 2 + 12, 1, kDim, line3);
+  centred(y0 + m.title_y, m.s, kInk, fit(title, m.s, w - 8 * m.s).c_str());
+  centred(y0 + m.title_y + m.glyph_px + 3 * m.s, m.s, kInk, line2);
+  centred(y0 + m.title_y + m.glyph_px * 2 + 6 * m.s, m.list_s, kDim, line3);
 }
 
-// The cheats page: one scrolling list with the database's own headings in it.
-void Menu::draw_cheats(const Blit& d) const {
-  const int px0 = (static_cast<int>(ds::SCREEN_W) - kCheatPanelW) / 2;
-  const int py0 = (static_cast<int>(ds::SCREEN_H) - kCheatPanelH) / 2;
-  panel(d, px0, py0, kCheatPanelW, kCheatPanelH);
+// The two scrolling pages share their frame: panel, centred title, rule, and
+// the geometry every row is laid out against. `visible_` is measured here
+// because update() needs it and only draw knows the canvas.
+namespace {
+struct ListFrame { Metrics m; int px0, py0, w, h, visible, text_x, avail; };
 
+ListFrame list_frame(const Canvas& d, const char* title) {
+  ListFrame f{};
+  f.m = metrics(d);
+  f.w = list_panel_w(d, f.m);
+  f.h = list_panel_h(d, f.m);
+  f.px0 = (d.w - f.w) / 2;
+  f.py0 = (d.h - f.h) / 2;
+  f.visible = list_visible(f.m, f.h);
+  panel(d, f.px0, f.py0, f.w, f.h);
+  draw_text(d, f.px0 + (f.w - text_width(f.m.s, title)) / 2, f.py0 + f.m.title_y, f.m.s, kInk, title);
+  fill_rect(d, f.px0 + f.m.pad, f.py0 + f.m.rule_y, f.w - 2 * f.m.pad, std::max(1, f.m.s / 2), kEdge);
+  // The scroll bar's track sits in the right margin, so rows stop short of it.
+  f.text_x = f.px0 + f.m.pad;
+  f.avail = f.w - 2 * f.m.pad - 6 * f.m.list_s;
+  return f;
+}
+} // namespace
+
+// The cheats page: one scrolling list with the database's own headings in it.
+void Menu::draw_cheats(const Canvas& d) const {
   // The heading counts the codes, not the lines, so it matches the number the
   // frontend logged when it loaded them.
   size_t on = 0;
   if (codes_) for (const cheat::Code& c : *codes_) if (c.enabled) ++on;
   char title[32];
   std::snprintf(title, sizeof title, "CHEATS  %zu ON", on);
-  draw_text(d, px0 + (kCheatPanelW - text_width(kScale, title)) / 2, py0 + kTitleY, kScale, kInk, title);
-  fill_rect(d, px0 + 8, py0 + kRuleY, kCheatPanelW - 16, 1, kEdge);
+  const ListFrame f = list_frame(d, title);
+  const Metrics& m = f.m;
+  visible_ = f.visible;
 
   if (lines_.empty()) {
-    draw_text(d, px0 + 10, py0 + kCheatRowsY + 4, kCheatScale, kDim, "NO CHEATS FOR THIS GAME");
+    draw_text(d, f.text_x + m.list_s * 2, f.py0 + m.list_rows_y + m.list_s * 4, m.list_s, kDim, "NO CHEATS FOR THIS GAME");
     return;
   }
 
@@ -415,130 +477,130 @@ void Menu::draw_cheats(const Blit& d) const {
   // move_cheat_row keeps this in range; clamped again because draw must be
   // safe whatever the caller did.
   int top = cheat_top_;
-  if (top > n - kCheatVisible) top = n - kCheatVisible;
+  if (top > n - f.visible) top = n - f.visible;
   if (top < 0) top = 0;
 
-  const int text_x = px0 + 8, avail = kCheatPanelW - 16 - 6;
   marquee_overflow_ = 0;   // set below if the selected row is actually too long
-  for (int i = 0; i < kCheatVisible && top + i < n; ++i) {
+  for (int i = 0; i < f.visible && top + i < n; ++i) {
     const Line& l = lines_[static_cast<size_t>(top + i)];
-    const int ry = py0 + kCheatRowsY + i * kCheatRowH;
+    const int ry = f.py0 + m.list_rows_y + i * m.list_row_h;
     const bool sel = top + i == cheat_row_;
-    if (sel) fill_rect(d, px0 + 4, ry - 2, kCheatPanelW - 14, kCheatRowH, kSel);
+    if (sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
     if (l.kind == Line::Heading) {
       const std::string& name = (*groups_)[static_cast<size_t>(l.at)].name;
-      draw_text(d, text_x, ry, kCheatScale, kEdgeText, fit(name, kCheatScale, avail).c_str());
+      draw_text(d, f.text_x, ry, m.list_s, kEdgeText, fit(name, m.list_s, f.avail).c_str());
       continue;
     }
     const cheat::Code& c = (*codes_)[static_cast<size_t>(l.at)];
     if (l.kind == Line::Note) {
       // A note is the database author talking, not a switch: no box for it.
-      draw_text(d, text_x + 4, ry, kCheatScale, kDim, fit(c.name, kCheatScale, avail - 4).c_str());
+      draw_text(d, f.text_x + 4 * m.list_s, ry, m.list_s, kDim, fit(c.name, m.list_s, f.avail - 4 * m.list_s).c_str());
       continue;
     }
     const char* box = c.enabled ? "[X] " : "[ ] ";
     const u32 ink = c.enabled || sel ? kInk : kDim;
     if (!sel) {
-      draw_text(d, text_x, ry, kCheatScale, ink, fit(std::string(box) + c.name, kCheatScale, avail).c_str());
+      draw_text(d, f.text_x, ry, m.list_s, ink, fit(std::string(box) + c.name, m.list_s, f.avail).c_str());
       continue;
     }
     // The selected row scrolls its name rather than cutting it, so the whole
     // of it can be read without leaving the row. The checkbox stays put --
     // it is the thing being toggled, and it must not scroll out of sight --
     // so only the name moves, inside what is left of the row.
-    const int box_w = text_width(kCheatScale, box) + kCheatScale;
-    draw_text(d, text_x, ry, kCheatScale, ink, box);
-    const int name_x = text_x + box_w, name_avail = avail - box_w;
-    marquee_overflow_ = text_width(kCheatScale, c.name.c_str()) - name_avail;
+    const int box_w = text_width(m.list_s, box) + m.list_s;
+    draw_text(d, f.text_x, ry, m.list_s, ink, box);
+    const int name_x = f.text_x + box_w, name_avail = f.avail - box_w;
+    marquee_overflow_ = text_width(m.list_s, c.name.c_str()) - name_avail;
     if (marquee_overflow_ <= 0) {
-      draw_text(d, name_x, ry, kCheatScale, ink, c.name.c_str());
+      draw_text(d, name_x, ry, m.list_s, ink, c.name.c_str());
       continue;
     }
     const int clip0 = g_clip_x0, clip1 = g_clip_x1;
     g_clip_x0 = name_x;
     g_clip_x1 = name_x + name_avail;
-    draw_text(d, name_x - marquee_offset(marquee_overflow_), ry, kCheatScale, ink, c.name.c_str());
+    draw_text(d, name_x - marquee_offset(marquee_overflow_), ry, m.list_s, ink, c.name.c_str());
     g_clip_x0 = clip0;
     g_clip_x1 = clip1;
   }
 
-  scroll_bar(d, px0, py0, n, top);
+  scroll_bar(d, m, f.px0, f.py0, f.w, f.visible, n, top);
 }
 
 // The game picker: the cheats page's list, with a row per ROM and nothing to
 // toggle. A long filename is the rule rather than the exception here, so the
 // selected row scrolls its name exactly as a long cheat name does.
-void Menu::draw_games(const Blit& d) const {
-  const int px0 = (static_cast<int>(ds::SCREEN_W) - kCheatPanelW) / 2;
-  const int py0 = (static_cast<int>(ds::SCREEN_H) - kCheatPanelH) / 2;
-  panel(d, px0, py0, kCheatPanelW, kCheatPanelH);
-
+void Menu::draw_games(const Canvas& d) const {
   const int n = games_ ? static_cast<int>(games_->size()) : 0;
   char title[32];
   std::snprintf(title, sizeof title, "GAMES  %d", n);
-  draw_text(d, px0 + (kCheatPanelW - text_width(kScale, title)) / 2, py0 + kTitleY, kScale, kInk, title);
-  fill_rect(d, px0 + 8, py0 + kRuleY, kCheatPanelW - 16, 1, kEdge);
+  const ListFrame f = list_frame(d, title);
+  const Metrics& m = f.m;
+  visible_ = f.visible;
 
   if (n == 0) {
     // Say what is wrong rather than showing an empty box: an unset or empty
     // games directory is the likely reason, and it is fixable.
-    draw_text(d, px0 + 10, py0 + kCheatRowsY + 4, kCheatScale, kDim, "NO GAMES FOUND -- SET");
-    draw_text(d, px0 + 10, py0 + kCheatRowsY + 4 + kCheatRowH, kCheatScale, kDim, "[PATHS] GAMES IN THE");
-    draw_text(d, px0 + 10, py0 + kCheatRowsY + 4 + 2 * kCheatRowH, kCheatScale, kDim, "CONFIG FILE");
+    const char* why[] = {"NO GAMES FOUND -- SET", "[PATHS] GAMES IN THE", "CONFIG FILE"};
+    for (int i = 0; i < 3; ++i)
+      draw_text(d, f.text_x + m.list_s * 2, f.py0 + m.list_rows_y + m.list_s * 4 + i * m.list_row_h, m.list_s, kDim, why[i]);
     return;
   }
 
   int top = game_top_;
-  if (top > n - kCheatVisible) top = n - kCheatVisible;
+  if (top > n - f.visible) top = n - f.visible;
   if (top < 0) top = 0;
 
-  const int text_x = px0 + 8, avail = kCheatPanelW - 16 - 6;
   marquee_overflow_ = 0;
-  for (int i = 0; i < kCheatVisible && top + i < n; ++i) {
+  for (int i = 0; i < f.visible && top + i < n; ++i) {
     const std::string& name = (*games_)[static_cast<size_t>(top + i)].title;
-    const int ry = py0 + kCheatRowsY + i * kCheatRowH;
+    const int ry = f.py0 + m.list_rows_y + i * m.list_row_h;
     const bool sel = top + i == game_row_;
-    if (sel) fill_rect(d, px0 + 4, ry - 2, kCheatPanelW - 14, kCheatRowH, kSel);
+    if (sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
     if (!sel) {
-      draw_text(d, text_x, ry, kCheatScale, kDim, fit(name, kCheatScale, avail).c_str());
+      draw_text(d, f.text_x, ry, m.list_s, kDim, fit(name, m.list_s, f.avail).c_str());
       continue;
     }
-    marquee_overflow_ = text_width(kCheatScale, name.c_str()) - avail;
-    if (marquee_overflow_ <= 0) { draw_text(d, text_x, ry, kCheatScale, kInk, name.c_str()); continue; }
+    marquee_overflow_ = text_width(m.list_s, name.c_str()) - f.avail;
+    if (marquee_overflow_ <= 0) { draw_text(d, f.text_x, ry, m.list_s, kInk, name.c_str()); continue; }
     const int clip0 = g_clip_x0, clip1 = g_clip_x1;
-    g_clip_x0 = text_x;
-    g_clip_x1 = text_x + avail;
-    draw_text(d, text_x - marquee_offset(marquee_overflow_), ry, kCheatScale, kInk, name.c_str());
+    g_clip_x0 = f.text_x;
+    g_clip_x1 = f.text_x + f.avail;
+    draw_text(d, f.text_x - marquee_offset(marquee_overflow_), ry, m.list_s, kInk, name.c_str());
     g_clip_x0 = clip0;
     g_clip_x1 = clip1;
   }
-  scroll_bar(d, px0, py0, n, top);
+  scroll_bar(d, m, f.px0, f.py0, f.w, f.visible, n, top);
 }
 
-void Menu::draw(const Blit& d) const {
+void Menu::draw(const Canvas& d) const {
   if (page_ == Page::Games) { draw_games(d); return; }
   if (page_ == Page::Cheats) { draw_cheats(d); return; }
   const bool slots = page_ == Page::Slot;
-  const int scale = kScale, row_h = kRowH, title_y = kTitleY, rule_y = kRuleY, rows_y = kRowsY;
+  Metrics m = metrics(d);
   const int rows = slots ? kSlotRows : root_rows();   // the slot page stacks its ten in two columns
-  const int panel_w = slots ? 200 : 150;
-  const int panel_h = panel_height(rows);
-  const int px0 = (static_cast<int>(ds::SCREEN_W) - panel_w) / 2;
-  const int py0 = (static_cast<int>(ds::SCREEN_H) - panel_h) / 2;
+  // Step the glyph scale down rather than let a tall page run off a short
+  // canvas: `put` would clip it in silence, which is how the old fixed
+  // geometry failed. Two rows always fit at scale 2 on any canvas this runs on.
+  while (m.s > 2 && (panel_height(m, rows) > d.h || (slots ? 100 : 75) * m.s > d.w)) m = metrics(Canvas{d.px, d.pitch, d.w * (m.s - 1) / m.s, d.h * (m.s - 1) / m.s});
+  const int scale = m.s, row_h = m.row_h, title_y = m.title_y, rule_y = m.rule_y, rows_y = m.rows_y;
+  const int panel_w = std::min(d.w - 2 * m.pad, (slots ? 100 : 75) * m.s);
+  const int panel_h = panel_height(m, rows);
+  const int px0 = (d.w - panel_w) / 2;
+  const int py0 = (d.h - panel_h) / 2;
   panel(d, px0, py0, panel_w, panel_h);
 
   const char* title = slots ? "STATE SLOT" : "PAUSED";
   draw_text(d, px0 + (panel_w - text_width(scale, title)) / 2, py0 + title_y, scale, kInk, title);
-  fill_rect(d, px0 + 8, py0 + rule_y, panel_w - 16, 1, kEdge);
+  fill_rect(d, px0 + m.pad, py0 + rule_y, panel_w - 2 * m.pad, std::max(1, m.s / 2), kEdge);
 
   char buf[24];
   for (int i = 0; i < (slots ? 10 : root_rows()); ++i) {
     // Slots fill a column at a time: 0-4 on the left, 5-9 on the right.
     const int col = slots ? i / kSlotRows : 0;
-    const int cell_w = slots ? (panel_w - 16) / 2 : panel_w - 16;
-    const int cell_x = px0 + 8 + col * cell_w;
+    const int cell_w = slots ? (panel_w - 2 * m.pad) / 2 : panel_w - 2 * m.pad;
+    const int cell_x = px0 + m.pad + col * cell_w;
     const int ry = py0 + rows_y + (slots ? i % kSlotRows : i) * row_h;
-    if (i == row_) fill_rect(d, cell_x, ry - 2, cell_w, row_h, kSel);
+    if (i == row_) fill_rect(d, cell_x, ry - m.s, cell_w, row_h, kSel);
     const char* label = buf;
     const int item = slots ? i : root_item(i);
     if (slots) std::snprintf(buf, sizeof buf, "%d %s", i, used_[i] ? "USED" : "EMPTY");
@@ -547,7 +609,7 @@ void Menu::draw(const Blit& d) const {
     // Loading an empty slot, and every empty slot in the list, reads dimmer:
     // the menu says what is there before the player commits to it.
     const bool weak = (slots && !used_[i]) || (!slots && kRoot[item].result == Result::Load && !used_[slot_]);
-    draw_text(d, cell_x + 6, ry, scale, weak && i != row_ ? kDim : kInk, label);
+    draw_text(d, cell_x + 3 * m.s, ry, scale, weak && i != row_ ? kDim : kInk, label);
   }
 }
 

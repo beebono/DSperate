@@ -505,6 +505,14 @@ void Session::save_enabled(NDS& nds) const {
 // the bottom screen in DS pixel space and mapped onto the destination (the
 // frontend's scaled buffer, or a copy of the framebuffer).
 using CursorDst = ds::sdl::Blit;   // px/pitch/h and the DS-column map; xrun null: 1:1
+
+// A canvas over a DS-sized scratch buffer: the fallback for the tiers with no
+// panel-resolution surface the CPU may write. At 256x192 the menu's own scale
+// works out to 2, which is the size it drew at when it lived in DS space, so
+// this path puts down exactly the pixels it always did.
+ds::sdl::Canvas ds_canvas(u32* px) {
+  return ds::sdl::Canvas{px, ds::SCREEN_W, static_cast<int>(ds::SCREEN_W), static_cast<int>(ds::SCREEN_H)};
+}
 void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
   auto fill = [&](int x, int y, u32 colour) {
     if (x < 0 || x > 255 || y < 0 || y > 191) return;
@@ -1161,7 +1169,7 @@ sdl_ready:
       if (cancel) std::snprintf(line2, sizeof line2, "STOPPING");
       else if (now - last_change > 5000) std::snprintf(line2, sizeof line2, "WAITING ON THE CARD");
       else std::snprintf(line2, sizeof line2, "UNPACKING%.*s", dots, "...");
-      ds::sdl::draw_notice(ds::sdl::Blit{menu_fb[menu_screen].data(), ds::SCREEN_W, ds::SCREEN_H, nullptr},
+      ds::sdl::draw_notice(ds_canvas(menu_fb[menu_screen].data()),
                            title.c_str(), line2, "FIRST LAUNCH ONLY    B CANCELS");
       ds::sdl::Display::Target target[2] = {};
       bool scaled = display.begin_frame(target);
@@ -1660,7 +1668,16 @@ sdl_ready:
           ds::sdl::dim_framebuffer(menu_fb[i].data(), static_cast<u32>(menu_fb[i].size()));
           fb[i] = menu_fb[i].data();
         }
-        menu.draw(ds::sdl::Blit{menu_fb[menu_screen].data(), ds::SCREEN_W, ds::SCREEN_H, nullptr});
+        // Where the panel's own pixels can be written, the menu is drawn on
+        // them: it is then laid out for the screen it is actually on rather
+        // than for one DS screen's slice of it, which is what a single-screen
+        // device wants, and it comes out at panel resolution instead of being
+        // upscaled with the picture. The other two tiers (the display engine,
+        // whose scaler reads DS-sized buffers, and SDL_Renderer, which has no
+        // frame buffer) keep the old path: the same drawing code over a
+        // 256x192 scratch, which then goes through the scaler like a frame.
+        const bool on_canvas = display.canvas_capable();
+        if (!on_canvas) menu.draw(ds_canvas(menu_fb[menu_screen].data()));
         // The menu has to reach the screen the same way a frame does. On the
         // scanline tiers (window surface, dmabuf, scanout) Display has no
         // renderer at all -- open() returns before creating one -- so draw()
@@ -1673,8 +1690,14 @@ sdl_ready:
         if (scaled) {
           set_scale_targets(target, true, true);
           for (int i = 0; i < 2; ++i) nds.gpu.scale_image(i, menu_fb[i].data());
-          display.end_frame();
-          if (dual_window) display2.end_frame();
+          // The insets go down before the menu, so the PiP inset cannot land
+          // on top of it.
+          display.finish_views();
+          if (dual_window) display2.finish_views();
+          ds::sdl::Display::CanvasView cv;
+          if (on_canvas && display.canvas(cv)) menu.draw(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h});
+          display.present();
+          if (dual_window) display2.present();
           // Nothing may keep pointing into a buffer the display just released.
           set_scale_targets(target, false);
         } else {

@@ -106,7 +106,7 @@ void test_draw_bounds() {
       std::fill(fb.begin(), fb.end(), 0xDEADBEEF);
       // Draw into the middle of a larger buffer: a guard row and column on
       // every side catches a write past the screen.
-      m.draw(ds::sdl::Blit{fb.data() + (w + 2) + 1, w + 2, h, nullptr});
+      m.draw(ds::sdl::Canvas{fb.data() + (w + 2) + 1, static_cast<ds::u32>(w + 2), w, h});
       for (u32 x = 0; x < w + 2; ++x) CHECK(fb[x] == 0xDEADBEEF);                        // above
       for (u32 x = 0; x < w + 2; ++x) CHECK(fb[(h + 1) * (w + 2) + x] == 0xDEADBEEF);    // below
       for (u32 y = 0; y < h + 2; ++y) CHECK(fb[y * (w + 2)] == 0xDEADBEEF);              // left
@@ -119,15 +119,15 @@ void test_draw_bounds() {
 
 void test_text_metrics() {
   std::vector<u32> fb(ds::SCREEN_W * ds::SCREEN_H, 0);
-  const ds::sdl::Blit d{fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr};
+  const ds::sdl::Canvas d{fb.data(), ds::SCREEN_W, ds::SCREEN_W, ds::SCREEN_H};
   CHECK(ds::sdl::text_width(2, "") == 0);
   CHECK(ds::sdl::text_width(1, "A") == 5);
   CHECK(ds::sdl::text_width(2, "AB") == 22);       // 10 + gap 2 + 10
   CHECK(ds::sdl::draw_text(d, 10, 10, 2, 0xFFFFFFFF, "AB") == 10 + 22);
   // Lowercase folds to uppercase, so the two draw the same pixels.
   std::vector<u32> a(ds::SCREEN_W * ds::SCREEN_H, 0), b = a;
-  ds::sdl::draw_text(ds::sdl::Blit{a.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, 4, 4, 2, 0xFFFFFFFF, "save");
-  ds::sdl::draw_text(ds::sdl::Blit{b.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, 4, 4, 2, 0xFFFFFFFF, "SAVE");
+  ds::sdl::draw_text(ds::sdl::Canvas{a.data(), ds::SCREEN_W, ds::SCREEN_W, ds::SCREEN_H}, 4, 4, 2, 0xFFFFFFFF, "save");
+  ds::sdl::draw_text(ds::sdl::Canvas{b.data(), ds::SCREEN_W, ds::SCREEN_W, ds::SCREEN_H}, 4, 4, 2, 0xFFFFFFFF, "SAVE");
   CHECK(a == b);
 }
 
@@ -285,7 +285,7 @@ void test_cheats_draw_bounds() {
   open_cheats(m);
   for (int step = 0; step < 210; ++step) {
     std::fill(fb.begin(), fb.end(), 0xDEADBEEF);
-    m.draw(ds::sdl::Blit{fb.data() + (w + 2) + 1, w + 2, h, nullptr});
+    m.draw(ds::sdl::Canvas{fb.data() + (w + 2) + 1, static_cast<ds::u32>(w + 2), w, h});
     for (u32 x = 0; x < w + 2; ++x) CHECK(fb[x] == 0xDEADBEEF);
     for (u32 x = 0; x < w + 2; ++x) CHECK(fb[(h + 1) * (w + 2) + x] == 0xDEADBEEF);
     for (u32 y = 0; y < h + 2; ++y) CHECK(fb[y * (w + 2)] == 0xDEADBEEF);
@@ -302,7 +302,7 @@ void test_cheats_draw_empty() {
   Menu m;
   m.set_cheats(&none, &no_groups);
   m.set_open(true);
-  m.draw(ds::sdl::Blit{fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr});
+  m.draw(ds::sdl::Canvas{fb.data(), ds::SCREEN_W, ds::SCREEN_W, ds::SCREEN_H});
 }
 
 // --- key repeat and the scrolling name ------------------------------------
@@ -400,7 +400,7 @@ void test_key_repeat_only_on_cheats() {
 void test_marquee() {
   const u32 w = ds::SCREEN_W, h = ds::SCREEN_H;
   std::vector<u32> fb(w * h, 0);
-  const ds::sdl::Blit d{fb.data(), w, h, nullptr};
+  const ds::sdl::Canvas d{fb.data(), static_cast<ds::u32>(w), w, h};
 
   FlatFixture longnames(4, "An extremely long cheat name that cannot possibly fit across the panel");
   Menu m;
@@ -430,7 +430,7 @@ void test_marquee() {
 void test_marquee_resets_on_move() {
   const u32 w = ds::SCREEN_W, h = ds::SCREEN_H;
   std::vector<u32> fb(w * h, 0);
-  const ds::sdl::Blit d{fb.data(), w, h, nullptr};
+  const ds::sdl::Canvas d{fb.data(), static_cast<ds::u32>(w), w, h};
   FlatFixture f(10, "An extremely long cheat name that cannot possibly fit across the panel");
   Menu m;
   m.set_cheats(&f.codes, &f.groups);
