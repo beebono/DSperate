@@ -2905,10 +2905,12 @@ int Renderer3D::steal_mode() {
 // worker still has to reach; whatever is claimed here is on the display's
 // path anyway. Returns true if `upto` is done -- without having waited.
 bool Renderer3D::steal_bins(u64 gen, u32 upto) {
-  const int mode = steal_mode();
-  if (mode == 0 || (mode == 1 && std::this_thread::get_id() != owner_)) return false;
+  // The common line finds its band drawn: one atomic load, no thread-id
+  // lookup -- the fast path is what it was before stealing.
   const u64 mask = u64{1} << upto;
   if (pool_->done(gen, mask)) return true;
+  const int mode = steal_mode();
+  if (mode == 0 || (mode == 1 && std::this_thread::get_id() != owner_)) return false;
   // A band of this thread's own for the duration; none free means two
   // thieves are already at it, and this one waits like before.
   StealBand* sb = nullptr;
