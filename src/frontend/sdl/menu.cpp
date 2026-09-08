@@ -56,9 +56,13 @@ struct Metrics {
   int list_row_h, list_rows_y;
 };
 
-Metrics metrics(const Canvas& d) {
+// Metrics for an explicit glyph scale. The pages that must shrink to fit step
+// this down directly: deriving a smaller scale by shrinking the canvas and
+// asking again does not always converge -- 640x480 asks for 5, and the
+// canvas that would give 4 gives 4 again forever.
+Metrics metrics_for(int s) {
   Metrics m{};
-  m.s = ui_scale(d);
+  m.s = std::clamp(s, 2, 10);
   // Cheat names are sentences ("Press L+R+SELECT For 7 Red Coins") and a game
   // can have thousands of them, so the list pages drop to half scale: about
   // thirty characters across and twelve at a time, against fifteen and five.
@@ -73,6 +77,8 @@ Metrics metrics(const Canvas& d) {
   m.list_rows_y = m.rule_y + 3 * m.s;
   return m;
 }
+
+Metrics metrics(const Canvas& d) { return metrics_for(ui_scale(d)); }
 
 int panel_height(const Metrics& m, int rows) { return m.rows_y + rows * m.row_h + m.pad; }
 // The list pages take most of the canvas: they are the ones with thousands of
@@ -738,7 +744,7 @@ void Menu::draw_options(const Canvas& d) const {
   if (rows > kOptionPages) widest = std::max(widest, text_width(m.s, save_row));
   // Step the scale down rather than clip, as the root page does.
   while (m.s > 2 && (widest + 8 * m.s > d.w || panel_height(m, rows) > d.h)) {
-    m = metrics(Canvas{d.px, d.pitch, d.w * (m.s - 1) / m.s, d.h * (m.s - 1) / m.s});
+    m = metrics_for(m.s - 1);
     widest = 0;
     for (int i = 0; i < kOptionPages; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
     if (rows > kOptionPages) { std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL"); widest = std::max(widest, text_width(m.s, save_row)); }
@@ -1049,8 +1055,7 @@ void Menu::draw_text_edit(const Canvas& d) const {
     return std::max({edit_max_ * kAdvance * mm.s, text_width(mm.s, edit_label_.c_str()),
                      text_width(mm.list_s, kHelp)}) + 8 * mm.s;
   };
-  while (m.s > 2 && want(m) > d.w)
-    m = metrics(Canvas{d.px, d.pitch, d.w * (m.s - 1) / m.s, d.h * (m.s - 1) / m.s});
+  while (m.s > 2 && want(m) > d.w) m = metrics_for(m.s - 1);
   const int panel_w = std::min(d.w - 2 * m.pad, want(m));
   const int panel_h = m.rows_y + m.row_h * 3 + m.pad;
   const int px0 = (d.w - panel_w) / 2, py0 = (d.h - panel_h) / 2;
@@ -1089,7 +1094,7 @@ void Menu::draw(const Canvas& d) const {
   // Step the glyph scale down rather than let a tall page run off a short
   // canvas: `put` would clip it in silence, which is how the old fixed
   // geometry failed. Two rows always fit at scale 2 on any canvas this runs on.
-  while (m.s > 2 && (panel_height(m, rows) > d.h || (slots ? 100 : 75) * m.s > d.w)) m = metrics(Canvas{d.px, d.pitch, d.w * (m.s - 1) / m.s, d.h * (m.s - 1) / m.s});
+  while (m.s > 2 && (panel_height(m, rows) > d.h || (slots ? 100 : 75) * m.s > d.w)) m = metrics_for(m.s - 1);
   const int scale = m.s, row_h = m.row_h, title_y = m.title_y, rule_y = m.rule_y, rows_y = m.rows_y;
   const int panel_w = std::min(d.w - 2 * m.pad, (slots ? 100 : 75) * m.s);
   const int panel_h = panel_height(m, rows);

@@ -3,9 +3,13 @@
 #include "frontend/sdl/menu.h"
 #include "core/io/io.h"
 #include "core/cheat/database.h"
+#include "frontend/sdl/settings.h"
 #include "check.h"
 
 #include <algorithm>
+#include <cstring>
+#include <map>
+#include <string>
 #include <vector>
 
 using ds::u32;
@@ -447,6 +451,455 @@ void test_marquee_resets_on_move() {
 
 } // namespace
 
+
+// A settings host with nothing behind it: the values live in a map, and the
+// dependency and tier questions are answered by fields the test sets. Enough
+// for the menu's own behaviour, which is what these tests are about.
+struct FakeHost : ds::sdl::SettingsHost {
+  std::map<std::string, std::string> kv;
+  std::map<std::string, bool> off;      // rows the test has switched off
+  std::vector<std::string> writes;      // keys set, in order
+  bool per_game = false, game = true, pad = false, capturing_ = false, user_ok = true;
+  std::string pending;                  // what the "device" is about to report
+  int commits = 0;
+
+  std::string get(const char* key) const override {
+    const auto it = kv.find(key);
+    return it == kv.end() ? "" : it->second;
+  }
+  void set(const char* key, const std::string& v) override { kv[key] = v; writes.push_back(key); }
+  bool enabled(const ds::sdl::Setting& s) const override {
+    const auto it = off.find(s.key);
+    return it == off.end() || !it->second;
+  }
+  const char* disabled_reason(const ds::sdl::Setting& s) const override { return enabled(s) ? "" : "NO"; }
+  bool value_allowed(const ds::sdl::Setting&, const char*) const override { return true; }
+  void commit() override { ++commits; }
+  bool save_per_game() const override { return per_game && game; }
+  void set_save_per_game(bool on) override { per_game = on && game; }
+  bool has_game() const override { return game; }
+
+  int binding_count(bool) const override { return 4; }
+  Binding binding(bool p, int i) const override {
+    Binding b;
+    b.key = (p ? "pad.k" : "keys.k") + std::to_string(i);
+    b.label = "ROW" + std::to_string(i);
+    const auto it = kv.find(b.key);
+    b.value = it == kv.end() ? "NONE" : it->second;
+    return b;
+  }
+  bool has_pad() const override { return pad; }
+  void begin_capture(bool) override { capturing_ = true; }
+  void cancel_capture() override { capturing_ = false; }
+  bool capturing() const override { return capturing_; }
+  std::string take_capture() override {
+    if (pending.empty()) return "";
+    std::string out; out.swap(pending); capturing_ = false; return out;
+  }
+  void bind(const std::string& k, const std::string& v) override { kv[k] = v; writes.push_back(k); }
+  void reset_bindings(bool) override { writes.push_back("reset"); }
+  std::vector<std::string> collisions() const override { return {}; }
+  bool user_settings_used() const override { return user_ok; }
+};
+
+// Walking into a page and back out again lands where it left, at every depth.
+// The old flat page state shared one row between the root and the slot page
+// and had to reset it on the way in and out, which a stack cannot do.
+void test_page_stack() {
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  // SAVE, LOAD, SLOT, OPTIONS, RESUME, QUIT -- no cheats row without codes.
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_DOWN));
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::None);      // into Options
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::None);      // into Emulation
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::None);      // back to Options
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::None);      // back to the root
+  // ... on the row that opened it, so A goes straight back in.
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::None);
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::None);
+  // And B at the root resumes rather than popping past it.
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::Resume);
+}
+
+// The slot page's selection is its own: entering it and coming back must not
+// move the root page's row, and vice versa.
+void test_slot_row_is_separate() {
+  Menu m;
+  m.set_open(true);
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_DOWN));                                 // the slot row
+  m.input(press(B::BTN_A));                                    // into the slot page
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_DOWN));                                 // move within it
+  m.input(press(B::BTN_B));                                    // back out without choosing
+  // Still on the slot row: A opens the slot page again rather than doing
+  // whatever the row two below happens to be.
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::None);
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::None);
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::Resume);
+}
+
+// Stepping a value: the ends clamp, a sentinel sits one step below the range,
+// and a percent survives being shown and written back.
+void test_setting_steps() {
+  FakeHost h;
+  const ds::sdl::Setting* t = ds::sdl::kEmuSettings;
+  const int n = ds::sdl::settings_count(t);
+  CHECK(n > 0);
+  const auto find = [&](const char* key) -> const ds::sdl::Setting& {
+    for (int i = 0; i < n; ++i) if (!std::strcmp(t[i].key, key)) return t[i];
+    CHECK(false);
+    return t[0];
+  };
+  const ds::sdl::Setting& fs = find("emu.frameskip");
+  CHECK(ds::sdl::step_value(fs, "0", -1, h) == "0");            // clamped at the bottom
+  CHECK(ds::sdl::step_value(fs, "3", +1, h) == "3");            // and at the top
+  CHECK(ds::sdl::step_value(fs, "1", +1, h) == "2");
+  // A sentinel: down off the bottom of the range, and back up onto it.
+  const ds::sdl::Setting& ff = find("emu.ff_speed");
+  CHECK(ds::sdl::step_value(ff, "1", -1, h) == "0");
+  CHECK(ds::sdl::display_value(ff, "0") == "UNLIMITED");
+  CHECK(ds::sdl::step_value(ff, "0", -1, h) == "0");            // nothing below it
+  CHECK(ds::sdl::step_value(ff, "0", +1, h) == "1");
+  // A boolean wraps, because a two-entry list has to.
+  const ds::sdl::Setting& oc = find("emu.cpu_oc");
+  CHECK(ds::sdl::step_value(oc, "false", +1, h) == "true");
+  CHECK(ds::sdl::step_value(oc, "true", +1, h) == "false");
+}
+
+// A percent row keeps a 0..1 double in the file: stepping it must not creep,
+// or a value would drift every time the row was moved.
+void test_percent_round_trip() {
+  FakeHost h;
+  const ds::sdl::Setting* t = ds::sdl::kLayoutSettings;
+  const ds::sdl::Setting* pip = nullptr;
+  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+    if (!std::strcmp(t[i].key, "video.pip_alpha")) pip = &t[i];
+  CHECK(pip != nullptr);
+  std::string v = "1";
+  CHECK(ds::sdl::display_value(*pip, v) == "100%");
+  // All the way down and back up again lands on the same string it started.
+  for (int i = 0; i < 10; ++i) v = ds::sdl::step_value(*pip, v, -1, h);
+  CHECK(ds::sdl::display_value(*pip, v) == "0%");
+  for (int i = 0; i < 10; ++i) v = ds::sdl::step_value(*pip, v, +1, h);
+  CHECK(ds::sdl::display_value(*pip, v) == "100%");
+  CHECK(ds::sdl::step_value(*pip, v, +1, h) == v);   // clamped
+}
+
+// A value the file already holds outside the menu's range is shown as it
+// stands and stepped from where it is, not clamped the moment the page opens.
+void test_out_of_range_value_is_kept() {
+  FakeHost h;
+  const ds::sdl::Setting* t = ds::sdl::kEmuSettings;
+  const ds::sdl::Setting* fs = nullptr;
+  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+    if (!std::strcmp(t[i].key, "emu.frameskip")) fs = &t[i];
+  CHECK(fs != nullptr);
+  CHECK(ds::sdl::display_value(*fs, "8") == "8");      // shown as the file wrote it
+  // Touching it brings it into the menu's range, from either direction: the
+  // page offers 0..3, so once the player moves the row that is what it holds.
+  CHECK(ds::sdl::step_value(*fs, "8", -1, h) == "3");
+  CHECK(ds::sdl::step_value(*fs, "8", +1, h) == "3");
+  // A choice the table does not know reads as itself rather than being
+  // silently redrawn as something else.
+  const ds::sdl::Setting* ch = nullptr;
+  for (int i = 0; i < ds::sdl::settings_count(ds::sdl::kVideoSettings); ++i)
+    if (!std::strcmp(ds::sdl::kVideoSettings[i].key, "video.chunky")) ch = &ds::sdl::kVideoSettings[i];
+  CHECK(ch != nullptr);
+  CHECK(ds::sdl::display_value(*ch, "wibble") == "wibble");
+}
+
+// Every table's stated default has to be one the table itself can represent,
+// or the first press on that row would jump somewhere unrelated.
+void test_defaults_are_reachable() {
+  FakeHost h;
+  for (const ds::sdl::Setting* t : {ds::sdl::kEmuSettings, ds::sdl::kVideoSettings,
+                                    ds::sdl::kLayoutSettings, ds::sdl::kUserSettings}) {
+    for (int i = 0; i < ds::sdl::settings_count(t); ++i) {
+      const ds::sdl::Setting& s = t[i];
+      const std::string def = ds::sdl::default_value(s);
+      // Shown as something, and stepping from it stays inside the range.
+      CHECK(!ds::sdl::display_value(s, def).empty());
+      if (s.type == ds::sdl::Setting::Type::Text) continue;
+      const std::string up = ds::sdl::step_value(s, def, +1, h);
+      CHECK(!ds::sdl::display_value(s, up).empty());
+      CHECK(!ds::sdl::display_value(s, ds::sdl::step_value(s, up, -1, h)).empty());
+    }
+  }
+}
+
+// The row walk steps over rows the host has switched off, in both directions,
+// and a page whose last rows are all off must not strand the selection.
+void test_disabled_rows_are_skipped() {
+  FakeHost h;
+  // Everything but the first and the last row of the emulation page is off.
+  const ds::sdl::Setting* t = ds::sdl::kEmuSettings;
+  const int n = ds::sdl::settings_count(t);
+  for (int i = 1; i < n - 1; ++i) h.off[t[i].key] = true;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  m.input(press(B::BTN_A));                                    // Emulation
+  // Down lands on the last row, skipping every disabled one between.
+  m.input(press(B::BTN_DOWN));
+  const size_t before = h.writes.size();
+  m.input(press(B::BTN_RIGHT));                                // steps the row it is on
+  CHECK(h.writes.size() == before + 1);
+  CHECK(h.writes.back() == t[n - 1].key);
+  // Down again has nowhere to go and must leave the selection alone.
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_RIGHT));
+  CHECK(h.writes.back() == t[n - 1].key);
+  // And back up to the first, over the same gap.
+  m.input(press(B::BTN_UP));
+  m.input(press(B::BTN_RIGHT));
+  CHECK(h.writes.back() == t[0].key);
+  m.input(press(B::BTN_UP));                                   // nothing above it
+  m.input(press(B::BTN_RIGHT));
+  CHECK(h.writes.back() == t[0].key);
+}
+
+// A disabled row is never stepped, however it came to be selected.
+void test_disabled_row_does_not_step() {
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+  m.input(press(B::BTN_A));                                    // Emulation, on row 0
+  h.off[ds::sdl::kEmuSettings[0].key] = true;                  // switched off underneath it
+  m.input(press(B::BTN_RIGHT));
+  CHECK(h.writes.empty());
+  m.input(press(B::BTN_A));
+  CHECK(h.writes.empty());
+}
+
+// Leaving a row, and leaving the page, tell the frontend it may now do the
+// expensive thing a change asked for -- reopening the display.
+void test_commit_on_leaving() {
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+  m.input(press(B::BTN_A));
+  const int at_entry = h.commits;
+  m.input(press(B::BTN_RIGHT));
+  CHECK(h.commits == at_entry);        // still on the row: nothing committed yet
+  m.input(press(B::BTN_DOWN));
+  CHECK(h.commits > at_entry);         // left the row
+  const int after_move = h.commits;
+  m.input(press(B::BTN_B));
+  CHECK(h.commits > after_move);       // left the page
+}
+
+// The Controls page binds what the device reports, to the row that asked.
+void test_controls_binding() {
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));     // CONTROLS
+  m.input(press(B::BTN_A));
+  m.input(press(B::BTN_DOWN));                                 // row 1
+  m.input(press(B::BTN_A));                                    // listen
+  CHECK(h.capturing());
+  // Nothing is bound until the device reports something.
+  m.update(0, 0, 10);
+  CHECK(h.writes.empty());
+  h.pending = "J";
+  m.update(0, 0, 10);
+  CHECK(!h.writes.empty());
+  CHECK(h.writes.back() == "keys.k1");
+  CHECK(h.kv["keys.k1"] == "J");
+  CHECK(!h.capturing());
+  // Y clears the row it is on; X puts the column back.
+  m.input(press(B::BTN_Y));
+  CHECK(h.kv["keys.k1"] == "none");
+  m.input(press(B::BTN_X));
+  CHECK(h.writes.back() == "reset");
+}
+
+// The Controls page opens on the pad when there is one: on a handheld that is
+// the only input, and the keyboard column would be a dead end.
+void test_controls_opens_on_the_pad() {
+  for (const bool pad : {false, true}) {
+    FakeHost h;
+    h.pad = pad;
+    Menu m;
+    m.set_settings_host(&h);
+    m.set_open(true);
+    for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+    m.input(press(B::BTN_A));
+    for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+    m.input(press(B::BTN_A));
+    m.input(press(B::BTN_A));                                  // listen on row 0
+    h.pending = "Q";
+    m.update(0, 0, 10);
+    CHECK(h.writes.back() == (pad ? "pad.k0" : "keys.k0"));
+  }
+}
+
+// The character editor: the cursor walks the field, the tables wrap, and
+// nothing is written until A.
+void test_text_editor() {
+  FakeHost h;
+  h.kv["user.nickname"] = "AB";
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));     // DS OPTIONS
+  m.input(press(B::BTN_A));
+  m.input(press(B::BTN_A));                                    // the nickname editor
+  CHECK(h.writes.empty());                                     // opening writes nothing
+  m.input(press(B::BTN_DOWN));                                 // A -> B
+  m.input(press(B::BTN_B));                                    // abandon
+  CHECK(h.kv["user.nickname"] == "AB");                        // ... and nothing was kept
+  m.input(press(B::BTN_A));                                    // open it again
+  m.input(press(B::BTN_DOWN));                                 // A -> B
+  m.input(press(B::BTN_A));                                    // commit
+  CHECK(h.kv["user.nickname"] == "BB");
+  // The cursor moves along the field and past its end, up to the length the
+  // firmware keeps; the table wraps rather than running off its end.
+  m.input(press(B::BTN_A));
+  for (int i = 0; i < 40; ++i) m.input(press(B::BTN_RIGHT));
+  for (int i = 0; i < 40; ++i) m.input(press(B::BTN_UP));
+  for (int i = 0; i < 8; ++i) m.input(press(B::BTN_L));        // round every table and back
+  m.input(press(B::BTN_A));
+  CHECK(h.kv["user.nickname"].size() <= 10);                   // never past the field
+}
+
+// With a real firmware dump [user] is not read, so the page has nothing to
+// select and must not pretend otherwise.
+void test_ds_options_with_a_firmware_dump() {
+  FakeHost h;
+  h.user_ok = false;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+  for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // opens, and explains itself
+  m.input(press(B::BTN_A));                                    // nothing to open here
+  m.input(press(B::BTN_RIGHT));                                // nothing to step
+  CHECK(h.writes.empty());
+  std::vector<u32> fb(ds::SCREEN_W * ds::SCREEN_H);
+  m.draw(ds::sdl::Canvas{fb.data(), ds::SCREEN_W, ds::SCREEN_W, ds::SCREEN_H});
+}
+
+// The save-to switch only exists when there is a game to save to.
+void test_save_target_switch() {
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  for (int i = 0; i < 5; ++i) m.input(press(B::BTN_DOWN));     // the save row
+  CHECK(!h.save_per_game());
+  m.input(press(B::BTN_RIGHT));
+  CHECK(h.save_per_game());
+  m.input(press(B::BTN_LEFT));
+  CHECK(!h.save_per_game());
+  // With no game the row is not there, so five downs wrap to a page row and
+  // A opens a page rather than toggling anything.
+  FakeHost h2;
+  h2.game = false;
+  Menu m2;
+  m2.set_settings_host(&h2);
+  m2.set_open(true);
+  for (int i = 0; i < 3; ++i) m2.input(press(B::BTN_DOWN));
+  m2.input(press(B::BTN_A));
+  for (int i = 0; i < 5; ++i) m2.input(press(B::BTN_DOWN));
+  m2.input(press(B::BTN_A));
+  CHECK(!h2.save_per_game());
+}
+
+// Every page, at canvas sizes from a DS screen to a desktop and in portrait,
+// stays inside the canvas and writes nothing past its edges.
+void test_canvas_sizes() {
+  static const int dims[][2] = {{256, 192}, {320, 240}, {480, 272}, {512, 384},
+                                {640, 480}, {720, 720}, {1280, 720}, {1920, 1080},
+                                {240, 320}, {160, 128}};
+  std::vector<ds::cheat::Code> codes;
+  std::vector<ds::cheat::Group> groups;
+  { ds::cheat::Group g; g.name = "GROUP"; groups.push_back(g); }
+  for (int i = 0; i < 50; ++i) {
+    ds::cheat::Code c;
+    c.name = "A CHEAT WITH A REASONABLY LONG NAME " + std::to_string(i);
+    c.group = 0;
+    c.words.push_back(1);
+    codes.push_back(c);
+  }
+  std::vector<Menu::GameEntry> games;
+  for (int i = 0; i < 30; ++i) games.push_back({"GAME " + std::to_string(i), "/x"});
+
+  for (const auto& wh : dims) {
+    const int w = wh[0], h = wh[1];
+    // A guard row and column on every side catches a write past the canvas.
+    std::vector<u32> fb(static_cast<size_t>(w + 2) * (h + 2), 0xDEADBEEF);
+    const ds::sdl::Canvas d{fb.data() + (w + 2) + 1, static_cast<u32>(w + 2), w, h};
+    CHECK(ds::sdl::ui_scale(d) >= 2);
+    const auto guards_intact = [&] {
+      for (int x = 0; x < w + 2; ++x) {
+        CHECK(fb[static_cast<size_t>(x)] == 0xDEADBEEF);
+        CHECK(fb[static_cast<size_t>(h + 1) * (w + 2) + x] == 0xDEADBEEF);
+      }
+      for (int y = 0; y < h + 2; ++y) {
+        CHECK(fb[static_cast<size_t>(y) * (w + 2)] == 0xDEADBEEF);
+        CHECK(fb[static_cast<size_t>(y) * (w + 2) + w + 1] == 0xDEADBEEF);
+      }
+    };
+    FakeHost host;
+    Menu m;
+    m.set_settings_host(&host);
+    m.set_cheats(&codes, &groups);
+    m.set_games(&games);
+    m.set_open(true);
+    // The root, then every page reachable from it.
+    m.draw(d); guards_intact();
+    for (int i = 0; i < 3; ++i) { m.input(press(B::BTN_DOWN)); m.draw(d); guards_intact(); }
+    m.input(press(B::BTN_A));  m.draw(d); guards_intact();     // Options
+    for (int page = 0; page < 5; ++page) {
+      Menu p;
+      p.set_settings_host(&host);
+      p.set_cheats(&codes, &groups);
+      p.set_open(true);
+      for (int i = 0; i < 4; ++i) p.input(press(B::BTN_DOWN)); // cheats row is shown now
+      p.input(press(B::BTN_A));                                 // Options
+      for (int i = 0; i < page; ++i) p.input(press(B::BTN_DOWN));
+      p.input(press(B::BTN_A));
+      p.draw(d); guards_intact();
+      p.input(press(B::BTN_DOWN)); p.draw(d); guards_intact();
+      p.input(press(B::BTN_A));    p.draw(d); guards_intact();  // and whatever A opens there
+    }
+    // The slot page, the cheats page, the game picker and the notice.
+    Menu s;
+    s.set_open(true);
+    s.input(press(B::BTN_DOWN)); s.input(press(B::BTN_DOWN)); s.input(press(B::BTN_A));
+    s.draw(d); guards_intact();
+    Menu g;
+    g.set_games(&games);
+    g.open_games();
+    g.draw(d); guards_intact();
+    ds::sdl::draw_notice(d, "A GAME WITH A VERY LONG TITLE INDEED", "UNPACKING...", "FIRST LAUNCH ONLY");
+    guards_intact();
+  }
+}
+
 int main() {
   test_root_rows();
   test_wrap_and_back();
@@ -469,6 +922,21 @@ int main() {
   test_key_repeat_only_on_cheats();
   test_marquee();
   test_marquee_resets_on_move();
+  test_page_stack();
+  test_slot_row_is_separate();
+  test_setting_steps();
+  test_percent_round_trip();
+  test_out_of_range_value_is_kept();
+  test_defaults_are_reachable();
+  test_disabled_rows_are_skipped();
+  test_disabled_row_does_not_step();
+  test_commit_on_leaving();
+  test_controls_binding();
+  test_controls_opens_on_the_pad();
+  test_text_editor();
+  test_ds_options_with_a_firmware_dump();
+  test_save_target_switch();
+  test_canvas_sizes();
   std::printf("menu: ok\n");
   return 0;
 }

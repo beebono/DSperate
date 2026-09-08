@@ -48,6 +48,12 @@ add_executable(test_menu menu_test.cpp ../src/frontend/sdl/menu.cpp ../src/front
 target_link_libraries(test_menu PRIVATE dsperate_core)
 add_test(NAME menu COMMAND test_menu)
 
+# The settings file, likewise frontend code: the menu and the layout hotkeys
+# both rewrite single keys in it, and it had no tests at all.
+add_executable(test_config config_test.cpp ../src/frontend/sdl/config.cpp)
+target_link_libraries(test_config PRIVATE dsperate_core)
+add_test(NAME config COMMAND test_config)
+
 add_executable(test_cheat cheat_test.cpp)
 target_link_libraries(test_cheat PRIVATE dsperate_core)
 add_test(NAME cheat COMMAND test_cheat)
