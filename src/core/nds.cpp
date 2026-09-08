@@ -115,6 +115,93 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
   return true;
 }
 
+// The two copies of the settings the DS menu writes, found the way
+// normalise_touch_calibration finds them: a pointer to them lives at 0x20 of
+// the header, in 8-byte units. Zero when the image has none.
+namespace {
+constexpr u32 kUserBlockSize = 0x100;
+u16 rd16(const u8* p) { return static_cast<u16>(p[0] | (p[1] << 8)); }
+void wr16(u8* p, u16 v) { p[0] = static_cast<u8>(v); p[1] = static_cast<u8>(v >> 8); }
+
+// Which copy is live: the greater update counter, in the 0..0x7F ring the
+// console counts in, so 0 beats 0x7F rather than losing to it.
+int live_user_block(const u8* base) {
+  const u16 a = rd16(base + 0x70) & 0x7F, b = rd16(base + kUserBlockSize + 0x70) & 0x7F;
+  if (a == b) return 0;
+  return ((b - a) & 0x7F) < 0x40 ? 1 : 0;
+}
+
+// A firmware string: UTF-16 with its length in code units. Only the low byte
+// of each unit is kept, and anything not printable ASCII is dropped -- these
+// strings are handed to a menu whose font has no room for the rest, and a
+// character that cannot be shown must not be written back either.
+std::string read_fw_string(const u8* p, u32 len_units, u32 max_units) {
+  std::string out;
+  for (u32 i = 0; i < len_units && i < max_units; ++i) {
+    const u16 u = rd16(p + 2 * i);
+    if (u >= 0x20 && u < 0x7F) out += static_cast<char>(u);
+  }
+  return out;
+}
+} // namespace
+
+u32 NDS::user_settings_offset() const {
+  if (firmware.size() < 0x200) return 0;
+  const u32 base = static_cast<u32>(rd16(firmware.data() + 0x20)) << 3;
+  if (base == 0 || base + 2 * kUserBlockSize > firmware.size()) return 0;
+  return base;
+}
+
+bool NDS::read_user_settings(bios::UserSettings& out) const {
+  const u32 base = user_settings_offset();
+  if (!base) return false;
+  const u8* u = firmware.data() + base + static_cast<u32>(live_user_block(firmware.data() + base)) * kUserBlockSize;
+  out.favourite_colour = u[0x02] & 15;
+  out.birthday_month = (u[0x03] >= 1 && u[0x03] <= 12) ? u[0x03] : 1;
+  out.birthday_day = (u[0x04] >= 1 && u[0x04] <= 31) ? u[0x04] : 1;
+  out.nickname = read_fw_string(u + 0x06, rd16(u + 0x1A), 10);
+  out.message = read_fw_string(u + 0x1C, rd16(u + 0x50), 26);
+  out.language = static_cast<u8>(rd16(u + 0x64) & 7);
+  return true;
+}
+
+bool NDS::write_user_settings(UserField field, const bios::UserSettings& in) {
+  const u32 base = user_settings_offset();
+  if (!base) return false;
+  const u16 counter = static_cast<u16>((rd16(firmware.data() + base + static_cast<u32>(live_user_block(firmware.data() + base)) * kUserBlockSize + 0x70) + 1) & 0x7F);
+  // Both copies are written with the same contents and the same counter, so
+  // whichever the console picks is the one the player asked for. The DS
+  // alternates them instead; it has no reason to, and a tie is ambiguous.
+  for (u32 blk = 0; blk < 2; ++blk) {
+    u8* u = firmware.data() + base + blk * kUserBlockSize;
+    switch (field) {
+    case UserField::Nickname:
+    case UserField::Message: {
+      const bool nick = field == UserField::Nickname;
+      const std::string& v = nick ? in.nickname : in.message;
+      const u32 max = nick ? 10u : 26u;
+      u8* dst = u + (nick ? 0x06 : 0x1C);
+      const u32 n = static_cast<u32>(v.size() < max ? v.size() : max);
+      for (u32 i = 0; i < max; ++i) wr16(dst + 2 * i, i < n ? static_cast<u8>(v[i]) : 0);
+      wr16(u + (nick ? 0x1A : 0x50), static_cast<u16>(n));
+      break;
+    }
+    case UserField::Colour:        u[0x02] = static_cast<u8>(in.favourite_colour & 15); break;
+    case UserField::BirthdayMonth: u[0x03] = (in.birthday_month >= 1 && in.birthday_month <= 12) ? in.birthday_month : 1; break;
+    case UserField::BirthdayDay:   u[0x04] = (in.birthday_day >= 1 && in.birthday_day <= 31) ? in.birthday_day : 1; break;
+    // The backlight bits share this halfword and are the console's, not ours.
+    case UserField::Language:      wr16(u + 0x64, static_cast<u16>((rd16(u + 0x64) & ~7) | (in.language & 7))); break;
+    }
+    wr16(u + 0x70, counter);
+    wr16(u + 0x72, bios::crc16(u, 0x70, 0xFFFF));
+    // Mark what changed so the sidecar carries it: a settings block spans one
+    // page at the sizes the DS uses, but page it properly rather than assume.
+    for (u32 off = 0; off < kUserBlockSize; off += FW_PAGE)
+      firmware_written(base + blk * kUserBlockSize + off);
+  }
+  return true;
+}
+
 void NDS::firmware_written(u32 offset) {
   if (firmware_synthetic) return;   // nothing on disk to persist against
   const u32 page = offset / FW_PAGE;

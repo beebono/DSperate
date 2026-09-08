@@ -23,7 +23,11 @@ struct Choice { const char* value; const char* label; };
 
 enum Flag : u8 {
   FlagLive    = 0,        // takes effect as soon as it is set
-  FlagReopen  = 1u << 0,  // needs the display closed and opened again
+  // Moves the picture about, so it is applied when the menu closes rather
+  // than as it is asked for -- some of these also need the display closed and
+  // opened again, and none of them are worth watching happen a step at a time
+  // while a page is being read.
+  FlagDeferred = 1u << 0,
   FlagRestart = 1u << 1,  // only read at startup; the row says so
   FlagInexact = 1u << 2,  // trades accuracy for speed; drawn as a warning
 };
@@ -58,6 +62,9 @@ struct Setting {
   // A value one step below `lo` that means something other than a number.
   const char* sentinel_value;      // what goes in the file ("auto", "0")
   const char* sentinel_label;      // what the player reads ("AUTO", "UNLIMITED")
+  // Appended to a number when it is shown, to say what it counts: a bare "4"
+  // on FAST FORWARD SPEED does not say four of what.
+  const char* suffix;
   // What the frontend uses when the key is absent. It has to be stated rather
   // than assumed to be the first choice or the bottom of the range: the menu
   // would otherwise show a value the emulator is not running with, which is
@@ -87,10 +94,11 @@ struct SettingsHost {
   // cells in its scaler and can only do their mean, so the rest are not shown
   // there rather than shown and ignored.
   virtual bool value_allowed(const Setting& s, const char* value) const = 0;
-  // Anything expensive a change asked for, now that the player has finished
-  // asking. Stepping LCD GRID from 0 to 50 is five presses, and reopening the
-  // display on each of them would flicker the window five times; the menu
-  // calls this when the selection leaves the row or the page instead.
+  // Everything deferred, now that the menu is closing. Stepping LCD GRID from
+  // 0 to 50 is five presses, and reopening the display on each of them would
+  // flicker the window five times; laying the screens out again under a page
+  // the player is still reading is worse. The menu calls this once, on its way
+  // out.
   virtual void commit() = 0;
   virtual bool save_per_game() const = 0;
   virtual void set_save_per_game(bool on) = 0;
@@ -123,10 +131,12 @@ struct SettingsHost {
   // Bindings that shadow one another, one line each; empty when there are none.
   virtual std::vector<std::string> collisions() const = 0;
 
-  // False when a real firmware dump is in use, in which case [user] is not
-  // read at all -- the dump's own pages win and the DS menu edits them. The
-  // page says so rather than accepting changes that would do nothing.
-  virtual bool user_settings_used() const = 0;
+  // Where the DS Options page's changes end up, for the page to say. With a
+  // generated firmware that is [user] in the config file; with a real dump it
+  // is the dump's own settings pages, edited into the sidecar beside it --
+  // never into the dump, which the player may not be able to regenerate.
+  // Returns null when there is nothing worth saying.
+  virtual const char* user_settings_note() const = 0;
 };
 
 // The pages. Each is terminated by a row with a null key.

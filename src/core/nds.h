@@ -68,6 +68,21 @@ struct NDS {
   // The extracted image the current cart was mapped from, empty otherwise.
   std::string rom_cache_path;
   void normalise_touch_calibration();   // see nds.cpp; called by load_bios
+
+  // The console's own settings, as the firmware holds them: the pages the DS
+  // menu writes. With a dump these are the dump's, and editing them goes to
+  // the sidecar like any other firmware write; with a generated firmware they
+  // are what [user] built it from. Reading gives back what a game would see.
+  //
+  // A field at a time, deliberately. A dump's nickname may hold characters
+  // this cannot represent (it is UTF-16, and these strings carry one byte per
+  // code unit), and rewriting every field to change one would turn a name the
+  // player never touched into mojibake.
+  enum class UserField : u8 { Nickname, Message, Colour, BirthdayMonth, BirthdayDay, Language };
+  bool read_user_settings(bios::UserSettings& out) const;
+  // Where the two settings copies live, or 0 if the image has none.
+  u32  user_settings_offset() const;
+  bool write_user_settings(UserField field, const bios::UserSettings& in);
   void setup_direct_boot();          // skip the firmware: load the ROM's binaries and jump to them
 
   // Firmware settings persistence.

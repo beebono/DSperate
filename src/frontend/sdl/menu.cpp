@@ -207,6 +207,11 @@ void dim_framebuffer(u32* px, u32 n) {
 
 
 void Menu::set_open(bool o) {
+  // Everything a change asked for that would move the picture about is done
+  // here rather than as it is asked for: the player is choosing settings, not
+  // watching the screen jump under the page they are reading. This is the one
+  // place every way out of the menu goes through.
+  if (!o && open_ && host_) host_->commit();
   open_ = o;
   depth_ = 1;
   stack_[0] = Page::Root;
@@ -650,7 +655,6 @@ int Menu::settings_rows() const { return settings_count(table()); }
 // Walks past the rows the host has switched off, exactly as the cheats list
 // walks past its headings, and stops at the ends rather than wrapping.
 bool Menu::move_setting_row(int delta) {
-  host_->commit();   // done with the row that is being left
   const Setting* t = table();
   const int n = settings_count(t);
   const int slot = table_slot();
@@ -691,9 +695,6 @@ Menu::Result Menu::handle_options(u32 presses) {
   if (save_row || (!hit(B::BTN_A) && !hit(B::BTN_START))) return Result::None;
   static constexpr Page kPages[kOptionPages] = {Page::Emulation, Page::VisualFx, Page::Layout, Page::Controls, Page::DsOptions};
   push(kPages[opt_row_]);
-  // The DS Options page can be opened with a dump in use -- it explains
-  // itself there -- but there is nothing on it to select.
-  if (page() == Page::DsOptions && !host_->user_settings_used()) { set_row_[table_slot()] = 0; return Result::None; }
   if (page() == Page::Controls) {
     // A handheld's only input is its pad, so open on that column when one is
     // plugged in; a desktop with no pad opens on the keyboard.
@@ -724,7 +725,7 @@ Menu::Result Menu::handle_settings(u32 presses) {
     if (cur.type == Setting::Type::Text && host_->enabled(cur)) open_text_edit();
     else step_setting(+1);
   }
-  if (hit(B::BTN_B))   { host_->commit(); pop(); }
+  if (hit(B::BTN_B))     pop();
   return Result::None;
 }
 
@@ -735,21 +736,23 @@ void Menu::draw_options(const Canvas& d) const {
   const bool per_game = host_ && host_->save_per_game();
   char save_row[40];
   std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL");
-  // Wide enough for the longest row it will actually draw, rather than a
-  // number that happened to fit the rows it had when it was written: the
-  // save-to switch changes width as it is toggled, and a panel sized for the
-  // shorter one clips the other.
-  int widest = 0;
-  for (int i = 0; i < kOptionPages; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
-  if (rows > kOptionPages) widest = std::max(widest, text_width(m.s, save_row));
-  // Step the scale down rather than clip, as the root page does.
-  while (m.s > 2 && (widest + 8 * m.s > d.w || panel_height(m, rows) > d.h)) {
-    m = metrics_for(m.s - 1);
-    widest = 0;
-    for (int i = 0; i < kOptionPages; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
-    if (rows > kOptionPages) { std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL"); widest = std::max(widest, text_width(m.s, save_row)); }
-  }
-  const int panel_w = std::min(d.w - 2 * m.pad, widest + 8 * m.s);
+  // Sized for the widest row the page can ever draw, not the one it is drawing
+  // now: the save-to switch is longer on "THIS GAME" than on "GLOBAL", and
+  // measuring the current text made the whole panel change width as it was
+  // toggled. Always measure the long one.
+  static constexpr const char* kWidestSaveRow = "SAVE TO < THIS GAME >";
+  const auto widest_row = [&](const Metrics& mm) {
+    int w = 0;
+    for (int i = 0; i < kOptionPages; ++i) w = std::max(w, text_width(mm.s, kItems[i]));
+    if (rows > kOptionPages) w = std::max(w, text_width(mm.s, kWidestSaveRow));
+    return w;
+  };
+  // Step the scale down rather than clip, as the root page does. The margin is
+  // the row's own indent on the left and the same again past the closing
+  // arrow, so the switch does not sit against the panel edge.
+  const int side = 3 * m.pad;
+  while (m.s > 2 && (widest_row(m) + 2 * side > d.w || panel_height(m, rows) > d.h)) m = metrics_for(m.s - 1);
+  const int panel_w = std::min(d.w - 2 * m.pad, widest_row(m) + 2 * (3 * m.pad));
   const int panel_h = panel_height(m, rows);
   const int px0 = (d.w - panel_w) / 2, py0 = (d.h - panel_h) / 2;
   panel(d, px0, py0, panel_w, panel_h);
@@ -759,10 +762,7 @@ void Menu::draw_options(const Canvas& d) const {
     const int ry = py0 + m.rows_y + i * m.row_h;
     if (i == opt_row_) fill_rect(d, px0 + m.pad, ry - m.s, panel_w - 2 * m.pad, m.row_h, kSel);
     if (i < kOptionPages) {
-      // DS OPTIONS reads dim when a real firmware dump is in use: [user] is
-      // not consulted then, and the page says so when it is opened.
-      const bool ready = i != kDsOptionsRow || !host_ || host_->user_settings_used();
-      draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, ready || i == opt_row_ ? kInk : kDim, kItems[i]);
+      draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, kInk, kItems[i]);
       continue;
     }
     // The save-to switch, drawn as the slot row is: the value between arrows,
@@ -781,20 +781,13 @@ void Menu::draw_settings(const Canvas& d) const {
   const Setting* t = table();
   const int n = settings_count(t);
   const int sel = set_row_[table_slot()];
-  // A real firmware dump keeps its own settings, so nothing on the DS Options
-  // page would be read. Say it instead of drawing rows that do nothing.
-  if (page() == Page::DsOptions && !host_->user_settings_used()) {
-    const char* why[] = {"A FIRMWARE DUMP IS IN USE, SO", "THE CONSOLE'S OWN SETTINGS APPLY.",
-                         "CHANGE THEM IN THE DS MENU:", "THEY ARE KEPT BESIDE THE DUMP."};
-    for (int i = 0; i < 4; ++i)
-      draw_text(d, f.text_x, f.py0 + m.list_rows_y + i * m.list_row_h, m.list_s, kDim, why[i]);
-    return;
-  }
 
-  // A note under the list explains the selected row. It costs two rows of
-  // list, and is worth them: these settings are not self-explanatory, and the
+  // A note under the list explains the selected row: two lines for the note
+  // itself and a third for what it takes to apply, so a long note is not cut
+  // short to make room for "REOPENS THE DISPLAY". It costs three rows of list,
+  // and is worth them: these settings are not self-explanatory, and the
   // alternative is the player guessing or reading the ini.
-  const int note_rows = 2;
+  const int note_lines = 2, note_rows = note_lines + 1;
   const int visible = std::max(1, f.visible - note_rows);
   int top = set_top_[table_slot()];
   if (sel < top) top = sel;
@@ -837,10 +830,20 @@ void Menu::draw_settings(const Canvas& d) const {
   // the second note line, so the note itself wraps into one line when there is
   // one and two when the row is free.
   const char* when = (cur.flags & FlagRestart) ? "RESTART REQUIRED"
-                   : (cur.flags & FlagReopen)  ? "REOPENS THE DISPLAY" : nullptr;
+                   : (cur.flags & FlagDeferred) ? "APPLIED WHEN THE MENU CLOSES" : nullptr;
   if (when && !host_->enabled(cur)) when = nullptr;
+  // Where it is kept matters on the DS Options page: with a firmware dump the
+  // changes go beside the dump rather than into the config, and the save-to
+  // switch does not apply to them.
+  std::string when_text;
+  if (when) {
+    when_text = when;
+    if (page() == Page::DsOptions)
+      if (const char* src = host_->user_settings_note()) { when_text += " - "; when_text += src; }
+    when = when_text.c_str();
+  }
   if (line) {
-    const int lines = when ? 1 : note_rows;
+    const int lines = note_lines;
     // Wrapped on spaces rather than cut with an ellipsis: a note that stops
     // mid-sentence tells the player less than the room allows.
     std::string rest = line;
@@ -860,7 +863,7 @@ void Menu::draw_settings(const Canvas& d) const {
       while (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
     }
   }
-  if (when) draw_text(d, f.text_x, note_y + 2 * m.list_s + (note_rows - 1) * m.list_row_h, m.list_s, kEdgeText, when);
+  if (when) draw_text(d, f.text_x, note_y + 2 * m.list_s + note_lines * m.list_row_h, m.list_s, kEdgeText, fit(when, m.list_s, f.avail).c_str());
 }
 
 // The Controls page. Two columns of bindings -- keyboard and pad -- with the

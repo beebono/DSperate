@@ -459,7 +459,8 @@ struct FakeHost : ds::sdl::SettingsHost {
   std::map<std::string, std::string> kv;
   std::map<std::string, bool> off;      // rows the test has switched off
   std::vector<std::string> writes;      // keys set, in order
-  bool per_game = false, game = true, pad = false, capturing_ = false, user_ok = true;
+  bool per_game = false, game = true, pad = false, capturing_ = false;
+  const char* user_note = nullptr;   // non-null when a firmware dump holds them
   std::string pending;                  // what the "device" is about to report
   int commits = 0;
 
@@ -499,7 +500,7 @@ struct FakeHost : ds::sdl::SettingsHost {
   void bind(const std::string& k, const std::string& v) override { kv[k] = v; writes.push_back(k); }
   void reset_bindings(bool) override { writes.push_back("reset"); }
   std::vector<std::string> collisions() const override { return {}; }
-  bool user_settings_used() const override { return user_ok; }
+  const char* user_settings_note() const override { return user_note; }
 };
 
 // Walking into a page and back out again lands where it left, at every depth.
@@ -559,12 +560,15 @@ void test_setting_steps() {
   CHECK(ds::sdl::step_value(fs, "0", -1, h) == "0");            // clamped at the bottom
   CHECK(ds::sdl::step_value(fs, "3", +1, h) == "3");            // and at the top
   CHECK(ds::sdl::step_value(fs, "1", +1, h) == "2");
-  // A sentinel: down off the bottom of the range, and back up onto it.
+  // A sentinel: down off the bottom of the range, and back up onto it. The
+  // range starts at 2, since 1X is real time and that is not fast forwarding.
   const ds::sdl::Setting& ff = find("emu.ff_speed");
-  CHECK(ds::sdl::step_value(ff, "1", -1, h) == "0");
+  CHECK(ds::sdl::step_value(ff, "2", -1, h) == "0");
   CHECK(ds::sdl::display_value(ff, "0") == "UNLIMITED");
   CHECK(ds::sdl::step_value(ff, "0", -1, h) == "0");            // nothing below it
-  CHECK(ds::sdl::step_value(ff, "0", +1, h) == "1");
+  CHECK(ds::sdl::step_value(ff, "0", +1, h) == "2");
+  // A number says what it counts.
+  CHECK(ds::sdl::display_value(ff, "4") == "4X");
   // A boolean wraps, because a two-entry list has to.
   const ds::sdl::Setting& oc = find("emu.cpu_oc");
   CHECK(ds::sdl::step_value(oc, "false", +1, h) == "true");
@@ -681,9 +685,10 @@ void test_disabled_row_does_not_step() {
   CHECK(h.writes.empty());
 }
 
-// Leaving a row, and leaving the page, tell the frontend it may now do the
-// expensive thing a change asked for -- reopening the display.
-void test_commit_on_leaving() {
+// Anything that would move the picture about waits until the menu closes, so
+// the screens do not jump under a page the player is still reading. Every way
+// out goes through set_open(false), which is where it happens.
+void test_commit_on_closing() {
   FakeHost h;
   Menu m;
   m.set_settings_host(&h);
@@ -693,12 +698,19 @@ void test_commit_on_leaving() {
   m.input(press(B::BTN_A));
   const int at_entry = h.commits;
   m.input(press(B::BTN_RIGHT));
-  CHECK(h.commits == at_entry);        // still on the row: nothing committed yet
+  CHECK(h.commits == at_entry);        // changed something: still nothing done
   m.input(press(B::BTN_DOWN));
-  CHECK(h.commits > at_entry);         // left the row
-  const int after_move = h.commits;
+  CHECK(h.commits == at_entry);        // left the row: still nothing
   m.input(press(B::BTN_B));
-  CHECK(h.commits > after_move);       // left the page
+  CHECK(h.commits == at_entry);        // left the page: still nothing
+  m.input(press(B::BTN_B));            // back at the root
+  CHECK(h.commits == at_entry);
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::Resume);
+  m.set_open(false);
+  CHECK(h.commits == at_entry + 1);    // ... and now, once
+  // Closing again does not do it twice.
+  m.set_open(false);
+  CHECK(h.commits == at_entry + 1);
 }
 
 // The Controls page binds what the device reports, to the row that asked.
@@ -781,23 +793,28 @@ void test_text_editor() {
   CHECK(h.kv["user.nickname"].size() <= 10);                   // never past the field
 }
 
-// With a real firmware dump [user] is not read, so the page has nothing to
-// select and must not pretend otherwise.
+// The DS Options page is editable either way: with a generated firmware the
+// values are [user] in the config, with a dump they are the dump's own pages.
+// Only where they are kept differs, and the page says which.
 void test_ds_options_with_a_firmware_dump() {
-  FakeHost h;
-  h.user_ok = false;
-  Menu m;
-  m.set_settings_host(&h);
-  m.set_open(true);
-  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
-  m.input(press(B::BTN_A));
-  for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));
-  m.input(press(B::BTN_A));                                    // opens, and explains itself
-  m.input(press(B::BTN_A));                                    // nothing to open here
-  m.input(press(B::BTN_RIGHT));                                // nothing to step
-  CHECK(h.writes.empty());
-  std::vector<u32> fb(ds::SCREEN_W * ds::SCREEN_H);
-  m.draw(ds::sdl::Canvas{fb.data(), ds::SCREEN_W, ds::SCREEN_W, ds::SCREEN_H});
+  for (const char* note : {static_cast<const char*>(nullptr), "KEPT BESIDE THE FIRMWARE"}) {
+    FakeHost h;
+    h.user_note = note;
+    Menu m;
+    m.set_settings_host(&h);
+    m.set_open(true);
+    for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+    m.input(press(B::BTN_A));
+    for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));
+    m.input(press(B::BTN_A));                                  // DS OPTIONS
+    m.input(press(B::BTN_DOWN));
+    m.input(press(B::BTN_DOWN));                               // FAVOURITE COLOUR, a stepped row
+    m.input(press(B::BTN_RIGHT));
+    CHECK(!h.writes.empty());
+    CHECK(h.writes.back() == "user.colour");
+    std::vector<u32> fb(ds::SCREEN_W * ds::SCREEN_H);
+    m.draw(ds::sdl::Canvas{fb.data(), ds::SCREEN_W, ds::SCREEN_W, ds::SCREEN_H});
+  }
 }
 
 // The save-to switch only exists when there is a game to save to.
@@ -930,7 +947,7 @@ int main() {
   test_defaults_are_reachable();
   test_disabled_rows_are_skipped();
   test_disabled_row_does_not_step();
-  test_commit_on_leaving();
+  test_commit_on_closing();
   test_controls_binding();
   test_controls_opens_on_the_pad();
   test_text_editor();

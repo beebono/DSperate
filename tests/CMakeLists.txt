@@ -54,6 +54,12 @@ add_executable(test_config config_test.cpp ../src/frontend/sdl/config.cpp)
 target_link_libraries(test_config PRIVATE dsperate_core)
 add_test(NAME config COMMAND test_config)
 
+# The console's own settings inside a firmware image, and the sidecar they are
+# kept in when the firmware is a dump the emulator must not write to.
+add_executable(test_firmware firmware_test.cpp)
+target_link_libraries(test_firmware PRIVATE dsperate_core)
+add_test(NAME firmware COMMAND test_firmware)
+
 add_executable(test_cheat cheat_test.cpp)
 target_link_libraries(test_cheat PRIVATE dsperate_core)
 add_test(NAME cheat COMMAND test_cheat)

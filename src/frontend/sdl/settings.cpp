@@ -38,23 +38,23 @@ const Choice kCorner[]   = {{"tl", "TOP LEFT"}, {"tr", "TOP RIGHT"}, {"bl", "BOT
 
 // Shorthand for the common shapes, so a table row reads as its own contents.
 constexpr Setting boolean(const char* k, const char* l, const char* def, u8 f, Dep d, const char* n) {
-  return Setting{k, l, T::Bool, kOnOff, 2, 0, 0, 0, nullptr, nullptr, def, f, d, n};
+  return Setting{k, l, T::Bool, kOnOff, 2, 0, 0, 0, nullptr, nullptr, nullptr, def, f, d, n};
 }
 constexpr Setting pick(const char* k, const char* l, const Choice* c, u8 nc, const char* def, u8 f, Dep d, const char* n) {
-  return Setting{k, l, T::Pick, c, nc, 0, 0, 0, nullptr, nullptr, def, f, d, n};
+  return Setting{k, l, T::Pick, c, nc, 0, 0, 0, nullptr, nullptr, nullptr, def, f, d, n};
 }
 constexpr Setting number(const char* k, const char* l, int lo, int hi, int st, const char* def, u8 f, Dep d, const char* n,
-                         const char* sv = nullptr, const char* sl = nullptr) {
-  return Setting{k, l, T::Int, nullptr, 0, lo, hi, st, sv, sl, def, f, d, n};
+                         const char* sv = nullptr, const char* sl = nullptr, const char* sx = nullptr) {
+  return Setting{k, l, T::Int, nullptr, 0, lo, hi, st, sv, sl, sx, def, f, d, n};
 }
 constexpr Setting percent(const char* k, const char* l, int lo, int hi, int st, const char* def, u8 f, Dep d, const char* n,
                           const char* sv = nullptr, const char* sl = nullptr) {
-  return Setting{k, l, T::Percent, nullptr, 0, lo, hi, st, sv, sl, def, f, d, n};
+  return Setting{k, l, T::Percent, nullptr, 0, lo, hi, st, sv, sl, nullptr, def, f, d, n};
 }
 constexpr Setting text(const char* k, const char* l, int maxlen, const char* def, u8 f, const char* n) {
-  return Setting{k, l, T::Text, nullptr, 0, maxlen, maxlen, 0, nullptr, nullptr, def, f, Dep::None, n};
+  return Setting{k, l, T::Text, nullptr, 0, maxlen, maxlen, 0, nullptr, nullptr, nullptr, def, f, Dep::None, n};
 }
-constexpr Setting end() { return Setting{nullptr, nullptr, T::Bool, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr, 0, Dep::None, nullptr}; }
+constexpr Setting end() { return Setting{nullptr, nullptr, T::Bool, nullptr, 0, 0, 0, 0, nullptr, nullptr, nullptr, nullptr, 0, Dep::None, nullptr}; }
 
 } // namespace
 
@@ -69,8 +69,9 @@ const Setting kEmuSettings[] = {
           "FASTEST AND LEAST SAFE. GAMES THAT PACE ON THE 3D FIFO WILL BREAK"),
   boolean("emu.fast_load", "FAST LOAD", "false", FlagLive | FlagInexact, Dep::None,
           "SHORTER LOADING SCREENS. GAMES THAT RACE THE CARD CAN MISBEHAVE"),
-  number("emu.ff_speed", "FAST FORWARD SPEED", 1, 16, 1, "0", FlagLive, Dep::None,
-         "HOW FAST THE FAST FORWARD HOTKEY RUNS", "0", "UNLIMITED"),
+  // From 2: "1X" is real time, which is what not fast-forwarding already is.
+  number("emu.ff_speed", "FAST FORWARD SPEED", 2, 16, 1, "0", FlagLive, Dep::None,
+         "HOW MANY TIMES REAL TIME THE FAST FORWARD HOTKEY RUNS AT", "0", "UNLIMITED", "X"),
   number("emu.ff_skip", "FAST FORWARD SKIP", 0, 9, 1, "3", FlagLive, Dep::None,
          "WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE"),
   boolean("emu.autosave", "AUTOSAVE ON QUIT", "false", FlagLive, Dep::None,
@@ -79,40 +80,40 @@ const Setting kEmuSettings[] = {
 };
 
 const Setting kVideoSettings[] = {
-  pick("video.integer_scale", "INTEGER SCALE", kIntScale, 3, "off", FlagReopen, Dep::None,
+  pick("video.integer_scale", "INTEGER SCALE", kIntScale, 3, "off", FlagDeferred, Dep::None,
        "WHOLE PANEL PIXELS PER DS PIXEL. UNDER LETTERBOXES, OVER CROPS"),
-  boolean("video.linear", "BILINEAR", "false", FlagReopen, Dep::PanelEffects,
+  boolean("video.linear", "BILINEAR", "false", FlagDeferred, Dep::PanelEffects,
           "SMOOTH SCALING. OVERRIDES THE GRID, SEAMS AND CHUNKY"),
-  percent("video.lcd_grid", "LCD GRID", 0, 100, 10, "0", FlagReopen, Dep::GridSeam,
+  percent("video.lcd_grid", "LCD GRID", 0, 100, 10, "0", FlagDeferred, Dep::GridSeam,
           "A DARK SEAM AROUND EVERY DS PIXEL, LIKE THE ORIGINAL SCREEN"),
-  pick("video.seam", "SEAM", kSeam, 3, "dark", FlagReopen, Dep::GridSeam,
+  pick("video.seam", "SEAM", kSeam, 3, "dark", FlagDeferred, Dep::GridSeam,
        "DARK DRAWS THE GRID. BLEND SOFTENS ONLY THE STRADDLING PIXEL"),
-  pick("video.chunky", "CHUNKY", kChunky, 7, "false", FlagReopen, Dep::Chunky,
+  pick("video.chunky", "CHUNKY", kChunky, 7, "false", FlagDeferred, Dep::Chunky,
        "DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES"),
-  number("video.chunky_cell", "CHUNKY CELL", 2, 8, 1, "auto", FlagReopen, Dep::ChunkyCell,
+  number("video.chunky_cell", "CHUNKY CELL", 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
          "PANEL PIXELS PER CELL", "auto", "AUTO"),
   boolean("video.aa", "ANTI-ALIASING", "false", FlagLive, Dep::None,
           "SMOOTH 3D EDGES AS THE HARDWARE DID. OFF IS CHEAPER"),
   boolean("video.fps", "FPS COUNTER", "false", FlagLive, Dep::None,
           "FRAMES PER SECOND IN THE CORNER OF THE SCREEN"),
-  boolean("video.fullscreen", "FULLSCREEN", "false", FlagLive, Dep::Windowed, nullptr),
+  boolean("video.fullscreen", "FULLSCREEN", "false", FlagDeferred, Dep::Windowed, nullptr),
   end(),
 };
 
 const Setting kLayoutSettings[] = {
-  pick("video.screen", "MAIN SCREEN", kScreen, 2, "top", FlagLive, Dep::None,
+  pick("video.screen", "MAIN SCREEN", kScreen, 2, "top", FlagDeferred, Dep::None,
        "THE SCREEN SHOWN ALONE, LARGE OR FIRST"),
-  pick("video.pip_corner", "PIP CORNER", kCorner, 4, "br", FlagLive, Dep::Pip,
+  pick("video.pip_corner", "PIP CORNER", kCorner, 4, "br", FlagDeferred, Dep::Pip,
        "WHERE THE SMALL SCREEN SITS"),
-  percent("video.pip_scale", "PIP SIZE", 10, 90, 5, "0.33", FlagLive, Dep::Pip,
+  percent("video.pip_scale", "PIP SIZE", 10, 90, 5, "0.33", FlagDeferred, Dep::Pip,
           "HOW BIG THE SMALL SCREEN IS AGAINST THE LARGE ONE"),
-  percent("video.pip_alpha", "PIP OPACITY", 0, 100, 10, "1", FlagLive, Dep::Pip,
+  percent("video.pip_alpha", "PIP OPACITY", 0, 100, 10, "1", FlagDeferred, Dep::Pip,
           "HOW SOLID THE SMALL SCREEN IS AT REST"),
   number("video.pip_touch_hold", "PIP TOUCH HOLD", 10, 300, 10, "60", FlagLive, Dep::PipTouchHold,
          "FRAMES THE SMALL SCREEN STAYS SOLID AFTER IT IS TOUCHED", "0", "NEVER FADE"),
-  percent("video.dominant_ratio", "DOMINANT RATIO", 10, 90, 5, "auto", FlagLive, Dep::Dominant,
+  percent("video.dominant_ratio", "DOMINANT RATIO", 10, 90, 5, "auto", FlagDeferred, Dep::Dominant,
           "THE SMALLER SCREEN'S SIZE. AUTO FITS WHOLE PIXELS", "auto", "AUTO"),
-  percent("video.dominant_threshold", "DOMINANT THRESHOLD", 10, 99, 5, "0.25", FlagLive, Dep::DominantThreshold,
+  percent("video.dominant_threshold", "DOMINANT THRESHOLD", 10, 99, 5, "0.25", FlagDeferred, Dep::DominantThreshold,
           "THE SMALLEST SECONDARY AUTO WILL ACCEPT"),
   end(),
 };
@@ -210,7 +211,7 @@ std::string display_value(const Setting& s, const std::string& value) {
   }
   case T::Int:
     if (s.sentinel_value && v == s.sentinel_value) return s.sentinel_label;
-    return v;
+    return s.suffix ? v + s.suffix : v;
   case T::Percent: {
     if (s.sentinel_value && v == s.sentinel_value) return s.sentinel_label;
     return std::to_string(percent_of(v)) + "%";

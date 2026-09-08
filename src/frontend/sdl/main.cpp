@@ -1529,9 +1529,16 @@ sdl_ready:
     Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi, ds::sdl::Input& in)
         : cfg(c), nds(n), display(d), vs(v), global_ini(gi), game_ini(pi), input(in) {}
 
-    std::string get(const char* key) const override { return cfg.str(key, ""); }
+    std::string get(const char* key) const override {
+      if (is_user_key(key) && user_in_firmware()) return user_get(key);
+      return cfg.str(key, "");
+    }
 
     void set(const char* key, const std::string& value) override {
+      // The console's own settings live in the firmware, not the config, when
+      // there is a dump to hold them: writing [user] there would change
+      // nothing, since the dump's pages are what the console reads.
+      if (is_user_key(key) && user_in_firmware()) { user_set(key, value); return; }
       cfg.set(key, value);
       apply(key, value);
       // Remembered where the player asked. The per-game file is only offered
@@ -1542,12 +1549,17 @@ sdl_ready:
         std::fprintf(stderr, "settings: cannot write %s\n", path.c_str());
     }
 
-    // Set by a change that needs the display reopened, done by commit().
-    bool reopen_wanted = false;
+    // What a change asked for and commit() will do when the menu closes.
+    bool reopen_wanted = false, layout_wanted = false, fullscreen_wanted = false;
+    std::function<void()> relayout;
+    std::function<void()> refullscreen;
     void commit() override {
-      if (!reopen_wanted) return;
-      reopen_wanted = false;
-      reopen();
+      // The layout first: reopening carries the live layout across, so doing
+      // it the other way round would open the window on the old one and then
+      // lay it out again.
+      if (layout_wanted) { layout_wanted = false; relayout(); }
+      if (fullscreen_wanted) { fullscreen_wanted = false; refullscreen(); }
+      if (reopen_wanted) { reopen_wanted = false; reopen(); }
     }
 
     bool has_game() const override { return !game_ini.empty(); }
@@ -1619,11 +1631,66 @@ sdl_ready:
 
     std::vector<std::string> collisions() const override { return input.collisions(); }
 
-    // [user] is only read when the firmware is generated. With a real dump
-    // the dump's own settings pages win and the DS menu edits those (they go
-    // to the .ovr sidecar), so the page says so rather than taking changes
-    // that would do nothing.
-    bool user_settings_used() const override { return nds.firmware_synthetic; }
+    // --- DS Options -------------------------------------------------------
+    // With a generated firmware these are [user] in the config file, which is
+    // what the firmware is built from. With a real dump they are the dump's
+    // own settings pages: read from the image, written back to it in memory,
+    // and persisted to the sidecar beside the dump -- never into the dump
+    // itself, which the player may not be able to regenerate.
+    std::string fw_override;
+
+    bool user_in_firmware() const { return !nds.firmware_synthetic; }
+
+    const char* user_settings_note() const override {
+      return user_in_firmware() ? "IN THE FIRMWARE" : nullptr;
+    }
+
+    static bool is_user_key(const char* key) { return std::strncmp(key, "user.", 5) == 0; }
+
+    // Which field of the settings block a config key names.
+    static bool user_field(const char* key, NDS::UserField& out) {
+      const std::string k = key + 5;
+      if (k == "nickname")       { out = NDS::UserField::Nickname; return true; }
+      if (k == "message")        { out = NDS::UserField::Message; return true; }
+      if (k == "colour")         { out = NDS::UserField::Colour; return true; }
+      if (k == "birthday_month") { out = NDS::UserField::BirthdayMonth; return true; }
+      if (k == "birthday_day")   { out = NDS::UserField::BirthdayDay; return true; }
+      if (k == "language")       { out = NDS::UserField::Language; return true; }
+      return false;
+    }
+
+    std::string user_get(const char* key) const {
+      ds::bios::UserSettings u;
+      if (!nds.read_user_settings(u)) return "";
+      const std::string k = key + 5;
+      if (k == "nickname")       return u.nickname;
+      if (k == "message")        return u.message;
+      if (k == "colour")         return std::to_string(u.favourite_colour);
+      if (k == "birthday_month") return std::to_string(u.birthday_month);
+      if (k == "birthday_day")   return std::to_string(u.birthday_day);
+      if (k == "language")       return std::to_string(u.language);
+      return "";
+    }
+
+    void user_set(const char* key, const std::string& v) {
+      ds::bios::UserSettings u;
+      if (!nds.read_user_settings(u)) return;
+      NDS::UserField f;
+      if (!user_field(key, f)) return;
+      const std::string k = key + 5;
+      if (k == "nickname")            u.nickname = v;
+      else if (k == "message")        u.message = v;
+      else if (k == "colour")         u.favourite_colour = static_cast<u8>(std::atoi(v.c_str()) & 15);
+      else if (k == "birthday_month") u.birthday_month = static_cast<u8>(std::atoi(v.c_str()));
+      else if (k == "birthday_day")   u.birthday_day = static_cast<u8>(std::atoi(v.c_str()));
+      else if (k == "language")       u.language = static_cast<u8>(std::atoi(v.c_str()) & 7);
+      if (!nds.write_user_settings(f, u)) return;
+      // Written out now rather than at exit: this is a setting the player has
+      // just changed, and a kill would otherwise lose it.
+      std::string err;
+      if (!nds.save_firmware_override(fw_override, err))
+        std::fprintf(stderr, "firmware settings: %s: %s\n", fw_override.c_str(), err.c_str());
+    }
 
     static std::string upper(const std::string& s) {
       std::string out = s;
@@ -1689,7 +1756,29 @@ sdl_ready:
 
   Host host(cfg, nds, display, vs, global_ini, session.game_ini, input);
   host.reconfigure_input = [&] { input.configure(cfg); };
+  host.fw_override = fw_override;
   host.reopen = [&] { reopen_display(); };
+  // The whole layout in one go, re-read from the config: every row on the
+  // Layout page is a field of it, so there is nothing per-key to do. The live
+  // mode is kept -- the page has no row for it, and the layout hotkey may have
+  // moved it since the file was read.
+  host.relayout = [&] {
+    if (dual_window) return;   // two windows, one screen each: nothing to lay out
+    VideoSetup want;
+    if (!parse_video(cfg, want)) return;
+    want.layout.mode = display.current_layout().mode;
+    display.set_layout(want.layout);
+    vs.layout = want.layout;
+    pip_alpha = static_cast<int>(want.layout.pip_alpha * 255.0 + 0.5);
+    apply_visibility();
+    menu_dirty = true;
+  };
+  host.refullscreen = [&] {
+    if (display.fullscreen() == cfg.flag("video.fullscreen", false)) return;
+    display.toggle_fullscreen();
+    if (dual_window) display2.toggle_fullscreen();
+    menu_dirty = true;
+  };
   // Push one changed key into the running machine. Anything not named here
   // either needs the display reopened (the picture settings, handled below)
   // or is only read at startup, and its row says so.
@@ -1717,34 +1806,17 @@ sdl_ready:
     if (is("emu.autosave")) { autosave = on; return; }
     if (is("video.aa")) { nds.gpu3d.renderer().set_aa(on); return; }
     if (is("video.fps")) { fps_osd = on; if (on && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; } return; }
-    if (is("video.fullscreen")) {
-      if (display.fullscreen() != on) { display.toggle_fullscreen(); if (dual_window) display2.toggle_fullscreen(); }
-      menu_dirty = true;
-      return;
-    }
     if (is("video.pip_touch_hold")) { pip_touch_hold = std::max(0, std::atoi(v.c_str())); return; }
-    // The layout family goes through set_layout, exactly as the hotkeys do.
+    // Everything below moves the picture about, so it is only noted here and
+    // done when the menu closes (Host::commit).
+    if (is("video.fullscreen")) { host.fullscreen_wanted = true; return; }
     if (is("video.screen") || is("video.pip_corner") || is("video.pip_scale") ||
         is("video.pip_alpha") || is("video.dominant_ratio") || is("video.dominant_threshold")) {
-      if (dual_window) return;   // two windows, one screen each: nothing to lay out
-      Disp::Layout l = display.current_layout();
-      if (is("video.screen")) l.primary = v == "bottom" ? 1 : 0;
-      else if (is("video.pip_corner")) Disp::parse_corner(v, l.corner);
-      else if (is("video.pip_scale")) l.pip = std::clamp(std::atof(v.c_str()), 0.1, 0.9);
-      else if (is("video.pip_alpha")) { l.pip_alpha = std::clamp(std::atof(v.c_str()), 0.0, 1.0); pip_alpha = static_cast<int>(l.pip_alpha * 255.0 + 0.5); }
-      else if (is("video.dominant_threshold")) l.dominant_min = std::clamp(std::atof(v.c_str()), 0.1, 0.99);
-      else {
-        l.dominant_auto = v == "auto";
-        if (!l.dominant_auto) l.dominant = std::clamp(std::atof(v.c_str()), 0.1, 0.99);
-      }
-      display.set_layout(l);
-      vs.layout = l;
-      apply_visibility();
-      menu_dirty = true;
+      host.layout_wanted = true;
       return;
     }
-    // Everything else that is offered is a picture setting: it is baked into
-    // the scaler's tables when the display opens, so the display comes back.
+    // The picture settings are baked into the scaler's tables when the display
+    // opens, so applying them means opening it again.
     if (is("video.linear") || is("video.lcd_grid") || is("video.seam") ||
         is("video.chunky") || is("video.chunky_cell") || is("video.integer_scale"))
       host.reopen_wanted = true;
