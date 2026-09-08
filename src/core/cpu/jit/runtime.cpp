@@ -174,6 +174,19 @@ static void purge() {
 
 const u8* host_page_of(const u8* p) { return reinterpret_cast<const u8*>(reinterpret_cast<u64>(p) & ~u64{mem::PAGE_SIZE - 1}); }
 
+// The bytes of `b` that lie on `page`, as offsets within it. A block spans at
+// most two pages, which need not be adjacent in host memory: on its first
+// page the code runs from host_lo to the page end (or host_hi if that is the
+// only page), on its second from the page start to host_hi. An unmapped end
+// (null) counts as the whole page.
+static void page_span(const Block* b, const u8* page, u32& lo, u32& hi) {
+  if (!b->host_lo || !b->host_hi) { lo = 0; hi = mem::PAGE_SIZE - 1; return; }
+  const u8* seg_lo; const u8* seg_hi;
+  if (page == b->host_pages[0]) { seg_lo = b->host_lo; seg_hi = (b->npages == 1) ? b->host_hi : page + mem::PAGE_SIZE - 1; }
+  else                          { seg_lo = page; seg_hi = b->host_hi; }
+  lo = static_cast<u32>(seg_lo - page); hi = static_cast<u32>(seg_hi - page);
+}
+
 bool code_query(const u8* host_page) { return g_rt.code_pages.count(host_page) != 0; }
 
 void set_code_tag(const u8* host_page, bool on) {
@@ -214,9 +227,8 @@ void remove_from_page_lists(Block* b) {
   for (u32 i = 0; i < b->npages; ++i) {
     auto it = g_rt.code_pages.find(b->host_pages[i]);
     if (it == g_rt.code_pages.end()) continue;
-    auto& v = it->second;
-    for (size_t k = 0; k < v.size(); ++k) if (v[k] == b) { v[k] = v.back(); v.pop_back(); break; }
-    if (v.empty()) { g_rt.code_pages.erase(it); set_code_tag(b->host_pages[i], false); }
+    it->second.remove(b);
+    if (it->second.empty()) { g_rt.code_pages.erase(it); set_code_tag(b->host_pages[i], false); }
   }
 }
 
@@ -381,7 +393,9 @@ static void register_block(JitCpu& jc, Block* b) {
   for (u32 i = 0; i < b->npages; ++i) {
     auto& v = r.code_pages[b->host_pages[i]];
     if (v.empty()) set_code_tag(b->host_pages[i], true);
-    v.push_back(b);
+    u32 lo, hi;
+    page_span(b, b->host_pages[i], lo, hi);
+    v.add(b, lo, hi);
   }
   jc.blocks[b->key] = b;
   lut_insert(jc, b);
@@ -657,29 +671,18 @@ static void start() {
 } // namespace
 
 
-// Does the block's code on `page` overlap the written bytes [lo, hi]? A block
-// spans at most two pages, which need not be adjacent in host memory, so the
-// test is per page: on its first page the code runs from host_lo to the page
-// end (or host_hi if that is the only page), on its second from the page
-// start to host_hi. An unmapped end (null) is treated as covering the page.
-static bool block_touched(const Block* b, const u8* page, const u8* lo, const u8* hi) {
-  if (!b->host_lo || !b->host_hi) return true;
-  const u8* seg_lo; const u8* seg_hi;
-  if (page == b->host_pages[0]) { seg_lo = b->host_lo; seg_hi = (b->npages == 1) ? b->host_hi : page + mem::PAGE_SIZE - 1; }
-  else                          { seg_lo = page; seg_hi = b->host_hi; }
-  return lo <= seg_hi && hi >= seg_lo;
-}
-
 // A store changed bytes [lo, hi] on `host_page` (both on that page): kill the
 // blocks whose code they belong to, and only those -- data sharing a 2 KB page
 // with code is the common case, not the exception (DraStic's third filter).
 void invalidate_host_range(const u8* host_page, const u8* lo, const u8* hi) {
   auto it = g_rt.code_pages.find(host_page);
   if (it == g_rt.code_pages.end()) return;
-  std::vector<Block*>& list = it->second;
+  Runtime::PageBlocks& list = it->second;
+  const u32 slo = static_cast<u32>(lo - host_page), shi = static_cast<u32>(hi - host_page);
   std::vector<Block*> victims;
-  for (size_t k = 0; k < list.size();) {
-    if (block_touched(list[k], host_page, lo, hi)) { victims.push_back(list[k]); list[k] = list.back(); list.pop_back(); }
+  for (size_t k = 0; k < list.span.size();) {
+    const u32 sp = list.span[k];
+    if (slo <= (sp >> 16) && shi >= (sp & 0xFFFF)) { victims.push_back(list.blocks[k]); list.remove_at(k); }
     else ++k;
   }
   if (victims.empty()) { churn::range_miss++; return; }
@@ -690,7 +693,7 @@ void invalidate_host_range(const u8* host_page, const u8* lo, const u8* hi) {
 void invalidate_host_page(const u8* host_page) {
   auto it = g_rt.code_pages.find(host_page);
   if (it == g_rt.code_pages.end()) return;
-  std::vector<Block*> victims = std::move(it->second);
+  std::vector<Block*> victims = std::move(it->second.blocks);
   g_rt.code_pages.erase(it);
   set_code_tag(host_page, false);
   invalidate_blocks(host_page, std::move(victims));
@@ -720,9 +723,8 @@ static void invalidate_blocks(const u8* host_page, std::vector<Block*> victims) 
     for (u32 i = 0; i < b->npages; ++i) if (b->host_pages[i] != host_page) {
       auto jt = g_rt.code_pages.find(b->host_pages[i]);
       if (jt == g_rt.code_pages.end()) continue;
-      auto& v = jt->second;
-      for (size_t k = 0; k < v.size(); ++k) if (v[k] == b) { v[k] = v.back(); v.pop_back(); break; }
-      if (v.empty()) { g_rt.code_pages.erase(jt); set_code_tag(b->host_pages[i], false); }
+      jt->second.remove(b);
+      if (jt->second.empty()) { g_rt.code_pages.erase(jt); set_code_tag(b->host_pages[i], false); }
     }
   }
   for (JitCpu& jc : g_rt.cpus) if (jc.ctx) jc.ctx->hot.alerts |= ALERT_INVALIDATED;

@@ -194,7 +194,20 @@ struct Runtime {
   // (deque: stable addresses). One malloc per block was a measurable slice
   // of an overlay burst's translate stall.
   std::deque<Block> block_pool;
-  std::unordered_map<const u8*, std::vector<Block*>> code_pages;   // host page -> blocks
+  // host page -> blocks with code on it. The byte range each block covers
+  // on the page is kept in a parallel array (offsets within the page,
+  // lo | hi << 16), so a store's range test scans a few cache lines instead
+  // of dereferencing every Block: Golden Sun keeps a hundred-odd hot blocks
+  // on one ITCM page it also writes data to, ~80 stores a frame.
+  struct PageBlocks {
+    std::vector<Block*> blocks;
+    std::vector<u32> span;
+    void add(Block* b, u32 lo, u32 hi) { blocks.push_back(b); span.push_back(lo | (hi << 16)); }
+    void remove_at(size_t k) { blocks[k] = blocks.back(); blocks.pop_back(); span[k] = span.back(); span.pop_back(); }
+    bool remove(const Block* b) { for (size_t k = 0; k < blocks.size(); ++k) if (blocks[k] == b) { remove_at(k); return true; } return false; }
+    bool empty() const { return blocks.empty(); }
+  };
+  std::unordered_map<const u8*, PageBlocks> code_pages;
   bool trace = false;
   bool strict = false;    // check the budget after every instruction (exact lockstep with the interpreter)
   bool debug = false;     // DS_JIT_DEBUG: log fallbacks
