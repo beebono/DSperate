@@ -533,15 +533,17 @@ void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
   box(cx + c0, cy + c0, c1 - c0, c1 - c0, centre);
 }
 
-// A small white label (3x5 font, doubled: digits, capitals and spaces;
-// anything else draws as a space) on a black box, in DS screen coordinates so
-// it lands the same whether the frame was scaled straight into the window
-// (the xrun path) or copied first. `right` anchors the box to the right edge
-// instead of the left, which is how the two callers -- the state slot field
-// in the top-left, the FPS counter in the top-right -- stay clear of each
-// other. `bottom` anchors to the bottom edge instead of the top, which is how
-// an overlay steps out of the way of the PiP inset sharing its corner.
-void draw_label(const CursorDst& d, const char* text, bool right, bool bottom) {
+// A small white label (3x5 font: digits, capitals and spaces; anything else
+// draws as a space) on a black box, anchored to a corner of the canvas.
+// `right` anchors to the right edge instead of the left, which is how the two
+// callers -- the state slot field top-left, the FPS counter top-right -- stay
+// clear of each other.
+//
+// There is no `bottom` any more. It existed because the overlays were drawn
+// before the PiP inset was blitted, so one sharing the inset's corner was
+// buried and had to dodge to the opposite edge. Drawn on the canvas after
+// Display::finish_views(), nothing can be drawn over them.
+void draw_label(const ds::sdl::Canvas& d, const char* text, bool right) {
   static const u8 digits[10][5] = {
     {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
     {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7}};
@@ -558,23 +560,27 @@ void draw_label(const CursorDst& d, const char* text, bool right, bool bottom) {
     return blank;
   };
   auto fill = [&](int x, int y, u32 colour) {
-    const ds::sdl::BlitRect r = ds::sdl::blit_rect(d, x, y);
-    for (u32 yy = r.y0; yy < r.y1; ++yy) for (u32 xx = r.x0; xx < r.x1; ++xx) d.px[yy * d.pitch + xx] = colour;
+    if (x < 0 || x >= d.w || y < 0 || y >= d.h) return;
+    d.px[static_cast<size_t>(y) * d.pitch + static_cast<size_t>(x)] = colour;
   };
   int n = 0; while (text[n]) ++n;
   if (n == 0) return;
-  const int S = 2;                                   // glyph scale
-  const int w = n * 3 * S + (n - 1) * S + 4;         // glyphs, one S-wide gap between each, 2px border
-  const int h = 5 * S + 4;
-  const int X = right ? static_cast<int>(ds::SCREEN_W) - 4 - w : 4;
-  const int Y = bottom ? static_cast<int>(ds::SCREEN_H) - 4 - h : 4;
+  // The same measure the menu uses, so the two agree on how big a pixel is.
+  // At 256x192 -- the DS-space fallback -- it is 2, the scale this drew at
+  // when it lived in DS pixels, and the box comes out where it always did.
+  const int S = ds::sdl::ui_scale(d);
+  const int pad = S, margin = 2 * S;
+  const int w = n * 3 * S + (n - 1) * S + 2 * pad;   // glyphs, one S-wide gap between each, a border
+  const int h = 5 * S + 2 * pad;
+  const int X = right ? d.w - margin - w : margin;
+  const int Y = margin;
   for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) fill(X + x, Y + y, 0xFF000000);
   for (int g = 0; g < n; ++g) {
     const u8* f = glyph(text[g]);
     for (int r = 0; r < 5; ++r) for (int c = 0; c < 3; ++c)
       if ((f[r] >> (2 - c)) & 1)
         for (int y = 0; y < S; ++y) for (int x = 0; x < S; ++x)
-          fill(X + 2 + g * 4 * S + c * S + x, Y + 2 + r * S + y, 0xFFFFFFFF);
+          fill(X + pad + g * 4 * S + c * S + x, Y + pad + r * S + y, 0xFFFFFFFF);
   }
 }
 
@@ -587,12 +593,13 @@ constexpr int SLOT_OSD_FRAMES = 90;
 // where the other overlays are -- into the presented buffer, never into the
 // GPU's framebuffers the screenshot reads -- so it is never in the picture.
 constexpr int FLASH_FRAMES = 12;
-void draw_flash(const CursorDst& d, u32 alpha) {
-  const ds::sdl::BlitRect r0 = ds::sdl::blit_rect(d, 0, 0), r1 = ds::sdl::blit_rect(d, ds::SCREEN_W - 1, ds::SCREEN_H - 1);
-  const u32 w = r1.x1 - r0.x0;
-  if (!w || r1.y1 <= r0.y0) return;
-  std::vector<u32> white(w, 0xFFFFFFFFu);
-  for (u32 y = r0.y0; y < r1.y1; ++y) ds::sdl::Display::blend_row(d.px + y * d.pitch + r0.x0, white.data(), w, alpha);
+void draw_flash(const ds::sdl::Canvas& d, u32 alpha) {
+  if (d.w <= 0 || d.h <= 0) return;
+  // The whole canvas, margins included: the flash says the picture was taken,
+  // and on the canvas that is the whole window rather than one screen's view.
+  std::vector<u32> white(static_cast<size_t>(d.w), 0xFFFFFFFFu);
+  for (int y = 0; y < d.h; ++y)
+    ds::sdl::Display::blend_row(d.px + static_cast<size_t>(y) * d.pitch, white.data(), static_cast<size_t>(d.w), alpha);
 }
 
 // A launcher's SIGTERM (or Ctrl-C) must still flush the battery save.
@@ -1907,24 +1914,41 @@ sdl_ready:
       // window has no primary; both panels are shown, so the top screen it is.
       const Disp::Layout& osd_l = display.current_layout();
       const int osd_screen = dual_window ? 0 : osd_l.primary;
-      // The PiP inset is blitted over the primary screen after this, so an
-      // overlay in the inset's corner would be buried. Only the two top
-      // corners are contested -- the slot digit sits top-left, the counter
-      // top-right -- so the one whose corner the inset takes moves down its
-      // own edge. Nothing else in the layout puts a screen in a corner: the
-      // dominant modes lay the secondary out as a strip.
-      const bool pip = !dual_window && osd_l.mode == Disp::Mode::Pip;
-      const bool inset_top = pip && (osd_l.corner == Disp::Corner::TopLeft || osd_l.corner == Disp::Corner::TopRight);
-      const bool inset_left = osd_l.corner == Disp::Corner::TopLeft || osd_l.corner == Disp::Corner::BottomLeft;
-      const bool slot_bottom = inset_top && inset_left, fps_bottom = inset_top && !inset_left;
       if (scaled) {
+        // The crosshair first, and still in DS pixels: it points at a place on
+        // the bottom screen, so it belongs in that view's coordinates wherever
+        // the view is. It also has to go down before finish_views(), because
+        // when the bottom screen is the PiP inset its target is the side
+        // buffer that finish_views() then copies into the canvas.
         if (cursor) draw_cursor(CursorDst{target[1].px, target[1].pitch, target[1].h, target[1].xrun}, input.stylus_x(), input.stylus_y(), cursor_size);
-        const CursorDst od{target[osd_screen].px, target[osd_screen].pitch, target[osd_screen].h, target[osd_screen].xrun};
-        if (slot_osd) draw_label(od, slot_text.c_str(), false, slot_bottom);
-        if (fps_field) draw_label(od, fps_text.c_str(), true, fps_bottom);
-        if (flash_alpha) for (int i = 0; i < 2; ++i) if (target[i].px) draw_flash(CursorDst{target[i].px, target[i].pitch, target[i].h, target[i].xrun}, flash_alpha);
-        display.end_frame();
-        if (dual_window) display2.end_frame();
+        display.finish_views();
+        if (dual_window) display2.finish_views();
+        // Everything else is a message to the player rather than a part of the
+        // picture, so it goes on the canvas, over the finished frame.
+        ds::sdl::Display::CanvasView cv;
+        if (display.canvas_capable() && display.canvas(cv)) {
+          const ds::sdl::Canvas c{cv.px, cv.pitch, cv.w, cv.h};
+          if (slot_osd) draw_label(c, slot_text.c_str(), false);
+          if (fps_field) draw_label(c, fps_text.c_str(), true);
+          if (flash_alpha) {
+            draw_flash(c, flash_alpha);
+            ds::sdl::Display::CanvasView cv2;
+            if (dual_window && display2.canvas(cv2)) draw_flash(ds::sdl::Canvas{cv2.px, cv2.pitch, cv2.w, cv2.h}, flash_alpha);
+          }
+        } else if (target[osd_screen].px) {
+          // The display-engine tier: the targets are the DS-sized buffers its
+          // scaler reads, so the canvas is that buffer and the label lands
+          // where it did before.
+          const auto tgt_canvas = [](const ds::sdl::Display::Target& t) {
+            return ds::sdl::Canvas{t.px, t.pitch, t.xrun ? static_cast<int>(t.xrun[ds::SCREEN_W]) : static_cast<int>(ds::SCREEN_W), static_cast<int>(t.h)};
+          };
+          const ds::sdl::Canvas c = tgt_canvas(target[osd_screen]);
+          if (slot_osd) draw_label(c, slot_text.c_str(), false);
+          if (fps_field) draw_label(c, fps_text.c_str(), true);
+          if (flash_alpha) for (int i = 0; i < 2; ++i) if (target[i].px) draw_flash(tgt_canvas(target[i]), flash_alpha);
+        }
+        display.present();
+        if (dual_window) display2.present();
       } else {
         const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
         if (cursor) {
@@ -1936,16 +1960,16 @@ sdl_ready:
         // copies the frame that already has the crosshair in it, so both show.
         if (slot_osd || fps_field) {
           std::memcpy(osd_fb.data(), fb[osd_screen], osd_fb.size() * 4);
-          const CursorDst od{osd_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr};
-          if (slot_osd) draw_label(od, slot_text.c_str(), false, slot_bottom);
-          if (fps_field) draw_label(od, fps_text.c_str(), true, fps_bottom);
+          const ds::sdl::Canvas od = ds_canvas(osd_fb.data());
+          if (slot_osd) draw_label(od, slot_text.c_str(), false);
+          if (fps_field) draw_label(od, fps_text.c_str(), true);
           fb[osd_screen] = osd_fb.data();
         }
         // Last, over whatever the cursor and the overlays left: a screen
         // still pointing at the GPU's own buffer is copied out first.
         if (flash_alpha) for (int i = 0; i < 2; ++i) {
           if (fb[i] == nds.gpu.framebuffer(i)) { std::memcpy(flash_fb[i].data(), fb[i], flash_fb[i].size() * 4); fb[i] = flash_fb[i].data(); }
-          draw_flash(CursorDst{const_cast<u32*>(fb[i]), ds::SCREEN_W, ds::SCREEN_H, nullptr}, flash_alpha);
+          draw_flash(ds_canvas(const_cast<u32*>(fb[i])), flash_alpha);
         }
         display.draw(fb);
         if (dual_window) display2.draw(fb);
