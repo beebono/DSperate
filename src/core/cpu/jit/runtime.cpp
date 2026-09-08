@@ -938,6 +938,16 @@ DensitySlot* density_new_slot() {
 
 void report(std::FILE* out) {
   const Stats& s = g_rt.stats;
+  // DS_JIT_DUMP=<path>: the arena bytes as they stand at exit, with a one-line
+  // header "<base> <size>", so a perf sample's ip decodes to the host
+  // instruction it landed on (objdump -b binary -maarch64 on the file).
+  if (const char* dump = std::getenv("DS_JIT_DUMP")) {
+    if (FILE* f = std::fopen(dump, "wb")) {
+      std::fprintf(f, "%llx %llx\n", (unsigned long long)reinterpret_cast<uintptr_t>(g_rt.arena), (unsigned long long)g_rt.pos);
+      std::fwrite(g_rt.arena, 1, g_rt.pos, f);
+      std::fclose(f);
+    }
+  }
   std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, slow accesses %llu, entries %llu, invalidated %llu, revived %llu, flushes %llu\n",
                (unsigned long long)s.blocks_translated, (unsigned long long)s.instrs_translated, (unsigned long long)s.instrs_fallback,
                (unsigned long long)s.slow_accesses, (unsigned long long)s.entries, (unsigned long long)s.blocks_invalidated, (unsigned long long)s.blocks_revived, (unsigned long long)s.flushes);
