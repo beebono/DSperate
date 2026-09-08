@@ -51,6 +51,24 @@ public:
   static constexpr u32 COST7_BYTES  = 0x20000 * COST7_STRIDE;
   static constexpr u32 NC7_SLOTS    = 4;
 
+  // ARM9 precomputed pipeline-refill table: what an indirect branch to a
+  // page costs, for every shape refill_cycles() can take, so the recompiler's
+  // branch_indirect stub spends one byte load where it used to evaluate the
+  // two-fetch formula with two dependent timing-table loads. Four bytes per
+  // 4 KB page, indexed by the *second* fetch's placement (the first fetch is
+  // always a line fill on a cacheable page, `X` below):
+  //   [0] first + second, second mid-line        (X + Y)
+  //   [1] first + second, second line-aligned     (X + X)
+  //   [2] first + second, second in the next page (X + X[page+1])
+  //   [3] first only (Thumb, target word-aligned) (X)
+  // with X = fetch_cost9(page, branch) and Y = fetch_cost9(page, sequential).
+  // Built from the same bytes fetch_cost9 reads, so it is exact by
+  // construction; it follows cpu9_ in one allocation so the pinned timing
+  // register reaches it with one add of REFILL9_OFFSET.
+  static constexpr u32 CPU9_BYTES     = 0x100000 * 8;
+  static constexpr u32 REFILL9_OFFSET = CPU9_BYTES;
+  static constexpr u32 REFILL9_BYTES  = 0x100000 * 4;
+
   Timing();
   void reset();
 
@@ -119,7 +137,9 @@ private:
   u32  nc7_values_[NC7_SLOTS] = {};
   bool cost7_ready_ = false;   // set_region7 keeps the table current once this is true
   std::unique_ptr<u8[]> regions7_; // 0x20000
-  std::unique_ptr<u8[]> cpu9_;     // 0x100000 * 4
+  std::unique_ptr<u8[]> cpu9_;     // [0, CPU9_BYTES) 8 bytes per page, then the refill table
+  u8* refill9_rw() const { return cpu9_.get() + REFILL9_OFFSET; }
+  void build_refill9(u32 first_page, u32 last_page);   // [first, last), clamped
 };
 
 } // namespace ds::mem

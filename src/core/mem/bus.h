@@ -64,6 +64,7 @@ public:
   Timing& timing() { return timing_; }
   const Timing& timing() const { return timing_; }
   void update_gba_slot_timings();    // EXMEMCNT
+  int gba_slot_applied_ = -1;        // EXMEMCNT timing bits the tables currently hold
   void enable_watch(u32 addr);       // debug: log writes to a main-RAM word (see DS_WATCH, headless)
 
   // Slow paths, reached when the page table returns nullptr.

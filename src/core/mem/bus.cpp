@@ -57,12 +57,21 @@ void Bus::reset() {
   update_wram();
   update_vram();
   update_tcm(nds_.cpu(Cpu::ARM9), true);
+  gba_slot_applied_ = -1;        // the timing tables were just reset
   update_gba_slot_timings();
 }
 
 void Bus::update_gba_slot_timings() {
+  // Only bits 0-4 and 7 reach the slot timings (5-6 are the PHI output);
+  // a rewrite that leaves them alone would rebuild 12 K pages for nothing.
+  // (Games probing the slot do flip ownership several times in one frame --
+  // Super Mario 64 six times in frame 16 -- and those rebuilds are real.)
+  const u16 ex = nds_.io.exmemcnt & 0x9F;
+  if (gba_slot_applied_ == ex) return;
+  gba_slot_applied_ = ex;
   prof::add(prof::C_BUS_GBA_TIMING, 1);
-  const u16 ex = nds_.io.exmemcnt;
+  static const bool debug = std::getenv("DS_DEBUG_TIMING") != nullptr;
+  if (debug) std::fprintf(stderr, "[timing] exmemcnt %04x frame %llu\n", nds_.io.exmemcnt, (unsigned long long)nds_.frame_count);
   static const int rom_n[4] = {10, 8, 6, 18};
   const int rn = rom_n[(ex >> 2) & 3], rs = (ex & 0x10) ? 4 : 6;
   static const int ram_n[4] = {10, 8, 6, 18};
@@ -461,6 +470,7 @@ void Bus::relink() {
   a9.cost7 = a7.cost7 = timing_.cost7();
   cp15_update_pu_map(a9);
   update_tcm(a9, true);          // also update_wram() and update_vram()
+  gba_slot_applied_ = -1;        // the loaded EXMEMCNT is not what the tables hold
   update_gba_slot_timings();
 }
 

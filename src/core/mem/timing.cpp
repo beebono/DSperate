@@ -14,7 +14,7 @@ constexpr u32 CACHE_CODE = 3, CACHE_DATA = 3;   // cycles for a cached fetch/acc
 
 Timing::Timing()
     : pu_map(new u8[0x100000]), bus9_(new u8[0x40000 * 8]), regions9_(new u8[0x40000]),
-      tim7_(new u8[COST7_OFFSET + COST7_BYTES]), regions7_(new u8[0x20000]), cpu9_(new u8[0x100000 * 8]),
+      tim7_(new u8[COST7_OFFSET + COST7_BYTES]), regions7_(new u8[0x20000]), cpu9_(new u8[CPU9_BYTES + REFILL9_BYTES]),
       retime_flags_(new u8[0x100000]) {
   std::memset(retime_flags_.get(), 0, 0x100000);
   reset();
@@ -51,7 +51,25 @@ void Timing::reset() {
     c[0] = static_cast<u8>(b[2] << 1); c[1] = static_cast<u8>(b[0] << 1); c[2] = static_cast<u8>(b[2] << 1); c[3] = static_cast<u8>(b[3] << 1);
     c[4] = c[0]; c[5] = c[1]; c[6] = c[2]; c[7] = c[3];
   }
+  build_refill9(0, 0x100000);
   build_cost7();
+}
+
+// Mirrors refill_cycles()/fetch_cost9() in cpu_cycles.h: a branch fetch on a
+// cacheable page (0xFF) is a line fill (3), a sequential fetch is a hit (1)
+// unless it starts a line (3); everything else costs the page's code byte.
+void Timing::build_refill9(u32 first_page, u32 last_page) {
+  auto X = [&](u32 p) { const u8 c = cpu9_[p * 8]; return c == 0xFF ? 3u : c; };
+  auto Y = [&](u32 p) { const u8 c = cpu9_[p * 8]; return c == 0xFF ? 1u : c; };
+  if (last_page > 0x100000) last_page = 0x100000;
+  for (u32 p = first_page; p < last_page; ++p) {
+    u8* r = refill9_rw() + p * 4;
+    const u32 x = X(p);
+    r[0] = static_cast<u8>(x + Y(p));
+    r[1] = static_cast<u8>(x + x);
+    r[2] = static_cast<u8>(x + (p + 1 < 0x100000 ? X(p + 1) : x));
+    r[3] = static_cast<u8>(x);
+  }
 }
 
 // The ARM7 data cost, evaluated once per (page, translate-time constants)
@@ -166,6 +184,7 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
   // old pricing (stores as cache hits) for comparison.
   static const bool store_bus = [] { const char* e = std::getenv("DS_STORE_BUS"); return !e || std::atoi(e) != 0; }();
   const u32 first = start >> 12, last = (end == 0xFFFFFFFF) ? 0x100000 : (end >> 12);
+  u32 x_prev = 0, y_prev = 0; bool changed_prev = false;
   for (u32 i = first; i < last; ++i) {
     const u8 pu = pu_map[i];
     const u8* b = &bus9_[(i >> 2) * 8];
@@ -181,6 +200,13 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
     c[4] = c[0];
     if (!(itcm || dtcm) && (pu & 0x10) && store_bus) { c[5] = static_cast<u8>(b[0] << 1); c[6] = static_cast<u8>(b[2] << 1); c[7] = static_cast<u8>(b[3] << 1); }
     else { c[5] = c[1]; c[6] = c[2]; c[7] = c[3]; }
+    // Refill entries, written inline and only where a branch cost moved
+    // (a full-range rebuild leaves most pages alone): page i-1's entry [2]
+    // needs this page's cost, so each page is finished one iteration late.
+    const u32 x = c[0] == 0xFF ? 3u : c[0];
+    const bool changed = c[0] != old_code;
+    if (i > first && (changed || changed_prev)) { u8* r = refill9_rw() + (i - 1) * 4; r[0] = static_cast<u8>(x_prev + y_prev); r[1] = static_cast<u8>(x_prev + x_prev); r[2] = static_cast<u8>(x_prev + x); r[3] = static_cast<u8>(x_prev); }
+    x_prev = x; y_prev = c[0] == 0xFF ? 1u : c[0]; changed_prev = changed;
     // Only the bytes a translation can have baked count as a retime.
     const u8 f = static_cast<u8>((c[0] != old_code ? RETIME_CODE : 0) | (c[2] != old_data ? RETIME_DATA : 0));
     if (f && (retime_flags_[i] & f) != f) {
@@ -188,6 +214,11 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
       retime_flags_[i] |= f;
     }
   }
+  // The pages at both edges of the range: the last one (its neighbour is
+  // outside the range) and the one before `first` (its entry [2] reads
+  // page `first`, which just changed).
+  if (last > first && changed_prev) build_refill9(last - 1, last);
+  if (first) build_refill9(first - 1, first);
   if (notify) notify_cpu9(cpu);
 }
 

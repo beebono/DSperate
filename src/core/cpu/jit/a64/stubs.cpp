@@ -17,6 +17,7 @@
 #include "core/cpu/jit/jit_internal.h"
 #include "core/cpu/jit/a64/convention.h"
 #include "core/cpu/jit/a64/emit.h"
+#include "core/mem/timing.h"
 #include "core/sched/scheduler.h"
 
 #include <cstring>
@@ -442,37 +443,31 @@ void emit_stubs(Runtime& rt) {
     e.and_imm(2, 0, ~1u);                   // a
     if (c == 0) {
       // ARM9 refill: ARM a: cost(a,B)+cost(a+4,S); Thumb: a&2 ? cost(a-2,B)+cost(a+2,S) : cost(a,B).
-      // Branch-free: the three shapes are one formula. With T = bit 0 of w0
-      // and odd = bit 1 of a (clear for ARM, whose a is word aligned):
-      //   first  = a - 2*odd            (B fetch)
-      //   second = a + 4 - 2*T          (S fetch, dropped when T && !odd)
-      // The old form took a data-dependent branch per state and one inside
-      // every S fetch (the 0xFF cache-line test); the second page byte is
-      // simply loaded as well -- same line as the first unless the pair
-      // crosses a 4 KB page -- and selected. Flags are free here (x17).
+      // The per-page refill table (mem::Timing::build_refill9) holds every
+      // shape the formula can take; what is left here is choosing the byte.
+      // With T = bit 0 of w0 and odd = bit 1 of a (clear for ARM):
+      //   first  = a - 2*odd            (its page selects the entry)
+      //   second = a + 4 - 2*T          (dropped when T && !odd -> byte 3)
+      //   index  = second starts a page ? 2 : second starts a line ? 1 : 0
+      // One byte load replaces the two dependent timing-table loads and the
+      // cache-line/0xFF selects the formula needed. Flags are free here (x17).
       e.and_imm(4, 0, 1);                       // T
       e.ubfx(5, 2, 1, 1);                       // odd
       e.sub_reg(3, 2, 5, LSL, 1);               // first
-      e.lsr_imm(3, 3, 12);
-      e.add_reg(3, R_TIM, 3, LSL, 3, true);
-      e.ldrb(3, 3, 0);
-      e.movz(6, 3);
-      e.cmp_imm(3, 0xFF);
-      e.csel(3, 6, 3, EQ);                      // cost(first, B): 0xFF -> 3
+      e.lsr_imm(3, 3, 12);                      // its page
       e.add_imm(7, 2, 4);
       e.sub_reg(7, 7, 4, LSL, 1);               // second
-      e.lsr_imm(1, 7, 12);
-      e.add_reg(1, R_TIM, 1, LSL, 3, true);
-      e.ldrb(1, 1, 0);
-      e.tst_imm(7, 0x1F);
-      e.movz(7, 1);
-      e.csel(7, 6, 7, EQ);                      // line-aligned ? 3 : 1
-      e.cmp_imm(1, 0xFF);
-      e.csel(1, 7, 1, EQ);                      // cost(second, S)
       e.bic_reg(4, 4, 5);                       // T && !odd: no second fetch
+      e.tst_imm(7, 0xFFF);
+      e.cset(6, EQ);                            // second in the next page
+      e.tst_imm(7, 0x1F);
+      e.csinc(6, 6, 6, NE);                     // + line-aligned (implied by the above)
+      e.movz(1, 3);
       e.cmp_imm(4, 0);
-      e.csel(1, ZR, 1, NE);
-      e.add_reg(3, 3, 1);
+      e.csel(6, 1, 6, NE);                      // first only
+      e.add_reg(3, R_TIM, 3, LSL, 2, true);
+      e.add_imm(3, 3, mem::Timing::REFILL9_OFFSET, true);
+      e.ldrb_reg(3, 3, 6);
     } else {
       // ARM7 refill: t = timing7[a >> 15]; Thumb: t0 + t1; ARM: t2 + t3
       e.lsr_imm(4, 2, 15);
