@@ -165,6 +165,28 @@ std::string rom_ext(const std::string& rom) {
   return ext;
 }
 
+// The four-letter game code from a plain .nds header (offset 0x0C), for the
+// per-game config file. Read straight off the file because the config layering
+// has to happen before the cart is loaded -- the display, audio and input are
+// all configured from `cfg` well before that, so a per-game [video] or [keys]
+// merged at cart-load time would arrive too late to be read. A zip is not
+// peeked (its entry is only known once unpacked); those fall back to the
+// filename file early and pick up the code file at the later merge.
+bool peek_game_code(const std::string& rom, char out[4]) {
+  if (rom_ext(rom) != ".nds") return false;
+  FILE* f = std::fopen(rom.c_str(), "rb");
+  if (!f) return false;
+  char code[4] = {};
+  const bool ok = std::fseek(f, 0x0C, SEEK_SET) == 0 && std::fread(code, 1, 4, f) == 4;
+  std::fclose(f);
+  // A header's code is four printable characters; anything else is not one.
+  for (int i = 0; ok && i < 4; ++i)
+    if (code[i] < 0x20 || code[i] >= 0x7f) return false;
+  if (!ok) return false;
+  std::memcpy(out, code, 4);
+  return true;
+}
+
 // Battery save: next to the ROM, or under [paths] saves.
 std::string save_path(const std::string& rom, const std::string& dir) {
   return dir.empty() ? rom_stem(rom) + ".sav" : dir + "/" + base_name(rom_stem(rom)) + ".sav";
@@ -686,6 +708,30 @@ int main(int argc, char** argv) {
   const std::string rom_path = rom ? std::string(rom) : ds::sdl::Config::dir() + "/BootMenu.nds";
   if (boot_firmware) VLOG("no game: booting the firmware\n");
 
+  // The per-game files go on top of the global one, the command line on top of
+  // both: title ID first, then the file named after the ROM, so the filename
+  // wins -- that is also where hotkey- and menu-picked settings are remembered.
+  //
+  // This has to happen here, not when the cart is loaded, because everything
+  // below reads `cfg` first: the display is opened, audio started and input
+  // configured long before the ROM is in the slot. Merged there, a per-game
+  // [keys], [pad] or video.scale was silently ignored -- even though the layout
+  // hotkey writes video.layout into that very file. The merge runs again after
+  // the cart is loaded, which is what covers a zip (whose game code cannot be
+  // read without unpacking it) and costs nothing when the values are the same.
+  auto merge_game_config = [&](const char* code) {
+    std::vector<std::string> paths;
+    if (code) paths.push_back(ds::sdl::Config::game_path_code(code));
+    paths.push_back(ds::sdl::Config::game_path_rom(rom_path));
+    for (const std::string& p : paths)
+      if (!p.empty() && cfg.load(p)) VLOG("config: %s\n", p.c_str());
+    apply_cli();
+  };
+  if (!boot_firmware) {
+    char code[4];
+    merge_game_config(peek_game_code(rom_path, code) ? code : nullptr);
+  }
+
   // Real-time scheduling for the whole process: set here, before any thread
   // exists (the NDS below starts the compositor), so the emulation thread,
   // the compositor, the band workers and SDL's own threads all inherit it. On the RG DS (four cores that the
@@ -704,6 +750,11 @@ int main(int argc, char** argv) {
       else VLOG("realtime scheduling: %s %d\n", rt.c_str(), prio);
     }
   }
+  // Core knobs the core reads from the environment. These must be set before
+  // the NDS is constructed: Scheduler's constructor reads DS_IDLE_SKIP once
+  // (scheduler.cpp), so setting it afterwards left emu.idle_skip a no-op.
+  if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);
+
   NDS nds;
   ds::bios::UserSettings user;
   user.nickname = cfg.str("user.nickname", user.nickname);
@@ -742,9 +793,6 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "firmware settings: %s -- warning: %s\n", fw_override.c_str(), err.c_str());
     }
   }
-  // Core knobs that the core reads from the environment.
-  if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);
-
   int scale = cfg.num("video.scale", 2);
   if (scale < 1) scale = 1;
   const bool fullscreen = cfg.flag("video.fullscreen", false), linear = cfg.flag("video.linear", false);
@@ -1095,13 +1143,13 @@ sdl_ready:
       VLOG("loader cart: none; the slot stays empty\n");
     }
   }
-  // The per-game file goes on top of the global one, the command line on top of both.
-  // Title ID first, then the ROM's filename, so the file named like the ROM
-  // wins; that is also where hotkey-picked settings are remembered.
+  // The same merge again, now that the cart's real game code is known. For a
+  // plain .nds this repeats what the early merge above already did; for a zip,
+  // whose code could not be read without unpacking it, this is the first time
+  // the title-ID file is seen. Anything read before this point (display, audio,
+  // input) therefore takes a zip's per-game settings only from the filename file.
   if (nds.cart) {
-    for (const std::string& p : {ds::sdl::Config::game_path_code(nds.cart->header().game_code), ds::sdl::Config::game_path_rom(rom_path)})
-      if (!p.empty() && cfg.load(p)) VLOG("config: %s\n", p.c_str());
-    apply_cli();
+    merge_game_config(nds.cart->header().game_code);
     VLOG("game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
     // Which entry a zip was read from -- the interesting case is an archive
     // holding more than one, where the pick is worth being able to check.
