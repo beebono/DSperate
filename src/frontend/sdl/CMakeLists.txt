@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp menu.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
+add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp menu.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
   display_drm.cpp display_disp.cpp display_fbdev.cpp)
 target_link_libraries(dsperate PRIVATE dsperate_core ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS})
 target_include_directories(dsperate PRIVATE ${SDL2_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../../..)

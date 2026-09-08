@@ -180,6 +180,7 @@ public:
   void end_frame();   // unlock and present
   void on_resize() { layout(); build_scale(); margins_dirty_ = true; }
   void toggle_fullscreen();
+  bool fullscreen() const { return fullscreen_; }
   // Switches layout; a windowed window is resized to the new mode's natural
   // size at the current scale. Ignored on a single-screen (dual-window)
   // display.

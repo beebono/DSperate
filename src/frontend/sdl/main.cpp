@@ -929,18 +929,13 @@ int main(int argc, char** argv) {
   // this function reading as it did, and are what a settings change re-fills.
   VideoSetup vs;
   if (!parse_video(cfg, vs)) return 2;
-  int& scale = vs.scale;
-  const bool &fullscreen = vs.fullscreen, &linear = vs.linear;
-  ds::sdl::Display::IntScale& int_scale = vs.int_scale;
-  const double& grid_s = vs.grid_s;
   const u32& grid = vs.grid;
   const u8& seam_blend = vs.seam_blend;
   u8& chunky = vs.chunky;
-  int& chunky_cell = vs.chunky_cell;
   const u32& chunky_thresh = vs.chunky_thresh;
   bool audio_on = cfg.flag("audio.enabled", true), mic_on = cfg.flag("audio.mic", true);
   const bool jit = cfg.flag("emu.jit", true);
-  const bool &vsync = vs.vsync, &dual_window = vs.dual_window;
+  const bool& dual_window = vs.dual_window;
   const long quantum = cfg.num("emu.quantum", 0);   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
   using Disp = ds::sdl::Display;
   using Menu = ds::sdl::Menu;
@@ -1125,7 +1120,7 @@ sdl_ready:
           : ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source || !target[i].grid ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
                                       at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
                                       static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == vs.bottom_display ? display2 : display).cell_map(i)),
-                                      linear && !at_source, target[i].lin_sx, target[i].lin_wx};
+                                      vs.linear && !at_source, target[i].lin_sx, target[i].lin_wx};
       st.y_lo = target[i].y_lo; st.y_hi = target[i].y_hi;   // the crop window (integer overscale)
       nds.gpu.set_scale_target(i, st);
     }
@@ -1362,8 +1357,8 @@ sdl_ready:
   // for a frame runs at line 215 of the frame before it; will_skip_frame()
   // reports what the frame about to run will actually do (a frame that
   // display-captures is never skipped, whatever the policy asks for).
-  const int fs_limit = cfg.num("emu.frameskip", 0);
-  const bool fs_adaptive = cfg.str("emu.frameskip_mode", "adaptive") != "fixed";
+  int fs_limit = cfg.num("emu.frameskip", 0);            // the menu can change these
+  bool fs_adaptive = cfg.str("emu.frameskip_mode", "adaptive") != "fixed";
   const bool fs_capture = cfg.flag("emu.frameskip_capture", false);
   nds.gpu.set_frameskip_capture(fs_capture);
   u64 fs_refused = 0;         // skips the core would not take (capture / display FIFO)
@@ -1383,14 +1378,14 @@ sdl_ready:
   // Auto-save: one state written to the unlisted ".auto" slot when the
   // session ends, so a launcher's kill or a Ctrl-C can be resumed with
   // --load-state. Nothing is written while playing, so it costs no frame time.
-  const bool autosave = cfg.flag("emu.autosave", false);
+  bool autosave = cfg.flag("emu.autosave", false);
   // Its thumbnail: "true" puts <GAMECODE>.auto.png beside the state, any
   // other value is the file to write (a launcher names the picture its game
   // switcher looks for). Only taken when the state is written.
   const std::string autosave_png_cfg = cfg.str("emu.autosave_png", "false");
   const bool autosave_png = autosave_png_cfg != "false" && autosave_png_cfg != "0" && !autosave_png_cfg.empty();
   bool ff_toggle = cfg.flag("emu.fast_forward", false);
-  const int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
+  int ff_speed = cfg.num("emu.ff_speed", 0), ff_skip = cfg.num("emu.ff_skip", 3);
   bool was_fast = false;
   std::vector<u32> cursor_fb(ds::SCREEN_W * ds::SCREEN_H);   // bottom screen with the pen crosshair
   std::vector<u32> osd_fb(ds::SCREEN_W * ds::SCREEN_H);      // the primary screen with the slot digit / FPS counter
@@ -1401,7 +1396,7 @@ sdl_ready:
   auto show_slot = [&](const std::string& text) { slot_text = text; slot_shown = SLOT_OSD_FRAMES; };
   // PiP inset opacity: where it is now (0..255), frames of opacity left
   // after the last touch, and the hold length from the config.
-  const int pip_touch_hold = std::max(0, cfg.num("video.pip_touch_hold", 60));
+  int pip_touch_hold = std::max(0, cfg.num("video.pip_touch_hold", 60));
   constexpr int PIP_FADE_STEP = 24;                          // ~10 frames rest to opaque
   int pip_alpha = static_cast<int>(layout.pip_alpha * 255.0 + 0.5), pip_hold = 0;
   // The pause menu (menu.h) and the two screen copies it is composited into.
@@ -1478,6 +1473,198 @@ sdl_ready:
     apply_visibility();
     menu_dirty = true;
   };
+  // Reopen the display with whatever [video] now says. The tier and the
+  // dual-window panel order are boot decisions and are carried over: choosing
+  // them forces SDL's video driver, which is settled before SDL_Init. The
+  // layout is carried over too, because the hotkeys may have moved it since
+  // the file was read and the player would not expect a Visual FX change to
+  // put the screens back.
+  //
+  // If the new settings will not open, the old ones are put back; if those
+  // will not either there is no window to play in, so the session ends.
+  auto reopen_display = [&]() -> bool {
+    VideoSetup want;
+    if (!parse_video(cfg, want)) return false;
+    want.use_disp = vs.use_disp;
+    want.use_fbdev = vs.use_fbdev;
+    want.bottom_display = vs.bottom_display;
+    want.layout = display.current_layout();
+    const VideoSetup before = vs;
+    display.close();
+    if (dual_window) display2.close();
+    vs = want;
+    if (!open_displays(vs, display, display2)) {
+      std::fprintf(stderr, "video: those settings would not open; keeping the old ones\n");
+      display.close();
+      if (dual_window) display2.close();
+      vs = before;
+      if (!open_displays(vs, display, display2)) { std::fprintf(stderr, "video: and neither will the old ones\n"); input.request_quit(); }
+      return false;
+    }
+    apply_visibility();
+    // A new window has forgotten that a text page is on it: the display-engine
+    // tier suspends its chunky divisor while the menu is up, and without this
+    // the menu would come back with its glyphs merged.
+    display.set_page(paused);
+    menu_dirty = true;
+    return true;
+  };
+
+  // The pause menu's window onto the settings. Everything that knows what a
+  // key means lives here; menu.cpp only knows how to draw a row and step a
+  // value, the way the cheats page knows nothing about the cheat engine.
+  struct Host final : ds::sdl::SettingsHost {
+    ds::sdl::Config& cfg;
+    NDS& nds;
+    Disp& display;
+    VideoSetup& vs;
+    const std::string& global_ini;
+    const std::string& game_ini;
+    std::function<void(const char*, const std::string&)> apply;
+    std::function<void()> reopen;
+    bool per_game = false;
+
+    Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi)
+        : cfg(c), nds(n), display(d), vs(v), global_ini(gi), game_ini(pi) {}
+
+    std::string get(const char* key) const override { return cfg.str(key, ""); }
+
+    void set(const char* key, const std::string& value) override {
+      cfg.set(key, value);
+      apply(key, value);
+      // Remembered where the player asked. The per-game file is only offered
+      // when there is a game, and it is the file the layout hotkeys already
+      // write, so the two agree about where a preference lives.
+      const std::string& path = per_game && !game_ini.empty() ? game_ini : global_ini;
+      if (!ds::sdl::Config::store(path, key, value))
+        std::fprintf(stderr, "settings: cannot write %s\n", path.c_str());
+    }
+
+    // Set by a change that needs the display reopened, done by commit().
+    bool reopen_wanted = false;
+    void commit() override {
+      if (!reopen_wanted) return;
+      reopen_wanted = false;
+      reopen();
+    }
+
+    bool has_game() const override { return !game_ini.empty(); }
+    bool save_per_game() const override { return per_game && has_game(); }
+    void set_save_per_game(bool on) override { per_game = on && has_game(); }
+
+    // The tier questions. effects_at_source means the frontend is drawing at
+    // DS resolution for a hardware scaler, where the grid, the seams and
+    // bilinear have no panel pixels to work with; chunky still applies there,
+    // but only as the mean, which is what the scaler can do.
+    bool panel_effects() const { return !display.effects_at_source(); }
+
+    bool value_allowed(const ds::sdl::Setting& s, const char* value) const override {
+      if (std::strcmp(s.key, "video.chunky") != 0 || panel_effects()) return true;
+      return !std::strcmp(value, "false") || !std::strcmp(value, "mean");
+    }
+
+    bool enabled(const ds::sdl::Setting& s) const override { return !*disabled_reason(s); }
+
+    const char* disabled_reason(const ds::sdl::Setting& s) const override {
+      const auto flag = [&](const char* k, bool def) { return cfg.flag(k, def); };
+      const Disp::Layout& l = display.current_layout();
+      const bool pip = l.mode == Disp::Mode::Pip;
+      const bool dominant = l.mode == Disp::Mode::DominantV || l.mode == Disp::Mode::DominantH;
+      switch (s.depends) {
+      case ds::sdl::Dep::None: return "";
+      case ds::sdl::Dep::FrameskipMode:
+        return cfg.num("emu.frameskip", 0) > 0 ? "" : "ONLY WITH FRAMESKIP ON";
+      case ds::sdl::Dep::PanelEffects:
+        return panel_effects() ? "" : "THIS SCREEN SCALES IN HARDWARE";
+      case ds::sdl::Dep::GridSeam:
+        if (!panel_effects()) return "THIS SCREEN SCALES IN HARDWARE";
+        return flag("video.linear", false) ? "BILINEAR IS ON" : "";
+      case ds::sdl::Dep::Chunky:
+        return flag("video.linear", false) ? "BILINEAR IS ON" : "";
+      case ds::sdl::Dep::ChunkyCell:
+        if (flag("video.linear", false)) return "BILINEAR IS ON";
+        return cfg.str("video.chunky", "false") == "false" ? "ONLY WITH CHUNKY ON" : "";
+      case ds::sdl::Dep::Windowed:
+        // A tier that owns the panel is already filling it; there is no
+        // window to make bigger.
+        return display.scaling() && !display.window() ? "THIS SCREEN IS ALWAYS FULL" : "";
+      case ds::sdl::Dep::Pip:
+        return pip ? "" : "PIP LAYOUT ONLY";
+      case ds::sdl::Dep::PipTouchHold:
+        if (!pip) return "PIP LAYOUT ONLY";
+        return l.pip_alpha < 1.0 ? "" : "ONLY WHEN THE PIP FADES";
+      case ds::sdl::Dep::Dominant:
+        return dominant ? "" : "DOMINANT LAYOUTS ONLY";
+      case ds::sdl::Dep::DominantThreshold:
+        if (!dominant) return "DOMINANT LAYOUTS ONLY";
+        return cfg.str("video.dominant_ratio", "auto") == "auto" ? "" : "ONLY WHEN THE RATIO IS AUTO";
+      }
+      return "";
+    }
+  };
+
+  Host host(cfg, nds, display, vs, global_ini, session.game_ini);
+  host.reopen = [&] { reopen_display(); };
+  // Push one changed key into the running machine. Anything not named here
+  // either needs the display reopened (the picture settings, handled below)
+  // or is only read at startup, and its row says so.
+  host.apply = [&](const char* key, const std::string& v) {
+    const auto is = [&](const char* k) { return std::strcmp(key, k) == 0; };
+    const bool on = v == "1" || v == "true" || v == "yes" || v == "on";
+    if (is("emu.frameskip")) { fs_limit = std::atoi(v.c_str()); return; }
+    if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }
+    // ::ds::jit, not ds::jit: a local `jit` (the interpreter switch) shadows
+    // the namespace in here. The pricing is baked in when a block is
+    // translated, so the cache goes with it -- otherwise the change would
+    // only reach code the game had not run yet.
+    if (is("emu.cpu_oc")) {
+#if DSPERATE_JIT
+      ::ds::jit::set_cpu_oc(on);
+      ::ds::jit::flush_all();
+#endif
+      nds.gpu3d.set_geometry_worker(on || cfg.flag("emu.timing_oc", false));
+      return;
+    }
+    if (is("emu.timing_oc")) { nds.gpu3d.set_timing_oc(on); nds.gpu3d.set_geometry_worker(on || cfg.flag("emu.cpu_oc", false)); return; }
+    if (is("emu.fast_load")) { nds.io.set_cart_bulk(on); return; }
+    if (is("emu.ff_speed")) { ff_speed = std::atoi(v.c_str()); return; }
+    if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
+    if (is("emu.autosave")) { autosave = on; return; }
+    if (is("video.aa")) { nds.gpu3d.renderer().set_aa(on); return; }
+    if (is("video.fps")) { fps_osd = on; if (on && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; } return; }
+    if (is("video.fullscreen")) {
+      if (display.fullscreen() != on) { display.toggle_fullscreen(); if (dual_window) display2.toggle_fullscreen(); }
+      menu_dirty = true;
+      return;
+    }
+    if (is("video.pip_touch_hold")) { pip_touch_hold = std::max(0, std::atoi(v.c_str())); return; }
+    // The layout family goes through set_layout, exactly as the hotkeys do.
+    if (is("video.screen") || is("video.pip_corner") || is("video.pip_scale") ||
+        is("video.pip_alpha") || is("video.dominant_ratio") || is("video.dominant_threshold")) {
+      if (dual_window) return;   // two windows, one screen each: nothing to lay out
+      Disp::Layout l = display.current_layout();
+      if (is("video.screen")) l.primary = v == "bottom" ? 1 : 0;
+      else if (is("video.pip_corner")) Disp::parse_corner(v, l.corner);
+      else if (is("video.pip_scale")) l.pip = std::clamp(std::atof(v.c_str()), 0.1, 0.9);
+      else if (is("video.pip_alpha")) { l.pip_alpha = std::clamp(std::atof(v.c_str()), 0.0, 1.0); pip_alpha = static_cast<int>(l.pip_alpha * 255.0 + 0.5); }
+      else if (is("video.dominant_threshold")) l.dominant_min = std::clamp(std::atof(v.c_str()), 0.1, 0.99);
+      else {
+        l.dominant_auto = v == "auto";
+        if (!l.dominant_auto) l.dominant = std::clamp(std::atof(v.c_str()), 0.1, 0.99);
+      }
+      display.set_layout(l);
+      vs.layout = l;
+      apply_visibility();
+      menu_dirty = true;
+      return;
+    }
+    // Everything else that is offered is a picture setting: it is baked into
+    // the scaler's tables when the display opens, so the display comes back.
+    if (is("video.linear") || is("video.lcd_grid") || is("video.seam") ||
+        is("video.chunky") || is("video.chunky_cell") || is("video.integer_scale"))
+      host.reopen_wanted = true;
+  };
+  menu.set_settings_host(&host);
   auto set_paused = [&](bool p) {
     if (p == paused) return;
     paused = p;

@@ -143,15 +143,18 @@ void scroll_bar(const Canvas& d, const Metrics& m, int px0, int py0, int panel_w
 // New entries go here and nowhere else -- the panel sizes itself to the count.
 constexpr int kSlotRow = 2;
 constexpr int kCheatRow = 3;   // hidden when no database matched this ROM
+constexpr int kOptionsRow = 4; // hidden when the frontend gave no settings host
 constexpr struct RootItem { const char* label; Menu::Result result; } kRoot[] = {
   {"SAVE STATE", Menu::Result::Save},
   {"LOAD STATE", Menu::Result::Load},
   {nullptr,      Menu::Result::None},
   {"CHEATS",     Menu::Result::None},
+  {"OPTIONS",    Menu::Result::None},
   {"RESUME",     Menu::Result::Resume},
   {"QUIT",       Menu::Result::Quit},
 };
 static_assert(static_cast<int>(std::size(kRoot)) == Menu::kRootRows, "kRootRows must match the table");
+static_assert(kRoot[kOptionsRow].result == Menu::Result::None, "kOptionsRow must name the options row");
 static_assert(kRoot[kSlotRow].label == nullptr, "kSlotRow must name the slot row");
 static_assert(kRoot[kCheatRow].result == Menu::Result::None, "kCheatRow must name the cheats row");
 // Rows are cheap to add (one entry above). The panel is sized from the canvas
@@ -196,7 +199,8 @@ void dim_framebuffer(u32* px, u32 n) {
 
 void Menu::set_open(bool o) {
   open_ = o;
-  page_ = Page::Root;
+  depth_ = 1;
+  stack_[0] = Page::Root;
   row_ = 0;
 }
 
@@ -206,12 +210,34 @@ void Menu::set_cheats(std::vector<cheat::Code>* codes, const std::vector<cheat::
   lines_.clear();
 }
 
-// The root page hides the cheats row when nothing matched, so what is on
-// screen is a subset of the table.
-int Menu::root_rows() const { return have_cheats() ? kRootRows : kRootRows - 1; }
+// The root page hides the rows that would have nothing behind them -- cheats
+// when no database matched, options when the frontend gave no host -- so what
+// is on screen is a subset of the table and the two have to be mapped.
+bool Menu::root_visible(int item) const {
+  if (item == kCheatRow) return have_cheats();
+  if (item == kOptionsRow) return have_options();
+  return true;
+}
+
+int Menu::root_rows() const {
+  int n = 0;
+  for (int i = 0; i < kRootRows; ++i) if (root_visible(i)) ++n;
+  return n;
+}
 
 int Menu::root_item(int row) const {
-  return (!have_cheats() && row >= kCheatRow) ? row + 1 : row;
+  for (int i = 0; i < kRootRows; ++i) if (root_visible(i) && row-- == 0) return i;
+  return kRootRows - 1;
+}
+
+void Menu::push(Page p) {
+  if (depth_ < kMaxDepth) stack_[depth_++] = p;
+}
+
+bool Menu::pop() {
+  if (depth_ <= 1) return false;
+  --depth_;
+  return true;
 }
 
 // The display list: a heading wherever the group changes, then every code.
@@ -275,7 +301,8 @@ void Menu::toggle_cheat() {
 
 void Menu::open_games() {
   open_ = true;
-  page_ = Page::Games;
+  depth_ = 1;
+  stack_[0] = Page::Games;
   game_row_ = 0;
   game_top_ = 0;
   chosen_.clear();
@@ -297,7 +324,11 @@ void Menu::move_game_row(int delta) {
   if (game_top_ < 0) game_top_ = 0;
 }
 
-int Menu::list_row() const { return page_ == Page::Games ? game_row_ : cheat_row_; }
+int Menu::list_row() const {
+  if (page() == Page::Games) return game_row_;
+  if (settings_page()) return set_row_[table_slot()];
+  return cheat_row_;
+}
 
 int Menu::marquee_offset(int overflow) const {
   if (overflow <= 0) return 0;
@@ -327,7 +358,9 @@ Menu::Result Menu::update(u32 presses, u32 held, u32 ms) {
            repeat_ms_ >= step; step = kRepeatRateMs) {
         repeat_ms_ -= step;
         repeating_ = true;
-        if (page_ == Page::Games) move_game_row(dir); else move_cheat_row(dir);
+        if (page() == Page::Games) move_game_row(dir);
+        else if (settings_page()) move_setting_row(dir);
+        else move_cheat_row(dir);
         dirty_ = true;
       }
     }
@@ -347,17 +380,20 @@ Menu::Result Menu::update(u32 presses, u32 held, u32 ms) {
 Menu::Result Menu::handle(u32 presses) {
   using B = io::Io::Button;
   const auto hit = [&](B b) { return (presses >> b) & 1; };
-  if (page_ == Page::Slot) {
+  if (page() == Page::Slot) {
     // Ten slots as two columns of five: up/down walk a column, left/right
-    // cross between them. row_ is the slot itself, 0-4 left and 5-9 right.
-    if (hit(B::BTN_UP))    row_ = (row_ % kSlotRows == 0) ? row_ + kSlotRows - 1 : row_ - 1;
-    if (hit(B::BTN_DOWN))  row_ = (row_ % kSlotRows == kSlotRows - 1) ? row_ - kSlotRows + 1 : row_ + 1;
-    if (hit(B::BTN_LEFT) || hit(B::BTN_RIGHT)) row_ = (row_ + kSlotRows) % 10;
-    if (hit(B::BTN_B)) { page_ = Page::Root; row_ = kSlotRow; return Result::None; }
-    if (hit(B::BTN_A) || hit(B::BTN_START)) { slot_ = row_; page_ = Page::Root; row_ = kSlotRow; }
+    // cross between them. slot_row_ is the slot itself, 0-4 left and 5-9
+    // right. It is not row_, which is the root page's selection: they used to
+    // share one variable and be reset on every entry and exit, which a page
+    // stack cannot do -- popping has to leave the page below as it was.
+    if (hit(B::BTN_UP))    slot_row_ = (slot_row_ % kSlotRows == 0) ? slot_row_ + kSlotRows - 1 : slot_row_ - 1;
+    if (hit(B::BTN_DOWN))  slot_row_ = (slot_row_ % kSlotRows == kSlotRows - 1) ? slot_row_ - kSlotRows + 1 : slot_row_ + 1;
+    if (hit(B::BTN_LEFT) || hit(B::BTN_RIGHT)) slot_row_ = (slot_row_ + kSlotRows) % 10;
+    if (hit(B::BTN_B)) { pop(); return Result::None; }
+    if (hit(B::BTN_A) || hit(B::BTN_START)) { slot_ = slot_row_; pop(); }
     return Result::None;
   }
-  if (page_ == Page::Games) {
+  if (page() == Page::Games) {
     // The same walk as the cheats page: up/down step, the shoulders page.
     // A is the only way off it -- see open_games() on why B is inert.
     if (hit(B::BTN_UP))   move_game_row(-1);
@@ -370,7 +406,9 @@ Menu::Result Menu::handle(u32 presses) {
     }
     return Result::None;
   }
-  if (page_ == Page::Cheats) {
+  if (page() == Page::Options) return handle_options(presses);
+  if (settings_page()) return handle_settings(presses);
+  if (page() == Page::Cheats) {
     // Up/down step, the shoulders page: a list of thousands is not one to
     // walk a row at a time.
     if (hit(B::BTN_UP))   move_cheat_row(-1);
@@ -378,7 +416,7 @@ Menu::Result Menu::handle(u32 presses) {
     if (hit(B::BTN_L)) for (int i = 0; i < visible_; ++i) move_cheat_row(-1);
     if (hit(B::BTN_R)) for (int i = 0; i < visible_; ++i) move_cheat_row(+1);
     if (hit(B::BTN_A)) toggle_cheat();
-    if (hit(B::BTN_B)) { page_ = Page::Root; row_ = kCheatRow; }
+    if (hit(B::BTN_B)) pop();
     return Result::None;
   }
   const int rows = root_rows();
@@ -393,15 +431,16 @@ Menu::Result Menu::handle(u32 presses) {
   }
   if (hit(B::BTN_B)) return Result::Resume;
   if (!hit(B::BTN_A) && !hit(B::BTN_START)) return Result::None;
-  if (item == kSlotRow) { page_ = Page::Slot; row_ = slot_; return Result::None; }
+  if (item == kSlotRow) { push(Page::Slot); slot_row_ = slot_; return Result::None; }
   if (item == kCheatRow) {
     build_lines();
     cheat_row_ = 0;
     cheat_top_ = 0;
     if (!lines_.empty() && lines_[0].kind != Line::Toggle) move_cheat_row(+1);
-    page_ = Page::Cheats;
+    push(Page::Cheats);
     return Result::None;
   }
+  if (item == kOptionsRow) { push(Page::Options); return Result::None; }
   return kRoot[item].result;
 }
 
@@ -572,10 +611,222 @@ void Menu::draw_games(const Canvas& d) const {
   scroll_bar(d, m, f.px0, f.py0, f.w, f.visible, n, top);
 }
 
+// The Options tree. Four pages of settings and, when there is a game in the
+// slot, where a change is remembered: the global file, or this game's own.
+const Setting* Menu::table() const {
+  switch (page()) {
+  case Page::Emulation: return kEmuSettings;
+  case Page::VisualFx:  return kVideoSettings;
+  case Page::Layout:    return kLayoutSettings;
+  default:              return kEmuSettings;
+  }
+}
+
+int Menu::table_slot() const {
+  switch (page()) {
+  case Page::VisualFx: return 1;
+  case Page::Layout:   return 2;
+  default:             return 0;
+  }
+}
+
+int Menu::settings_rows() const { return settings_count(table()); }
+
+// Walks past the rows the host has switched off, exactly as the cheats list
+// walks past its headings, and stops at the ends rather than wrapping.
+bool Menu::move_setting_row(int delta) {
+  host_->commit();   // done with the row that is being left
+  const Setting* t = table();
+  const int n = settings_count(t);
+  const int slot = table_slot();
+  int at = set_row_[slot];
+  for (int step = 0; step < n; ++step) {
+    at += delta > 0 ? 1 : -1;
+    if (at < 0 || at >= n) return false;
+    if (!host_->enabled(t[at])) continue;
+    set_row_[slot] = at;
+    return true;
+  }
+  return false;
+}
+
+void Menu::step_setting(int dir) {
+  const Setting* t = table();
+  const Setting& s = t[set_row_[table_slot()]];
+  if (!host_->enabled(s)) return;
+  const std::string cur = host_->get(s.key);
+  const std::string next = step_value(s, cur, dir, *host_);
+  if (next == cur) return;
+  host_->set(s.key, next);
+}
+
+Menu::Result Menu::handle_options(u32 presses) {
+  using B = io::Io::Button;
+  const auto hit = [&](B b) { return (presses >> b) & 1; };
+  const int rows = 4 + (host_->has_game() ? 1 : 0);
+  if (hit(B::BTN_UP))   opt_row_ = (opt_row_ + rows - 1) % rows;
+  if (hit(B::BTN_DOWN)) opt_row_ = (opt_row_ + 1) % rows;
+  const bool save_row = host_->has_game() && opt_row_ == 4;
+  // Left/right work the save-to switch in place, the way they work the slot
+  // on the root page: it is a two-way choice, not a page to enter.
+  if (save_row && (hit(B::BTN_LEFT) || hit(B::BTN_RIGHT) || hit(B::BTN_A) || hit(B::BTN_START)))
+    host_->set_save_per_game(!host_->save_per_game());
+  if (hit(B::BTN_B)) { pop(); return Result::None; }
+  if (save_row || (!hit(B::BTN_A) && !hit(B::BTN_START))) return Result::None;
+  static constexpr Page kPages[4] = {Page::Emulation, Page::VisualFx, Page::Layout, Page::Emulation};
+  if (opt_row_ == 3) return Result::None;   // DS OPTIONS: not built yet
+  push(kPages[opt_row_]);
+  // Land on something selectable: the first row of a page can be switched off
+  // (the layout page's pip rows in a stacked layout, say).
+  const int slot = table_slot();
+  set_row_[slot] = 0;
+  if (!host_->enabled(table()[0]) && !move_setting_row(+1)) set_row_[slot] = 0;
+  return Result::None;
+}
+
+Menu::Result Menu::handle_settings(u32 presses) {
+  using B = io::Io::Button;
+  const auto hit = [&](B b) { return (presses >> b) & 1; };
+  if (hit(B::BTN_UP))    move_setting_row(-1);
+  if (hit(B::BTN_DOWN))  move_setting_row(+1);
+  if (hit(B::BTN_LEFT))  step_setting(-1);
+  if (hit(B::BTN_RIGHT)) step_setting(+1);
+  // A steps a setting forward as well, so the whole page can be worked with
+  // one button on a handheld whose d-pad the player is already holding.
+  if (hit(B::BTN_A))     step_setting(+1);
+  if (hit(B::BTN_B))   { host_->commit(); pop(); }
+  return Result::None;
+}
+
+void Menu::draw_options(const Canvas& d) const {
+  static constexpr const char* kItems[4] = {"EMULATION", "VISUAL FX", "LAYOUT", "DS OPTIONS"};
+  Metrics m = metrics(d);
+  const int rows = 4 + (host_ && host_->has_game() ? 1 : 0);
+  const bool per_game = host_ && host_->save_per_game();
+  char save_row[40];
+  std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL");
+  // Wide enough for the longest row it will actually draw, rather than a
+  // number that happened to fit the rows it had when it was written: the
+  // save-to switch changes width as it is toggled, and a panel sized for the
+  // shorter one clips the other.
+  int widest = 0;
+  for (int i = 0; i < 4; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
+  if (rows > 4) widest = std::max(widest, text_width(m.s, save_row));
+  // Step the scale down rather than clip, as the root page does.
+  while (m.s > 2 && (widest + 8 * m.s > d.w || panel_height(m, rows) > d.h)) {
+    m = metrics(Canvas{d.px, d.pitch, d.w * (m.s - 1) / m.s, d.h * (m.s - 1) / m.s});
+    widest = 0;
+    for (int i = 0; i < 4; ++i) widest = std::max(widest, text_width(m.s, kItems[i]));
+    if (rows > 4) { std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL"); widest = std::max(widest, text_width(m.s, save_row)); }
+  }
+  const int panel_w = std::min(d.w - 2 * m.pad, widest + 8 * m.s);
+  const int panel_h = panel_height(m, rows);
+  const int px0 = (d.w - panel_w) / 2, py0 = (d.h - panel_h) / 2;
+  panel(d, px0, py0, panel_w, panel_h);
+  draw_text(d, px0 + (panel_w - text_width(m.s, "OPTIONS")) / 2, py0 + m.title_y, m.s, kInk, "OPTIONS");
+  fill_rect(d, px0 + m.pad, py0 + m.rule_y, panel_w - 2 * m.pad, std::max(1, m.s / 2), kEdge);
+  for (int i = 0; i < rows; ++i) {
+    const int ry = py0 + m.rows_y + i * m.row_h;
+    if (i == opt_row_) fill_rect(d, px0 + m.pad, ry - m.s, panel_w - 2 * m.pad, m.row_h, kSel);
+    if (i < 4) {
+      // DS OPTIONS has no page behind it yet; it reads dim so that pressing A
+      // on it and getting nothing is not a surprise.
+      const bool ready = i != 3;
+      draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, ready || i == opt_row_ ? kInk : kDim, kItems[i]);
+      continue;
+    }
+    // The save-to switch, drawn as the slot row is: the value between arrows,
+    // so it reads as something to change rather than somewhere to go.
+    draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, kInk, save_row);
+  }
+}
+
+// A settings page: one scrolling list of label-and-value rows, laid out like
+// the cheats page because it is the same problem -- more rows than fit.
+void Menu::draw_settings(const Canvas& d) const {
+  static constexpr const char* kTitles[3] = {"EMULATION", "VISUAL FX", "LAYOUT"};
+  const ListFrame f = list_frame(d, kTitles[table_slot()]);
+  const Metrics& m = f.m;
+  visible_ = f.visible;
+  const Setting* t = table();
+  const int n = settings_count(t);
+  const int sel = set_row_[table_slot()];
+
+  // A note under the list explains the selected row. It costs two rows of
+  // list, and is worth them: these settings are not self-explanatory, and the
+  // alternative is the player guessing or reading the ini.
+  const int note_rows = 2;
+  const int visible = std::max(1, f.visible - note_rows);
+  int top = set_top_[table_slot()];
+  if (sel < top) top = sel;
+  if (sel >= top + visible) top = sel - visible + 1;
+  if (top > n - visible) top = n - visible;
+  if (top < 0) top = 0;
+  set_top_[table_slot()] = top;
+
+  const int value_w = f.avail / 2;
+  for (int i = 0; i < visible && top + i < n; ++i) {
+    const Setting& s = t[top + i];
+    const int ry = f.py0 + m.list_rows_y + i * m.list_row_h;
+    const bool on = host_->enabled(s);
+    const bool is_sel = top + i == sel;
+    if (is_sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
+    // A setting that trades accuracy for speed is coloured, not just noted:
+    // the ini's comments shout about these and the menu should too.
+    u32 ink = kInk;
+    if (!on) ink = kPanelEdgeDim;
+    else if (!is_sel && (s.flags & FlagInexact)) ink = kEdgeText;
+    draw_text(d, f.text_x, ry, m.list_s, ink, fit(s.label, m.list_s, f.avail - value_w).c_str());
+    const std::string v = on ? display_value(s, host_->get(s.key)) : "--";
+    const std::string shown = on && is_sel ? "< " + v + " >" : v;
+    draw_text(d, f.text_x + f.avail - std::min(value_w, text_width(m.list_s, shown.c_str())),
+              ry, m.list_s, ink, fit(shown, m.list_s, value_w).c_str());
+  }
+  scroll_bar(d, m, f.px0, f.py0, f.w, visible, n, top);
+
+  // The note, under a rule at the foot of the panel.
+  const int note_y = f.py0 + m.list_rows_y + visible * m.list_row_h + m.list_s;
+  fill_rect(d, f.px0 + m.pad, note_y, f.w - 2 * m.pad, std::max(1, m.list_s), kPanelEdgeDim);
+  const Setting& cur = t[sel];
+  const char* why = host_->disabled_reason(cur);
+  const char* line = why && *why ? why : cur.note;
+  const u32 note_ink = why && *why ? kEdgeText : kDim;
+  // What it will take to see the change, when that is not "nothing". It takes
+  // the second note line, so the note itself wraps into one line when there is
+  // one and two when the row is free.
+  const char* when = (cur.flags & FlagRestart) ? "RESTART REQUIRED"
+                   : (cur.flags & FlagReopen)  ? "REOPENS THE DISPLAY" : nullptr;
+  if (when && !host_->enabled(cur)) when = nullptr;
+  if (line) {
+    const int lines = when ? 1 : note_rows;
+    // Wrapped on spaces rather than cut with an ellipsis: a note that stops
+    // mid-sentence tells the player less than the room allows.
+    std::string rest = line;
+    for (int i = 0; i < lines && !rest.empty(); ++i) {
+      std::string take = rest;
+      size_t cut = std::string::npos;
+      while (text_width(m.list_s, take.c_str()) > f.avail) {
+        cut = take.find_last_of(' ');
+        if (cut == std::string::npos) break;
+        take.resize(cut);
+      }
+      // One word longer than the row: cut it rather than loop forever.
+      if (text_width(m.list_s, take.c_str()) > f.avail) take = fit(take, m.list_s, f.avail);
+      draw_text(d, f.text_x, note_y + 2 * m.list_s + i * m.list_row_h, m.list_s, note_ink, take.c_str());
+      if (take.size() >= rest.size()) break;
+      rest.erase(0, take.size());
+      while (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
+    }
+  }
+  if (when) draw_text(d, f.text_x, note_y + 2 * m.list_s + (note_rows - 1) * m.list_row_h, m.list_s, kEdgeText, when);
+}
+
 void Menu::draw(const Canvas& d) const {
-  if (page_ == Page::Games) { draw_games(d); return; }
-  if (page_ == Page::Cheats) { draw_cheats(d); return; }
-  const bool slots = page_ == Page::Slot;
+  if (page() == Page::Games) { draw_games(d); return; }
+  if (page() == Page::Cheats) { draw_cheats(d); return; }
+  if (page() == Page::Options) { draw_options(d); return; }
+  if (settings_page()) { draw_settings(d); return; }
+  const bool slots = page() == Page::Slot;
   Metrics m = metrics(d);
   const int rows = slots ? kSlotRows : root_rows();   // the slot page stacks its ten in two columns
   // Step the glyph scale down rather than let a tall page run off a short
@@ -600,7 +851,7 @@ void Menu::draw(const Canvas& d) const {
     const int cell_w = slots ? (panel_w - 2 * m.pad) / 2 : panel_w - 2 * m.pad;
     const int cell_x = px0 + m.pad + col * cell_w;
     const int ry = py0 + rows_y + (slots ? i % kSlotRows : i) * row_h;
-    if (i == row_) fill_rect(d, cell_x, ry - m.s, cell_w, row_h, kSel);
+    if (i == (slots ? slot_row_ : row_)) fill_rect(d, cell_x, ry - m.s, cell_w, row_h, kSel);
     const char* label = buf;
     const int item = slots ? i : root_item(i);
     if (slots) std::snprintf(buf, sizeof buf, "%d %s", i, used_[i] ? "USED" : "EMPTY");
@@ -609,7 +860,7 @@ void Menu::draw(const Canvas& d) const {
     // Loading an empty slot, and every empty slot in the list, reads dimmer:
     // the menu says what is there before the player commits to it.
     const bool weak = (slots && !used_[i]) || (!slots && kRoot[item].result == Result::Load && !used_[slot_]);
-    draw_text(d, cell_x + 3 * m.s, ry, scale, weak && i != row_ ? kDim : kInk, label);
+    draw_text(d, cell_x + 3 * m.s, ry, scale, weak && i != (slots ? slot_row_ : row_) ? kDim : kInk, label);
   }
 }
 
