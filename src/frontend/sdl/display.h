@@ -203,8 +203,32 @@ public:
   bool map_point(int wx, int wy, int& screen, int& sx, int& sy) const;
 
   // Renderer output size, which is what map_point's coordinates are in (it
-  // differs from the window size on scaled displays).
+  // differs from the window size on scaled displays). Note this is NOT
+  // uniformly panel resolution: on the display-engine tier it is the DS-space
+  // canvas the scaler reads. For drawing, ask canvas() instead.
   void output_size(int& w, int& h) const { out_size(w, h); }
+
+  // The whole output buffer, for the frontend's own drawing (the pause menu,
+  // the overlays) in panel pixels rather than DS pixels. Valid between
+  // begin_frame() and present(); draw after finish_views() so an inset does
+  // not land on top of what was drawn.
+  struct CanvasView { u32* px; u32 pitch; int w, h; };
+  bool canvas(CanvasView& out) const {
+    if (!frame_px_) return false;
+    out = CanvasView{frame_px_, frame_pitch_, frame_w_, frame_h_};
+    return true;
+  }
+  // Whether this tier has a panel-resolution buffer the CPU can write at all.
+  // False on the display-engine tier, whose targets are two DS-sized buffers
+  // the scaler reads, and on the SDL_Renderer path, which has no frame buffer
+  // of its own; both keep the DS-space drawing path.
+  bool canvas_capable() const { return scaled_ && !disp_; }
+
+  // end_frame() in two halves, so the frontend can draw over the finished
+  // picture: finish_views() copies the insets into place, present() puts it on
+  // the screen. Calling end_frame() does both, and finish_views() is idempotent.
+  void finish_views();
+  void present();
   SDL_Window* window() const { return win_; }
   u32 window_id() const { return win_ ? SDL_GetWindowID(win_) : 0; }
 
@@ -270,6 +294,7 @@ private:
   u32*              frame_px_ = nullptr;   // the buffer begin_frame handed out, for end_frame's insets
   int               frame_w_ = 0, frame_h_ = 0;   // ... and its size, for clipping an inset at the edge
   u32               frame_pitch_ = 0;
+  bool              insets_done_ = false;   // finish_views() ran for this frame
 };
 
 } // namespace ds::sdl

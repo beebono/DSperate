@@ -591,6 +591,123 @@ void draw_flash(const CursorDst& d, u32 alpha) {
 volatile std::sig_atomic_t g_signalled = 0;
 void on_signal(int) { g_signalled = 1; }
 
+
+// Everything [video] settles before a window exists, in one place, so that the
+// same values can be re-read and re-applied when a setting is changed from the
+// pause menu rather than only at boot. parse_video() is pure: it reads the
+// config and never touches SDL. open_displays() is the other half, the set_*
+// calls that have to happen before Display::open because the scanline scaler
+// builds its tables there.
+//
+// The tier fields (disp, fbdev, and the dual-window panel order) are decided
+// once at boot and are not re-derived: choosing them forces SDL's video driver,
+// which is settled before SDL_Init and cannot be changed with a window open.
+struct VideoSetup {
+  int    scale = 2;
+  bool   fullscreen = false, linear = false, vsync = true, dual_window = false;
+  ds::sdl::Display::IntScale int_scale = ds::sdl::Display::IntScale::Off;
+  double grid_s = 0.0;      // 0..1 as configured
+  u32    grid = 256;        // brightness kept on a seam, 0..256 (256 = off)
+  u8     seam_blend = 0;    // 0 dark, 1 blend, 2 blend in linear light
+  u8     chunky = 0;
+  int    chunky_cell = -1;
+  u32    chunky_thresh = 180 * 256;
+  ds::sdl::Display::Layout layout;
+  std::vector<ds::sdl::Display::Mode> layout_cycle;
+  // Boot-only, see above.
+  bool   use_disp = false, use_fbdev = false;
+  int    bottom_display = 1;
+};
+
+bool parse_video(const ds::sdl::Config& cfg, VideoSetup& vs) {
+  using Disp = ds::sdl::Display;
+  vs.scale = cfg.num("video.scale", 2);
+  if (vs.scale < 1) vs.scale = 1;
+  vs.fullscreen = cfg.flag("video.fullscreen", false);
+  vs.linear = cfg.flag("video.linear", false);
+  vs.vsync = cfg.flag("video.vsync", true);
+  vs.dual_window = cfg.flag("video.dual_window", false);
+  if (!Disp::parse_int_scale(cfg.str("video.integer_scale", "off"), vs.int_scale)) { std::fprintf(stderr, "integer_scale must be off, under or over\n"); return false; }
+  // Grid strength -> brightness kept on the seams, 0..256 (256 = off).
+  vs.grid_s = std::min(1.0, std::max(0.0, cfg.real("video.lcd_grid", 0.0)));
+  vs.grid = static_cast<u32>(std::lround((1.0 - vs.grid_s) * 256.0));
+  vs.seam_blend = 0;
+  {
+    const std::string sm = cfg.str("video.seam", "dark");
+    if (sm == "blend") vs.seam_blend = 1; else if (sm == "blend_linear") vs.seam_blend = 2;
+    else if (sm != "dark") { std::fprintf(stderr, "unknown seam %s (dark | blend | blend_linear)\n", sm.c_str()); return false; }
+    if (vs.linear && (vs.grid_s > 0.0 || vs.seam_blend || cfg.str("video.chunky", "false") != "false"))
+      std::fprintf(stderr, "video.linear takes precedence over lcd_grid, seam and chunky\n");
+  }
+  {
+    const std::string c = cfg.str("video.chunky_cell", "auto");
+    if (c == "auto") vs.chunky_cell = -1; else if (c == "pair" || c == "2x") vs.chunky_cell = 0;
+    else { vs.chunky_cell = std::atoi(c.c_str()); if (vs.chunky_cell < 2 || vs.chunky_cell > 64) { std::fprintf(stderr, "chunky_cell %s: auto | pair | 2..64\n", c.c_str()); return false; } }
+  }
+  vs.chunky_thresh = static_cast<u32>(std::min(255, std::max(0, cfg.num("video.chunky_threshold", 180)))) * 256;
+  vs.chunky = 0;
+  {
+    const std::string c = cfg.str("video.chunky", "false");
+    if (c == "tl") vs.chunky = 1; else if (c == "mean" || c == "true" || c == "1" || c == "yes" || c == "on") vs.chunky = 2;
+    else if (c == "min") vs.chunky = 4; else if (c == "max") vs.chunky = 5; else if (c == "mode") vs.chunky = 3;
+    else if (c == "extreme") vs.chunky = 6;
+    else if (!(c == "false" || c == "0" || c == "no" || c == "off" || c.empty())) { std::fprintf(stderr, "unknown chunky %s (mean | extreme | mode | tl | min | max | false)\n", c.c_str()); return false; }
+  }
+  vs.layout = Disp::Layout{};
+  vs.layout_cycle.clear();
+  {
+    const std::string l = cfg.str("video.layout", "vertical"), sc = cfg.str("video.screen", "top"), co = cfg.str("video.pip_corner", "br");
+    if (!Disp::parse_mode(l, vs.layout.mode)) { std::fprintf(stderr, "unknown layout %s\n", l.c_str()); return false; }
+    if (sc == "top") vs.layout.primary = 0; else if (sc == "bottom") vs.layout.primary = 1;
+    else { std::fprintf(stderr, "unknown screen %s (top | bottom)\n", sc.c_str()); return false; }
+    if (!Disp::parse_corner(co, vs.layout.corner)) { std::fprintf(stderr, "unknown pip_corner %s (tl | tr | bl | br)\n", co.c_str()); return false; }
+    // The ring layout_next/prev step through; a mode outside it joins at its start.
+    std::string cyc = cfg.str("video.layout_cycle", "vertical,horizontal,single,pip,dominant_v,dominant_h");
+    for (size_t at = 0; at <= cyc.size();) {
+      size_t end = cyc.find(',', at); if (end == std::string::npos) end = cyc.size();
+      std::string name = cyc.substr(at, end - at);
+      name.erase(0, name.find_first_not_of(' ')); name.erase(name.find_last_not_of(' ') + 1);
+      Disp::Mode m;
+      if (!name.empty() && !Disp::parse_mode(name, m)) { std::fprintf(stderr, "unknown layout %s in layout_cycle\n", name.c_str()); return false; }
+      if (!name.empty()) vs.layout_cycle.push_back(m);
+      at = end + 1;
+    }
+    if (vs.layout_cycle.empty()) vs.layout_cycle.push_back(vs.layout.mode);
+    vs.layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
+    vs.layout.pip_alpha = std::clamp(cfg.real("video.pip_alpha", 1.0), 0.0, 1.0);
+    const std::string dr = cfg.str("video.dominant_ratio", "auto");
+    vs.layout.dominant_auto = dr == "auto";
+    if (!vs.layout.dominant_auto) {
+      char* end = nullptr; const double v = std::strtod(dr.c_str(), &end);
+      if (end == dr.c_str() || *end) { std::fprintf(stderr, "dominant_ratio must be a number or auto\n"); return false; }
+      vs.layout.dominant = std::clamp(v, 0.1, 0.99);
+    }
+    vs.layout.dominant_min = std::clamp(cfg.real("video.dominant_threshold", 0.25), 0.1, 0.99);
+  }
+  return true;
+}
+
+// The set_* calls and the open itself. Split from parse_video so a settings
+// change can close the windows and come back through here with new values.
+bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Display& display2) {
+  if (vs.dual_window) {
+    display.set_chunky(vs.chunky != 0, vs.chunky_cell); display2.set_chunky(vs.chunky != 0, vs.chunky_cell);
+    display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s); display2.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
+    display.set_integer_scale(vs.int_scale); display2.set_integer_scale(vs.int_scale);
+    if (!display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout, 0, 1 - vs.bottom_display) ||
+        !display2.open("DSperate (Bottom)", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout, 1, vs.bottom_display)) return false;
+    if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); return false; }
+    return true;
+  }
+  display.set_chunky(vs.chunky != 0, vs.chunky_cell);
+  display.set_disp(vs.use_disp);
+  display.set_integer_scale(vs.int_scale);
+  display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
+  if (!vs.linear) display.set_disp_grid(static_cast<u8>(((256 - vs.grid) * 255) / 256));
+  display.set_fbdev(vs.use_fbdev);
+  return display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -793,73 +910,27 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "firmware settings: %s -- warning: %s\n", fw_override.c_str(), err.c_str());
     }
   }
-  int scale = cfg.num("video.scale", 2);
-  if (scale < 1) scale = 1;
-  const bool fullscreen = cfg.flag("video.fullscreen", false), linear = cfg.flag("video.linear", false);
-  ds::sdl::Display::IntScale int_scale = ds::sdl::Display::IntScale::Off;
-  if (!ds::sdl::Display::parse_int_scale(cfg.str("video.integer_scale", "off"), int_scale)) { std::fprintf(stderr, "integer_scale must be off, under or over\n"); return 2; }
-  // Grid strength -> brightness kept on the seams, 0..256 (256 = off).
-  const double grid_s = std::min(1.0, std::max(0.0, cfg.real("video.lcd_grid", 0.0)));
-  const u32 grid = static_cast<u32>(std::lround((1.0 - grid_s) * 256.0));
-  u8 seam_blend = 0;
-  {
-    const std::string sm = cfg.str("video.seam", "dark");
-    if (sm == "blend") seam_blend = 1; else if (sm == "blend_linear") seam_blend = 2;
-    else if (sm != "dark") { std::fprintf(stderr, "unknown seam %s (dark | blend | blend_linear)\n", sm.c_str()); return 2; }
-    if (linear && (grid_s > 0.0 || seam_blend || cfg.flag("video.chunky", false) || cfg.str("video.chunky", "false") != "false"))
-      std::fprintf(stderr, "video.linear takes precedence over lcd_grid, seam and chunky\n");
-  }
-  u8 chunky = 0;
-  int chunky_cell = -1;
-  {
-    const std::string c = cfg.str("video.chunky_cell", "auto");
-    if (c == "auto") chunky_cell = -1; else if (c == "pair" || c == "2x") chunky_cell = 0;
-    else { chunky_cell = std::atoi(c.c_str()); if (chunky_cell < 2 || chunky_cell > 64) { std::fprintf(stderr, "chunky_cell %s: auto | pair | 2..64\n", c.c_str()); return 2; } }
-  }
-  const u32 chunky_thresh = static_cast<u32>(std::min(255, std::max(0, cfg.num("video.chunky_threshold", 180)))) * 256;
-  {
-    const std::string c = cfg.str("video.chunky", "false");
-    if (c == "tl") chunky = 1; else if (c == "mean" || c == "true" || c == "1" || c == "yes" || c == "on") chunky = 2;
-    else if (c == "min") chunky = 4; else if (c == "max") chunky = 5; else if (c == "mode") chunky = 3;
-    else if (c == "extreme") chunky = 6;
-    else if (!(c == "false" || c == "0" || c == "no" || c == "off" || c.empty())) { std::fprintf(stderr, "unknown chunky %s (mean | extreme | mode | tl | min | max | false)\n", c.c_str()); return 2; }
-  }
+  // [video] in one place; see VideoSetup. The references below keep the rest of
+  // this function reading as it did, and are what a settings change re-fills.
+  VideoSetup vs;
+  if (!parse_video(cfg, vs)) return 2;
+  int& scale = vs.scale;
+  const bool &fullscreen = vs.fullscreen, &linear = vs.linear;
+  ds::sdl::Display::IntScale& int_scale = vs.int_scale;
+  const double& grid_s = vs.grid_s;
+  const u32& grid = vs.grid;
+  const u8& seam_blend = vs.seam_blend;
+  u8& chunky = vs.chunky;
+  int& chunky_cell = vs.chunky_cell;
+  const u32& chunky_thresh = vs.chunky_thresh;
   bool audio_on = cfg.flag("audio.enabled", true), mic_on = cfg.flag("audio.mic", true);
-  const bool jit = cfg.flag("emu.jit", true), vsync = cfg.flag("video.vsync", true), dual_window = cfg.flag("video.dual_window", false);
+  const bool jit = cfg.flag("emu.jit", true);
+  const bool &vsync = vs.vsync, &dual_window = vs.dual_window;
   const long quantum = cfg.num("emu.quantum", 0);   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
   using Disp = ds::sdl::Display;
   using Menu = ds::sdl::Menu;
-  Disp::Layout layout;
-  std::vector<Disp::Mode> layout_cycle;
-  {
-    const std::string l = cfg.str("video.layout", "vertical"), sc = cfg.str("video.screen", "top"), co = cfg.str("video.pip_corner", "br");
-    if (!Disp::parse_mode(l, layout.mode)) { std::fprintf(stderr, "unknown layout %s\n", l.c_str()); return 2; }
-    if (sc == "top") layout.primary = 0; else if (sc == "bottom") layout.primary = 1;
-    else { std::fprintf(stderr, "unknown screen %s (top | bottom)\n", sc.c_str()); return 2; }
-    if (!Disp::parse_corner(co, layout.corner)) { std::fprintf(stderr, "unknown pip_corner %s (tl | tr | bl | br)\n", co.c_str()); return 2; }
-    // The ring layout_next/prev step through; a mode outside it joins at its start.
-    std::string cyc = cfg.str("video.layout_cycle", "vertical,horizontal,single,pip,dominant_v,dominant_h");
-    for (size_t at = 0; at <= cyc.size();) {
-      size_t end = cyc.find(',', at); if (end == std::string::npos) end = cyc.size();
-      std::string name = cyc.substr(at, end - at);
-      name.erase(0, name.find_first_not_of(' ')); name.erase(name.find_last_not_of(' ') + 1);
-      Disp::Mode m;
-      if (!name.empty() && !Disp::parse_mode(name, m)) { std::fprintf(stderr, "unknown layout %s in layout_cycle\n", name.c_str()); return 2; }
-      if (!name.empty()) layout_cycle.push_back(m);
-      at = end + 1;
-    }
-    if (layout_cycle.empty()) layout_cycle.push_back(layout.mode);
-    layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
-    layout.pip_alpha = std::clamp(cfg.real("video.pip_alpha", 1.0), 0.0, 1.0);
-    const std::string dr = cfg.str("video.dominant_ratio", "auto");
-    layout.dominant_auto = dr == "auto";
-    if (!layout.dominant_auto) {
-      char* end = nullptr; const double v = std::strtod(dr.c_str(), &end);
-      if (end == dr.c_str() || *end) { std::fprintf(stderr, "dominant_ratio must be a number or auto\n"); return 2; }
-      layout.dominant = std::clamp(v, 0.1, 0.99);
-    }
-    layout.dominant_min = std::clamp(cfg.real("video.dominant_threshold", 0.25), 0.1, 0.99);
-  }
+  Disp::Layout& layout = vs.layout;
+  std::vector<Disp::Mode>& layout_cycle = vs.layout_cycle;
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
@@ -889,7 +960,8 @@ int main(int argc, char** argv) {
   };
   const std::string disp_mode = cfg.str("video.disp");
   const bool disp_auto = disp_mode.empty() || disp_mode == "auto";
-  bool use_disp = disp_mode == "true" || disp_mode == "on";
+  bool& use_disp = vs.use_disp;
+  use_disp = disp_mode == "true" || disp_mode == "on";
   if ((use_disp || disp_auto) && !dual_window) {
     if (ds::sdl::DispOut::available()) { use_disp = true; go_headless("video.disp"); }
     else if (use_disp) {
@@ -908,7 +980,8 @@ int main(int argc, char** argv) {
   // compositor, not us, should have it. on forces it wherever fb0 answers.
   const std::string fbdev_mode = cfg.str("video.fbdev");
   const bool fbdev_auto = fbdev_mode.empty() || fbdev_mode == "auto";
-  bool use_fbdev = fbdev_mode == "true" || fbdev_mode == "on";
+  bool& use_fbdev = vs.use_fbdev;
+  use_fbdev = fbdev_mode == "true" || fbdev_mode == "on";
   if (!use_disp && (use_fbdev || fbdev_auto) && !dual_window) {
     // The signals: the launcher named the mali driver, this SDL2 was built
     // with one, the launcher named a headless driver outright, or nothing
@@ -960,7 +1033,6 @@ sdl_ready:
 
   ds::sdl::Display display;
   ds::sdl::Display display2;   // dual-window: the bottom screen's own window
-  int bottom_display = 1;
   if (dual_window) {
     if (SDL_GetNumVideoDisplays() < 2) { std::fprintf(stderr, "--dual-window needs two video displays\n"); SDL_Quit(); return 1; }
     // Which display is the physical bottom panel depends on the driver, both
@@ -968,15 +1040,9 @@ sdl_ready:
     // which is -- unintuitively -- the lower panel, while sway's canvas
     // arranges the outputs the other way around.
     const char* vd = SDL_GetCurrentVideoDriver();
-    bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
-    display.set_chunky(chunky != 0, chunky_cell); display2.set_chunky(chunky != 0, chunky_cell);
-    display.set_grid_strength(linear ? 0.0 : grid_s); display2.set_grid_strength(linear ? 0.0 : grid_s);
-    display.set_integer_scale(int_scale); display2.set_integer_scale(int_scale);
-    if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout, 0, 1 - bottom_display) ||
-        !display2.open("DSperate (Bottom)", scale, fullscreen, linear, vsync, layout, 1, bottom_display)) { SDL_Quit(); return 1; }
-    if (display.scaling() != display2.scaling()) { std::fprintf(stderr, "dual-window: mixed display modes\n"); SDL_Quit(); return 1; }
-  } else { display.set_chunky(chunky != 0, chunky_cell); display.set_disp(use_disp); display.set_integer_scale(int_scale); display.set_grid_strength(linear ? 0.0 : grid_s);
-    if (!linear) display.set_disp_grid(static_cast<u8>(((256 - grid) * 255) / 256)); display.set_fbdev(use_fbdev); if (!display.open("DSperate", scale, fullscreen, linear, vsync, layout)) { SDL_Quit(); return 1; } }
+    vs.bottom_display = vd && !std::strcmp(vd, "KMSDRM") ? 0 : 1;
+  }
+  if (!open_displays(vs, display, display2)) { SDL_Quit(); return 1; }
   // A single-screen layout shows one screen: the core skips the other's
   // engine (Gpu::set_screen_visible). Every other layout, and dual-window,
   // shows both.
@@ -1043,7 +1109,7 @@ sdl_ready:
           ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun_plain}
           : ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source || !target[i].grid ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
                                       at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
-                                      static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == bottom_display ? display2 : display).cell_map(i)),
+                                      static_cast<const ds::gpu::Gpu::CellMap*>((dual_window && i == vs.bottom_display ? display2 : display).cell_map(i)),
                                       linear && !at_source, target[i].lin_sx, target[i].lin_wx};
       st.y_lo = target[i].y_lo; st.y_hi = target[i].y_hi;   // the crop window (integer overscale)
       nds.gpu.set_scale_target(i, st);

@@ -721,6 +721,7 @@ void Display::clear_margins(u32* px, u32 pitch, int w, int h) const {
 // side buffer for the rest.
 void Display::targets(u32* px, u32 stride, int w, int h, Target out[SCREENS]) {
   frame_px_ = px; frame_pitch_ = stride; frame_w_ = w; frame_h_ = h;
+  insets_done_ = false;
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (v.direct) {
@@ -755,7 +756,8 @@ void Display::blend_row(u32* dst, const u32* src, size_t n, u32 alpha) {
 // (a ninth of the large screen by default) and the rows are read
 // sequentially, so it stays cheap, but an opaque inset takes the copy.
 void Display::blit_insets() {
-  if (!frame_px_) return;
+  if (!frame_px_ || insets_done_) return;
+  insets_done_ = true;
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     if (v.direct || !v.shown) continue;
@@ -770,7 +772,6 @@ void Display::blit_insets() {
       else blend_row(dst, src, static_cast<size_t>(x1 - x0), inset_alpha_);
     }
   }
-  frame_px_ = nullptr;
 }
 
 bool Display::begin_frame(Target out[SCREENS]) {
@@ -848,17 +849,30 @@ bool Display::begin_frame(Target out[SCREENS]) {
   return true;
 }
 
-void Display::end_frame() {
+// The insets go down before anything the frontend draws over the frame, so
+// that an overlay cannot be buried by the PiP inset the way it was when the
+// overlays lived in DS space and were drawn before this.
+void Display::finish_views() {
+  if (disp_) return;
+  blit_insets();
+}
+
+void Display::present() {
   if (disp_) {
     const u32* fb[SCREENS];
     for (int i = 0; i < SCREENS; ++i) fb[i] = src_side_[i].data();
     draw(fb);
     return;
   }
-  blit_insets();
+  frame_px_ = nullptr;
   if (out_frame_) { out_frame_ = false; out_->end_frame(); return; }
   if (SDL_MUSTLOCK(surf_)) SDL_UnlockSurface(surf_);
   SDL_UpdateWindowSurface(win_);
+}
+
+void Display::end_frame() {
+  finish_views();
+  present();
 }
 
 } // namespace ds::sdl
