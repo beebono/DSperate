@@ -43,13 +43,17 @@ void Timing::reset() {
   set_region7(0x04800000, 0x04808000, REGION_WIFI0, 32, 1, 1);
   set_region7(0x04808000, 0x04810000, REGION_WIFI1, 32, 1, 1);
   set_region7(0x06000000, 0x07000000, REGION_VRAM, 16, 1, 1);
-  // CPU table: no PU yet -> nothing cached.
-  std::memset(cpu9_.get(), 0, 0x100000 * 8);
-  for (u32 i = 0; i < 0x100000; ++i) {
-    const u8* b = &bus9_[(i >> 2) * 8];
-    u8* c = &cpu9_[i * 8];
-    c[0] = static_cast<u8>(b[2] << 1); c[1] = static_cast<u8>(b[0] << 1); c[2] = static_cast<u8>(b[2] << 1); c[3] = static_cast<u8>(b[3] << 1);
-    c[4] = c[0]; c[5] = c[1]; c[6] = c[2]; c[7] = c[3];
+  // CPU table: no PU yet -> nothing cached. One slot per 16 KB bus entry,
+  // stored four times as a word: this runs over a million pages at every
+  // reset, and byte stores made it a visible share of boot.
+  for (u32 g = 0; g < 0x40000; ++g) {
+    const u8* b = &bus9_[g * 8];
+    u8 slot[8];
+    slot[0] = static_cast<u8>(b[2] << 1); slot[1] = static_cast<u8>(b[0] << 1); slot[2] = static_cast<u8>(b[2] << 1); slot[3] = static_cast<u8>(b[3] << 1);
+    slot[4] = slot[0]; slot[5] = slot[1]; slot[6] = slot[2]; slot[7] = slot[3];
+    u64 w; std::memcpy(&w, slot, 8);
+    u64* c = reinterpret_cast<u64*>(&cpu9_[g * 4 * 8]);
+    c[0] = w; c[1] = w; c[2] = w; c[3] = w;
   }
   build_refill9(0, 0x100000);
   build_cost7();
@@ -63,12 +67,9 @@ void Timing::build_refill9(u32 first_page, u32 last_page) {
   auto Y = [&](u32 p) { const u8 c = cpu9_[p * 8]; return c == 0xFF ? 1u : c; };
   if (last_page > 0x100000) last_page = 0x100000;
   for (u32 p = first_page; p < last_page; ++p) {
-    u8* r = refill9_rw() + p * 4;
-    const u32 x = X(p);
-    r[0] = static_cast<u8>(x + Y(p));
-    r[1] = static_cast<u8>(x + x);
-    r[2] = static_cast<u8>(x + (p + 1 < 0x100000 ? X(p + 1) : x));
-    r[3] = static_cast<u8>(x);
+    const u32 x = X(p), xn = p + 1 < 0x100000 ? X(p + 1) : x;
+    const u32 r = (x + Y(p)) | ((x + x) << 8) | ((x + xn) << 16) | (x << 24);
+    std::memcpy(refill9_rw() + p * 4, &r, 4);
   }
 }
 
@@ -104,37 +105,48 @@ void Timing::build_cost7() {
 }
 
 // Fill [first_page, last_page) from the current bus table and nc slots.
+// The 32-byte block depends only on the page's two bus bytes and whether it
+// is main RAM, and consecutive pages nearly always agree, so the block is
+// evaluated once per change of input and copied otherwise: the full rebuild
+// at reset was ~100 ms of boot on the device when every page evaluated the
+// model 32 times.
 void Timing::build_cost7_range(u32 first_page, u32 last_page) {
   auto smax = [](s32 a, s32 b) { return a > b ? a : b; };
+  u8 block[COST7_STRIDE];
+  u32 key = 0xFFFFFFFFu;   // (nd16, nd32, data_main) of `block`
   for (u32 p = first_page; p < last_page; ++p) {
     const u8* t = &bus7()[p * 4];
     const bool data_main = (p >> 9) == 2;        // (addr >> 24) == 2
-    u8* out = &cost7_rw()[p * COST7_STRIDE];
-    for (u32 cm = 0; cm < 2; ++cm)
-      for (u32 cdi = 0; cdi < 2; ++cdi)
-        for (u32 ni = 0; ni < NC7_SLOTS; ++ni)
-          for (u32 w = 0; w < 2; ++w) {
-            const u32 v = nc7_values_[ni];
-            if (v == 0xFFFFFFFFu) { out[cost7_offset(cm, cdi, ni, w)] = 0; continue; }
-            const s32 nc = static_cast<s32>(v);
-            const s32 nd = t[w ? 2 : 0];         // singles are never sequential
-            s32 cost;
-            if (data_main) {
-              if (cm) cost = nd + nc;
-              else {
-                const s32 ncx = nc + static_cast<s32>(cdi);
-                cost = smax(smax(ncx, nd), nd + ncx - 3);
-              }
-            } else {
-              if (cm) {
-                const s32 ndp = nd + static_cast<s32>(cdi);
-                cost = smax(smax(nc, ndp), ndp + nc - 3);
+    const u32 k = t[0] | (t[2] << 8) | (data_main ? 0x10000u : 0u);
+    if (k != key) {
+      key = k;
+      for (u32 cm = 0; cm < 2; ++cm)
+        for (u32 cdi = 0; cdi < 2; ++cdi)
+          for (u32 ni = 0; ni < NC7_SLOTS; ++ni)
+            for (u32 w = 0; w < 2; ++w) {
+              const u32 v = nc7_values_[ni];
+              if (v == 0xFFFFFFFFu) { block[cost7_offset(cm, cdi, ni, w)] = 0; continue; }
+              const s32 nc = static_cast<s32>(v);
+              const s32 nd = t[w ? 2 : 0];         // singles are never sequential
+              s32 cost;
+              if (data_main) {
+                if (cm) cost = nd + nc;
+                else {
+                  const s32 ncx = nc + static_cast<s32>(cdi);
+                  cost = smax(smax(ncx, nd), nd + ncx - 3);
+                }
               } else {
-                cost = nd + nc + static_cast<s32>(cdi);
+                if (cm) {
+                  const s32 ndp = nd + static_cast<s32>(cdi);
+                  cost = smax(smax(nc, ndp), ndp + nc - 3);
+                } else {
+                  cost = nd + nc + static_cast<s32>(cdi);
+                }
               }
+              block[cost7_offset(cm, cdi, ni, w)] = static_cast<u8>(cost);
             }
-            out[cost7_offset(cm, cdi, ni, w)] = static_cast<u8>(cost);
-          }
+    }
+    std::memcpy(&cost7_rw()[p * COST7_STRIDE], block, COST7_STRIDE);
   }
 }
 
@@ -188,8 +200,12 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
   for (u32 i = first; i < last; ++i) {
     const u8 pu = pu_map[i];
     const u8* b = &bus9_[(i >> 2) * 8];
-    u8* c = &cpu9_[i * 8];
-    const u8 old_code = c[0], old_data = c[2];
+    u8* slot = &cpu9_[i * 8];
+    // The slot is composed in a local and stored as one word only when it
+    // changed: a full-range rebuild (reset, PU setup) runs a million times.
+    u64 old_w; std::memcpy(&old_w, slot, 8);
+    const u8 old_code = static_cast<u8>(old_w), old_data = static_cast<u8>(old_w >> 16);
+    u8 c[8];
     const u32 addr = i << 12;
     const bool itcm = addr < cpu.itcm_size;
     const bool dtcm = (addr & cpu.dtcm_mask) == cpu.dtcm_base;
@@ -200,6 +216,8 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
     c[4] = c[0];
     if (!(itcm || dtcm) && (pu & 0x10) && store_bus) { c[5] = static_cast<u8>(b[0] << 1); c[6] = static_cast<u8>(b[2] << 1); c[7] = static_cast<u8>(b[3] << 1); }
     else { c[5] = c[1]; c[6] = c[2]; c[7] = c[3]; }
+    u64 new_w; std::memcpy(&new_w, c, 8);
+    if (new_w != old_w) std::memcpy(slot, &new_w, 8);
     // Refill entries, written inline and only where a branch cost moved
     // (a full-range rebuild leaves most pages alone): page i-1's entry [2]
     // needs this page's cost, so each page is finished one iteration late.
