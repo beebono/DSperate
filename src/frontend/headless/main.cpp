@@ -225,9 +225,9 @@ int main(int argc, char** argv) {
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(timing_oc);
-  // Geometry worker, on by default with either inexact tier (no-FIFO, or the
-  // FIFO kept with polygons priced as kept under --cpu-oc); DS_GX_THREAD=0 for the A/B.
-  { const char* e = std::getenv("DS_GX_THREAD"); nds.gpu3d.set_geometry_worker((timing_oc || cpu_oc) && !(e && std::atoi(e) == 0)); }
+  // Geometry worker + per-frame shape controller, with either inexact tier
+  // (no-FIFO, or the FIFO kept with the cull priced by ratio under --cpu-oc).
+  nds.gpu3d.set_geometry_worker(timing_oc || cpu_oc);   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
   nds.gpu3d.renderer().set_aa(!no_aa);
 
   if (rom && cheat_db) {
@@ -425,10 +425,12 @@ int main(int argc, char** argv) {
 #endif
     if (i >= stats_from)
       frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
-      // DS_FRAME_SERIES=<path>: the run-order series ("ms polygons" per line),
+      // DS_FRAME_SERIES=<path>: the run-order series ("ms polygons raster_ns gx_ns" per line),
       // for the shape of a tail -- alternation, bursts -- rather than its size.
       static FILE* series = [] { const char* p = std::getenv("DS_FRAME_SERIES"); return p ? std::fopen(p, "w") : nullptr; }();
-      if (series) std::fprintf(series, "%.3f %u\n", frame_ms.back(), nds.gpu3d.render_polygon_count());
+      // ms polygons raster_ns(serial, last synced frame) gx_worker_busy_ns
+      if (series) std::fprintf(series, "%.3f %u %llu %llu\n", frame_ms.back(), nds.gpu3d.render_polygon_count(),
+                               (unsigned long long)nds.gpu3d.last_raster_ns(), (unsigned long long)nds.gpu3d.take_worker_busy_ns());
     // The console has switched itself off. On a firmware boot that is the
     // firmware leaving its settings pages, with the pages it wrote already in
     // the image, so this is the moment to put them on disk -- and then to

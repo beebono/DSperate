@@ -1115,10 +1115,9 @@ sdl_ready:
 
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
-  // Geometry worker, on by default with either inexact tier (no-FIFO, or the
-  // FIFO kept with polygons priced as kept under --cpu-oc); DS_GX_THREAD=0 for the A/B.
-  { const char* e = std::getenv("DS_GX_THREAD");
-    nds.gpu3d.set_geometry_worker((cfg.flag("emu.timing_oc", false) || cfg.flag("emu.cpu_oc", false)) && !(e && std::atoi(e) == 0)); }
+  // Geometry worker + per-frame shape controller, with either inexact tier
+  // (no-FIFO, or the FIFO kept with the cull priced by ratio under --cpu-oc).
+  nds.gpu3d.set_geometry_worker(cfg.flag("emu.timing_oc", false) || cfg.flag("emu.cpu_oc", false));   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
   nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
   nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
   if (!boot_firmware) nds.setup_direct_boot();

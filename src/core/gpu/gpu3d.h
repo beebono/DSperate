@@ -144,6 +144,9 @@ public:
   // taken from the previous frame's kept ratio (see pr_kept_num_): the
   // mechanism a game paces itself on (level, stall, busy bits) is intact, at
   // a throughput that follows the scene a frame late.
+  // Start the worker thread and the shape controller (DS_GX_THREAD: 0 never,
+  // 1 controller (default), 2 always on). Which frames actually use it is the
+  // controller's call -- see shape_step.
   void set_geometry_worker(bool on);
   bool geometry_worker() const { return worker_on_; }
 
@@ -186,6 +189,10 @@ public:
   // emulation thread at the start of a display frame, used by whichever
   // thread composites its lines.
   Renderer3D::FrameRef frame_ref() const { return renderer_.frame_ref(); }
+  // Instrumentation: the worker's execution time (ns) accumulated since the
+  // last take_worker_busy_ns, and the raster's serial cost of the last frame.
+  u64 take_worker_busy_ns() { return worker_busy_ns_.exchange(0, std::memory_order_relaxed); }
+  u64 last_raster_ns() const { return renderer_.last_band_sum_ns(); }
   const u32* line(const Renderer3D::FrameRef& f, u32 y);   // 3D output for display line y, X-scrolled (RGB666 + 5-bit alpha at 24-28)
   // Force the asynchronous raster to finish. Called wherever something is
   // about to change what its workers are reading -- in practice only
@@ -323,6 +330,7 @@ private:
   std::atomic<bool> joiner_waiting_{false};
   std::thread worker_thread_;
   u32 q_rd_local_ = 0;                  // worker's cursor
+  std::atomic<u64> worker_busy_ns_{0};   // time spent executing batches
   void q_push(const Entry& e) {
     // No cross-core load per entry: q_rd_ is a line the worker keeps dirty,
     // so the producer reads it only when its last reading says the queue is
@@ -334,6 +342,35 @@ private:
   void q_publish();
   void q_wait_room();
   void worker_join();                   // everything queued has executed
+  void worker_activate(bool on);        // route commands to the worker (true) or execute inline (false); queue must be empty
+  std::atomic<u64> join_wait_ns_{0};     // time spent in worker_join since the last take
+  // ---- shape controller -----------------------------------------------------
+  // Two shapes, chosen per frame at VBlank: A = three band workers, geometry
+  // inline on the emulation thread; B = two band workers plus the geometry
+  // worker. Both titles measured so far alternate a heavy list and a light one
+  // frame by frame, and the heavy list is built in one frame and rasterised
+  // during the next -- so the best shape flips every frame: B while a heavy
+  // list is being built, A while one is being rasterised. Predictions come
+  // from the frame two back (same phase): the serial raster cost of the list
+  // about to be dispatched (Renderer3D's band sum), and the emulation thread's
+  // own cost in each shape, remembered per phase and refreshed by an
+  // occasional probe of the shape not in use. Cost of a shape = the longer of
+  // its two paths: emulation thread, and raster (serial cost / bands, with an
+  // imbalance factor) -- the compositor tail is common to both. That was the
+  // plan; what runs is empirical, see shape_step.
+  int shape_mode_ = 1;
+  bool worker_started_ = false;
+  struct Phase {
+    u64 wall_ns[2] = {0, 0};         // frame wall time last seen in shape A / B (lightly averaged)
+    u32 age[2] = {~0u, ~0u};         // frames since each was measured (~0 = never)
+    bool shape_b = true;             // the shape this phase runs in now
+  };
+  Phase phase_[2];
+  std::chrono::steady_clock::time_point frame_t0_{};
+  bool frame_t0_valid_ = false;
+  u32 frame_idx_ = 0;
+  u64 gx_inline_ns_ = 0;               // inline execution time this interval (shape A)
+  void shape_step();
   void worker_loop();
   void worker_stop();
   void stack_reset();                   // GXSTAT bit 15 written: clear the flag, reset proj/tex stacks

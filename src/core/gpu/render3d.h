@@ -79,10 +79,6 @@ public:
   // what the hardware draws, so the core default is on; the SDL frontend
   // makes it opt-in (video.aa), the headless frontend has --no-aa for measurement.
   void set_aa(bool on) { aa_ = on; }
-  // Upper bound on band workers (0 = none): the geometry worker sets 2 so the
-  // two together take the cores the three band workers had. DS_R3D_THREADS
-  // still overrides.
-  static void set_band_cap(u32 cap);
   bool aa() const { return aa_; }
 
 private:
@@ -522,6 +518,14 @@ public:
   void sync_line(const FrameRef& f, s32 y);   // any thread; each call waits for one band at most
   void sync_all();
   bool raster_pending() const { return pending_bands_ != 0; }
+  // Serial raster cost of the frame most recently synced (sum over bands, ns).
+  u64 last_band_sum_ns() const { return band_sum_ns_[0]; }
+  // Time the dispatching thread spent on the raster path (waiting, or drawing
+  // a stolen bin) since the last take. The shape controller's input.
+  u64 take_owner_wait_ns() { return owner_wait_ns_.exchange(0, std::memory_order_relaxed); }
+  // Band workers for the next dispatch (0 = band_count's default); set by the
+  // shape controller, overridden by DS_R3D_THREADS.
+  void set_bands_next(u32 n) { bands_next_ = n; }
 private:
   std::function<void(u32)> job_fn_;   // outlives the dispatch, unlike a local
   u32 pending_bands_ = 0;             // bins in flight (0 = nothing running)
@@ -577,6 +581,8 @@ private:
   struct StealBand { std::unique_ptr<Renderer3D> band; std::atomic<bool> busy{false}; u64 gen = ~u64{0}; };
   StealBand steal_[2];
   std::thread::id owner_;                // the thread render() dispatched from
+  std::atomic<u64> owner_wait_ns_{0};
+  u32 bands_next_ = 0;
   bool steal_bins(u64 gen, u32 upto);    // claim and draw unclaimed bins until bin `upto` is done; true if it is
   // DS_R3D_STEAL: 0 off, 1 (default) the dispatching thread only, 2 any
   // thread. The compositor stealing measured flat-to-worse on Golden Sun (RG

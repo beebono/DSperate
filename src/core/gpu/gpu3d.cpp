@@ -332,7 +332,7 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
 
 } // namespace
 
-Gpu3D::~Gpu3D() { worker_stop(); renderer_.sync_all(); }
+Gpu3D::~Gpu3D() { if (worker_on_) worker_join(); worker_stop(); renderer_.sync_all(); }
 
 Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) { reset(); }
 
@@ -476,6 +476,7 @@ void Gpu3D::finish_work(s32 cycles) {
 
 void Gpu3D::run_to_slow(u64 arm9_time) {
   prof::add(prof::C_GX_RUN_SLOW, 1);
+  const auto t0 = std::chrono::steady_clock::now();
   const u64 now = arm9_time >> 1;
   cycle_count_ -= static_cast<s32>(now - timestamp_);
   timestamp_ = now;
@@ -528,6 +529,7 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
     ring_rd_ = rd; pipe_n_ = pipe; fifo_n_ = fifo; drain_settle_ = settle;
   }
   if (worker_on_ && q_pending_) q_publish();
+  else if (worker_started_) gx_inline_ns_ += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   if (cycle_count_ <= 0 && pipe_n_ == 0) {
     if (gxstat_ & (1u << 27)) finish_work(-cycle_count_); else cycle_count_ = 0;
     if (num_pushpop_ == 0) gxstat_ &= ~(1u << 14);
@@ -572,6 +574,7 @@ void Gpu3D::promote_stalled() {
 
 void Gpu3D::drain_all() {
   if (!geometry_on_) return;
+  const auto t0 = std::chrono::steady_clock::now();
   const u64 now = nds_.sched.now();
   // run_to_slow drains while its cycle deficit is non-positive; give it one
   // it cannot exhaust and it runs the ring dry. A SWAP_BUFFERS ends a pass
@@ -594,6 +597,7 @@ void Gpu3D::drain_all() {
   }
   cycle_count_ = 0;
   timestamp_ = now >> 1;
+  if (worker_started_) gx_inline_ns_ += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
 }
 
 void Gpu3D::check_fifo_irq() {
@@ -1469,8 +1473,8 @@ void Gpu3D::vblank() {
       pr_kept_num_ = w_polys_kept_; pr_kept_den_ = w_polys_submitted_;
       if (pr_kept_acc_ >= pr_kept_den_) pr_kept_acc_ = 0;
     }
-    w_polys_submitted_ = w_polys_kept_ = 0;
   } else if (no_fifo_) drain_all();
+  w_polys_submitted_ = w_polys_kept_ = 0;
   // The raster of the frame being displayed may still be running (nothing
   // on this thread waits for it any more): it reads its own copy of the
   // render state and a bank the swap below leaves alone (see raster_bank_).
@@ -1532,6 +1536,7 @@ void Gpu3D::vblank() {
   // join and nothing feeds it inside this call, so no lock is needed; it is
   // taken anyway so that every write to a bank role is under it.
   { std::lock_guard<std::mutex> lk(bank_mu_); pending_bank_ = render_bank_; }
+  if (worker_started_) shape_step();
 }
 
 void Gpu3D::render_frame() {
@@ -1602,24 +1607,97 @@ void Gpu3D::shadow_exec(u8 cmd, u32 param) {
 }
 
 void Gpu3D::set_geometry_worker(bool on) {
-  if (on == worker_on_) return;
+  if (on == worker_started_) return;
   if (on) {
-    if (no_fifo_) drain_all();   // hand over an empty ring (with the FIFO kept the ring stays the emulation thread's)
+    static const int mode = [] { const char* e = std::getenv("DS_GX_THREAD"); return e ? std::atoi(e) : 1; }();
+    shape_mode_ = mode;
+    if (shape_mode_ == 0) return;
     q_wr_local_ = q_rd_local_ = q_rd_seen_ = 0; q_pending_ = false;
     q_wr_.store(0, std::memory_order_relaxed); q_rd_.store(0, std::memory_order_relaxed);
     q_stop_ = false;
+    worker_started_ = true;
+    worker_thread_ = std::thread([this] { worker_loop(); });
+    worker_activate(true);       // B first: the worker's cost gets measured
+  } else {
+    if (worker_on_) { worker_join(); worker_activate(false); }
+    worker_stop();
+    worker_started_ = false;
+    renderer_.set_bands_next(0);
+  }
+}
+
+// Switch the command route. Only with the queue empty (after a join): the
+// worker's state and the ring's are then one consistent engine state, and
+// exec_single on this thread or on the worker continues it either way.
+void Gpu3D::worker_activate(bool on) {
+  if (on == worker_on_) return;
+  if (on) {
+    if (no_fifo_) drain_all();   // hand over an empty ring (with the FIFO kept the ring stays the emulation thread's)
     worker_on_ = true;
     exec_timed_ = false;
     pricer_resync();
-    worker_thread_ = std::thread([this] { worker_loop(); });
-    renderer_.set_band_cap(2);   // the worker takes the third band worker's core
+    renderer_.set_bands_next(2);   // the worker takes the third band worker's core
   } else {
-    worker_join();
-    worker_stop();
     worker_on_ = false;
     exec_timed_ = !untimed_;
-    renderer_.set_band_cap(0);
+    renderer_.set_bands_next(3);
   }
+}
+
+// The shape controller's step, at VBlank after the join (see the header).
+//
+// Empirical, not modelled: a cost model (emulation thread vs raster / bands)
+// was tried first and was off by 3 ms either way -- it overestimated the
+// two-band raster path on Spirit Tracks (band sums carry per-band setup) and
+// underestimated it on Golden Sun (the compositor tail follows the raster).
+// Both shapes get run anyway, so the controller remembers the wall time each
+// phase measured in each shape and picks the shorter; the other shape is
+// probed again after a while, soon when the two are close and rarely when
+// one is clearly better, so a probe frame costs little where it matters.
+void Gpu3D::shape_step() {
+  static const bool log = std::getenv("DS_GX_SHAPE_LOG") != nullptr;
+  const auto now = std::chrono::steady_clock::now();
+  const u64 waits = nds_.gpu.take_join_wait_ns() + renderer_.take_owner_wait_ns() + join_wait_ns_.exchange(0, std::memory_order_relaxed);
+  const u64 gx_worker = take_worker_busy_ns();
+  const u64 gx_inline = gx_inline_ns_; gx_inline_ns_ = 0;
+  const u64 wall = frame_t0_valid_ ? static_cast<u64>((now - frame_t0_).count()) : 0;
+  frame_t0_ = now; frame_t0_valid_ = true;
+  const u32 k = frame_idx_++;
+  Phase& ended = phase_[k & 1];
+  for (Phase& p : phase_) for (u32& a : p.age) if (a != ~0u) ++a;
+  const u32 ran = worker_on_ ? 1 : 0;
+  // The first frames after a start or a load are translation bursts, not the
+  // scene: a 36 ms first measurement of one shape locked the other in for the
+  // whole run. Skipped, and a stale memory is replaced rather than blended
+  // (a probe's job is to re-measure); a fresh one blends 1:3 so a single odd
+  // frame does not flip the choice.
+  constexpr u32 kSettleFrames = 16, kStale = 32;
+  if (k >= kSettleFrames && wall && wall < 200000000) {
+    ended.wall_ns[ran] = (ended.age[ran] == ~0u || ended.age[ran] > kStale) ? wall : (ended.wall_ns[ran] * 3 + wall) / 4;
+    ended.age[ran] = 0;
+  }
+  if (shape_mode_ != 1) return;    // 2: always the worker
+  // Decide for the next interval: its phase is the one two back.
+  Phase& next = phase_[(k + 1) & 1];
+  constexpr u64 kMargin = 300000;            // 0.3 ms: do not flap on noise
+  bool b = next.shape_b;
+  const char* why = "";
+  if (next.age[0] == ~0u || next.age[1] == ~0u) { b = next.age[1] == ~0u; why = " (first)"; }   // measure B first, then A
+  else {
+    const u64 wa = next.wall_ns[0], wb = next.wall_ns[1];
+    if (b && wa + kMargin < wb) b = false;
+    else if (!b && wb + kMargin < wa) b = true;
+    // Re-probe the other shape about once a second: one frame in 64 in the
+    // shape not chosen, so a measurement that has gone stale (or was wrong)
+    // cannot hold for more than that.
+    constexpr u32 kProbeAfter = 64;
+    if (next.age[b ? 0 : 1] > kProbeAfter) { b = !b; why = " (probe)"; }
+  }
+  if (log) std::fprintf(stderr, "[shape] ended f%u ran %c wall %.2f waits %.2f gxw %.2f gxi %.2f list %u polys | next f%u: A %.2f (age %u) B %.2f (age %u) -> %c%s\n",
+                        k, ran ? 'B' : 'A', wall / 1e6, waits / 1e6, gx_worker / 1e6, gx_inline / 1e6, render_count_[render_bank_],
+                        k + 1, next.wall_ns[0] / 1e6, next.age[0], next.wall_ns[1] / 1e6, next.age[1], b ? 'B' : 'A', why);
+  next.shape_b = b;
+  worker_activate(b);
 }
 
 // The queue is empty: the shadow and the pricer are functions of the executed state.
@@ -1785,14 +1863,17 @@ void Gpu3D::worker_join() {
   const u32 target = q_wr_local_;
   if (q_rd_.load(std::memory_order_acquire) == target) return;
   prof::Scope sc(prof::GX_JOIN);
+  const auto t0 = std::chrono::steady_clock::now();
   // A spin first: the common join (VBlank) finds the worker on its last few
   // commands, and a sleep here costs the wake-up latency on top of the wait.
-  if (spin_for(200, [&] { return q_rd_.load(std::memory_order_acquire) == target; })) return;
-  std::unique_lock<std::mutex> lk(q_mu_);
-  joiner_waiting_.store(true, std::memory_order_seq_cst);
-  std::atomic_thread_fence(std::memory_order_seq_cst);
-  q_done_cv_.wait(lk, [&] { return q_rd_.load(std::memory_order_seq_cst) == target; });
-  joiner_waiting_.store(false, std::memory_order_relaxed);
+  if (!spin_for(200, [&] { return q_rd_.load(std::memory_order_acquire) == target; })) {
+    std::unique_lock<std::mutex> lk(q_mu_);
+    joiner_waiting_.store(true, std::memory_order_seq_cst);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    q_done_cv_.wait(lk, [&] { return q_rd_.load(std::memory_order_seq_cst) == target; });
+    joiner_waiting_.store(false, std::memory_order_relaxed);
+  }
+  join_wait_ns_.fetch_add(static_cast<u64>((std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
 }
 
 void Gpu3D::worker_loop() {
@@ -1815,11 +1896,13 @@ void Gpu3D::worker_loop() {
     // Execute the batch; the cursor is published once at its end -- a
     // joiner only needs to know when everything is done, and per-command
     // publication would put a release store in the hottest loop.
+    const auto t0 = std::chrono::steady_clock::now();
     while (rd != wr) {
       const Entry e = q_[rd & (QN - 1)];
       ++rd;
       exec_single(e.cmd, e.param);
     }
+    worker_busy_ns_.fetch_add(static_cast<u64>((std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
     q_rd_.store(rd, std::memory_order_seq_cst);
     q_rd_local_ = rd;
     std::atomic_thread_fence(std::memory_order_seq_cst);

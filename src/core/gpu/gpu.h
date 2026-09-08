@@ -153,6 +153,9 @@ public:
   // the worker is hot for the whole display period, i.e. a core is spoken
   // for, which the 3D band count allows for (Renderer3D::render).
   bool lag_active() const { return lag_frame_ && par_2d_ && !lazy_frame_; }
+  // Time the emulation thread spent in join_worker since the last take (ns):
+  // the compositor-path wait the 3D shape controller reads at VBlank.
+  u64 take_join_wait_ns() { const u64 v = join_wait_ns_; join_wait_ns_ = 0; return v; }
   // Bus::vram_read on an LCDC page under the capture read trap: join the
   // lines in flight if the read is of the bank the capture is writing.
   bool lcdc_read_trapped() const { return read_trap_bank_ >= 0; }
@@ -454,6 +457,7 @@ private:
   // latches so far, in order -- then frame_done and the traps lifted, as
   // render_ranges does for a frame that finished on this thread.
   void join_worker();
+  u64 join_wait_ns_ = 0;
   void finish_a();
 public:
   void journal_full() { join_worker(); }   // Engine2D::queue on a full journal

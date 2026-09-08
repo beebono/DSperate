@@ -2647,7 +2647,8 @@ void Renderer3D::render(const Gpu3D& gx) {
   // waiting on it for the previous frame's bands (sync_line).
   if (!pool_ || pool_->workers() < maxb) pool_ = std::make_unique<Pool>(maxb);
 
-  const u32 nb = (adapt_enabled() && !threads_forced()) ? adaptive_workers(maxb) : maxb;
+  u32 nb = (adapt_enabled() && !threads_forced()) ? adaptive_workers(maxb) : maxb;
+  if (bands_next_ && !threads_forced()) nb = bands_next_ < maxb ? bands_next_ : maxb;
   last_nb_ = nb;
   wait_ns_.store(0, std::memory_order_relaxed);   // consumed by adaptive_workers; start the next frame's tally
 
@@ -2875,10 +2876,14 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
   if (!f.nbins || !pool_) return;
   u32 b = 0;
   while (b + 1 < f.nbins && y >= f.bin_y[b + 1]) ++b;
-  if (steal_bins(f.gen, b)) return;
-  DS_PROF(R3D_WAIT);
-  const u64 ns = pool_->wait_bits(f.gen, u64{1} << b);
-  if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed);
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool owner = std::this_thread::get_id() == owner_;
+  if (!steal_bins(f.gen, b)) {
+    DS_PROF(R3D_WAIT);
+    const u64 ns = pool_->wait_bits(f.gen, u64{1} << b);
+    if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed);
+  }
+  if (owner) owner_wait_ns_.fetch_add(static_cast<u64>((std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
 }
 // Wait for all of them: before the next frame's raster, and whenever
 // something is about to change what the workers are reading (Bus::update_vram
@@ -2890,8 +2895,10 @@ void Renderer3D::sync_all() {
   // be inside the job at that point -- it marks its last bin done from in
   // there. Waiting on an idle pool costs one uncontended lock.
   u64 ns = 0;
+  const auto t0 = std::chrono::steady_clock::now();
   if (pool_ && pending_bands_) steal_bins(gen_, nbins_ - 1);
   if (pool_) { DS_PROF(R3D_WAIT); ns = pool_->wait_idle(); if (ns) wait_ns_.fetch_add(ns, std::memory_order_relaxed); }
+  if (pool_ && std::this_thread::get_id() == owner_) owner_wait_ns_.fetch_add(static_cast<u64>((std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
   if (!pending_bands_) return;
   if (ns) prof::add(prof::C_R3D_SYNC_ALL, 1);   // bands were still running: something waited for the whole raster
   pending_bands_ = 0;
@@ -3058,9 +3065,6 @@ bool Renderer3D::threads_forced() {
 // polygon *count* says nothing about raster cost (a skybox or a full-screen
 // quad is a full frame of spans), and skipping banding below 24 polygons
 // cost 12 % of the whole win on SM64DS.
-static u32 g_band_cap = 0;
-void Renderer3D::set_band_cap(u32 cap) { g_band_cap = cap; }
-
 u32 Renderer3D::band_count(u32 polygons) {
   static const int forced = [] {
     const char* e = std::getenv("DS_R3D_THREADS");
@@ -3068,7 +3072,6 @@ u32 Renderer3D::band_count(u32 polygons) {
   }();
   if (forced >= 0) return forced < 1 ? 1u : static_cast<u32>(forced);
   if (polygons < 2) return 1;
-  if (g_band_cap) return g_band_cap;
   // Pinned at three since 2026-08-29 (RG DS knob sweep against the CPU cuts
   // of 2026-08-28: mlbis -6.8 %, etody -2.6 %, sm64 -1.4 %, meteos/dbori flat;
   // GSDD +5.8 %, whose main thread is the critical path). Before the pin a

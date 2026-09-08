@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/gpu.h"
+#include <chrono>
 #include "core/state/state.h"
 #include "core/gpu/vram_map.h"
 #include "core/gpu/kernels.h"
@@ -603,7 +604,7 @@ void Gpu::join_worker() {
   if (!inflight_[0] && !inflight_[1] && !scale_inflight_) return;
   const bool dbg = g_dbg_join;
   if (dbg) std::fprintf(stderr, "[join] frame %llu line %u hblank %d a %u..%u b %u..%u deferred %d\n", (unsigned long long)nds_.frame_count, line_, hblank_done_ ? 1 : 0, job_first_[0], job_last_[0], job_first_[1], job_last_[1], a_deferred_ ? 1 : 0);
-  worker_.wait();
+  { const auto t0 = std::chrono::steady_clock::now(); worker_.wait(); join_wait_ns_ += static_cast<u64>((std::chrono::steady_clock::now() - t0).count()); }
   inflight_[0] = inflight_[1] = false; scale_inflight_ = false; bscale_n_ = 0;
   if (a_deferred_) { a_deferred_ = false; finish_a(); }
 }
