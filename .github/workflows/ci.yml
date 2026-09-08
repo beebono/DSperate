@@ -29,8 +29,7 @@ jobs:
         run: tools/gen_example_configs.sh && git diff --exit-code configs/default.ini
 
   # Native arm64: the JIT and NEON paths on real silicon, and the binaries a
-  # handheld runs. libstdc++/libgcc are linked statically so the artefact does
-  # not depend on the runner's Ubuntu being no newer than the device's.
+  # handheld runs (see Package for the two tarballs).
   arm64:
     runs-on: ubuntu-24.04-arm
     steps:
@@ -46,23 +45,36 @@ jobs:
       # build. STRICT keeps the per-function mismatch warnings in the log.
       - name: Build and test
         run: |
-          cmake --preset host -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc" -DDSPERATE_PGO=use -DDSPERATE_PGO_STRICT=ON
+          cmake --preset host -DDSPERATE_PGO=use -DDSPERATE_PGO_STRICT=ON
           # "source locations ... have changed" is benign (the checkout path is
           # in the checksum; the counts still apply) and one per function, so it
           # is filtered; "control flow ... does not match" is a dropped profile.
           cmake --build --preset host 2>&1 | grep -v "source locations for function" | tee build.log
           echo "PGO: $(grep -c 'control flow of function' build.log || true) functions changed since the profile ($(sed -n 's/^commit //p' pgo/aarch64/MANIFEST | cut -c1-9), $(sed -n 's/^date //p' pgo/aarch64/MANIFEST)); $(grep -c 'data file not found' build.log || true) objects without one"
           ctest --preset host --output-on-failure
+      # Two tarballs from one build. The standard one is what a distro with a
+      # current libstdc++ wants (ROCKNIX packages it as a binary): dynamically
+      # linked and stripped. The -static one carries libstdc++/libgcc inside
+      # and its debug symbols, for a device whose runtime may be older than
+      # the runner's or for a backtrace; the reconfigure only relinks.
       - name: Package
         run: |
-          mkdir -p dist/dsperate-${GITHUB_REF_NAME}-linux-aarch64
+          d=dsperate-${GITHUB_REF_NAME}-linux-aarch64
+          mkdir -p dist/$d dist/$d-static
+          cp build/host/src/frontend/sdl/dsperate build/host/src/frontend/headless/dsperate-headless dist/$d/
+          strip dist/$d/dsperate dist/$d/dsperate-headless
+          cp LICENSE README.md dist/$d/
+          tar -C dist -czf $d.tar.gz $d
+          cmake --preset host -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --build --preset host
           cp build/host/src/frontend/sdl/dsperate build/host/src/frontend/headless/dsperate-headless \
-             LICENSE README.md dist/dsperate-${GITHUB_REF_NAME}-linux-aarch64/
-          tar -C dist -czf dsperate-${GITHUB_REF_NAME}-linux-aarch64.tar.gz dsperate-${GITHUB_REF_NAME}-linux-aarch64
+             LICENSE README.md dist/$d-static/
+          tar -C dist -czf $d-static.tar.gz $d-static
+          ls -l *.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: dsperate-linux-aarch64
-          path: dsperate-*-linux-aarch64.tar.gz
+          path: dsperate-*-linux-aarch64*.tar.gz
 
   # 32-bit ARM (armhf): the A32 JIT backend and the ARMv7 NEON subset, which no
   # other job covers.  Cross-built from x86 against multiarch armhf packages
@@ -88,20 +100,28 @@ jobs:
           sudo apt-get install -y ninja-build g++-arm-linux-gnueabihf qemu-user-static libsdl2-dev:armhf
       - name: Cross build and test (qemu-arm)
         run: |
-          cmake --preset arm32-cross -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --preset arm32-cross
           cmake --build --preset arm32-cross
           cd build/arm32 && ctest --output-on-failure
       - name: Package
         run: |
           test -x build/arm32/src/frontend/sdl/dsperate  # SDL2:armhf must have been found
-          mkdir -p dist/dsperate-${GITHUB_REF_NAME}-linux-armhf
+          d=dsperate-${GITHUB_REF_NAME}-linux-armhf
+          mkdir -p dist/$d dist/$d-static
+          cp build/arm32/src/frontend/sdl/dsperate build/arm32/src/frontend/headless/dsperate-headless dist/$d/
+          arm-linux-gnueabihf-strip dist/$d/dsperate dist/$d/dsperate-headless
+          cp LICENSE README.md dist/$d/
+          tar -C dist -czf $d.tar.gz $d
+          cmake --preset arm32-cross -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --build --preset arm32-cross
           cp build/arm32/src/frontend/sdl/dsperate build/arm32/src/frontend/headless/dsperate-headless \
-             LICENSE README.md dist/dsperate-${GITHUB_REF_NAME}-linux-armhf/
-          tar -C dist -czf dsperate-${GITHUB_REF_NAME}-linux-armhf.tar.gz dsperate-${GITHUB_REF_NAME}-linux-armhf
+             LICENSE README.md dist/$d-static/
+          tar -C dist -czf $d-static.tar.gz $d-static
+          ls -l *.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: dsperate-linux-armhf
-          path: dsperate-*-linux-armhf.tar.gz
+          path: dsperate-*-linux-armhf*.tar.gz
 
   # Tag v* to publish. The notes are a stand-in (name, tag, changelog link)
   # meant to be edited on GitHub afterwards.
@@ -124,8 +144,10 @@ jobs:
       - name: Check the tarballs arrived
         run: |
           ls -l
-          test -f dsperate-${GITHUB_REF_NAME}-linux-aarch64.tar.gz
-          test -f dsperate-${GITHUB_REF_NAME}-linux-armhf.tar.gz
+          for a in aarch64 armhf; do
+            test -f dsperate-${GITHUB_REF_NAME}-linux-$a.tar.gz
+            test -f dsperate-${GITHUB_REF_NAME}-linux-$a-static.tar.gz
+          done
       - name: Write release notes
         run: |
           prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
@@ -139,9 +161,11 @@ jobs:
             echo
             echo "Full changelog: ${changes}"
             echo
-            echo "Requires a BIOS/firmware set dumped from your own DS; none is included."
+            echo "Games run without BIOS or firmware dumps (built-in FreeBIOS and a generated firmware); a set dumped from your own DS unlocks the firmware boot and cycle-exact SWI timing. None is included."
+            echo
+            echo "Tarballs: \`linux-aarch64\` / \`linux-armhf\` are dynamically linked and stripped -- the ones to package. The \`-static\` variants carry libstdc++/libgcc inside and keep their debug symbols, for a device whose runtime is older than the build's, or for a backtrace."
           } > notes.md
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dsperate-*-linux-aarch64.tar.gz dsperate-*-linux-armhf.tar.gz --title "DSperate ${GITHUB_REF_NAME}" --notes-file notes.md
+        run: gh release create "${GITHUB_REF_NAME}" dsperate-*-linux-aarch64.tar.gz dsperate-*-linux-aarch64-static.tar.gz dsperate-*-linux-armhf.tar.gz dsperate-*-linux-armhf-static.tar.gz --title "DSperate ${GITHUB_REF_NAME}" --notes-file notes.md
