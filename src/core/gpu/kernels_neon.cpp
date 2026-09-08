@@ -34,6 +34,20 @@ inline uint8x16_t narrow(uint32x4_t a, uint32x4_t b, uint32x4_t c, uint32x4_t d)
   return vcombine_u8(vmovn_u16(vcombine_u16(vmovn_u32(a), vmovn_u32(b))), vmovn_u16(vcombine_u16(vmovn_u32(c), vmovn_u32(d))));
 }
 
+// Sixteen direct-colour words -> records, the arithmetic form of
+// direct_colour(): each 5-bit field becomes a byte plane (x2, bit 15 dropped)
+// and the planes are interleaved out with the alpha byte.
+inline void direct16(const u16* v, Pixel* out) {
+  const uint16x8_t lo = vld1q_u16(v), hi = vld1q_u16(v + 8);
+  const uint8x16_t m = vdupq_n_u8(0x3E);
+  uint8x16x4_t px;
+  px.val[0] = vandq_u8(vcombine_u8(vmovn_u16(vshlq_n_u16(lo, 1)), vmovn_u16(vshlq_n_u16(hi, 1))), m);
+  px.val[1] = vandq_u8(vcombine_u8(vshrn_n_u16(lo, 4), vshrn_n_u16(hi, 4)), m);
+  px.val[2] = vandq_u8(vcombine_u8(vmovn_u16(vshrq_n_u16(lo, 9)), vmovn_u16(vshrq_n_u16(hi, 9))), m);
+  px.val[3] = vdupq_n_u8(0xFF);
+  vst4q_u8(reinterpret_cast<u8*>(out), px);
+}
+
 // Blend of two records with per-lane weights, 4 pixels. R and B share one
 // multiply chain (each field reaches at most 63*32+16 < 2^11, so they do not
 // meet); after the shift a field is at most 126, so its bit 6 is the
@@ -244,11 +258,12 @@ void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables
     const u8 t0 = top_tid[i];
     if (compat::maxv_u8(tt) == compat::minv_u8(tt) && !(line3d && t0 == T_BG0)) {
       const Pixel* tab = tables[t0];
-      for (u32 k = 0; k < 16; ++k) top_px[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
+      if (tab == direct_table()) direct16(top + i, top_px + i);
+      else for (u32 k = 0; k < 16; ++k) top_px[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
     } else {
       for (u32 k = 0; k < 16; ++k) {
         const u8 t = top_tid[i + k];
-        top_px[i + k] = (line3d && t == T_BG0) ? line3d[i + k] : (tables[t][top[i + k] & 0x7FFF] | 0xFF000000);
+        top_px[i + k] = (line3d && t == T_BG0) ? line3d[i + k] : resolve_one(tables[t], top[i + k]);
       }
     }
   }
@@ -304,15 +319,15 @@ void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const 
     if (top_run && second_run) {
       const Pixel* top_tab = tables[t0];
       const Pixel* second_tab = tables[s0];
-      for (u32 k = 0; k < 16; ++k) {
-        top_px[i + k] = top_tab[top[i + k] & 0x7FFF] | 0xFF000000;
-        second_px[i + k] = second_tab[second[i + k] & 0x7FFF] | 0xFF000000;
-      }
+      if (top_tab == direct_table()) direct16(top + i, top_px + i);
+      else for (u32 k = 0; k < 16; ++k) top_px[i + k] = top_tab[top[i + k] & 0x7FFF] | 0xFF000000;
+      if (second_tab == direct_table()) direct16(second + i, second_px + i);
+      else for (u32 k = 0; k < 16; ++k) second_px[i + k] = second_tab[second[i + k] & 0x7FFF] | 0xFF000000;
     } else {
       for (u32 k = 0; k < 16; ++k) {
         const u8 t = top_tid[i + k];
-        top_px[i + k] = (line3d && t == T_BG0) ? line3d[i + k] : (tables[t][top[i + k] & 0x7FFF] | 0xFF000000);
-        second_px[i + k] = tables[second_tid[i + k]][second[i + k] & 0x7FFF] | 0xFF000000;
+        top_px[i + k] = (line3d && t == T_BG0) ? line3d[i + k] : resolve_one(tables[t], top[i + k]);
+        second_px[i + k] = resolve_one(tables[second_tid[i + k]], second[i + k]);
       }
     }
   }
@@ -495,9 +510,10 @@ void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pi
     const uint8x16_t t = vld1q_u8(top_tid + i);
     if (compat::maxv_u8(t) == compat::minv_u8(t)) {
       const Pixel* tab = tables[top_tid[i]];
-      for (u32 k = 0; k < 16; ++k) out[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
+      if (tab == direct_table()) direct16(top + i, out + i);
+      else for (u32 k = 0; k < 16; ++k) out[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
     } else {
-      for (u32 k = 0; k < 16; ++k) out[i + k] = tables[top_tid[i + k]][top[i + k] & 0x7FFF] | 0xFF000000;
+      for (u32 k = 0; k < 16; ++k) out[i + k] = resolve_one(tables[top_tid[i + k]], top[i + k]);
     }
   }
 }
@@ -506,6 +522,7 @@ void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pi
 // independent loads per iteration, which is what keeps an in-order core busy
 // through the load latency; the address arithmetic vectorises around them.
 void resolve16_one(const u16* v, const Pixel* table, Pixel* out) {
+  if (table == direct_table()) { for (u32 i = 0; i < 256; i += 16) direct16(v + i, out + i); return; }
   for (u32 i = 0; i < 256; i += 8) {
     const uint16x8_t idx = vandq_u16(vld1q_u16(v + i), vdupq_n_u16(0x7FFF));
     alignas(16) u16 ix[8];

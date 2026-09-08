@@ -126,7 +126,7 @@ public:
     return base ? reinterpret_cast<u8*>(base + addr) : nullptr;
   }
   inline u8* write_ptr(u32 addr, bool* is_code) const {
-    if (prof::enabled) {          // census: what a write-path dirty bit must intercept
+    if (prof::census && prof::enabled) {   // census: what a write-path dirty bit must intercept (DSPERATE_CENSUS)
       const u32 r = addr >> 24;
       if (r == 5) prof::add(prof::C_W_PALETTE, 1);
       else if (r == 7) prof::add(prof::C_W_OAM, 1);

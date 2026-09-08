@@ -28,13 +28,33 @@ namespace ds::gpu {
 //      2D work that runs on the emulation thread rather than the line worker
 //  16  engine A's scanline scaler only (emit_scaled)
 //  32  engine B's scanline scaler only
-unsigned ablate() { static const unsigned m = [] { const char* e = std::getenv("DS_ABLATE"); return e ? static_cast<unsigned>(std::atoi(e)) : 0u; }(); return m; }
+// Debug knobs read once, in the constructor: function-local statics cost a
+// guard load and test per call, and ablate() runs three or four times per
+// line per engine; begin_frame read three of these with getenv every frame.
+namespace {
+unsigned g_ablate = 0;
+bool g_dbg_join = false, g_dbg_gpu = false, g_dbg_vramnz = false, g_dbg_skip = false;
+const char* g_dump_frame = nullptr;
+void read_knobs() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+  if (const char* e = std::getenv("DS_ABLATE")) g_ablate = static_cast<unsigned>(std::atoi(e));
+  g_dbg_join = std::getenv("DS_DEBUG_JOIN") != nullptr;
+  g_dbg_gpu = std::getenv("DS_DEBUG_GPU") != nullptr;
+  g_dbg_vramnz = std::getenv("DS_DEBUG_VRAMNZ") != nullptr;
+  g_dbg_skip = std::getenv("DS_DEBUG_SKIP") != nullptr;
+  g_dump_frame = std::getenv("DS_DEBUG_DUMP_FRAME");
+}
+}  // namespace
+unsigned ablate() { return g_ablate; }
 
 static void ev_scanline(NDS& nds, u32) { nds.gpu.on_scanline_start(); }
 static void ev_hblank(NDS& nds, u32)   { nds.gpu.on_hblank(); }
 static void ev_fifo(NDS& nds, u32 x)   { nds.gpu.on_display_fifo(x); }
 
 Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
+  read_knobs();
   // DS_2D_THREAD=0 keeps engine B on the emulation thread. The two paths must
   // produce identical frames; the env var is what makes that checkable.
   if (const char* l = std::getenv("DS_2D_LAZY")) lazy_enabled_ = std::atoi(l) != 0;
@@ -478,17 +498,17 @@ void Gpu::begin_frame() {
   // previous one. Latched once, here: the raster moves on to the next frame
   // at line 215 of this one while the compositor may still be reading it.
   ref3d_ = nds_.gpu3d.frame_ref();
-  if (std::getenv("DS_DEBUG_GPU"))
+  if (g_dbg_gpu)
     std::fprintf(stderr, "[gpu] frame %llu powcnt %04x dispcntA %08x dispcntB %08x mb %04x/%04x cap %08x vramcnt %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
                  static_cast<unsigned long long>(nds_.frame_count), nds_.io.powcnt1, engine[0].dispcnt(), engine[1].dispcnt(), master_bright_g_[0], master_bright_g_[1], capcnt_,
                  nds_.io.vramcnt[0], nds_.io.vramcnt[1], nds_.io.vramcnt[2], nds_.io.vramcnt[3], nds_.io.vramcnt[4], nds_.io.vramcnt[5], nds_.io.vramcnt[6], nds_.io.vramcnt[7], nds_.io.vramcnt[8]);
-  if (std::getenv("DS_DEBUG_VRAMNZ")) {
+  if (g_dbg_vramnz) {
     std::fprintf(stderr, "[vram] frame %llu nz:", static_cast<unsigned long long>(nds_.frame_count));
     for (int i = 0; i < 9; ++i) { u32 n = 0; const u8* b = nds_.bus.vram_bank(i); for (u32 k = 0; k < mem::Bus::VRAM_BANK_SIZES[i]; ++k) n += b[k] != 0; std::fprintf(stderr, " %c=%u", 'A' + i, n); }
     for (int i : {5, 7}) { const u8* b = nds_.bus.vram_bank(i); u32 lo = ~0u, hi = 0; for (u32 k = 0; k < mem::Bus::VRAM_BANK_SIZES[i]; ++k) if (b[k]) { if (k < lo) lo = k; hi = k; } std::fprintf(stderr, " %c[%x..%x]", 'A' + i, lo, hi); }
     std::fputc('\n', stderr);
   }
-  if (const char* f = std::getenv("DS_DEBUG_DUMP_FRAME")) {   // with DS_DEBUG_DUMP_LINE=L: engine state and one rendered line
+  if (const char* f = g_dump_frame) {   // with DS_DEBUG_DUMP_LINE=L: engine state and one rendered line
     if (nds_.frame_count == static_cast<u64>(std::atoi(f))) {
       const char* l = std::getenv("DS_DEBUG_DUMP_LINE"); const u32 line = l ? std::atoi(l) : 96;
       engine[0].debug_dump(line); engine[1].debug_dump(line);
@@ -504,7 +524,7 @@ void Gpu::begin_frame() {
   // Frameskip, for this frame's display lines: what the raster at line 215
   // assumed, re-checked now that this frame's capture bit is known.
   skip_frame_ = skip_next_ && skippable();
-  if (std::getenv("DS_DEBUG_SKIP"))   // frameskip: the decision, and what refused it
+  if (g_dbg_skip)   // frameskip: the decision, and what refused it
     std::fprintf(stderr, "[skip] frame %llu req %d raster %d capture %d/%u fifo %d period %u -> %s\n",
                  static_cast<unsigned long long>(nds_.frame_count), skip_req_ ? 1 : 0, skip_next_ ? 1 : 0,
                  capture_on_ ? 1 : 0, capture_recent_, run_fifo_ ? 1 : 0, phase_period_, skip_frame_ ? "skipped" : "drawn");
@@ -571,7 +591,7 @@ void Gpu::worker_job(void* self) {
 
 void Gpu::join_worker() {
   if (!inflight_[0] && !inflight_[1] && !scale_inflight_) return;
-  static const bool dbg = std::getenv("DS_DEBUG_JOIN") != nullptr;
+  const bool dbg = g_dbg_join;
   if (dbg) std::fprintf(stderr, "[join] frame %llu line %u hblank %d a %u..%u b %u..%u deferred %d\n", (unsigned long long)nds_.frame_count, line_, hblank_done_ ? 1 : 0, job_first_[0], job_last_[0], job_first_[1], job_last_[1], a_deferred_ ? 1 : 0);
   worker_.wait();
   inflight_[0] = inflight_[1] = false; scale_inflight_ = false; bscale_n_ = 0;
@@ -612,7 +632,7 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
   // What the lines read of the frame-level capture state, as of now -- the
   // same for lines drawn here and for lines handed over.
   capcnt_render_ = capcnt_; capture_render_ = capture_on_;
-  static const bool dbg = std::getenv("DS_DEBUG_JOIN") != nullptr;
+  const bool dbg = g_dbg_join;
   auto hand = [&](bool a, bool b) {
     if (dbg) std::fprintf(stderr, "[hand] frame %llu line %u a %u..%u b %u..%u lag %d stash %u\n", (unsigned long long)nds_.frame_count, line_, a ? af : 1, a ? al : 0, b ? bf : 1, b ? bl : 0, lag_frame_ ? 1 : 0, bscale_n_);
     job_first_[0] = a ? af : 1; job_last_[0] = a ? al : 0;
@@ -707,9 +727,8 @@ void Gpu::step_engine(int e, u32 line) {
   if (e == 0 && capture_render_ && !skip_frame_ && !(abl & 4)) { DS_PROF(CAPTURE); capture(line); }
   // Sprites are rendered one line ahead of the backgrounds.
   if (draw && line < SCREEN_H - 1) {
-    prof::Scope* sc = (e == 0 && prof::enabled) ? new prof::Scope(prof::OBJ_DRAW) : nullptr;
+    prof::Scope sc(prof::OBJ_DRAW, e == 0);
     en.render_sprites(line + 1);
-    delete sc;
   }
   en.post_draw(false);
 }
@@ -718,7 +737,7 @@ void Gpu::step_engine(int e, u32 line) {
 // 6->8 bit expansion, into the screen POWCNT1 bit 15 gives it (or scaled
 // straight into the frontend's buffer).
 void Gpu::output_engine(int e, u32 line) {
-  prof::Scope* sc = (e == 0 && prof::enabled) ? new prof::Scope(prof::OUTPUT) : nullptr;
+  prof::Scope sc(prof::OUTPUT, e == 0);
   const Engine2D& en = engine[e];
   const int screen = en.screen();
   const bool scaled = scaling();
@@ -743,7 +762,6 @@ void Gpu::output_engine(int e, u32 line) {
       std::memcpy(st.px, dst, sizeof st.px);
     } else emit_scaled(screen, line, dst);
   }
-  delete sc;
 }
 
 // One source line to the destination rows it covers. Destination row y takes

@@ -21,6 +21,13 @@ enum Stage : u32 {
   COUNT
 };
 extern bool enabled;
+// Census counters that sit on a per-access path (PageTable::write_ptr) cost a
+// global load and a branch on every store even when disabled, so they are
+// compiled in only on request: -DDSPERATE_CENSUS=1.
+#ifndef DSPERATE_CENSUS
+#define DSPERATE_CENSUS 0
+#endif
+constexpr bool census = DSPERATE_CENSUS != 0;
 // DS_ASYNC_PROBE: true between the line the raster would start on and the
 // deadline it would have to be joined by -- the window an async raster would
 // be exposed to CPU writes in.
@@ -159,10 +166,12 @@ void report();
 void frame_mark();
 void frame_breakdown(const std::vector<double>& frame_ms);
 
+// A stack object; `on` lets a caller time only some of its invocations
+// (one engine of two) without heap-allocating the scope conditionally.
 struct Scope {
-  Stage s; std::chrono::steady_clock::time_point t0;
-  explicit Scope(Stage st) : s(st) { if (enabled) t0 = std::chrono::steady_clock::now(); }
-  ~Scope() { if (enabled) add_ns(s, static_cast<u64>((std::chrono::steady_clock::now() - t0).count())); }
+  Stage s; bool on; std::chrono::steady_clock::time_point t0;
+  explicit Scope(Stage st, bool want = true) : s(st), on(want && enabled) { if (on) t0 = std::chrono::steady_clock::now(); }
+  ~Scope() { if (on) add_ns(s, static_cast<u64>((std::chrono::steady_clock::now() - t0).count())); }
 };
 
 } // namespace ds::prof

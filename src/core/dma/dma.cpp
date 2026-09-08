@@ -248,9 +248,10 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
   // code-tagged or trapped page), the per-unit path is taken for the rest of
   // that page without re-walking the page table for every unit.
   u32 no_run_below = 0;
+  u32 loops = 0;                                // C_DMA_LOOP, added once after the loop
   while (c.iter_count > 0 && used < budget) {
     if (a9 && nds_.gpu3d.stalled()) break;      // a full GX FIFO stalls the ARM9's DMA too
-    prof::add(prof::C_DMA_LOOP, 1);
+    ++loops;
     u32 cost = unit_cycles(c, burst_start, word);
     if (a9) cost <<= 1;
     used += cost;
@@ -484,6 +485,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
     c.cur_dst += c.dst_inc * step;
     c.iter_count--; c.rem_count--;
   }
+  if (loops) prof::add(prof::C_DMA_LOOP, loops);
   if (c.rem_count) {
     if (c.iter_count == 0) {
       set_running(c, 0);   // wait for the next trigger

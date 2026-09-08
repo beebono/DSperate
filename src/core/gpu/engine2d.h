@@ -193,7 +193,6 @@ private:
   alignas(16) std::array<u16, 4096> objext_copy_{};
   u16 objext_checked_ = 0, objext_have_ = 0;   // per 256-entry palette
   const Pixel* obj_std_pal18();
-  static const Pixel* rgb555_table();
   void obj_ext_pal18(u32 pal);                 // validate / convert one OBJ extended palette
   // Per-line resolve tables by TableId.
   const Pixel* tables_[T_COUNT] = {};

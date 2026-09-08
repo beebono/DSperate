@@ -941,6 +941,7 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
   const u32 row = row_of(y) + 1;
   const u8* ra = sb.vr; const u8* ga = sb.vg; const u8* ba = sb.vb;
   const s16* sa = sb.sc; const s16* ta = sb.tc;
+  u32 resolved = 0;                // counted once after the loop, not per pixel
   for (s32 x = xa; x < xb; ++x) {
     const u32 i = static_cast<u32>(x - sb.x0);
     if (!sb.pass[i]) continue;    // neither the top pixel nor the one underneath can take it
@@ -964,7 +965,7 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
     const u32 vr = ra[i], vg = ga[i], vb = ba[i];
     const s32 s = sa[i], t = ta[i];
     const u32 color = shade_pixel<textured>(sh, vr, vg, vb, s, t);
-    prof::add(prof::C_RESOLVED_PIXELS, 1);
+    ++resolved;
     const u32 alpha = color >> 24;
     if (alpha <= sh.alpha_ref) continue;
     if (alpha == 31) {
@@ -992,6 +993,7 @@ void Renderer3D::resolve_span(const Shade& sh, const SpanBuf& sb, s32 y, s32 xa,
       if (aa && (dstattr & 0xF) && addr < static_cast<u32>(RSIZE)) plot_translucent(addr + RSIZE, color, zz, polyattr, shadow);
     }
   }
+  if (resolved) prof::add(prof::C_RESOLVED_PIXELS, resolved);
 }
 
 // The texture half of a Shade: format, size, VRAM addressing and the direct

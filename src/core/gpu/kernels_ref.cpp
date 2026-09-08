@@ -5,6 +5,10 @@
 // kernels_neon.cpp must match them bit for bit.
 #include "core/gpu/kernels.h"
 
+namespace ds::gpu::kern {
+const Pixel* direct_table() { static const Pixel sentinel[1] = {}; return sentinel; }
+}
+
 namespace ds::gpu::kern::ref {
 
 namespace {
@@ -171,11 +175,11 @@ void select16_obj_flat(const u16* v, const u8* attr, const u8* win, u32 prio, u1
 }
 
 void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pixel* out) {
-  for (u32 i = 0; i < 256; ++i) out[i] = tables[top_tid[i]][top[i] & 0x7FFF] | 0xFF000000;
+  for (u32 i = 0; i < 256; ++i) out[i] = resolve_one(tables[top_tid[i]], top[i]);
 }
 
 void resolve16_one(const u16* v, const Pixel* table, Pixel* out) {
-  for (u32 i = 0; i < 256; ++i) out[i] = table[v[i] & 0x7FFF] | 0xFF000000;
+  for (u32 i = 0; i < 256; ++i) out[i] = resolve_one(table, v[i]);
 }
 
 void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables, const Pixel* line3d,
@@ -184,7 +188,7 @@ void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables
   for (u32 i = 0; i < 256; ++i) {
     const u8 tt = top_tid[i];
     top_id[i] = id_of[tt];
-    top_px[i] = (line3d && tt == T_BG0) ? line3d[i] : (tables[tt][top[i] & 0x7FFF] | 0xFF000000);
+    top_px[i] = (line3d && tt == T_BG0) ? line3d[i] : resolve_one(tables[tt], top[i]);
   }
 }
 
@@ -204,8 +208,8 @@ void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const 
   static const u8 id_of[T_COUNT] = {L_BG0, L_BG1, L_BG2, L_BG3, L_OBJ, L_OBJ, L_OBJ, L_BACKDROP, 0};
   for (u32 i = 0; i < 256; ++i) {
     const u8 tt = top_tid[i], st = second_tid[i];
-    top_px[i] = tables[tt][top[i] & 0x7FFF] | 0xFF000000;
-    second_px[i] = tables[st][second[i] & 0x7FFF] | 0xFF000000;
+    top_px[i] = resolve_one(tables[tt], top[i]);
+    second_px[i] = resolve_one(tables[st], second[i]);
     top_id[i] = id_of[tt]; second_id[i] = id_of[st];
     u8 kind = K_NORMAL, a = 0;
     if (tt == T_BG0 && line3d) { kind = K_3D; a = (line3d[i] >> 24) & 0x1F; top_px[i] = line3d[i]; }

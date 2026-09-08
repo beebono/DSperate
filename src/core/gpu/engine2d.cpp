@@ -427,16 +427,6 @@ void Engine2D::debug_dump(u32 line) {
 
 const Pixel Engine2D::zero_table_[256] = {};
 
-// RGB555 (bit 15 ignored) -> 18-bit record, for direct-colour layers.
-const Pixel* Engine2D::rgb555_table() {
-  static const std::array<Pixel, 32768> table = [] {
-    std::array<Pixel, 32768> t{};
-    for (u32 c = 0; c < 32768; ++c) t[c] = rgb15_to_18(static_cast<u16>(c));
-    return t;
-  }();
-  return table.data();
-}
-
 namespace {
 // DS_DEBUG_OUTHASH=1: a hash of each engine's composite output per frame
 // (and per line of frame DS_DEBUG_OUTHASH_FRAME), to find where two builds
@@ -470,11 +460,12 @@ void Engine2D::render_line(u32 line) {
     if (dispcnt_ & 0xE000) prof::add(prof::C_2D_WINDOW_LINES, 1);
     if (bldcnt_ & 0xC0) prof::add(prof::C_2D_EFFECT_LINES, 1);
   }
-  prof::Scope* sc = prof::enabled ? new prof::Scope(prof::BG_DRAW) : nullptr;
   const int mode = dispcnt_ & 7;
   auto bg_on = [&](int n) { return (layer_enable_ >> n) & 1; };
 
   // 1. Rasterise each enabled background into its plane.
+  {
+  prof::Scope sc(prof::BG_DRAW);
   switch (mode) {
   case 0: for (int n = 0; n < 4; ++n) if (bg_on(n)) draw_bg_text(line, n); break;
   case 1: if (bg_on(0)) draw_bg_text(line, 0); if (bg_on(1)) draw_bg_text(line, 1); if (bg_on(2)) draw_bg_text(line, 2); if (bg_on(3)) draw_bg_affine(line, 3); break;
@@ -487,9 +478,9 @@ void Engine2D::render_line(u32 line) {
   }
   // BG0 is the 3D layer on engine A when DISPCNT bit 3 is set (modes 0-5, 7; mode 6 has no text BG0).
   if (!num_ && (dispcnt_ & 8) && bg_on(0)) draw_bg_3d();
+  }
 
   // 2. Window plane, 3. sprite X mosaic, 4. priority select, 5. colour effects.
-  delete sc;
   if (prof::enabled) {
     u32 layers = 0; int only = -1;
     for (int n = 0; n < 4; ++n) if (bg_[n].any) { ++layers; only = n; }
@@ -792,7 +783,7 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
     const u32 ofx = (cnt & (1 << 13)) ? 0 : ~xmask, ofy = (cnt & (1 << 13)) ? 0 : ~ymask;
     const u32 base = (cnt & 0x1F00) << 6;
     const bool direct = cnt & (1 << 2);
-    if (direct) plane.table = rgb555_table();
+    if (direct) plane.table = kern::direct_table();
     if (!mosaic && dx == 0x100 && dy == 0) { bitmap_row_degenerate(plane, base, xmask, ymask, yshift, ofx == 0, direct, rx, ry); return; }
     u32 mosaic_phase = 0;
     s32 mosaic_rx = rx, mosaic_ry = ry;
@@ -1241,7 +1232,7 @@ void Engine2D::setup_tables() {
   for (int n = 0; n < 4; ++n) tables_[n] = bg_[n].table;
   tables_[T_BACKDROP] = std_pal18();
   tables_[T_NONE] = zero_table_;
-  tables_[T_OBJ_DIRECT] = rgb555_table();
+  tables_[T_OBJ_DIRECT] = kern::direct_table();
   tables_[T_OBJ_STD] = tables_[T_OBJ_EXT] = tables_[T_BACKDROP];
   if ((layer_enable_ & 0x10) && num_sprites_) {
     // Which OBJ palettes the line's opaque paletted sprite pixels use. Eight

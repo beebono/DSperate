@@ -17,6 +17,21 @@
 
 namespace ds::gpu::kern {
 
+// Direct colour (BGR555 words from a bitmap BG or sprite, bit 15 ignored)
+// resolves by arithmetic, not by a table: `direct_table()` is a sentinel the
+// resolve kernels compare the hoisted table pointer against, and
+// `direct_colour` is the conversion (rgb15_to_18 for a palette entry whose
+// bit 15 is clear). The 128 KB gather table it replaced missed L1 on every
+// pixel of a direct-colour line and evicted the rest of the 2D working set.
+const Pixel* direct_table();
+inline Pixel direct_colour(u16 c) {
+  return ((c & 0x001F) << 1) | (((c & 0x03E0) >> 4) << 8) | (((c & 0x7C00) >> 9) << 16);
+}
+// One resolved pixel through `tab`, whichever kind it is (mixed blocks).
+inline Pixel resolve_one(const Pixel* tab, u16 c) {
+  return (tab == direct_table() ? direct_colour(c) : tab[c & 0x7FFF]) | 0xFF000000;
+}
+
 #define DS_KERNEL_LIST(NS)                                                                                   \
   /* Priority select of one layer line (u16, bit 15 opaque) into the top/second values and table ids. */    \
   void NS##select16(const u16* v, const u8* win, u8 wbit, u8 tid, u16* top, u8* top_tid, u16* second, u8* second_tid); \

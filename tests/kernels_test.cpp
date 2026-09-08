@@ -68,7 +68,7 @@ static void test_select16() {
 static void test_resolve16() {
   static Pixel tabs[8][32768];
   const Pixel* tables[8];
-  for (u32 t = 0; t < 8; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = tabs[t]; }
+  for (u32 t = 0; t < 8; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = t == 6 ? kern::direct_table() : tabs[t]; }
   alignas(16) u16 top[256]; alignas(16) u8 tid[256]; alignas(16) Pixel oa[256], ob[256];
   for (u32 it = 0; it < 200; ++it) {
     const bool uniform = it & 1;
@@ -86,13 +86,15 @@ static void test_resolve16_one() {
     for (u32 i = 0; i < 256; ++i) v[i] = static_cast<u16>(rng());
     kern::ref::resolve16_one(v, tab, oa); N::resolve16_one(v, tab, ob);
     CHECK_SAME("resolve16_one", oa, ob, sizeof oa);
+    kern::ref::resolve16_one(v, kern::direct_table(), oa); N::resolve16_one(v, kern::direct_table(), ob);
+    CHECK_SAME("resolve16_one direct", oa, ob, sizeof oa);
   }
 }
 
 static void test_resolve16_full() {
   static Pixel tabs[9][32768];
   const Pixel* tables[9];
-  for (u32 t = 0; t < 9; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = tabs[t]; }
+  for (u32 t = 0; t < 9; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = t == 6 ? kern::direct_table() : tabs[t]; }
   alignas(16) u16 top[256], second[256]; alignas(16) u8 tt[256], st[256], attr[256], alpha[256]; alignas(16) Pixel line3d[256];
   alignas(16) Pixel tpa[256], tpb[256], spa[256], spb[256]; alignas(16) u8 ia[256], ib[256], ka[256], kb[256], aa[256], ab[256], sa[256], sb[256];
   for (u32 it = 0; it < 200; ++it) {
@@ -108,7 +110,7 @@ static void test_resolve16_full() {
 static void test_resolve16_top() {
   static Pixel tabs[9][32768];
   const Pixel* tables[9];
-  for (u32 t = 0; t < 9; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = tabs[t]; }
+  for (u32 t = 0; t < 9; ++t) { for (u32 i = 0; i < 32768; ++i) tabs[t][i] = rng() & 0x3F3F3F; tables[t] = t == 6 ? kern::direct_table() : tabs[t]; }
   alignas(16) u16 top[256]; alignas(16) u8 tt[256]; alignas(16) Pixel line3d[256];
   alignas(16) Pixel tpa[256], tpb[256]; alignas(16) u8 ia[256], ib[256];
   for (u32 it = 0; it < 200; ++it) {
