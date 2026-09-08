@@ -165,10 +165,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # language = 1                  # 0 Japanese, 1 English, 2 French, 3 German, 4 Italian, 5 Spanish
 
 [paths]
-# bios9 = /path/to/bios9.bin   # unset or missing, a built-in replacement BIOS (FreeBIOS) runs
-# bios7 = /path/to/bios7.bin   #   games, with a note at start; it cannot boot the DS menu and
-                                #   its timing is not Nintendo's
-# firmware = /path/to/firmware.bin  # unset or missing, a generated firmware carrying [user] below
+# bios9 = /path/to/bios9.bin    # unset or missing, a built-in replacement BIOS (FreeBIOS) runs
+# bios7 = /path/to/bios7.bin    # games, with a note at start; it cannot boot the DS menu and
+                                # its timing is not hardware accurate
+# firmware = /path/to/firmware.bin  # unset or missing, a generated firmware carrying [user] above
 # firmware_override = /path/to/firmware.bin.ovr
                                 # settings changed inside the firmware's own menu (nickname, colour,
                                 # language...) are kept here, never in the dump. Delete it to reset.
