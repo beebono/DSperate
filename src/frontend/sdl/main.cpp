@@ -125,9 +125,10 @@ const char* kUsage =
     "                  alternate frames the limit counts pairs (DS_DEBUG_SKIP=1 shows the period)\n"
     "  --frameskip-mode M  adaptive (default; skip only while the emulator is behind, up to N)\n"
     "                  | fixed (always skip N of every N+1)\n"
-    "  --frameskip-capture  skip frames that display-capture too (INEXACT: the captured VRAM\n"
-    "                  holds the last drawn frame). Without it a game that captures every\n"
-    "                  frame -- Pokemon B/W, Golden Sun -- skips nothing; emu.frameskip_capture\n"
+    "  --no-frameskip-capture  do not skip frames that display-capture. Exact, but a game that\n"
+    "                  captures every frame -- Pokemon B/W, Golden Sun -- then skips nothing,\n"
+    "                  so frameskip does nothing at all on it. On by default (the captured\n"
+    "                  VRAM holds the last drawn frame); emu.frameskip_capture\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --stats-from N  leave the first N frames out of the frame statistics (DS_FRAME_STATS)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
@@ -807,6 +808,7 @@ int main(int argc, char** argv) {
     else if (arg("--frameskip")) cli.set("emu.frameskip", argv[++i]);
     else if (arg("--frameskip-mode")) cli.set("emu.frameskip_mode", argv[++i]);
     else if (flag("--frameskip-capture")) cli.set("emu.frameskip_capture", "true");
+    else if (flag("--no-frameskip-capture")) cli.set("emu.frameskip_capture", "false");
     else if (flag("--aa")) cli.set("video.aa", "true");
     else if (flag("--no-aa")) cli.set("video.aa", "false");
     // The two halves of Timing OC separately: they pull in opposite directions
@@ -1359,7 +1361,7 @@ sdl_ready:
   // display-captures is never skipped, whatever the policy asks for).
   int fs_limit = cfg.num("emu.frameskip", 0);            // the menu can change these
   bool fs_adaptive = cfg.str("emu.frameskip_mode", "adaptive") != "fixed";
-  const bool fs_capture = cfg.flag("emu.frameskip_capture", false);
+  const bool fs_capture = cfg.flag("emu.frameskip_capture", true);
   nds.gpu.set_frameskip_capture(fs_capture);
   u64 fs_refused = 0;         // skips the core would not take (capture / display FIFO)
   const double frame_budget_ms = frame_ns / 1e6;
@@ -2087,7 +2089,7 @@ sdl_ready:
     // policy has nothing it may skip.
     if (!skipped && fs_in_skip && ++fs_refused == 120 && !fs_capture)
       std::fprintf(stderr, "frameskip: this game display-captures its frames, which cannot be skipped exactly;\n"
-                           "           --frameskip-capture (or [emu] frameskip_capture) skips them anyway\n");
+                           "           drop --no-frameskip-capture (or [emu] frameskip_capture = true) to skip them anyway\n");
     const bool present = pause_pending || shot_pending ? !skipped
                                        : (!skipped && !fs_partial && (!fast || ff_skip <= 0 || frames % static_cast<u64>(ff_skip + 1) == 0));
     // A translucent PiP inset comes up to opaque while the bottom screen is
