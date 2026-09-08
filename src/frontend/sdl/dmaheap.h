@@ -28,4 +28,16 @@ int alloc(size_t len, const std::function<bool(int fd)>& usable, const char* tag
 // The pinned source, for the log ("/dev/dma_heap/cma-uncached", "ion:cma").
 const char* chosen();
 
+// CPU access to a dmabuf has to be bracketed, or the device may not see what
+// was written: the mainline CMA heap maps its pages cached and does its cache
+// maintenance in this ioctl, so without it the last writes before a commit can
+// still be sitting in the CPU's caches when the display controller reads the
+// buffer. That shows up as the most recently drawn pixels flickering -- the
+// overlays, which are the last thing written before the frame is handed over.
+//
+// An allocator that does not implement the ioctl (legacy ION) fails it once
+// and is not asked again; those heaps are uncached anyway.
+void sync_begin_write(int fd);
+void sync_end_write(int fd);
+
 } // namespace ds::sdl::dmaheap

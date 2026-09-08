@@ -190,7 +190,12 @@ u32* DmabufOut::begin_frame() {
   for (;;) {
     wl_display_dispatch_queue_pending(dpy_, q_);
     for (int i = 0; i < BUFS; ++i)
-      if (!bufs_[i].busy) { cur_ = i; return bufs_[i].px; }
+      if (!bufs_[i].busy) {
+        cur_ = i;
+        // CPU writes into a dmabuf are bracketed; see dmaheap::sync_begin_write.
+        dmaheap::sync_begin_write(bufs_[i].fd);
+        return bufs_[i].px;
+      }
     // All buffers pending: wait for a release. This is where the display's
     // pacing is felt, the same place the shm path feels its commit.
     wl_display_flush(dpy_);
@@ -205,6 +210,9 @@ u32* DmabufOut::begin_frame() {
 void DmabufOut::end_frame() {
   if (dead_ || cur_ < 0) return;
   Buf& b = bufs_[cur_];
+  // Everything drawn this frame has to be visible to the compositor and to
+  // the display controller before the buffer is handed over.
+  dmaheap::sync_end_write(b.fd);
   b.busy = true;
   wl_surface_attach(surf_, b.wb, 0, 0);
   wl_surface_damage(surf_, 0, 0, w_, h_);

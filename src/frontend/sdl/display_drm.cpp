@@ -237,7 +237,12 @@ u32* DrmOut::begin_frame() {
   pump(fd_, false);
   for (;;) {
     for (int i = 0; i < BUFS; ++i)
-      if (!bufs_[i].busy) { cur_ = i; return bufs_[i].px; }
+      if (!bufs_[i].busy) {
+        cur_ = i;
+        // CPU writes into a dmabuf are bracketed; see dmaheap::sync_begin_write.
+        dmaheap::sync_begin_write(bufs_[i].fd);
+        return bufs_[i].px;
+      }
     // On screen, pending and queued: the emulation is a frame ahead of the
     // panel, and this wait is the vsync.
     if (pending_ < 0) { std::fprintf(stderr, "drm: no free buffer\n"); dead_ = true; return nullptr; }
@@ -249,6 +254,9 @@ void DrmOut::end_frame() {
   if (dead_ || cur_ < 0) return;
   const int i = cur_;
   cur_ = -1;
+  // Everything drawn this frame has to reach memory before the display
+  // controller scans the buffer out.
+  dmaheap::sync_end_write(bufs_[i].fd);
   bufs_[i].busy = true;
   if (pending_ >= 0) { queued_ = i; return; }   // one flip per CRTC at a time; retire() issues this one
   if (!flip(i)) dead_ = true;

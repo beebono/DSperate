@@ -16,6 +16,41 @@
 #include <unistd.h>
 
 namespace ds::sdl::dmaheap {
+namespace {
+
+// linux/dma-buf.h, which the handhelds' images do not ship; the layout is
+// kernel UAPI and fixed, as with drm_uapi.h.
+struct dma_buf_sync { unsigned long long flags; };
+constexpr unsigned long long kSyncWrite = 2ull;      // DMA_BUF_SYNC_WRITE
+constexpr unsigned long long kSyncStart = 0ull << 2; // DMA_BUF_SYNC_START
+constexpr unsigned long long kSyncEnd   = 1ull << 2; // DMA_BUF_SYNC_END
+#ifndef DMA_BUF_IOCTL_SYNC
+#define DMA_BUF_IOCTL_SYNC _IOW('b', 0, struct ds::sdl::dmaheap::dma_buf_sync)
+#endif
+
+// Set once the kernel says it has no such ioctl, so a legacy allocator does
+// not pay for a failing call on every frame.
+bool g_no_sync = false;
+
+void sync(int fd, unsigned long long flags) {
+  if (fd < 0 || g_no_sync) return;
+  dma_buf_sync s{flags};
+  while (ioctl(fd, DMA_BUF_IOCTL_SYNC, &s) != 0) {
+    if (errno == EINTR || errno == EAGAIN) continue;
+    // ENOTTY: this allocator has no sync ioctl (legacy ION), and its buffers
+    // are uncached. Anything else is worth knowing about, once.
+    if (errno != ENOTTY) std::fprintf(stderr, "dmabuf: sync failed (%s); frames may tear\n", std::strerror(errno));
+    g_no_sync = true;
+    return;
+  }
+}
+
+} // namespace
+
+void sync_begin_write(int fd) { sync(fd, kSyncStart | kSyncWrite); }
+void sync_end_write(int fd) { sync(fd, kSyncEnd | kSyncWrite); }
+
+
 
 namespace {
 
