@@ -81,8 +81,12 @@ void Input::configure(const Config& cfg) {
     pad_map_[i] = parse_pad(cfg.str(std::string("pad.") + kButtonNames[i], kPadDefaults[i]));
   }
   for (int i = 0; i < static_cast<int>(Action::Count); ++i) {
-    key_hot_[i] = parse_key(cfg.str(std::string("hotkeys.") + kActionNames[i], kKeyHotDefaults[i]));
-    pad_hot_[i] = parse_pad(cfg.str(std::string("padhotkeys.") + kActionNames[i], kPadHotDefaults[i]));
+    key_hot_[i][0] = parse_key(cfg.str(std::string("hotkeys.") + kActionNames[i], kKeyHotDefaults[i]));
+    pad_hot_[i][0] = parse_pad(cfg.str(std::string("padhotkeys.") + kActionNames[i], kPadHotDefaults[i]));
+    // The second binding, if the player set one. No default: unset means the
+    // action has the one control its column's layout gives it.
+    key_hot_[i][1] = parse_key(cfg.str(std::string("hotkeys.") + kActionNames[i] + ".alt", "none"));
+    pad_hot_[i][1] = parse_pad(cfg.str(std::string("padhotkeys.") + kActionNames[i] + ".alt", "none"));
   }
   key_mod_ = parse_key(cfg.str("hotkeys.modifier", "none"));
   pad_mod_ = parse_pad(cfg.str("padhotkeys.modifier", "guide"));   // BTN_MODE
@@ -134,15 +138,21 @@ void Input::warn_collisions() const {
       if (exact(key_map_[i], key_map_[j]))
         std::fprintf(stderr, "config: keys.%s = %s is already keys.%s; only %s will fire\n", kButtonNames[i], key_name(key_map_[i]).c_str(), kButtonNames[j], kButtonNames[j]);
     for (int a = 0; a < na; ++a)
-      if (same(key_hot_[a], key_map_[i]) && !key_hot_[a].mod)
-        std::fprintf(stderr, "config: hotkeys.%s = %s shadows keys.%s; the game will never see it\n", kActionNames[a], key_name(key_hot_[a]).c_str(), kButtonNames[i]);
+      for (int sl = 0; sl < HOT_SLOTS; ++sl)
+        if (same(key_hot_[a][sl], key_map_[i]) && !key_hot_[a][sl].mod)
+          std::fprintf(stderr, "config: hotkeys.%s%s = %s shadows keys.%s; the game will never see it\n", kActionNames[a], hot_suffix(sl), key_name(key_hot_[a][sl]).c_str(), kButtonNames[i]);
     if (same(key_mod_, key_map_[i]))
       std::fprintf(stderr, "config: hotkeys.modifier = %s shadows keys.%s\n", key_name(key_mod_).c_str(), kButtonNames[i]);
   }
-  for (int a = 0; a < na; ++a)
+  // Every binding against every earlier one, the two slots included: the
+  // first match in key_down()'s order wins, and that order is action then
+  // slot.
+  for (int a = 0; a < na * HOT_SLOTS; ++a)
     for (int b = 0; b < a; ++b)
-      if (exact(key_hot_[a], key_hot_[b]))
-        std::fprintf(stderr, "config: hotkeys.%s = %s is already hotkeys.%s; only %s will fire\n", kActionNames[a], key_name(key_hot_[a]).c_str(), kActionNames[b], kActionNames[b]);
+      if (exact(key_hot_[a / HOT_SLOTS][a % HOT_SLOTS], key_hot_[b / HOT_SLOTS][b % HOT_SLOTS]))
+        std::fprintf(stderr, "config: hotkeys.%s%s = %s is already hotkeys.%s%s; only %s will fire\n",
+                     kActionNames[a / HOT_SLOTS], hot_suffix(a % HOT_SLOTS), key_name(key_hot_[a / HOT_SLOTS][a % HOT_SLOTS]).c_str(),
+                     kActionNames[b / HOT_SLOTS], hot_suffix(b % HOT_SLOTS), kActionNames[b / HOT_SLOTS]);
 
   // Controller. The modifier doubling as a DS button is by design (a lone
   // release delivers it as a tap), so that pair is not a collision.
@@ -151,27 +161,32 @@ void Input::warn_collisions() const {
       if (exact(pad_map_[i], pad_map_[j]))
         std::fprintf(stderr, "config: pad.%s = %s is already pad.%s; only %s will fire\n", kButtonNames[i], pad_name(pad_map_[i]).c_str(), kButtonNames[j], kButtonNames[j]);
     for (int a = 0; a < na; ++a)
-      if (same(pad_hot_[a], pad_map_[i]) && !pad_hot_[a].mod && pad_hot_[a].with < 0)
-        std::fprintf(stderr, "config: padhotkeys.%s = %s shadows pad.%s; the game will never see it\n", kActionNames[a], pad_name(pad_hot_[a]).c_str(), kButtonNames[i]);
+      for (int sl = 0; sl < HOT_SLOTS; ++sl)
+        if (same(pad_hot_[a][sl], pad_map_[i]) && !pad_hot_[a][sl].mod && pad_hot_[a][sl].with < 0)
+          std::fprintf(stderr, "config: padhotkeys.%s%s = %s shadows pad.%s; the game will never see it\n", kActionNames[a], hot_suffix(sl), pad_name(pad_hot_[a][sl]).c_str(), kButtonNames[i]);
     if (stylus_visible_binding() && same(stylus_button_, pad_map_[i]))
       std::fprintf(stderr, "config: pad.stylus_button = %s shadows pad.%s; the game will never see it\n", pad_name(stylus_button_).c_str(), kButtonNames[i]);
     if (same(stylus_chord_, pad_map_[i]))
       std::fprintf(stderr, "config: pad.stylus_dpad = %s shadows pad.%s; the game will never see it\n", pad_name(stylus_chord_).c_str(), kButtonNames[i]);
   }
-  for (int a = 0; a < na; ++a) {
-    for (int b = 0; b < a; ++b)
-      if (exact(pad_hot_[a], pad_hot_[b]))
-        std::fprintf(stderr, "config: padhotkeys.%s = %s is already padhotkeys.%s; only %s will fire\n", kActionNames[a], pad_name(pad_hot_[a]).c_str(), kActionNames[b], kActionNames[b]);
+  for (int k = 0; k < na * HOT_SLOTS; ++k) {
+    const int a = k / HOT_SLOTS, sl = k % HOT_SLOTS;
+    const Bind& h = pad_hot_[a][sl];
+    for (int b = 0; b < k; ++b)
+      if (exact(h, pad_hot_[b / HOT_SLOTS][b % HOT_SLOTS]))
+        std::fprintf(stderr, "config: padhotkeys.%s%s = %s is already padhotkeys.%s%s; only %s will fire\n",
+                     kActionNames[a], hot_suffix(sl), pad_name(h).c_str(),
+                     kActionNames[b / HOT_SLOTS], hot_suffix(b % HOT_SLOTS), kActionNames[b / HOT_SLOTS]);
     // The pen claims its button unless the modifier is held, so only an
     // unmodified hotkey on it is dead.
-    if (!pad_hot_[a].mod) {
-      if (stylus_visible_binding() && same(pad_hot_[a], stylus_button_))
-        std::fprintf(stderr, "config: padhotkeys.%s = %s is pad.stylus_button; bind it as mod+%s or it will never fire\n", kActionNames[a], pad_name(pad_hot_[a]).c_str(), pad_name(pad_hot_[a]).c_str());
-      if (same(pad_hot_[a], stylus_chord_))
-        std::fprintf(stderr, "config: padhotkeys.%s = %s is pad.stylus_dpad; bind it as mod+%s or it will never fire\n", kActionNames[a], pad_name(pad_hot_[a]).c_str(), pad_name(pad_hot_[a]).c_str());
+    if (!h.mod) {
+      if (stylus_visible_binding() && same(h, stylus_button_))
+        std::fprintf(stderr, "config: padhotkeys.%s%s = %s is pad.stylus_button; bind it as mod+%s or it will never fire\n", kActionNames[a], hot_suffix(sl), pad_name(h).c_str(), pad_name(h).c_str());
+      if (same(h, stylus_chord_))
+        std::fprintf(stderr, "config: padhotkeys.%s%s = %s is pad.stylus_dpad; bind it as mod+%s or it will never fire\n", kActionNames[a], hot_suffix(sl), pad_name(h).c_str(), pad_name(h).c_str());
     }
-    if (same(pad_hot_[a], pad_mod_) && pad_hot_[a].with < 0)
-      std::fprintf(stderr, "config: padhotkeys.%s = %s is the modifier; it will never fire\n", kActionNames[a], pad_name(pad_hot_[a]).c_str());
+    if (same(h, pad_mod_) && h.with < 0)
+      std::fprintf(stderr, "config: padhotkeys.%s%s = %s is the modifier; it will never fire\n", kActionNames[a], hot_suffix(sl), pad_name(h).c_str());
   }
   if (stylus_visible_binding() && same(stylus_button_, stylus_chord_))
     std::fprintf(stderr, "config: pad.stylus_button and pad.stylus_dpad are both %s; the chord will never engage\n", pad_name(stylus_button_).c_str());
@@ -212,10 +227,10 @@ void Input::fire(Action a, bool down) {
 // Keyboard: hotkeys first (with the modifier when bound), then DS buttons.
 bool Input::key_down(SDL_Keycode k, bool down) {
   if (key_mod_.kind == Bind::Key && key_mod_.code == k) { key_mod_down_ = down; return true; }
-  for (int i = 0; i < static_cast<int>(Action::Count); ++i) {
-    const Bind& b = key_hot_[i];
+  for (int i = 0; i < static_cast<int>(Action::Count) * HOT_SLOTS; ++i) {
+    const Bind& b = key_hot_[i / HOT_SLOTS][i % HOT_SLOTS];
     if (b.kind != Bind::Key || b.code != k || (b.mod && !key_mod_down_)) continue;
-    const Action a = static_cast<Action>(i);
+    const Action a = static_cast<Action>(i / HOT_SLOTS);
     if (a == Action::FastForward) ff_key_ = down;
     else if (a == Action::Mic) mic_key_ = down;
     else fire(a, down);
@@ -265,8 +280,8 @@ bool Input::pad_down(const Bind& b, bool down) {
   // matches both as the binding's own button (partner held) and as the
   // partner (own button held). The most specific binding wins.
   int best = -1, best_score = -1;
-  for (int i = 0; i < static_cast<int>(Action::Count); ++i) {
-    const Bind& h = pad_hot_[i];
+  for (int i = 0; i < static_cast<int>(Action::Count) * HOT_SLOTS; ++i) {
+    const Bind& h = pad_hot_[i / HOT_SLOTS][i % HOT_SLOTS];
     if (h.kind == Bind::None || (h.mod && !pad_mod_down_)) continue;
     const bool own = same(h) && (h.with < 0 || (held_ >> h.with) & 1);
     const bool partner = h.with >= 0 && b.kind == Bind::PadButton && b.code == h.with && h.kind == Bind::PadButton && ((held_ >> h.code) & 1);
@@ -275,16 +290,20 @@ bool Input::pad_down(const Bind& b, bool down) {
     if (score > best_score) { best = i; best_score = score; }
   }
   if (best >= 0) {
-    const Bind& h = pad_hot_[best];
+    const Bind& h = pad_hot_[best / HOT_SLOTS][best % HOT_SLOTS];
     if (h.mod && down) pad_mod_used_ = true;
-    const Action a = static_cast<Action>(best);
+    const Action a = static_cast<Action>(best / HOT_SLOTS);
     if (a == Action::FastForward) ff_pad_ = down;
     else if (a == Action::Mic) mic_pad_ = down;
     else fire(a, down);
     return true;
   }
   // A release that completes no binding still ends a held action.
-  if (!down) { if (same(pad_hot_[static_cast<int>(Action::FastForward)])) ff_pad_ = false; if (same(pad_hot_[static_cast<int>(Action::Mic)])) mic_pad_ = false; }
+  if (!down)
+    for (int sl = 0; sl < HOT_SLOTS; ++sl) {
+      if (same(pad_hot_[static_cast<int>(Action::FastForward)][sl])) ff_pad_ = false;
+      if (same(pad_hot_[static_cast<int>(Action::Mic)][sl])) mic_pad_ = false;
+    }
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     if (same(pad_map_[i])) { set(static_cast<B>(i), down); return true; }
   return false;
@@ -418,8 +437,10 @@ std::vector<std::string> Input::collisions() const {
   // so the button is dead.
   for (int a = 0; a < static_cast<int>(Action::Count); ++a)
     for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i) {
-      if (same(key_hot_[a], key_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES KEY " + kButtonNames[i]);
-      if (same(pad_hot_[a], pad_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES PAD " + kButtonNames[i]);
+      for (int sl = 0; sl < HOT_SLOTS; ++sl) {
+        if (same(key_hot_[a][sl], key_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES KEY " + kButtonNames[i]);
+        if (same(pad_hot_[a][sl], pad_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES PAD " + kButtonNames[i]);
+      }
     }
   return out;
 }

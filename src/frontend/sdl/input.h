@@ -110,6 +110,13 @@ public:
   static int action_count();
   static const char* key_hot_default(int i);
   static const char* pad_hot_default(int i);
+  // A hotkey can carry a second binding in the same column, spelled
+  // "<action>.alt" in the config (hotkeys.pause.alt, padhotkeys.pause.alt).
+  // It has no built-in default -- the first binding is the layout the device
+  // was designed around -- so it starts unset and only exists if the player
+  // sets it. DS buttons have no second binding.
+  static constexpr int HOT_SLOTS = 2;
+  static const char* hot_suffix(int slot) { return slot == 1 ? ".alt" : ""; }
 
 private:
   // One binding: a keyboard key, a pad button or a pad axis direction, with
@@ -142,8 +149,8 @@ private:
 
   Bind key_map_[io::Io::BTN_COUNT];
   Bind pad_map_[io::Io::BTN_COUNT];
-  Bind key_hot_[static_cast<int>(Action::Count)];
-  Bind pad_hot_[static_cast<int>(Action::Count)];
+  Bind key_hot_[static_cast<int>(Action::Count)][HOT_SLOTS];
+  Bind pad_hot_[static_cast<int>(Action::Count)][HOT_SLOTS];
   Bind key_mod_, pad_mod_;
   bool key_mod_down_ = false, pad_mod_down_ = false, pad_mod_used_ = false;
   int  pad_mod_button_ = -1;   // the DS button the pad modifier would otherwise be

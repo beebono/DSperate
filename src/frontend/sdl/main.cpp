@@ -1577,7 +1577,9 @@ sdl_ready:
     ds::sdl::Input& input;
     std::function<void()> reconfigure_input;
 
-    int binding_count(bool) const override { return ds::sdl::Input::button_count() + ds::sdl::Input::action_count(); }
+    // Every hotkey takes two rows: its binding and the second one the player
+    // may add (input.h, "<action>.alt"). DS buttons keep their single row.
+    int binding_count(bool) const override { return ds::sdl::Input::button_count() + ds::sdl::Input::action_count() * ds::sdl::Input::HOT_SLOTS; }
 
     Binding binding(bool pad, int i) const override {
       const int nb = ds::sdl::Input::button_count();
@@ -1588,11 +1590,13 @@ sdl_ready:
         out.label = upper(name);
         out.value = cfg.str(out.key, pad ? ds::sdl::Input::pad_default(i) : ds::sdl::Input::key_default(i));
       } else {
-        const int a = i - nb;
+        const int a = (i - nb) / ds::sdl::Input::HOT_SLOTS, slot = (i - nb) % ds::sdl::Input::HOT_SLOTS;
         const char* name = ds::sdl::action_name(static_cast<ds::sdl::Action>(a));
-        out.key = (pad ? "padhotkeys." : "hotkeys.") + std::string(name);
-        out.label = upper(name);
-        out.value = cfg.str(out.key, pad ? ds::sdl::Input::pad_hot_default(a) : ds::sdl::Input::key_hot_default(a));
+        out.key = (pad ? "padhotkeys." : "hotkeys.") + std::string(name) + ds::sdl::Input::hot_suffix(slot);
+        out.label = upper(name) + (slot ? " (2)" : "");
+        // The second binding has no default: unset is what it means.
+        out.value = slot ? cfg.str(out.key, "none")
+                         : cfg.str(out.key, pad ? ds::sdl::Input::pad_hot_default(a) : ds::sdl::Input::key_hot_default(a));
       }
       // The file writes key names with underscores and lower case; the page
       // reads better in the font it has, which has no lower case anyway.
@@ -1626,12 +1630,13 @@ sdl_ready:
         cfg.set(k, v);
         ds::sdl::Config::store(path, k, v);
       }
-      for (int a = 0; a < ds::sdl::Input::action_count(); ++a) {
-        const std::string k = (pad ? "padhotkeys." : "hotkeys.") + std::string(ds::sdl::action_name(static_cast<ds::sdl::Action>(a)));
-        const char* v = pad ? ds::sdl::Input::pad_hot_default(a) : ds::sdl::Input::key_hot_default(a);
-        cfg.set(k, v);
-        ds::sdl::Config::store(path, k, v);
-      }
+      for (int a = 0; a < ds::sdl::Input::action_count(); ++a)
+        for (int slot = 0; slot < ds::sdl::Input::HOT_SLOTS; ++slot) {
+          const std::string k = (pad ? "padhotkeys." : "hotkeys.") + std::string(ds::sdl::action_name(static_cast<ds::sdl::Action>(a))) + ds::sdl::Input::hot_suffix(slot);
+          const char* v = slot ? "none" : pad ? ds::sdl::Input::pad_hot_default(a) : ds::sdl::Input::key_hot_default(a);
+          cfg.set(k, v);
+          ds::sdl::Config::store(path, k, v);
+        }
       reconfigure_input();
     }
 
