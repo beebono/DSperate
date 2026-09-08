@@ -43,6 +43,11 @@ inline BlitRect blit_rect(const Blit& d, int x, int y) {
 // two sources. See Display::canvas_capable().
 struct Canvas { u32* px; u32 pitch; int w, h; };
 
+// What a piece of drawing covered, so the frontend can tell the display which
+// part of the canvas it touched (Display::note_canvas_draw). Empty when
+// nothing was drawn.
+struct Rect { int x = 0, y = 0, w = 0, h = 0; };
+
 // A 5x7 uppercase font, `scale` times. Lowercase is folded to uppercase and
 // anything outside the table draws as a space. Returns the x past the string.
 int  draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s);

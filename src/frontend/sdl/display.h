@@ -230,6 +230,17 @@ public:
   // the screen. Calling end_frame() does both, and finish_views() is idempotent.
   void finish_views();
   void present();
+
+  // Where the frontend drew on the canvas this frame, so it can be cleaned up
+  // before that buffer is used again. The scanout tiers keep several buffers
+  // in rotation and the letterbox outside the views is cleared once per buffer
+  // and then left alone -- which was true while the only things drawn there
+  // were the screens themselves. An overlay drawn on the canvas is not
+  // repainted by the emulator, so without this the previous overlay stays in
+  // the buffers it was drawn into and the rotation shows fragments of it.
+  // Rects accumulate into one for the frame; passing nothing is harmless.
+  void note_canvas_draw(int x, int y, int w, int h);
+  void note_canvas_draw_all() { note_canvas_draw(0, 0, frame_w_, frame_h_); }
   SDL_Window* window() const { return win_; }
   u32 window_id() const { return win_ ? SDL_GetWindowID(win_) : 0; }
 
@@ -281,6 +292,12 @@ private:
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL
   bool              margins_dirty_ = true;
   u32               out_clean_ = 0;       // scanout buffers (by index) whose letterbox is cleared
+  // What the frontend drew on the canvas: this frame, and the last time each
+  // buffer was used. More buffers than any tier keeps (drm 3, dmabuf 4).
+  static constexpr int kMaxBufs = 8;
+  SDL_Rect          canvas_drawn_{0, 0, 0, 0};
+  SDL_Rect          canvas_prev_[kMaxBufs] = {};
+  void clear_rect(u32* px, u32 pitch, int w, int h, const SDL_Rect& r) const;
   bool              out_frame_ = false;   // current begin_frame targeted the scanout tier
   int               scaled_w_ = 0, scaled_h_ = 0;
   std::vector<u16>  xrun_[SCREENS];   // per screen, 257 entries; see kern::scale_row

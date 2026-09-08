@@ -717,6 +717,27 @@ void Display::clear_margins(u32* px, u32 pitch, int w, int h) const {
   }
 }
 
+// The frontend's own drawing on the canvas, accumulated into one rect for the
+// frame. One rect rather than a list because the two things drawn are a modal
+// page (which takes the lot) and a label in a corner: a union costs a few
+// cleared pixels and saves keeping a list.
+void Display::note_canvas_draw(int x, int y, int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  if (canvas_drawn_.w == 0 || canvas_drawn_.h == 0) { canvas_drawn_ = SDL_Rect{x, y, w, h}; return; }
+  const int x0 = std::min(canvas_drawn_.x, x), y0 = std::min(canvas_drawn_.y, y);
+  const int x1 = std::max(canvas_drawn_.x + canvas_drawn_.w, x + w);
+  const int y1 = std::max(canvas_drawn_.y + canvas_drawn_.h, y + h);
+  canvas_drawn_ = SDL_Rect{x0, y0, x1 - x0, y1 - y0};
+}
+
+void Display::clear_rect(u32* px, u32 pitch, int w, int h, const SDL_Rect& r) const {
+  const int x0 = std::max(0, r.x), y0 = std::max(0, r.y);
+  const int x1 = std::min(w, r.x + r.w), y1 = std::min(h, r.y + r.h);
+  if (x1 <= x0 || y1 <= y0) return;
+  for (int y = y0; y < y1; ++y)
+    std::memset(px + static_cast<size_t>(y) * pitch + x0, 0, static_cast<size_t>(x1 - x0) * sizeof(u32));
+}
+
 // Hands out one target per screen: the window buffer for direct views, the
 // side buffer for the rest.
 void Display::targets(u32* px, u32 stride, int w, int h, Target out[SCREENS]) {
@@ -816,6 +837,13 @@ bool Display::begin_frame(Target out[SCREENS]) {
       const int idx = out_->current();
       const u32 bit = idx >= 0 && idx < 32 ? 1u << idx : 0u;
       if (!(out_clean_ & bit)) { clear_margins(px, stride, out_->width(), out_->height()); out_clean_ |= bit; }
+      // Whatever the frontend drew on this buffer last time round: the views
+      // are redrawn over it, the letterbox is not.
+      if (idx >= 0 && idx < kMaxBufs) {
+        clear_rect(px, stride, out_->width(), out_->height(), canvas_prev_[idx]);
+        canvas_prev_[idx] = SDL_Rect{0, 0, 0, 0};
+      }
+      canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
       targets(px, stride, out_->width(), out_->height(), out);
       out_frame_ = true;
       return true;
@@ -845,6 +873,11 @@ bool Display::begin_frame(Target out[SCREENS]) {
   u32* base = static_cast<u32*>(s->pixels);
   const u32 stride = static_cast<u32>(s->pitch) / sizeof(u32);
   if (margins_dirty_) { clear_margins(base, stride, s->w, s->h); margins_dirty_ = false; }
+  // The window surface is one buffer, but SDL may hand back a different one:
+  // treat it as buffer 0 and scrub it the same way.
+  clear_rect(base, stride, s->w, s->h, canvas_prev_[0]);
+  canvas_prev_[0] = SDL_Rect{0, 0, 0, 0};
+  canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
   targets(base, stride, s->w, s->h, out);
   return true;
 }
@@ -864,6 +897,11 @@ void Display::present() {
     draw(fb);
     return;
   }
+  // Remember what was drawn against the buffer it went into, so the next use
+  // of that buffer starts by taking it back out.
+  const int idx = out_frame_ && out_ ? out_->current() : 0;
+  if (idx >= 0 && idx < kMaxBufs) canvas_prev_[idx] = canvas_drawn_;
+  canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
   frame_px_ = nullptr;
   if (out_frame_) { out_frame_ = false; out_->end_frame(); return; }
   if (SDL_MUSTLOCK(surf_)) SDL_UnlockSurface(surf_);

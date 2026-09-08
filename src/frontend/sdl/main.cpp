@@ -544,7 +544,7 @@ void draw_cursor(const CursorDst& d, int cx, int cy, int size) {
 // before the PiP inset was blitted, so one sharing the inset's corner was
 // buried and had to dodge to the opposite edge. Drawn on the canvas after
 // Display::finish_views(), nothing can be drawn over them.
-void draw_label(const ds::sdl::Canvas& d, const char* text, bool right) {
+ds::sdl::Rect draw_label(const ds::sdl::Canvas& d, const char* text, bool right) {
   static const u8 digits[10][5] = {
     {7,5,5,5,7}, {2,6,2,2,7}, {7,1,7,4,7}, {7,1,7,1,7}, {5,5,7,1,1},
     {7,4,7,1,7}, {7,4,7,5,7}, {7,1,1,1,1}, {7,5,7,5,7}, {7,5,7,1,7}};
@@ -565,7 +565,7 @@ void draw_label(const ds::sdl::Canvas& d, const char* text, bool right) {
     d.px[static_cast<size_t>(y) * d.pitch + static_cast<size_t>(x)] = colour;
   };
   int n = 0; while (text[n]) ++n;
-  if (n == 0) return;
+  if (n == 0) return {};
   // The same measure the menu uses, so the two agree on how big a pixel is.
   // At 256x192 -- the DS-space fallback -- it is 2, the scale this drew at
   // when it lived in DS pixels, and the box comes out where it always did.
@@ -583,6 +583,7 @@ void draw_label(const ds::sdl::Canvas& d, const char* text, bool right) {
         for (int y = 0; y < S; ++y) for (int x = 0; x < S; ++x)
           fill(X + pad + g * 4 * S + c * S + x, Y + pad + r * S + y, 0xFFFFFFFF);
   }
+  return ds::sdl::Rect{X, Y, w, h};
 }
 
 // The state slot field: the slot's digit after a slot hotkey, or what just
@@ -2050,7 +2051,13 @@ sdl_ready:
           display.finish_views();
           if (dual_window) display2.finish_views();
           ds::sdl::Display::CanvasView cv;
-          if (on_canvas && display.canvas(cv)) menu.draw(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h});
+          if (on_canvas && display.canvas(cv)) {
+            menu.draw(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h});
+            // The whole canvas: the page moves about as pages are walked, and
+            // it is only presented when it changes, so there is nothing to be
+            // gained by being precise about it.
+            display.note_canvas_draw_all();
+          }
           display.present();
           if (dual_window) display2.present();
           // Nothing may keep pointing into a buffer the display just released.
@@ -2276,12 +2283,21 @@ sdl_ready:
         ds::sdl::Display::CanvasView cv;
         if (display.canvas_capable() && display.canvas(cv)) {
           const ds::sdl::Canvas c{cv.px, cv.pitch, cv.w, cv.h};
-          if (slot_osd) draw_label(c, slot_text.c_str(), false);
-          if (fps_field) draw_label(c, fps_text.c_str(), true);
+          // Each of these says what it covered: the emulator repaints the
+          // screens every frame but nothing repaints the letterbox, so the
+          // display has to take the last overlay back out of a buffer before
+          // it is used again (Display::note_canvas_draw).
+          const auto note = [&](const ds::sdl::Rect& r) { display.note_canvas_draw(r.x, r.y, r.w, r.h); };
+          if (slot_osd) note(draw_label(c, slot_text.c_str(), false));
+          if (fps_field) note(draw_label(c, fps_text.c_str(), true));
           if (flash_alpha) {
             draw_flash(c, flash_alpha);
+            display.note_canvas_draw_all();
             ds::sdl::Display::CanvasView cv2;
-            if (dual_window && display2.canvas(cv2)) draw_flash(ds::sdl::Canvas{cv2.px, cv2.pitch, cv2.w, cv2.h}, flash_alpha);
+            if (dual_window && display2.canvas(cv2)) {
+              draw_flash(ds::sdl::Canvas{cv2.px, cv2.pitch, cv2.w, cv2.h}, flash_alpha);
+              display2.note_canvas_draw_all();
+            }
           }
         } else if (target[osd_screen].px) {
           // The display-engine tier: the targets are the DS-sized buffers its
