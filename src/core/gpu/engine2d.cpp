@@ -610,7 +610,7 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
   if (!mosaic) {
     const u8* map[2] = {vv.direct(tilemap, 64), nullptr};
     map[1] = wide ? vv.direct(tilemap + 0x800, 64) : map[0];
-    alignas(16) u8 rows[33 * 8]; u8 ctl[33]; u16 tiles[33];
+    alignas(16) u8 rows[33 * 8]; alignas(16) u16 tiles[33];
     u32 palmask = 0;
     plane.table = std_pal18();
     // Map entries first: a row of one repeated tile whose row is
@@ -632,8 +632,12 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
         if (widexmask) blk ^= 1;
       }
     }
-    bool uniform = true;
-    for (u32 t = 1; t < 33; ++t) uniform &= tiles[t] == tiles[0];
+    // The control bytes for the kernel and the uniformity test, over the
+    // whole map row at once: ctl = palette (bits 12-15) | hflip (bit 10 -> 4).
+    // The previous per-tile form was 32 scalar compares plus a dependent
+    // chain inside the gather loop below.
+    u8 ctl[33];
+    const bool uniform = kern::active::text_ctl(tiles, ctl);
     if (uniform) {
       const u32 ty = (tiles[0] & (1 << 11)) ? 7 - ty0 : ty0;
       const u32 a = c256 ? tileset + ((tiles[0] & 0x3FF) << 6) + (ty << 3) : tileset + ((tiles[0] & 0x3FF) << 5) + (ty << 2);
@@ -652,15 +656,19 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
     // depth so the row size, shifts and stores are constants in the loop.
     u64 rowacc = 0;
     const u32 amask = vv.addr_mask();
+    // The block pointer is looked up only when the block changes: a tileset
+    // is 16 KB, so one map row's tiles almost always share a block, and the
+    // lookup was one of two dependent loads per tile.
+    u32 last_blk = ~0u; const u8* last_ptr = nullptr;
+    auto block_ptr = [&](u32 am) { const u32 b = am / VramView::BLOCK; if (b != last_blk) { last_blk = b; last_ptr = vv.ptr[b]; } return last_ptr; };
     if (c256) {
       for (u32 t = 0; t < 33; ++t) {
         const u16 tile = tiles[t];
         const u32 ty = (tile & (1 << 11)) ? 7 - ty0 : ty0;
-        ctl[t] = static_cast<u8>((tile >> 12) | ((tile >> 6) & 0x10));
         palmask |= 1u << (tile >> 12);
         const u32 a = tileset + ((tile & 0x3FF) << 6) + (ty << 3), am = a & amask;
         u64 row;
-        if (const u8* p = vv.ptr[am / VramView::BLOCK]) std::memcpy(&row, p + (am & (VramView::BLOCK - 1)), 8);
+        if (const u8* p = block_ptr(am)) std::memcpy(&row, p + (am & (VramView::BLOCK - 1)), 8);
         else { row = 0; for (u32 i = 0; i < 8; ++i) row |= static_cast<u64>(vm.read8(vv, a + i)) << (8 * i); }
         std::memcpy(rows + t * 8, &row, 8);
         rowacc |= row;
@@ -669,11 +677,9 @@ void Engine2D::draw_bg_text(u32 line, int bg) {
       for (u32 t = 0; t < 33; ++t) {
         const u16 tile = tiles[t];
         const u32 ty = (tile & (1 << 11)) ? 7 - ty0 : ty0;
-        ctl[t] = static_cast<u8>((tile >> 12) | ((tile >> 6) & 0x10));
-        palmask |= 1u << (tile >> 12);
         const u32 a = tileset + ((tile & 0x3FF) << 5) + (ty << 2), am = a & amask;
         u32 row;
-        if (const u8* p = vv.ptr[am / VramView::BLOCK]) std::memcpy(&row, p + (am & (VramView::BLOCK - 1)), 4);
+        if (const u8* p = block_ptr(am)) std::memcpy(&row, p + (am & (VramView::BLOCK - 1)), 4);
         else { row = 0; for (u32 i = 0; i < 4; ++i) row |= static_cast<u32>(vm.read8(vv, a + i)) << (8 * i); }
         std::memcpy(rows + t * 4, &row, 4);
         rowacc |= row;
@@ -977,7 +983,12 @@ inline void Engine2D::put_sprite_pixel(s32 x, u16 value, bool opaque, u8 attr, u
 void Engine2D::render_sprites(u32 line) {
   if (!enabled_) return;      // the OBJ planes are left as they are
   num_sprites_ = 0; obj_prio_mask_ = 0;
-  obj_v_.fill(0); obj_attr_.fill(0); obj_alpha_.fill(0); obj_win_.fill(0);
+  // Only the attribute plane needs clearing: every reader of obj_v_ and
+  // obj_alpha_ is gated on OA_OPAQUE in the attribute byte (the selects, the
+  // extended-palette scan, the OBJ alpha in resolve16_full; the mosaic latch
+  // copies the attribute along with them), so stale values there are never
+  // seen. That is ~800 bytes of stores per line per engine saved.
+  obj_attr_.fill(0); obj_win_.fill(0);
   if (!obj_enable_) return;
 
   const u16* oam = oam_.data();
@@ -1130,7 +1141,7 @@ void Engine2D::draw_sprite_rotscale(const u16* attr, const u16* oam, int bw, int
     else { addr = ((tile & 0x0F) << 4) + ((tile & 0x3F0) << 7); stride = 128 * 2; }
     for (; xoff < static_cast<u32>(bw); ++xoff, ++x, rx += pa, ry += pc) {
       if (static_cast<u32>(rx) >= fw || static_cast<u32>(ry) >= fh) continue;
-      const u16 c = vm.read16(vv, addr + (ry >> 8) * stride + ((rx >> 8) << 1));
+      const u16 c = vram_fetch16(vm, vv, addr + (ry >> 8) * stride + ((rx >> 8) << 1));
       put_sprite_pixel(x, c, c & 0x8000, a, static_cast<u8>(alpha + 1), window);
     }
     return;
@@ -1147,14 +1158,14 @@ void Engine2D::draw_sprite_rotscale(const u16* attr, const u16* oam, int bw, int
     if (dispcnt_ & (1u << 31)) pal_base = static_cast<u16>((attr[2] & 0xF000) >> 4); else a |= OA_STDPAL;
     for (; xoff < static_cast<u32>(bw); ++xoff, ++x, rx += pa, ry += pc) {
       if (static_cast<u32>(rx) >= fw || static_cast<u32>(ry) >= fh) continue;
-      const u8 idx = vm.read8(vv, base + (ry >> 11) * row_stride + ((ry & 0x700) >> 5) + (rx >> 11) * 64 + ((rx & 0x700) >> 8));
+      const u8 idx = vram_fetch8(vm, vv, base + (ry >> 11) * row_stride + ((ry & 0x700) >> 5) + (rx >> 11) * 64 + ((rx & 0x700) >> 8));
       put_sprite_pixel(x, static_cast<u16>(LV_OPAQUE | pal_base | idx), idx != 0, a, 0, window);
     }
   } else {
     const u16 pal_base = static_cast<u16>((attr[2] & 0xF000) >> 8); a |= OA_STDPAL;
     for (; xoff < static_cast<u32>(bw); ++xoff, ++x, rx += pa, ry += pc) {
       if (static_cast<u32>(rx) >= fw || static_cast<u32>(ry) >= fh) continue;
-      u8 idx = vm.read8(vv, base + (ry >> 11) * row_stride + ((ry & 0x700) >> 6) + (rx >> 11) * 32 + ((rx & 0x700) >> 9));
+      u8 idx = vram_fetch8(vm, vv, base + (ry >> 11) * row_stride + ((ry & 0x700) >> 6) + (rx >> 11) * 32 + ((rx & 0x700) >> 9));
       idx = (rx & 0x100) ? (idx >> 4) : (idx & 0xF);
       put_sprite_pixel(x, static_cast<u16>(LV_OPAQUE | pal_base | idx), idx != 0, a, 0, window);
     }

@@ -81,6 +81,9 @@ inline Pixel resolve_one(const Pixel* tab, u16 c) {
      (bits 0-3) | 0x10 for a horizontally flipped tile. Writes 8*n values 0x8000 | pal << 4 | idx (0 for       \
      index 0); returns whether any is opaque. */                                                             \
   bool NS##text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v);                                      \
+  /* Control bytes for a 33-entry text map row: palette (bits 12-15) | hflip (bit 10 -> 4); returns whether \
+     all 33 entries are the same tile. */                                                                    \
+  bool NS##text_ctl(const u16* tiles, u8* ctl);                                                              \
   /* Text BG row, 256-colour tiles: n tiles of 8 indices; values 0x8000 | (ext ? pal << 8 : 0) | idx. */     \
   bool NS##text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v);                             \
   /* A bitmap BG row read left to right (a rotscale layer whose matrix is the identity within the line):   \

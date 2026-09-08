@@ -24,6 +24,8 @@ run() { # variant scene
     sm64)  args="--save $AB/scenes/sm64.sav --replay $AB/scenes/sm64.dsin --frames $FRAMES";          rom="$ROMS/Super Mario 64 DS.nds";;
     gsdd)  args="--load-state $AB/scenes/gsdd-phase2.dss --frames $FRAMES --stats-from 30";           rom="$ROMS/Golden Sun - Dark Dawn.nds";;
     st)    args="--load-state /storage/roms/savestates/nds/BKIE.0.dss --frames $FRAMES --stats-from 30"; rom="$ROMS/Legend of Zelda, The - Spirit Tracks.nds";;
+    mlbis) args="--save $AB/scenes/mlbis.sav --replay $AB/scenes/mlbis.dsin --frames $FRAMES";        rom="$ROMS/Mario & Luigi - Bowser's Inside Story.nds";;
+    meteos) args="--save $AB/scenes/meteos.sav --replay $AB/scenes/meteos.dsin --frames $FRAMES";     rom="$ROMS/Meteos.nds";;
   esac
   out=$(./dsperate-headless.$1 $COMMON $args "$rom" 2>&1)
   line=$(echo "$out" | grep '^frame ms: median'); over=$(echo "$out" | grep '^frame budget:' | sed 's/frame budget: \([0-9]*\) of.*/\1/')

@@ -28,6 +28,7 @@
 #include "core/types.h"
 
 #include <arm_neon.h>
+#include <cstring>
 
 #ifndef DS_A32_SUBSET
 #define DS_A32_SUBSET 0
@@ -71,6 +72,16 @@ namespace ds::gpu::kern::compat {
 #endif
 }
 
+[[gnu::always_inline]] inline u16 minv_u16(uint16x8_t v) {
+#if DS_A32_SUBSET
+  uint16x4_t d = vpmin_u16(vget_low_u16(v), vget_high_u16(v));
+  d = vpmin_u16(d, d);
+  return vget_lane_u16(vpmin_u16(d, d), 0);
+#else
+  return vminvq_u16(v);
+#endif
+}
+
 [[gnu::always_inline]] inline u16 maxv_u16(uint16x8_t v) {
 #if DS_A32_SUBSET
   uint16x4_t d = vpmax_u16(vget_low_u16(v), vget_high_u16(v));
@@ -109,6 +120,14 @@ namespace ds::gpu::kern::compat {
 #else
   return vmaxvq_u8(v) == vminvq_u8(v);
 #endif
+}
+// "Are these 16 bytes in memory all the same?" without a vector->scalar
+// readback: two 64-bit loads, replicate the first byte, compare. On an
+// in-order core the umaxv+fmov pair cannot overlap the branch that reads it.
+[[gnu::always_inline]] inline bool uniform_u8_mem(const u8* p) {
+  u64 a, b; std::memcpy(&a, p, 8); std::memcpy(&b, p + 8, 8);
+  const u64 r = (a & 0xFF) * 0x0101010101010101ull;
+  return ((a ^ r) | (b ^ r)) == 0;
 }
 
 // ---- table lookups --------------------------------------------------------

@@ -150,6 +150,13 @@ static void test_rows16() {
     const bool ra2 = kern::ref::text_row_256(rows, ctl, n, ext, va), rb2 = N::text_row_256(rows, ctl, n, ext, vb);
     if (ra2 != rb2) { std::fprintf(stderr, "FAIL text_row_256 any %d vs %d\n", ra2, rb2); ++failures; }
     CHECK_SAME("text_row_256", va, vb, n * 16);
+    alignas(16) u16 tiles[33]; u8 ca[33], cb[33];
+    for (auto& x : tiles) x = static_cast<u16>(rng());
+    if (it % 3 == 0) for (auto& x : tiles) x = tiles[0];
+    if (it % 7 == 0) tiles[32] ^= 0x400;
+    const bool ua = kern::ref::text_ctl(tiles, ca), ub = N::text_ctl(tiles, cb);
+    if (ua != ub) { std::fprintf(stderr, "FAIL text_ctl uniform %d vs %d\n", ua, ub); ++failures; }
+    CHECK_SAME("text_ctl", ca, cb, 33);
   }
   alignas(16) u32 line[256]; alignas(16) u16 la[256], lb[256];
   for (u32 it = 0; it < 100; ++it) {

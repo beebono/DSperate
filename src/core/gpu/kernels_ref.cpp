@@ -236,6 +236,15 @@ bool layer16_3d(const u32* line3d, u16* v) {
   return any != 0;
 }
 
+bool text_ctl(const u16* tiles, u8* ctl) {
+  bool uniform = true;
+  for (u32 t = 0; t < 33; ++t) {
+    ctl[t] = static_cast<u8>((tiles[t] >> 12) | ((tiles[t] >> 6) & 0x10));
+    uniform &= tiles[t] == tiles[0];
+  }
+  return uniform;
+}
+
 bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {
   bool any = false;
   for (u32 t = 0; t < n; ++t, packed += 4, v += 8) {

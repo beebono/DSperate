@@ -149,13 +149,14 @@ void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, con
     const uint8x16_t fx = vbicq_u8(vbicq_u8(t1hit, objblend), blend3d);
     // The records as byte planes; lanes no effect touches pass through as
     // they are (bytes 0-2 whole, alpha 0xFF).
-    uint8x16x4_t a = vld4q_u8(reinterpret_cast<const u8*>(top + i));
-    // Most blocks of most lines blend nothing: copy through.
+    // Most blocks of most lines blend nothing: copy through, whole records
+    // with the alpha byte forced -- no de-interleave for a copy.
     if (compat::maxv_u8(vorrq_u8(vorrq_u8(objblend, blend3d), fx)) == 0) {
-      a.val[3] = vff;
-      vst4q_u8(reinterpret_cast<u8*>(out + i), a);
+      const uint32x4_t alpha = vdupq_n_u32(0xFF000000);
+      for (u32 k = 0; k < 16; k += 4) vst1q_u32(out + i + k, vorrq_u32(vld1q_u32(top + i + k), alpha));
       continue;
     }
+    uint8x16x4_t a = vld4q_u8(reinterpret_cast<const u8*>(top + i));
     const bool has_obj = compat::maxv_u8(objblend) != 0, has_3d = compat::maxv_u8(blend3d) != 0, has_fx = compat::maxv_u8(fx) != 0;
     const uint8x16x4_t b = vld4q_u8(reinterpret_cast<const u8*>(second + i));
     uint8x16_t a6[3], b6[3], o[3];
@@ -256,7 +257,7 @@ void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables
     const uint8x16_t tt = vld1q_u8(top_tid + i);
     vst1q_u8(top_id + i, compat::tbl1q_u8(ids, tt));
     const u8 t0 = top_tid[i];
-    if (compat::maxv_u8(tt) == compat::minv_u8(tt) && !(line3d && t0 == T_BG0)) {
+    if (compat::uniform_u8_mem(top_tid + i) && !(line3d && t0 == T_BG0)) {
       const Pixel* tab = tables[t0];
       if (tab == direct_table()) direct16(top + i, top_px + i);
       else for (u32 k = 0; k < 16; ++k) top_px[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
@@ -314,8 +315,8 @@ void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const 
     // The 3D override must remain per-pixel, so it disables only the top
     // lookup hoist when BG0 is the selected layer.
     const u8 t0 = top_tid[i], s0 = second_tid[i];
-    const bool top_run = compat::maxv_u8(tt) == compat::minv_u8(tt) && !(line3d && t0 == T_BG0);
-    const bool second_run = compat::maxv_u8(st) == compat::minv_u8(st);
+    const bool top_run = compat::uniform_u8_mem(top_tid + i) && !(line3d && t0 == T_BG0);
+    const bool second_run = compat::uniform_u8_mem(second_tid + i);
     if (top_run && second_run) {
       const Pixel* top_tab = tables[t0];
       const Pixel* second_tab = tables[s0];
@@ -364,36 +365,80 @@ bool layer16_3d(const u32* line3d, u16* v) {
   return compat::maxv_u16(any) != 0;
 }
 
+namespace {
+// Two text tiles (16 pixels) from their 16 index bytes and the two control
+// bytes, each broadcast over its tile's lanes: the flip is a per-half byte
+// reverse selected by ctl bit 4, the palette term comes from ctl bits 0-3
+// (`pal_shift` 4 for 16-colour tiles, 8 for extended 256-colour ones, or
+// none), and index 0 is transparent. No general register enters the loop:
+// the old one-tile form spent three GPR->SIMD dups per eight pixels.
+template <int pal_shift>
+[[gnu::always_inline]] inline uint8x16_t text_pair(uint8x16_t idx, const u8* ctl, u16* v) {
+  const uint8x8_t c2 = vreinterpret_u8_u16(vld1_dup_u16(reinterpret_cast<const u16*>(ctl)));   // [c0 c1 c0 c1 ..]
+  const uint8x16_t ctl16 = vcombine_u8(vdup_lane_u8(c2, 0), vdup_lane_u8(c2, 1));
+  idx = vbslq_u8(vtstq_u8(ctl16, vdupq_n_u8(0x10)), vrev64q_u8(idx), idx);
+  const int8x16_t nz = vreinterpretq_s8_u8(vtstq_u8(idx, idx));
+  const uint16x8_t m0 = vreinterpretq_u16_s16(vmovl_s8(vget_low_s8(nz))), m1 = vreinterpretq_u16_s16(vmovl_s8(vget_high_s8(nz)));
+  uint16x8_t o0 = vorrq_u16(vmovl_u8(vget_low_u8(idx)), vdupq_n_u16(LV_OPAQUE));
+  uint16x8_t o1 = vorrq_u16(vmovl_u8(vget_high_u8(idx)), vdupq_n_u16(LV_OPAQUE));
+  if (pal_shift == 4) {
+    const uint8x16_t base = vshlq_n_u8(vandq_u8(ctl16, vdupq_n_u8(0xF)), 4);
+    o0 = vorrq_u16(o0, vmovl_u8(vget_low_u8(base))); o1 = vorrq_u16(o1, vmovl_u8(vget_high_u8(base)));
+  } else if (pal_shift == 8) {
+    const uint8x16_t pal = vandq_u8(ctl16, vdupq_n_u8(0xF));
+    o0 = vorrq_u16(o0, vshll_n_u8(vget_low_u8(pal), 8)); o1 = vorrq_u16(o1, vshll_n_u8(vget_high_u8(pal), 8));
+  }
+  vst1q_u16(v, vandq_u16(m0, o0));
+  vst1q_u16(v + 8, vandq_u16(m1, o1));
+  return idx;
+}
+// One tile, for an odd tail.
+[[gnu::always_inline]] inline uint8x8_t text_one(uint8x8_t idx, u8 c, u16 base, u16* v) {
+  idx = vbsl_u8(vdup_n_u8((c & 0x10) ? 0xFF : 0), vrev64_u8(idx), idx);
+  const uint16x8_t i16 = vmovl_u8(idx);
+  const uint16x8_t m = vmvnq_u16(vceqq_u16(i16, vdupq_n_u16(0)));
+  vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | base)))));
+  return idx;
+}
+}  // namespace
+
+bool text_ctl(const u16* tiles, u8* ctl) {
+  const uint16x8_t t0 = vdupq_n_u16(tiles[0]);
+  uint16x8_t same = vdupq_n_u16(0xFFFF);
+  for (u32 t = 0; t < 32; t += 8) {
+    const uint16x8_t tv = vld1q_u16(tiles + t);
+    vst1_u8(ctl + t, vorr_u8(vmovn_u16(vshrq_n_u16(tv, 12)), vand_u8(vshrn_n_u16(tv, 6), vdup_n_u8(0x10))));
+    same = vandq_u16(same, vceqq_u16(tv, t0));
+  }
+  ctl[32] = static_cast<u8>((tiles[32] >> 12) | ((tiles[32] >> 6) & 0x10));
+  return compat::minv_u16(same) != 0 && tiles[32] == tiles[0];
+}
+
 bool text_row_16(const u8* packed, const u8* ctl, u32 n, u16* v) {
-  uint8x8_t any = vdup_n_u8(0);
-  for (u32 t = 0; t < n; ++t, packed += 4, v += 8) {
+  uint8x16_t any = vdupq_n_u8(0);
+  u32 t = 0;
+  for (; t + 2 <= n; t += 2, packed += 8, v += 16) {
+    const uint8x8_t raw = vld1_u8(packed);                    // two tiles' packed nibbles
+    const uint8x8x2_t nib = vzip_u8(vand_u8(raw, vdup_n_u8(0xF)), vshr_n_u8(raw, 4));
+    any = vorrq_u8(any, text_pair<4>(vcombine_u8(nib.val[0], nib.val[1]), ctl + t, v));
+  }
+  if (t < n) {
     u32 w; std::memcpy(&w, packed, 4);
     const uint8x8_t raw = vreinterpret_u8_u32(vdup_n_u32(w));
     const uint8x8x2_t nib = vzip_u8(vand_u8(raw, vdup_n_u8(0xF)), vshr_n_u8(raw, 4));
-    uint8x8_t idx = nib.val[0];
-    const uint8x8_t rev = vrev64_u8(idx);
-    const uint8x8_t mask = vbsl_u8(vdup_n_u8((ctl[t] & 0x10) ? 0xFF : 0), vdup_n_u8(0xFF), vdup_n_u8(0x00));
-    idx = vbsl_u8(mask, rev, idx);
-    const uint16x8_t i16 = vmovl_u8(idx);
-    const uint16x8_t m = vmvnq_u16(vceqq_u16(i16, vdupq_n_u16(0)));
-    vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | ((ctl[t] & 0xF) << 4))))));
-    any = vorr_u8(any, idx);
+    any = vorrq_u8(any, vcombine_u8(text_one(nib.val[0], ctl[t], static_cast<u16>((ctl[t] & 0xF) << 4), v), vdup_n_u8(0)));
   }
   return compat::maxv_u8(any) != 0;
 }
 
 bool text_row_256(const u8* rows, const u8* ctl, u32 n, bool ext, u16* v) {
-  uint8x8_t any = vdup_n_u8(0);
-  for (u32 t = 0; t < n; ++t, rows += 8, v += 8) {
-    uint8x8_t idx = vld1_u8(rows);
-    const uint8x8_t rev = vrev64_u8(idx);
-    const uint8x8_t mask = vbsl_u8(vdup_n_u8((ctl[t] & 0x10) ? 0xFF : 0), vdup_n_u8(0xFF), vdup_n_u8(0x00));
-    idx = vbsl_u8(mask, rev, idx);
-    const uint16x8_t i16 = vmovl_u8(idx);
-    const uint16x8_t m = vmvnq_u16(vceqq_u16(i16, vdupq_n_u16(0)));
-    vst1q_u16(v, vandq_u16(m, vorrq_u16(i16, vdupq_n_u16(static_cast<u16>(LV_OPAQUE | (ext ? (ctl[t] & 0xF) << 8 : 0))))));
-    any = vorr_u8(any, idx);
+  uint8x16_t any = vdupq_n_u8(0);
+  u32 t = 0;
+  for (; t + 2 <= n; t += 2, rows += 16, v += 16) {
+    const uint8x16_t idx = vld1q_u8(rows);
+    any = vorrq_u8(any, ext ? text_pair<8>(idx, ctl + t, v) : text_pair<0>(idx, ctl + t, v));
   }
+  if (t < n) any = vorrq_u8(any, vcombine_u8(text_one(vld1_u8(rows), ctl[t], ext ? static_cast<u16>((ctl[t] & 0xF) << 8) : 0, v), vdup_n_u8(0)));
   return compat::maxv_u8(any) != 0;
 }
 
@@ -507,8 +552,7 @@ void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pi
   // A gather; runs of one table are the common case, so the table pointer
   // is hoisted per 16 pixels when the ids agree.
   for (u32 i = 0; i < 256; i += 16) {
-    const uint8x16_t t = vld1q_u8(top_tid + i);
-    if (compat::maxv_u8(t) == compat::minv_u8(t)) {
+    if (compat::uniform_u8_mem(top_tid + i)) {
       const Pixel* tab = tables[top_tid[i]];
       if (tab == direct_table()) direct16(top + i, out + i);
       else for (u32 k = 0; k < 16; ++k) out[i + k] = tab[top[i + k] & 0x7FFF] | 0xFF000000;
@@ -523,18 +567,19 @@ void resolve16(const u16* top, const u8* top_tid, const Pixel* const* tables, Pi
 // through the load latency; the address arithmetic vectorises around them.
 void resolve16_one(const u16* v, const Pixel* table, Pixel* out) {
   if (table == direct_table()) { for (u32 i = 0; i < 256; i += 16) direct16(v + i, out + i); return; }
+  // Scalar on purpose: the indices come straight from `v` as two 64-bit
+  // loads, eight independent table loads are in flight per iteration, and
+  // nothing crosses between the vector and general register files (the
+  // previous form stored the indices to the stack and reloaded them, which
+  // the A55 does not forward, then inserted each entry lane by lane).
   for (u32 i = 0; i < 256; i += 8) {
-    const uint16x8_t idx = vandq_u16(vld1q_u16(v + i), vdupq_n_u16(0x7FFF));
-    alignas(16) u16 ix[8];
-    vst1q_u16(ix, idx);
-    const uint32x4_t alpha = vdupq_n_u32(0xFF000000);
-    uint32x4_t lo = vdupq_n_u32(0), hi = vdupq_n_u32(0);
-    lo = vsetq_lane_u32(table[ix[0]], lo, 0); lo = vsetq_lane_u32(table[ix[1]], lo, 1);
-    lo = vsetq_lane_u32(table[ix[2]], lo, 2); lo = vsetq_lane_u32(table[ix[3]], lo, 3);
-    hi = vsetq_lane_u32(table[ix[4]], hi, 0); hi = vsetq_lane_u32(table[ix[5]], hi, 1);
-    hi = vsetq_lane_u32(table[ix[6]], hi, 2); hi = vsetq_lane_u32(table[ix[7]], hi, 3);
-    vst1q_u32(out + i, vorrq_u32(lo, alpha));
-    vst1q_u32(out + i + 4, vorrq_u32(hi, alpha));
+    u64 a, b; std::memcpy(&a, v + i, 8); std::memcpy(&b, v + i + 4, 8);
+    Pixel o[8];
+    o[0] = table[(a      ) & 0x7FFF] | 0xFF000000; o[1] = table[(a >> 16) & 0x7FFF] | 0xFF000000;
+    o[2] = table[(a >> 32) & 0x7FFF] | 0xFF000000; o[3] = table[(a >> 48) & 0x7FFF] | 0xFF000000;
+    o[4] = table[(b      ) & 0x7FFF] | 0xFF000000; o[5] = table[(b >> 16) & 0x7FFF] | 0xFF000000;
+    o[6] = table[(b >> 32) & 0x7FFF] | 0xFF000000; o[7] = table[(b >> 48) & 0x7FFF] | 0xFF000000;
+    std::memcpy(out + i, o, sizeof o);
   }
 }
 
