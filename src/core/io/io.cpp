@@ -957,7 +957,10 @@ void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
     }
     if (cpu == Cpu::ARM7 && spu::Spu::owns_reg(addr)) { nds_.spu.write(addr, width, value); return; }
   }
-  if (width == 32) { if (write32_special(cpu, addr, value).handled) return; write16(cpu, addr, static_cast<u16>(value)); write16(cpu, addr + 2, static_cast<u16>(value >> 16)); return; }
+  if (width == 32) {
+    if (cpu == Cpu::ARM9 && addr >= 0x04000240 && addr < 0x0400024A) { vramcnt_store(addr, value, 4); return; }
+    if (write32_special(cpu, addr, value).handled) return; write16(cpu, addr, static_cast<u16>(value)); write16(cpu, addr + 2, static_cast<u16>(value >> 16)); return;
+  }
   if (width == 16) { write16(cpu, addr, static_cast<u16>(value)); return; }
   write8(cpu, addr, static_cast<u8>(value));
 }
@@ -1135,7 +1138,7 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   case 0x182: if (a9) { powcnt1 = value & 0x820F; nds_.gpu.set_powcnt(powcnt1); } else { powcnt2 = value & 0x0003; nds_.spu.set_powcnt2(powcnt2); } return;
   default: break;
   }
-  if (addr >= 0x04000240 && addr < 0x0400024A && a9) { write8(cpu, addr, static_cast<u8>(value)); write8(cpu, addr + 1, static_cast<u8>(value >> 8)); return; }
+  if (addr >= 0x04000240 && addr < 0x0400024A && a9) { vramcnt_store(addr, value, 2); return; }
   if (a9 && ((addr >= 0x04000290 && addr < 0x040002A0) || addr == 0x040002B8 || addr == 0x040002BA || addr == 0x040002BC || addr == 0x040002BE)) {
     const u32 cur = read32_special(cpu, addr & ~3u).value;
     write32_special(cpu, addr & ~3u, (addr & 2) ? ((cur & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((cur & 0xFFFF0000) | value));
@@ -1156,17 +1159,28 @@ u8 Io::read8(Cpu cpu, u32 addr) {
   return static_cast<u8>((addr & 1) ? (v >> 8) : v);
 }
 
+// VRAMCNT A-I and WRAMCNT, `n` bytes from `addr`. A 32-bit store to 0x240
+// (the usual way banks A-D are programmed) changes up to four banks at once;
+// the remap -- 8 K page-table entries per CPU plus a 2D catch-up and a worker
+// join -- runs once for the store, not once per byte.
+void Io::vramcnt_store(u32 addr, u32 value, u32 n) {
+  static const bool dbg_vramcnt = std::getenv("DS_DEBUG_VRAMCNT") != nullptr;
+  bool vram_changed = false;
+  for (u32 i = 0; i < n; ++i, ++addr, value >>= 8) {
+    if (addr < 0x04000240 || addr >= 0x0400024A) continue;
+    const u32 k = addr - 0x04000240;
+    const u8 b = static_cast<u8>(value);
+    if (k == 7) { if (wramcnt != (b & 3)) { wramcnt = b & 3; nds_.bus.update_wram(); } continue; }
+    const u32 bank = k < 7 ? k : k - 1;                 // 0x248/0x249 are banks H/I
+    if (dbg_vramcnt) std::fprintf(stderr, "[vramcnt] %c = %02x frame %llu line %u pc %08x\n", 'A' + bank, b, (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(Cpu::ARM9).hot.regs[15]);
+    if (vramcnt[bank] != b) { vramcnt[bank] = b; vram_changed = true; }
+  }
+  if (vram_changed) nds_.bus.update_vram();
+}
+
 void Io::write8(Cpu cpu, u32 addr, u8 value) {
   const bool a9 = cpu == Cpu::ARM9;
-  if (a9 && addr >= 0x04000240 && addr < 0x0400024A) {
-    const u32 k = addr - 0x04000240;
-    if (k == 7) { if (wramcnt != (value & 3)) { wramcnt = value & 3; nds_.bus.update_wram(); } return; }
-    const u32 bank = k < 7 ? k : k - 1;                 // 0x248/0x249 are banks H/I
-    static const bool dbg_vramcnt = std::getenv("DS_DEBUG_VRAMCNT") != nullptr;
-    if (dbg_vramcnt) std::fprintf(stderr, "[vramcnt] %c = %02x frame %llu line %u pc %08x\n", 'A' + bank, value, (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(Cpu::ARM9).hot.regs[15]);
-    if (vramcnt[bank] != value) { vramcnt[bank] = value; nds_.bus.update_vram(); }
-    return;
-  }
+  if (a9 && addr >= 0x04000240 && addr < 0x0400024A) { vramcnt_store(addr, value, 1); return; }
   if (addr == 0x04000300) { write16(cpu, addr, value); return; }
   if (!a9 && addr == 0x04000301) {                       // HALTCNT
     const u8 v = value & 0xC0;

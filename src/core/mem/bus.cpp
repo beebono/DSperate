@@ -224,6 +224,11 @@ void Bus::update_vram() {
       else if (in_run) { pt.remap(0x06000000 + (run << PAGE_SHIFT), (i - run) << PAGE_SHIFT, cur + run, RW); in_run = false; }
     }
   };
+  for (u32 w = 0; w < VRAM_PAGES / 64; ++w) {
+    u64 m = 0;
+    for (u32 b = 0; b < 64; ++b) if (h9[w * 64 + b]) m |= u64{1} << b;
+    vram_mapped9_[w] = m;
+  }
   if (!vram_hosts_valid_) { pt9.remap(0x06000000, 0x01000000, h9, RW); pt7.remap(0x06000000, 0x01000000, h7, RW); vram_hosts_valid_ = true; }
   else { apply(pt9, h9, vram_hosts_prev_[0].get()); apply(pt7, h7, vram_hosts_prev_[1].get()); }
   std::swap(vram_hosts_[0], vram_hosts_prev_[0]);
@@ -383,9 +388,15 @@ void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
 
 void Bus::set_vram_trap(bool on, bool lcdc, bool a_only) {
   PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
-  if (a_only) { pt9.set_write_trap(0x06000000, 0x00200000, on); pt9.set_write_trap(0x06400000, 0x00200000, on); }   // BG-A, OBJ-A
-  else pt9.set_write_trap(0x06000000, 0x00800000, on);         // the four engine windows
-  if (lcdc) pt9.set_write_trap(0x06800000, 0x00800000, on);    // LCDC and its 1 MB mirrors
+  // Over the mapped pages only (~330 of the 8 K in the engine windows):
+  // Golden Sun toggles this ~31 times a frame.
+  auto range = [&](u32 addr, u32 size) {
+    const u32 first = (addr - 0x06000000) >> PAGE_SHIFT;
+    pt9.set_write_trap_bits(addr >> PAGE_SHIFT, size >> PAGE_SHIFT, vram_mapped9_ + first / 64, on);
+  };
+  if (a_only) { range(0x06000000, 0x00200000); range(0x06400000, 0x00200000); }   // BG-A, OBJ-A
+  else range(0x06000000, 0x00800000);         // the four engine windows
+  if (lcdc) range(0x06800000, 0x00800000);    // LCDC and its 1 MB mirrors
 }
 
 // A trapped entry keeps only its tags: read_ptr and write_ptr both see no

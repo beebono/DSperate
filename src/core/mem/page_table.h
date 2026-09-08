@@ -111,6 +111,10 @@ public:
   // must hold no read-only or MMIO pages: their SPECIAL bit means something
   // else and lifting the trap would clear it.
   void set_write_trap(u32 guest, u32 size, bool on);
+  // The same over the pages whose bit is set in `bits` (bit i = page
+  // first_page + i, `count` pages): the caller knows which pages of a window
+  // are mapped, so a toggle visits those instead of the whole window.
+  void set_write_trap_bits(u32 first_page, u32 count, const u64* bits, bool on);
 
   // Tag (or untag) every entry in the low 256 MB of guest space that maps the
   // given 2 KB host page. Code pages are tracked by host address so that the

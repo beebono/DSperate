@@ -146,7 +146,22 @@ void PageTable::set_write_trap(u32 guest, u32 size, bool on) {
   for (u32 p = first; p < first + count; ++p) {
     const Entry e = table_[p];
     if (!(e & BASE_MASK)) continue;
-    table_[p] = on ? (e | TAG_SPECIAL) : (e & ~TAG_SPECIAL);
+    const Entry want = on ? (e | TAG_SPECIAL) : (e & ~TAG_SPECIAL);
+    if (want != e) table_[p] = want;   // no writeback for a line already right
+  }
+}
+
+void PageTable::set_write_trap_bits(u32 first_page, u32 count, const u64* bits, bool on) {
+  for (u32 w = 0; w * 64 < count; ++w) {
+    u64 m = bits[w];
+    while (m) {
+      const u32 p = first_page + w * 64 + static_cast<u32>(__builtin_ctzll(m));
+      m &= m - 1;
+      const Entry e = table_[p];
+      if (!(e & BASE_MASK)) continue;
+      const Entry want = on ? (e | TAG_SPECIAL) : (e & ~TAG_SPECIAL);
+      if (want != e) table_[p] = want;
+    }
   }
 }
 

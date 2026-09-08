@@ -235,6 +235,7 @@ private:
   void write16(Cpu cpu, u32 addr, u16 value);
   u8   read8(Cpu cpu, u32 addr);
   void write8(Cpu cpu, u32 addr, u8 value);
+  void vramcnt_store(u32 addr, u32 value, u32 n);   // VRAMCNT/WRAMCNT bytes, one remap per store
   // Returned by value rather than through a `bool&`: taking the address of a
   // local made -fstack-protector-strong put a guard on every Io::read and
   // Io::write, which are on the recompiler's slow memory path.

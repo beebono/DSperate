@@ -88,7 +88,10 @@ public:
   static constexpr u32 VRAM_PAGES = 0x01000000 / PAGE_SIZE;   // the 0x06000000 region, per CPU
   std::unique_ptr<u8*[]> vram_hosts_[2] = {std::make_unique<u8*[]>(VRAM_PAGES), std::make_unique<u8*[]>(VRAM_PAGES)};   // update_vram scratch (next)
   std::unique_ptr<u8*[]> vram_hosts_prev_[2] = {std::make_unique<u8*[]>(VRAM_PAGES), std::make_unique<u8*[]>(VRAM_PAGES)};   // what the page tables hold now
-  bool vram_hosts_valid_ = false;   // prev arrays describe the tables (false after reset / a table rebuild)
+  bool vram_hosts_valid_ = false;
+  // Which pages of the ARM9 0x06000000 window have a host (rebuilt by
+  // update_vram): the write trap toggles visit these, not all 8 K entries.
+  u64 vram_mapped9_[VRAM_PAGES / 64] = {};   // prev arrays describe the tables (false after reset / a table rebuild)
   static constexpr u32 VRAM_BANK_SIZES[9] = {0x20000, 0x20000, 0x20000, 0x20000, 0x10000, 0x4000, 0x4000, 0x8000, 0x4000};
   static constexpr u32 VRAM_TOTAL = 0x20000 * 4 + 0x10000 + 0x4000 * 2 + 0x8000 + 0x4000;
 
