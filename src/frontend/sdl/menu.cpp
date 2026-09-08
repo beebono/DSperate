@@ -922,9 +922,10 @@ void Menu::draw_controls(const Canvas& d) const {
   visible_ = f.visible;
 
   const int n = host_->binding_count(bind_pad_);
-  // Two rows at the foot: what the buttons do, and any clash the bindings
-  // have made. A clash is the thing most worth saying, so it wins the line.
-  const int foot_rows = 2;
+  // Three rows at the foot: what the buttons do over two lines, since the
+  // whole legend does not fit one at this scale and being cut off is worse
+  // than costing a row, then any clash the bindings have made.
+  const int foot_rows = 3;
   const int visible = std::max(1, f.visible - foot_rows);
   int top = bind_top_;
   if (bind_row_ < top) top = bind_row_;
@@ -952,13 +953,14 @@ void Menu::draw_controls(const Canvas& d) const {
 
   const int foot_y = f.py0 + m.list_rows_y + visible * m.list_row_h + m.list_s;
   fill_rect(d, f.px0 + m.pad, foot_y, f.w - 2 * m.pad, std::max(1, m.list_s), kPanelEdgeDim);
-  const char* help = listening ? "PRESS THE CONTROL TO BIND, OR ESCAPE TO CANCEL"
-                   : host_->has_pad() ? "A BIND   Y CLEAR   X DEFAULTS   L/R KEYBOARD OR PAD"
-                                      : "A BIND   Y CLEAR   X DEFAULTS   L/R SWAP COLUMN";
-  draw_text(d, f.text_x, foot_y + 2 * m.list_s, m.list_s, kDim, fit(help, m.list_s, f.avail).c_str());
+  const char* help1 = listening ? "PRESS THE CONTROL TO BIND," : "A BIND   Y CLEAR   X DEFAULTS";
+  const char* help2 = listening ? "OR ESCAPE TO CANCEL"
+                    : host_->has_pad() ? "L/R KEYBOARD OR PAD" : "L/R SWAP COLUMN";
+  draw_text(d, f.text_x, foot_y + 2 * m.list_s, m.list_s, kDim, fit(help1, m.list_s, f.avail).c_str());
+  draw_text(d, f.text_x, foot_y + 2 * m.list_s + m.list_row_h, m.list_s, kDim, fit(help2, m.list_s, f.avail).c_str());
   const std::vector<std::string> clash = host_->collisions();
   if (!clash.empty())
-    draw_text(d, f.text_x, foot_y + 2 * m.list_s + m.list_row_h, m.list_s, kEdgeText,
+    draw_text(d, f.text_x, foot_y + 2 * m.list_s + 2 * m.list_row_h, m.list_s, kEdgeText,
               fit(clash[0], m.list_s, f.avail).c_str());
 }
 
@@ -973,6 +975,9 @@ const char* const kCharTables[] = {
 };
 const char* const kCharTableNames[] = {"CAPITALS", "LOWER CASE", "NUMBERS"};
 constexpr int kCharTableCount = 3;
+// The widest a field is laid out before it wraps, which puts the firmware's
+// 26-character message on two lines as the console's own screen has it.
+constexpr int kEditCols = 13;
 
 // Which table a character belongs to, so opening the editor on an existing
 // name lands on the right one rather than always on capitals.
@@ -1050,17 +1055,27 @@ Menu::Result Menu::handle_text_edit(u32 presses) {
 }
 
 void Menu::draw_text_edit(const Canvas& d) const {
-  static constexpr const char* kHelp = "UP/DOWN LETTER   L/R TABLE   A DONE   B CANCEL";
+  // Two lines, so neither is cut off on a small panel: what moves about, then
+  // what finishes.
+  static constexpr const char* kHelp1 = "UP/DOWN LETTER   L/R TABLE";
+  static constexpr const char* kHelp2 = "A DONE   B CANCEL";
   Metrics m = metrics(d);
   // Wide enough for the field at the page scale and for the help line at the
   // list scale, whichever is wider; the scale steps down rather than clip.
+  // The firmware's message is 26 characters and the console's own settings
+  // screen takes it over two lines; the editor lays it out the same way, so
+  // what is typed here looks like what the DS menu will show. A field that
+  // fits one line keeps one.
+  const int cols = edit_max_ > kEditCols ? (edit_max_ + 1) / 2 : edit_max_;
+  const int rows = (edit_max_ + cols - 1) / (cols > 0 ? cols : 1);
   const auto want = [&](const Metrics& mm) {
-    return std::max({edit_max_ * kAdvance * mm.s, text_width(mm.s, edit_label_.c_str()),
-                     text_width(mm.list_s, kHelp)}) + 8 * mm.s;
+    return std::max({cols * kAdvance * mm.s, text_width(mm.s, edit_label_.c_str()),
+                     text_width(mm.list_s, kHelp1), text_width(mm.list_s, kHelp2)}) + 8 * mm.s;
   };
   while (m.s > 2 && want(m) > d.w) m = metrics_for(m.s - 1);
   const int panel_w = std::min(d.w - 2 * m.pad, want(m));
-  const int panel_h = m.rows_y + m.row_h * 3 + m.pad;
+  // The field, then the table's name and the two help lines under it.
+  const int panel_h = m.rows_y + rows * m.row_h + m.s + 3 * m.list_row_h + m.pad;
   const int px0 = (d.w - panel_w) / 2, py0 = (d.h - panel_h) / 2;
   panel(d, px0, py0, panel_w, panel_h);
 
@@ -1072,16 +1087,18 @@ void Menu::draw_text_edit(const Canvas& d) const {
   // The character under the cursor is highlighted rather than underlined: the
   // font has no descender room, and a filled cell reads at any scale.
   for (int i = 0; i < static_cast<int>(edit_buf_.size()); ++i) {
-    const int cx = fx + i * kAdvance * m.s;
-    if (i == edit_pos_) fill_rect(d, cx - m.s, fy - m.s, kAdvance * m.s, m.glyph_px + 2 * m.s, kSel);
+    const int cx = fx + (i % cols) * kAdvance * m.s, cy = fy + (i / cols) * m.row_h;
+    if (i == edit_pos_) fill_rect(d, cx - m.s, cy - m.s, kAdvance * m.s, m.glyph_px + 2 * m.s, kSel);
     const char one[2] = {edit_buf_[static_cast<size_t>(i)], 0};
-    draw_text(d, cx, fy, m.s, kInk, one);
+    draw_text(d, cx, cy, m.s, kInk, one);
   }
   // The font is uppercase-only, so a lower-case letter draws as a capital:
   // the table's name is the only way to tell which case is being written.
-  draw_text(d, fx, fy + m.row_h + m.s, m.list_s, kEdgeText, kCharTableNames[edit_table_]);
-  draw_text(d, fx, fy + m.row_h + m.s + m.list_row_h, m.list_s, kDim,
-            fit(kHelp, m.list_s, panel_w - 6 * m.s).c_str());
+  const int below = fy + rows * m.row_h + m.s;
+  const int avail = panel_w - 6 * m.s;
+  draw_text(d, fx, below, m.list_s, kEdgeText, kCharTableNames[edit_table_]);
+  draw_text(d, fx, below + m.list_row_h, m.list_s, kDim, fit(kHelp1, m.list_s, avail).c_str());
+  draw_text(d, fx, below + 2 * m.list_row_h, m.list_s, kDim, fit(kHelp2, m.list_s, avail).c_str());
 }
 
 void Menu::draw(const Canvas& d) const {
