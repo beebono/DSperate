@@ -31,7 +31,7 @@ namespace ds::cpu {
 // Which addresses a loop's loads may touch. RamOnly: backed RAM. GxstatOnly:
 // RAM plus GXSTAT, and at least one load must be GXSTAT (the swap-wait shape).
 // All: RAM plus the scheduled-event register set (see safe_poll_address).
-enum class IdlePorts : u8 { RamOnly, GxstatOnly, All };
+enum class IdlePorts : u8 { RamOnly, GxstatOnly, SpicntOnly, All };   // SpicntOnly: RAM and SPICNT (the ARM7's SPI busy poll)
 
 // True when the CPU's next instruction lies inside a proven idle loop.
 // Cheap on the repeat path: one hash lookup plus one page-table probe per load.

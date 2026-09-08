@@ -228,6 +228,16 @@ public:
   // reason; the completion event is only armed when the SPI IRQ is enabled.
   bool spi_busy() const { return nds_sched_now() < spi_ready_at; }
   u16  spicnt_read() const { return static_cast<u16>(spicnt | (spi_busy() ? 0x0080 : 0)); }
+  // The ARM7 polling SPICNT's busy bit: after SPI_POLL_STREAK consecutive
+  // busy reads with no other I/O access between them, the rest of the wait
+  // is charged to the ARM7's slice budget instead of being spun through.
+  // Scheduler::now() interpolates from the consumed budget, so the ARM7
+  // reaches the ready time at the same guest instant, only without the
+  // iterations (Spirit Tracks: ~9 k polls a frame, each a slow-path read).
+  // DS_IDLE_SKIP=0 turns it off with the other idle-loop skips.
+  static constexpr u32 SPI_POLL_STREAK = 4;
+  u32 spi_poll_streak_ = 0;
+  u16  spicnt_read_arm7();
 
 private:
   NDS& nds_;

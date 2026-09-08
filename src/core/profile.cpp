@@ -28,7 +28,7 @@ const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d res
   "slices", "slices arm9 halted", "slices arm7 halted", "slices both halted", "slices with dma", "slices run to the deadline (both halted)",
   "cycles total", "cycles both halted", "cycles arm9 halted only", "cycles arm7 halted only", "cycles neither halted",
   "cycles arm9 awake+spinning", "cycles arm7 awake+spinning", "cycles one spinning, other halted", "cycles all idle (halt or spin)",
-  "host ns arm9 in spin slices", "host ns arm7 in spin slices", "host ns arm9 working", "host ns arm7 working", "cycles skipped by idle-loop detect", "idle veto: dma", "idle veto: gx busy", "idle veto: irq pending", "idle veto: pc filter", "idle veto: arm9 not a loop", "idle veto: arm7 not a loop", "idle skip allowed",
+  "host ns arm9 in spin slices", "host ns arm7 in spin slices", "host ns arm9 working", "host ns arm7 working", "cycles skipped by idle-loop detect", "idle veto: dma", "idle veto: gx busy", "idle veto: irq pending", "idle veto: pc filter", "idle veto: arm9 not a loop", "idle veto: arm7 not a loop", "idle skip allowed", "arm7 spi poll: slices slept", "arm7 spi poll: cycles slept",
   "2d lines rendered", "2d text bg lines", "2d affine bg lines", "2d extended bg lines", "2d 3d-layer lines", "2d lines with sprites", "2d lines with windows", "2d lines with colour effect", "2d lines where an effect can apply", "2d flat lines (no effect possible)", "2d plane selects",
   "2d lines: 0 layers", "2d lines: 1 layer", "2d lines: 2 layers", "2d lines: 3 layers", "2d lines: 4+ layers", "2d lines: 1 layer, fully opaque", "2d lines with obj pixels", "2d lines with 3d pixels", "2d lines with a window", "2d bg lines 16-colour text", "2d bg lines 256-colour text", "2d bg lines direct colour", "2d bg lines empty (transparent row)", "2d 3d-layer lines with nothing visible", "2d fast lines: backdrop only", "2d fast lines: one opaque layer", "2d full lines: effect mode live", "2d full lines: translucent 3d", "2d full lines: semi/bitmap sprites", "2d full lines: second target needed", "2d full lines: fade only", "3d spans: constant colour", "3d spans: interpolated colour", "3d band 0 ns", "3d band 1 ns", "3d band 2 ns", "3d band 3 ns", "3d band phase ns (slowest band)", "3d band ns summed (all bands)", "async probe: frames measured", "async probe: texture vram changed by next line 0", "async probe: texture vram changed by next swap", "async probe: vramcnt rewritten by next line 0", "async probe: vramcnt rewritten by next swap", "3d raster force-joined (vram touched)", "3d bins drawn by the thread that would have waited", "3d frames at 1 worker", "3d frames at 2 workers", "3d frames at 3 workers", "3d frames at 4 workers", "3d batches flushed", "3d spans batched", "3d pixels batched",
   "gx swap_buffers (new list)", "gx swaps whose list is unchanged", "gx vblanks with no swap", "gx no-swap frames rejected by the register compare",
@@ -119,7 +119,11 @@ void frame_mark() {
 }
 
 void frame_breakdown(const std::vector<double>& frame_ms) {
-  if (!enabled || frame_series.empty() || frame_series.size() != frame_ms.size()) return;
+  // frame_mark runs every frame; the statistics may leave the first N out
+  // (--stats-from), so the series is aligned to its tail.
+  if (!enabled || frame_series.empty() || frame_series.size() < frame_ms.size()) return;
+  if (frame_series.size() > frame_ms.size())
+    frame_series.erase(frame_series.begin(), frame_series.begin() + static_cast<long>(frame_series.size() - frame_ms.size()));
   const size_t n = frame_ms.size();
   std::vector<size_t> order(n);
   for (size_t i = 0; i < n; ++i) order[i] = i;
@@ -146,21 +150,26 @@ void frame_breakdown(const std::vector<double>& frame_ms) {
     for (u32 s = 0; s < COUNT; ++s) g.stage[s] *= k;
     return g;
   };
-  const Group m = mean(mid), t = mean(tail);
-  std::fprintf(stderr, "[frames] stage breakdown, mean of typical (middle 20%%, %zu frames) vs p99 tail (%zu frames), sorted by what the tail adds:\n",
-               mid.size(), tail.size());
-  std::fprintf(stderr, "[frames] %-16s %9s %9s %9s\n", "stage", "typ ms", "p99 ms", "delta");
+  // The fastest fifth as well: titles that alternate a heavy and a light
+  // frame (Spirit Tracks, Golden Sun's title) put the light one here and the
+  // heavy one in the middle, and the difference between the two columns is
+  // what the heavy frame does that the light one does not.
+  const std::vector<size_t> low(order.begin(), order.begin() + static_cast<long>(n / 5));
+  const Group m = mean(mid), t = mean(tail), l = mean(low);
+  std::fprintf(stderr, "[frames] stage breakdown, mean of fastest fifth (%zu frames), typical (middle 20%%, %zu frames) and p99 tail (%zu frames), sorted by what the tail adds:\n",
+               low.size(), mid.size(), tail.size());
+  std::fprintf(stderr, "[frames] %-16s %9s %9s %9s %9s\n", "stage", "fast ms", "typ ms", "p99 ms", "delta");
   std::vector<u32> rows(COUNT);
   for (u32 s = 0; s < COUNT; ++s) rows[s] = s;
   std::sort(rows.begin(), rows.end(), [&](u32 a, u32 b) { return t.stage[a] - m.stage[a] > t.stage[b] - m.stage[b]; });
   for (u32 s : rows)
     if (m.stage[s] >= 0.0005 || t.stage[s] >= 0.0005)
-      std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %+9.3f\n", names[s], m.stage[s], t.stage[s], t.stage[s] - m.stage[s]);
-  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %+9.3f   (frame_ms minus timed stages: JIT translate, event/bus work between scopes, sched)\n",
-               "untimed", m.untimed, t.untimed, t.untimed - m.untimed);
-  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %+9.3f   (overlaps the band wait; not part of the wall time)\n",
-               "band workers", m.workers, t.workers, t.workers - m.workers);
-  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %+9.3f\n", "frame total", m.ms, t.ms, t.ms - m.ms);
+      std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %9.3f %+9.3f\n", names[s], l.stage[s], m.stage[s], t.stage[s], t.stage[s] - m.stage[s]);
+  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %9.3f %+9.3f   (frame_ms minus timed stages: JIT translate, event/bus work between scopes, sched)\n",
+               "untimed", l.untimed, m.untimed, t.untimed, t.untimed - m.untimed);
+  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %9.3f %+9.3f   (overlaps the band wait; not part of the wall time)\n",
+               "band workers", l.workers, m.workers, t.workers, t.workers - m.workers);
+  std::fprintf(stderr, "[frames] %-16s %9.3f %9.3f %9.3f %+9.3f\n", "frame total", l.ms, m.ms, t.ms, t.ms - m.ms);
   // The worst individual frames, each with its heaviest stages: clusters with
   // one cause look alike here, mixed causes do not.
   const size_t worst_n = std::min<size_t>(6, n);

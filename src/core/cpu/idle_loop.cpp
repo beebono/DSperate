@@ -61,6 +61,7 @@ inline bool safe_poll_address(CpuContext& cpu, u32 addr, IdlePorts ports, bool& 
   const u32 port = addr & 0x0FFFFFFCu;
   if (ports != IdlePorts::All) {
     if (ports == IdlePorts::GxstatOnly && port == 0x04000600) { gxstat = true; return true; }
+    if (ports == IdlePorts::SpicntOnly && port == 0x040001C0) return true;
     return false;
   }
   // Only registers that change at a scheduled event, never between two of

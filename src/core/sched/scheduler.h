@@ -71,6 +71,7 @@ public:
     return now_ + (static_cast<u64>(running_start_budget_ - running_->hot.cycle_budget - running_->preempt_residual) << running_shift_);
   }
   const CpuContext* running() const { return running_; }
+  bool idle_skip_enabled() const { return idle_skip_ != 0; }
 
   // Called when an immediate DMA starts on `cpu`: if that CPU is the one
   // executing, it leaves its run loop after the current instruction and the
@@ -183,6 +184,14 @@ private:
   // loop is treated as halted for the slice. Sets which CPUs to skip and
   // returns whether the whole machine is idle. See cpu/idle_loop.h.
   bool machine_idle(bool& skip9, bool& skip7) const;
+  // ARM7-only sleep: the ARM7 sitting in a proven poll loop on SPICNT while
+  // a transfer is in flight (touch/mic sampling: Spirit Tracks does ~9 k
+  // such polls a frame, each a slow-path I/O read) is treated as halted for
+  // the slice while the ARM9 runs on; `wake` receives the transfer's ready
+  // time so the slice can end there.
+  bool arm7_spi_poll(u64& wake) const;
+  mutable u32 spi_pc_ring_[8] = {};
+  mutable u32 spi_pc_pos_ = 0;
   // Rings of each CPU's recent slice-start PCs. A slice ends at an arbitrary
   // point inside a loop, so "still in the loop" is membership in the last
   // few, not equality with the last one. The first ring is the idle-skip

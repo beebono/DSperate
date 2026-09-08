@@ -405,6 +405,25 @@ void Io::spi_release() {
   spi_pm.hold = false; spi_fw.hold = false; spi_fw.addr = 0; spi_tsc.pos = 0;
 }
 
+u16 Io::spicnt_read_arm7() {
+  if (!spi_busy()) { spi_poll_streak_ = 0; return spicnt_read(); }
+  if (++spi_poll_streak_ >= SPI_POLL_STREAK && nds_.sched.idle_skip_enabled()) {
+    CpuContext& a7 = nds_.cpu(Cpu::ARM7);
+    if (nds_.sched.running() == &a7 && a7.hot.cycle_budget > 0) {
+      // ARM9 cycles left until ready, in ARM7 cycles rounded up, capped at
+      // the slice: past that the loop resumes in the next slice and either
+      // the boundary sleep (Scheduler::arm7_spi_poll) or this catches it.
+      const u64 rem9 = spi_ready_at - nds_.sched.now();
+      s32 charge = static_cast<s32>((rem9 + 1) / 2);
+      if (charge > a7.hot.cycle_budget) charge = a7.hot.cycle_budget;
+      a7.hot.cycle_budget -= charge;
+      prof::add(prof::C_CYC_A7_SPI_SLEPT, static_cast<u64>(charge) * 2);
+      prof::add(prof::C_A7_SPI_SLEEP, 1);
+    }
+  }
+  return spicnt_read();
+}
+
 void Io::spi_write_data(u8 value) {
   if (!(spicnt & 0x8000)) return;
   if (spi_busy()) return;
@@ -936,6 +955,7 @@ bool Io::census_on() { return g_ioc.on; }
 
 u32 Io::read(Cpu cpu, u32 addr, u32 width) {
   if (g_ioc.on) g_ioc.rd[cpu == Cpu::ARM9 ? 0 : 1][addr]++;
+  if (cpu == Cpu::ARM7 && (addr & ~3u) != 0x040001C0) spi_poll_streak_ = 0;
   if (!io_unowned(addr - 0x04000000)) {
     if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) return nds_.gpu3d.read(addr, width);
     if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) return nds_.gpu.reg_read(addr, width);
@@ -948,6 +968,7 @@ u32 Io::read(Cpu cpu, u32 addr, u32 width) {
 
 void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
   if (g_ioc.on) g_ioc.wr[cpu == Cpu::ARM9 ? 0 : 1][addr]++;
+  if (cpu == Cpu::ARM7) spi_poll_streak_ = 0;
   if (!io_unowned(addr - 0x04000000)) {
     if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) { nds_.gpu3d.write(addr, width, value); return; }
     if (cpu == Cpu::ARM9 && gpu::Gpu::owns_reg(addr)) {
@@ -1039,7 +1060,7 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0xd4: case 0xd5: case 0xd6: case 0xd7: {
     const u32 i = addr - 0x040001A8; return static_cast<u16>(cart.cmd[i] | (cart.cmd[i + 1] << 8));
   }
-  case 0xe0: return a9 ? 0 : spicnt_read();
+  case 0xe0: return a9 ? 0 : spicnt_read_arm7();
   case 0xe1: return a9 ? 0 : spidata;
   case 0x102: return exmemcnt;
   case 0x5d: case 0x63: case 0x69: case 0x6f: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000BA) / 12) >> 16);

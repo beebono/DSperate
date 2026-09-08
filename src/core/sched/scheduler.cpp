@@ -140,6 +140,22 @@ bool Scheduler::machine_idle(bool& skip9, bool& skip7) const {
   return true;
 }
 
+bool Scheduler::arm7_spi_poll(u64& wake) const {
+  if (!idle_skip_) return false;
+  const CpuContext& a7 = nds_.cpu(Cpu::ARM7);
+  if (a7.halted || (a7.hot.irq_pending && !(a7.hot.cpsr & 0x80))) return false;
+  if (!nds_.io.spi_busy()) return false;
+  if (nds_.dma.any_running(Cpu::ARM7)) return false;
+  const u32 pc = a7.hot.regs[15];
+  bool repeated = false;
+  for (u32 k = 0; k < 8; ++k) if (spi_pc_ring_[k] == pc) { repeated = true; break; }
+  spi_pc_ring_[spi_pc_pos_++ & 7] = pc;
+  if (!repeated) return false;
+  if (!cpu::in_idle_loop(const_cast<CpuContext&>(a7), cpu::IdlePorts::SpicntOnly)) return false;
+  wake = nds_.io.spi_ready_at;
+  return true;
+}
+
 bool Scheduler::both_idle() const {
   const CpuContext& a9 = nds_.cpu(Cpu::ARM9);
   const CpuContext& a7 = nds_.cpu(Cpu::ARM7);
@@ -346,6 +362,12 @@ begin:
     const bool idle = slice > quantum_ && all_idle;
     if (slice > quantum_ && !idle) slice = quantum_;
     if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
+    u64 wake = 0;
+    if (!all_idle && !sl_.skip7 && arm7_spi_poll(wake)) {
+      sl_.skip7 = true;
+      if (wake > now_ && static_cast<s64>(wake - now_) < slice) slice = static_cast<s64>(wake - now_);
+      if (prof::enabled) { prof::add(prof::C_A7_SPI_SLEEP, 1); prof::add(prof::C_CYC_A7_SPI_SLEPT, static_cast<u64>(slice)); }
+    }
     sl_.slice = slice;
     if (prof::enabled) count_slice(idle, slice);
     if (prof::enabled && (sl_.skip9 || sl_.skip7)) prof::add(prof::C_CYC_IDLE_SKIPPED, static_cast<u64>(slice));
@@ -466,6 +488,12 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
     const bool idle = slice > quantum_ && all_idle;
     if (slice > quantum_ && !idle) slice = quantum_;
     if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
+    u64 wake = 0;
+    if (!all_idle && !skip7 && arm7_spi_poll(wake)) {
+      skip7 = true;
+      if (wake > now_ && static_cast<s64>(wake - now_) < slice) slice = static_cast<s64>(wake - now_);
+      if (prof::enabled) { prof::add(prof::C_A7_SPI_SLEEP, 1); prof::add(prof::C_CYC_A7_SPI_SLEPT, static_cast<u64>(slice)); }
+    }
     if (prof::enabled) count_slice(idle, slice);
     if (prof::enabled && (skip9 || skip7)) prof::add(prof::C_CYC_IDLE_SKIPPED, static_cast<u64>(slice));
 
