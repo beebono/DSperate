@@ -281,8 +281,16 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # all = every proven poll loop
 # autosave = false              # on quit, save a state to the hidden "auto" slot
                                 # (<states>/<GAMECODE>.auto.dss). Covers Ctrl-C and a launcher's
-                                # SIGTERM, not SIGKILL. Resume with --load-state <that path>; the slot
-                                # never shows in the menu. Skipped during a replay or recording
+                                # SIGTERM, not SIGKILL. Resume with autoload below (or --load-state
+                                # <that path>); the slot never shows in the menu. Skipped during a
+                                # replay or recording
+# autoload = false              # when a game starts and its auto slot exists, resume from it instead
+                                # of booting. Applies to a game named on the command line and to one
+                                # launched from the loader cart's picker; never to a cart-less
+                                # firmware boot, and never during a replay or recording. --load-state
+                                # wins over it, and an auto state that cannot be read is a warning,
+                                # not a failure: the game boots as usual. The state is kept, so a
+                                # SIGKILL still leaves the last clean exit's state to resume from
 # autosave_png = false          # a picture with the auto state, laid out as the window shows it:
                                 # true = <states>/<GAMECODE>.auto.png | a path = that file (for a
                                 # launcher's game switcher). Taken from the emulator's own frame, so

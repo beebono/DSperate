@@ -76,6 +76,8 @@ const Setting kEmuSettings[] = {
          "WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE"),
   boolean("emu.autosave", "AUTOSAVE ON QUIT", "false", FlagLive, Dep::None,
           "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"),
+  boolean("emu.autoload", "AUTOLOAD ON START", "false", FlagRestart, Dep::None,
+          "WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE"),
   end(),
 };
 

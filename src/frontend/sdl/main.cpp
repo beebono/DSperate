@@ -138,6 +138,8 @@ const char* kUsage =
     "                  menu needs a real clock to appear at all)\n"
     "  --load-state F  start from a save state instead of booting the game\n"
     "  --autosave-png F  with emu.autosave, write a PNG of both screens to F beside the auto state\n"
+    "  --autoload      start from the auto slot (emu.autosave's state) when there is one\n"
+    "  --no-autoload   ignore it for this run, whatever emu.autoload says\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n"
     "  --clear-cache   delete every unpacked zipped game (the .dsperate directories beside the\n"
@@ -296,6 +298,21 @@ std::string state_path(NDS& nds, const std::string& dir, int slot) {
 std::string auto_state_path(NDS& nds, const std::string& dir) {
   const std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
   return dir + "/" + code + ".auto.dss";
+}
+
+// Autoload: the auto slot as the starting point, when emu.autoload asks for
+// it and the file is there. The state is left in place -- a SIGKILL never
+// gets to write one, so the last clean exit's state stays resumable, and a
+// clean exit overwrites it anyway.
+std::string autoload_path(NDS& nds, const std::string& dir, bool enabled) {
+  // Never for a cart-less firmware boot: auto_state_path() keys on the "NONE"
+  // code there, and would pick up whatever an earlier cart-less session left.
+  if (!enabled || !nds.cart) return {};
+  const std::string path = auto_state_path(nds, dir);
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return {};
+  std::fclose(f);
+  return path;
 }
 
 // The screen layout rides along after the machine's chunks, so a state
@@ -785,6 +802,8 @@ int main(int argc, char** argv) {
     else if (arg("--save")) save_arg = argv[++i];
     else if (arg("--load-state")) load_state = argv[++i];
     else if (arg("--autosave-png")) cli.set("emu.autosave_png", argv[++i]);
+    else if (flag("--autoload")) cli.set("emu.autoload", "true");
+    else if (flag("--no-autoload")) cli.set("emu.autoload", "false");
     // A state load starts cold -- every translated block went with the old
     // run and the caches hold the loader's data -- so the first frames are
     // slow in a way the scene never is. Measured on the RG DS: ~13 ms on max
@@ -829,7 +848,7 @@ int main(int argc, char** argv) {
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
 
@@ -1293,14 +1312,30 @@ sdl_ready:
   }
   // After the battery save, so a state's SRAM wins over <rom>.sav, and after
   // the replay log is open so it can be wound forward to the state's frame.
-  if (load_state) {
+  // An explicit --load-state wins; the auto slot is only what is fallen back
+  // to. Skipped under a replay (its inputs run from boot, so a state would
+  // desynchronise it) and a recording (the same reason autosave_now() skips
+  // them: the log is the inputs from boot).
+  const std::string autoload = load_state || log.reading() || log.writing()
+                                   ? std::string()
+                                   : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
+  if (load_state || !autoload.empty()) {
+    const char* start_state = load_state ? load_state : autoload.c_str();
     bool got_layout = false;
-    if (!load_state_file(nds, load_state, layout, got_layout)) return 1;
-    // The state's view replaces the config's, dual-window aside (two panels
-    // show both screens, whatever the state says).
-    if (got_layout && !dual_window) { display.set_layout(layout); apply_visibility(); }
-    // A replay continues from the state's frame, not from the log's start.
-    if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
+    // A --load-state that cannot be read is the player's explicit request and
+    // fails the run; an unreadable auto state (truncated by a SIGKILL
+    // mid-write, or written by an older build) only means there is nothing to
+    // resume, so the game boots as usual. load_state_file() has said why.
+    if (!load_state_file(nds, start_state, layout, got_layout)) {
+      if (load_state) return 1;
+    } else {
+      if (!load_state) std::fprintf(stderr, "state: autoloaded %s\n", start_state);
+      // The state's view replaces the config's, dual-window aside (two panels
+      // show both screens, whatever the state says).
+      if (got_layout && !dual_window) { display.set_layout(layout); apply_visibility(); }
+      // A replay continues from the state's frame, not from the log's start.
+      if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
+    }
   }
   ds::sdl::Lid lid;
   if (!replay) lid.open();
@@ -2005,6 +2040,17 @@ sdl_ready:
           menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
           session.load_enabled(nds);
           load_save(nds, session.sav);
+          // The game's own auto slot, now that its code is known: a game
+          // started from the picker resumes exactly as one named on the
+          // command line does. After the battery save, so the state's SRAM
+          // wins, and never during a replay or a recording.
+          if (const std::string a = log.reading() || log.writing()
+                                        ? std::string()
+                                        : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
+              !a.empty() && load_state_file(nds, a, loaded_layout, got_layout)) {
+            std::fprintf(stderr, "state: autoloaded %s\n", a.c_str());
+            apply_loaded_layout();
+          }
           sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
           state_slot = 0;
           refresh_slots();

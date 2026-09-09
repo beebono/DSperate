@@ -46,7 +46,8 @@ melonDS (frame dumps, instruction traces) and measured on the Anbernic RG DS
 - **Sound.** The SPU mixes all sixteen channels (PCM8/16, ADPCM, PSG, noise),
   capture units and the output at 32768 Hz; the SDL frontend plays it and
   paces the emulator from the audio queue.
-- **Sessions.** Battery saves, save states (ten slots, exact round trip),
+- **Sessions.** Battery saves, save states (ten slots, exact round trip,
+  plus an auto slot that can be saved on quit and resumed on start),
   input recording and replay (a played scene becomes a benchmark), a real or
   fake microphone, and the lid/hinge.
 - **Firmware boot.** With no game the console boots its own firmware: the DS
@@ -190,7 +191,8 @@ A55, before the window appears.
                  [--interp] [--lockstep | --quantum N] [--timing-oc] [--cpu-oc] [--fast-load]
                  [--aa | --no-aa] [--frameskip N] [--frameskip-mode adaptive|fixed] [--frameskip-capture]
                  [--frames N] [--stats-from N] [--record F | --replay F] [--rtc-host]
-                 [--save F] [--load-state F] [--autosave-png F] [--clear-cache]
+                 [--save F] [--load-state F] [--autoload | --no-autoload]
+                 [--autosave-png F] [--clear-cache]
 
 `dsperate --help` describes each one; every option has a key in the settings
 file, and the command line overrides it. There is no renderer switch: the
@@ -309,9 +311,21 @@ all.
 `[emu] autosave = true` writes one state on quit to an unlisted eleventh slot,
 `<states>/<GAMECODE>.auto.dss`. Nothing is written while playing, so it costs
 no frame time; a Ctrl-C or a launcher's SIGTERM is covered, a `SIGKILL` is not.
-Resume it with `--load-state` on that path -- the slot never shows in the pause
-menu and the slot hotkeys never reach it, so it cannot be overwritten by hand.
-It is skipped during a replay or a recording, like the save-state hotkey.
+The slot never shows in the pause menu and the slot hotkeys never reach it, so
+it cannot be overwritten by hand. It is skipped during a replay or a recording,
+like the save-state hotkey.
+
+`[emu] autoload = true` picks that state up again: when a game starts and its
+auto slot is there, the session resumes from it instead of booting, so a
+handheld that only knows how to launch a ROM comes back where it left off. It
+covers a game named on the command line and one launched from the loader
+cart's picker alike -- the slot is keyed to the game's own code, so the picker
+resumes whichever game was chosen -- but never a cart-less firmware boot, and
+never a replay or a recording. `--load-state` wins over it, and an auto state
+that cannot be read (a `SIGKILL` caught the write half-done, or an older build
+wrote it) is a warning rather than a failure: the game boots as usual. The
+state is kept after loading, so the last clean exit stays resumable even if
+this session is killed. `--autoload` and `--no-autoload` set it for one run.
 
 ### Firmware boot
 
