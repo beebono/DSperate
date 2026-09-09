@@ -371,14 +371,16 @@ out what we do not use: `RC_DISABLE_LUA`, no `RC_CLIENT_SUPPORTS_RAINTEGRATION`
 Each phase is useful on its own and testable without the next.
 
 1. **Hash and identify, offline-shaped.** -- **DONE** 2026-09-09, see below.
-2. **Memory reader plus a local runtime.** `read_memory` over
-   `main_ram`/`dtcm` with everything else reading zero, `rc_client_do_frame`
-   exactly once per frame, hardcore explicitly off. Drive it with a hand-written achievement set to prove triggers fire.
-   **Measure here**: `rc_client_do_frame` cost on the A55 with a real set
-   loaded, p99 and over-budget frames, before any networking exists.
-3. **Transport.** The libcurl dlopen shim behind a transport interface, the
-   worker thread, a queue draining on the emu thread. The product User-Agent,
-   set once. Login with password, a 0600 token file with the password fallback,
+2. **Memory reader plus a local runtime.** -- **DONE** 2026-09-09, see below.
+3. **Session and transport.** The libcurl dlopen shim behind a transport
+   interface, the worker thread, a queue draining on the emu thread. The
+   `rc_client` session, with **`rc_client_set_hardcore_enabled(client, 0)`
+   immediately after `rc_client_create`** and `rc_client_do_frame` called from
+   `main.cpp`'s loop exactly once per `nds.run_frame()`; also
+   `rc_runtime_validate_addresses`, so the unbacked region marks achievements
+   unsupported rather than merely reading zero. The product User-Agent is
+   already built (`cheevos::user_agent()`) and needs connecting to the
+   transport. Login with password, a 0600 token file with the password fallback,
    game identify and load. Still no UI beyond stderr. Small enough now that it
    is no longer the project's centre of gravity. This is also where the one
    genuinely untested question gets answered: whether an unlock from an
@@ -440,6 +442,71 @@ above):
   has not hashed (a different revision or region), not failures -- the same code
   produced all six.
 
+## Phase 2 as built
+
+`src/cheevos/cheevos_memory.{h,cpp}` and `tests/cheevos_memory_test.cpp`, plus
+`tools/cheevos_bench.cpp`. The vendored `src/rcheevos/` (the condition
+evaluator) now compiles; `rc_client.c` and `rapi/` still do not.
+
+`cheevos::Memory` is the window: `attach()`, `read()`, `supported()`, and the
+two adapters rcheevos' entry points want. Three decisions in it are worth
+knowing:
+
+- **The region table is read from rcheevos at run time and checked**, not
+  copied. `attach()` takes `rc_console_memory_regions(RC_CONSOLE_NINTENDO_DS)`
+  and refuses to start if it is not the three regions with the sizes this code
+  expects. If an upstream update ever gives the DSi hole real RAM, that is a
+  loud failure rather than every achievement silently reading 12 MB off.
+- **Unbacked reads return zero and report a short count.** The count is the
+  signal: rcheevos reads "fewer bytes than asked" as "this address is not
+  supported here" and disables the achievement, rather than evaluating it
+  against whatever the DS left at that address.
+- **Nothing goes through `Bus::io_read` or the page tables** -- just a bounds
+  check and a `memcpy` from `bus.main_ram` / `bus.dtcm`. Emulation cannot tell a
+  read happened: no write traps, no timing, no VRAM remap side effects.
+
+### What it costs on the A55
+
+Measured on the RG DS, `tools/cheevos_bench` (warm-up run discarded, per
+`device-benchmark-warmup-reverses-results`), against a synthetic set whose
+addresses are spread over the first 1 MB:
+
+| set | mean | p50 | p99 | max | p99 as share of a 16.67 ms frame |
+|-----|------|-----|-----|-----|------------------------------|
+| 120 achievements x 6 conditions | 100.6 us | 96.2 us | 210.9 us | 482 us | **1.27 %** |
+| 250 x 10 (pessimistic) | 380.3 us | 349.1 us | 755.1 us | 2113 us | 4.53 % |
+
+The first row is the realistic one -- a large DS set is around a hundred
+achievements -- and 0.60 % of a frame mean, 1.27 % p99, is affordable. Cost
+scales roughly linearly in total conditions, so the second row is the shape of
+the risk rather than a prediction.
+
+Three caveats, because this is a synthetic set and it would be easy to read too
+much into it:
+
+- It is probably **harder than a real set**, not easier: the addresses are
+  spread across 1 MB with no locality, where a real set clusters around the
+  handful of structures a game keeps its state in. Cache behaviour favours the
+  real one.
+- The `max` column (482 us, 2.1 ms) is almost certainly scheduling noise rather
+  than evaluation -- the benchmark runs at default priority on a live device --
+  but it has not been separated out, so it is quoted rather than explained away.
+- It does not include `rc_client`'s own per-frame bookkeeping, which phase 3
+  adds on top, nor the network thread.
+
+The one place to re-check is Golden Sun, which already runs over budget
+(`compositor-thread-step1`): 1.3 % p99 is cheap in the abstract and less cheap
+on a frame that is already late. Worth a look with a real set in phase 6.
+
+### Deliberately not done
+
+The frontend is not wired up. `rc_client_do_frame` has nothing to drive until
+there is a session and a set to evaluate, so a call in `main.cpp`'s loop now
+would be dead code that still had to be kept correct; it lands in phase 3 with
+the session, and the phases list above says so. What this phase proves is that
+the window and the runtime are right and affordable, which is what phase 3
+needs to build on.
+
 ## What I expect to go wrong
 
 - **The User-Agent**, which is the one thing that silently disables the entire
@@ -453,6 +520,11 @@ above):
   the player can actually see.
 - **Unlock submission from an unregistered client**, which is untested and
   cannot be tested before phase 3.
+- **Writing trigger expressions by hand**, which is how phase 2's tests are
+  driven. In RetroAchievements' syntax an unprefixed `0x...` on the right of a
+  comparison is a *16-bit memory read*, not a constant -- `0xH001004=0x2A` asks
+  whether a byte equals the halfword at address 0x2A. A hex constant is `h2A`.
+  It parses, it activates, and it silently never fires.
 - **CFW variability.** We are depending on someone else's library set, so a
   ROCKNIX update can move it -- and `rig-device-access` already records that a
   ROCKNIX update wipes `/storage/dsperate` and the BIOS dumps. The failure has

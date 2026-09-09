@@ -94,4 +94,12 @@ if(DSPERATE_CHEEVOS)
   add_executable(test_cheevos_hash cheevos_hash_test.cpp)
   target_link_libraries(test_cheevos_hash PRIVATE dsperate_cheevos)
   add_test(NAME cheevos_hash COMMAND test_cheevos_hash)
+
+  # The memory window and the condition runtime (phase 2). Reaches rcheevos'
+  # own headers to drive rc_runtime directly, which the library does not expose
+  # to its users, so the include path is added here rather than made PUBLIC.
+  add_executable(test_cheevos_memory cheevos_memory_test.cpp)
+  target_link_libraries(test_cheevos_memory PRIVATE dsperate_cheevos)
+  target_include_directories(test_cheevos_memory PRIVATE ${CMAKE_SOURCE_DIR}/src/cheevos/rcheevos/include)
+  add_test(NAME cheevos_memory COMMAND test_cheevos_memory)
 endif()
