@@ -19,7 +19,7 @@ namespace {
 // Wider than the 3x5 the slot digit uses: at this size M/N/W are distinct and
 // a word is read rather than decoded, which a menu needs and an OSD digit
 // does not.
-constexpr u8 kFont[62][7] = {
+constexpr u8 kFont[66][7] = {
   { 0, 0, 0, 0, 0, 0, 0}, { 4, 4, 4, 4, 4, 0, 4}, {10,10, 0, 0, 0, 0, 0}, {10,10,31,10,31,10,10},
   { 4,15,20,14, 5,30, 4}, {24,25, 2, 4, 8,19, 3}, { 8,20,20, 8,21,18,13}, { 4, 4, 0, 0, 0, 0, 0},
   { 2, 4, 8, 8, 8, 4, 2}, { 8, 4, 2, 2, 2, 4, 8}, { 0, 4,21,14,21, 4, 0}, { 0, 4, 4,31, 4, 4, 0},
@@ -36,7 +36,15 @@ constexpr u8 kFont[62][7] = {
   {14,17,17,17,21,18,13}, {30,17,17,30,20,18,17}, {15,16,16,14, 1, 1,30}, {31, 4, 4, 4, 4, 4, 4},
   {17,17,17,17,17,17,14}, {17,17,17,17,17,10, 4}, {17,17,17,21,21,27,17}, {17,17,10, 4,10,17,17},
   {17,17,10, 4, 4, 4, 4}, {31, 1, 2, 4, 8,16,31},
-  { 6, 4, 4, 4, 4, 4, 6}, {16,16, 8, 4, 2, 1, 1}, {12, 4, 4, 4, 4, 4,12}};
+  { 6, 4, 4, 4, 4, 4, 6}, {16,16, 8, 4, 2, 1, 1}, {12, 4, 4, 4, 4, 4,12},
+  // Face-button positions, indices 62..65, addressed as the control bytes
+  // \x01..\x04 (Menu::kFaceSouth and friends). A diamond of four pips with
+  // the named one filled: which corner of the cluster a pad button sits in is
+  // the same on every pad, where its letter is not.
+  // East and west are two columns wide against north and south's three, so
+  // that they stop short of the cell's centre column -- the axis the top and
+  // bottom pips sit on -- and the diamond keeps its hole.
+  { 0, 4, 0,17,14,14,14}, { 0, 4, 3,19, 3, 4, 0}, { 0, 4,24,25,24, 4, 0}, {14,14,14,17, 0, 4, 0}};
 
 constexpr int kGlyphW = 5, kGlyphH = 7, kAdvance = 6;   // advance includes the one-pixel gap
 
@@ -90,6 +98,10 @@ int list_visible(const Metrics& m, int panel_h) {
 }
 
 int glyph(char c) {
+  // The face-position pips live below the printable range rather than after
+  // ']': the next free codes up there are 0x5E..0x61, and 0x61 is 'a', which
+  // the fold below would swallow.
+  if (c >= 1 && c <= 4) return 62 + c - 1;
   if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
   const int i = static_cast<int>(static_cast<unsigned char>(c)) - 0x20;
   return (i >= 0 && i < 62) ? i : 0;
@@ -433,7 +445,7 @@ Menu::Result Menu::handle(u32 presses) {
     if (hit(B::BTN_DOWN)) move_cheat_row(+1);
     if (hit(B::BTN_L)) for (int i = 0; i < visible_; ++i) move_cheat_row(-1);
     if (hit(B::BTN_R)) for (int i = 0; i < visible_; ++i) move_cheat_row(+1);
-    if (hit(B::BTN_A)) toggle_cheat();
+    if (hit(B::BTN_A) || hit(B::BTN_START)) toggle_cheat();
     if (hit(B::BTN_B)) pop();
     return Result::None;
   }
@@ -720,7 +732,7 @@ Menu::Result Menu::handle_settings(u32 presses) {
   if (hit(B::BTN_RIGHT)) step_setting(+1);
   // A steps a setting forward as well, so the whole page can be worked with
   // one button on a handheld whose d-pad the player is already holding.
-  if (hit(B::BTN_A)) {
+  if (hit(B::BTN_A) || hit(B::BTN_START)) {
     const Setting& cur = table()[set_row_[table_slot()]];
     if (cur.type == Setting::Type::Text && host_->enabled(cur)) open_text_edit();
     else step_setting(+1);
@@ -879,6 +891,23 @@ void Menu::move_bind_row(int delta) {
 Menu::Result Menu::handle_controls(u32 presses) {
   using B = io::Io::Button;
   const auto hit = [&](B b) { return (presses >> b) & 1; };
+  // The list is not a fixed length: a hotkey's second row appears when its
+  // first is bound and goes away when that is cleared, so the row under the
+  // cursor may have stopped existing since the last press. Clamp before
+  // anything reads it -- acting on a row that is off the end binds nothing
+  // and silently does nothing at all.
+  move_bind_row(0);
+  // The page draws "PRESS THE CONTROL TO BIND" for as long as the frontend is
+  // listening, so it has to be redrawn when that stops. Finishing a bind marks
+  // the page dirty below, but a capture the device itself cancelled -- Escape,
+  // or a pad press in the keyboard column -- changes nothing the menu would
+  // otherwise notice, and the prompt stayed on screen over a page that was no
+  // longer listening. The next press then went to reopening the capture rather
+  // than to leaving, which is what made backing out take two.
+  if (const bool listening = host_->capturing(); listening != listen_shown_) {
+    listen_shown_ = listening;
+    dirty_ = true;
+  }
   // While listening, the frontend is swallowing the real device, so none of
   // it reaches the switch below. The press is collected here instead, on the
   // idle tick after it happened, and bound to the row that asked for it.
@@ -900,7 +929,10 @@ Menu::Result Menu::handle_controls(u32 presses) {
     bind_row_ = 0;
     bind_top_ = 0;
   }
-  if (hit(B::BTN_A) || hit(B::BTN_START)) host_->begin_capture(bind_pad_);
+  // A alone opens a capture here, where every other page also takes START:
+  // START is a control the player may be trying to bind, and it cannot both
+  // open the listener and be the thing the listener hears.
+  if (hit(B::BTN_A)) host_->begin_capture(bind_pad_);
   // Y clears a binding, which is the only way to get back to "none" -- there
   // is no key to press that means "no key".
   if (hit(B::BTN_Y)) {
@@ -922,14 +954,18 @@ void Menu::draw_controls(const Canvas& d) const {
   visible_ = f.visible;
 
   const int n = host_->binding_count(bind_pad_);
+  // Hiding a hotkey's second row can make the list shorter than the cursor
+  // was; drawing is const, so the clamp is local here and handle_controls()
+  // is what actually moves the cursor back.
+  const int sel = std::min(bind_row_, std::max(0, n - 1));
   // Three rows at the foot: what the buttons do over two lines, since the
   // whole legend does not fit one at this scale and being cut off is worse
   // than costing a row, then any clash the bindings have made.
   const int foot_rows = 3;
   const int visible = std::max(1, f.visible - foot_rows);
   int top = bind_top_;
-  if (bind_row_ < top) top = bind_row_;
-  if (bind_row_ >= top + visible) top = bind_row_ - visible + 1;
+  if (sel < top) top = sel;
+  if (sel >= top + visible) top = sel - visible + 1;
   if (top > n - visible) top = n - visible;
   if (top < 0) top = 0;
   bind_top_ = top;
@@ -939,7 +975,7 @@ void Menu::draw_controls(const Canvas& d) const {
   for (int i = 0; i < visible && top + i < n; ++i) {
     const SettingsHost::Binding b = host_->binding(bind_pad_, top + i);
     const int ry = f.py0 + m.list_rows_y + i * m.list_row_h;
-    const bool is_sel = top + i == bind_row_;
+    const bool is_sel = top + i == sel;
     if (is_sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
     draw_text(d, f.text_x, ry, m.list_s, kInk, fit(b.label, m.list_s, f.avail - value_w).c_str());
     // The row being rebound says so where its value was, so it is obvious
@@ -953,7 +989,11 @@ void Menu::draw_controls(const Canvas& d) const {
 
   const int foot_y = f.py0 + m.list_rows_y + visible * m.list_row_h + m.list_s;
   fill_rect(d, f.px0 + m.pad, foot_y, f.w - 2 * m.pad, std::max(1, m.list_s), kPanelEdgeDim);
-  const char* help1 = listening ? "PRESS THE CONTROL TO BIND," : "A BIND   Y CLEAR   X DEFAULTS";
+  // The footer names DS buttons, and the console puts A on the right, B at the
+  // bottom, X at the top and Y on the left -- so the pips say where to press
+  // without the player having to know whose letters these are. The pad in hand
+  // may print something else entirely on the same four buttons.
+  const char* help1 = listening ? "PRESS THE CONTROL TO BIND," : "\x02 BIND   \x03 CLEAR   \x04 DEFAULTS";
   const char* help2 = listening ? "OR ESCAPE TO CANCEL"
                     : host_->has_pad() ? "L/R KEYBOARD OR PAD" : "L/R SWAP COLUMN";
   draw_text(d, f.text_x, foot_y + 2 * m.list_s, m.list_s, kDim, fit(help1, m.list_s, f.avail).c_str());
@@ -1058,7 +1098,7 @@ void Menu::draw_text_edit(const Canvas& d) const {
   // Two lines, so neither is cut off on a small panel: what moves about, then
   // what finishes.
   static constexpr const char* kHelp1 = "UP/DOWN LETTER   L/R TABLE";
-  static constexpr const char* kHelp2 = "A DONE   B CANCEL";
+  static constexpr const char* kHelp2 = "\x02 DONE   \x01 CANCEL";
   Metrics m = metrics(d);
   // Wide enough for the field at the page scale and for the help line at the
   // list scale, whichever is wider; the scale steps down rather than clip.

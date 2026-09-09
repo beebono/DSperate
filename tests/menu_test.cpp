@@ -480,7 +480,11 @@ struct FakeHost : ds::sdl::SettingsHost {
   void set_save_per_game(bool on) override { per_game = on && game; }
   bool has_game() const override { return game; }
 
-  int binding_count(bool) const override { return 4; }
+  // The real host hides a hotkey's second row until there is something to put
+  // on it, so a bind or a clear can make this list longer or shorter under the
+  // cursor. `rows` is what that looks like from the menu's side.
+  int rows = 4;
+  int binding_count(bool) const override { return rows; }
   Binding binding(bool p, int i) const override {
     Binding b;
     b.key = (p ? "pad.k" : "keys.k") + std::to_string(i);
@@ -742,6 +746,58 @@ void test_controls_binding() {
   CHECK(h.writes.back() == "reset");
 }
 
+// A row that disappears must not leave the cursor pointing off the end of the
+// list: clearing a hotkey's first slot takes its second row away with it.
+void test_controls_list_can_shrink() {
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));     // CONTROLS
+  m.input(press(B::BTN_A));
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));     // the last row
+  h.rows = 2;                                                  // two rows went away
+  m.input(press(B::BTN_Y));                                    // clear, which re-clamps first
+  // Whatever it cleared, it has to be a row that still exists.
+  CHECK(h.writes.back() == "keys.k1");
+  // And the page still draws, with the selection inside the list.
+  std::vector<u32> px(256 * 192, 0);
+  ds::sdl::Canvas c{px.data(), 256, 256, 192};
+  m.draw(c);
+  // The cursor is usable again straight away: down then up lands on a real row.
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_Y));
+  CHECK(h.writes.back() == "keys.k1");
+}
+
+// A capture the device cancelled -- Escape, or a pad press in the keyboard
+// column -- has to take the "PRESS THE CONTROL TO BIND" prompt off the screen.
+// Nothing else marks the page dirty for it, and a page still showing the
+// prompt spends the next press reopening the capture instead of leaving.
+void test_controls_repaints_when_a_capture_is_cancelled() {
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));     // CONTROLS
+  m.input(press(B::BTN_A));
+  m.input(press(B::BTN_A));                                    // listen
+  CHECK(h.capturing());
+  m.update(0, 0, 10);                                          // the listening page is drawn
+  m.clear_dirty();
+  h.capturing_ = false;                                        // the device backed out
+  m.update(0, 0, 10);
+  CHECK(m.dirty());
+  // And the page is live again straight away: one press does something.
+  m.clear_dirty();
+  m.input(press(B::BTN_DOWN));
+  CHECK(m.dirty());
+}
+
 // The Controls page opens on the pad when there is one: on a handheld that is
 // the only input, and the keyboard column would be a dead end.
 void test_controls_opens_on_the_pad() {
@@ -949,6 +1005,8 @@ int main() {
   test_disabled_row_does_not_step();
   test_commit_on_closing();
   test_controls_binding();
+  test_controls_list_can_shrink();
+  test_controls_repaints_when_a_capture_is_cancelled();
   test_controls_opens_on_the_pad();
   test_text_editor();
   test_ds_options_with_a_firmware_dump();

@@ -332,6 +332,14 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft
 # dpright) or axes (+leftx -lefty +righttrigger ...). SDL names buttons by
 # position, so the DS's A is the pad's "b".
+# These aliases are accepted anywhere an SDL name is, and say the same thing
+# without having to remember whose letters SDL used:
+#   north east south west  = y b a x   (where the button sits, not its letter)
+#   select func            = back guide
+#   l1 r1 l2 r2 l3 r3      = leftshoulder rightshoulder +lefttrigger
+#                            +righttrigger leftstick rightstick
+# The menu shows every binding in these terms; the file is always written back
+# in SDL's names, so a binding made in the menu and one typed here agree.
 [pad]
 # a = b
 # b = a

@@ -48,6 +48,14 @@ struct Canvas { u32* px; u32 pitch; int w, h; };
 // nothing was drawn.
 struct Rect { int x = 0, y = 0, w = 0, h = 0; };
 
+// Face-button position pips: a diamond of four with the named one filled.
+// They are control bytes so they can sit inside an ordinary string -- "\x01 A"
+// draws the pip for the bottom button and then its SDL letter.
+constexpr char kFaceSouth = '\x01';   // bottom  (SDL a)
+constexpr char kFaceEast  = '\x02';   // right   (SDL b)
+constexpr char kFaceWest  = '\x03';   // left    (SDL x)
+constexpr char kFaceNorth = '\x04';   // top     (SDL y)
+
 // A 5x7 uppercase font, `scale` times. Lowercase is folded to uppercase and
 // anything outside the table draws as a space. Returns the x past the string.
 int  draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s);
@@ -233,6 +241,7 @@ private:
   Result handle_settings(u32 presses);
   Result handle_controls(u32 presses);
   void draw_text_edit(const Canvas& d) const;
+  bool listen_shown_ = false;   // the Controls page last drew the listening prompt
   Result handle_text_edit(u32 presses);
   // The character editor, for the two free-text [user] fields. A handheld has
   // no keyboard, so a character is chosen by cycling rather than typed: up

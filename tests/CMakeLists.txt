@@ -54,6 +54,17 @@ add_executable(test_config config_test.cpp ../src/frontend/sdl/config.cpp)
 target_link_libraries(test_config PRIVATE dsperate_core)
 add_test(NAME config COMMAND test_config)
 
+# Input, for the menu's way back from a broken binding: the fallback layer and
+# the reachability warning both have to stay silent under the defaults, which
+# only a test will keep true. Guarded because it needs SDL2's headers, which
+# the core tests do not.
+if(DSPERATE_SDL)
+  add_executable(test_input input_test.cpp ../src/frontend/sdl/input.cpp ../src/frontend/sdl/config.cpp)
+  target_link_libraries(test_input PRIVATE dsperate_core ${SDL2_LIBRARIES})
+  target_include_directories(test_input PRIVATE ${SDL2_INCLUDE_DIRS})
+  add_test(NAME input COMMAND test_input)
+endif()
+
 # The console's own settings inside a firmware image, and the sidecar they are
 # kept in when the firmware is a dump the emulator must not write to.
 add_executable(test_firmware firmware_test.cpp)

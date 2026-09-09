@@ -747,6 +747,40 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
   return display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout);
 }
 
+// The Controls page's rows that are neither a DS button nor a hotkey: the
+// modifier a pad chord is built on, and the pen's tap button and stick. The
+// modifier exists in both columns; the pen is the pad's, so its two rows are
+// only offered there.
+struct Extra { const char* key_keys; const char* key_pad; const char* label; };
+constexpr Extra kExtras[] = {
+  {"hotkeys.modifier", "padhotkeys.modifier", "MODIFIER"},
+  {nullptr,            "pad.stylus_button",   "STYLUS TAP"},
+  {nullptr,            "pad.stylus_axis",     "STYLUS STICK"},
+  {nullptr,            "pad.stylus_dpad",     "STYLUS DPAD"},
+};
+bool extra_in_column(const Extra& e, bool pad) { return pad || e.key_keys; }
+int extra_count(bool pad) {
+  int n = 0;
+  for (const Extra& e : kExtras) n += extra_in_column(e, pad) ? 1 : 0;
+  return n;
+}
+const Extra& extra_at(bool pad, int j) {
+  for (const Extra& e : kExtras)
+    if (extra_in_column(e, pad) && j-- == 0) return e;
+  return kExtras[0];   // unreachable: callers bound j by extra_count()
+}
+const char* extra_key(const Extra& e, bool pad) { return pad ? e.key_pad : e.key_keys; }
+
+// What the emulator starts from, so the page's "defaults" is the same answer
+// Input::configure() would give. One lookup for showing a row and for
+// resetting it: two would drift the moment a default changed.
+const char* extra_default(const char* key, bool pad, const ds::sdl::Config& cfg) {
+  if (std::strcmp(key, "pad.stylus_button") == 0) return ds::sdl::Input::stylus_button_default();
+  if (std::strcmp(key, "pad.stylus_axis") == 0)   return ds::sdl::Input::stylus_axis_default(cfg);
+  if (std::strcmp(key, "pad.stylus_dpad") == 0)   return ds::sdl::Input::stylus_dpad_default();
+  return ds::sdl::Input::mod_default(pad);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1612,30 +1646,79 @@ sdl_ready:
     ds::sdl::Input& input;
     std::function<void()> reconfigure_input;
 
-    // Every hotkey takes two rows: its binding and the second one the player
-    // may add (input.h, "<action>.alt"). DS buttons keep their single row.
-    int binding_count(bool) const override { return ds::sdl::Input::button_count() + ds::sdl::Input::action_count() * ds::sdl::Input::HOT_SLOTS; }
+    // What a slot of a hotkey holds, defaults included; "none" for unset.
+    std::string hot_value(bool pad, int a, int slot) const {
+      const std::string key = (pad ? "padhotkeys." : "hotkeys.") + std::string(ds::sdl::action_name(static_cast<ds::sdl::Action>(a)))
+                            + ds::sdl::Input::hot_suffix(slot);
+      // The second binding has no default: unset is what it means.
+      if (slot) return cfg.str(key, "none");
+      return cfg.str(key, pad ? ds::sdl::Input::pad_hot_default(a) : ds::sdl::Input::key_hot_default(a));
+    }
+    static bool is_set(const std::string& v) { return !v.empty() && v != "none"; }
+
+    // A hotkey's second row is only worth a line on the page once there is
+    // something to put on it: it is shown when the player has set one, and
+    // when the first slot is bound and a second could usefully join it. An
+    // action bound to nothing in this column has no use for a second control,
+    // and on the pad column that is most of the list.
+    bool alt_row_shown(bool pad, int a) const {
+      return is_set(hot_value(pad, a, 1)) || is_set(hot_value(pad, a, 0));
+    }
+
+    // The rows of a column, in order: the twelve DS buttons, then each hotkey
+    // with its second row if that is shown, then the extras. Counting and
+    // indexing go through the same rules, so a hidden row cannot leave the two
+    // disagreeing.
+    int binding_count(bool pad) const override {
+      int n = ds::sdl::Input::button_count() + extra_count(pad);
+      for (int a = 0; a < ds::sdl::Input::action_count(); ++a) n += alt_row_shown(pad, a) ? 2 : 1;
+      return n;
+    }
+
+    // What an extra row holds, and how it reads.
+    std::string extra_value(const Extra& e, bool pad) const {
+      const char* key = extra_key(e, pad);
+      const std::string v = cfg.str(key, extra_default(key, pad, cfg));
+      // A stick, not an axis: that row names the stick the pen follows.
+      if (std::strcmp(key, "pad.stylus_axis") == 0)
+        return v == "left" ? "LEFT STICK" : v == "right" ? "RIGHT STICK" : "NONE";
+      return pad ? ds::sdl::Input::pad_label(v) : upper(v);
+    }
 
     Binding binding(bool pad, int i) const override {
       const int nb = ds::sdl::Input::button_count();
       Binding out;
+      if (i < 0) return out;
       if (i < nb) {
         const char* name = ds::sdl::Input::button_name(i);
         out.key = (pad ? "pad." : "keys.") + std::string(name);
         out.label = upper(name);
         out.value = cfg.str(out.key, pad ? ds::sdl::Input::pad_default(i) : ds::sdl::Input::key_default(i));
       } else {
-        const int a = (i - nb) / ds::sdl::Input::HOT_SLOTS, slot = (i - nb) % ds::sdl::Input::HOT_SLOTS;
+        int k = i - nb, a = 0, slot = 0;
+        for (; a < ds::sdl::Input::action_count(); ++a) {
+          const int rows = alt_row_shown(pad, a) ? 2 : 1;
+          if (k < rows) { slot = k; break; }
+          k -= rows;
+        }
+        if (a >= ds::sdl::Input::action_count()) {
+          if (k >= extra_count(pad)) return out;   // past the end: no row
+          const Extra& e = extra_at(pad, k);
+          out.key = extra_key(e, pad);
+          out.label = e.label;
+          out.value = extra_value(e, pad);
+          return out;                              // already in the page's own terms
+        }
         const char* name = ds::sdl::action_name(static_cast<ds::sdl::Action>(a));
         out.key = (pad ? "padhotkeys." : "hotkeys.") + std::string(name) + ds::sdl::Input::hot_suffix(slot);
         out.label = upper(name) + (slot ? " (2)" : "");
-        // The second binding has no default: unset is what it means.
-        out.value = slot ? cfg.str(out.key, "none")
-                         : cfg.str(out.key, pad ? ds::sdl::Input::pad_hot_default(a) : ds::sdl::Input::key_hot_default(a));
+        out.value = hot_value(pad, a, slot);
       }
-      // The file writes key names with underscores and lower case; the page
-      // reads better in the font it has, which has no lower case anyway.
-      out.value = upper(out.value);
+      // The file writes SDL's names in lower case; the page reads better in
+      // the font it has, which has no lower case anyway. Pad values get the
+      // position pips and the L1/L2/SELECT spellings on top of that -- display
+      // only, the file keeps SDL's names (input.h, pad_label).
+      out.value = pad ? ds::sdl::Input::pad_label(out.value) : upper(out.value);
       return out;
     }
 
@@ -1645,7 +1728,23 @@ sdl_ready:
     bool capturing() const override { return input.capturing(); }
     std::string take_capture() override { return input.take_capture(); }
 
-    void bind(const std::string& key, const std::string& value) override {
+    void bind(const std::string& key, const std::string& value0) override {
+      std::string value = value0;
+      // The pen follows a stick, so this row stores which one rather than the
+      // axis the player happened to push. Anything that is not a stick says
+      // nothing about that and is left alone -- the row keeps what it had.
+      if (key == "pad.stylus_axis" && value != "none") {
+        const char* stick = ds::sdl::Input::stylus_axis_of(value);
+        if (!stick) return;
+        value = stick;
+      }
+      // A modifier cannot be built on the modifier, and neither can the pen's
+      // tap: both are matched by the control alone, so a "mod+" here would
+      // simply never fire.
+      if ((key == "hotkeys.modifier" || key == "padhotkeys.modifier" ||
+           key == "pad.stylus_button" || key == "pad.stylus_dpad") &&
+          value.compare(0, 4, "mod+") == 0)
+        value = value.substr(4);
       cfg.set(key, value);
       const std::string& path = per_game && !game_ini.empty() ? game_ini : global_ini;
       if (!ds::sdl::Config::store(path, key, value))
@@ -1672,6 +1771,15 @@ sdl_ready:
           cfg.set(k, v);
           ds::sdl::Config::store(path, k, v);
         }
+      // The extras are rows of this column too, so "defaults" has to mean all
+      // of it: a modifier left somewhere odd is exactly the sort of thing the
+      // player reaches for this key to undo.
+      for (int j = 0; j < extra_count(pad); ++j) {
+        const char* k = extra_key(extra_at(pad, j), pad);
+        const char* v = extra_default(k, pad, cfg);
+        cfg.set(k, v);
+        ds::sdl::Config::store(path, k, v);
+      }
       reconfigure_input();
     }
 

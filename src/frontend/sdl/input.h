@@ -41,6 +41,10 @@ public:
   input::Frame frame() {
     const input::Frame f{static_cast<u16>(buttons_ | pressed_ | stick_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_ || touched_ || stylus_down_};
     pressed_ = 0; stick_pressed_ = 0; touched_ = false;
+    // The menu's fallback presses (menu_fallback) never reach the guest, and
+    // they die with the frame they happened on: an unbound Escape pressed
+    // during play must not still be waiting to cancel the next menu opened.
+    menu_fb_pressed_ = 0;
     return f;
   }
 
@@ -53,10 +57,14 @@ public:
   // guest never sees them, because the menu is only up while paused and
   // frame() is not being called. Edge-triggered: a held direction moves one
   // row, the same as the taps frame() is built to catch.
-  u32 take_menu_presses() { const u32 p = pressed_ | stick_pressed_; pressed_ = 0; stick_pressed_ = 0; return p; }
+  u32 take_menu_presses() {
+    const u32 p = pressed_ | stick_pressed_ | menu_fb_pressed_;
+    pressed_ = 0; stick_pressed_ = 0; menu_fb_pressed_ = 0;
+    return p;
+  }
   // What is held right now, for the menu's key repeat. Not the same as the
   // edges above: a direction held down produces one press and then nothing.
-  u32 menu_held() const { return buttons_ | stick_; }
+  u32 menu_held() const { return buttons_ | stick_ | menu_fb_held_; }
   bool fast_forward_held() const { return ff_key_ || ff_pad_; }
 
   // Hinge: a real lid switch (lid.h) drives set_lid() directly; the `lid`
@@ -107,6 +115,20 @@ public:
   static int button_count();
   static const char* key_default(int i);
   static const char* pad_default(int i);
+  // A pad binding as the menu draws it (L1/SELECT/position pips), against the
+  // SDL spelling the config file stores. Display only: nothing is written back
+  // in this form.
+  static std::string pad_label(const std::string& value);
+  // The controls that are neither a DS button nor a hotkey, for the rows the
+  // Controls page gives them: the modifier a pad chord is built on, and the
+  // pen's tap button and stick.
+  static const char* mod_default(bool pad);
+  static const char* stylus_button_default();
+  static const char* stylus_dpad_default();
+  static const char* stylus_axis_default(const Config& cfg);
+  // A captured stick axis as the stick it belongs to ("left"/"right"), or
+  // nullptr when what was captured is not a stick at all.
+  static const char* stylus_axis_of(const std::string& captured);
   static int action_count();
   static const char* key_hot_default(int i);
   static const char* pad_hot_default(int i);
@@ -117,6 +139,12 @@ public:
   // sets it. DS buttons have no second binding.
   static constexpr int HOT_SLOTS = 2;
   static const char* hot_suffix(int slot) { return slot == 1 ? ".alt" : ""; }
+
+  // The event-level paths below are what the menu's rescue behaviour lives in
+  // (the fallback layer, the capture's escape), and they are reached from
+  // handle(), which needs a Display and a window. tests/input_test.cpp drives
+  // them directly instead.
+  friend struct InputTestAccess;
 
 private:
   // One binding: a keyboard key, a pad button or a pad axis direction, with
@@ -132,14 +160,36 @@ private:
   }
   void touch_at(int wx, int wy, Display& display);
   void warn_collisions() const;   // bindings that shadow one another, at configure time
+  bool reachable(int ds_button) const;   // is there a control for it on the hardware in hand?
+  bool bound_and_present(int ds_button) const;   // bound to a control this hardware has
+  bool pad_control_free(int sdl_button) const;   // nothing bound to it, so the menu fallback has it
+  bool key_control_free(SDL_Keycode k) const;
   void fire(Action a, bool down);
   bool key_down(SDL_Keycode k, bool down);
   bool pad_down(const Bind& b, bool down);   // a button or axis edge; true if consumed
   void axis(Uint8 which, Sint16 value);
   bool capture_event(const SDL_Event& e);
+  bool axis_moved(int axis, int value) const;    // past the deadzone this axis needs
+  bool is_pad_mod_button(int sdl_button) const;   // the pad's hotkey modifier
+  bool is_key_mod(SDL_Keycode k) const;
+  // The menu is navigated by the player's own bindings, so a player who binds
+  // DS A to nothing reachable can no longer reach the page that would put it
+  // back. These are the controls the menu falls back on, and they are consulted
+  // only when key_down()/pad_down() report that nothing at all is bound to the
+  // control: a control the player has given a job keeps that job, and cannot
+  // fire two menu actions at once. Under the shipped defaults every entry
+  // below is bound, so the fallback contributes nothing until something is
+  // orphaned.
+  void menu_fallback_key(SDL_Keycode k, bool down);
+  void menu_fallback_pad(const Bind& b, bool down);
+  void menu_fallback(int ds_button, bool down) {
+    if (down) { menu_fb_held_ |= 1u << ds_button; menu_fb_pressed_ |= 1u << ds_button; }
+    else menu_fb_held_ &= ~(1u << ds_button);
+  }
 
   u32  buttons_ = 0, pressed_ = 0, stick_ = 0;   // held now; pressed since the last frame; stick as d-pad
   u32  stick_prev_ = 0, stick_pressed_ = 0;      // stick-as-d-pad edges, for the pause menu
+  u32  menu_fb_held_ = 0, menu_fb_pressed_ = 0;  // menu-only fallback, for orphaned bindings
   bool touching_ = false, touched_ = false;
   int  touch_x_ = 0, touch_y_ = 0;
   bool quit_ = false;
@@ -175,6 +225,7 @@ private:
   // Swallows the release of whatever was captured, so letting go of the key
   // does not immediately register as the next thing the page asked for.
   bool capture_swallow_ = false;
+  bool capture_mod_ = false;      // the modifier is held: what follows is a chord
 };
 
 } // namespace ds::sdl
