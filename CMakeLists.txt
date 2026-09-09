@@ -18,6 +18,7 @@ option(DSPERATE_TESTS    "Build unit tests"                                     
 option(DSPERATE_HEADLESS "Build the headless frontend"                            ON)
 option(DSPERATE_SDL      "Build the SDL2 frontend (off when SDL2 is not found)"   ON)
 option(DSPERATE_WAYLAND  "Build the Wayland dmabuf scanout tier (off when SDL2 has no Wayland)" ON)
+option(DSPERATE_CHEEVOS  "Build RetroAchievements support (rcheevos)"                  OFF)
 
 # Host tiers.  These are two independent questions and the build keeps them
 # apart: the recompiler emits A64 and so needs an AArch64 host, while the
@@ -148,6 +149,12 @@ set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 add_subdirectory(src/core)
+# RetroAchievements. OFF until the feature is finished
+# (docs/retroachievements-scoping.md); nothing links it when it is off, so the
+# default build is byte-identical to one from before it existed.
+if(DSPERATE_CHEEVOS)
+  add_subdirectory(src/cheevos)
+endif()
 if(DSPERATE_HEADLESS)
   add_subdirectory(src/frontend/headless)
 endif()

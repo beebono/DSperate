@@ -134,4 +134,23 @@ void RomSource::read(u32 addr, u8* dst, u32 n) const {
   }
 }
 
+u32 RomSource::read_unpatched(u32 addr, u8* dst, u32 n) const {
+  // How much of the request the file actually covers. Deliberately linear:
+  // a request that would wrap the power-of-two mask is not something a file
+  // reader should answer with bytes from the front of the image, so it simply
+  // counts as unavailable, and the 0xFF fill below stands.
+  const u32 start = addr & mask_;
+  u32 have = 0;
+  if (start < size_) have = n < size_ - start ? n : size_ - start;
+
+  while (n) {
+    const u8* pg = page_unpatched(addr & mask_ & ~(PAGE - 1));
+    const u32 off = addr & (PAGE - 1);
+    const u32 take = n < PAGE - off ? n : PAGE - off;
+    std::memcpy(dst, pg + off, take);
+    dst += take; addr += take; n -= take;
+  }
+  return have;
+}
+
 } // namespace ds::cart

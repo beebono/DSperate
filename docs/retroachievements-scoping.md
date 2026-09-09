@@ -233,16 +233,33 @@ hardcore unlocks from an emulator that permits save states and cheats, which
 is the one failure here with consequences outside our own build -- it puts bad
 data on other people's accounts. It deserves a test, not a comment.
 
-## Non-technical blocker, worth resolving first
+## The blocker, now confirmed: client registration
 
-RetroAchievements gates which clients may talk to the API, and rcheevos
-expects a client to identify itself (`rc_client_get_user_agent_clause`,
-`rc_client.h:142`). Before building much of this, DSperate should be raised
-with the RA team to confirm what an unregistered client may do -- in
-particular whether Casual unlocks from a new client are accepted. If the
-answer is "not until registered", that is a conversation to start now rather
-than after the transport exists. I have not verified current RA policy here;
-it needs asking, not guessing.
+This was an open question in the first draft. It is not any more. Asking the
+server to identify a known-good ROM, 2026-09-09:
+
+```
+GET https://retroachievements.org/dorequest.php?r=gameid&m=<md5>
+{"Success":false,"Status":403,"Code":"unsupported_client",
+ "Error":"This client is not supported.","GameID":0}
+```
+
+Every request gets that, including an unauthenticated game lookup that needs no
+account. RetroAchievements gates access by client at the API, and DSperate is
+not a registered client, so **there is nothing over the network this feature
+can do until RA registers it.** rcheevos expects the client to identify itself
+(`rc_client_get_user_agent_clause`, `rc_client.h:142`); that identity is what
+has to be agreed with the RA team.
+
+To be explicit about the thing not to do: the 403 keys off the client
+identity, so it would "go away" if we presented someone else's. That is
+circumventing an access control and misrepresenting the client to a service
+whose own data integrity depends on knowing what wrote to it. It is not an
+option, and the registration conversation is the only route.
+
+This reorders the project. Phases 1 and 2 are entirely local and are unblocked
+-- and phase 1 is done, below. Phase 3 onward cannot be finished, only written,
+until registration happens, so **start that conversation now**.
 
 ## Build shape
 
@@ -262,13 +279,18 @@ is this project's established pattern and it keeps the device builds
 reproducible. The only other new source is our trimmed curl declarations and
 the dlopen shim, modelled on `wl_dyn.{h,cpp}`.
 
-Placement: **frontend, not core.** It needs config, UI, threads and sockets,
-all of which live in `src/frontend/sdl/`. It only needs `NDS&` for
-`bus.main_ram` and `bus.dtcm`. `dsperate_core` stays free of networking, and
-the headless frontend stays unaffected.
+Placement: **`src/cheevos/`, a library of its own.** Not the core, which must
+stay free of a network transport, and which the headless frontend links; and
+not loose files in `src/frontend/sdl/`, because `tests/` links frontend
+translation units one at a time and a library is what makes that
+straightforward. It depends on `dsperate_core` (for `cart::RomSource`, and
+later `bus.main_ram` / `bus.dtcm`) and nothing depends on it but the SDL
+frontend.
 
-One new CMake option, `DSPERATE_CHEEVOS` (OFF initially), and no new
-`find_package` -- there is nothing to find, because nothing is linked. Compile
+One new CMake option, `DSPERATE_CHEEVOS` (OFF until the feature is finished),
+and no new `find_package` -- there is nothing to find, because nothing is
+linked. With it off nothing references the library, so the default build is
+what it was before any of this existed. Compile
 out what we do not use: `RC_DISABLE_LUA`, no `RC_CLIENT_SUPPORTS_RAINTEGRATION`
 (Windows-only toolkit), no `RC_CLIENT_SUPPORTS_EXTERNAL`.
 
@@ -276,10 +298,7 @@ out what we do not use: `RC_DISABLE_LUA`, no `RC_CLIENT_SUPPORTS_RAINTEGRATION`
 
 Each phase is useful on its own and testable without the next.
 
-1. **Hash and identify, offline-shaped.** Vendor rcheevos, build it, wire the
-   `RomSource` filereader, compute the NDS hash for a ROM. Verify against
-   known RA hashes for a handful of titles. No network yet. Proves the trap in
-   §2 is handled and gets the build working.
+1. **Hash and identify, offline-shaped.** -- **DONE** 2026-09-09, see below.
 2. **Memory reader plus a local runtime.** `read_memory` over
    `main_ram`/`dtcm`, `rc_client_do_frame` each frame, hardcore explicitly
    off. Drive it with a hand-written achievement set to prove triggers fire.
@@ -301,11 +320,52 @@ Leaderboards and rich presence fall out of rcheevos almost free once 1-4 are
 done and are worth doing; badge art, the static-tier transport and hardcore
 are separate decisions.
 
+## Phase 1 as built
+
+`src/cheevos/`: the vendored snapshot (`rcheevos/README.md` records the commit
+and what is compiled), `cheevos_hash.cpp` (the `RomSource` filereader and
+`ds::cheevos::rom_hash`), `tools/cheevos_hash.cpp` (prints the hash for the
+files named on the command line) and `tests/cheevos_hash_test.cpp`.
+
+The one core change is `RomSource::read_unpatched`, which reads past the
+`patch()` overlay to the bytes the file holds *and returns how many it had*.
+Both halves were needed, and neither is obvious:
+
+- The overlay bypass is §2's trap. `RomSource::read` goes through `page()`,
+  which serves the overlay first, and the secure-area rewrite lands on exactly
+  the page where the ARM9 binary -- and therefore the hash -- begins.
+- The short count is a second, quieter version of the same thing. rcheevos
+  0-pads a truncated icon block, which it can only do if the reader reports a
+  short read; `RomSource` otherwise serves 0xFF past the end of the image, and
+  0xFF pads hash differently from 0x00 pads. Homebrew is where this shows up.
+
+What it was checked against, given that RA's own database is unreachable (see
+above):
+
+- **An independent implementation.** A separate ~20-line Python implementation
+  of the documented algorithm, written from the rule rather than from this
+  code, agrees on **all 46 .nds files** in the local library.
+- **Golden values in the test**, from that same independent implementation over
+  a synthetic ROM, so the spec is pinned rather than the behaviour.
+- **The trap, directly**: a test rewrites the secure area through `patch()`,
+  confirms the rewrite is visible through `read()`, and confirms the hash does
+  not move.
+- **Zip and mmap equivalence**: one ROM raw, stored in a zip, and deflated in a
+  zip all hash identically, as do an owned and a mapped source.
+- **Exactness**: all five scenes bit-identical to the pre-change build over 200
+  frames (`tools/scene_hashes.sh`), and the 18 tests pass.
+
+What remains unproven, and cannot be proven locally: that these hashes are the
+ones RetroAchievements holds. The algorithm agreement is strong evidence and
+not a substitute. First thing to re-run once the client is registered.
+
 ## What I expect to go wrong
 
-- **Hash mismatches** from the secure-area rewrite (§2) or from SuperCard
-  headers, presenting as "game not found" rather than as an error. This is now
-  the top risk, having displaced the TLS work.
+- **Registration stalling**, which blocks phases 3-6 entirely. It is now the
+  schedule risk, not a technical one.
+- **Hash mismatches** against RA's real database, despite the above -- an
+  unusual dump shape, or a SuperCard header, that the local 46 did not cover.
+  The symptom is "game not found" rather than an error.
 - **CFW variability.** We are depending on someone else's library set, so a
   ROCKNIX update can move it -- and `rig-device-access` already records that a
   ROCKNIX update wipes `/storage/dsperate` and the BIOS dumps. The failure has

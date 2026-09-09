@@ -87,3 +87,11 @@ add_test(NAME zip COMMAND test_zip)
 add_executable(test_rom_source rom_source_test.cpp)
 target_link_libraries(test_rom_source PRIVATE dsperate_core)
 add_test(NAME rom_source COMMAND test_rom_source)
+
+# The RetroAchievements hash (docs/retroachievements-scoping.md, phase 1).
+# Guarded because the vendored rcheevos is only built with the feature.
+if(DSPERATE_CHEEVOS)
+  add_executable(test_cheevos_hash cheevos_hash_test.cpp)
+  target_link_libraries(test_cheevos_hash PRIVATE dsperate_cheevos)
+  add_test(NAME cheevos_hash COMMAND test_cheevos_hash)
+endif()

@@ -79,9 +79,7 @@ public:
     if (!overlay_.empty()) {
       for (const Patch& o : overlay_) if (o.base == p) return o.bytes.data();
     }
-    if (p + PAGE <= size_) return data_ + p;
-    if (p < size_) return tail_.data();
-    return ff_page();
+    return page_unpatched(p);
   }
   // A writable copy of the page holding `addr`, served by page() from then
   // on. For the secure-area rewrite only.
@@ -90,12 +88,32 @@ public:
   // Small bounded reads for construction and direct boot. Beyond the image
   // the bytes are 0xFF.
   void read(u32 addr, u8* dst, u32 n) const;
+  // The same, but reading past any patch() overlay to the bytes the file
+  // actually holds, and reporting how many of them there were: `n` minus the
+  // part of the request that fell beyond the image (which is still filled
+  // with 0xFF, as read() would).
+  //
+  // This exists for the RetroAchievements hash and wants care. That hash
+  // covers the ARM9 binary, which begins at the secure area -- exactly the
+  // 0x800 bytes Cart re-encrypts through patch(). Hashing through read()
+  // would hash our rewrite rather than the file, and the symptom is not an
+  // error but a hash RetroAchievements has never seen, i.e. a game that
+  // silently has no achievements. The short count matters for the same
+  // reason: rcheevos 0-pads a truncated icon block, so it has to be able to
+  // tell a short read from 0xFF padding. See docs/retroachievements-scoping.md.
+  u32 read_unpatched(u32 addr, u8* dst, u32 n) const;
   u32 read32(u32 addr) const { u8 b[4]; read(addr, b, 4); return static_cast<u32>(b[0]) | (b[1] << 8) | (b[2] << 16) | (static_cast<u32>(b[3]) << 24); }
 
 private:
   RomSource() = default;
   void finish();   // mask_, tail_ from data_/size_
   static const u8* ff_page();
+  // `p` already masked and page-aligned; the overlay is not consulted.
+  const u8* page_unpatched(u32 p) const {
+    if (p + PAGE <= size_) return data_ + p;
+    if (p < size_) return tail_.data();
+    return ff_page();
+  }
 
   struct Patch { u32 base; std::vector<u8> bytes; };
   const u8* data_ = nullptr;
