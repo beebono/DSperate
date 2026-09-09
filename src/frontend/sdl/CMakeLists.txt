@@ -2,6 +2,13 @@
 add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp menu.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
   display_drm.cpp display_disp.cpp display_fbdev.cpp)
 target_link_libraries(dsperate PRIVATE dsperate_core ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS})
+# RetroAchievements, when it is built at all. The frontend is the only consumer;
+# with DSPERATE_CHEEVOS off the macro is undefined and main.cpp compiles as it
+# did before any of this existed.
+if(DSPERATE_CHEEVOS)
+  target_link_libraries(dsperate PRIVATE dsperate_cheevos)
+  target_compile_definitions(dsperate PRIVATE DSPERATE_CHEEVOS=1)
+endif()
 target_include_directories(dsperate PRIVATE ${SDL2_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 # The Wayland dmabuf tier (DSPERATE_WAYLAND, decided at the top level): the
 # real DmabufOut with the vendored protocol code, or a stub whose open() says

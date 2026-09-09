@@ -6,10 +6,10 @@
 # frontend should never gain one), and the tests link frontend translation
 # units one at a time, which a library makes straightforward.
 #
-# Phase 2 (docs/retroachievements-scoping.md) is everything that works without
-# a server: the hash, the memory window, and the runtime that evaluates
-# achievement conditions against it. rc_client.c and rapi/ -- the session and
-# the server protocol -- are vendored but not built until phase 3.
+# Phase 3 (docs/retroachievements-scoping.md) builds the whole of rcheevos we
+# use: the hash, the condition runtime, the session (rc_client.c) and the server
+# protocol (rapi/). Still not built: rc_client_raintegration.c (a Windows-only
+# authoring toolkit) and rc_libretro.c (libretro's own integration).
 set(RC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rcheevos)
 
 # The condition evaluator. Whole-directory on purpose: these translation units
@@ -17,9 +17,16 @@ set(RC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rcheevos)
 # memref) and picking a subset would be guesswork that breaks on an update.
 file(GLOB RC_RUNTIME_SOURCES ${RC_DIR}/src/rcheevos/*.c)
 
+# The session and the server protocol (phase 3).
+file(GLOB RC_API_SOURCES ${RC_DIR}/src/rapi/*.c)
+
 add_library(dsperate_cheevos STATIC
   cheevos_hash.cpp
   cheevos_memory.cpp
+  cheevos_http.cpp
+  cheevos_client.cpp
+  ${RC_DIR}/src/rc_client.c
+  ${RC_API_SOURCES}
   ${RC_RUNTIME_SOURCES}
   ${RC_DIR}/src/rhash/hash.c
   ${RC_DIR}/src/rhash/hash_rom.c
@@ -42,6 +49,8 @@ target_include_directories(dsperate_cheevos
 # archive. See cheevos_hash.cpp.
 target_compile_definitions(dsperate_cheevos PRIVATE
   RC_HASH_NO_DISC RC_HASH_NO_ENCRYPTED RC_HASH_NO_ZIP RC_DISABLE_LUA)
+# rc_client.c needs its own headers, and cheevos_client.cpp includes rc_client.h.
+target_include_directories(dsperate_cheevos PRIVATE ${RC_DIR}/src/rapi)
 
 # The version in the User-Agent DSperate sends to RetroAchievements. The server
 # refuses a client it cannot recognise (403 unsupported_client) on every
@@ -66,7 +75,7 @@ target_compile_definitions(dsperate_cheevos PRIVATE
 
 # For cart::RomSource. The dependency runs this way round on purpose: the core
 # knows nothing about achievements.
-target_link_libraries(dsperate_cheevos PUBLIC dsperate_core)
+target_link_libraries(dsperate_cheevos PUBLIC dsperate_core ${CMAKE_DL_LIBS})
 
 # Prints the hash for the ROMs named on the command line, which is how the
 # result gets checked against what RetroAchievements actually has. Built with
@@ -78,6 +87,11 @@ target_link_libraries(dsperate_cheevos_hash PRIVATE dsperate_cheevos)
 # What the condition runtime costs per frame, which has to be known on an A55
 # before phase 3 commits to a shape. Reaches rcheevos' headers directly, as the
 # test does.
+# Drives a real session from the command line: the only way to exercise login
+# and set loading before there is any UI.
+add_executable(dsperate_cheevos_session ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cheevos_session.cpp)
+target_link_libraries(dsperate_cheevos_session PRIVATE dsperate_cheevos)
+
 add_executable(dsperate_cheevos_bench ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/cheevos_bench.cpp)
 target_link_libraries(dsperate_cheevos_bench PRIVATE dsperate_cheevos)
 target_include_directories(dsperate_cheevos_bench PRIVATE ${RC_DIR}/include)

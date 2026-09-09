@@ -102,4 +102,9 @@ if(DSPERATE_CHEEVOS)
   target_link_libraries(test_cheevos_memory PRIVATE dsperate_cheevos)
   target_include_directories(test_cheevos_memory PRIVATE ${CMAKE_SOURCE_DIR}/src/cheevos/rcheevos/include)
   add_test(NAME cheevos_memory COMMAND test_cheevos_memory)
+
+  # The credential sidecar (phase 3). No network.
+  add_executable(test_cheevos_client cheevos_client_test.cpp)
+  target_link_libraries(test_cheevos_client PRIVATE dsperate_cheevos)
+  add_test(NAME cheevos_client COMMAND test_cheevos_client)
 endif()

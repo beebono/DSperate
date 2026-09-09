@@ -418,6 +418,18 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # screenshot = none
 # mic = leftstick
 # fps = none
+
+[cheevos]
+# RetroAchievements, Casual mode (formerly Softcore). Hardcore is not
+# supported: DSperate allows save states and cheats, so it must never claim a
+# hardcore unlock, and nothing here can turn one on.
+# enabled = false               # talk to RetroAchievements at all. Needs libcurl on the device (the
+                                # CFW's -- ROCKNIX has it; the static handheld builds do not and
+                                # report the feature unavailable), and an account signed in from the
+                                # menu. With this off nothing is evaluated and nothing is sent
+# username =                    # who to sign in as. The password is never stored; a successful
+                                # sign-in keeps the token RetroAchievements returns, in
+                                # <config>/cheevos.token, mode 0600
 )";
 }
 

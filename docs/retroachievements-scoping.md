@@ -372,19 +372,7 @@ Each phase is useful on its own and testable without the next.
 
 1. **Hash and identify, offline-shaped.** -- **DONE** 2026-09-09, see below.
 2. **Memory reader plus a local runtime.** -- **DONE** 2026-09-09, see below.
-3. **Session and transport.** The libcurl dlopen shim behind a transport
-   interface, the worker thread, a queue draining on the emu thread. The
-   `rc_client` session, with **`rc_client_set_hardcore_enabled(client, 0)`
-   immediately after `rc_client_create`** and `rc_client_do_frame` called from
-   `main.cpp`'s loop exactly once per `nds.run_frame()`; also
-   `rc_runtime_validate_addresses`, so the unbacked region marks achievements
-   unsupported rather than merely reading zero. The product User-Agent is
-   already built (`cheevos::user_agent()`) and needs connecting to the
-   transport. Login with password, a 0600 token file with the password fallback,
-   game identify and load. Still no UI beyond stderr. Small enough now that it
-   is no longer the project's centre of gravity. This is also where the one
-   genuinely untested question gets answered: whether an unlock from an
-   unregistered client is credited.
+3. **Session and transport.** -- **DONE** 2026-09-09, see below.
 4. **UI.** Login page, achievement list, text toasts on the existing OSD
    paths, across display tiers on device.
 5. **Save state integration** and the progress chunk.
@@ -550,6 +538,116 @@ the session, and the phases list above says so. What this phase proves is that
 the window and the runtime are right and affordable, which is what phase 3
 needs to build on.
 
+## Phase 3 as built
+
+`src/cheevos/cheevos_http.{h,cpp}` (the transport), `cheevos_client.{h,cpp}`
+(the session and the credential sidecar), `tools/cheevos_session.cpp`,
+`tests/cheevos_client_test.cpp`, a `[cheevos]` section in `config.cpp`, and
+about forty lines in `main.cpp`. The whole of rcheevos we use now compiles:
+`rc_client.c` and `rapi/` joined the runtime and the hash.
+
+### The transport
+
+`dlopen("libcurl.so.4")`, following `wl_dyn.h`, with nothing linked and no curl
+package needed at build time -- the nine entry points and fourteen option
+numbers we use are declared in `cheevos_http.cpp`. The option numbers are read
+out of curl's own header and are safe to hard-code: curl assigns each a
+permanent number and has never renumbered one, because every binary ever linked
+against it would break.
+
+Verified on the RG DS, against the live server:
+
+```
+cheevos: session up, transport libcurl (dlopen), user agent DSperate/1.13.1 rcheevos/12.4
+cheevos: -> https://retroachievements.org/dorequest.php (POST)
+cheevos: <- status 401, 123 bytes
+  [problem] RetroAchievements sign-in failed -- Invalid user/password combination. Please try again.
+```
+
+That is a deliberately wrong password, and it is the useful test: the server's
+*own* error message coming back means dlopen, TLS, ROCKNIX's trust store, the
+User-Agent, rapi's request building, rapi's response parsing, the completion
+hand-off and the message path all work. Everything bar a valid account.
+
+A few details that are decisions rather than defaults: `CURLOPT_NOSIGNAL`,
+because curl's alarm-based DNS timeout is not thread-safe and this runs on a
+worker; `Expect:` cleared, so curl does not wait a second for a 100-continue
+the server never sends; an 8 MB cap on a response body, since a confused reply
+must not grow without limit on a 512 MB handheld; and `CURLOPT_CAINFO` left
+*unset* so curl uses the store it was built against, with `DS_CHEEVOS_CAINFO`
+as the escape hatch for a CFW that got it wrong.
+
+### Threading
+
+- `rc_client`, the memory reads and every rcheevos callback run on the
+  emulation thread, and nowhere else. `rc_client_set_allow_background_memory_reads(c, 0)`
+  makes that a promise rather than a convention.
+- One worker thread does HTTP and touches neither `rc_client` nor guest memory.
+- `frame()` drains completed requests -- invoking the rcheevos callbacks on the
+  emulation thread -- and then calls `rc_client_do_frame`.
+
+The worker drops itself to `SCHED_OTHER` and `nice(10)` on start. It inherits
+whatever `emu.realtime` gave the process, and a thread that blocks on a socket
+for 270 ms must not hold a real-time priority:
+`rt-scheduling-closes-the-tail` found the frame tail was preemption by
+unrelated threads, and this would be a new one.
+
+### Casual mode, in one line
+
+`rc_client_set_hardcore_enabled(c, 0)` immediately after `rc_client_create`,
+because rc_client defaults it **on**. Nothing sets it back, and
+`RC_CLIENT_EVENT_RESET` (which only hardcore raises) is logged and ignored.
+
+### Unsupported addresses: already handled
+
+Phase 2 left a note to wire `rc_runtime_validate_addresses`. It turns out not
+to be needed, and the reason is worth recording. `rc_client` runs its own
+`rc_client_validate_addresses` at game load (`rc_client.c:1346`) which, for
+every memory reference in the set, does:
+
+```c
+if (memref->address > max_address ||
+    client->callbacks.read_memory(memref->address, buffer, 1, client) == 0) {
+  /* ... invalidate the achievements and leaderboards using it ... */
+```
+
+That is exactly the contract `Memory::read` was built to satisfy -- zero bytes
+backed means "not supported here". So the decision in phase 2 to return a short
+count rather than pretend is what makes unsupported achievements get disabled,
+with no extra code at all.
+
+### In the frontend
+
+`cheevos.enabled` is off by default. When on: the session starts, the stored
+token signs in, and the ROM is hashed once -- from `nds.cart->source()`, which
+is only safe because `read_unpatched` reads past the secure-area rewrite `Cart`
+has already done by then. `cheevos.frame()` is called exactly once per
+`nds.run_frame()`, and `cheevos.idle()` on the paused path instead.
+
+The set is *not* requested at boot. Signing in is asynchronous, so asking
+immediately produced "Could not load achievements -- Login required", which
+reads as a bug rather than as "you are not signed in". Instead a small
+`cheevos_catch_up()` watches for the session reaching `SignedIn` and asks then
+-- which is also the hook phase 4's menu needs, so signing in from the menu
+loads the set for the game already running.
+
+### Credentials
+
+`<config>/cheevos.token`, mode 0600 from creation rather than chmod'ed after
+(a token another user could read even briefly is a token to treat as leaked),
+written to a temporary and renamed. Username and token only -- the password is
+never stored. Tested: the round trip, the permissions, that a missing file is
+not an error, that a half-written file is refused rather than used, and that a
+newline in either field is refused rather than written.
+
+### Still unverified
+
+The one thing that needs a real account: **whether an unlock from an
+unregistered client is credited.** Sign-in, set loading and unlock submission
+all need credentials, so what phase 3 proves is that the pipe carries requests
+and returns the server's answers, not that a full session succeeds. First thing
+to try once there is an account to try it with.
+
 ## What I expect to go wrong
 
 - **The User-Agent**, which is the one thing that silently disables the entire
@@ -561,8 +659,8 @@ needs to build on.
   (three of our six looked up as `GameID:0`). Not a bug, but it will be reported
   as one, so "this ROM is not one RetroAchievements knows" has to be a message
   the player can actually see.
-- **Unlock submission from an unregistered client**, which is untested and
-  cannot be tested before phase 3.
+- **Unlock submission from an unregistered client**, still untested: it needs a
+  real account, not just a working transport.
 - **Writing trigger expressions by hand**, which is how phase 2's tests are
   driven. In RetroAchievements' syntax an unprefixed `0x...` on the right of a
   comparison is a *16-bit memory read*, not a constant -- `0xH001004=0x2A` asks

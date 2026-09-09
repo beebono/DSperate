@@ -18,6 +18,10 @@
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
 #endif
+#if DSPERATE_CHEEVOS
+#include "cheevos/cheevos_client.h"
+#include "cheevos/cheevos_hash.h"
+#endif
 #include "audio.h"
 #include "config.h"
 #include "display.h"
@@ -2000,6 +2004,57 @@ sdl_ready:
     if (p) flush_save(); else { next_frame = SDL_GetPerformanceCounter(); fs_debt_ms = 0; }
     VLOG("%s\n", p ? "paused" : "resumed");
   };
+#if DSPERATE_CHEEVOS
+  // RetroAchievements, Casual mode (docs/retroachievements-scoping.md). Off
+  // unless asked for, and every failure here is reported once and then ignored:
+  // a device with no libcurl, no network, or no account still plays games.
+  ds::cheevos::Client cheevos;
+  const bool cheevos_on = cfg.flag("cheevos.enabled", false);
+  std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
+  bool cheevos_set_asked = false;
+  auto cheevos_show = [&] {
+    for (const ds::cheevos::Message& m : cheevos.take_messages()) {
+      // Phase 4 turns these into toasts on the OSD paths; for now they are
+      // stderr, which is also where the problems need to be visible.
+      std::fprintf(stderr, "cheevos: %s%s%s\n", m.text.c_str(),
+                   m.detail.empty() ? "" : " -- ", m.detail.c_str());
+    }
+  };
+  // The set can only be asked for once signed in, and signing in is
+  // asynchronous -- so this watches for the moment rather than trying at boot
+  // and reporting "Login required", which would read as a bug rather than as
+  // "you are not signed in yet". It is also the hook phase 4's menu needs:
+  // signing in there loads the set for the game already running.
+  auto cheevos_catch_up = [&] {
+    if (cheevos_set_asked || cheevos_hash.empty()) return;
+    if (cheevos.state() != ds::cheevos::State::SignedIn) return;
+    cheevos_set_asked = true;
+    cheevos.load_game(nds, cheevos_hash);
+  };
+  if (cheevos_on) {
+    std::string err;
+    if (!cheevos.start(err)) {
+      std::fprintf(stderr, "cheevos: %s\n", cheevos.unavailable_reason().c_str());
+    } else {
+      // Sign in from the stored token. A password is never kept, so there is
+      // nothing else to try here; a token the server has expired comes back as
+      // a failure and the player signs in again from the menu (phase 4).
+      ds::cheevos::Credentials creds;
+      if (!ds::cheevos::load_credentials(ds::sdl::Config::dir(), creds, err) && !err.empty())
+        std::fprintf(stderr, "cheevos: %s\n", err.c_str());
+      if (!creds.empty()) cheevos.sign_in_with_token(creds.username, creds.token);
+      else std::fprintf(stderr, "cheevos: not signed in\n");
+
+      // The game's identity, computed now and used when the sign-in lands.
+      // Hashing the cart's own source is safe *because* read_unpatched reads
+      // past the secure-area rewrite Cart has already done by this point --
+      // see docs/retroachievements-scoping.md.
+      if (nds.cart && !ds::cheevos::rom_hash(nds.cart->source(), session.rom_path, cheevos_hash, err))
+        std::fprintf(stderr, "cheevos: cannot identify this ROM: %s\n", err.c_str());
+    }
+    cheevos_show();
+  }
+#endif
   while (!input.quit() && !g_signalled && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
@@ -2256,6 +2311,13 @@ sdl_ready:
           if (dual_window) display2.draw(fb);
         }
       }
+#if DSPERATE_CHEEVOS
+      // Paused: no frame to evaluate, but the session still has a queue to
+      // work through (a pending unlock, a token refresh). idle() does that and
+      // nothing else. ~60 ms here, comfortably inside the once-a-second the
+      // session wants.
+      if (cheevos_on) { cheevos.idle(); cheevos_catch_up(); cheevos_show(); }
+#endif
       SDL_Delay(10);
       continue;
     }
@@ -2397,6 +2459,14 @@ sdl_ready:
     static Uint64 last_slice_end = 0;
     if (last_slice_end) nds.gpu3d.note_external_ns(static_cast<u64>((t0 - last_slice_end) / ticks_per_ns));
     nds.run_frame();
+#if DSPERATE_CHEEVOS
+    // Exactly once per emulated frame, and only here. rcheevos keeps a delta
+    // per memory reference, so a second call against the same frame collapses
+    // delta onto current and single-frame edge triggers stop firing, silently
+    // (tests/cheevos_memory_test.cpp pins this). This also drains the HTTP
+    // completions, so every rcheevos callback runs on this thread.
+    if (cheevos_on) { cheevos.frame(); cheevos_catch_up(); cheevos_show(); }
+#endif
 
     // The console has switched itself off. On a firmware boot that is the
     // firmware leaving its settings pages -- the flash writes that saved them
