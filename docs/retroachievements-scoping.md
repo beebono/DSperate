@@ -10,6 +10,16 @@ Scope is deliberately **Casual only** (the mode RetroAchievements renamed from
 that policing is a second project with a different risk profile. Everything
 below is built so Casual works on its own and hardcore stays a later decision.
 
+## Prior art
+
+drastic-nano (GammaOS) added Casual RetroAchievements to DraStic and documented
+it: `frameworks/base/cmds/drastic-nano/RETROACHIEVEMENTS.md` in
+TheGammaSqueeze/GammaOSNextDistribution-14. It is the closest thing to a
+reference integration for this console and it is worth reading before writing
+any of phase 2 or 3. Where it has settled a question, this document says so
+rather than re-deriving it; where we diverge (we are Casual-only, we hash from
+our own bytes, we have save states to keep honest) that is called out too.
+
 ## Why this is mostly not an achievements problem
 
 rcheevos is the achievement engine, and it is the part we do not have to
@@ -63,6 +73,14 @@ VRAM remap side effects). Reads are exact by construction.
 DTCM is a flat 16 KB buffer in DSperate, which is exactly the shape rcheevos
 wants -- it deliberately exposes DTCM at a fake `0x0E000000` because the real
 base is movable. No translation work.
+
+One rule to take from drastic-nano rather than discover: everything **not**
+backed -- the 12 MB DSi-only padding above all -- reads as **zero**, and is left
+for rc_client to mark the affected achievements unsupported at load. The
+tempting alternative, serving whatever the DS has at that address, produces
+false unlocks: a condition written against DSi RAM would be comparing against
+unrelated live data instead of being disabled. Zero plus "unsupported" is the
+honest answer.
 
 This is the whole of the "emulator integration" in the traditional sense. It
 is perhaps 40 lines.
@@ -140,6 +158,17 @@ and nothing else. Practical consequences:
   `CURLOPT_CAINFO`. It is right on ROCKNIX, and it is right on any CFW that
   built its own curl. Keep a config override for the one that isn't.
 
+**A second backend is proven, which matters for the static tiers.**
+drastic-nano ships the subprocess route -- a worker thread that `fork`s and
+`exec`s the device's `curl` binary (not `popen`), keeps the child pid, reads
+body and status from its output, treats a transport failure as retryable, and
+`SIGKILL`s an in-flight request if the game exits. So the fallback this document
+lists below is not speculative; someone runs it in production against this same
+server. It stays the fallback rather than the plan, because on ROCKNIX dlopen
+avoids a process spawn per request and keeps the response in memory -- but it is
+the obvious way to reach the A30 later, and the interface should be shaped so
+that backend is a drop-in.
+
 **Where this degrades, and the cost of accepting that.** The two static
 handhelds do not get achievements in v1, and it is worth being blunt that
 this is a real limitation rather than an oversight:
@@ -158,6 +187,21 @@ and neither in v1: link libcurl statically into those two tiers, or shell out
 to a `curl` binary (the A30 has one at `/mnt/SDCARD/spruce/bin/curl`). Putting
 the transport behind an interface from the start is what keeps those cheap, so
 do that even though v1 has exactly one backend.
+
+**Driving the runtime.** `rc_client_do_frame` is called **exactly once per
+frame advance**, never batched and never twice. drastic-nano's notes are
+explicit about why, and it is the kind of bug that would take a week to find:
+rcheevos keeps a Delta (the previous frame's value) per memory reference, so
+calling `do_frame` twice against one memory snapshot collapses Delta onto
+Current and **single-frame edge triggers stop firing**. Achievements would
+simply never unlock, with nothing in any log. When the emulator is paused, frame
+evaluation stops and `rc_client_idle` runs at least once a second to keep the
+session alive without evaluating frozen memory.
+
+Worth noting our frame loop is in better shape for this than theirs: they
+decoupled rendering from a free-running emulation thread and had to drive off
+vblank, where `main.cpp`'s loop already advances exactly one frame per
+iteration (`nds.run_frame()`, `main.cpp:2399`). One call site, one frame.
 
 **Threading.** HTTP runs on its own worker thread; nothing blocking goes near
 the emulation thread -- see the 270 ms above. rcheevos' own locking is
@@ -210,15 +254,22 @@ Two things to be careful of, both already learned the hard way:
 
 - Credentials: RA issues a token on password login; store the **token**, never
   the password. A sidecar beside the config rather than `dsperate.ini` itself,
-  following the `.ovr` precedent (`firmware-boot`). `Config::dir()` gives the
-  location.
+  following the `.ovr` precedent (`firmware-boot`); `Config::dir()` gives the
+  location, and the file is mode **0600**, as drastic-nano's is. Their other
+  lesson is worth copying: a stale token must fall back to a password login
+  that re-establishes a fresh one, or a player whose token expires is locked out
+  of their own account with no way back from inside the emulator.
 - Settings: `cheevos.enabled`, `cheevos.username`, `cheevos.toasts`,
   `cheevos.unofficial`, `cheevos.encore` go through the existing
   `SettingsHost` key/value interface (`settings.h:82`) -- no new mechanism.
 - Save states: rcheevos offers `rc_client_serialize_progress_sized` /
   `rc_client_deserialize_progress_sized`. Save states are *allowed* in Casual,
   so this matters: without it, loading a state leaves achievement progress
-  describing a world that no longer exists. States are chunked with a format
+  describing a world that no longer exists. Note drastic-nano explicitly did
+  **not** wire these -- it could afford not to, because its hardcore mode blocks
+  state loading outright and its softcore simply wears the desync. A
+  Casual-only emulator has no such escape, so this is one place we have to do
+  more than the reference integration, not less. States are chunked with a format
   version (`state/state.h:14-27`, `FORMAT_VERSION = 1`), so this is a new
   optional chunk -- old states load without it, and a state without the chunk
   calls `rc_client_reset`.
@@ -233,33 +284,54 @@ hardcore unlocks from an emulator that permits save states and cheats, which
 is the one failure here with consequences outside our own build -- it puts bad
 data on other people's accounts. It deserves a test, not a comment.
 
-## The blocker, now confirmed: client registration
+## Client identity: not a blocker, but a hard requirement
 
-This was an open question in the first draft. It is not any more. Asking the
-server to identify a known-good ROM, 2026-09-09:
+An earlier revision of this document recorded a blocker here. It was wrong, and
+the way it was wrong is worth keeping, because it is a trap anyone integrating
+RetroAchievements will hit once.
+
+A game lookup with curl's default User-Agent is refused outright:
 
 ```
-GET https://retroachievements.org/dorequest.php?r=gameid&m=<md5>
+$ curl -A "curl/8.21.0" "https://retroachievements.org/dorequest.php?r=gameid&m=<md5>"
 {"Success":false,"Status":403,"Code":"unsupported_client",
  "Error":"This client is not supported.","GameID":0}
 ```
 
-Every request gets that, including an unauthenticated game lookup that needs no
-account. RetroAchievements gates access by client at the API, and DSperate is
-not a registered client, so **there is nothing over the network this feature
-can do until RA registers it.** rcheevos expects the client to identify itself
-(`rc_client_get_user_agent_clause`, `rc_client.h:142`); that identity is what
-has to be agreed with the RA team.
+The same request, identifying itself honestly as what it is, succeeds:
 
-To be explicit about the thing not to do: the 403 keys off the client
-identity, so it would "go away" if we presented someone else's. That is
-circumventing an access control and misrepresenting the client to a service
-whose own data integrity depends on knowing what wrote to it. It is not an
-option, and the registration conversation is the only route.
+```
+$ curl -A "DSperate/0.1.0 rcheevos/12.4.0" "https://retroachievements.org/dorequest.php?r=gameid&m=<md5>"
+{"Success":true,"GameID":14806}
+```
 
-This reorders the project. Phases 1 and 2 are entirely local and are unblocked
--- and phase 1 is done, below. Phase 3 onward cannot be finished, only written,
-until registration happens, so **start that conversation now**.
+So `unsupported_client` is the server refusing an **unrecognisable** client, not
+an unapproved one. It is a well-formedness check on the User-Agent, and it
+applies to every endpoint including the unauthenticated lookup above.
+
+The requirement, which drastic-nano's notes state as a rule and we have now
+confirmed from the outside, is a product token with **no spaces in the product
+name**, numeric versioning so the server can negotiate, and an `rcheevos/<ver>`
+clause. rcheevos builds the second half itself
+(`rc_client_get_user_agent_clause`, `rc_client.h:142`); the product half is
+ours, and `DSperate/<version>` is it. Two rules around it:
+
+- It must always be **our** identity. Presenting another client's product token
+  would clear the same 403, and that is circumventing an access control and
+  misrepresenting the writer to a service whose data integrity depends on
+  knowing who wrote. Not an option, ever, including "temporarily, for testing".
+- It is a real interface, so it is set in one place and not composed ad hoc.
+
+What registration *does* gate, per drastic-nano: "Hardcore credit requires the
+`GammaOS-DrasticNano` identifier to be on the server's approved emulator list."
+Hardcore credit -- which this project has scoped out. So **Casual is not
+blocked**, and phases 3-6 are unblocked.
+
+One honesty caveat: what is verified is identify-and-lookup, from outside, with
+no account. Whether an unlock submission from an unregistered client is
+accepted is untested -- it needs an account and a running session, i.e. phase 3.
+Getting DSperate onto the approved list is still worth doing, and is the
+prerequisite if hardcore is ever reconsidered.
 
 ## Build shape
 
@@ -300,14 +372,17 @@ Each phase is useful on its own and testable without the next.
 
 1. **Hash and identify, offline-shaped.** -- **DONE** 2026-09-09, see below.
 2. **Memory reader plus a local runtime.** `read_memory` over
-   `main_ram`/`dtcm`, `rc_client_do_frame` each frame, hardcore explicitly
-   off. Drive it with a hand-written achievement set to prove triggers fire.
+   `main_ram`/`dtcm` with everything else reading zero, `rc_client_do_frame`
+   exactly once per frame, hardcore explicitly off. Drive it with a hand-written achievement set to prove triggers fire.
    **Measure here**: `rc_client_do_frame` cost on the A55 with a real set
    loaded, p99 and over-budget frames, before any networking exists.
 3. **Transport.** The libcurl dlopen shim behind a transport interface, the
-   worker thread, a queue draining on the emu thread. Login with password,
-   token persisted, game identify and load. Still no UI beyond stderr. Small
-   enough now that it is no longer the project's centre of gravity.
+   worker thread, a queue draining on the emu thread. The product User-Agent,
+   set once. Login with password, a 0600 token file with the password fallback,
+   game identify and load. Still no UI beyond stderr. Small enough now that it
+   is no longer the project's centre of gravity. This is also where the one
+   genuinely untested question gets answered: whether an unlock from an
+   unregistered client is credited.
 4. **UI.** Login page, achievement list, text toasts on the existing OSD
    paths, across display tiers on device.
 5. **Save state integration** and the progress chunk.
@@ -355,17 +430,29 @@ above):
 - **Exactness**: all five scenes bit-identical to the pre-change build over 200
   frames (`tools/scene_hashes.sh`), and the 18 tests pass.
 
-What remains unproven, and cannot be proven locally: that these hashes are the
-ones RetroAchievements holds. The algorithm agreement is strong evidence and
-not a substitute. First thing to re-run once the client is registered.
+- **RetroAchievements' own database**, once the User-Agent was right. Of six
+  titles looked up through `r=gameid`, three came back with real game IDs
+  (Sonic Rush 14806, The World Ends With You 4887, Phoenix Wright 12747) and
+  three with `GameID:0`. That is the verification this document previously said
+  was impossible. The lookup is an **exact** match against RA's hash table, so
+  a non-zero game ID is proof the hash is byte-for-byte what RA holds; three
+  independent exact matches do not happen by accident. The zeros are dumps RA
+  has not hashed (a different revision or region), not failures -- the same code
+  produced all six.
 
 ## What I expect to go wrong
 
-- **Registration stalling**, which blocks phases 3-6 entirely. It is now the
-  schedule risk, not a technical one.
-- **Hash mismatches** against RA's real database, despite the above -- an
-  unusual dump shape, or a SuperCard header, that the local 46 did not cover.
-  The symptom is "game not found" rather than an error.
+- **The User-Agent**, which is the one thing that silently disables the entire
+  feature with a 403 and no other symptom. It belongs in one place, and the
+  first thing phase 3 should log is the exact string it sent.
+- **Delta collapse** from a stray second `rc_client_do_frame` in a frame --
+  achievements that never unlock, with nothing in any log to say why.
+- **Hash misses** against RA's real database for dumps they have not hashed
+  (three of our six looked up as `GameID:0`). Not a bug, but it will be reported
+  as one, so "this ROM is not one RetroAchievements knows" has to be a message
+  the player can actually see.
+- **Unlock submission from an unregistered client**, which is untested and
+  cannot be tested before phase 3.
 - **CFW variability.** We are depending on someone else's library set, so a
   ROCKNIX update can move it -- and `rig-device-access` already records that a
   ROCKNIX update wipes `/storage/dsperate` and the BIOS dumps. The failure has
