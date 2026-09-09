@@ -212,18 +212,20 @@ public:
   // The whole output buffer, for the frontend's own drawing (the pause menu,
   // the overlays) in panel pixels rather than DS pixels. Valid between
   // begin_frame() and present(); draw after finish_views() so an inset does
-  // not land on top of what was drawn.
+  // not land on top of what was drawn. On the display-engine tier it is
+  // instead the overlay layer's own surface -- transparent, cleared on the
+  // first call of a frame, and put on the panel by draw(), so it is valid
+  // there whether or not that tier is scaling.
   struct CanvasView { u32* px; u32 pitch; int w, h; };
-  bool canvas(CanvasView& out) const {
-    if (!frame_px_) return false;
-    out = CanvasView{frame_px_, frame_pitch_, frame_w_, frame_h_};
-    return true;
-  }
-  // Whether this tier has a panel-resolution buffer the CPU can write at all.
-  // False on the display-engine tier, whose targets are two DS-sized buffers
-  // the scaler reads, and on the SDL_Renderer path, which has no frame buffer
-  // of its own; both keep the DS-space drawing path.
-  bool canvas_capable() const { return scaled_ && !disp_; }
+  bool canvas(CanvasView& out) const;
+  // Whether the frontend can draw at panel resolution on this tier. True on
+  // the scanline tiers (the canvas is the frame itself) and on the
+  // display-engine tier when it has its overlay layer (the canvas is then a
+  // transparent image the DE blends over the frame -- the picture under it is
+  // untouched, and anything not drawn shows through). False on the
+  // SDL_Renderer path, which has no buffer of its own and keeps the DS-space
+  // drawing path.
+  bool canvas_capable() const;
 
   // end_frame() in two halves, so the frontend can draw over the finished
   // picture: finish_views() copies the insets into place, present() puts it on
@@ -295,6 +297,7 @@ private:
   // What the frontend drew on the canvas: this frame, and the last time each
   // buffer was used. More buffers than any tier keeps (drm 3, dmabuf 4).
   static constexpr int kMaxBufs = 8;
+  mutable bool      canvas_taken_ = false;   // canvas() was handed out this frame (the overlay tier)
   SDL_Rect          canvas_drawn_{0, 0, 0, 0};
   SDL_Rect          canvas_prev_[kMaxBufs] = {};
   void clear_rect(u32* px, u32 pitch, int w, int h, const SDL_Rect& r) const;

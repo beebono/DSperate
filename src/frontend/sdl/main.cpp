@@ -2243,6 +2243,15 @@ sdl_ready:
           // Nothing may keep pointing into a buffer the display just released.
           set_scale_targets(target, false);
         } else {
+          // The display-engine tier without chunky hands the core's
+          // framebuffers to the layer as they are, so there is no scaled
+          // frame -- but there is still the overlay layer, and the menu
+          // belongs on it at panel resolution.
+          ds::sdl::Display::CanvasView cv;
+          if (on_canvas && display.canvas(cv)) {
+            menu.draw(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h});
+            display.note_canvas_draw_all();
+          }
           display.draw(fb);
           if (dual_window) display2.draw(fb);
         }
@@ -2500,9 +2509,22 @@ sdl_ready:
           draw_cursor(CursorDst{cursor_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, input.stylus_x(), input.stylus_y(), cursor_size);
           fb[1] = cursor_fb.data();
         }
+        // The overlay layer, where there is one: the labels go on the panel's
+        // own pixels instead of into a copy of a DS framebuffer, which is both
+        // sharper and one less 192 K copy. The flash stays below -- it covers
+        // every pixel, and on the overlay that would be a panel-sized upload
+        // on each of its frames.
+        ds::sdl::Display::CanvasView ocv;
+        const bool osd_on_canvas = display.canvas_capable() && (slot_osd || fps_field) && display.canvas(ocv);
+        if (osd_on_canvas) {
+          const ds::sdl::Canvas c{ocv.px, ocv.pitch, ocv.w, ocv.h};
+          if (slot_osd) draw_label(c, slot_text.c_str(), false);
+          if (fps_field) draw_label(c, fps_text.c_str(), true);
+          display.note_canvas_draw_all();
+        }
         // After the cursor: when the overlays are on the bottom screen this
         // copies the frame that already has the crosshair in it, so both show.
-        if (slot_osd || fps_field) {
+        if (!osd_on_canvas && (slot_osd || fps_field)) {
           std::memcpy(osd_fb.data(), fb[osd_screen], osd_fb.size() * 4);
           const ds::sdl::Canvas od = ds_canvas(osd_fb.data());
           if (slot_osd) draw_label(od, slot_text.c_str(), false);

@@ -120,7 +120,35 @@ public:
   // so it costs nothing per frame; it is redrawn when the layout changes.
   // Set before open(); 0 = no grid.
   void set_grid(u8 alpha) { grid_alpha_ = alpha; }
-  bool grid() const { return grid_layer_ >= 0; }
+  bool grid() const { return grid_layer_ >= 0 && grid_alpha_ != 0; }
+
+  // The same layer as a drawing surface for the frontend (the pause menu, the
+  // OSD): a panel-resolution ARGB image the DE blends per pixel over the
+  // scaled picture, so the menu comes out at the panel's own resolution
+  // instead of being upscaled with the frame -- what every other tier does
+  // through Display::canvas().
+  //
+  // It shares the grid's layer and image because this chip offers no second
+  // one, which the A30 was probed for: the DE has two pipes and per-pixel
+  // alpha blends only ACROSS pipes, and both are taken (the scaler on 1, this
+  // on 0); layers 1 and 2 are free but have nowhere to point, since fb0 has
+  // 864 KB left after four composites and the overlay against the 1.2 MB a
+  // second panel-sized image needs, and fb1-fb7 advertise 4.9 MB each but are
+  // unallocated (smem_start 0, mmap fails). So the grid seams and whatever
+  // the frontend draws are composed into one image.
+  //
+  // Costs nothing per frame: the image is recomposed only when the frontend
+  // says it changed, and uploaded to fb0 only when the composition differs
+  // from what is already there. Enable before open().
+  void set_overlay(bool on) { overlay_wanted_ = on; }
+  bool overlay_available() const { return grid_layer_ >= 0 && overlay_wanted_; }
+  // The surface, in DISPLAY orientation (the panel turned by rot, so drawing
+  // code works the way up the player holds it). Cleared to transparent on the
+  // first call of a frame. False when there is no overlay.
+  bool overlay(u32*& px, int& pitch, int& w, int& h);
+  // Said after drawing: `any` false means nothing was drawn this frame, which
+  // takes the last overlay back off the panel.
+  void overlay_changed(bool any);
   // Nearest-neighbour scaling (see the header comment); set before open().
   // false leaves the driver's own filter in place (--linear).
   void set_nearest(bool on) { nearest_wanted_ = on; }
@@ -188,6 +216,13 @@ private:
   size_t grid_off_ = 0;             // the grid image's offset in fb0 memory (after the composites)
   Dims grid_dims_;                  // the composite size the image was drawn for
   std::vector<u32> grid_stage_;     // the image is composed here, then copied to fb0 in bulk
+  bool overlay_wanted_ = false;
+  bool ov_active_ = false;          // the frontend drew something last frame
+  bool ov_taken_ = false;           // overlay() was called since the last compose
+  int  ov_w_ = 0, ov_h_ = 0;        // the surface's size, in display orientation
+  std::vector<u32> ov_stage_;       // what the frontend draws into (display orientation)
+  std::vector<u32> ov_sent_;        // the last image uploaded to fb0, to skip identical ones
+  void compose_overlay();           // grid seams + ov_stage_, rotated, into fb0 if it changed
   bool ui_was_enabled_ = false;
   bool layer_enabled_ = false;      // our layer is on (enabled on the first flip)
   ViewRect views_[VIEWS];

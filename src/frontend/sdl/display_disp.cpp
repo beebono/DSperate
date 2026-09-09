@@ -198,14 +198,22 @@ bool DispOut::open(int rot, bool vsync) {
   if (ioctl(fb_, FBIOGET_LAYER_HDL_0, &hdl) == 0) ui_layer_ = static_cast<int>(hdl);
   for (int l = 0; l < 4; ++l) if (l != ui_layer_) { layer_ = l; break; }
   grid_layer_ = -1; grid_enabled_ = false; grid_dirty_ = false; grid_dims_ = Dims{};
-  if (grid_alpha_) {
+  ov_active_ = false; ov_taken_ = false; ov_stage_.clear(); ov_sent_.clear();
+  // One image serves the grid and the frontend's overlay: see the header on
+  // why there is no second layer to be had.
+  if (grid_alpha_ || overlay_wanted_) {
     grid_off_ = buf_bytes_ * BUFS;
     const size_t need = static_cast<size_t>(panel_w_) * panel_h_ * sizeof(u32);
     if (grid_off_ + need <= fix.smem_len) {
       for (int l = 0; l < 4; ++l) if (l != ui_layer_ && l != layer_) { grid_layer_ = l; break; }
       grid_dirty_ = true;
     }
-    if (grid_layer_ < 0) std::fprintf(stderr, "disp: no room or layer for the LCD grid; grid off\n");
+    if (grid_layer_ < 0) std::fprintf(stderr, "disp: no room or layer for the overlay; grid and menu layer off\n");
+  }
+  {
+    const bool turned = rot_ == 90 || rot_ == 270;
+    ov_w_ = turned ? panel_h_ : panel_w_;
+    ov_h_ = turned ? panel_w_ : panel_h_;
   }
   for (auto& v : views_) v = ViewRect{};
   for (auto& d : dims_) d = Dims{};
@@ -347,6 +355,8 @@ void DispOut::draw_grid(Dims d) {
   if (grid_layer_ < 0 || d.w <= 0 || d.h <= 0) return;
   const size_t n = static_cast<size_t>(panel_w_) * panel_h_;
   grid_stage_.assign(n, 0u);
+  // The layer may be carrying only the frontend's overlay.
+  if (!grid_alpha_) { grid_dims_ = d; grid_dirty_ = false; return; }
   const Fit f = fit(d);
   const u32 seam = static_cast<u32>(grid_alpha_) << 24;
   std::vector<u8> col_seam(static_cast<size_t>(panel_w_)), row_seam(static_cast<size_t>(panel_h_));
@@ -397,9 +407,63 @@ void DispOut::draw_grid(Dims d) {
       for (int x = std::max(0, px0); x < std::min(panel_w_, px1); ++x) if (col_seam[x]) row[x] = seam;
     }
   }
-  std::memcpy(map_ + grid_off_, grid_stage_.data(), n * sizeof(u32));
   grid_dims_ = d;
   grid_dirty_ = false;
+}
+
+// The surface the frontend draws into. Display orientation, so a menu laid
+// out for a 640x480 screen is upright on a panel mounted portrait.
+bool DispOut::overlay(u32*& px, int& pitch, int& w, int& h) {
+  if (!overlay_available() || ov_w_ <= 0 || ov_h_ <= 0) return false;
+  const size_t n = static_cast<size_t>(ov_w_) * ov_h_;
+  if (ov_stage_.size() != n) ov_stage_.assign(n, 0u);
+  else if (!ov_taken_) std::fill(ov_stage_.begin(), ov_stage_.end(), 0u);
+  ov_taken_ = true;
+  px = ov_stage_.data(); pitch = ov_w_; w = ov_w_; h = ov_h_;
+  return true;
+}
+
+void DispOut::overlay_changed(bool any) {
+  if (!overlay_available()) return;
+  if (!any && !ov_taken_ && !ov_active_) return;   // nothing drawn, nothing showing
+  if (!any && !ov_stage_.empty()) std::fill(ov_stage_.begin(), ov_stage_.end(), 0u);
+  ov_active_ = any;
+  ov_taken_ = false;
+  grid_dirty_ = true;   // recompose before the next flip
+}
+
+// Grid seams first, then the frontend's surface rotated over them, and the
+// result into fb0 -- but only when it differs from the image already there.
+// fb0 is uncached, so a needless 1.2 MB copy is the one cost worth avoiding;
+// the compare is against a cached copy.
+void DispOut::compose_overlay() {
+#if defined(__linux__)
+  if (grid_layer_ < 0) return;
+  const size_t n = static_cast<size_t>(panel_w_) * panel_h_;
+  if (grid_stage_.size() != n) return;
+  if (ov_active_ && ov_stage_.size() == static_cast<size_t>(ov_w_) * ov_h_) {
+    // (x, y) on the surface -> the panel, the inverse of canvas_point's turn.
+    for (int y = 0; y < ov_h_; ++y) {
+      const u32* src = ov_stage_.data() + static_cast<size_t>(y) * ov_w_;
+      for (int x = 0; x < ov_w_; ++x) {
+        const u32 c = src[x];
+        if (!(c >> 24)) continue;                 // transparent: the picture shows
+        int px, py;
+        switch (rot_) {
+          case 270: px = y;             py = ov_w_ - 1 - x; break;
+          case 90:  px = ov_h_ - 1 - y; py = x;             break;
+          case 180: px = ov_w_ - 1 - x; py = ov_h_ - 1 - y; break;
+          default:  px = x;             py = y;             break;
+        }
+        if (px >= 0 && px < panel_w_ && py >= 0 && py < panel_h_)
+          grid_stage_[static_cast<size_t>(py) * panel_w_ + px] = c;
+      }
+    }
+  }
+  if (ov_sent_.size() == n && std::memcmp(ov_sent_.data(), grid_stage_.data(), n * sizeof(u32)) == 0) return;
+  std::memcpy(map_ + grid_off_, grid_stage_.data(), n * sizeof(u32));
+  ov_sent_.assign(grid_stage_.begin(), grid_stage_.end());
+#endif
 }
 
 bool DispOut::set_grid_layer() {
@@ -668,7 +732,10 @@ void DispOut::present(const u32* const fb[VIEWS]) {
   dims_[buf] = d;
   // The grid follows the layout: redrawn in place (it is scanned out live,
   // so a layout change may show one torn refresh of it).
-  if (grid_layer_ >= 0 && (grid_dirty_ || d.w != grid_dims_.w || d.h != grid_dims_.h)) draw_grid(d);
+  if (grid_layer_ >= 0 && (grid_dirty_ || d.w != grid_dims_.w || d.h != grid_dims_.h)) {
+    draw_grid(d);
+    compose_overlay();
+  }
   if (diag_) ++diag_posts_;
   if (thread_.joinable()) {
     { std::lock_guard<std::mutex> g(mu_); pending_ = buf; }

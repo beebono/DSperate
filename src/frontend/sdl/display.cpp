@@ -92,6 +92,9 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
     auto d = std::make_unique<DispOut>();
     d->set_grid(disp_grid_);
+    // The menu and the OSD want panel pixels; the layer they share with the
+    // grid is the only place on this chip to get them.
+    d->set_overlay(true);
     d->set_nearest(!linear);
     d->set_integer_scale(static_cast<int>(int_scale_));
     if (d->open(rot, vsync)) {
@@ -101,7 +104,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
       std::fprintf(stderr, "video: display-engine scaler (%s), rot %d, layout %s, %s driver, vsync %s%s%s\n",
                    disp_->nearest() ? "nearest" : "driver filter", rot, mode_name(layout_.mode), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off",
                    !chunky_ ? "" : disp_->divisor() > 1 ? ", chunky in the scaler" : ", chunky at source",
-                   disp_->grid() ? ", grid layer" : "");
+                   disp_->grid() ? ", grid layer" : disp_->overlay_available() ? ", overlay layer" : "");
       return true;
     }
   }
@@ -358,6 +361,9 @@ void Display::place(const Layout& layout_, int w, int h, View views_[SCREENS], I
 
 void Display::draw(const u32* const fb[SCREENS]) {
   if (disp_) {
+    // Whatever the frontend drew (or stopped drawing) goes to the overlay
+    // layer with this frame, so the two reach the panel together.
+    if (disp_->overlay_available()) { disp_->overlay_changed(canvas_taken_); canvas_taken_ = false; }
     // In view order: view i is layer i, later views on top.
     const u32* slots[DispOut::VIEWS] = {nullptr, nullptr};
     for (int i = 0; i < nviews_ && i < DispOut::VIEWS; ++i) slots[i] = views_[i].shown ? fb[views_[i].screen] : nullptr;
@@ -888,6 +894,33 @@ bool Display::begin_frame(Target out[SCREENS]) {
 void Display::finish_views() {
   if (disp_) return;
   blit_insets();
+}
+
+bool Display::canvas_capable() const {
+  // The display-engine tier has no panel-resolution frame buffer, but it has a
+  // panel-resolution overlay layer, which serves the same purpose: what the
+  // frontend draws is composited by the DE over the picture rather than into
+  // it. Note this does NOT depend on the scaling path -- without chunky the
+  // tier gives the core's framebuffers to the layer as they are (scaled_
+  // false) and still has its overlay, and the frontend's unscaled path draws
+  // on it just the same.
+  if (disp_) return disp_->overlay_available();
+  // Everywhere else the canvas is the frame itself, so it needs one: the
+  // SDL_Renderer path has no buffer of its own and keeps the DS-space path.
+  return scaled_;
+}
+
+bool Display::canvas(CanvasView& out) const {
+  if (disp_) {
+    u32* px = nullptr; int pitch = 0, w = 0, h = 0;
+    if (!disp_->overlay(px, pitch, w, h)) return false;
+    canvas_taken_ = true;
+    out = CanvasView{px, static_cast<u32>(pitch), w, h};
+    return true;
+  }
+  if (!frame_px_) return false;
+  out = CanvasView{frame_px_, frame_pitch_, frame_w_, frame_h_};
+  return true;
 }
 
 void Display::present() {
