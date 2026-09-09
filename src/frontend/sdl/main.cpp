@@ -1232,16 +1232,32 @@ sdl_ready:
       if (cancel) std::snprintf(line2, sizeof line2, "STOPPING");
       else if (now - last_change > 5000) std::snprintf(line2, sizeof line2, "WAITING ON THE CARD");
       else std::snprintf(line2, sizeof line2, "UNPACKING%.*s", dots, "...");
-      ds::sdl::draw_notice(ds_canvas(menu_fb[menu_screen].data()),
-                           title.c_str(), line2, "FIRST LAUNCH ONLY    B CANCELS");
+      const char* const line3 = "FIRST LAUNCH ONLY    B CANCELS";
+      // The notice goes where the pause menu goes: on the panel's own pixels
+      // where they can be written, so it is laid out for the screen it is
+      // actually on and comes out at panel resolution rather than being
+      // upscaled with the held frame. The display-engine and SDL_Renderer
+      // tiers keep the 256x192 scratch, which goes through the scaler.
+      const bool on_canvas = display.canvas_capable();
+      if (!on_canvas) ds::sdl::draw_notice(ds_canvas(menu_fb[menu_screen].data()), title.c_str(), line2, line3);
       ds::sdl::Display::Target target[2] = {};
       bool scaled = display.begin_frame(target);
       if (dual_window) scaled = display2.begin_frame(target) && scaled;
       if (scaled) {
         set_scale_targets(target, true, true);
         for (int i = 0; i < 2; ++i) nds.gpu.scale_image(i, menu_fb[i].data());
-        display.end_frame();
-        if (dual_window) display2.end_frame();
+        // Before the notice, so a PiP inset cannot land on top of it.
+        display.finish_views();
+        if (dual_window) display2.finish_views();
+        ds::sdl::Display::CanvasView cv;
+        if (on_canvas && display.canvas(cv)) {
+          ds::sdl::draw_notice(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h}, title.c_str(), line2, line3);
+          // The whole canvas: the dots repaint the panel every step anyway,
+          // and the letterbox around it is not redrawn by anything else.
+          display.note_canvas_draw_all();
+        }
+        display.present();
+        if (dual_window) display2.present();
         set_scale_targets(target, false);
       } else {
         display.draw(fb);
