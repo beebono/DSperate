@@ -498,6 +498,49 @@ The one place to re-check is Golden Sun, which already runs over budget
 (`compositor-thread-step1`): 1.3 % p99 is cheap in the abstract and less cheap
 on a frame that is already late. Worth a look with a real set in phase 6.
 
+### Rejected: evaluating on a presentation thread
+
+Worth writing down, because it is the obvious idea and it comes back. The
+thought is that the presenter already runs once per frame and is mostly idle
+waiting on a vsync, so `do_frame`'s ~100 us could go there and off the
+emulation thread. Three reasons not to, any one of them sufficient:
+
+- **The thread is not there on the target.** A presenter thread is created only
+  by `DispOut` (`display_disp.cpp:231`) and `FbdevOut`
+  (`display_fbdev.cpp:110`) -- the A30 and H700 tiers. The DRM and Wayland
+  tiers the RG DS runs present on the main thread. So it would be machinery
+  built exclusively for the two `-static` tiers that cannot run achievements in
+  the first place.
+- **It is not one call per emulated frame.** The presenter takes the newest
+  posted frame and drops the rest (`queued_ = pending_; pending_ = -1;`); that
+  is the point of it, and `diag_flips_` / `diag_posts_` are counted separately
+  because they diverge. Frameskip widens the gap. Driving the runtime from
+  there means missed `do_frame` calls, which is exactly the hit-count and
+  edge-trigger corruption `tests/cheevos_memory_test.cpp` pins down.
+- **The memory would not be coherent.** Reading `main_ram` while the emulation
+  thread writes it gives torn reads part-way through a structure, and a
+  condition evaluated against a half-updated structure is how a false unlock
+  happens -- the one failure mode here with consequences on other people's
+  accounts.
+
+The salvageable version is to hand a worker a *snapshot* rather than live
+memory: at the frame boundary copy just the addresses the active set
+references, which for a real set is a few hundred -- a 1-2 KB cache-friendly
+copy, far cheaper than evaluating. That is defeated by pointer-following.
+`RC_CONDITION_ADD_ADDRESS` and `num_indirect_conditions` are first-class in
+rcheevos (`rc_runtime_types.h:149`) and real sets use them, so which addresses
+get read depends on values read *during* evaluation and the set cannot be known
+in advance.
+
+So it stays on the emulation thread, at the frame boundary. What makes that an
+easy trade is that the cost is **opt-in**: nothing is evaluated unless the
+player is signed in and the game has a set, so 0.6 % mean / 1.27 % p99 is paid
+by players who asked for it and by nobody else.
+
+One warning for later: if the `compositor-thread` branch lands there *will* be
+a real per-frame worker and this idea will look attractive again. Its lag mode
+makes the one-call-per-frame problem worse, not better.
+
 ### Deliberately not done
 
 The frontend is not wired up. `rc_client_do_frame` has nothing to drive until
