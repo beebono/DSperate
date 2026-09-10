@@ -141,6 +141,42 @@ void test_sign_in_collects_both_fields() {
   CHECK(!host.sign_ins[0].second.empty());
 }
 
+// A slot the cursor moved past without a character being chosen is still a
+// space in the buffer. For a credential that is not a space the player wants
+// -- neither field may contain one -- so it must not be submitted: it would
+// only produce a sign-in failure with no visible cause.
+void test_sign_in_drops_skipped_slots() {
+  FakeCheevos host;
+  Menu m;
+  m.set_cheevos_host(&host);
+  m.set_open(true);
+  to_row(m, kCheevosVisibleRow);
+  m.input(press(B::BTN_A));                 // account page
+  m.input(press(B::BTN_A));                 // SIGN IN -> username
+
+  // Choose a character, skip two slots, choose another.
+  const auto typed_with_a_gap = [&] {
+    m.input(press(B::BTN_UP));
+    m.input(press(B::BTN_RIGHT));
+    m.input(press(B::BTN_RIGHT));
+    m.input(press(B::BTN_RIGHT));
+    m.input(press(B::BTN_UP));
+    m.input(press(B::BTN_A));
+  };
+  typed_with_a_gap();                       // username
+  typed_with_a_gap();                       // password
+
+  CHECK(host.sign_ins.size() == 1);
+  const std::string& user = host.sign_ins[0].first;
+  const std::string& pass = host.sign_ins[0].second;
+  CHECK(user.find(' ') == std::string::npos);
+  CHECK(pass.find(' ') == std::string::npos);
+  // Two characters were chosen in each, and the gap is gone rather than
+  // padded: the length is the proof.
+  CHECK(user.size() == 2);
+  CHECK(pass.size() == 2);
+}
+
 // Abandoning the username prompt must not leave a half-finished sign-in behind
 // for some later, unrelated edit to complete.
 void test_cancelling_sign_in_sends_nothing() {
@@ -1237,6 +1273,7 @@ int main() {
   test_cheevos_row_hidden_without_a_host();
   test_achievements_row_opens_the_account_page();
   test_sign_in_collects_both_fields();
+  test_sign_in_drops_skipped_slots();
   test_cancelling_sign_in_sends_nothing();
   test_sign_out_is_offered_when_signed_in();
   test_account_switches_toggle();

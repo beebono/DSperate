@@ -2305,6 +2305,18 @@ sdl_ready:
   // and reporting "Login required", which would read as a bug rather than as
   // "you are not signed in yet". It is also the hook phase 4's menu needs:
   // signing in there loads the set for the game already running.
+  // What the account page was last drawn against. The menu only composites when
+  // something says it changed, and the session changes on its own -- a sign-in
+  // completing, a set arriving -- so without this the page sits on
+  // "SIGNING IN..." until the player presses something.
+  ds::cheevos::State cheevos_drawn_state = ds::cheevos::State::Off;
+  auto cheevos_menu_follow = [&] {
+    if (cheevos.state() == cheevos_drawn_state) return;
+    cheevos_drawn_state = cheevos.state();
+    cheevos_menu.refresh();   // the list and the counts move with it
+    menu_dirty = true;
+  };
+
   auto cheevos_catch_up = [&] {
     if (cheevos_set_asked || cheevos_hash.empty()) return;
     if (cheevos.state() != ds::cheevos::State::SignedIn) return;
@@ -2611,7 +2623,7 @@ sdl_ready:
       // work through (a pending unlock, a token refresh). idle() does that and
       // nothing else. ~60 ms here, comfortably inside the once-a-second the
       // session wants.
-      if (cheevos_on) { cheevos.idle(); cheevos_catch_up(); cheevos_show(); }
+      if (cheevos_on) { cheevos.idle(); cheevos_catch_up(); cheevos_show(); cheevos_menu_follow(); }
 #endif
       SDL_Delay(10);
       continue;
@@ -2765,6 +2777,7 @@ sdl_ready:
       cheevos.frame();
       cheevos_catch_up();
       cheevos_show();
+      cheevos_menu_follow();
       toast_step();
     }
 #endif

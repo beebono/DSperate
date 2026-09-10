@@ -19,7 +19,7 @@ namespace {
 // Wider than the 3x5 the slot digit uses: at this size M/N/W are distinct and
 // a word is read rather than decoded, which a menu needs and an OSD digit
 // does not.
-constexpr u8 kFont[66][7] = {
+constexpr u8 kFont[92][7] = {
   { 0, 0, 0, 0, 0, 0, 0}, { 4, 4, 4, 4, 4, 0, 4}, {10,10, 0, 0, 0, 0, 0}, {10,10,31,10,31,10,10},
   { 4,15,20,14, 5,30, 4}, {24,25, 2, 4, 8,19, 3}, { 8,20,20, 8,21,18,13}, { 4, 4, 0, 0, 0, 0, 0},
   { 2, 4, 8, 8, 8, 4, 2}, { 8, 4, 2, 2, 2, 4, 8}, { 0, 4,21,14,21, 4, 0}, { 0, 4, 4,31, 4, 4, 0},
@@ -44,7 +44,25 @@ constexpr u8 kFont[66][7] = {
   // East and west are two columns wide against north and south's three, so
   // that they stop short of the cell's centre column -- the axis the top and
   // bottom pips sit on -- and the diamond keeps its hole.
-  { 0, 4, 0,17,14,14,14}, { 0, 4, 3,19, 3, 4, 0}, { 0, 4,24,25,24, 4, 0}, {14,14,14,17, 0, 4, 0}};
+  { 0, 4, 0,17,14,14,14}, { 0, 4, 3,19, 3, 4, 0}, { 0, 4,24,25,24, 4, 0}, {14,14,14,17, 0, 4, 0},
+  // Lower case, indices 66..91. The rest of the menu still folds a-z onto the
+  // capitals -- a row of settings reads better in one case -- but the name
+  // editor draws what is actually being typed, because a player choosing
+  // between "n" and "N" for a password has to be able to see which one they
+  // have. Reached through glyph_cased(), never through glyph().
+  //
+  // Seven rows and no room below the baseline, so g/j/p/q/y put their tails on
+  // the last row rather than under it: at this size a descender that dropped
+  // into the next row's space would collide with it.
+  { 0, 0,14, 1,15,17,15}, {16,16,22,25,17,17,30}, { 0, 0,14,16,16,17,14},   // a b c
+  { 1, 1,13,19,17,17,15}, { 0, 0,14,17,31,16,14}, { 6, 9, 8,28, 8, 8, 8},   // d e f
+  { 0, 0,15,17,15, 1,14}, {16,16,22,25,17,17,17}, { 4, 0,12, 4, 4, 4,14},   // g h i
+  { 2, 0, 6, 2, 2,18,12}, {16,16,18,20,24,20,18}, {12, 4, 4, 4, 4, 4,14},   // j k l
+  { 0, 0,26,21,21,21,21}, { 0, 0,22,25,17,17,17}, { 0, 0,14,17,17,17,14},   // m n o
+  { 0, 0,30,17,30,16,16}, { 0, 0,13,19,15, 1, 1}, { 0, 0,22,25,16,16,16},   // p q r
+  { 0, 0,15,16,14, 1,30}, { 8, 8,28, 8, 8, 9, 6}, { 0, 0,17,17,17,19,13},   // s t u
+  { 0, 0,17,17,17,10, 4}, { 0, 0,17,17,21,21,10}, { 0, 0,17,10, 4,10,17},   // v w x
+  { 0, 0,17,17,15, 1,14}, { 0, 0,31, 2, 4, 8,31}};                          // y z
 
 constexpr int kGlyphW = 5, kGlyphH = 7, kAdvance = 6;   // advance includes the one-pixel gap
 
@@ -105,6 +123,13 @@ int glyph(char c) {
   if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
   const int i = static_cast<int>(static_cast<unsigned char>(c)) - 0x20;
   return (i >= 0 && i < 62) ? i : 0;
+}
+
+// The same, but keeping a lower-case letter lower case. Only the name editor
+// wants this; everywhere else the fold to capitals is deliberate.
+int glyph_cased(char c) {
+  if (c >= 'a' && c <= 'z') return 66 + (c - 'a');
+  return glyph(c);
 }
 
 // One pixel. Clipped to the canvas so a caller may lay out past the edges
@@ -193,9 +218,9 @@ int text_width(int scale, const char* s) {
   return n > 0 ? n * kAdvance * scale - scale : 0;   // no gap after the last glyph
 }
 
-int draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s) {
+int draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s, bool keep_case) {
   for (const char* p = s; *p; ++p) {
-    const u8* g = kFont[glyph(*p)];
+    const u8* g = kFont[keep_case ? glyph_cased(*p) : glyph(*p)];
     for (int r = 0; r < kGlyphH; ++r)
       for (int c = 0; c < kGlyphW; ++c)
         if ((g[r] >> (kGlyphW - 1 - c)) & 1)
@@ -1397,6 +1422,14 @@ Menu::Result Menu::handle_text_edit(u32 presses) {
     // Trailing spaces are an artefact of moving right, not part of the name.
     std::string out = edit_buf_;
     while (!out.empty() && out.back() == ' ') out.pop_back();
+    // For a credential every space goes, not just the trailing ones: the
+    // editor starts each slot on a space, so one left in the middle means the
+    // cursor passed over that slot without choosing anything -- not that the
+    // player wants a space in their username. Neither field may contain one
+    // anyway, so submitting it would only produce a sign-in failure the player
+    // could not see the cause of.
+    if (edit_dest_ != EditDest::Setting)
+      out.erase(std::remove(out.begin(), out.end(), ' '), out.end());
     switch (edit_dest_) {
     case EditDest::Setting:
       host_->set(edit_key_.c_str(), out);
@@ -1468,9 +1501,15 @@ void Menu::draw_text_edit(const Canvas& d) const {
     // A password shows only the character being chosen: the rest are masked,
     // because the field is on a screen somebody else can see. The cursor's own
     // character has to stay visible -- cycling A..Z blind is unusable.
-    const bool mask = edit_dest_ == EditDest::CheevosPassword && i != edit_pos_;
-    const char one[2] = {mask ? '*' : edit_buf_[static_cast<size_t>(i)], 0};
-    draw_text(d, cx, cy, m.s, kInk, one);
+    //
+    // A space is not masked, because a space is not a character here: it is a
+    // slot the cursor passed over without anything being chosen (see the
+    // accept path). Drawing '*' for one claims a letter is there that is not,
+    // and the player then cannot tell how long what they typed actually is.
+    const char c = edit_buf_[static_cast<size_t>(i)];
+    const bool mask = edit_dest_ == EditDest::CheevosPassword && i != edit_pos_ && c != ' ';
+    const char one[2] = {mask ? '*' : c, 0};
+    draw_text(d, cx, cy, m.s, kInk, one, true);
   }
   // The font is uppercase-only, so a lower-case letter draws as a capital:
   // the table's name is the only way to tell which case is being written.

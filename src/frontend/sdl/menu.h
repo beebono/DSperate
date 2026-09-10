@@ -58,7 +58,10 @@ constexpr char kFaceNorth = '\x04';   // top     (SDL y)
 
 // A 5x7 uppercase font, `scale` times. Lowercase is folded to uppercase and
 // anything outside the table draws as a space. Returns the x past the string.
-int  draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s);
+// `keep_case` draws a-z with the lower-case glyphs instead of folding them
+// onto the capitals. Off everywhere but the name editor, where the player has
+// to be able to see which case they are typing.
+int  draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s, bool keep_case = false);
 int  text_width(int scale, const char* s);
 // The glyph scale a canvas of this size should draw at. The old menu drew at
 // scale 2 into a 256-wide buffer that was then upscaled to the panel, so twice
