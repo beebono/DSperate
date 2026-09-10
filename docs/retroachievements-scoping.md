@@ -235,34 +235,34 @@ on the device, which is **1.1**. The Moonlight port's libcurl is the wrong one
 to copy for this reason -- it wants `libssl.so.3` / `libcrypto.so.3`, which
 would have to come with it.
 
-There is a second half to the A30 case that is easy to miss. `run_dsperate`
-exports one directory and does not vary it by platform:
+### Where the file actually goes
 
-```sh
-export LD_LIBRARY_PATH="$EMU_DIR/lib64:$LD_LIBRARY_PATH"
-```
+Both devices already have a directory on `LD_LIBRARY_PATH` that will do, so
+**neither needs a launcher change**:
 
-`Emu/NDS` has no `lib` or `lib32` at all -- its 32-bit directories are
-`lib32_Brick`, `lib32_Flip` and `libs_MiyooMini`, and those belong to DraStic
-(`drastic_functions.sh:171`), not to us. So on the A30 DSperate has **no
-card-side library directory on its path**; it sees only the rootfs. Dropping an
-armhf `libcurl.so.4` into some `Emu/NDS/lib` would not be found, because
-nothing exports it.
+| device | put `libcurl.so.4` in | why it is already on the path |
+|--------|----------------------|------------------------------|
+| spruce H700 (aarch64) | `Emu/NDS/lib64/`, **with `libssl.so.1.1` and `libcrypto.so.1.1` beside it** | `run_dsperate` exports `$EMU_DIR/lib64` |
+| Miyoo A30 (armv7) | `/mnt/SDCARD/spruce/miyoomini/lib/` | `platform/miyoo_mini_startup.sh:14` exports it platform-wide, first |
 
-The surgical fix is `DS_CHEEVOS_LIBCURL`, which this backend reads before
-falling back to the soname:
+The H700 wants all three because `spruce/h700/lib64` -- which does hold OpenSSL
+1.1 -- is **not** on the general path (`AnbernicXXCommon.cfg:101` lists
+`dll-mali`, `spruce/flip/lib`, `/usr/lib`, `/usr/lib/aarch64-linux-gnu`, and
+line 510 adds only `h700/lib32`). That is exactly why spruce's own DC emulator
+keeps the trio in `Emu/DC/lib64`, and copying those three files is the whole
+job.
 
-```sh
-[ "$PLATFORM" = "A30" ] && export DS_CHEEVOS_LIBCURL="$EMU_DIR/<dir>/libcurl.so.4"
-```
+The A30 wants only libcurl, because `spruce/miyoomini/lib` already holds
+`libssl.so.1.1`, `libcrypto.so.1.1` and `libz.so.1`, all armhf.
 
-That is better than adding a directory to `LD_LIBRARY_PATH`, and the reason is
-worth stating: a directory exposes *everything* in it to the loader. Pointing
-DSperate at `libs_MiyooMini` -- the obvious candidate, since spruce already
-maintains it -- would also put DraStic's SDL2, EGL and ALSA ahead of the
-system's, which is a good way to break the emulator while trying to add a
-feature to it. An absolute path to one file cannot shadow anything.
-libcurl's own dependencies still resolve normally from `/usr/lib`.
+One thing not to do, since it is the obvious way to "match DraStic": do not put
+DSperate on `Emu/NDS/libs_MiyooMini`. That is DraStic's bundle
+(`drastic_functions.sh:171`) and it contains its own `libSDL2-2.0.so.0`;
+`dsperate.a30` links SDL2 dynamically with no RPATH, so prepending that
+directory would swap the SDL2 the emulator runs on. Adding a directory to
+`LD_LIBRARY_PATH` exposes everything in it, which is fine for a directory of
+our own and not for somebody else's. `DS_CHEEVOS_LIBCURL` remains available for
+a firmware where none of the above fits.
 
 The `curl`-subprocess backend remains the other route for a device where none
 of that is practical, behind the same interface.
