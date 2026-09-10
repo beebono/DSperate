@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include <dlfcn.h>
+#include <sys/stat.h>
 
 namespace ds::cheevos {
 namespace {
@@ -57,6 +58,22 @@ struct Api {
   void  (*slist_free_all)(curl_slist*);
 };
 
+// Trust stores, for a libcurl whose compiled-in path does not exist here. That
+// is the normal case for one a packager dropped into the emulator's own lib
+// directory: it was built against some other filesystem. Only consulted when
+// the usual system stores are absent, so a CFW that has its own keeps using it.
+const char* const kCaPaths[] = {
+  "/etc/ssl/certs/ca-certificates.crt",
+  "/etc/pki/tls/certs/ca-bundle.crt",
+  "/etc/ssl/cert.pem",
+  "/mnt/SDCARD/spruce/etc/ca-certificates.crt",
+};
+
+bool exists(const char* path) {
+  struct stat st{};
+  return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 // Growth-bounded sink. A RetroAchievements response is a few KB; a patch (the
 // achievement set for a game) can be a few hundred. The cap is generous and
 // exists so a confused or hostile response cannot grow without limit on a
@@ -78,7 +95,17 @@ size_t write_cb(char* data, size_t size, size_t nmemb, void* user) {
 
 class CurlBackend final : public Backend {
 public:
-  CurlBackend(void* handle, const Api& api) : handle_(handle), api_(api) {}
+  CurlBackend(void* handle, const Api& api, const char* from)
+      : handle_(handle), api_(api), name_(std::string("libcurl (") + from + ")") {
+    // Resolved once: where the trust store is is a property of the device, not
+    // of a request.
+    if (const char* ca = std::getenv("DS_CHEEVOS_CAINFO")) {
+      if (*ca) { ca_ = ca; return; }
+    }
+    for (const char* p : kCaPaths) {
+      if (exists(p)) { ca_ = p; break; }
+    }
+  }
   ~CurlBackend() override {
     // The library is deliberately left open. curl_global_cleanup is not called
     // either: OpenSSL and curl both register process-wide state, and tearing it
@@ -87,7 +114,7 @@ public:
     (void)handle_;
   }
 
-  const char* name() const override { return "libcurl (dlopen)"; }
+  const char* name() const override { return name_.c_str(); }
 
   Response perform(const Request& req, const char* user_agent) override {
     Response res;
@@ -106,12 +133,9 @@ public:
     api_.easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
     api_.easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
     api_.easy_setopt(c, CURLOPT_TIMEOUT_MS, 30000L);
-    // Normally unset, so curl uses the CA store it was built against -- which
-    // is right on every CFW that built its own curl. DS_CHEEVOS_CAINFO is the
-    // escape hatch for one that did not.
-    if (const char* ca = std::getenv("DS_CHEEVOS_CAINFO")) {
-      if (*ca) api_.easy_setopt(c, CURLOPT_CAINFO, ca);
-    }
+    // Set only when a store was actually found; otherwise curl uses the one it
+    // was built against, which is right wherever the CFW built its own.
+    if (!ca_.empty()) api_.easy_setopt(c, CURLOPT_CAINFO, ca_.c_str());
 
     curl_slist* headers = nullptr;
     if (!req.body.empty()) {
@@ -149,15 +173,29 @@ public:
 private:
   void* handle_;
   Api api_;
+  std::string name_, ca_;
 };
 
 } // namespace
 
 std::unique_ptr<Backend> make_curl_backend(std::string& err) {
   err.clear();
-  // The soname, never the "libcurl.so" development symlink: devices ship the
-  // runtime only, and where that symlink does exist it is by luck.
-  void* h = dlopen("libcurl.so.4", RTLD_NOW | RTLD_LOCAL);
+
+  // The soname, and nothing else. Deliberately no list of places a library
+  // might be hiding: on a CFW the launcher decides what this process can see.
+  // spruce's dsperate_functions.sh exports
+  // LD_LIBRARY_PATH="$EMU_DIR/lib64:$LD_LIBRARY_PATH", so a libcurl.so.4
+  // dropped into the emulator's own lib directory is found by this line with
+  // no help from us. Hunting through other applications' bundles would work
+  // until any of them moved, and would be us borrowing a library nobody
+  // offered.
+  //
+  // DS_CHEEVOS_LIBCURL is the escape hatch for a firmware that keeps it
+  // somewhere the loader cannot see.
+  const char* explicit_path = std::getenv("DS_CHEEVOS_LIBCURL");
+  if (explicit_path && !*explicit_path) explicit_path = nullptr;
+  const char* what = explicit_path ? explicit_path : "libcurl.so.4";
+  void* h = dlopen(what, RTLD_NOW | RTLD_LOCAL);
   if (!h) {
     const char* e = dlerror();
     err = e ? e : "libcurl.so.4 not found";
@@ -193,7 +231,7 @@ std::unique_ptr<Backend> make_curl_backend(std::string& err) {
     dlclose(h);
     return nullptr;
   }
-  return std::make_unique<CurlBackend>(h, api);
+  return std::make_unique<CurlBackend>(h, api, what);
 }
 
 } // namespace ds::cheevos

@@ -158,35 +158,63 @@ and nothing else. Practical consequences:
   `CURLOPT_CAINFO`. It is right on ROCKNIX, and it is right on any CFW that
   built its own curl. Keep a config override for the one that isn't.
 
-**A second backend is proven, which matters for the static tiers.**
+**A second backend is proven, and is the A30's remaining route.**
 drastic-nano ships the subprocess route -- a worker thread that `fork`s and
 `exec`s the device's `curl` binary (not `popen`), keeps the child pid, reads
 body and status from its output, treats a transport failure as retryable, and
 `SIGKILL`s an in-flight request if the game exits. So the fallback this document
 lists below is not speculative; someone runs it in production against this same
-server. It stays the fallback rather than the plan, because on ROCKNIX dlopen
-avoids a process spawn per request and keeps the response in memory -- but it is
-the obvious way to reach the A30 later, and the interface should be shaped so
-that backend is a drop-in.
+server. It stays the fallback rather than the plan, because dlopen avoids a
+process spawn per request and keeps the response in memory -- but it is the way
+to reach a device with a `curl` binary and no loadable libcurl, which is
+exactly the A30, and the interface is shaped so that backend is a drop-in.
 
-**Where this degrades, and the cost of accepting that.** The two static
-handhelds do not get achievements in v1, and it is worth being blunt that
-this is a real limitation rather than an oversight:
+**Where this degrades -- corrected 2026-09-09.** An earlier revision of this
+document said the other two handheld tiers link `-static`, so `dlopen` could
+never work there. **That was wrong**, and it was wrong in the direction that
+closes doors: neither build is static. `toolchains/a30/tc-a30.cmake` sets
+`-static-libstdc++ -static-libgcc` -- the C++ runtime only -- and
+`toolchains/rg35xxsp/build-dsperate.sh` passes no `-static` at all. glibc is
+dynamic in both, so `dlopen` works exactly as it does on the RG DS.
 
-| device | libcurl.so | CA bundle | our build | v1 |
-|--------|-----------|-----------|-----------|-----|
-| RG DS / ROCKNIX | **yes** | **yes** | dynamic | **works** |
-| RG35XX SP | no | yes | `-static` | no |
-| Miyoo A30 | no | none | `-static` | no |
+What actually decides it is whether a libcurl for the right architecture is
+present:
 
-Both secondary tiers link `-static` (`rg35xxsp-static-build`,
-`miyoo-a30-build-and-display`), and `dlopen` from a fully static glibc binary
-is unsupported -- so those builds could not use a CFW library even if one were
-installed. Two later routes exist, both behind the same transport interface
-and neither in v1: link libcurl statically into those two tiers, or shell out
-to a `curl` binary (the A30 has one at `/mnt/SDCARD/spruce/bin/curl`). Putting
-the transport behind an interface from the start is what keeps those cheap, so
-do that even though v1 has exactly one backend.
+| device | libcurl the loader can see | CA store | achievements |
+|--------|---------------------------|----------|--------------|
+| RG DS / ROCKNIX | `libcurl.so.4`, system | yes | **works** |
+| spruce, H700 (aarch64) | none installed, but see below | `/mnt/SDCARD/spruce/etc/ca-certificates.crt` | **works once one is dropped in** |
+| Miyoo A30 (armv7) | none anywhere on the device | same | no armhf build exists |
+| RG35XX SP (NextUI) | none | `/etc/ssl/certs/...` | none installed |
+
+And the way to give it one is already built into the CFW, which is why this
+code has **no list of paths to hunt through**. spruce's
+`spruce/scripts/emu/lib/dsperate_functions.sh` does:
+
+```sh
+run_dsperate() {
+        export HOME="$EMU_DIR"
+        export LD_LIBRARY_PATH="$EMU_DIR/lib64:$LD_LIBRARY_PATH"
+```
+
+So a `libcurl.so.4` placed in the emulator's own `lib64` (`/mnt/SDCARD/Emu/NDS/lib64`,
+which already holds a `libfreeimage.so.3`) is found by the plain
+`dlopen("libcurl.so.4")` with no code change at all. That is the supported hook,
+and it belongs to whoever packages DSperate for the device.
+
+The tempting alternative was to probe the copies spruce ships with other
+applications -- there are aarch64 `libcurl.so.4`s under `Emu/DC/lib64`,
+`Emu/SCUMMVM/lib` and the Moonlight port. Rejected: it would work until any of
+them moved, and it is borrowing a library nobody offered us.
+`DS_CHEEVOS_LIBCURL` covers the case where a firmware puts one somewhere the
+loader cannot see.
+
+The A30 is the one genuine gap, and not for a reason DSperate can fix: every
+libcurl on that card is **AArch64**, shipped for the H700 device the same
+spruce image serves. A 32-bit process cannot load them, and a filesystem-wide
+search finds no armhf libcurl at all. That needs an armhf build from the
+packager. The `curl`-subprocess backend remains the other route, behind the
+same interface.
 
 **Driving the runtime.** `rc_client_do_frame` is called **exactly once per
 frame advance**, never batched and never twice. drastic-nano's notes are
