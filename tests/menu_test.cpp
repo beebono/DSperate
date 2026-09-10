@@ -1142,11 +1142,11 @@ void test_text_editor() {
   m.input(press(B::BTN_A));
   m.input(press(B::BTN_A));                                    // the nickname editor
   CHECK(h.writes.empty());                                     // opening writes nothing
-  m.input(press(B::BTN_DOWN));                                 // A -> B
+  m.input(press(B::BTN_UP));                                   // A -> B
   m.input(press(B::BTN_B));                                    // abandon
   CHECK(h.kv["user.nickname"] == "AB");                        // ... and nothing was kept
   m.input(press(B::BTN_A));                                    // open it again
-  m.input(press(B::BTN_DOWN));                                 // A -> B
+  m.input(press(B::BTN_UP));                                   // A -> B
   m.input(press(B::BTN_A));                                    // commit
   CHECK(h.kv["user.nickname"] == "BB");
   // The cursor moves along the field and past its end, up to the length the
