@@ -397,6 +397,40 @@ void test_draw_bounds() {
   }
 }
 
+// A state refused at boot is reported on the slot row: the player who finds
+// their game at the beginning has somewhere to look. The row must still fit
+// the panel (it is what sizes the widest form), and the notice must go away
+// as soon as they touch the slot.
+void test_slot_notice() {
+  const u32 w = ds::SCREEN_W, h = ds::SCREEN_H;
+  std::vector<u32> fb((w + 2) * (h + 2), 0xDEADBEEF);
+  Menu m;
+  m.set_open(true);
+  m.set_slot_notice("REJECTED");
+  // Drawn with the same guard band as test_draw_bounds: the longer label must
+  // not push the panel off the canvas.
+  m.draw(ds::sdl::Canvas{fb.data() + (w + 2) + 1, static_cast<ds::u32>(w + 2), w, h});
+  for (u32 x = 0; x < w + 2; ++x) CHECK(fb[x] == 0xDEADBEEF);
+  for (u32 x = 0; x < w + 2; ++x) CHECK(fb[(h + 1) * (w + 2) + x] == 0xDEADBEEF);
+  for (u32 y = 0; y < h + 2; ++y) CHECK(fb[y * (w + 2)] == 0xDEADBEEF);
+  for (u32 y = 0; y < h + 2; ++y) CHECK(fb[y * (w + 2) + w + 1] == 0xDEADBEEF);
+  // The warning colour is on the panel somewhere; without the notice it is not.
+  const u32 kWarn = 0xFFFFC050;
+  CHECK(std::find(fb.begin(), fb.end(), kWarn) != fb.end());
+  m.clear_slot_notice();
+  std::fill(fb.begin(), fb.end(), 0xDEADBEEF);
+  m.draw(ds::sdl::Canvas{fb.data() + (w + 2) + 1, static_cast<ds::u32>(w + 2), w, h});
+  CHECK(std::find(fb.begin(), fb.end(), kWarn) == fb.end());
+  // Stepping the slot clears it, so it never outlives the player's attention.
+  m.set_slot_notice("REJECTED");
+  m.input(press(B::BTN_DOWN));   // onto LOAD... walk to the slot row
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_RIGHT));  // step the slot
+  std::fill(fb.begin(), fb.end(), 0xDEADBEEF);
+  m.draw(ds::sdl::Canvas{fb.data() + (w + 2) + 1, static_cast<ds::u32>(w + 2), w, h});
+  CHECK(std::find(fb.begin(), fb.end(), kWarn) == fb.end());
+}
+
 void test_text_metrics() {
   std::vector<u32> fb(ds::SCREEN_W * ds::SCREEN_H, 0);
   const ds::sdl::Canvas d{fb.data(), ds::SCREEN_W, ds::SCREEN_W, ds::SCREEN_H};
@@ -1256,6 +1290,7 @@ int main() {
   test_slot_grid_navigation();
   test_slot_untouched_off_row();
   test_draw_bounds();
+  test_slot_notice();
   test_text_metrics();
   test_dim();
   test_cheats_row_hidden_without_codes();

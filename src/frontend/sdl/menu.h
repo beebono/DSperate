@@ -192,6 +192,12 @@ public:
   void set_slot(int s) { slot_ = s; }
   // Shown on the root row so the player can see what a save would overwrite.
   void set_slot_used(int s, bool used) { if (s >= 0 && s < 10) used_[s] = used; }
+  // A short word shown after "SLOT < n >" when a state was refused rather
+  // than loaded -- an autoloaded slot that silently started the game from
+  // the beginning is otherwise invisible. Cleared as soon as the player acts
+  // on the slot; the console log carries the reason.
+  void set_slot_notice(const char* n) { slot_notice_ = n ? n : ""; }
+  void clear_slot_notice() { slot_notice_.clear(); }
 
   // One menu tick. `presses` are the button edges since the last call, `held`
   // is what is down now (for key repeat) and `ms` is how long since the last
@@ -232,6 +238,7 @@ private:
   int  row_ = 0;        // the root page's selection
   int  slot_row_ = 0;   // the slot page's, kept apart so backing out lands where it left
   int  slot_ = 0;
+  std::string slot_notice_;
   bool used_[10] = {};
 
   std::vector<cheat::Code>* codes_ = nullptr;

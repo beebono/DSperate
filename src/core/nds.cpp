@@ -105,6 +105,11 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
   if (b7.empty()) std::memcpy(bus.bios7.get(), bios::kFreeBios7, bios::kFreeBios7_len);
   else std::memcpy(bus.bios7.get(), b7.data(), b7.size());
   bios_native = !b9.empty() && !b7.empty();
+  // Over the regions as they will be seen, not the files: that covers the
+  // FreeBIOS substitution and its zero fill in one hash.
+  bios_id = 1469598103934665603ull;
+  for (u32 i = 0; i < mem::Bus::BIOS9_SIZE; ++i) bios_id = (bios_id ^ bus.bios9.get()[i]) * 1099511628211ull;
+  for (u32 i = 0; i < mem::Bus::BIOS7_SIZE; ++i) bios_id = (bios_id ^ bus.bios7.get()[i]) * 1099511628211ull;
   firmware_synthetic = fw.empty();
   firmware = firmware_synthetic ? bios::generate_firmware(user) : std::move(fw);
   firmware_id = 1469598103934665603ull;
@@ -451,6 +456,8 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   w.begin("HEAD");
   w.put(cart ? cart->header().game_code_u32() : 0u);   // 0: a firmware boot, no card in the slot
   w.put(rom_id);
+  w.put(bios_id);        // the state resumes inside the BIOS; see NDS::bios_id
+  w.put(firmware_id);    // recorded to explain a divergence, not enforced (see load_state)
   w.put(frame_count);
 #if DSPERATE_JIT
   w.put(u32{1});
@@ -486,14 +493,31 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   if (std::memcmp(magic, "DSST", 4) != 0) { err = "not a DSperate save state"; return false; }
   if (version != state::FORMAT_VERSION) { err = "save state format " + std::to_string(version) + ", this build reads " + std::to_string(state::FORMAT_VERSION); return false; }
   if (!r.begin("HEAD")) { err = r.error(); return false; }
-  u32 code = 0; u64 ident = 0, frames = 0; u32 jit_built = 0;
-  r.fields(code, ident, frames, jit_built);
+  u32 code = 0; u64 ident = 0, bios = 0, fw = 0, frames = 0; u32 jit_built = 0;
+  r.fields(code, ident, bios, fw, frames, jit_built);
   r.end();
   // A state taken on a firmware boot records a zero game code and identity;
   // it only loads back into another firmware boot, and vice versa.
   const u32 want_code = cart ? cart->header().game_code_u32() : 0u;
   if (code != want_code) { err = cart ? "save state is for another game" : "save state is for a game, not the firmware"; return false; }
   if (ident != rom_id) { err = "save state is for another ROM image"; return false; }
+  // The BIOS is not in the state, but the CPUs' PCs are, and at a frame
+  // boundary the ARM7 is almost always inside a BIOS routine. Resuming that
+  // against a different pair -- swapping a dump for FreeBIOS or back -- puts
+  // it in unrelated code: measured on Mario & Luigi: Bowser's Inside Story,
+  // the ARM7 parks in Undefined mode with IRQs masked and never returns,
+  // which reads to a player as a hang with dead sound and controls.
+  if (bios != bios_id) {
+    err = "save state was made with a different BIOS (" +
+          std::string(bios_native ? "this run has BIOS dumps, the state was made with others or with FreeBIOS"
+                                  : "this run uses the built-in FreeBIOS, the state was made with BIOS dumps") +
+          "); it would resume the ARM7 inside the wrong BIOS";
+    return false;
+  }
+  // A different firmware does not wedge the machine the way a different BIOS
+  // does -- nothing resumes inside it -- so it is reported, not refused.
+  if (fw != firmware_id)
+    std::fprintf(stderr, "state: made with a different firmware; the console identity a game stored in its save may not match\n");
 
   // From here the machine is being overwritten: a failure leaves it broken.
   gpu.prepare_load();

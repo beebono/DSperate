@@ -443,6 +443,12 @@ bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::
 // caller must reset the machine if this fails after the load began (the
 // error says so). `layout` is set to the view the state carries, when it
 // carries one (a headless or older file does not), and left alone otherwise.
+// Set when load_state_file() was given a real state and the core refused it
+// -- a BIOS mismatch, another ROM, an older format. Not set for an empty or
+// unreadable slot, which is nothing to report. The menu shows it on the slot
+// row (Menu::set_slot_notice); the reason has already gone to the log.
+std::string g_state_refused;
+
 bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout& layout, bool& layout_loaded) {
   layout_loaded = false;
   std::vector<u8> bytes;
@@ -452,9 +458,14 @@ bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout
     std::fclose(f);
   }
   if (bytes.empty()) { std::fprintf(stderr, "state: no state in slot (%s)\n", path.c_str()); return false; }
+  g_state_refused.clear();
   ds::state::Reader r(bytes.data(), bytes.size());
   std::string err;
-  if (!nds.load_state(r, err)) { std::fprintf(stderr, "state: cannot load %s: %s\n", path.c_str(), err.c_str()); return false; }
+  if (!nds.load_state(r, err)) {
+    std::fprintf(stderr, "state: cannot load %s: %s\n", path.c_str(), err.c_str());
+    g_state_refused = "REJECTED";
+    return false;
+  }
   layout_loaded = read_layout_chunk(r, layout);
   read_cheevos_chunk(r);
   std::fprintf(stderr, "state: loaded %s (frame %llu%s)\n", path.c_str(), static_cast<unsigned long long>(nds.frame_count),
@@ -1614,7 +1625,11 @@ sdl_ready:
     FILE* f = std::fopen(state_path(nds, session.states_dir, i).c_str(), "rb");
     menu.set_slot_used(i, f != nullptr);
     if (f) std::fclose(f);
-  } };
+  }
+  // Carried onto the slot row: a state refused at boot (the auto slot loads
+  // before there is a menu to tell) would otherwise show only as the game
+  // starting from the beginning.
+  menu.set_slot_notice(g_state_refused.empty() ? nullptr : g_state_refused.c_str()); };
   // Battery save flush: once the chip has been quiet for a second, and at
   // every point a session could end (pause, lid, quit).
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
@@ -2478,7 +2493,10 @@ sdl_ready:
         // which a load would leave unreplayable.
         case Menu::Result::Save:
           if (save_readonly) std::fprintf(stderr, "state: not during a replay\n");
-          else if (save_state_file(nds, state_path(nds, session.states_dir, menu.slot()), display.current_layout())) flush_save();
+          else if (save_state_file(nds, state_path(nds, session.states_dir, menu.slot()), display.current_layout())) {
+            g_state_refused.clear();   // the slot now holds a state this build made
+            flush_save();
+          }
           refresh_slots();
           break;
         case Menu::Result::Load:

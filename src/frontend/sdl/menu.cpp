@@ -157,6 +157,7 @@ void fill_rect(const Canvas& d, int x, int y, int w, int h, u32 colour) {
 
 constexpr u32 kInk = 0xFFFFFFFF, kDim = 0xFF909090, kPanel = 0xFF101018, kEdge = 0xFF5060A0, kSel = 0xFF3050A0;
 constexpr u32 kEdgeText = 0xFFA0B0E0, kPanelEdgeDim = 0xFF303040;   // group headings; the scroll-bar track
+constexpr u32 kWarn = 0xFFFFC050;   // the slot row when a state was refused
 
 // The panel every page sits in: a filled box with a one-pixel edge.
 void panel(const Canvas& d, int x, int y, int w, int h) {
@@ -447,7 +448,7 @@ Menu::Result Menu::handle(u32 presses) {
     if (hit(B::BTN_DOWN))  slot_row_ = (slot_row_ % kSlotRows == kSlotRows - 1) ? slot_row_ - kSlotRows + 1 : slot_row_ + 1;
     if (hit(B::BTN_LEFT) || hit(B::BTN_RIGHT)) slot_row_ = (slot_row_ + kSlotRows) % 10;
     if (hit(B::BTN_B)) { pop(); return Result::None; }
-    if (hit(B::BTN_A) || hit(B::BTN_START)) { slot_ = slot_row_; pop(); }
+    if (hit(B::BTN_A) || hit(B::BTN_START)) { slot_ = slot_row_; slot_notice_.clear(); pop(); }
     return Result::None;
   }
   if (page() == Page::Games) {
@@ -487,8 +488,8 @@ Menu::Result Menu::handle(u32 presses) {
   // not need the page at all.
   const int item = root_item(row_);
   if (item == kSlotRow) {
-    if (hit(B::BTN_LEFT))  slot_ = (slot_ + 9) % 10;
-    if (hit(B::BTN_RIGHT)) slot_ = (slot_ + 1) % 10;
+    if (hit(B::BTN_LEFT))  { slot_ = (slot_ + 9) % 10; slot_notice_.clear(); }
+    if (hit(B::BTN_RIGHT)) { slot_ = (slot_ + 1) % 10; slot_notice_.clear(); }
   }
   if (hit(B::BTN_B)) return Result::Resume;
   if (!hit(B::BTN_A) && !hit(B::BTN_START)) return Result::None;
@@ -1542,7 +1543,7 @@ void Menu::draw(const Canvas& d) const {
     for (int i = 0; i < kRootRows; ++i) {
       if (!root_visible(i)) continue;
       // The slot row formats its own text; "SLOT < 0 >" is its widest form.
-      const char* label = kRoot[i].label ? kRoot[i].label : "SLOT < 0 >";
+      const char* label = kRoot[i].label ? kRoot[i].label : (slot_notice_.empty() ? "SLOT < 0 >" : "SLOT < 0 > REJECTED");
       // The 3*s the label is indented by, on both sides, plus the panel's own
       // padding: without the second one the text sits hard against the edge.
       w = std::max(w, text_width(mm.s, label) + 6 * mm.s + 2 * mm.pad);
@@ -1575,12 +1576,19 @@ void Menu::draw(const Canvas& d) const {
     const char* label = buf;
     const int item = slots ? i : root_item(i);
     if (slots) std::snprintf(buf, sizeof buf, "%d %s", i, used_[i] ? "USED" : "EMPTY");
-    else if (item == kSlotRow) std::snprintf(buf, sizeof buf, "SLOT < %d >", slot_);
+    else if (item == kSlotRow) std::snprintf(buf, sizeof buf, "SLOT < %d >%s%s", slot_,
+                                             slot_notice_.empty() ? "" : " ", slot_notice_.c_str());
     else label = kRoot[item].label;
     // Loading an empty slot, and every empty slot in the list, reads dimmer:
     // the menu says what is there before the player commits to it.
     const bool weak = (slots && !used_[i]) || (!slots && kRoot[item].result == Result::Load && !used_[slot_]);
-    draw_text(d, cell_x + 3 * m.s, ry, scale, weak && i != (slots ? slot_row_ : row_) ? kDim : kInk, label);
+    // A refused state is the one thing on this page the player did not ask
+    // for and cannot see the consequence of -- the game just started at the
+    // beginning -- so the slot row says so in warning colour until they move
+    // off it. The console log says which BIOS, and why.
+    const bool warn = !slots && item == kSlotRow && !slot_notice_.empty();
+    const u32 ink = warn ? kWarn : (weak && i != (slots ? slot_row_ : row_) ? kDim : kInk);
+    draw_text(d, cell_x + 3 * m.s, ry, scale, ink, label);
   }
 }
 

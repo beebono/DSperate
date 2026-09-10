@@ -133,6 +133,14 @@ struct NDS {
   std::vector<u8> fw_page_dirty;
   u32 fw_dirty_pages = 0;
   u64 firmware_id = 0;           // identity of the pristine dump; an override names it
+  // Identity of the two BIOS images in bus.bios9/bios7, set by load_bios.
+  // A save state restores the ARM7 mid-BIOS-routine nearly every time -- at a
+  // frame boundary it idles in the BIOS's IntrWait loop -- and the BIOS is
+  // not part of the state, so resuming one against a different pair lands the
+  // PC in unrelated code (FreeBIOS fills only 0x2030 of the ARM7 region; the
+  // rest is zero). The state header carries this so the load is refused
+  // instead.
+  u64 bios_id = 0;
 
   mem::Bus   bus;
   Scheduler  sched;

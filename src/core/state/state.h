@@ -24,7 +24,7 @@ namespace ds::state {
 // A chunk may grow: a reader that reaches the end of a chunk early stops
 // taking fields (`more()` is false), and a writer that appends fields keeps
 // old files loadable as long as the new fields default sensibly.
-constexpr u32 FORMAT_VERSION = 1;
+constexpr u32 FORMAT_VERSION = 2;   // 2: HEAD carries bios_id + firmware_id
 
 class Writer {
 public:
