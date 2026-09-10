@@ -245,12 +245,26 @@ Both devices already have a directory on `LD_LIBRARY_PATH` that will do, so
 | spruce H700 (aarch64) | `Emu/NDS/lib64/`, **with `libssl.so.1.1` and `libcrypto.so.1.1` beside it** | `run_dsperate` exports `$EMU_DIR/lib64` |
 | Miyoo A30 (armv7) | `/mnt/SDCARD/spruce/miyoomini/lib/` | `platform/miyoo_mini_startup.sh:14` exports it platform-wide, first |
 
-The H700 wants all three because `spruce/h700/lib64` -- which does hold OpenSSL
-1.1 -- is **not** on the general path (`AnbernicXXCommon.cfg:101` lists
-`dll-mali`, `spruce/flip/lib`, `/usr/lib`, `/usr/lib/aarch64-linux-gnu`, and
-line 510 adds only `h700/lib32`). That is exactly why spruce's own DC emulator
-keeps the trio in `Emu/DC/lib64`, and copying those three files is the whole
-job.
+The H700 case depends on which OpenSSL the libcurl was built against, and
+spruce's own notes settle it. `spruce/h700/lib64/PROVENANCE.md` says of the
+OpenSSL pair it keeps there:
+
+> `libssl.so.1.1`, `libcrypto.so.1.1` | E-Reader only (`libzip` wants OpenSSL
+> 1.1; **BaseOS has 3**).
+
+So the H700 rootfs provides OpenSSL **3**, on the path via
+`/usr/lib/aarch64-linux-gnu` (`AnbernicXXCommon.cfg:101`), and 1.1 only where an
+app brings it. Two ways to finish, both fine:
+
+- **Copy the trio from `Emu/DC/lib64`** -- `libcurl.so.4`, `libssl.so.1.1`,
+  `libcrypto.so.1.1` -- into `Emu/NDS/lib64`. No build at all, and it is what
+  the DC emulator already does for the same reason.
+- **Or ship one `libcurl.so.4` built against OpenSSL 3**, which needs nothing
+  beside it because BaseOS already has 3.
+
+Note `spruce/h700/lib64` itself is *not* a candidate: nothing puts it on a
+global path (line 510 adds only `h700/lib32`), and its own PROVENANCE says that
+is deliberate.
 
 The A30 wants only libcurl, because `spruce/miyoomini/lib` already holds
 `libssl.so.1.1`, `libcrypto.so.1.1` and `libz.so.1`, all armhf.
