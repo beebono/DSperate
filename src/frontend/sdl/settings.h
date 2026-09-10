@@ -43,6 +43,7 @@ enum class Dep : u8 {
   Chunky,             // video.linear off (chunky survives at DS resolution)
   ChunkyCell,         // Chunky, and video.chunky not off
   Windowed,           // the tier does not own the panel outright
+  OneWindow,          // not dual-window: two panels show one screen each, so there is no layout
   Pip,                // the layout is pip
   PipTouchHold,       // Pip, and the inset is not fully opaque (it is a fade timer)
   Dominant,           // the layout is dominant_v or dominant_h
@@ -138,6 +139,13 @@ struct SettingsHost {
   // Returns null when there is nothing worth saying.
   virtual const char* user_settings_note() const = 0;
 };
+
+// The Layout page's hotkey-cycle rows are one checkbox per Display::Mode,
+// keyed "video.layout_cycle.<mode>". They are the host's view onto the ini's
+// single `video.layout_cycle` list: get() answers whether the mode is in it,
+// set() adds or removes it. The host refuses to remove the last one, so the
+// hotkeys always have somewhere to go.
+constexpr const char* kLayoutCyclePrefix = "video.layout_cycle.";
 
 // The pages. Each is terminated by a row with a null key.
 extern const Setting kEmuSettings[];

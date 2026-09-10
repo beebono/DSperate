@@ -34,11 +34,20 @@ const Choice kMonth[]    = {{"1", "JANUARY"}, {"2", "FEBRUARY"}, {"3", "MARCH"},
                             {"9", "SEPTEMBER"}, {"10", "OCTOBER"}, {"11", "NOVEMBER"}, {"12", "DECEMBER"}};
 const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
                             {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
+// A checkbox: the same two values as kOnOff, drawn as a box. Rows that are
+// members of a set rather than switches read better that way.
+const Choice kCheck[]    = {{"false", "[ ]"}, {"true", "[X]"}};
+// Display::mode_name's words, in Display::Mode order.
+const Choice kLayout[]   = {{"vertical", "VERTICAL"}, {"horizontal", "HORIZONTAL"}, {"single", "SINGLE"},
+                            {"pip", "PIP"}, {"dominant_v", "DOMINANT V"}, {"dominant_h", "DOMINANT H"}};
 const Choice kCorner[]   = {{"tl", "TOP LEFT"}, {"tr", "TOP RIGHT"}, {"bl", "BOTTOM LEFT"}, {"br", "BOTTOM RIGHT"}};
 
 // Shorthand for the common shapes, so a table row reads as its own contents.
 constexpr Setting boolean(const char* k, const char* l, const char* def, u8 f, Dep d, const char* n) {
   return Setting{k, l, T::Bool, kOnOff, 2, 0, 0, 0, nullptr, nullptr, nullptr, def, f, d, n};
+}
+constexpr Setting check(const char* k, const char* l, const char* def, u8 f, Dep d, const char* n) {
+  return Setting{k, l, T::Bool, kCheck, 2, 0, 0, 0, nullptr, nullptr, nullptr, def, f, d, n};
 }
 constexpr Setting pick(const char* k, const char* l, const Choice* c, u8 nc, const char* def, u8 f, Dep d, const char* n) {
   return Setting{k, l, T::Pick, c, nc, 0, 0, 0, nullptr, nullptr, nullptr, def, f, d, n};
@@ -103,6 +112,8 @@ const Setting kVideoSettings[] = {
 };
 
 const Setting kLayoutSettings[] = {
+  pick("video.layout", "LAYOUT", kLayout, 6, "vertical", FlagDeferred, Dep::OneWindow,
+       "HOW THE TWO SCREENS SHARE THE WINDOW"),
   pick("video.screen", "MAIN SCREEN", kScreen, 2, "top", FlagDeferred, Dep::None,
        "THE SCREEN SHOWN ALONE, LARGE OR FIRST"),
   pick("video.pip_corner", "PIP CORNER", kCorner, 4, "br", FlagDeferred, Dep::Pip,
@@ -117,6 +128,20 @@ const Setting kLayoutSettings[] = {
           "THE SMALLER SCREEN'S SIZE. AUTO FITS WHOLE PIXELS", "auto", "AUTO"),
   percent("video.dominant_threshold", "DOMINANT THRESHOLD", 10, 99, 5, "0.25", FlagDeferred, Dep::DominantThreshold,
           "THE SMALLEST SECONDARY AUTO WILL ACCEPT"),
+  // What the layout hotkeys step through, one box per layout. Live: the
+  // hotkeys read the list when pressed, and nothing on screen moves.
+  check("video.layout_cycle.vertical", "CYCLE VERTICAL", "true", FlagLive, Dep::OneWindow,
+        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
+  check("video.layout_cycle.horizontal", "CYCLE HORIZONTAL", "true", FlagLive, Dep::OneWindow,
+        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
+  check("video.layout_cycle.single", "CYCLE SINGLE", "true", FlagLive, Dep::OneWindow,
+        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
+  check("video.layout_cycle.pip", "CYCLE PIP", "true", FlagLive, Dep::OneWindow,
+        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
+  check("video.layout_cycle.dominant_v", "CYCLE DOMINANT V", "true", FlagLive, Dep::OneWindow,
+        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
+  check("video.layout_cycle.dominant_h", "CYCLE DOMINANT H", "true", FlagLive, Dep::OneWindow,
+        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS. ONE ALWAYS STAYS"),
   end(),
 };
 

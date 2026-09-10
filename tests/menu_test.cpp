@@ -928,6 +928,37 @@ void test_percent_round_trip() {
   CHECK(ds::sdl::step_value(*pip, v, +1, h) == v);   // clamped
 }
 
+// The Layout page: the LAYOUT pick heads it, one checkbox per Display mode
+// follows, and a host that refuses to empty the hotkey ring leaves the last
+// tick where it is rather than wrapping to nothing.
+void test_layout_page_rows() {
+  const ds::sdl::Setting* t = ds::sdl::kLayoutSettings;
+  const int n = ds::sdl::settings_count(t);
+  CHECK(!std::strcmp(t[0].key, "video.layout"));
+  CHECK(t[0].type == ds::sdl::Setting::Type::Pick && t[0].nchoices == 6);
+  CHECK(ds::sdl::display_value(t[0], "dominant_h") == "DOMINANT H");
+  const size_t pl = std::strlen(ds::sdl::kLayoutCyclePrefix);
+  int boxes = 0;
+  for (int i = 0; i < n; ++i)
+    if (!std::strncmp(t[i].key, ds::sdl::kLayoutCyclePrefix, pl)) {
+      ++boxes;
+      CHECK(t[i].type == ds::sdl::Setting::Type::Bool);
+      CHECK(ds::sdl::display_value(t[i], "true") == "[X]");
+      CHECK(ds::sdl::display_value(t[i], "false") == "[ ]");
+    }
+  CHECK(boxes == 6);
+  // The host says which values a row may take; refusing "false" is how the
+  // real one keeps one layout in the ring.
+  struct LastTick final : FakeHost {
+    bool value_allowed(const ds::sdl::Setting&, const char* v) const override { return std::strcmp(v, "false") != 0; }
+  } h;
+  const ds::sdl::Setting& box = t[n - 1];
+  CHECK(ds::sdl::step_value(box, "true", +1, h) == "true");
+  CHECK(ds::sdl::step_value(box, "true", -1, h) == "true");
+  FakeHost free;
+  CHECK(ds::sdl::step_value(box, "true", +1, free) == "false");
+}
+
 // A value the file already holds outside the menu's range is shown as it
 // stands and stepped from where it is, not clamped the moment the page opens.
 void test_out_of_range_value_is_kept() {
@@ -1341,6 +1372,7 @@ int main() {
   test_slot_row_is_separate();
   test_setting_steps();
   test_percent_round_trip();
+  test_layout_page_rows();
   test_out_of_range_value_is_kept();
   test_defaults_are_reachable();
   test_disabled_rows_are_skipped();

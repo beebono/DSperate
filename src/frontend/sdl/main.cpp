@@ -757,6 +757,32 @@ struct VideoSetup {
   int    bottom_display = 1;
 };
 
+constexpr const char* kDefaultLayoutCycle = "vertical,horizontal,single,pip,dominant_v,dominant_h";
+
+// "vertical, pip" -> the modes, in the file's order. Duplicates are kept as
+// written; an unknown name is reported and fails the parse. `out` is what the
+// file said, possibly empty -- the caller decides what an empty ring means.
+bool parse_layout_cycle(const std::string& cyc, std::vector<ds::sdl::Display::Mode>& out) {
+  using Disp = ds::sdl::Display;
+  out.clear();
+  for (size_t at = 0; at <= cyc.size();) {
+    size_t end = cyc.find(',', at); if (end == std::string::npos) end = cyc.size();
+    std::string name = cyc.substr(at, end - at);
+    name.erase(0, name.find_first_not_of(' ')); name.erase(name.find_last_not_of(' ') + 1);
+    Disp::Mode m;
+    if (!name.empty() && !Disp::parse_mode(name, m)) { std::fprintf(stderr, "unknown layout %s in layout_cycle\n", name.c_str()); return false; }
+    if (!name.empty()) out.push_back(m);
+    at = end + 1;
+  }
+  return true;
+}
+
+std::string layout_cycle_string(const std::vector<ds::sdl::Display::Mode>& cycle) {
+  std::string s;
+  for (ds::sdl::Display::Mode m : cycle) { if (!s.empty()) s += ','; s += ds::sdl::Display::mode_name(m); }
+  return s;
+}
+
 bool parse_video(const ds::sdl::Config& cfg, VideoSetup& vs) {
   using Disp = ds::sdl::Display;
   vs.scale = cfg.num("video.scale", 2);
@@ -800,16 +826,7 @@ bool parse_video(const ds::sdl::Config& cfg, VideoSetup& vs) {
     else { std::fprintf(stderr, "unknown screen %s (top | bottom)\n", sc.c_str()); return false; }
     if (!Disp::parse_corner(co, vs.layout.corner)) { std::fprintf(stderr, "unknown pip_corner %s (tl | tr | bl | br)\n", co.c_str()); return false; }
     // The ring layout_next/prev step through; a mode outside it joins at its start.
-    std::string cyc = cfg.str("video.layout_cycle", "vertical,horizontal,single,pip,dominant_v,dominant_h");
-    for (size_t at = 0; at <= cyc.size();) {
-      size_t end = cyc.find(',', at); if (end == std::string::npos) end = cyc.size();
-      std::string name = cyc.substr(at, end - at);
-      name.erase(0, name.find_first_not_of(' ')); name.erase(name.find_last_not_of(' ') + 1);
-      Disp::Mode m;
-      if (!name.empty() && !Disp::parse_mode(name, m)) { std::fprintf(stderr, "unknown layout %s in layout_cycle\n", name.c_str()); return false; }
-      if (!name.empty()) vs.layout_cycle.push_back(m);
-      at = end + 1;
-    }
+    if (!parse_layout_cycle(cfg.str("video.layout_cycle", kDefaultLayoutCycle), vs.layout_cycle)) return false;
     if (vs.layout_cycle.empty()) vs.layout_cycle.push_back(vs.layout.mode);
     vs.layout.pip = std::clamp(cfg.real("video.pip_scale", 1.0 / 3.0), 0.1, 0.9);
     vs.layout.pip_alpha = std::clamp(cfg.real("video.pip_alpha", 1.0), 0.0, 1.0);
@@ -1735,8 +1752,30 @@ sdl_ready:
     Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi, ds::sdl::Input& in)
         : cfg(c), nds(n), display(d), vs(v), global_ini(gi), game_ini(pi), input(in) {}
 
+    // The LAYOUT row reads the live layout, not the file: the hotkeys and a
+    // loaded state move it without writing video.layout. Until commit() a
+    // choice made on the row is held here, so the row shows what was picked
+    // and the pip/dominant rows switch on for it straight away.
+    std::string pending_mode;
+    Disp::Mode effective_mode() const {
+      Disp::Mode m;
+      if (!pending_mode.empty() && Disp::parse_mode(pending_mode, m)) return m;
+      return display.current_layout().mode;
+    }
+    // The cycle checkboxes: which mode a row names, or false for any other key.
+    static bool cycle_key(const char* key, Disp::Mode& m) {
+      const size_t n = std::strlen(ds::sdl::kLayoutCyclePrefix);
+      return std::strncmp(key, ds::sdl::kLayoutCyclePrefix, n) == 0 && Disp::parse_mode(key + n, m);
+    }
+    bool in_cycle(Disp::Mode m) const {
+      return std::find(vs.layout_cycle.begin(), vs.layout_cycle.end(), m) != vs.layout_cycle.end();
+    }
+
     std::string get(const char* key) const override {
       if (is_user_key(key) && user_in_firmware()) return user_get(key);
+      if (std::strcmp(key, "video.layout") == 0) return Disp::mode_name(effective_mode());
+      Disp::Mode m;
+      if (cycle_key(key, m)) return in_cycle(m) ? "true" : "false";
       return cfg.str(key, "");
     }
 
@@ -1745,6 +1784,26 @@ sdl_ready:
       // there is a dump to hold them: writing [user] there would change
       // nothing, since the dump's pages are what the console reads.
       if (is_user_key(key) && user_in_firmware()) { user_set(key, value); return; }
+      // A checkbox edits the ring: the ring is what the file keeps, so that is
+      // what gets applied and stored. Ticking a mode that is out of the ring
+      // puts it back at its place in Display::Mode order among the ones that
+      // are in, so the ring reads the same way whatever order it was built.
+      Disp::Mode m;
+      if (cycle_key(key, m)) {
+        std::vector<Disp::Mode> ring = vs.layout_cycle;
+        const bool on = value == "true";
+        if (on && !in_cycle(m)) {
+          auto at = ring.begin();
+          while (at != ring.end() && *at < m) ++at;
+          ring.insert(at, m);
+        } else if (!on) {
+          ring.erase(std::remove(ring.begin(), ring.end(), m), ring.end());
+          if (ring.empty()) return;   // never nothing: value_allowed refuses this too
+        }
+        set("video.layout_cycle", layout_cycle_string(ring));
+        return;
+      }
+      if (std::strcmp(key, "video.layout") == 0) pending_mode = value;
       cfg.set(key, value);
       apply(key, value);
       // Remembered where the player asked. The per-game file is only offered
@@ -1995,6 +2054,12 @@ sdl_ready:
     bool panel_effects() const { return !display.effects_at_source(); }
 
     bool value_allowed(const ds::sdl::Setting& s, const char* value) const override {
+      // The last ticked layout cannot be unticked: the hotkeys need somewhere
+      // to go, and an empty ring would mean "only the current layout", which
+      // is not what unticking everything reads as.
+      Disp::Mode m;
+      if (cycle_key(s.key, m))
+        return std::strcmp(value, "false") != 0 || !in_cycle(m) || vs.layout_cycle.size() > 1;
       if (std::strcmp(s.key, "video.chunky") != 0 || panel_effects()) return true;
       return !std::strcmp(value, "false") || !std::strcmp(value, "mean");
     }
@@ -2004,8 +2069,11 @@ sdl_ready:
     const char* disabled_reason(const ds::sdl::Setting& s) const override {
       const auto flag = [&](const char* k, bool def) { return cfg.flag(k, def); };
       const Disp::Layout& l = display.current_layout();
-      const bool pip = l.mode == Disp::Mode::Pip;
-      const bool dominant = l.mode == Disp::Mode::DominantV || l.mode == Disp::Mode::DominantH;
+      // The mode the page is working towards, so picking PIP on the LAYOUT
+      // row lights the pip rows before the menu has closed.
+      const Disp::Mode mode = effective_mode();
+      const bool pip = mode == Disp::Mode::Pip;
+      const bool dominant = mode == Disp::Mode::DominantV || mode == Disp::Mode::DominantH;
       switch (s.depends) {
       case ds::sdl::Dep::None: return "";
       case ds::sdl::Dep::FrameskipMode:
@@ -2024,6 +2092,9 @@ sdl_ready:
         // A tier that owns the panel is already filling it; there is no
         // window to make bigger.
         return display.scaling() && !display.window() ? "THIS SCREEN IS ALWAYS FULL" : "";
+      case ds::sdl::Dep::OneWindow:
+        // Two windows show one screen each; there is nothing to lay out.
+        return vs.dual_window ? "NOT WITH TWO WINDOWS" : "";
       case ds::sdl::Dep::Pip:
         return pip ? "" : "PIP LAYOUT ONLY";
       case ds::sdl::Dep::PipTouchHold:
@@ -2044,14 +2115,15 @@ sdl_ready:
   host.fw_override = fw_override;
   host.reopen = [&] { reopen_display(); };
   // The whole layout in one go, re-read from the config: every row on the
-  // Layout page is a field of it, so there is nothing per-key to do. The live
-  // mode is kept -- the page has no row for it, and the layout hotkey may have
-  // moved it since the file was read.
+  // Layout page is a field of it, so there is nothing per-key to do. The mode
+  // is the LAYOUT row's choice if one was made, else the live one -- the
+  // layout hotkey or a loaded state may have moved it since the file was read.
   host.relayout = [&] {
-    if (dual_window) return;   // two windows, one screen each: nothing to lay out
+    if (dual_window) { host.pending_mode.clear(); return; }   // two windows, one screen each: nothing to lay out
     VideoSetup want;
-    if (!parse_video(cfg, want)) return;
-    want.layout.mode = display.current_layout().mode;
+    if (!parse_video(cfg, want)) { host.pending_mode.clear(); return; }
+    want.layout.mode = host.effective_mode();
+    host.pending_mode.clear();
     display.set_layout(want.layout);
     vs.layout = want.layout;
     pip_alpha = static_cast<int>(want.layout.pip_alpha * 255.0 + 0.5);
@@ -2095,7 +2167,13 @@ sdl_ready:
     // Everything below moves the picture about, so it is only noted here and
     // done when the menu closes (Host::commit).
     if (is("video.fullscreen")) { host.fullscreen_wanted = true; return; }
-    if (is("video.screen") || is("video.pip_corner") || is("video.pip_scale") ||
+    // The hotkey ring is read when a hotkey is pressed; nothing on screen moves.
+    if (is("video.layout_cycle")) {
+      std::vector<Disp::Mode> ring;
+      if (parse_layout_cycle(v, ring) && !ring.empty()) layout_cycle = ring;
+      return;
+    }
+    if (is("video.layout") || is("video.screen") || is("video.pip_corner") || is("video.pip_scale") ||
         is("video.pip_alpha") || is("video.dominant_ratio") || is("video.dominant_threshold")) {
       host.layout_wanted = true;
       return;
