@@ -193,22 +193,51 @@ and a `state_roundtrip.sh` pass. Phases 1..4 additionally end with a
 melonDS-trace comparison on the DSiWare oracle titles (section 6). Line counts
 are estimates from the melonDS equivalents scaled for our page-table bus.
 
-### Phase 0 -- dumps and oracles (no code)
+### Phase 0 -- dumps and oracles (mostly done 2026-09-10)
 
-- Dump from a DSi: `bios7i.bin`, `bios9i.bin`, `nand.bin` with nocash footer
-  (dsibiosdumper / the standard NAND dumpers write it), and the 128 KB DSi
-  firmware melonDS wants for its own config. Extract two or three installed
-  DSiWare titles as `.app` + `.tmd` (melonDS's TitleManager exports the app;
-  NUS still serves `tmd` for the title ID at
-  `nus.cdn.t.shop.nintendowifi.net/ccs/download/<idhi><idlo>/tmd`).
-  **The research tree has none of this today** (`binary/real-bios` is DS
-  only). This blocks every gate below.
-- Build melonDS DSi mode with the trace instrumentation already used by
-  `tools/compare_traces.py` (`dsperate-research/build/melonds-trace`), confirm
-  the oracle titles run there from NAND, and record their first N frames.
-- Pick the oracle set: one title with no save and no DSP (a simple game), one
-  save-heavy title (public.sav in use from frame 1), one DSP title (AAC or
-  G.711 -- Flipnote-class), one 3D title.
+Assets now live in `<project_root>/dsi-binary/` (outside the repo, never
+committed):
+
+| file | verified |
+|------|----------|
+| `bios/biosdsi7.bin`, `biosdsi9.bin` (64 KB each) | low-32 KB CRC32s match melonDS's `ARM7iBIOSLowCRC32`/`ARM9iBIOSLowCRC32`; the full-image CRCs do **not**, so these are the common half dumps: melonDS direct boot works, `FullBIOSBoot` does not. Exactly the class section 3.3 plans for |
+| `bios/dsinand.bin` (240 MiB + 64) | nocash footer present; FAT key derived from its ConsoleID decrypts the MBR and the `TWL` FAT16 partition (`tools/dsi_nand.py info`) |
+| `bios/dsifirmware.bin` (128 KB) | the DSi-mode DS firmware melonDS's Qt frontend wants; we do not need it for direct boot |
+| `games/*.cia` | 3DS-format CIAs whose single content is the **plain, unencrypted DSiWare SRL**; extracted beside them as `.nds` + `.tmd` |
+| `games/*.bin` | the DSi's own SD-card exports: AES-CCM under this console's ES key, no DS header. Ignore; melonDS cannot import them either |
+
+The three CIA titles, all USA, all DSiWare (`unit_code 3`, title-ID high
+`00030004`), all modcrypted (`0x1C = 0x3`), all `public.sav = 16 KB`, no
+`private.sav`, and all with **`AppFlags & 1` set** -- so they run the
+touchscreen in DSi mode, which promotes the DSi TSC from "port it anyway" to
+required in phase 1:
+
+| title | code | SRL | ARM9i / ARM7i | in NAND? |
+|-------|------|-----|---------------|----------|
+| Dr Mario Express | KD9E | 3.9 MB | 11 KB / 297 KB | no |
+| Plants vs Zombies | KZLE | 15.7 MB | 21 KB / 300 KB | no |
+| Shantae: Risky's Revenge | KS3E | 16.7 MB | 25 KB / 300 KB | **yes**, `00000001.app` bit-identical to the CIA SRL |
+
+The NAND itself has **15 DSiWare titles installed** under `/title/00030004`
+(`tools/dsi_nand.py titles`), each with `title.tmd`, `.app` and a
+`public.sav`; two are interesting for the save path beyond the 16 KB norm:
+KNAE with a 10 MB `public.sav` and KDME with 416 KB. They can be extracted
+with `dsi_nand.py extract` for more oracle titles (the user's own console).
+The 3DS-style CIA TMDs (2868 bytes, title-ID high `00048004`) are **not** what
+`melonDS::ImportTitle` wants: it takes the 520-byte DSi TMD with the
+`00030004` ID. For an install into the oracle NAND, take the first 0x208 bytes
+and patch the title ID at 0x18C; melonDS never checks the signature.
+
+Still to do in phase 0:
+
+- `dsperate-research/tools/melonds/trace_melonds.cpp` builds an `NDSArgs` DS
+  only. Add a `--dsi` mode: `DSiArgs` with the two 64 KB BIOSes, the NAND
+  opened read-write on a **copy**, `DSPHLE = true`, direct boot of the SRL.
+  ~50 lines; it is the oracle for every gate below.
+- Confirm Shantae runs in that build from frame 0 and record the first N
+  frames' trace. Then pick the rest of the oracle set from the NAND: one
+  no-DSP 2D title, KNAE or KDME for the large-save path, one DSP user (find
+  by scanning the ARM9i binaries for the DSP register base `0x04004300`).
 
 ### Phase 1 -- the machine, exact (~1 500 lines)
 
@@ -254,9 +283,10 @@ behind a `dsi_` flag on `NDS`; DS mode must not change a byte.
    NITRO/DSP ratio) and SOUNDBIAS ignored in DSi mode. The frontend's audio
    pacer already resamples nothing -- 47 kHz output means a second `SAMPLE_RATE`
    the SDL device opens at, decided at load.
-11. **TSC:** the DSi CODEC on SPI with `SetMode(0)` compatibility; direct boot
-   leaves it in DS mode unless `AppFlags & 1`, so most titles never see the
-   new register file. Port the bank-3 register model anyway (272 lines).
+11. **TSC:** the DSi CODEC on SPI, bank-switched register file, `SetMode(0)`
+   DS-compat mode. Direct boot leaves it in DS mode unless `AppFlags & 1`, and
+   all three of our titles set that bit, so this is required, not optional
+   (272 lines in melonDS).
 
 Gate: a no-save, no-DSP DSiWare title runs to its title screen with the
 melonDS instruction trace matching, and nothing else's hashes moved.
@@ -328,7 +358,11 @@ frame-hash soak against melonDS on the real-NAND backer shows no drift.
   Ship G.711 and graphics first, AAC when a decoder choice is made.
 - Frontend: `[paths] bios9i`, `bios7i`, `dsi_nand` (ini only, per
   `settings.h`'s rule); the games picker gains DSiWare detection by header and
-  a "(DSiWare)" tag; a menu row for exporting/importing `.pub/.prv`; the
+  a "(DSiWare)" tag. **Accept `.cia` directly**: the DSiWare CIAs people
+  actually have carry the plain SRL as their one content, so a 40-line header
+  walk (cert/ticket/TMD aligned to 0x40) turns into a `RomSource::map_file`
+  at an offset -- the same trick the zip path uses. Encrypted-content CIAs
+  (TMD content type bit 0) are refused with a clear message; a menu row for exporting/importing `.pub/.prv`; the
   `Emulation` page shows DSP state. Nothing else in the menu changes.
 - RetroAchievements: DSiWare is `RC_CONSOLE_NINTENDO_DSI` (78) with its own
   memory map; the identify step already hashes the ROM bytes we have. The DS
@@ -365,16 +399,19 @@ frame-hash soak against melonDS on the real-NAND backer shows no drift.
 - **Frame hashes** via `DS_FRAME_HASH=1` and the FIFO SHA-1 harness on the
   oracle titles, recorded as new `scenes/*.dsin` entries once inputs are
   captured.
-- **Unit tests**: `aes` (vectors), `nand_synth` (build, mount with a
-  reference FAT parser, read back), `ndma`, `sdhost` (command sequences
+- **Unit tests**: `aes` (vectors), `nand_synth` (build, then mount and read
+  back with `tools/dsi_nand.py`, the independent Python FAT/crypto reader
+  written against melonDS's derivation), `ndma`, `sdhost` (command sequences
   captured from the melonDS trace), `dsi_header`.
 - Never benchmark or hash under a missing DSi BIOS; `load_bios` refuses DSi
   titles without both `bios7i`/`bios9i` rather than degrading.
 
 ## 7. Risks and open questions
 
-1. **No test assets yet.** Everything above waits on a NAND + BIOS dump and
-   two or three titles. Phase 0 is the real first step.
+1. **Test breadth.** We have three CIA titles and fifteen more in one NAND,
+   all USA, all from one console. Enough to build against; not a compatibility
+   survey. The DSP and camera questions in particular stay open until more
+   titles are looked at.
 2. **Synthetic NAND fidelity.** Titles use the SDK's FS library, which reads
    the FAT it finds; a mistake in our FAT16 builder or in the save-volume
    geometry shows as a title that "has no save data" or reformats. Mitigation:
