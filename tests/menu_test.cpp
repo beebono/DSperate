@@ -98,6 +98,28 @@ void test_cheevos_row_hidden_without_a_host() {
   CHECK(m2.input(press(B::BTN_A)) == Menu::Result::Resume);
 }
 
+// The row opens the account page even when a set is loaded: that page is where
+// "signed in as", "no set for this ROM" and the switches live, and the list is
+// one row further in. Arriving straight in the list hid all of it.
+void test_achievements_row_opens_the_account_page() {
+  FakeCheevos host;
+  host.in = true;
+  for (int i = 0; i < 5; ++i) {
+    ds::sdl::CheevosHost::Row r;
+    r.title = "ACHIEVEMENT " + std::to_string(i);
+    host.rows.push_back(r);
+  }
+  Menu m;
+  m.set_cheevos_host(&host);
+  m.set_open(true);
+  to_row(m, kCheevosVisibleRow);
+  m.input(press(B::BTN_A));
+  // Row 0 of the account page is SIGN OUT when signed in; pressing A there
+  // proves which page we are on without needing to see it.
+  m.input(press(B::BTN_A));
+  CHECK(host.signed_out_calls == 1);
+}
+
 // Signing in is two prompts, and the password must reach the host together with
 // the username typed before it.
 void test_sign_in_collects_both_fields() {
@@ -194,7 +216,9 @@ void test_list_scrolls_within_bounds() {
   m.set_cheevos_host(&host);
   m.set_open(true);
   to_row(m, kCheevosVisibleRow);
-  m.input(press(B::BTN_A));                 // straight to the list
+  m.input(press(B::BTN_A));                 // the account page
+  m.input(press(B::BTN_DOWN));              // signed in, so row 1 is VIEW ACHIEVEMENTS
+  m.input(press(B::BTN_A));                 // and now the list
   for (int i = 0; i < 80; ++i) m.input(press(B::BTN_UP));
   for (int i = 0; i < 200; ++i) m.input(press(B::BTN_DOWN));
   for (int i = 0; i < 20; ++i) m.input(press(B::BTN_R));
@@ -225,9 +249,10 @@ void test_cheevos_draw_bounds() {
       m.set_open(true);
       to_row(m, kCheevosVisibleRow);
       m.input(press(B::BTN_A));
-      m.draw(c);                            // the list
-      m.input(press(B::BTN_A));             // on to the account page
-      m.draw(c);
+      m.draw(c);                            // the account page
+      m.input(press(B::BTN_DOWN));          // VIEW ACHIEVEMENTS
+      m.input(press(B::BTN_A));
+      m.draw(c);                            // and the list
       for (size_t i = static_cast<size_t>(w) * h; i < px.size(); ++i) CHECK(px[i] == 0xDEADBEEF);
     }
   }
@@ -1210,6 +1235,7 @@ int main() {
   test_key_repeat_only_on_cheats();
   test_marquee();
   test_cheevos_row_hidden_without_a_host();
+  test_achievements_row_opens_the_account_page();
   test_sign_in_collects_both_fields();
   test_cancelling_sign_in_sends_nothing();
   test_sign_out_is_offered_when_signed_in();

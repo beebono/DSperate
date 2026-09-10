@@ -950,8 +950,20 @@ actually looking found three things in a few minutes:
   and an entry hung off the bottom edge.
 - The toast sized itself to its description and came out a full-width banner
   that read as a takeover rather than a notification, with nothing to say it
-  was an unlock. It now has an `ACHIEVEMENT UNLOCKED` accent line, and a width
-  capped so a long description truncates instead of stretching it.
+  was an unlock. It now has an `ACHIEVEMENT UNLOCKED` accent line, sits in the
+  bottom-right corner (the DS picture is centred, so a corner covers least),
+  and sizes itself to its text up to two thirds of the canvas -- which is wide
+  enough for "Signed in to RetroAchievements" and most game titles, and
+  truncates the few that are longer rather than spanning the screen.
+
+A fourth arrived once the achievements row existed: the root menu's panel was a
+flat 75 glyphs wide on the assumption that every label was short, so
+`ACHIEVEMENTS` ran off the right edge. It is measured from the widest *visible*
+label now, with the old width as a floor, so a menu without that row is
+unchanged. And the row opens the account page rather than the list even when a
+set is loaded -- that page answers "am I signed in", "does this game have a
+set" and "why not", and the list is one row further in; arriving straight in
+the list hid all of it.
 
 Worth remembering for phase 6: a bounds test says the drawing is safe, not that
 it is right.

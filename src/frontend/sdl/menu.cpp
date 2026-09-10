@@ -478,16 +478,12 @@ Menu::Result Menu::handle(u32 presses) {
   }
   if (item == kOptionsRow) { push(Page::Options); return Result::None; }
   if (item == kCheevosRow) {
-    // Straight to the list when there is one; to the account page otherwise,
-    // because then the interesting question is why there is not.
-    if (cheevos_ && cheevos_->has_set() && cheevos_->row_count() > 0) {
-      cheevos_row_ = 0;
-      cheevos_top_ = 0;
-      push(Page::Cheevos);
-    } else {
-      account_row_ = 0;
-      push(Page::CheevosAccount);
-    }
+    // Always the account page. It answers "am I signed in", "does this game
+    // have a set" and "why not", carries the switches, and the list is one row
+    // away -- whereas arriving straight in the list leaves the player with no
+    // sight of any of that.
+    account_row_ = 0;
+    push(Page::CheevosAccount);
     return Result::None;
   }
   return kRoot[item].result;
@@ -520,7 +516,7 @@ void draw_notice(const Canvas& d, const char* title, const char* line2, const ch
   centred(y0 + m.title_y + m.glyph_px * 2 + 6 * m.s, m.list_s, kDim, line3);
 }
 
-// An unlock, while the game is being played. Bottom-centre and only as wide as
+// An unlock, while the game is being played. Bottom-right and only as wide as
 // it needs to be: draw_notice takes the middle of the screen because nothing is
 // running behind it, and this must not.
 namespace {
@@ -536,18 +532,24 @@ ToastBox toast_box(const Canvas& d, const char* header, const char* title, const
   if (points) head += "  " + std::to_string(points) + "P";
   b.lines = 1 + (header && *header ? 1 : 0) + (detail && *detail ? 1 : 0);
 
-  // Sized from the header and the title, which are short; a long description
-  // is truncated to that rather than stretching the panel across the screen,
-  // where it stops reading as a notification and starts hiding the game.
+  // Wide enough for whatever it has to say, up to two thirds of the screen.
+  // Past that it stops reading as a notification and starts hiding the game,
+  // so the text is truncated instead -- but titles like "Signed in to
+  // RetroAchievements" and most game names now fit rather than being cut at a
+  // width fixed in advance.
   const int want = std::max({text_width(m.list_s, head.c_str()),
                              header ? text_width(m.list_s, header) : 0,
                              detail ? text_width(m.list_s, detail) : 0});
-  const int cap = std::min(d.w - 2 * m.pad, 150 * m.list_s);
-  b.w = std::clamp(want + 6 * m.list_s, std::min(60 * m.list_s, cap), cap);
+  const int cap = std::min(d.w - 2 * m.pad, d.w * 2 / 3);
+  b.w = std::clamp(want + 6 * m.list_s, std::min(40 * m.list_s, cap), cap);
   b.h = 2 * m.list_s + b.lines * m.list_row_h + 2 * m.list_s;
-  b.x0 = (d.w - b.w) / 2;
-  // Clear of the bottom edge by a margin that scales with the panel.
-  b.y0 = std::max(0, d.h - b.h - 4 * m.list_row_h);
+  // Bottom right. The DS picture is centred, so the corner is the part of the
+  // screen a notification is least likely to cover something being read.
+  b.x0 = std::max(0, d.w - b.w - 2 * m.pad);
+  // One text row of clearance below, not four: the old gap floated it a whole
+  // banner's height off the bottom, which read as neither anchored nor
+  // centred.
+  b.y0 = std::max(0, d.h - b.h - m.list_row_h);
   return b;
 }
 } // namespace
@@ -1491,12 +1493,29 @@ void Menu::draw(const Canvas& d) const {
   const bool slots = page() == Page::Slot;
   Metrics m = metrics(d);
   const int rows = slots ? kSlotRows : root_rows();   // the slot page stacks its ten in two columns
+  // How wide the rows actually need to be. It used to be a flat 75 glyphs, on
+  // the reasoning that every label was short -- and then "ACHIEVEMENTS"
+  // arrived and ran off the right edge. Measured now, with the old width as a
+  // floor so a menu without that row looks exactly as it did.
+  const auto wanted_w = [&](const Metrics& mm) {
+    int w = (slots ? 100 : 75) * mm.s;
+    if (slots) return w;
+    for (int i = 0; i < kRootRows; ++i) {
+      if (!root_visible(i)) continue;
+      // The slot row formats its own text; "SLOT < 0 >" is its widest form.
+      const char* label = kRoot[i].label ? kRoot[i].label : "SLOT < 0 >";
+      // The 3*s the label is indented by, on both sides, plus the panel's own
+      // padding: without the second one the text sits hard against the edge.
+      w = std::max(w, text_width(mm.s, label) + 6 * mm.s + 2 * mm.pad);
+    }
+    return w;
+  };
   // Step the glyph scale down rather than let a tall page run off a short
   // canvas: `put` would clip it in silence, which is how the old fixed
   // geometry failed. Two rows always fit at scale 2 on any canvas this runs on.
-  while (m.s > 2 && (panel_height(m, rows) > d.h || (slots ? 100 : 75) * m.s > d.w)) m = metrics_for(m.s - 1);
+  while (m.s > 2 && (panel_height(m, rows) > d.h || wanted_w(m) > d.w)) m = metrics_for(m.s - 1);
   const int scale = m.s, row_h = m.row_h, title_y = m.title_y, rule_y = m.rule_y, rows_y = m.rows_y;
-  const int panel_w = std::min(d.w - 2 * m.pad, (slots ? 100 : 75) * m.s);
+  const int panel_w = std::min(d.w - 2 * m.pad, wanted_w(m));
   const int panel_h = panel_height(m, rows);
   const int px0 = (d.w - panel_w) / 2;
   const int py0 = (d.h - panel_h) / 2;

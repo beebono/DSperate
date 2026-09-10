@@ -114,11 +114,13 @@ void dim_framebuffer(u32* px, u32 n);
 // shows while the image is written. Drawn over a dimmed frame like the menu.
 void draw_notice(const Canvas& d, const char* title, const char* line2, const char* line3);
 
-// An achievement unlock, bottom-centre. A small panel rather than
+// An achievement unlock, in the bottom-right corner. A small panel rather than
 // draw_notice's centred one, because this appears while the game is being
-// played rather than instead of it. `detail` may be empty, and `points` is
-// drawn only when non-zero -- RetroAchievements has 0-point achievements and
-// "0 PTS" reads like a bug.
+// played rather than instead of it, and in the corner because the DS picture
+// is centred. It sizes itself to its text up to two thirds of the canvas and
+// truncates beyond that. `detail` may be empty, and `points` is drawn only
+// when non-zero -- RetroAchievements has 0-point achievements and "0 PTS"
+// reads like a bug.
 // `header` is the small accent line above the title ("ACHIEVEMENT UNLOCKED"),
 // which is what makes an unlock read as one rather than as a stray message; it
 // may be null. `detail` may be null too, and `points` is drawn only when
