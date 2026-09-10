@@ -142,7 +142,9 @@ synthetic NAND replaces it; it is not the product.
 
 ### 3.2 Direct boot only
 
-No boot ROM, no boot2, no launcher. `DSi::LoadNAND`'s boot2 shortcut
+No boot ROM, no boot2, no launcher -- but the state we hand the title is the
+one the *launcher* leaves, not melonDS's direct-boot state (phase 0 showed
+melonDS's gives DSiWare no NAND access). `DSi::LoadNAND`'s boot2 shortcut
 (hard-coded boot2 key, BIOS fragments copied into ITCM, MBK values from NAND
 offset 0x380) exists in melonDS to reach the system menu; we do not need it,
 and the `FullBIOSBoot` path additionally needs the rare full 64 KB dumps.
@@ -228,16 +230,49 @@ The 3DS-style CIA TMDs (2868 bytes, title-ID high `00048004`) are **not** what
 `00030004` ID. For an install into the oracle NAND, take the first 0x208 bytes
 and patch the title ID at 0x18C; melonDS never checks the signature.
 
-Still to do in phase 0:
+The oracle harness (done 2026-09-10): `dsperate-research/tools/melonds/
+trace_melonds --dsi <bios9i> <bios7i> <nand.bin>` builds a `DSi` with
+`DSPHLE`, works on a copy of the NAND, logs every eMMC block to
+`<prefix>.nand.log` (resolve with `tools/dsi_nand.py map`) and every SD host
+register access with `TRACE_SD_REGS=1`, takes scripted input (`--touch
+F:x,y[:N]`, `--key F:mask[:N]`), and dumps main RAM plus a full melonDS
+savestate the first time the ARM9 reaches an address (`--ram-at-pc9
+02004800:file --state-file f.mln`). The melonDS patches are
+`tools/melonds/melonds-trace-hook.patch`.
 
-- `dsperate-research/tools/melonds/trace_melonds.cpp` builds an `NDSArgs` DS
-  only. Add a `--dsi` mode: `DSiArgs` with the two 64 KB BIOSes, the NAND
-  opened read-write on a **copy**, `DSPHLE = true`, direct boot of the SRL.
-  ~50 lines; it is the oracle for every gate below.
-- Confirm Shantae runs in that build from frame 0 and record the first N
-  frames' trace. Then pick the rest of the oracle set from the NAND: one
-  no-DSP 2D title, KNAE or KDME for the large-save path, one DSP user (find
-  by scanning the ARM9i binaries for the DSP register base `0x04004300`).
+**What it found, and it changes section 3.2.** melonDS's own DSi direct boot
+runs a DSiWare SRL in *card mode*: it writes the boot indicator
+`0x02FFFC40 = 1` and `SCFG_EXT7 = 0x93FBFB06` (the SDMMC gate, bit 18, clear).
+All three titles therefore never touch NAND: Plants vs Zombies shows "The save
+data could not be accessed", Dr Mario Express stays black, Shantae plays but
+cannot save. Forcing indicator 3 and the gate open is *not* enough -- the
+titles then hang with the ARM7's SD thread never scheduled and the ARM9 polling
+ready bits at `0x02FFFF88`. So **melonDS direct boot is not the save oracle**.
+
+The launcher path is. Booting from NAND reaches the DSi menu; tapping through
+(health screen at frame 400, then `(60,113)` every 200 frames scrolls one icon,
+Shantae is the 14th, `(128,113)` launches) starts Shantae at frame 3791, and
+after "Touch to Start" it reads and writes
+`/TITLE/00030004/4B533345/DATA/PUBLIC.SAV` (24 reads, 7 writes), also reading
+Mighty Flip Champs' save (cross-title unlock) and every title's `DATA/` dir.
+Main RAM at the title's ARM9 entry differs from the direct boot in only 13
+256-byte blocks: `0x02000400` (TWLCFG copy, the launcher blanks some fields),
+`0x023FEE00` (launcher ARM7 code left behind), `0x02FFD7B0` (the launch
+parameter block melonDS marks TODO: `"00000009"`, a title-ID list),
+`0x02FFFC40` (3 vs 1), and the header copies at `0x02FFFA80`/`0x02FFC000` that
+melonDS writes and the launcher does not. The ARM9 also starts in system mode
+(CPSR `0x2000009F`, SP in DTCM at `0x0E003F80`) rather than melonDS's SVC/`0xD3`.
+
+Consequences for our design: our direct boot (phase 1, step 8) is specified by
+the **launcher-launched state**, not by melonDS's `SetupDirectBoot`; the
+remaining unknown (what else the ARM7 needs before its SD thread runs) is the
+first thing phase 1 must settle, with the harness's RAM/state dumps as the
+reference. Until then the exactness oracle for every DSiWare gate is a
+launcher launch recorded from the NAND, which the harness can script.
+
+Still to do in phase 0: pick the rest of the oracle set from the NAND (KNAE or
+KDME for the large-save path; a DSP user, found by scanning ARM9i binaries for
+`0x04004300`), and record their launcher launches.
 
 ### Phase 1 -- the machine, exact (~1 500 lines)
 

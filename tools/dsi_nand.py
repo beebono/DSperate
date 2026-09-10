@@ -7,6 +7,7 @@
     dsi_nand.py ls      nand.bin [path]          # e.g. /title/00030004
     dsi_nand.py titles  nand.bin                 # DSiWare with .app/.sav sizes
     dsi_nand.py extract nand.bin /path/in/nand out-file
+    dsi_nand.py map     nand.bin access.log         # trace_melonds --dsi log -> files touched
 
 Key derivation and sector crypto follow melonDS DSi_NAND.cpp:42-112 (FAT
 key from the ConsoleID, IV = SHA-1 of the eMMC CID, AES-CTR with byte-
@@ -79,6 +80,25 @@ class Nand:
             ents.append((name, e[11], struct.unpack_from('<H', e, 26)[0], struct.unpack_from('<I', e, 28)[0]))
         return ents
 
+    def walk(self):
+        """Yield (path, cluster, size, attr) for every file and directory."""
+        stack = [('', 0)]
+        while stack:
+            base, cl = stack.pop()
+            for name, attr, c, size in self.listdir(cl):
+                if name in ('.', '..'): continue
+                path = base + '/' + name
+                yield path, c, size, attr
+                if attr & 0x10: stack.append((path, c))
+
+    def owner_index(self):
+        """Map absolute byte offset -> owner, at cluster granularity."""
+        cs = self.spc * self.bps; idx = {}
+        for path, c, size, attr in self.walk():
+            for k, cl in enumerate(self.chain(c)):
+                idx[self.data_off + (cl - 2) * cs] = (path + ('/' if attr & 0x10 else ''), k * cs)
+        return idx
+
     def lookup(self, path):
         cl, attr, size = 0, 0x10, 0
         for part in [p for p in path.split('/') if p]:
@@ -110,6 +130,22 @@ def main(argv):
     elif cmd == 'extract':
         cl, attr, size = n.lookup(argv[3])
         open(argv[4], 'wb').write(n.file_data(cl, size)); print(f'{size} bytes -> {argv[4]}')
+    elif cmd == 'map':
+        idx = n.owner_index(); cs = n.spc * n.bps
+        from collections import Counter, defaultdict
+        hits = defaultdict(lambda: Counter()); first = {}
+        for i, line in enumerate(open(argv[3])):
+            rw, off, ln = line.split(); off = int(off, 16)
+            if off < n.base: who = '<before partition 0: stage2/boot>'
+            elif off < n.fat_off: who = '<part0 boot sector>'
+            elif off < n.root_off: who = '<part0 FAT>'
+            elif off < n.data_off: who = '<part0 root dir>'
+            elif off >= n.base + n.parts[0][1][1] * 512: who = '<part1/2: photo/other>'
+            else:
+                o = idx.get(off - (off - n.data_off) % cs); who = o[0] if o else '<part0 free cluster>'
+            hits[who][rw] += 1; first.setdefault(who, i)
+        for who in sorted(hits, key=lambda w: first[w]):
+            print(f"{hits[who]['r']:8d} r {hits[who]['w']:6d} w  first@{first[who]:<8d} {who}")
     else: sys.exit(__doc__)
 
 if __name__ == '__main__': main(sys.argv)
