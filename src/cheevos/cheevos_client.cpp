@@ -32,6 +32,23 @@ bool verbose() {
 
 const char* token_name = "/cheevos.token";
 
+// RetroAchievements' "warning" achievements -- the one every set carries to say
+// "Hardcore unlocks cannot be earned using this emulator" is the one we meet.
+// They are a real class, not a naming convention: rcheevos gives them ids from
+// 101000001 up, leaves them out of its own summary counts and never submits
+// them to the server (rc_client.c:25, :954, :4818).
+//
+// They are noise here. This build is Casual-only by design, so a notice that
+// hardcore will not count says nothing the player can act on, and popping a
+// toast (and a screenshot) for it on every launch is worse than saying nothing.
+// It stays in the log.
+//
+// The constant is rcheevos' but lives in its .c file rather than a header, so
+// this copy has to track it across an update; the vendored README says to
+// re-run the tests, and this is one of the things they would not catch.
+constexpr u32 WARNING_ACHIEVEMENT_ID = 101000001;
+bool is_warning(u32 id) { return id >= WARNING_ACHIEVEMENT_ID; }
+
 // The callbacks rcheevos is handed, with exactly its signatures, each one
 // finding the session through rc_client_get_userdata and forwarding. Written
 // out rather than casting Client's members to these types: a cast between
@@ -554,7 +571,7 @@ std::vector<Client::Achievement> Client::achievements() const {
     const rc_client_achievement_bucket_t& bucket = list->buckets[b];
     for (u32 i = 0; i < bucket.num_achievements; ++i) {
       const rc_client_achievement_t* a = bucket.achievements[i];
-      if (!a) continue;
+      if (!a || is_warning(a->id)) continue;   // and out of the count, as rcheevos does
       Achievement info;
       info.title = a->title ? a->title : "";
       info.description = a->description ? a->description : "";
@@ -634,7 +651,12 @@ void Client::handle_event(const void* event_ptr) {
 
   switch (e->type) {
     case RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED:
-      if (e->achievement) {
+      if (e->achievement && is_warning(e->achievement->id)) {
+        // No toast, and therefore no screenshot either -- the frontend hangs
+        // both off an Unlock message.
+        CLOG("ignoring warning achievement %u: %s\n", e->achievement->id,
+             e->achievement->title ? e->achievement->title : "");
+      } else if (e->achievement) {
         self->post(Message::Kind::Unlock,
                    e->achievement->title ? e->achievement->title : "Achievement unlocked",
                    e->achievement->description ? e->achievement->description : "",

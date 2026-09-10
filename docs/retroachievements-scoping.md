@@ -872,6 +872,25 @@ Three things fall out of it:
   nothing it wanted -- hardcore is out of scope. What it does do is put a
   0-point achievement on the player's account for the game saying so. That is
   RA's designed behaviour, not a fault, and registration is what removes it.
+
+  DSperate does not show it. These are a class rather than a naming
+  convention -- rcheevos gives them ids from `RC_CLIENT_ACHIEVEMENT_WARNING_ID`
+  (101000001) up, keeps them out of its own summary counts and never submits
+  them (`rc_client.c:25, :954, :4818`) -- so the same rule drops them here: no
+  toast, no unlock screenshot, and out of the achievement list and its counts.
+  A Casual-only build cannot act on "hardcore will not count", and the earlier
+  listing was reporting `2/110 earned` when one of those two was the warning.
+  It stays in the log. Verified on the device with encore on, which re-arms it:
+
+  ```
+  cheevos: rc: Unlocked warning achievement 101000001: Warning: Unknown Emulator
+  cheevos: ignoring warning achievement 101000001: Warning: Unknown Emulator
+  set: 109 achievements, 1 unlocked, ...
+  ```
+
+  The constant lives in rcheevos' `.c` file rather than a header, so our copy
+  has to track it across an update -- the kind of thing the tests would not
+  catch.
 - **0 of 110 achievements are unsupported.** The whole set evaluates against
   main RAM and data TCM, which is the two-region map from phase 2 validated
   against a real, large set rather than against our own reasoning.
