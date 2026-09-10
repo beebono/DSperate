@@ -209,12 +209,34 @@ them moved, and it is borrowing a library nobody offered us.
 `DS_CHEEVOS_LIBCURL` covers the case where a firmware puts one somewhere the
 loader cannot see.
 
-The A30 is the one genuine gap, and not for a reason DSperate can fix: every
-libcurl on that card is **AArch64**, shipped for the H700 device the same
-spruce image serves. A 32-bit process cannot load them, and a filesystem-wide
-search finds no armhf libcurl at all. That needs an armhf build from the
-packager. The `curl`-subprocess backend remains the other route, behind the
-same interface.
+### What a packager actually has to ship
+
+Read out of the libraries rather than guessed. `libcurl.so.4` from spruce's own
+`Emu/DC/lib64` declares:
+
+```
+NEEDED  libssl.so.1.1     NEEDED  libz.so.1        NEEDED  libc.so.6
+NEEDED  libcrypto.so.1.1  NEEDED  libpthread.so.0  (no RPATH or RUNPATH)
+```
+
+So **libssl alone is not enough**: `libcrypto` is a separate dependency, and
+with no RPATH the loader finds both only through `LD_LIBRARY_PATH` -- which is
+exactly what the launcher sets to `$EMU_DIR/lib64`. What each device still
+needs, having checked what is already installed:
+
+| device | already present | still missing |
+|--------|-----------------|---------------|
+| spruce H700 (aarch64) | `libssl.so.1.1` + `libcrypto.so.1.1` in `spruce/h700/lib64`; a **complete working trio** in `Emu/DC/lib64` | nothing to build -- copy `libcurl.so.4` (safest: all three) into `Emu/NDS/lib64` |
+| Miyoo A30 (armv7) | `libssl.so.1.1`, `libcrypto.so.1.1`, `libz.so.1`, all armhf, in `/usr/lib` | **an armhf `libcurl.so.4` built against OpenSSL 1.1** |
+
+The A30 is the only one needing a build, and only of libcurl itself. One
+compatibility note for whoever does it: it must match the OpenSSL major already
+on the device, which is **1.1**. The Moonlight port's libcurl is the wrong one
+to copy for this reason -- it wants `libssl.so.3` / `libcrypto.so.3`, which
+would have to come with it.
+
+The `curl`-subprocess backend remains the other route for a device where none
+of that is practical, behind the same interface.
 
 **Driving the runtime.** `rc_client_do_frame` is called **exactly once per
 frame advance**, never batched and never twice. drastic-nano's notes are
