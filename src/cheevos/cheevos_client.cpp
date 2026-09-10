@@ -592,6 +592,39 @@ Client::Summary Client::summary() const {
 }
 
 // ---------------------------------------------------------------------------
+// Progress, for save states
+
+bool Client::serialize_progress(std::vector<u8>& out) const {
+  out.clear();
+  if (!client_) return false;
+  rc_client_t* c = static_cast<rc_client_t*>(client_);
+  // Nothing to carry unless a set is actually loaded and being evaluated.
+  if (!rc_client_get_game_info(c)) return false;
+  const size_t n = rc_client_progress_size(c);
+  if (n == 0) return false;
+  out.resize(n);
+  if (rc_client_serialize_progress_sized(c, out.data(), out.size()) != RC_OK) {
+    out.clear();
+    return false;
+  }
+  return true;
+}
+
+bool Client::deserialize_progress(const u8* data, size_t size) {
+  if (!client_ || !data || size == 0) return false;
+  rc_client_t* c = static_cast<rc_client_t*>(client_);
+  if (!rc_client_get_game_info(c)) return false;
+  // rcheevos validates the blob against the set it currently holds and says so
+  // rather than half-applying it, which is what makes the "reset instead"
+  // fallback safe.
+  return rc_client_deserialize_progress_sized(c, data, size) == RC_OK;
+}
+
+void Client::reset() {
+  if (client_) rc_client_reset(static_cast<rc_client_t*>(client_));
+}
+
+// ---------------------------------------------------------------------------
 // Events from rcheevos
 
 void Client::handle_event(const void* event_ptr) {

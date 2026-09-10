@@ -467,7 +467,7 @@ Each phase is useful on its own and testable without the next.
 2. **Memory reader plus a local runtime.** -- **DONE** 2026-09-09, see below.
 3. **Session and transport.** -- **DONE** 2026-09-09, see below.
 4. **UI.** -- **DONE** 2026-09-09, see below.
-5. **Save state integration** and the progress chunk.
+5. **Save state integration.** -- **DONE** 2026-09-09, see below.
 6. **Device pass.** p99 and over-budget frames on the RG DS, PGO-vs-PGO in the
    SDL frontend per `pgo-frontend-ab-rule`, both run orders per
    `ab-run-order-bias`. Confirm the other two tiers still *build* and cleanly
@@ -995,6 +995,68 @@ Only the flag read and the assignment are new -- the capture path is the
 hotkey's, already exercised -- but the end-to-end case has not been seen fire,
 because it needs an achievement to actually unlock during play. Encore mode is
 the easy way to test it: replay a game with an earned achievement.
+
+## Phase 5 as built
+
+A `CHVO` chunk after the layout's `VIEW`, carrying the game id and
+`rc_client_serialize_progress_sized`'s blob. Same rules as `VIEW`: the
+frontend's chunk, absent from a headless or older file, no format version bump,
+and an older state simply ends where it would begin.
+
+This is the phase drastic-nano skipped, and it could afford to because its
+hardcore mode forbids loading a state at all. Casual has no such escape: save
+states are the point of the mode, so without this, loading one leaves the
+runtime describing a world that no longer exists -- hit counts part-way towards
+something the player has just rewound past, triggers primed by events that have
+been undone.
+
+### The ordering bug the device found
+
+The first version applied the chunk as it was read, which works for a load from
+the pause menu and silently does nothing for the case people actually use. The
+log said so plainly:
+
+```
+state: loaded /storage/chvtest/states/ASCE.auto.dss (frame 400, layout vertical)
+state: autoloaded ...
+cheevos: session up ...
+cheevos: signed in as Noxwell
+```
+
+A state named on the command line, or resumed from the auto slot, is read at
+startup -- **before** the session has signed in, let alone fetched the game's
+achievements. There was nothing to restore into, so the chunk was dropped and
+nobody was told.
+
+So the chunk is now *remembered* (`g_cheevos_pending`) and applied when the set
+arrives, from the frame loop just before `rc_client_do_frame` -- so the runtime
+is never evaluated for even one frame against progress belonging to a machine
+state it has left behind. The same path covers an in-session load whose set is
+still being fetched, which means one rule instead of two.
+
+### Refusing rather than guessing
+
+The chunk carries the game id, and the restore is abandoned in favour of
+`rc_client_reset` when it does not match, when the blob is empty, or when
+rcheevos rejects it (which it does when the set has changed since the state was
+written). A mismatched restore is how a false unlock happens, so the fallback
+is always the conservative one.
+
+### Verified on the device
+
+```
+save:    cheevos: Sonic Rush -- achievements active
+         state: saved .../ASCE.auto.dss (5545 KB)
+resume:  state: autoloaded .../ASCE.auto.dss
+         cheevos: Sonic Rush -- achievements active
+         cheevos: state progress restored
+
+and with a state written while achievements were off (5539 KB, no CHVO):
+         cheevos: state progress reset (none carried, or it did not apply)
+```
+
+The six-kilobyte difference is the blob. `tools/state_roundtrip.sh` still
+passes on mlbis and meteos, so the machine half of the file is untouched.
 
 ## What I expect to go wrong
 

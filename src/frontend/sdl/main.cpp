@@ -351,10 +351,84 @@ bool read_layout_chunk(ds::state::Reader& r, ds::sdl::Display::Layout& l) {
   return true;
 }
 
+// Achievement progress, riding after the layout for the same reasons and with
+// the same rules: the frontend's chunk, absent from a headless or older file,
+// no format version bump.
+//
+// This matters more in Casual mode than it might look. Save states are allowed
+// here -- that is the whole point of the mode -- so without this, loading a
+// state leaves the achievement runtime describing a world that no longer
+// exists: hit counts part-way towards something the player has just rewound
+// past, triggers primed by events that have been undone. drastic-nano could
+// skip it because its hardcore mode forbids loading states at all; we cannot.
+//
+// The hook is a file-scope pointer rather than an argument because every state
+// in the process belongs to the one session, and there are six call sites that
+// save or load. A defaulted parameter would let one of them quietly forget --
+// the autosave path especially -- and the symptom would be achievement
+// progress that is wrong only sometimes.
+// Saving only. Reading needs no hook at all -- the chunk goes into
+// g_cheevos_pending below and is applied later, for the ordering reason
+// explained there.
+struct CheevosStateHook {
+  virtual ~CheevosStateHook() = default;
+  // False when there is nothing to carry, and the chunk is then not written.
+  virtual bool save(u32& game_id, std::vector<u8>& blob) = 0;
+};
+CheevosStateHook* g_cheevos_state = nullptr;
+
+// The chunk a state carried, held until there is a set to put it into.
+//
+// This is not an optimisation, it is the only order that works. A state named
+// on the command line -- or resumed from the auto slot -- is loaded at startup,
+// long before the session has signed in and fetched the game's achievements;
+// the device log makes it plain:
+//
+//     state: loaded ... (frame 400)
+//     cheevos: session up ...
+//     cheevos: signed in as Noxwell
+//
+// So the chunk is remembered here and applied when the set arrives. The same
+// path covers an in-session load whose set is still being fetched, and means
+// there is one rule rather than two.
+struct PendingCheevosState {
+  bool waiting = false;      // a state was loaded and has not been accounted for
+  u32 game_id = 0;
+  std::vector<u8> blob;      // empty: the state carried no progress, so reset
+} g_cheevos_pending;
+
+void write_cheevos_chunk(ds::state::Writer& w) {
+  if (!g_cheevos_state) return;
+  u32 game_id = 0;
+  std::vector<u8> blob;
+  if (!g_cheevos_state->save(game_id, blob) || blob.empty()) return;
+  w.begin("CHVO");
+  w.put(game_id);
+  w.vec(blob);
+  w.end();
+}
+
+void read_cheevos_chunk(ds::state::Reader& r) {
+  // Deliberately no check for the hook: at startup the state is read before
+  // the session exists, and the whole point is that the chunk survives that.
+  // No chunk -- an older state, a headless one, or one saved with achievements
+  // off. The runtime still has to be put back to the start, or it would go on
+  // counting against a machine that has just jumped somewhere else.
+  if (r.at_end() || !r.begin("CHVO")) { g_cheevos_pending = {true, 0, {}}; return; }
+  u32 game_id = 0;
+  std::vector<u8> blob;
+  r.fields(game_id);
+  r.vec(blob);
+  r.end();
+  if (!r.ok() || blob.empty()) { g_cheevos_pending = {true, 0, {}}; return; }
+  g_cheevos_pending = {true, game_id, std::move(blob)};
+}
+
 bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
   ds::state::Writer w; std::string err;
   if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
   write_layout_chunk(w, layout);
+  write_cheevos_chunk(w);
   const std::string tmp = path + ".tmp";
   FILE* f = std::fopen(tmp.c_str(), "wb");
   if (!f) { std::fprintf(stderr, "state: cannot write %s\n", tmp.c_str()); return false; }
@@ -382,6 +456,7 @@ bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout
   std::string err;
   if (!nds.load_state(r, err)) { std::fprintf(stderr, "state: cannot load %s: %s\n", path.c_str(), err.c_str()); return false; }
   layout_loaded = read_layout_chunk(r, layout);
+  read_cheevos_chunk(r);
   std::fprintf(stderr, "state: loaded %s (frame %llu%s)\n", path.c_str(), static_cast<unsigned long long>(nds.frame_count),
                layout_loaded ? (std::string(", layout ") + ds::sdl::Display::mode_name(layout.mode)).c_str() : "");
   return true;
@@ -2176,10 +2251,48 @@ sdl_ready:
       sum = {};
     }
   } cheevos_menu;
+  // Achievement progress in and out of save states.
+  struct CheevosState final : CheevosStateHook {
+    ds::cheevos::Client* c = nullptr;
+    bool save(u32& game_id, std::vector<u8>& blob) override {
+      if (!c) return false;
+      game_id = c->game_id();
+      return c->serialize_progress(blob);
+    }
+  } cheevos_state;
+
+  // Puts a state's achievement progress in once there is a set to put it into.
+  // Called before rc_client_do_frame, so the runtime is never evaluated for a
+  // frame against progress belonging to a machine state it has left behind.
+  auto cheevos_apply_state = [&] {
+    if (!g_cheevos_pending.waiting) return;
+    if (cheevos.state() == ds::cheevos::State::LoadingGame ||
+        cheevos.state() == ds::cheevos::State::SigningIn) return;   // not yet; keep waiting
+    if (cheevos.state() != ds::cheevos::State::Playing) {
+      // No set will arrive for this game (signed out, or it has none). Nothing
+      // to restore into, so stop holding the blob.
+      g_cheevos_pending = {};
+      return;
+    }
+    // The game id has to match. A state from another game cannot restore into
+    // this set, and applying it anyway is how a false unlock happens -- so a
+    // mismatch resets rather than guesses, as does a blob rcheevos rejects,
+    // which it does when the set has changed since the state was written.
+    const bool ok = !g_cheevos_pending.blob.empty() && g_cheevos_pending.game_id != 0 &&
+                    g_cheevos_pending.game_id == cheevos.game_id() &&
+                    cheevos.deserialize_progress(g_cheevos_pending.blob.data(),
+                                                 g_cheevos_pending.blob.size());
+    if (!ok) cheevos.reset();
+    VLOG("cheevos: state progress %s\n", ok ? "restored" : "reset (none carried, or it did not apply)");
+    g_cheevos_pending = {};
+  };
+
   if (cheevos_on) {
     cheevos_menu.c = &cheevos;
     cheevos_menu.settings = &host;
     menu.set_cheevos_host(&cheevos_menu);
+    cheevos_state.c = &cheevos;
+    g_cheevos_state = &cheevos_state;
   }
 
   auto draw_toast_on = [&](const ds::sdl::Canvas& c) {
@@ -2648,6 +2761,7 @@ sdl_ready:
     // (tests/cheevos_memory_test.cpp pins this). This also drains the HTTP
     // completions, so every rcheevos callback runs on this thread.
     if (cheevos_on) {
+      cheevos_apply_state();
       cheevos.frame();
       cheevos_catch_up();
       cheevos_show();

@@ -125,6 +125,23 @@ public:
   // the session stays alive without evaluating frozen memory.
   void idle();
 
+  // Save states, which Casual mode allows -- so achievement progress has to
+  // travel with them. Without this, loading a state leaves the runtime
+  // describing a world that no longer exists: hit counts part-way to an
+  // achievement the player has just rewound past, triggers primed by events
+  // that have been undone.
+  //
+  // serialize() gives false when there is nothing to carry (no set loaded).
+  // deserialize() returns false if the blob does not apply -- a different
+  // game, or a set that has changed since -- and the caller must reset()
+  // instead; that is the safe direction, since a mismatched restore is how a
+  // false unlock happens.
+  bool serialize_progress(std::vector<u8>& out) const;
+  bool deserialize_progress(const u8* data, size_t size);
+  // Puts the runtime back to how it starts, for a state that carries no
+  // progress at all (one saved before this existed, or by the headless build).
+  void reset();
+
   std::vector<Message> take_messages();
 
   // The loaded set, as the player would see it listed. This is what phase 4's
