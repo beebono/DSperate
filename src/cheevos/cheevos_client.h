@@ -111,6 +111,24 @@ public:
 
   std::vector<Message> take_messages();
 
+  // The loaded set, as the player would see it listed. This is what phase 4's
+  // achievement page is built on, and it is also how you confirm the server
+  // actually recorded an unlock: load the game again and the achievement comes
+  // back `unlocked`, because that state came from RetroAchievements rather than
+  // from this session.
+  struct Achievement {
+    std::string title, description, progress;
+    u32 id = 0, points = 0;
+    bool unlocked = false;
+    bool unsupported = false;   // a condition reads memory we do not back
+  };
+  struct Summary {
+    u32 total = 0, unlocked = 0, unsupported = 0;
+    u32 points = 0, points_earned = 0;
+  };
+  std::vector<Achievement> achievements() const;
+  Summary summary() const;
+
   // Called by rcheevos' completion callbacks, which run on the emulation
   // thread inside frame(). Public only because those callbacks are free
   // functions in the implementation; not for the frontend.

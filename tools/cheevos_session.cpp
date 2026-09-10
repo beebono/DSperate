@@ -162,6 +162,21 @@ int main(int argc, char** argv) {
   if (client.state() == cheevos::State::Playing)
     std::printf("game:      %u  %s\n", client.game_id(), client.game_title().c_str());
 
+  if (client.state() == cheevos::State::Playing) {
+    const auto sum = client.summary();
+    std::printf("set:       %u achievements, %u unlocked, %u unsupported here; %u/%u points\n",
+                sum.total, sum.unlocked, sum.unsupported, sum.points_earned, sum.points);
+    // The unlocked ones come from the *server*, not from this session, so this
+    // is the proof that an unlock was actually recorded rather than merely
+    // detected locally.
+    for (const auto& a : client.achievements()) {
+      if (a.unlocked) std::printf("  unlocked: %s (%u pts)\n            %s\n", a.title.c_str(), a.points, a.description.c_str());
+    }
+    for (const auto& a : client.achievements()) {
+      if (a.unsupported) std::printf("  UNSUPPORTED: %s\n", a.title.c_str());
+    }
+  }
+
   // What a *real* set costs per frame, which tools/cheevos_bench can only
   // approximate: it has to invent achievements, and its synthetic addresses have
   // no locality. Nothing should unlock here either.

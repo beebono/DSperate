@@ -526,6 +526,53 @@ void Client::on_game_failed(const std::string& why) {
 }
 
 // ---------------------------------------------------------------------------
+// The loaded set
+
+std::vector<Client::Achievement> Client::achievements() const {
+  std::vector<Achievement> out;
+  if (!client_) return out;
+  rc_client_t* c = static_cast<rc_client_t*>(client_);
+  // Core only: unofficial achievements are a separate opt-in and do not count.
+  rc_client_achievement_list_t* list =
+      rc_client_create_achievement_list(c, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE,
+                                        RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+  if (!list) return out;
+  for (u32 b = 0; b < list->num_buckets; ++b) {
+    const rc_client_achievement_bucket_t& bucket = list->buckets[b];
+    for (u32 i = 0; i < bucket.num_achievements; ++i) {
+      const rc_client_achievement_t* a = bucket.achievements[i];
+      if (!a) continue;
+      Achievement info;
+      info.title = a->title ? a->title : "";
+      info.description = a->description ? a->description : "";
+      info.progress = a->measured_progress;
+      info.id = a->id;
+      info.points = a->points;
+      // In Casual the unlock we care about is the softcore one; `unlocked` is a
+      // bitmask, and state is what rcheevos derived from it.
+      info.unlocked = a->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED ||
+                      (a->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE) != 0;
+      info.unsupported = a->state == RC_CLIENT_ACHIEVEMENT_STATE_DISABLED ||
+                         bucket.bucket_type == RC_CLIENT_ACHIEVEMENT_BUCKET_UNSUPPORTED;
+      out.push_back(std::move(info));
+    }
+  }
+  rc_client_destroy_achievement_list(list);
+  return out;
+}
+
+Client::Summary Client::summary() const {
+  Summary s;
+  for (const Achievement& a : achievements()) {
+    ++s.total;
+    s.points += a.points;
+    if (a.unlocked) { ++s.unlocked; s.points_earned += a.points; }
+    if (a.unsupported) ++s.unsupported;
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------------------
 // Events from rcheevos
 
 void Client::handle_event(const void* event_ptr) {

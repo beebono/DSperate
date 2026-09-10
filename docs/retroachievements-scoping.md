@@ -695,12 +695,16 @@ The set above, measured on the RG DS over 2000 frames
 | | mean | p50 | p99 | max | p99 share of a frame |
 |---|---|---|---|---|---|
 | Sonic Rush, real set | 54.0 us | 39.7 us | 150.2 us | 836 us | **0.90 %** |
+| M&L: Bowser's Inside Story, 110 achievements | 85.0 us | 63.9 us | 281.7 us | 2311 us | **1.69 %** |
 | synthetic 120 x 6 (phase 2) | 100.6 us | 96.2 us | 210.9 us | 482 us | 1.27 % |
 
-So the real set is *cheaper* than the synthetic estimate, which is what phase 2
+Sonic Rush is *cheaper* than the synthetic estimate, which is what phase 2
 guessed would happen and for the reason it gave: the synthetic addresses are
-spread over 1 MB with no locality, where a real set clusters. The phase 2 number
-stands as a pessimistic bound. Caveat on the real one: the console it measured
+spread over 1 MB with no locality, where a real set clusters. A big set costs
+more -- Bowser's Inside Story has 110 achievements and reaches 1.69 % p99, the
+largest real figure so far -- and the scaling is roughly linear in total
+conditions, as the synthetic sweep suggested. Still affordable, and still only
+paid by players who asked for it. Caveat on the real one: the console it measured
 against was never booted, so conditions short-circuit differently than in play
 -- it is indicative, not a final figure, and phase 6 should re-measure during
 actual play.
@@ -748,13 +752,45 @@ the message say "this game has a set; your dump is not one of its N supported
 hashes", which is the actually useful sentence. It costs a whole-console list,
 so it is a phase 4+ idea, not a phase 3 one.
 
-### Still unverified
+### Unlocks are credited -- confirmed
 
-**Whether an unlock is credited.** Login and set loading are confirmed, and the
-server served the set to DSperate without complaint, which is encouraging --
-but an unlock needs a condition to actually fire, which needs somebody playing.
-`--cheevos` turns the feature on for one run without touching the config, so
-this is now a matter of playing a game rather than of writing anything.
+The last open question, closed 2026-09-09 by playing the game. Mario & Luigi:
+Bowser's Inside Story unlocked *Is This Thing On?* ("Test your microphone
+successfully; the mic is required for the set - DeSmuMe cores do NOT work!")
+during normal play on the RG DS. A fresh session afterwards reports:
+
+```
+game:      5323  Mario & Luigi: Bowser's Inside Story
+set:       110 achievements, 2 unlocked, 0 unsupported here; 1/1090 points
+  unlocked: Warning: Unknown Emulator (0 pts)
+            Hardcore unlocks cannot be earned using this emulator.
+  unlocked: Is This Thing On? (1 pts)
+```
+
+That unlocked state came back **from the server**, in a session that had not
+evaluated a single frame, so RetroAchievements recorded it. Casual unlocks from
+an unregistered client are credited.
+
+Three things fall out of it:
+
+- **`Warning: Unknown Emulator` is awarded too**, and its own description says
+  what it is for: "Hardcore unlocks cannot be earned using this emulator." So
+  RetroAchievements' client list gates *hardcore credit* specifically, exactly
+  as drastic-nano's notes said, and being unregistered costs this project
+  nothing it wanted -- hardcore is out of scope. What it does do is put a
+  0-point achievement on the player's account for the game saying so. That is
+  RA's designed behaviour, not a fault, and registration is what removes it.
+- **0 of 110 achievements are unsupported.** The whole set evaluates against
+  main RAM and data TCM, which is the two-region map from phase 2 validated
+  against a real, large set rather than against our own reasoning.
+- **The device's dump is recognised where the local one is not.** On the rig
+  this game hashes `b128e8292f69780efffcdb3da03577e6` and resolves to game 5323;
+  the copy on the development box hashes `3fe7980df6da68e16a72d2cd417c46ac` and
+  resolves to nothing. Same game, two dumps, one registered. It is the clearest
+  possible illustration of the section above.
+
+`Client::achievements()` and `Client::summary()` were added to get this answer
+and are what phase 4's achievement page will be built on.
 
 ## What I expect to go wrong
 
