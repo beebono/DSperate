@@ -907,11 +907,22 @@ slot label already had, joined rather than replaced.
   tell which achievement it is. Unlocked is marked `*` and drawn bright, locked
   dim, unsupported dimmer still and labelled, since that last one is not
   something the player can do anything about.
-- **RetroAchievements** -- status, progress, and the one or two things that can
-  be done: sign in, sign out, view the list. The status line is where "no
-  achievements for this ROM" says so *with the hash*, wrapped over as many lines
-  as it needs rather than truncated, because it is the one sentence on the page
-  that has to be readable.
+- **RetroAchievements** -- status, progress, the one or two things that can be
+  done (sign in, sign out, view the list), and the three switches:
+  `UNLOCK NOTICES`, `SCREENSHOT ON UNLOCK` and `ENCORE (NEXT LAUNCH)`. The
+  status line is where "no achievements for this ROM" says so *with the hash*,
+  wrapped over as many lines as it needs rather than truncated, because it is
+  the one sentence on the page that has to be readable.
+
+  The switches live here rather than in the Options tree for two reasons: the
+  page is only reachable when achievements are on, so they hide themselves
+  correctly for free, and it is where a player goes looking for them. They are
+  still written through the ordinary `SettingsHost`, so they land in the global
+  or per-game file exactly like every other setting and need no persistence of
+  their own. Encore's label says *next launch* because rcheevos reads it when a
+  game loads; a player who is not told that will decide it is broken. Left and
+  right work them as well as A, the way every other two-way choice in this menu
+  behaves.
 
 Signing in reuses the firmware name editor: two prompts, username then
 password, with the password masked except for the character under the cursor

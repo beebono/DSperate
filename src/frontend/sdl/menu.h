@@ -98,6 +98,14 @@ struct CheevosHost {
   // Both asynchronous: the menu shows whatever status() says on a later frame.
   virtual void sign_in(const std::string& username, const std::string& password) = 0;
   virtual void sign_out() = 0;
+
+  // The switches the account page offers. An enum rather than config keys so
+  // menu.cpp does not have to know what they are called; the frontend maps
+  // them onto cheevos.* and persists them the way every other setting is
+  // persisted.
+  enum class Option : u8 { Toasts, Screenshot, Encore };
+  virtual bool option(Option) const = 0;
+  virtual void set_option(Option, bool on) = 0;
 };
 
 void dim_framebuffer(u32* px, u32 n);

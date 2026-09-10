@@ -807,14 +807,36 @@ Menu::Result Menu::handle_cheevos(u32 presses) {
 namespace {
 // The account page's rows, chosen at draw and handle time from the same state
 // so the two cannot disagree about what row 1 is.
-enum class AccountRow : u8 { SignIn, SignOut, List };
-int account_rows(const CheevosHost* h, AccountRow out[3]) {
+enum class AccountRow : u8 { SignIn, SignOut, List, Toasts, Screenshot, Encore };
+constexpr int kAccountRows = 6;
+int account_rows(const CheevosHost* h, AccountRow out[kAccountRows]) {
   int n = 0;
   if (!h) return 0;
   if (h->signed_in()) out[n++] = AccountRow::SignOut;
   else out[n++] = AccountRow::SignIn;
   if (h->has_set() && h->row_count() > 0) out[n++] = AccountRow::List;
+  out[n++] = AccountRow::Toasts;
+  out[n++] = AccountRow::Screenshot;
+  out[n++] = AccountRow::Encore;
   return n;
+}
+
+// The switch rows draw as "LABEL        ON", so the label and the state are
+// found in the same two places on every row.
+struct AccountLabel { const char* text; bool toggle; CheevosHost::Option opt; };
+AccountLabel account_label(AccountRow r) {
+  switch (r) {
+  case AccountRow::SignOut:    return {"SIGN OUT", false, CheevosHost::Option::Toasts};
+  case AccountRow::SignIn:     return {"SIGN IN", false, CheevosHost::Option::Toasts};
+  case AccountRow::List:       return {"VIEW ACHIEVEMENTS", false, CheevosHost::Option::Toasts};
+  case AccountRow::Toasts:     return {"UNLOCK NOTICES", true, CheevosHost::Option::Toasts};
+  case AccountRow::Screenshot: return {"SCREENSHOT ON UNLOCK", true, CheevosHost::Option::Screenshot};
+  // Encore is read when a game loads, so changing it here cannot affect the
+  // game already running. Saying so in the label beats a player deciding it
+  // is broken.
+  case AccountRow::Encore:     return {"ENCORE (NEXT LAUNCH)", true, CheevosHost::Option::Encore};
+  }
+  return {"", false, CheevosHost::Option::Toasts};
 }
 } // namespace
 
@@ -854,14 +876,19 @@ void Menu::draw_cheevos_account(const Canvas& d) const {
   }
   y += m.list_row_h;
 
-  AccountRow rows[3];
+  AccountRow rows[kAccountRows];
   const int n = account_rows(cheevos_, rows);
   for (int i = 0; i < n; ++i) {
-    const char* label = rows[i] == AccountRow::SignOut ? "SIGN OUT"
-                      : rows[i] == AccountRow::SignIn  ? "SIGN IN" : "VIEW ACHIEVEMENTS";
+    const AccountLabel L = account_label(rows[i]);
     if (i == account_row_)
       fill_rect(d, f.px0 + m.list_s * 2, y - m.list_s * 2, f.w - m.list_s * 10, m.list_row_h, kSel);
-    draw_text(d, f.text_x, y, m.list_s, kInk, label);
+    draw_text(d, f.text_x, y, m.list_s, kInk, L.text);
+    if (L.toggle) {
+      const char* state = cheevos_->option(L.opt) ? "ON" : "OFF";
+      // Right-aligned inside the same margin the scroll bar leaves.
+      draw_text(d, f.px0 + f.w - m.pad - text_width(m.list_s, state), y, m.list_s,
+                cheevos_->option(L.opt) ? kInk : kDim, state);
+    }
     y += m.list_row_h;
   }
 }
@@ -869,14 +896,23 @@ void Menu::draw_cheevos_account(const Canvas& d) const {
 Menu::Result Menu::handle_cheevos_account(u32 presses) {
   using B = io::Io::Button;
   const auto hit = [&](B b) { return (presses >> b) & 1; };
-  AccountRow rows[3];
+  AccountRow rows[kAccountRows];
   const int n = account_rows(cheevos_, rows);
   if (n == 0) { if (hit(B::BTN_B)) pop(); return Result::None; }
   if (hit(B::BTN_UP))   account_row_ = (account_row_ + n - 1) % n;
   if (hit(B::BTN_DOWN)) account_row_ = (account_row_ + 1) % n;
   if (hit(B::BTN_B)) { pop(); return Result::None; }
+  const AccountRow at = rows[std::clamp(account_row_, 0, n - 1)];
+  // A switch works with left/right as well as A, the way the settings pages
+  // and the slot row do -- a two-way choice should not need a different key
+  // here than everywhere else.
+  const AccountLabel L = account_label(at);
+  if (L.toggle && (hit(B::BTN_LEFT) || hit(B::BTN_RIGHT) || hit(B::BTN_A) || hit(B::BTN_START))) {
+    cheevos_->set_option(L.opt, !cheevos_->option(L.opt));
+    return Result::None;
+  }
   if (!hit(B::BTN_A) && !hit(B::BTN_START)) return Result::None;
-  switch (rows[std::clamp(account_row_, 0, n - 1)]) {
+  switch (at) {
   case AccountRow::SignIn:
     // Two prompts, name then password: the editor does one field at a time.
     open_credential_edit(EditDest::CheevosUser);
@@ -890,6 +926,10 @@ Menu::Result Menu::handle_cheevos_account(u32 presses) {
     cheevos_top_ = 0;
     push(Page::Cheevos);
     break;
+  case AccountRow::Toasts:
+  case AccountRow::Screenshot:
+  case AccountRow::Encore:
+    break;   // handled above
   }
   return Result::None;
 }

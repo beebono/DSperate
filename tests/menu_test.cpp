@@ -57,6 +57,13 @@ struct FakeCheevos final : ds::sdl::CheevosHost {
   Row row(int i) const override { return rows.at(static_cast<size_t>(i)); }
   void sign_in(const std::string& u, const std::string& p) override { sign_ins.push_back({u, p}); }
   void sign_out() override { ++signed_out_calls; in = false; }
+
+  std::map<int, bool> opts;
+  bool option(Option o) const override {
+    const auto it = opts.find(static_cast<int>(o));
+    return it != opts.end() && it->second;
+  }
+  void set_option(Option o, bool on) override { opts[static_cast<int>(o)] = on; }
 };
 
 // Where the Achievements row sits. With no cheat database and no settings host
@@ -138,6 +145,35 @@ void test_sign_out_is_offered_when_signed_in() {
   m.input(press(B::BTN_A));                 // account page
   m.input(press(B::BTN_A));                 // its only row is SIGN OUT
   CHECK(host.signed_out_calls == 1);
+}
+
+// The account page's switches: reachable, and worked by left/right as well as
+// A, the way every other two-way choice in this menu is.
+void test_account_switches_toggle() {
+  FakeCheevos host;
+  Menu m;
+  m.set_cheevos_host(&host);
+  m.set_open(true);
+  to_row(m, kCheevosVisibleRow);
+  m.input(press(B::BTN_A));                 // account page; row 0 is SIGN IN
+  using O = ds::sdl::CheevosHost::Option;
+  CHECK(!host.option(O::Toasts));
+  m.input(press(B::BTN_DOWN));              // no set loaded, so row 1 is UNLOCK NOTICES
+  m.input(press(B::BTN_A));
+  CHECK(host.option(O::Toasts));
+  m.input(press(B::BTN_RIGHT));             // and it toggles back
+  CHECK(!host.option(O::Toasts));
+
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+  CHECK(host.option(O::Screenshot));
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_LEFT));
+  CHECK(host.option(O::Encore));
+
+  // A switch row must not also be a page: B still leaves the page.
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::None);
+  CHECK(m.open());
 }
 
 // With a set loaded the row goes straight to the list, which scrolls without
@@ -1177,6 +1213,7 @@ int main() {
   test_sign_in_collects_both_fields();
   test_cancelling_sign_in_sends_nothing();
   test_sign_out_is_offered_when_signed_in();
+  test_account_switches_toggle();
   test_list_scrolls_within_bounds();
   test_cheevos_draw_bounds();
   test_toast_draw_bounds();

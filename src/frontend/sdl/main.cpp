@@ -2054,6 +2054,9 @@ sdl_ready:
       if (m.kind == ds::cheevos::Message::Kind::Unlock && cfg.flag("cheevos.auto_screenshot", false))
         shot_pending = true;
       if (!cfg.flag("cheevos.toasts", true)) continue;
+      // cfg, not the menu host: both read the same key, and the host writes
+      // through cfg, so a switch flipped in the menu is live on the next
+      // message without any wiring between them.
       Toast t;
       t.header = m.kind == ds::cheevos::Message::Kind::Unlock ? "ACHIEVEMENT UNLOCKED"
                : m.kind == ds::cheevos::Message::Kind::Problem ? "RETROACHIEVEMENTS" : nullptr;
@@ -2140,6 +2143,33 @@ sdl_ready:
     void sign_in(const std::string& user, const std::string& password) override {
       if (c) c->sign_in(user, password);
     }
+
+    // The switches go through the ordinary settings host, so they are written
+    // to whichever file the player chose (global or per-game) and applied the
+    // same way every other setting is. Nothing new to persist.
+    ds::sdl::SettingsHost* settings = nullptr;
+    static const char* key_of(Option o) {
+      switch (o) {
+      case Option::Toasts:     return "cheevos.toasts";
+      case Option::Screenshot: return "cheevos.auto_screenshot";
+      case Option::Encore:     return "cheevos.encore";
+      }
+      return "";
+    }
+    bool option(Option o) const override {
+      if (!settings) return false;
+      const std::string v = settings->get(key_of(o));
+      // Only toasts default on; the other two are opt-in.
+      if (v.empty()) return o == Option::Toasts;
+      return v == "true" || v == "1" || v == "on";
+    }
+    void set_option(Option o, bool on) override {
+      if (!settings) return;
+      settings->set(key_of(o), on ? "true" : "false");
+      // Encore is read when a game loads, so tell the session now and it takes
+      // effect at the next load rather than being lost.
+      if (o == Option::Encore && c) c->set_encore(on);
+    }
     void sign_out() override {
       if (c) c->sign_out();
       rows.clear();
@@ -2148,6 +2178,7 @@ sdl_ready:
   } cheevos_menu;
   if (cheevos_on) {
     cheevos_menu.c = &cheevos;
+    cheevos_menu.settings = &host;
     menu.set_cheevos_host(&cheevos_menu);
   }
 
