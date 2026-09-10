@@ -132,6 +132,48 @@ int glyph_cased(char c) {
   return glyph(c);
 }
 
+// Text arrives as UTF-8 -- achievement and game titles come from
+// RetroAchievements as the game is actually named, "Ōkamiden" -- and the font
+// is ASCII. Rather than draw a blank per byte, a Latin letter with a mark is
+// folded onto the letter it decorates, which the player can read; anything
+// else that is not ASCII draws as '?', which at least admits something is
+// there. Returns the next glyph's ASCII code and advances `p` past however
+// many bytes it took.
+char next_char(const char*& p) {
+  const unsigned char b0 = static_cast<unsigned char>(*p++);
+  if (b0 < 0x80) return static_cast<char>(b0);
+  int len = b0 >= 0xF0 ? 4 : b0 >= 0xE0 ? 3 : b0 >= 0xC0 ? 2 : 0;
+  if (len == 0) return '?';                        // stray continuation byte
+  u32 cp = b0 & (0x7F >> len);
+  for (int i = 1; i < len; ++i, ++p) {
+    const unsigned char b = static_cast<unsigned char>(*p);
+    if ((b & 0xC0) != 0x80) return '?';            // truncated sequence: leave the tail for the next glyph
+    cp = (cp << 6) | (b & 0x3F);
+  }
+  // Latin-1 Supplement letters, U+00C0..U+00FF.
+  static constexpr char kLatin1[64 + 1] =
+      "AAAAAAACEEEEIIII" "DNOOOOOxOUUUUYTs"
+      "aaaaaaaceeeeiiii" "dnooooo/ouuuuyty";
+  // Latin Extended-A, U+0100..U+017F: the macrons, carons, ogoneks and
+  // strokes of most European spellings.
+  static constexpr char kLatinA[128 + 1] =
+      "AaAaAaCcCcCcCcDd" "DdEeEeEeEeEeGgGg" "GgGgHhHhIiIiIiIi" "IiIiJjKkkLlLlLlL"
+      "lLlNnNnNnnNnOoOo" "OoOoRrRrRrSsSsSs" "SsTtTtTtUuUuUuUu" "UuUuWwYyYZzZzZzs";
+  if (cp >= 0xC0 && cp <= 0xFF) return kLatin1[cp - 0xC0];
+  if (cp >= 0x100 && cp <= 0x17F) return kLatinA[cp - 0x100];
+  return '?';
+}
+
+// Drops the last code point of a UTF-8 string, so trimming for width never
+// leaves a lead byte behind.
+void pop_char(std::string& s) {
+  while (!s.empty()) {
+    const unsigned char b = static_cast<unsigned char>(s.back());
+    s.pop_back();
+    if ((b & 0xC0) != 0x80) break;
+  }
+}
+
 // One pixel. Clipped to the canvas so a caller may lay out past the edges
 // without checking. Columns outside [clip_x0, clip_x1) are dropped, which is
 // what lets a name scroll under the panel edge instead of over it; the
@@ -215,13 +257,14 @@ static_assert(kRoot[kCheevosRow].result == Menu::Result::None, "kCheevosRow must
 
 int text_width(int scale, const char* s) {
   int n = 0;
-  for (const char* p = s; *p; ++p) ++n;
+  for (const char* p = s; *p;) { next_char(p); ++n; }   // glyphs, not bytes
   return n > 0 ? n * kAdvance * scale - scale : 0;   // no gap after the last glyph
 }
 
 int draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s, bool keep_case) {
-  for (const char* p = s; *p; ++p) {
-    const u8* g = kFont[keep_case ? glyph_cased(*p) : glyph(*p)];
+  for (const char* p = s; *p;) {
+    const char ch = next_char(p);
+    const u8* g = kFont[keep_case ? glyph_cased(ch) : glyph(ch)];
     for (int r = 0; r < kGlyphH; ++r)
       for (int c = 0; c < kGlyphW; ++c)
         if ((g[r] >> (kGlyphW - 1 - c)) & 1)
@@ -525,7 +568,7 @@ namespace {
 std::string fit(const std::string& text, int scale, int width_px) {
   if (text_width(scale, text.c_str()) <= width_px) return text;
   std::string out = text;
-  while (!out.empty() && text_width(scale, (out + "...").c_str()) > width_px) out.pop_back();
+  while (!out.empty() && text_width(scale, (out + "...").c_str()) > width_px) pop_char(out);
   return out + "...";
 }
 } // namespace

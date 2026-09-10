@@ -80,6 +80,26 @@ void to_row(Menu& m, int row) {
 // With no host the row must not exist at all -- not be present and inert. A
 // build without RetroAchievements, or with it switched off, must look exactly
 // as it did before the feature: the fourth row is still RESUME.
+// Accented Latin letters fold onto the ASCII glyph they decorate, and a
+// multi-byte character is one glyph wide, not one per byte. "\xC5\x8C" is
+// U+014C, the O with a macron that opens "Okamiden".
+void test_utf8_folds_to_ascii_glyphs() {
+  using ds::sdl::Canvas; using ds::sdl::text_width; using ds::sdl::draw_text;
+  const char* accented = "\xC5\x8Ckamiden \xC3\x89t\xC3\xA9 \xC5\xA0";   // Ōkamiden Été Š
+  const char* plain    = "Okamiden Ete S";
+  CHECK(text_width(2, accented) == text_width(2, plain));
+  std::vector<u32> a(200 * 20, 0), b(200 * 20, 0);
+  const Canvas ca{a.data(), 200, 200, 20}, cb{b.data(), 200, 200, 20};
+  CHECK(draw_text(ca, 0, 0, 2, 0xFFFFFFFF, accented) == draw_text(cb, 0, 0, 2, 0xFFFFFFFF, plain));
+  CHECK(a == b);   // pixel for pixel the same word
+  // Something with no Latin base draws as '?' rather than nothing.
+  std::vector<u32> q(200 * 20, 0), z(200 * 20, 0);
+  draw_text(Canvas{q.data(), 200, 200, 20}, 0, 0, 2, 0xFFFFFFFF, "\xE3\x81\x82");   // あ
+  draw_text(Canvas{z.data(), 200, 200, 20}, 0, 0, 2, 0xFFFFFFFF, "?");
+  CHECK(q == z);
+  CHECK(text_width(2, "\xE3\x81\x82") == text_width(2, "?"));
+}
+
 void test_cheevos_row_hidden_without_a_host() {
   Menu m;
   m.set_open(true);
@@ -1314,6 +1334,7 @@ int main() {
   test_account_switches_toggle();
   test_list_scrolls_within_bounds();
   test_cheevos_draw_bounds();
+  test_utf8_folds_to_ascii_glyphs();
   test_toast_draw_bounds();
   test_marquee_resets_on_move();
   test_page_stack();
