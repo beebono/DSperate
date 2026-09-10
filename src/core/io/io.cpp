@@ -753,6 +753,8 @@ u32 Io::cart_read_data() {
 // ---- Wi-Fi ------------------------------------------------------------------
 namespace {
 constexpr u32 W_ID = 0x000, W_IF = 0x010, W_IE = 0x012, W_PowerUS = 0x036, W_Random = 0x044,
+  W_ModeReset = 0x004, W_ModeWEP = 0x006, W_TRXPower = 0x034, W_PowerTX = 0x038, W_PowerState = 0x03C,
+  W_PowerForce = 0x040, W_PowerDownCtrl = 0x048, W_RFPins = 0x19C, W_RFStatus = 0x214,
   W_Preamble = 0x0BC, W_USCount0 = 0x0F8, W_USCompare0 = 0x0F0, W_CmdCount = 0x118,
   W_BBCnt = 0x158, W_BBWrite = 0x15A, W_BBRead = 0x15C, W_BBBusy = 0x15E,
   W_RFData2 = 0x17C, W_RFData1 = 0x17E, W_RFBusy = 0x180, W_TXBusy = 0x0B6,
@@ -761,7 +763,7 @@ constexpr u32 W_ID = 0x000, W_IF = 0x010, W_IE = 0x012, W_PowerUS = 0x036, W_Ran
 
 void Io::wifi_reset() {
   wifi_ram.fill(0); wifi_io.fill(0); wifi_bb.fill(0); wifi_bb_ro.fill(0); wifi_rf.fill(0);
-  wifi_random = 1;
+  wifi_random = 1; wifi_power_on_pending = false;
   auto fixed = [&](u32 id, u8 v) { wifi_bb[id] = v; wifi_bb_ro[id] = 1; };
   fixed(0x00, 0x6D);
   for (u32 id : {0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x27, 0x4D, 0x5E, 0x5F, 0x60, 0x61, 0x66}) fixed(id, 0x00);
@@ -774,6 +776,65 @@ void Io::wifi_reset() {
   for (u32 a = 0x018; a < 0x01E; a += 2) wifi_io[a / 2] = 0xFFFF;   // MAC
   for (u32 a = 0x020; a < 0x026; a += 2) wifi_io[a / 2] = 0xFFFF;   // BSSID
   wifi_io[W_PowerUS / 2] = 0x0001;
+}
+
+// ---- transceiver power (after melonDS Wifi::UpdatePowerStatus) --------------
+void Io::wifi_set_irq(u32 irq) {
+  const u16 old = wifi_io[W_IF / 2] & wifi_io[W_IE / 2];
+  wifi_io[W_IF / 2] |= static_cast<u16>(1u << irq);
+  if (old == 0 && (wifi_io[W_IF / 2] & wifi_io[W_IE / 2])) request_irq(Cpu::ARM7, IRQ_WIFI);
+}
+
+void Io::wifi_set_status(u32 status) {
+  static const u16 rfpins[10] = {0x04, 0x84, 0, 0x46, 0, 0x84, 0x87, 0, 0x46, 0x04};
+  wifi_io[W_RFStatus / 2] = static_cast<u16>(status);
+  wifi_io[W_RFPins / 2] = rfpins[status < 10 ? status : 0];
+}
+
+static void ev_wifi_power(NDS& nds, u32) { nds.io.wifi_power_on_done(); }
+
+void Io::wifi_power_on_done() {
+  wifi_power_on_pending = false;
+  wifi_io[W_PowerState / 2] = 0;
+  wifi_set_status(1);
+  wifi_update_power(0);
+}
+
+void Io::wifi_update_power(int power) {
+  // W_PowerForce overrides all else; W_ModeReset bit 0 clear forces the
+  // transceiver off; otherwise IRQ13/15 or W_PowerState turn it on or off
+  // per the mode in W_ModeWEP, with W_PowerDownCtrl inhibiting a power-down.
+  int cur = 0;
+  if (wifi_io[W_TRXPower / 2] == 1) cur |= 1;
+  if (!(wifi_io[W_PowerState / 2] & 0x0200)) cur |= 2;
+  int req = cur;
+  if (wifi_io[W_PowerForce / 2] & 0x8000) req = (wifi_io[W_PowerForce / 2] & 1) ? 0 : 3;
+  else if (!(wifi_io[W_ModeReset / 2] & 1)) req = 0;
+  else {
+    if (power == 0) {
+      if ((wifi_io[W_PowerState / 2] & 0x0202) == 0x0202) power = 1;
+      else if ((wifi_io[W_PowerState / 2] & 0x0201) == 0x0001) power = -1;
+    }
+    if (power == -1 && (wifi_io[W_PowerDownCtrl / 2] & 1)) power = 0;
+    if (power == 1) req = 3;
+    else if (power == -1) req = wifi_io[W_PowerDownCtrl / 2] ? 3 : 0;
+    else if (wifi_io[W_PowerDownCtrl / 2] & 2) req = 3;
+  }
+  if (req == cur) return;
+  if (req & 1) { if (!(cur & 1)) { wifi_io[W_TRXPower / 2] = 1; wifi_set_status(1); } }
+  else { wifi_io[W_TRXPower / 2] = 0; wifi_set_status(9); }   // nothing in flight: no frames are modelled
+  if (req & 2) {
+    wifi_io[W_PowerState / 2] |= 0x0100;
+    if (!(cur & 2) && !wifi_power_on_pending) {
+      wifi_power_on_pending = true;
+      nds_.sched.schedule(EventId::Wifi, nds_.sched.now() + 2048ull * ARM9_CLOCK_HZ / 1'000'000, ev_wifi_power, 0);   // 2048 us
+      wifi_set_irq(11);
+    }
+  } else {
+    wifi_io[W_PowerState / 2] &= static_cast<u16>(~0x0101);
+    wifi_io[W_PowerState / 2] |= 0x0200;
+    if (wifi_power_on_pending) { wifi_power_on_pending = false; nds_.sched.cancel(EventId::Wifi); }
+  }
 }
 
 u16 Io::wifi_read16(u32 addr) {
@@ -813,6 +874,40 @@ void Io::wifi_write16(u32 addr, u16 value) {
   case W_ID: return;
   case W_IF: wifi_io[r / 2] &= ~value; return;
   case W_IFSet: wifi_io[W_IF / 2] |= value & 0xFBFF; return;
+  case W_ModeReset: {
+    const u16 old = wifi_io[r / 2];
+    wifi_io[r / 2] = value & 1;
+    if ((old ^ value) & 1) { wifi_io[0x27C / 2] = (value & 1) ? 0x0005 : 0x000A; wifi_update_power(0); }
+    if (value & 0x4000) wifi_io[W_ModeWEP / 2] = 0;
+    return;
+  }
+  case W_PowerUS: wifi_io[r / 2] = value & 3; return;
+  case W_PowerTX:
+    wifi_io[r / 2] = value & 3;
+    if (value & 2) {
+      if ((wifi_io[W_ModeWEP / 2] & 7) == 1) wifi_io[W_PowerDownCtrl / 2] |= 2;
+      else if ((wifi_io[W_ModeWEP / 2] & 7) == 2) wifi_io[W_PowerDownCtrl / 2] = 3;
+      wifi_update_power(0);
+    }
+    return;
+  case W_PowerState: {
+    if ((wifi_io[W_ModeWEP / 2] & 7) != 3) return;
+    u16 v = static_cast<u16>((wifi_io[r / 2] & 0x0300) | (value & 0x0003));
+    if ((v & 0x0300) == 0x0200) v &= ~1; else v &= ~2;
+    if (!(v & 0x0200)) v &= ~0x0100;
+    wifi_io[r / 2] = v;
+    wifi_update_power(0);
+    return;
+  }
+  case W_PowerForce: wifi_io[r / 2] = value & 0x8001; wifi_update_power(0); return;
+  case W_PowerDownCtrl:
+    wifi_io[r / 2] = value & 3;
+    if (wifi_io[W_PowerTX / 2] & 2) {
+      if ((wifi_io[W_ModeWEP / 2] & 7) == 1) wifi_io[r / 2] |= 2;
+      else if ((wifi_io[W_ModeWEP / 2] & 7) == 2) wifi_io[r / 2] = 3;
+    }
+    wifi_update_power(0);
+    return;
   case W_BBCnt:
     wifi_io[r / 2] = value;
     if ((value & 0xF000) == 0x5000) { const u32 id = value & 0xFF; if (!wifi_bb_ro[id]) wifi_bb[id] = static_cast<u8>(wifi_io[W_BBWrite / 2]); }
@@ -1238,6 +1333,7 @@ template <class S> void Io::sync_state(S& s) {
   s.fields(math.divcnt, math.sqrtcnt, math.div_num, math.div_den, math.div_quot, math.div_rem, math.sqrt_val, math.sqrt_res);
   s.fields(wifi_ram, wifi_io, wifi_bb, wifi_bb_ro, wifi_rf, wifi_rf_version, wifi_random);
   s.fields(math.div_ready_at, math.sqrt_ready_at, math.div_pending, math.sqrt_pending, spi_ready_at, cart.bulk);   // appended: older states leave them at rest
+  s.fields(wifi_power_on_pending);
   s.end();
   if constexpr (S::reading) {
     mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;   // the frontend hands a new buffer every frame
@@ -1250,6 +1346,7 @@ template <class S> void Io::sync_state(S& s) {
     nds_.sched.rebind(EventId::Div, ev_div);
     nds_.sched.rebind(EventId::Sqrt, ev_sqrt);
     nds_.sched.rebind(EventId::LcdIrq, ev_lcd_irq);
+    nds_.sched.rebind(EventId::Wifi, ev_wifi_power);
     // The clock is a property of the session, not of the state: a state saved
     // on a console with a running clock must not stop it on a harness run, or
     // start one there. Whatever this run was set up with keeps going, rebased

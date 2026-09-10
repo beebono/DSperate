@@ -203,7 +203,17 @@ public:
   std::array<u32, 0x40> wifi_rf{};
   u8  wifi_rf_version = 2;
   u16 wifi_random = 1;
+  // Transceiver power management (melonDS's UpdatePowerStatus): W_POWERFORCE,
+  // W_MODE_RST, W_POWERSTATE and W_POWER_TX drive W_TRXPOWER/W_RFSTATUS and
+  // the W_POWERSTATE flags, with a 2048 us power-on delay. Games shut the
+  // radio down before loading a save and spin on W_POWERSTATE until the
+  // power-off shows (Pokemon Platinum on CONTINUE).
+  bool wifi_power_on_pending = false;
   void wifi_reset();
+  void wifi_update_power(int power);      // 1 = on, 0 = no change, -1 = off
+  void wifi_set_status(u32 status);
+  void wifi_power_on_done();
+  void wifi_set_irq(u32 irq);
   u16  wifi_read16(u32 addr);
   void wifi_write16(u32 addr, u16 value);
   // Level-sensitive IRQ sources (the GX FIFO) set and clear their IF bit.

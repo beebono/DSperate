@@ -3212,6 +3212,9 @@ sdl_ready:
     fps_pace_ticks += SDL_GetPerformanceCounter() - t3;
 
     ++frames;
+    // DS_SHOT_AT=N: a screenshot (the hotkey's, into paths.screenshots) after
+    // frame N -- for offscreen/replay runs, where no hotkey can fire.
+    if (static const long shot_at = [] { const char* v = std::getenv("DS_SHOT_AT"); return v ? std::atol(v) : -1L; }(); shot_at >= 0 && frames == static_cast<u64>(shot_at)) shot_pending = true;
     if (nds.cart && nds.cart->sram_dirty()) {
       if (nds.cart->sram_writes() != sram_writes_seen) { sram_writes_seen = nds.cart->sram_writes(); sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();

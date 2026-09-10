@@ -26,7 +26,7 @@ struct NDS;
 enum class EventId : u8 {
   HBlank, VBlank_Scanline, Timer0, Timer1, Timer2, Timer3,
   Timer7_0, Timer7_1, Timer7_2, Timer7_3,
-  Dma, Spu, Spi, Rtc, Cart, Gx3D, DisplayFifo, Div, Sqrt, LcdIrq, Count
+  Dma, Spu, Spi, Rtc, Cart, Gx3D, DisplayFifo, Div, Sqrt, LcdIrq, Wifi, Count
 };
 
 // CPU interleave quantum in ARM9 cycles: the most one CPU runs before the
