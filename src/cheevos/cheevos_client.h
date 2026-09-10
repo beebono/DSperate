@@ -80,6 +80,20 @@ public:
   void shutdown();
 
   State state() const { return state_; }
+
+  // Encore mode: achievements the player has already earned are activated
+  // again, so replaying a game shows them unlocking as it goes. The server
+  // does not credit an unlock twice -- nothing is re-awarded -- so this changes
+  // what DSperate shows, not what the account holds.
+  //
+  // rcheevos evaluates it when a game loads and ignores it while one is
+  // loaded (rc_client.h:77), so set it before load_game(). Kept here as well
+  // as in rc_client so it survives being set before start().
+  void set_encore(bool on);
+  // Asks rcheevos rather than reporting our own flag back: the two could
+  // disagree (encore is only evaluated at game load), and the library's answer
+  // is the one that decides what happens.
+  bool encore() const;
   const char* transport_name() const;
   // The player-facing reason the session is not usable, when state() is Off.
   const std::string& unavailable_reason() const { return unavailable_; }
@@ -121,11 +135,14 @@ public:
   struct Achievement {
     std::string title, description, progress;
     u32 id = 0, points = 0;
-    bool unlocked = false;
+    bool unlocked = false;      // the *account* holds it -- what the list shows
+    bool active = false;        // armed, i.e. it can trigger now. Normally the
+                                // opposite of unlocked; in encore mode an
+                                // already-earned achievement is both.
     bool unsupported = false;   // a condition reads memory we do not back
   };
   struct Summary {
-    u32 total = 0, unlocked = 0, unsupported = 0;
+    u32 total = 0, unlocked = 0, active = 0, unsupported = 0;
     u32 points = 0, points_earned = 0;
   };
   std::vector<Achievement> achievements() const;
@@ -169,6 +186,7 @@ private:
   std::unique_ptr<Backend> http_;
   Memory mem_;
   State state_ = State::Off;
+  bool encore_ = false;
   std::string hash_;                 // the identity of the dump in the slot
   std::string unavailable_;
 

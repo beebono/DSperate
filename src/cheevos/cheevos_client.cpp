@@ -206,6 +206,16 @@ Client::~Client() { shutdown(); }
 
 const char* Client::transport_name() const { return http_ ? http_->name() : "none"; }
 
+void Client::set_encore(bool on) {
+  encore_ = on;
+  if (client_) rc_client_set_encore_mode_enabled(static_cast<rc_client_t*>(client_), on ? 1 : 0);
+}
+
+bool Client::encore() const {
+  if (!client_) return encore_;
+  return rc_client_get_encore_mode_enabled(static_cast<rc_client_t*>(client_)) != 0;
+}
+
 void Client::post(Message::Kind kind, std::string text, std::string detail, u32 points) {
   std::lock_guard<std::mutex> lk(mu_);
   messages_.push_back(Message{kind, std::move(text), std::move(detail), points});
@@ -251,6 +261,9 @@ bool Client::start(std::string& err) {
   // Memory is read only from inside do_frame/idle, which is how we can promise
   // that guest memory is touched on the emulation thread and nowhere else.
   rc_client_set_allow_background_memory_reads(c, 0);
+
+  // Whatever set_encore() was told before there was a client to tell.
+  rc_client_set_encore_mode_enabled(c, encore_ ? 1 : 0);
 
   if (verbose()) rc_client_enable_logging(c, RC_CLIENT_LOG_LEVEL_VERBOSE, &rc_log);
   rc_client_set_event_handler(c, &rc_event_handler);
@@ -550,8 +563,13 @@ std::vector<Client::Achievement> Client::achievements() const {
       info.points = a->points;
       // In Casual the unlock we care about is the softcore one; `unlocked` is a
       // bitmask, and state is what rcheevos derived from it.
+      // Two different questions, and encore is where they come apart: `unlocked`
+      // is whether the account holds it, `active` whether it can trigger now.
+      // Outside encore an earned achievement is not active; inside it, it is
+      // both, which is the whole point of the mode.
       info.unlocked = a->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED ||
                       (a->unlocked & RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE) != 0;
+      info.active = a->state == RC_CLIENT_ACHIEVEMENT_STATE_ACTIVE;
       info.unsupported = a->state == RC_CLIENT_ACHIEVEMENT_STATE_DISABLED ||
                          bucket.bucket_type == RC_CLIENT_ACHIEVEMENT_BUCKET_UNSUPPORTED;
       out.push_back(std::move(info));
@@ -567,6 +585,7 @@ Client::Summary Client::summary() const {
     ++s.total;
     s.points += a.points;
     if (a.unlocked) { ++s.unlocked; s.points_earned += a.points; }
+    if (a.active) ++s.active;
     if (a.unsupported) ++s.unsupported;
   }
   return s;

@@ -80,6 +80,10 @@ bool pump(cheevos::Client& c, Pred settled, int seconds) {
 
 int main(int argc, char** argv) {
   cheevos::Client client;
+  // DS_CHEEVOS_ENCORE=1 re-activates achievements the account has already
+  // earned, which is the only way to exercise the setting without replaying a
+  // game to a trigger.
+  if (const char* e = std::getenv("DS_CHEEVOS_ENCORE")) client.set_encore(std::atoi(e) != 0);
   std::string err;
   if (!client.start(err)) {
     std::printf("transport unavailable: %s\n", client.unavailable_reason().c_str());
@@ -164,8 +168,9 @@ int main(int argc, char** argv) {
 
   if (client.state() == cheevos::State::Playing) {
     const auto sum = client.summary();
-    std::printf("set:       %u achievements, %u unlocked, %u unsupported here; %u/%u points\n",
-                sum.total, sum.unlocked, sum.unsupported, sum.points_earned, sum.points);
+    std::printf("encore:    %s\n", client.encore() ? "on" : "off");
+    std::printf("set:       %u achievements, %u unlocked, %u active, %u unsupported here; %u/%u points\n",
+                sum.total, sum.unlocked, sum.active, sum.unsupported, sum.points_earned, sum.points);
     // The unlocked ones come from the *server*, not from this session, so this
     // is the proof that an unlock was actually recorded rather than merely
     // detected locally.

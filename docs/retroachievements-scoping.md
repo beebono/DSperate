@@ -852,6 +852,46 @@ actually looking found three things in a few minutes:
 Worth remembering for phase 6: a bounds test says the drawing is safe, not that
 it is right.
 
+### Two settings from the config file
+
+`cheevos.encore` and `cheevos.auto_screenshot`, both off by default.
+
+**Encore** re-activates achievements the account has already earned, so
+replaying a game shows the set unlocking as it goes. Two things about it are
+worth knowing. rcheevos evaluates it *when a game loads* and ignores it while
+one is loaded (`rc_client.h:77`), so it is set before `load_game` and a change
+takes effect on the next launch. And nothing is credited twice -- the server
+does not re-award an unlock -- so it changes what DSperate shows, not what the
+account holds.
+
+That distinction turned out to matter in the code too. `Achievement::unlocked`
+answers "does the account hold this", which encore does not change; a second
+flag, `active`, answers "can this trigger now", which is exactly what encore
+does change. Verified on the RG DS against a game with two earned
+achievements:
+
+```
+encore off:  110 achievements, 2 unlocked, 108 active
+encore on:   110 achievements, 2 unlocked, 110 active
+```
+
+Without the second flag the setting had no observable effect and would have
+looked like it did nothing. The account page appends `(ENCORE)` to the
+progress line, because an achievement re-unlocking otherwise reads as a fault.
+
+**Auto-screenshot** takes a picture when an achievement unlocks, through the
+same `shot_pending` the screenshot hotkey uses -- so it lands in the
+screenshots directory named like any other shot, and takes the same
+present-forcing path. Usually that is the frame the achievement triggered on;
+on a skipped frame it slips to the next, because `present` is decided earlier
+in the loop than the unlock is known. One frame late beats a missed shot. It
+captures the game rather than the toast, which goes on the canvas afterwards.
+
+Only the flag read and the assignment are new -- the capture path is the
+hotkey's, already exercised -- but the end-to-end case has not been seen fire,
+because it needs an achievement to actually unlock during play. Encore mode is
+the easy way to test it: replay a game with an earned achievement.
+
 ## What I expect to go wrong
 
 - **The User-Agent**, which is the one thing that silently disables the entire

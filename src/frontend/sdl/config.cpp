@@ -430,7 +430,12 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # toasts = true                 # show a panel at the bottom of the screen when an achievement unlocks,
                                 # and for sign-in and connection messages. Off leaves them in the log
 # encore = false                # allow achievements to be triggered again even if already achieved.
-# auto_screenshot = false       # take a screenshot when an achievement is acquired.
+                                # For replaying a game and watching the set unlock as it goes. Nothing
+                                # is credited twice, so this changes what DSperate shows, not what the
+                                # account holds. Read when a game loads, so it takes effect next launch
+# auto_screenshot = false       # take a screenshot when an achievement is acquired. Goes to the
+                                # screenshots directory named like any other, and shows the game rather
+                                # than the notice over it
 )";
 }
 

@@ -2040,6 +2040,19 @@ sdl_ready:
       // diagnosed, and a toast is gone in four seconds.
       std::fprintf(stderr, "cheevos: %s%s%s\n", m.text.c_str(),
                    m.detail.empty() ? "" : " -- ", m.detail.c_str());
+      // A picture of the moment it unlocked, through the same shot_pending the
+      // hotkey uses -- so it lands in the screenshots directory named like any
+      // other. Usually that is this frame, the one the achievement triggered
+      // on. The exception is a frame being skipped: `present` was decided
+      // above, before the unlock was known, so the shot slips to the next
+      // frame, where shot_pending forces a present. One frame late beats a
+      // missed shot, and it is the same path the hotkey takes.
+      //
+      // It captures the game, not the toast: the toast goes on the canvas
+      // afterwards, and a picture of the notice is less interesting than one
+      // of what earned it.
+      if (m.kind == ds::cheevos::Message::Kind::Unlock && cfg.flag("cheevos.auto_screenshot", false))
+        shot_pending = true;
       if (!cfg.flag("cheevos.toasts", true)) continue;
       Toast t;
       t.header = m.kind == ds::cheevos::Message::Kind::Unlock ? "ACHIEVEMENT UNLOCKED"
@@ -2094,9 +2107,12 @@ sdl_ready:
     }
     std::string progress() const override {
       if (!c || sum.total == 0) return {};
-      char buf[96];
-      std::snprintf(buf, sizeof buf, "%u/%u EARNED  %u/%u POINTS",
-                    sum.unlocked, sum.total, sum.points_earned, sum.points);
+      char buf[128];
+      // Encore is worth saying out loud: it is why an achievement the player
+      // has already earned unlocks again, which otherwise looks like a fault.
+      std::snprintf(buf, sizeof buf, "%u/%u EARNED  %u/%u POINTS%s",
+                    sum.unlocked, sum.total, sum.points_earned, sum.points,
+                    c->encore() ? "  (ENCORE)" : "");
       return buf;
     }
     bool signed_in() const override {
@@ -2156,6 +2172,9 @@ sdl_ready:
     if (!cheevos.start(err)) {
       std::fprintf(stderr, "cheevos: %s\n", cheevos.unavailable_reason().c_str());
     } else {
+      // Encore before anything loads: rcheevos evaluates it at game load and
+      // ignores it afterwards.
+      cheevos.set_encore(cfg.flag("cheevos.encore", false));
       // Sign in from the stored token. A password is never kept, so there is
       // nothing else to try here; a token the server has expired comes back as
       // a failure and the player signs in again from the menu (phase 4).
