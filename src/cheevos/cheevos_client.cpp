@@ -465,7 +465,13 @@ void load_done(int result, const char* error_message, rc_client_t* c, void* user
   if (!self) return;
   if (result == RC_OK) {
     const rc_client_game_t* g = rc_client_get_game_info(c);
-    self->on_game_loaded(g && g->title ? g->title : "", g ? g->id : 0);
+    const std::string title = g && g->title ? g->title : "";
+    const u32 id = g ? g->id : 0;
+    // A known dump whose game has no published set yet loads with RC_OK and
+    // zero core achievements. That is not "achievements active", and a toast
+    // saying so sends the player looking for a list that is not there.
+    if (self->achievements().empty()) self->on_empty_set(title, id);
+    else self->on_game_loaded(title, id);
   } else if (result == RC_NO_GAME_LOADED) {
     // The ROM hashed fine, RetroAchievements simply has no set for this dump.
     // An ordinary outcome, and one the player has to be able to see -- it is
@@ -529,7 +535,8 @@ void Client::load_game(NDS& nds, const std::string& hash) {
 void Client::unload_game() {
   if (!client_) return;
   rc_client_unload_game(static_cast<rc_client_t*>(client_));
-  if (state_ == State::Playing || state_ == State::LoadingGame || state_ == State::NoSet)
+  if (state_ == State::Playing || state_ == State::LoadingGame || state_ == State::NoSet ||
+      state_ == State::EmptySet)
     state_ = State::SignedIn;
 }
 
@@ -565,6 +572,13 @@ void Client::on_game_loaded(const std::string& title, u32 id) {
   post(Message::Kind::Info, title.empty() ? "Achievements loaded" : title,
        "achievements active");
   CLOG("game %u loaded: %s\n", id, title.c_str());
+}
+
+// Quiet on purpose: nothing has gone wrong and there is nothing to do, so no
+// popup. The account page says what happened instead.
+void Client::on_empty_set(const std::string& title, u32 id) {
+  state_ = State::EmptySet;
+  CLOG("game %u known (%s) but has no published achievements\n", id, title.c_str());
 }
 
 void Client::on_no_set() {

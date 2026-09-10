@@ -2200,6 +2200,10 @@ sdl_ready:
       case ds::cheevos::State::SignedIn:    return "SIGNED IN AS " + c->username();
       case ds::cheevos::State::LoadingGame: return "LOADING ACHIEVEMENTS...";
       case ds::cheevos::State::Playing:     return "SIGNED IN AS " + c->username();
+      // The dump is recognised; the game simply has no set yet. Said plainly
+      // so nobody goes looking for a list that does not exist.
+      case ds::cheevos::State::EmptySet:
+        return "NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET";
       case ds::cheevos::State::NoSet:
         // The hash is the actionable part: RetroAchievements identifies a dump,
         // so a ROM from your own cart often is not one it knows even when the
@@ -2223,7 +2227,8 @@ sdl_ready:
       if (!c) return false;
       const auto st = c->state();
       return st == ds::cheevos::State::SignedIn || st == ds::cheevos::State::Playing ||
-             st == ds::cheevos::State::LoadingGame || st == ds::cheevos::State::NoSet;
+             st == ds::cheevos::State::LoadingGame || st == ds::cheevos::State::NoSet ||
+             st == ds::cheevos::State::EmptySet;
     }
     bool has_set() const override { return !rows.empty(); }
     int row_count() const override { return static_cast<int>(rows.size()); }

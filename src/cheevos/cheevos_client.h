@@ -62,7 +62,8 @@ enum class State : u8 {
   SignedIn,
   LoadingGame,
   Playing,      // a set is loaded and being evaluated
-  NoSet,        // signed in, but this ROM has no achievements
+  NoSet,        // signed in, but RetroAchievements does not know this dump
+  EmptySet,     // the dump is known, but the game has no published achievements yet
 };
 
 class Client {
@@ -172,6 +173,7 @@ public:
   void on_sign_in_failed(const std::string& why);
   void on_game_loaded(const std::string& title, u32 id);
   void on_no_set();
+  void on_empty_set(const std::string& title, u32 id);
   void on_game_failed(const std::string& why);
 
   // The bodies behind the callbacks rcheevos is given. Typed trampolines with
