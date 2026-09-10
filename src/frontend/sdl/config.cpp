@@ -420,21 +420,17 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # fps = none
 
 [cheevos]
-# RetroAchievements, Casual mode (formerly Softcore). Hardcore is not
-# supported: DSperate allows save states and cheats, so it must never claim a
-# hardcore unlock, and nothing here can turn one on.
-# enabled = false               # talk to RetroAchievements at all. Needs libcurl on the device (the
-                                # CFW's -- ROCKNIX has it; the static handheld builds do not and
-                                # report the feature unavailable), and an account signed in from the
-                                # menu. With this off nothing is evaluated and nothing is sent
-# username =                    # who to sign in as. The password is never stored; a successful
-                                # sign-in keeps the token RetroAchievements returns, in
+# RetroAchievements, Casual mode (formerly Softcore). Hardcore is NOT supported!
+# enabled = false
+# username =                    # who to sign in as. The password is never stored in plaintext;
+                                # a successful sign-in keeps the token RetroAchievements returns, in
                                 # <config>/cheevos.token, mode 0600
 # use_system_login = true       # when DSperate has no sign-in of its own, use the one the CFW's front
-                                # end already made: ROCKNIX's EmulationStation writes a token to
-                                # /storage/.config/system/configs/system.cfg, and RetroArch keeps the
-                                # same thing. Only the token is read -- never the password those files
-                                # also hold in clear text -- and they are never written to
+                                # end already made.
+# toasts = true                 # show a panel at the bottom of the screen when an achievement unlocks,
+                                # and for sign-in and connection messages. Off leaves them in the log
+# encore = false                # allow achievements to be triggered again even if already achieved.
+# auto_screenshot = false       # take a screenshot when an achievement is acquired.
 )";
 }
 

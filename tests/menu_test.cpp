@@ -36,6 +36,185 @@ void test_root_rows() {
   CHECK(m.input(press(B::BTN_A)) == Menu::Result::Quit);          // row 4
 }
 
+
+// ---------------------------------------------------------------------------
+// The achievement pages. A fake host, because the point of CheevosHost is that
+// menu.cpp knows nothing about the RetroAchievements library -- so this test
+// does not link it either.
+namespace {
+struct FakeCheevos final : ds::sdl::CheevosHost {
+  bool in = false;
+  std::vector<Row> rows;
+  std::string status_line = "NOT SIGNED IN";
+  int signed_out_calls = 0;
+  std::vector<std::pair<std::string, std::string>> sign_ins;
+
+  std::string status() const override { return status_line; }
+  std::string progress() const override { return rows.empty() ? "" : "1/2 EARNED  5/15 POINTS"; }
+  bool signed_in() const override { return in; }
+  bool has_set() const override { return !rows.empty(); }
+  int row_count() const override { return static_cast<int>(rows.size()); }
+  Row row(int i) const override { return rows.at(static_cast<size_t>(i)); }
+  void sign_in(const std::string& u, const std::string& p) override { sign_ins.push_back({u, p}); }
+  void sign_out() override { ++signed_out_calls; in = false; }
+};
+
+// Where the Achievements row sits. With no cheat database and no settings host
+// the visible root rows are SAVE, LOAD, SLOT, [ACHIEVEMENTS,] RESUME, QUIT --
+// so it is the fourth, and without a host the fourth is RESUME. Spelled out
+// rather than searched for, because that arithmetic is the thing being tested.
+constexpr int kCheevosVisibleRow = 3;
+
+void to_row(Menu& m, int row) {
+  for (int i = 0; i < row; ++i) m.input(press(B::BTN_DOWN));
+}
+} // namespace
+
+// With no host the row must not exist at all -- not be present and inert. A
+// build without RetroAchievements, or with it switched off, must look exactly
+// as it did before the feature: the fourth row is still RESUME.
+void test_cheevos_row_hidden_without_a_host() {
+  Menu m;
+  m.set_open(true);
+  to_row(m, kCheevosVisibleRow);
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::Resume);
+
+  // And with one, RESUME has moved down by exactly one row.
+  FakeCheevos host;
+  Menu m2;
+  m2.set_cheevos_host(&host);
+  m2.set_open(true);
+  to_row(m2, kCheevosVisibleRow);
+  CHECK(m2.input(press(B::BTN_A)) == Menu::Result::None);   // the account page
+  CHECK(m2.input(press(B::BTN_B)) == Menu::Result::None);   // back to the root
+  to_row(m2, 1);                                           // the row below it
+  CHECK(m2.input(press(B::BTN_A)) == Menu::Result::Resume);
+}
+
+// Signing in is two prompts, and the password must reach the host together with
+// the username typed before it.
+void test_sign_in_collects_both_fields() {
+  FakeCheevos host;
+  Menu m;
+  m.set_cheevos_host(&host);
+  m.set_open(true);
+  to_row(m, kCheevosVisibleRow);
+  m.input(press(B::BTN_A));                 // no set loaded, so the account page
+  m.input(press(B::BTN_A));                 // SIGN IN -> the username editor
+  // One character is enough: the editor starts on a space, and UP steps the
+  // character, which the TextEdit tests already cover.
+  m.input(press(B::BTN_UP));
+  m.input(press(B::BTN_A));                 // accept the username
+  m.input(press(B::BTN_UP));
+  m.input(press(B::BTN_A));                 // accept the password
+  CHECK(host.sign_ins.size() == 1);
+  CHECK(!host.sign_ins[0].first.empty());
+  CHECK(!host.sign_ins[0].second.empty());
+}
+
+// Abandoning the username prompt must not leave a half-finished sign-in behind
+// for some later, unrelated edit to complete.
+void test_cancelling_sign_in_sends_nothing() {
+  FakeCheevos host;
+  Menu m;
+  m.set_cheevos_host(&host);
+  m.set_open(true);
+  to_row(m, kCheevosVisibleRow);
+  m.input(press(B::BTN_A));                 // account page
+  m.input(press(B::BTN_A));                 // SIGN IN
+  m.input(press(B::BTN_UP));
+  m.input(press(B::BTN_B));                 // abandon
+  CHECK(host.sign_ins.empty());
+}
+
+void test_sign_out_is_offered_when_signed_in() {
+  FakeCheevos host;
+  host.in = true;
+  host.status_line = "SIGNED IN AS SOMEPLAYER";
+  Menu m;
+  m.set_cheevos_host(&host);
+  m.set_open(true);
+  to_row(m, kCheevosVisibleRow);
+  m.input(press(B::BTN_A));                 // account page
+  m.input(press(B::BTN_A));                 // its only row is SIGN OUT
+  CHECK(host.signed_out_calls == 1);
+}
+
+// With a set loaded the row goes straight to the list, which scrolls without
+// running off either end and without wrapping.
+void test_list_scrolls_within_bounds() {
+  FakeCheevos host;
+  host.in = true;
+  for (int i = 0; i < 40; ++i) {
+    ds::sdl::CheevosHost::Row r;
+    r.title = "ACHIEVEMENT " + std::to_string(i);
+    r.detail = "DO THE THING";
+    r.points = 5;
+    r.unlocked = i == 0;
+    r.unsupported = i == 1;
+    host.rows.push_back(r);
+  }
+  Menu m;
+  m.set_cheevos_host(&host);
+  m.set_open(true);
+  to_row(m, kCheevosVisibleRow);
+  m.input(press(B::BTN_A));                 // straight to the list
+  for (int i = 0; i < 80; ++i) m.input(press(B::BTN_UP));
+  for (int i = 0; i < 200; ++i) m.input(press(B::BTN_DOWN));
+  for (int i = 0; i < 20; ++i) m.input(press(B::BTN_R));
+  for (int i = 0; i < 50; ++i) m.input(press(B::BTN_L));
+  // B leaves the page, not the menu.
+  CHECK(m.input(press(B::BTN_B)) == Menu::Result::None);
+  CHECK(m.open());
+}
+
+// Drawing both pages must stay inside the canvas, like every other page.
+void test_cheevos_draw_bounds() {
+  FakeCheevos host;
+  host.in = true;
+  for (int i = 0; i < 30; ++i) {
+    ds::sdl::CheevosHost::Row r;
+    r.title = "A VERY LONG ACHIEVEMENT NAME THAT MUST BE TRUNCATED SOMEWHERE";
+    r.detail = "AND A DESCRIPTION THAT IS ALSO FAR TOO LONG FOR ANY PANEL WIDTH";
+    r.points = 25;
+    host.rows.push_back(r);
+  }
+  host.status_line = "NO ACHIEVEMENTS FOR THIS ROM - HASH 810D47B8B473C425F9559B83CD54B34D";
+  for (int w : {256, 320, 640, 1280}) {
+    for (int h : {192, 240, 480, 720}) {
+      std::vector<u32> px(static_cast<size_t>(w) * h + 64, 0xDEADBEEF);
+      const ds::sdl::Canvas c{px.data(), static_cast<u32>(w), w, h};
+      Menu m;
+      m.set_cheevos_host(&host);
+      m.set_open(true);
+      to_row(m, kCheevosVisibleRow);
+      m.input(press(B::BTN_A));
+      m.draw(c);                            // the list
+      m.input(press(B::BTN_A));             // on to the account page
+      m.draw(c);
+      for (size_t i = static_cast<size_t>(w) * h; i < px.size(); ++i) CHECK(px[i] == 0xDEADBEEF);
+    }
+  }
+}
+
+// The toast, likewise: it is drawn over a live frame, so an overrun would
+// corrupt the picture rather than a menu nobody is looking past.
+void test_toast_draw_bounds() {
+  for (int w : {256, 320, 640, 1280}) {
+    for (int h : {192, 240, 480, 720}) {
+      std::vector<u32> px(static_cast<size_t>(w) * h + 64, 0xDEADBEEF);
+      const ds::sdl::Canvas c{px.data(), static_cast<u32>(w), w, h};
+      ds::sdl::draw_toast(c, "ACHIEVEMENT UNLOCKED", "A VERY LONG ACHIEVEMENT NAME INDEED", "WITH A LONG DESCRIPTION TOO", 25);
+      ds::sdl::draw_toast(c, nullptr, "SHORT", nullptr, 0);
+      const ds::sdl::Rect r = ds::sdl::toast_rect(c, nullptr, "SHORT", nullptr, 0);
+      CHECK(r.x >= 0 && r.y >= 0 && r.w > 0 && r.h > 0);
+      CHECK(r.x + r.w <= w);
+      CHECK(r.y + r.h <= h);
+      for (size_t i = static_cast<size_t>(w) * h; i < px.size(); ++i) CHECK(px[i] == 0xDEADBEEF);
+    }
+  }
+}
+
 void test_wrap_and_back() {
   Menu m;
   m.set_open(true);
@@ -994,6 +1173,13 @@ int main() {
   test_key_repeat_restarts();
   test_key_repeat_only_on_cheats();
   test_marquee();
+  test_cheevos_row_hidden_without_a_host();
+  test_sign_in_collects_both_fields();
+  test_cancelling_sign_in_sends_nothing();
+  test_sign_out_is_offered_when_signed_in();
+  test_list_scrolls_within_bounds();
+  test_cheevos_draw_bounds();
+  test_toast_draw_bounds();
   test_marquee_resets_on_move();
   test_page_stack();
   test_slot_row_is_separate();

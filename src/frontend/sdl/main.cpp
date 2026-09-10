@@ -39,6 +39,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstring>
+#include <deque>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <algorithm>
@@ -2021,13 +2022,123 @@ sdl_ready:
   const bool cheevos_on = cfg.flag("cheevos.enabled", false);
   std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
   bool cheevos_set_asked = false;
+
+  // The toast on screen, and what is waiting behind it. One at a time and
+  // timed like the slot label, because two unlocks can land on the same frame
+  // and stacking them would cover the game.
+  struct Toast { const char* header = nullptr; std::string title, detail; u32 points = 0; int frames = 0; };
+  std::deque<Toast> toast_queue;
+  Toast toast_now;
+  int toast_left = 0;
+  ds::sdl::Rect toast_last{};          // what the canvas has to take back out
+  constexpr int TOAST_FRAMES = 240;    // four seconds: long enough to read two lines
+  constexpr int TOAST_INFO_FRAMES = 150;
+
   auto cheevos_show = [&] {
     for (const ds::cheevos::Message& m : cheevos.take_messages()) {
-      // Phase 4 turns these into toasts on the OSD paths; for now they are
-      // stderr, which is also where the problems need to be visible.
+      // stderr as well as the screen: the log is where a problem gets
+      // diagnosed, and a toast is gone in four seconds.
       std::fprintf(stderr, "cheevos: %s%s%s\n", m.text.c_str(),
                    m.detail.empty() ? "" : " -- ", m.detail.c_str());
+      if (!cfg.flag("cheevos.toasts", true)) continue;
+      Toast t;
+      t.header = m.kind == ds::cheevos::Message::Kind::Unlock ? "ACHIEVEMENT UNLOCKED"
+               : m.kind == ds::cheevos::Message::Kind::Problem ? "RETROACHIEVEMENTS" : nullptr;
+      t.title = m.text;
+      t.detail = m.detail;
+      t.points = m.points;
+      t.frames = m.kind == ds::cheevos::Message::Kind::Unlock ? TOAST_FRAMES : TOAST_INFO_FRAMES;
+      toast_queue.push_back(std::move(t));
     }
+  };
+  // Advances the toast clock. Called once per frame from the same place the
+  // other per-frame overlay state is stepped.
+  auto toast_step = [&] {
+    if (toast_left > 0) { --toast_left; return; }
+    if (toast_queue.empty()) return;
+    toast_now = std::move(toast_queue.front());
+    toast_queue.pop_front();
+    toast_left = toast_now.frames;
+  };
+  const auto toast_on = [&] { return toast_left > 0; };
+  // What the Achievements pages read. The list is cached rather than rebuilt
+  // per frame: rc_client_create_achievement_list allocates, and the menu asks
+  // for rows on every idle tick it is drawn on.
+  struct CheevosMenuHost final : ds::sdl::CheevosHost {
+    ds::cheevos::Client* c = nullptr;
+    std::vector<ds::cheevos::Client::Achievement> rows;
+    ds::cheevos::Client::Summary sum{};
+    void refresh() {
+      if (!c) return;
+      rows = c->achievements();
+      sum = c->summary();
+    }
+    std::string status() const override {
+      if (!c) return "NOT AVAILABLE IN THIS BUILD";
+      switch (c->state()) {
+      case ds::cheevos::State::Off:
+        return c->unavailable_reason().empty() ? "TURNED OFF" : c->unavailable_reason();
+      case ds::cheevos::State::SignedOut:   return "NOT SIGNED IN";
+      case ds::cheevos::State::SigningIn:   return "SIGNING IN...";
+      case ds::cheevos::State::SignedIn:    return "SIGNED IN AS " + c->username();
+      case ds::cheevos::State::LoadingGame: return "LOADING ACHIEVEMENTS...";
+      case ds::cheevos::State::Playing:     return "SIGNED IN AS " + c->username();
+      case ds::cheevos::State::NoSet:
+        // The hash is the actionable part: RetroAchievements identifies a dump,
+        // so a ROM from your own cart often is not one it knows even when the
+        // game has a set. With the hash the player can ask for theirs to be
+        // added; without it this line is a dead end.
+        return "NO ACHIEVEMENTS FOR THIS ROM - HASH " + c->game_hash();
+      }
+      return "";
+    }
+    std::string progress() const override {
+      if (!c || sum.total == 0) return {};
+      char buf[96];
+      std::snprintf(buf, sizeof buf, "%u/%u EARNED  %u/%u POINTS",
+                    sum.unlocked, sum.total, sum.points_earned, sum.points);
+      return buf;
+    }
+    bool signed_in() const override {
+      if (!c) return false;
+      const auto st = c->state();
+      return st == ds::cheevos::State::SignedIn || st == ds::cheevos::State::Playing ||
+             st == ds::cheevos::State::LoadingGame || st == ds::cheevos::State::NoSet;
+    }
+    bool has_set() const override { return !rows.empty(); }
+    int row_count() const override { return static_cast<int>(rows.size()); }
+    Row row(int i) const override {
+      Row r;
+      if (i < 0 || i >= static_cast<int>(rows.size())) return r;
+      const auto& a = rows[static_cast<size_t>(i)];
+      r.title = a.title;
+      // Measured progress where the set provides it ("12/50"), the description
+      // otherwise: for a locked achievement the number is the useful half.
+      r.detail = (!a.unlocked && !a.progress.empty()) ? a.progress + "   " + a.description
+                                                     : a.description;
+      r.points = a.points;
+      r.unlocked = a.unlocked;
+      r.unsupported = a.unsupported;
+      return r;
+    }
+    void sign_in(const std::string& user, const std::string& password) override {
+      if (c) c->sign_in(user, password);
+    }
+    void sign_out() override {
+      if (c) c->sign_out();
+      rows.clear();
+      sum = {};
+    }
+  } cheevos_menu;
+  if (cheevos_on) {
+    cheevos_menu.c = &cheevos;
+    menu.set_cheevos_host(&cheevos_menu);
+  }
+
+  auto draw_toast_on = [&](const ds::sdl::Canvas& c) {
+    ds::sdl::draw_toast(c, toast_now.header, toast_now.title.c_str(),
+                        toast_now.detail.empty() ? nullptr : toast_now.detail.c_str(),
+                        toast_now.points);
   };
   // The set can only be asked for once signed in, and signing in is
   // asynchronous -- so this watches for the moment rather than trying at boot
@@ -2486,7 +2597,12 @@ sdl_ready:
     // delta onto current and single-frame edge triggers stop firing, silently
     // (tests/cheevos_memory_test.cpp pins this). This also drains the HTTP
     // completions, so every rcheevos callback runs on this thread.
-    if (cheevos_on) { cheevos.frame(); cheevos_catch_up(); cheevos_show(); }
+    if (cheevos_on) {
+      cheevos.frame();
+      cheevos_catch_up();
+      cheevos_show();
+      toast_step();
+    }
 #endif
 
     // The console has switched itself off. On a firmware boot that is the
@@ -2570,6 +2686,21 @@ sdl_ready:
           const auto note = [&](const ds::sdl::Rect& r) { display.note_canvas_draw(r.x, r.y, r.w, r.h); };
           if (slot_osd) note(draw_label(c, slot_text.c_str(), false));
           if (fps_field) note(draw_label(c, fps_text.c_str(), true));
+#if DSPERATE_CHEEVOS
+          // The toast covers more than a label, and nothing repaints the
+          // letterbox, so the area it used has to be handed back even on the
+          // frame it stops being drawn -- hence the note() outside the test.
+          if (toast_on()) {
+            draw_toast_on(c);
+            toast_last = ds::sdl::toast_rect(c, toast_now.header, toast_now.title.c_str(),
+                                             toast_now.detail.empty() ? nullptr : toast_now.detail.c_str(),
+                                             toast_now.points);
+          }
+          if (toast_last.w) {
+            note(toast_last);
+            if (!toast_on()) toast_last = {};
+          }
+#endif
           if (flash_alpha) {
             draw_flash(c, flash_alpha);
             display.note_canvas_draw_all();
@@ -2589,6 +2720,9 @@ sdl_ready:
           const ds::sdl::Canvas c = tgt_canvas(target[osd_screen]);
           if (slot_osd) draw_label(c, slot_text.c_str(), false);
           if (fps_field) draw_label(c, fps_text.c_str(), true);
+#if DSPERATE_CHEEVOS
+          if (toast_on()) draw_toast_on(c);
+#endif
           if (flash_alpha) for (int i = 0; i < 2; ++i) if (target[i].px) draw_flash(tgt_canvas(target[i]), flash_alpha);
         }
         display.present();
@@ -2606,20 +2740,31 @@ sdl_ready:
         // every pixel, and on the overlay that would be a panel-sized upload
         // on each of its frames.
         ds::sdl::Display::CanvasView ocv;
-        const bool osd_on_canvas = display.canvas_capable() && (slot_osd || fps_field) && display.canvas(ocv);
+#if DSPERATE_CHEEVOS
+        const bool want_osd = slot_osd || fps_field || toast_on();
+#else
+        const bool want_osd = slot_osd || fps_field;
+#endif
+        const bool osd_on_canvas = display.canvas_capable() && want_osd && display.canvas(ocv);
         if (osd_on_canvas) {
           const ds::sdl::Canvas c{ocv.px, ocv.pitch, ocv.w, ocv.h};
           if (slot_osd) draw_label(c, slot_text.c_str(), false);
           if (fps_field) draw_label(c, fps_text.c_str(), true);
+#if DSPERATE_CHEEVOS
+          if (toast_on()) draw_toast_on(c);
+#endif
           display.note_canvas_draw_all();
         }
         // After the cursor: when the overlays are on the bottom screen this
         // copies the frame that already has the crosshair in it, so both show.
-        if (!osd_on_canvas && (slot_osd || fps_field)) {
+        if (!osd_on_canvas && want_osd) {
           std::memcpy(osd_fb.data(), fb[osd_screen], osd_fb.size() * 4);
           const ds::sdl::Canvas od = ds_canvas(osd_fb.data());
           if (slot_osd) draw_label(od, slot_text.c_str(), false);
           if (fps_field) draw_label(od, fps_text.c_str(), true);
+#if DSPERATE_CHEEVOS
+          if (toast_on()) draw_toast_on(od);
+#endif
           fb[osd_screen] = osd_fb.data();
         }
         // Last, over whatever the cursor and the overlays left: a screen
@@ -2647,7 +2792,14 @@ sdl_ready:
       // real, unscaled frame has just been presented and is in fb_, which is
       // what either page is drawn over.
       if (launching) { launching = false; menu.open_games(); }
-      else { menu.set_slot(state_slot); refresh_slots(); menu.set_open(true); }
+      else {
+        menu.set_slot(state_slot);
+        refresh_slots();
+#if DSPERATE_CHEEVOS
+        if (cheevos_on) cheevos_menu.refresh();
+#endif
+        menu.set_open(true);
+      }
       menu_dirty = true;
       menu_ms = SDL_GetTicks();
       set_paused(true);

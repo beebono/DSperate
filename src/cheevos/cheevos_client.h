@@ -49,6 +49,8 @@ struct Message {
   Kind kind = Kind::Info;
   std::string text;     // one line, already player-facing
   std::string detail;   // may be empty
+  u32 points = 0;       // an unlock's value; 0 for everything else, and for
+                        // the 0-point achievements RetroAchievements has
 };
 
 // Where the session currently is. The frontend needs this to decide what to
@@ -148,7 +150,7 @@ public:
 
 private:
   void worker_loop();
-  void post(Message::Kind kind, std::string text, std::string detail = {});
+  void post(Message::Kind kind, std::string text, std::string detail = {}, u32 points = 0);
   void drain_completions();
 
   // One HTTP round trip, and the rcheevos callback waiting on it.

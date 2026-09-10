@@ -206,9 +206,9 @@ Client::~Client() { shutdown(); }
 
 const char* Client::transport_name() const { return http_ ? http_->name() : "none"; }
 
-void Client::post(Message::Kind kind, std::string text, std::string detail) {
+void Client::post(Message::Kind kind, std::string text, std::string detail, u32 points) {
   std::lock_guard<std::mutex> lk(mu_);
-  messages_.push_back(Message{kind, std::move(text), std::move(detail)});
+  messages_.push_back(Message{kind, std::move(text), std::move(detail), points});
 }
 
 std::vector<Message> Client::take_messages() {
@@ -585,7 +585,8 @@ void Client::handle_event(const void* event_ptr) {
       if (e->achievement) {
         self->post(Message::Kind::Unlock,
                    e->achievement->title ? e->achievement->title : "Achievement unlocked",
-                   e->achievement->description ? e->achievement->description : "");
+                   e->achievement->description ? e->achievement->description : "",
+                   e->achievement->points);
       }
       break;
     case RC_CLIENT_EVENT_GAME_COMPLETED:

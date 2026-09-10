@@ -163,6 +163,7 @@ void scroll_bar(const Canvas& d, const Metrics& m, int px0, int py0, int panel_w
 constexpr int kSlotRow = 2;
 constexpr int kCheatRow = 3;   // hidden when no database matched this ROM
 constexpr int kOptionsRow = 4; // hidden when the frontend gave no settings host
+constexpr int kCheevosRow = 5; // hidden unless RetroAchievements is built and on
 // The Options page's own entries, and which of them has no page yet.
 constexpr int kOptionPages = 5, kDsOptionsRow = 4;
 constexpr struct RootItem { const char* label; Menu::Result result; } kRoot[] = {
@@ -171,6 +172,7 @@ constexpr struct RootItem { const char* label; Menu::Result result; } kRoot[] = 
   {nullptr,      Menu::Result::None},
   {"CHEATS",     Menu::Result::None},
   {"OPTIONS",    Menu::Result::None},
+  {"ACHIEVEMENTS", Menu::Result::None},
   {"RESUME",     Menu::Result::Resume},
   {"QUIT",       Menu::Result::Quit},
 };
@@ -178,6 +180,7 @@ static_assert(static_cast<int>(std::size(kRoot)) == Menu::kRootRows, "kRootRows 
 static_assert(kRoot[kOptionsRow].result == Menu::Result::None, "kOptionsRow must name the options row");
 static_assert(kRoot[kSlotRow].label == nullptr, "kSlotRow must name the slot row");
 static_assert(kRoot[kCheatRow].result == Menu::Result::None, "kCheatRow must name the cheats row");
+static_assert(kRoot[kCheevosRow].result == Menu::Result::None, "kCheevosRow must name the achievements row");
 // Rows are cheap to add (one entry above). The panel is sized from the canvas
 // at draw time and the glyph scale steps down if it would not fit, so a new
 // row costs height rather than clipping in silence the way `put` would.
@@ -242,6 +245,7 @@ void Menu::set_cheats(std::vector<cheat::Code>* codes, const std::vector<cheat::
 bool Menu::root_visible(int item) const {
   if (item == kCheatRow) return have_cheats();
   if (item == kOptionsRow) return have_options();
+  if (item == kCheevosRow) return have_cheevos();
   return true;
 }
 
@@ -438,6 +442,8 @@ Menu::Result Menu::handle(u32 presses) {
   if (settings_page()) return handle_settings(presses);
   if (controls_page()) return handle_controls(presses);
   if (page() == Page::TextEdit) return handle_text_edit(presses);
+  if (page() == Page::Cheevos) return handle_cheevos(presses);
+  if (page() == Page::CheevosAccount) return handle_cheevos_account(presses);
   if (page() == Page::Cheats) {
     // Up/down step, the shoulders page: a list of thousands is not one to
     // walk a row at a time.
@@ -471,6 +477,19 @@ Menu::Result Menu::handle(u32 presses) {
     return Result::None;
   }
   if (item == kOptionsRow) { push(Page::Options); return Result::None; }
+  if (item == kCheevosRow) {
+    // Straight to the list when there is one; to the account page otherwise,
+    // because then the interesting question is why there is not.
+    if (cheevos_ && cheevos_->has_set() && cheevos_->row_count() > 0) {
+      cheevos_row_ = 0;
+      cheevos_top_ = 0;
+      push(Page::Cheevos);
+    } else {
+      account_row_ = 0;
+      push(Page::CheevosAccount);
+    }
+    return Result::None;
+  }
   return kRoot[item].result;
 }
 
@@ -501,6 +520,63 @@ void draw_notice(const Canvas& d, const char* title, const char* line2, const ch
   centred(y0 + m.title_y + m.glyph_px * 2 + 6 * m.s, m.list_s, kDim, line3);
 }
 
+// An unlock, while the game is being played. Bottom-centre and only as wide as
+// it needs to be: draw_notice takes the middle of the screen because nothing is
+// running behind it, and this must not.
+namespace {
+// One place that decides the geometry, so draw_toast and toast_rect cannot
+// disagree and leave a strip of an old toast on the canvas.
+struct ToastBox { Metrics m; int x0, y0, w, h, lines; };
+
+ToastBox toast_box(const Canvas& d, const char* header, const char* title, const char* detail, u32 points) {
+  ToastBox b{};
+  b.m = metrics(d);
+  const Metrics& m = b.m;
+  std::string head = title ? title : "";
+  if (points) head += "  " + std::to_string(points) + "P";
+  b.lines = 1 + (header && *header ? 1 : 0) + (detail && *detail ? 1 : 0);
+
+  // Sized from the header and the title, which are short; a long description
+  // is truncated to that rather than stretching the panel across the screen,
+  // where it stops reading as a notification and starts hiding the game.
+  const int want = std::max({text_width(m.list_s, head.c_str()),
+                             header ? text_width(m.list_s, header) : 0,
+                             detail ? text_width(m.list_s, detail) : 0});
+  const int cap = std::min(d.w - 2 * m.pad, 150 * m.list_s);
+  b.w = std::clamp(want + 6 * m.list_s, std::min(60 * m.list_s, cap), cap);
+  b.h = 2 * m.list_s + b.lines * m.list_row_h + 2 * m.list_s;
+  b.x0 = (d.w - b.w) / 2;
+  // Clear of the bottom edge by a margin that scales with the panel.
+  b.y0 = std::max(0, d.h - b.h - 4 * m.list_row_h);
+  return b;
+}
+} // namespace
+
+Rect toast_rect(const Canvas& d, const char* header, const char* title, const char* detail, u32 points) {
+  const ToastBox b = toast_box(d, header, title, detail, points);
+  return Rect{b.x0, b.y0, b.w, b.h};
+}
+
+void draw_toast(const Canvas& d, const char* header, const char* title, const char* detail, u32 points) {
+  const ToastBox b = toast_box(d, header, title, detail, points);
+  const Metrics& m = b.m;
+  panel(d, b.x0, b.y0, b.w, b.h);
+  std::string head = title ? title : "";
+  // Points only when there are any: RetroAchievements has 0-point achievements
+  // (its "unknown emulator" warning is one) and "0P" reads like a bug.
+  if (points) head += "  " + std::to_string(points) + "P";
+  const int avail = b.w - 4 * m.list_s;
+  const int x = b.x0 + 2 * m.list_s;
+  int y = b.y0 + 3 * m.list_s;
+  if (header && *header) {
+    draw_text(d, x, y, m.list_s, kEdgeText, fit(header, m.list_s, avail).c_str());
+    y += m.list_row_h;
+  }
+  draw_text(d, x, y, m.list_s, kInk, fit(head, m.list_s, avail).c_str());
+  if (detail && *detail)
+    draw_text(d, x, y + m.list_row_h, m.list_s, kDim, fit(detail, m.list_s, avail).c_str());
+}
+
 // The two scrolling pages share their frame: panel, centred title, rule, and
 // the geometry every row is laid out against. `visible_` is measured here
 // because update() needs it and only draw knows the canvas.
@@ -516,7 +592,10 @@ ListFrame list_frame(const Canvas& d, const char* title) {
   f.py0 = (d.h - f.h) / 2;
   f.visible = list_visible(f.m, f.h);
   panel(d, f.px0, f.py0, f.w, f.h);
-  draw_text(d, f.px0 + (f.w - text_width(f.m.s, title)) / 2, f.py0 + f.m.title_y, f.m.s, kInk, title);
+  // Fitted, not just centred. Every caller until now had a short title, so a
+  // long one ran off both edges of the panel rather than being cut.
+  const std::string t = fit(title, f.m.s, f.w - 4 * f.m.s);
+  draw_text(d, f.px0 + (f.w - text_width(f.m.s, t.c_str())) / 2, f.py0 + f.m.title_y, f.m.s, kInk, t.c_str());
   fill_rect(d, f.px0 + f.m.pad, f.py0 + f.m.rule_y, f.w - 2 * f.m.pad, std::max(1, f.m.s / 2), kEdge);
   // The scroll bar's track sits in the right margin, so rows stop short of it.
   f.text_x = f.px0 + f.m.pad;
@@ -639,6 +718,180 @@ void Menu::draw_games(const Canvas& d) const {
     g_clip_x1 = clip1;
   }
   scroll_bar(d, m, f.px0, f.py0, f.w, f.visible, n, top);
+}
+
+// ---------------------------------------------------------------------------
+// The achievement pages.
+
+// The list. Two lines per achievement -- the name, then its description or
+// measured progress -- because one line of either is not enough to know which
+// achievement it is, and the description is where a set tells you what to do.
+void Menu::draw_cheevos(const Canvas& d) const {
+  // The count goes in the title because it is short; the points total is on the
+  // account page, where there is room for a line of its own.
+  char title[40] = "ACHIEVEMENTS";
+  if (cheevos_ && cheevos_->row_count() > 0) {
+    int unlocked = 0;
+    for (int i = 0; i < cheevos_->row_count(); ++i) if (cheevos_->row(i).unlocked) ++unlocked;
+    std::snprintf(title, sizeof title, "ACHIEVEMENTS  %d/%d", unlocked, cheevos_->row_count());
+  }
+  const ListFrame f = list_frame(d, title);
+  const Metrics& m = f.m;
+  // Each entry is two text rows, so the count comes from the panel's own
+  // height rather than from halving list_visible(), which is measured for
+  // one-line rows: the rounding there left an entry hanging below the panel.
+  // list_row_h, not row_h: the latter is the page scale used by the root and
+  // settings pages, and is nearly twice as tall. Using it here fitted three
+  // entries on a 640x480 panel that comfortably holds six.
+  const int entry_h = 2 * m.list_row_h + 2 * m.list_s;   // a little air between entries
+  visible_ = std::max(1, (f.h - m.list_rows_y - m.pad) / entry_h);
+
+  const int n = cheevos_ ? cheevos_->row_count() : 0;
+  if (n == 0) {
+    draw_text(d, f.text_x + m.list_s * 2, f.py0 + m.list_rows_y + m.list_s * 4, m.list_s, kDim,
+              "NO ACHIEVEMENTS LOADED");
+    return;
+  }
+
+  const int top = std::clamp(cheevos_top_, 0, std::max(0, n - visible_));
+  for (int i = 0; i < visible_ && top + i < n; ++i) {
+    const int at = top + i;
+    const CheevosHost::Row r = cheevos_->row(at);
+    const int y = f.py0 + m.list_rows_y + i * entry_h;
+    if (at == cheevos_row_)
+      fill_rect(d, f.px0 + m.list_s * 2, y - m.list_s * 2, f.w - m.list_s * 10, entry_h, kSel);
+
+    // Unlocked is the thing the eye should find, so it is marked at the left
+    // and drawn bright; unsupported is dimmer still than locked, because it is
+    // not something the player can do anything about.
+    const char* mark = r.unsupported ? "-" : (r.unlocked ? "*" : " ");
+    const u32 ink = r.unsupported ? kPanelEdgeDim : (r.unlocked ? kInk : kDim);
+    std::string head = std::string(mark) + " " + r.title;
+    if (r.points) head += "  " + std::to_string(r.points) + "P";
+    draw_text(d, f.text_x, y, m.list_s, ink, fit(head, m.list_s, f.avail).c_str());
+
+    const std::string detail = r.unsupported ? "NOT SUPPORTED BY THIS EMULATOR YET" : r.detail;
+    if (!detail.empty())
+      draw_text(d, f.text_x + 4 * m.list_s, y + m.list_row_h, m.list_s, kPanelEdgeDim,
+                fit(detail, m.list_s, f.avail - 4 * m.list_s).c_str());
+  }
+  scroll_bar(d, m, f.px0, f.py0, f.w, visible_, n, top);
+}
+
+// Keeps the selection on screen, as the cheats list does, and stops at the
+// ends rather than wrapping: a hundred-row list that wraps loses your place.
+void Menu::move_cheevos_row(int delta) {
+  const int n = cheevos_ ? cheevos_->row_count() : 0;
+  if (n == 0) return;
+  cheevos_row_ = std::clamp(cheevos_row_ + delta, 0, n - 1);
+  const int vis = std::max(1, visible_);
+  if (cheevos_row_ < cheevos_top_) cheevos_top_ = cheevos_row_;
+  if (cheevos_row_ >= cheevos_top_ + vis) cheevos_top_ = cheevos_row_ - vis + 1;
+  cheevos_top_ = std::clamp(cheevos_top_, 0, std::max(0, n - vis));
+}
+
+Menu::Result Menu::handle_cheevos(u32 presses) {
+  using B = io::Io::Button;
+  const auto hit = [&](B b) { return (presses >> b) & 1; };
+  if (hit(B::BTN_UP))   move_cheevos_row(-1);
+  if (hit(B::BTN_DOWN)) move_cheevos_row(+1);
+  if (hit(B::BTN_L)) move_cheevos_row(-std::max(1, visible_));
+  if (hit(B::BTN_R)) move_cheevos_row(+std::max(1, visible_));
+  // A goes to the account, which is the only action this page has: the list is
+  // for reading, and an achievement is not something to do anything to.
+  if (hit(B::BTN_A) || hit(B::BTN_START)) { account_row_ = 0; push(Page::CheevosAccount); }
+  if (hit(B::BTN_B)) pop();
+  return Result::None;
+}
+
+namespace {
+// The account page's rows, chosen at draw and handle time from the same state
+// so the two cannot disagree about what row 1 is.
+enum class AccountRow : u8 { SignIn, SignOut, List };
+int account_rows(const CheevosHost* h, AccountRow out[3]) {
+  int n = 0;
+  if (!h) return 0;
+  if (h->signed_in()) out[n++] = AccountRow::SignOut;
+  else out[n++] = AccountRow::SignIn;
+  if (h->has_set() && h->row_count() > 0) out[n++] = AccountRow::List;
+  return n;
+}
+} // namespace
+
+// Status and the two things that can be done about it. Deliberately small: the
+// interesting content is the status line, which is where "no achievements for
+// this ROM" and "no network on this device" get said.
+void Menu::draw_cheevos_account(const Canvas& d) const {
+  const ListFrame f = list_frame(d, "RETROACHIEVEMENTS");
+  const Metrics& m = f.m;
+
+  const std::string status = cheevos_ ? cheevos_->status() : std::string{};
+  int y = f.py0 + m.list_rows_y;
+  // The status can be long ("RetroAchievements does not recognise this dump"):
+  // wrapped over as many lines as it takes rather than cut, because this is
+  // the one sentence on the page that has to be readable.
+  std::string rest = status;
+  const int cols = std::max(8, f.avail / (kAdvance * m.list_s));
+  while (!rest.empty()) {
+    std::string line = rest;
+    if (static_cast<int>(line.size()) > cols) {
+      size_t cut = line.rfind(' ', static_cast<size_t>(cols));
+      if (cut == std::string::npos || cut == 0) cut = static_cast<size_t>(cols);
+      line = rest.substr(0, cut);
+      rest = rest.substr(cut == static_cast<size_t>(cols) ? cut : cut + 1);
+    } else {
+      rest.clear();
+    }
+    draw_text(d, f.text_x, y, m.list_s, kDim, line.c_str());
+    y += m.list_row_h;
+  }
+
+  const std::string prog = cheevos_ ? cheevos_->progress() : std::string{};
+  if (!prog.empty()) {
+    y += m.list_row_h / 2;
+    draw_text(d, f.text_x, y, m.list_s, kEdgeText, prog.c_str());
+    y += m.list_row_h;
+  }
+  y += m.list_row_h;
+
+  AccountRow rows[3];
+  const int n = account_rows(cheevos_, rows);
+  for (int i = 0; i < n; ++i) {
+    const char* label = rows[i] == AccountRow::SignOut ? "SIGN OUT"
+                      : rows[i] == AccountRow::SignIn  ? "SIGN IN" : "VIEW ACHIEVEMENTS";
+    if (i == account_row_)
+      fill_rect(d, f.px0 + m.list_s * 2, y - m.list_s * 2, f.w - m.list_s * 10, m.list_row_h, kSel);
+    draw_text(d, f.text_x, y, m.list_s, kInk, label);
+    y += m.list_row_h;
+  }
+}
+
+Menu::Result Menu::handle_cheevos_account(u32 presses) {
+  using B = io::Io::Button;
+  const auto hit = [&](B b) { return (presses >> b) & 1; };
+  AccountRow rows[3];
+  const int n = account_rows(cheevos_, rows);
+  if (n == 0) { if (hit(B::BTN_B)) pop(); return Result::None; }
+  if (hit(B::BTN_UP))   account_row_ = (account_row_ + n - 1) % n;
+  if (hit(B::BTN_DOWN)) account_row_ = (account_row_ + 1) % n;
+  if (hit(B::BTN_B)) { pop(); return Result::None; }
+  if (!hit(B::BTN_A) && !hit(B::BTN_START)) return Result::None;
+  switch (rows[std::clamp(account_row_, 0, n - 1)]) {
+  case AccountRow::SignIn:
+    // Two prompts, name then password: the editor does one field at a time.
+    open_credential_edit(EditDest::CheevosUser);
+    break;
+  case AccountRow::SignOut:
+    cheevos_->sign_out();
+    account_row_ = 0;
+    break;
+  case AccountRow::List:
+    cheevos_row_ = 0;
+    cheevos_top_ = 0;
+    push(Page::Cheevos);
+    break;
+  }
+  return Result::None;
 }
 
 // The Options tree. Four pages of settings and, when there is a game in the
@@ -1030,6 +1283,7 @@ int table_of(char c) {
 
 void Menu::open_text_edit() {
   const Setting& s = table()[set_row_[table_slot()]];
+  edit_dest_ = EditDest::Setting;
   edit_key_ = s.key;
   edit_label_ = s.label;
   edit_max_ = s.lo;
@@ -1038,6 +1292,21 @@ void Menu::open_text_edit() {
   if (static_cast<int>(edit_buf_.size()) > edit_max_) edit_buf_.resize(static_cast<size_t>(edit_max_));
   // An empty field starts as one space, so there is a character to cycle.
   if (edit_buf_.empty()) edit_buf_ = " ";
+  edit_pos_ = 0;
+  edit_table_ = table_of(edit_buf_[0]);
+  push(Page::TextEdit);
+}
+
+// The same editor, collecting a credential instead of a setting. The field
+// limits are RetroAchievements' own (a username is at most 20 characters) and
+// generous for a password; the character tables are the ones the firmware name
+// editor uses, which is what a handheld with no keyboard has.
+void Menu::open_credential_edit(EditDest dest) {
+  edit_dest_ = dest;
+  edit_key_.clear();
+  edit_label_ = dest == EditDest::CheevosUser ? "RA USERNAME" : "RA PASSWORD";
+  edit_max_ = dest == EditDest::CheevosUser ? 20 : 32;
+  edit_buf_ = " ";
   edit_pos_ = 0;
   edit_table_ = table_of(edit_buf_[0]);
   push(Page::TextEdit);
@@ -1086,11 +1355,36 @@ Menu::Result Menu::handle_text_edit(u32 presses) {
     // Trailing spaces are an artefact of moving right, not part of the name.
     std::string out = edit_buf_;
     while (!out.empty() && out.back() == ' ') out.pop_back();
-    host_->set(edit_key_.c_str(), out);
-    pop();
+    switch (edit_dest_) {
+    case EditDest::Setting:
+      host_->set(edit_key_.c_str(), out);
+      pop();
+      break;
+    case EditDest::CheevosUser:
+      pending_user_ = out;
+      pop();
+      // Straight on to the password, so the two prompts read as one action.
+      if (!pending_user_.empty()) open_credential_edit(EditDest::CheevosPassword);
+      break;
+    case EditDest::CheevosPassword:
+      pop();
+      if (cheevos_) cheevos_->sign_in(pending_user_, out);
+      // Neither is kept: sign_in hands the password to rcheevos, which
+      // exchanges it for a token, and that token is what gets stored.
+      pending_user_.clear();
+      out.assign(out.size(), ' ');
+      break;
+    }
+    // Deliberately no reset of edit_dest_ here: the CheevosUser case opens the
+    // password prompt from inside this switch, and a reset would send the
+    // password to the settings host instead. open_text_edit and
+    // open_credential_edit each set it, which is the invariant that matters.
     return Result::None;
   }
-  if (hit(B::BTN_B)) pop();   // B abandons: nothing was written until A
+  if (hit(B::BTN_B)) {   // B abandons: nothing was written until A
+    pop();
+    pending_user_.clear();   // so a cancelled sign-in cannot be completed later
+  }
   return Result::None;
 }
 
@@ -1129,7 +1423,11 @@ void Menu::draw_text_edit(const Canvas& d) const {
   for (int i = 0; i < static_cast<int>(edit_buf_.size()); ++i) {
     const int cx = fx + (i % cols) * kAdvance * m.s, cy = fy + (i / cols) * m.row_h;
     if (i == edit_pos_) fill_rect(d, cx - m.s, cy - m.s, kAdvance * m.s, m.glyph_px + 2 * m.s, kSel);
-    const char one[2] = {edit_buf_[static_cast<size_t>(i)], 0};
+    // A password shows only the character being chosen: the rest are masked,
+    // because the field is on a screen somebody else can see. The cursor's own
+    // character has to stay visible -- cycling A..Z blind is unusable.
+    const bool mask = edit_dest_ == EditDest::CheevosPassword && i != edit_pos_;
+    const char one[2] = {mask ? '*' : edit_buf_[static_cast<size_t>(i)], 0};
     draw_text(d, cx, cy, m.s, kInk, one);
   }
   // The font is uppercase-only, so a lower-case letter draws as a capital:
@@ -1144,6 +1442,8 @@ void Menu::draw_text_edit(const Canvas& d) const {
 void Menu::draw(const Canvas& d) const {
   if (page() == Page::Games) { draw_games(d); return; }
   if (page() == Page::Cheats) { draw_cheats(d); return; }
+  if (page() == Page::Cheevos) { draw_cheevos(d); return; }
+  if (page() == Page::CheevosAccount) { draw_cheevos_account(d); return; }
   if (page() == Page::Options) { draw_options(d); return; }
   if (settings_page()) { draw_settings(d); return; }
   if (controls_page()) { draw_controls(d); return; }

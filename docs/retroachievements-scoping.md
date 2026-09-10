@@ -373,8 +373,7 @@ Each phase is useful on its own and testable without the next.
 1. **Hash and identify, offline-shaped.** -- **DONE** 2026-09-09, see below.
 2. **Memory reader plus a local runtime.** -- **DONE** 2026-09-09, see below.
 3. **Session and transport.** -- **DONE** 2026-09-09, see below.
-4. **UI.** Login page, achievement list, text toasts on the existing OSD
-   paths, across display tiers on device.
+4. **UI.** -- **DONE** 2026-09-09, see below.
 5. **Save state integration** and the progress chunk.
 6. **Device pass.** p99 and over-budget frames on the RG DS, PGO-vs-PGO in the
    SDL frontend per `pgo-frontend-ab-rule`, both run orders per
@@ -791,6 +790,67 @@ Three things fall out of it:
 
 `Client::achievements()` and `Client::summary()` were added to get this answer
 and are what phase 4's achievement page will be built on.
+
+## Phase 4 as built
+
+An `ACHIEVEMENTS` row on the pause menu leading to two pages, and a toast when
+something unlocks. `menu.h` grew a `CheevosHost` interface and `menu.cpp` the
+pages; `main.cpp` implements the host over `ds::cheevos::Client`.
+
+### The canvas note in this document was out of date
+
+Earlier revisions said the disp and renderer tiers have no CPU surface, and
+planned around it. That is no longer true of the disp tier: the DE's grid layer
+was repurposed as a panel-resolution overlay, so `Display::canvas_capable()`
+covers it (`display.cpp:899`) and only the SDL_Renderer path is left without
+one. So the pages and the toast use the canvas as the normal path, and the
+existing DS-space fallback is what SDL_Renderer gets -- the same three paths the
+slot label already had, joined rather than replaced.
+
+### The pages
+
+- **Achievements** -- a two-line entry per achievement (name and points, then
+  description or measured progress), because one line of either is not enough to
+  tell which achievement it is. Unlocked is marked `*` and drawn bright, locked
+  dim, unsupported dimmer still and labelled, since that last one is not
+  something the player can do anything about.
+- **RetroAchievements** -- status, progress, and the one or two things that can
+  be done: sign in, sign out, view the list. The status line is where "no
+  achievements for this ROM" says so *with the hash*, wrapped over as many lines
+  as it needs rather than truncated, because it is the one sentence on the page
+  that has to be readable.
+
+Signing in reuses the firmware name editor: two prompts, username then
+password, with the password masked except for the character under the cursor
+(cycling A-Z blind is unusable). The password goes straight to `sign_in` and is
+never stored -- rcheevos exchanges it for a token, and the token is what the
+sidecar keeps.
+
+`CheevosHost` is an interface for the same reason `SettingsHost` is: `menu.cpp`
+must not depend on the RetroAchievements library, so the pause menu still
+builds and still has tests with `DSPERATE_CHEEVOS` off. `tests/menu_test.cpp`
+drives the pages through a fake host and never links the library.
+
+### What only looking at it caught
+
+The tests check bounds, navigation and that nothing writes past the canvas.
+They passed while the pages were still wrong, and rendering them to PNG and
+actually looking found three things in a few minutes:
+
+- `list_frame` centred its title but never **fitted** it. Every page until now
+  had a short one, so a long title ran off both ends of the panel. Fixed in
+  `list_frame`, so every page benefits.
+- The list used `row_h` -- the *page* scale used by the root and settings pages
+  -- where a list page wants `list_row_h`. Entries were nearly twice as tall as
+  they should be: three fitted on a 640x480 panel that comfortably holds seven,
+  and an entry hung off the bottom edge.
+- The toast sized itself to its description and came out a full-width banner
+  that read as a takeover rather than a notification, with nothing to say it
+  was an unlock. It now has an `ACHIEVEMENT UNLOCKED` accent line, and a width
+  capped so a long description truncates instead of stretching it.
+
+Worth remembering for phase 6: a bounds test says the drawing is safe, not that
+it is right.
 
 ## What I expect to go wrong
 

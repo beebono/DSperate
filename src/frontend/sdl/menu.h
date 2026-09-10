@@ -66,11 +66,59 @@ int  text_width(int scale, const char* s);
 // the size it had and gains crispness, rather than shrinking to gain rows.
 int  ui_scale(const Canvas& d);
 // Halves every pixel's brightness, in place, over a whole framebuffer.
+// What the achievement pages read and act on. An interface for the same reason
+// SettingsHost is one: menu.cpp must not depend on the RetroAchievements
+// library, so the pause menu still builds -- and still has tests -- when
+// DSPERATE_CHEEVOS is off. main.cpp implements it over ds::cheevos::Client.
+//
+// Everything is a formatted string rather than the library's own types: the
+// menu's job is to draw lines, not to know what an achievement is.
+struct CheevosHost {
+  virtual ~CheevosHost() = default;
+
+  struct Row {
+    std::string title;       // the achievement's name
+    std::string detail;      // its description, or measured progress
+    u32  points = 0;
+    bool unlocked = false;
+    bool unsupported = false;   // a condition reads memory DSperate does not map
+  };
+
+  // One line for the account page: signed in as whom, signed out, or why there
+  // is nothing to show (no network on this device, no set for this ROM).
+  virtual std::string status() const = 0;
+  // "2/110 EARNED  1/1090 POINTS", or empty when no set is loaded.
+  virtual std::string progress() const = 0;
+  virtual bool signed_in() const = 0;
+  virtual bool has_set() const = 0;
+
+  virtual int  row_count() const = 0;
+  virtual Row  row(int i) const = 0;
+
+  // Both asynchronous: the menu shows whatever status() says on a later frame.
+  virtual void sign_in(const std::string& username, const std::string& password) = 0;
+  virtual void sign_out() = 0;
+};
+
 void dim_framebuffer(u32* px, u32 n);
 // A small centred panel with a title, a second line at the same size, and a
 // dim third one: the "unpacking" notice a first launch of a zipped game
 // shows while the image is written. Drawn over a dimmed frame like the menu.
 void draw_notice(const Canvas& d, const char* title, const char* line2, const char* line3);
+
+// An achievement unlock, bottom-centre. A small panel rather than
+// draw_notice's centred one, because this appears while the game is being
+// played rather than instead of it. `detail` may be empty, and `points` is
+// drawn only when non-zero -- RetroAchievements has 0-point achievements and
+// "0 PTS" reads like a bug.
+// `header` is the small accent line above the title ("ACHIEVEMENT UNLOCKED"),
+// which is what makes an unlock read as one rather than as a stray message; it
+// may be null. `detail` may be null too, and `points` is drawn only when
+// non-zero.
+void draw_toast(const Canvas& d, const char* header, const char* title, const char* detail, u32 points);
+// Where draw_toast will put it, so the caller can tell Display which part of
+// the canvas changed rather than repainting all of it.
+Rect toast_rect(const Canvas& d, const char* header, const char* title, const char* detail, u32 points);
 
 // The pause menu: a blitted, modal list drawn over the held last frame while
 // emulation is stopped. It is not an overlay -- nothing runs behind it -- so
@@ -104,6 +152,9 @@ public:
   // The options pages. Without a host there is no OPTIONS row: the menu has
   // nothing to read a setting from and nowhere to put one.
   void set_settings_host(SettingsHost* host) { host_ = host; }
+  // Null when the build has no RetroAchievements support or it is switched
+  // off; the root row then does not appear at all.
+  void set_cheevos_host(CheevosHost* host) { cheevos_ = host; }
   // Set when a toggle changed something, so the frontend knows to save the
   // selection. Cleared by the frontend once it has.
   bool cheats_dirty() const { return cheats_dirty_; }
@@ -146,7 +197,7 @@ public:
   // The root page is a table in menu.cpp (kRoot); this is its length, and the
   // panel grows with it. Adding a row is one entry there: the panel is sized
   // at draw time from the canvas, so a page no longer has a fixed ceiling.
-  static constexpr int kRootRows = 7;
+  static constexpr int kRootRows = 8;
   static constexpr int kSlotRows = 5;   // ten slots as two columns of five
 
 private:
@@ -154,7 +205,7 @@ private:
   // and a page three deep needs no special case. Games is the exception it
   // always was: it is raised as the launcher's own modal page with nothing
   // behind it, so it is pushed onto an empty stack and B does not leave it.
-  enum class Page : u8 { Root, Slot, Cheats, Games, Options, Emulation, VisualFx, Layout, Controls, DsOptions, TextEdit };
+  enum class Page : u8 { Root, Slot, Cheats, Games, Options, Emulation, VisualFx, Layout, Controls, DsOptions, TextEdit, Cheevos, CheevosAccount };
   static constexpr int kMaxDepth = 6;
   Page stack_[kMaxDepth] = {Page::Root};
   int  depth_ = 1;
@@ -233,6 +284,15 @@ private:
   bool move_setting_row(int delta);
   void step_setting(int dir);
   void draw_cheats(const Canvas& d) const;
+  void draw_cheevos(const Canvas& d) const;
+  void draw_cheevos_account(const Canvas& d) const;
+  Result handle_cheevos(u32 presses);
+  Result handle_cheevos_account(u32 presses);
+  void move_cheevos_row(int delta);
+  bool have_cheevos() const { return cheevos_ != nullptr; }
+  CheevosHost* cheevos_ = nullptr;
+  int cheevos_row_ = 0, cheevos_top_ = 0;
+  int account_row_ = 0;
   void draw_games(const Canvas& d) const;
   void draw_options(const Canvas& d) const;
   void draw_settings(const Canvas& d) const;
@@ -251,8 +311,16 @@ private:
   // The label is kept with the buffer, not looked up when drawing: by then
   // TextEdit is the page on top and table() no longer names the row that
   // opened it.
+  // Where an accepted edit goes. The editor is identical either way -- same
+  // character tables, same keys -- so rather than a second page it grew a
+  // destination. CheevosPassword also hides what it has collected.
+  enum class EditDest : u8 { Setting, CheevosUser, CheevosPassword };
   std::string edit_key_, edit_label_, edit_buf_;
   int  edit_pos_ = 0, edit_table_ = 0, edit_max_ = 0;
+  EditDest edit_dest_ = EditDest::Setting;
+  void open_credential_edit(EditDest dest);
+  std::string pending_user_;   // held between the two prompts; the password
+                               // goes straight to sign_in and is never stored
   // The Controls page: which column (keyboard or pad), where in it, and how
   // far it is scrolled. `bind_row_` is an index into the host's binding list.
   bool bind_pad_ = false;
