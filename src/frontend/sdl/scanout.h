@@ -48,6 +48,12 @@ public:
   // protocol/driver error, after which the caller falls back.
   virtual u32* begin_frame() = 0;
   virtual void end_frame() = 0;
+  // Block until the last end_frame() is actually on its way to the panel.
+  // A tier that defers work from end_frame() to the next begin_frame()
+  // (DrmOut queues a flip behind a pending one) needs this from a caller
+  // that presents once and then stops -- the pause menu -- or the frame
+  // sits queued until the next present. A no-op elsewhere.
+  virtual void flush() {}
 };
 
 } // namespace ds::sdl

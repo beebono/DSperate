@@ -2658,6 +2658,12 @@ sdl_ready:
           }
           display.present();
           if (dual_window) display2.present();
+          // No frame follows this present until the menu changes again, so a
+          // tier that flips lazily (DrmOut queues behind a pending flip and
+          // only issues it on the next begin_frame) must be pushed now, or
+          // the menu shows up one press late.
+          display.flush();
+          if (dual_window) display2.flush();
           // Nothing may keep pointing into a buffer the display just released.
           set_scale_targets(target, false);
         } else {

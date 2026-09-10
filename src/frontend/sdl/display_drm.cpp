@@ -262,4 +262,13 @@ void DrmOut::end_frame() {
   if (!flip(i)) dead_ = true;
 }
 
+// A queued flip is only issued when the pending one retires, and that
+// retire is only noticed from begin_frame(). Between frames that is the
+// pacing; after a one-off present with no frame behind it, it is a picture
+// that never arrives. Wait the pending flip out here so the queued one goes.
+void DrmOut::flush() {
+  while (queued_ >= 0 && pending_ >= 0 && !dead_)
+    if (!pump(fd_, true)) { dead_ = true; return; }
+}
+
 } // namespace ds::sdl

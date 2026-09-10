@@ -232,6 +232,9 @@ public:
   // the screen. Calling end_frame() does both, and finish_views() is idempotent.
   void finish_views();
   void present();
+  // After a present that no further frame follows (the pause menu): make
+  // sure the scanout tier has put it on its way. See ScanoutOut::flush.
+  void flush() { if (out_) out_->flush(); }
 
   // Where the frontend drew on the canvas this frame, so it can be cleaned up
   // before that buffer is used again. The scanout tiers keep several buffers
