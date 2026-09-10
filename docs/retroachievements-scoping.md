@@ -235,6 +235,35 @@ on the device, which is **1.1**. The Moonlight port's libcurl is the wrong one
 to copy for this reason -- it wants `libssl.so.3` / `libcrypto.so.3`, which
 would have to come with it.
 
+There is a second half to the A30 case that is easy to miss. `run_dsperate`
+exports one directory and does not vary it by platform:
+
+```sh
+export LD_LIBRARY_PATH="$EMU_DIR/lib64:$LD_LIBRARY_PATH"
+```
+
+`Emu/NDS` has no `lib` or `lib32` at all -- its 32-bit directories are
+`lib32_Brick`, `lib32_Flip` and `libs_MiyooMini`, and those belong to DraStic
+(`drastic_functions.sh:171`), not to us. So on the A30 DSperate has **no
+card-side library directory on its path**; it sees only the rootfs. Dropping an
+armhf `libcurl.so.4` into some `Emu/NDS/lib` would not be found, because
+nothing exports it.
+
+The surgical fix is `DS_CHEEVOS_LIBCURL`, which this backend reads before
+falling back to the soname:
+
+```sh
+[ "$PLATFORM" = "A30" ] && export DS_CHEEVOS_LIBCURL="$EMU_DIR/<dir>/libcurl.so.4"
+```
+
+That is better than adding a directory to `LD_LIBRARY_PATH`, and the reason is
+worth stating: a directory exposes *everything* in it to the loader. Pointing
+DSperate at `libs_MiyooMini` -- the obvious candidate, since spruce already
+maintains it -- would also put DraStic's SDL2, EGL and ALSA ahead of the
+system's, which is a good way to break the emulator while trying to add a
+feature to it. An absolute path to one file cannot shadow anything.
+libcurl's own dependencies still resolve normally from `/usr/lib`.
+
 The `curl`-subprocess backend remains the other route for a device where none
 of that is practical, behind the same interface.
 
