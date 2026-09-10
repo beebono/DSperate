@@ -149,6 +149,37 @@ void clear_credentials(const std::string& dir) {
   ::unlink(path.c_str());
 }
 
+bool read_token_file(const std::string& path, Credentials& out, std::string& err) {
+  out = Credentials{};
+  err.clear();
+  std::FILE* f = std::fopen(path.c_str(), "r");
+  if (!f) { err = path + ": " + std::strerror(errno); return false; }
+
+  // Whitespace-delimited words, at most the two we can use. PPSSPP writes the
+  // token with no trailing newline; ours writes "username\ntoken\n". Anything
+  // beyond the second word is ignored rather than guessed at.
+  std::vector<std::string> words;
+  char line[512];
+  while (words.size() < 3 && std::fgets(line, sizeof line, f)) {
+    std::string s(line);
+    size_t at = 0;
+    while (at < s.size() && words.size() < 3) {
+      const size_t b = s.find_first_not_of(" \t\r\n", at);
+      if (b == std::string::npos) break;
+      const size_t e = s.find_first_of(" \t\r\n", b);
+      words.push_back(s.substr(b, e == std::string::npos ? e : e - b));
+      at = e == std::string::npos ? s.size() : e;
+    }
+  }
+  std::fclose(f);
+
+  if (words.empty()) { err = path + ": no token in the file"; return false; }
+  if (words.size() == 1) { out.token = words[0]; return true; }
+  out.username = words[0];
+  out.token = words[1];
+  return true;
+}
+
 bool read_cfw_credentials(const std::string& path, Credentials& out) {
   out = Credentials{};
   std::FILE* f = std::fopen(path.c_str(), "r");

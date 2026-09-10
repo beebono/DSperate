@@ -252,6 +252,18 @@ void clear_credentials(const std::string& dir);
 // `key = "value"`). import_cfw_credentials walks the known locations and
 // reports which one it used in `source`. Both return false when there is
 // nothing usable, which is the ordinary case and not an error.
+// A token file written by something else, named on the command line
+// (--cheevos-token). The format is PPSSPP's, which is what the CFW front ends
+// that log in for you produce: the file holds the token and nothing else, so
+// the username has to come from the config (cheevos.username). Our own
+// two-line "username\ntoken" file is accepted here too, and then it carries
+// its own username.
+//
+// `out.username` is left empty for the bare-token shape; the caller fills it
+// in. Returns false with a reason in `err` when the file cannot be read or
+// holds no token.
+bool read_token_file(const std::string& path, Credentials& out, std::string& err);
+
 bool read_cfw_credentials(const std::string& path, Credentials& out);
 bool import_cfw_credentials(Credentials& out, std::string& source);
 

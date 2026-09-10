@@ -203,6 +203,47 @@ void the_cfw_sign_in_is_imported() {
   remove_dir(dir);
 }
 
+// --cheevos-token: PPSSPP writes the token alone with no trailing newline,
+// and our own two-line file has to keep working through the same reader.
+void a_token_file_is_read() {
+  const std::string dir = make_dir();
+  cheevos::Credentials c;
+  std::string err;
+
+  const std::string bare = dir + "/ppsspp_retroachievements.dat";
+  std::FILE* f = std::fopen(bare.c_str(), "w");
+  CHECK(f != nullptr);
+  std::fputs("0123456789abcdef", f);        // no newline, exactly as PPSSPP's helper writes it
+  std::fclose(f);
+  CHECK(cheevos::read_token_file(bare, c, err));
+  CHECK(c.username.empty());                 // the caller supplies it from the config
+  CHECK(c.token == "0123456789abcdef");
+
+  const std::string ours = dir + "/two-line";
+  f = std::fopen(ours.c_str(), "w");
+  CHECK(f != nullptr);
+  std::fputs("someplayer\nfedcba9876543210\n", f);
+  std::fclose(f);
+  CHECK(cheevos::read_token_file(ours, c, err));
+  CHECK(c.username == "someplayer");
+  CHECK(c.token == "fedcba9876543210");
+
+  // An empty file and a missing one are both failures with a reason: the
+  // player named this file, so silence would leave them guessing.
+  const std::string empty = dir + "/empty";
+  f = std::fopen(empty.c_str(), "w");
+  CHECK(f != nullptr);
+  std::fputs("\n  \n", f);
+  std::fclose(f);
+  CHECK(!cheevos::read_token_file(empty, c, err));
+  CHECK(!err.empty());
+  CHECK(!cheevos::read_token_file(dir + "/not-there", c, err));
+  CHECK(!err.empty());
+
+  ::unlink(bare.c_str()); ::unlink(ours.c_str()); ::unlink(empty.c_str());
+  remove_dir(dir);
+}
+
 } // namespace
 
 int main() {
@@ -214,6 +255,7 @@ int main() {
   a_newline_is_refused();
   an_incomplete_file_is_rejected();
   the_cfw_sign_in_is_imported();
+  a_token_file_is_read();
   std::printf("cheevos_client: ok\n");
   return 0;
 }
