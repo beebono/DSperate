@@ -382,6 +382,10 @@ void Menu::move_game_row(int delta) {
 
 int Menu::list_row() const {
   if (page() == Page::Games) return game_row_;
+  // Not in list_page(): the achievements list has its own shoulder paging and
+  // no key repeat, but it does marquee, and the marquee restarts on "has the
+  // selection moved", which is what this answers.
+  if (page() == Page::Cheevos) return cheevos_row_;
   if (settings_page()) return set_row_[table_slot()];
   if (controls_page()) return bind_row_;
   return cheat_row_;
@@ -782,6 +786,7 @@ void Menu::draw_cheevos(const Canvas& d) const {
   }
 
   const int top = std::clamp(cheevos_top_, 0, std::max(0, n - visible_));
+  marquee_overflow_ = 0;   // set below if the selected row's detail is too long
   for (int i = 0; i < visible_ && top + i < n; ++i) {
     const int at = top + i;
     const CheevosHost::Row r = cheevos_->row(at);
@@ -799,9 +804,27 @@ void Menu::draw_cheevos(const Canvas& d) const {
     draw_text(d, f.text_x, y, m.list_s, ink, fit(head, m.list_s, f.avail).c_str());
 
     const std::string detail = r.unsupported ? "NOT SUPPORTED BY THIS EMULATOR YET" : r.detail;
-    if (!detail.empty())
-      draw_text(d, f.text_x + 4 * m.list_s, y + m.list_row_h, m.list_s, kPanelEdgeDim,
-                fit(detail, m.list_s, f.avail - 4 * m.list_s).c_str());
+    if (detail.empty()) continue;
+    const int dx = f.text_x + 4 * m.list_s, davail = f.avail - 4 * m.list_s;
+    const int dy = y + m.list_row_h;
+    // A description is the one line here worth reading in full -- it is what
+    // a set tells you to do -- so the selected entry scrolls it instead of
+    // cutting it, exactly as the games and cheats lists scroll a long name.
+    if (at != cheevos_row_) {
+      draw_text(d, dx, dy, m.list_s, kPanelEdgeDim, fit(detail, m.list_s, davail).c_str());
+      continue;
+    }
+    marquee_overflow_ = text_width(m.list_s, detail.c_str()) - davail;
+    if (marquee_overflow_ <= 0) {
+      draw_text(d, dx, dy, m.list_s, kPanelEdgeDim, detail.c_str());
+      continue;
+    }
+    const int clip0 = g_clip_x0, clip1 = g_clip_x1;
+    g_clip_x0 = dx;
+    g_clip_x1 = dx + davail;
+    draw_text(d, dx - marquee_offset(marquee_overflow_), dy, m.list_s, kPanelEdgeDim, detail.c_str());
+    g_clip_x0 = clip0;
+    g_clip_x1 = clip1;
   }
   scroll_bar(d, m, f.px0, f.py0, f.w, visible_, n, top);
 }
