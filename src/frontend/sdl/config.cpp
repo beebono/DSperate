@@ -430,6 +430,11 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # username =                    # who to sign in as. The password is never stored; a successful
                                 # sign-in keeps the token RetroAchievements returns, in
                                 # <config>/cheevos.token, mode 0600
+# use_system_login = true       # when DSperate has no sign-in of its own, use the one the CFW's front
+                                # end already made: ROCKNIX's EmulationStation writes a token to
+                                # /storage/.config/system/configs/system.cfg, and RetroArch keeps the
+                                # same thing. Only the token is read -- never the password those files
+                                # also hold in clear text -- and they are never written to
 )";
 }
 

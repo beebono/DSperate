@@ -16,11 +16,14 @@
 // answers with its own error message rather than a transport failure, then
 // dlopen, TLS, the trust store, the User-Agent, rapi's request building and its
 // response parsing are all working. That is the whole pipe bar a valid account.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "cheevos/cheevos_client.h"
 #include "cheevos/cheevos_hash.h"
@@ -30,6 +33,12 @@
 using namespace ds;
 
 namespace {
+
+u64 now_ns() {
+  timespec ts{};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<u64>(ts.tv_sec) * 1000000000ull + static_cast<u64>(ts.tv_nsec);
+}
 
 const char* state_name(cheevos::State s) {
   switch (s) {
@@ -85,15 +94,29 @@ int main(int argc, char** argv) {
   const std::string user = argc > 1 ? argv[1] : "";
   const std::string pass = env_pass ? env_pass : (argc > 2 ? argv[2] : "");
 
+  // With no user named, fall back to the sign-in the CFW's front end already
+  // made -- which is what the emulator itself does.
+  cheevos::Credentials creds;
   if (user.empty()) {
-    std::printf("no user given; transport is up, nothing else to do\n");
-    client.shutdown();
-    return 0;
+    std::string from;
+    if (!cheevos::import_cfw_credentials(creds, from)) {
+      std::printf("no user given and no system sign-in found; transport is up, nothing else to do\n");
+      client.shutdown();
+      return 0;
+    }
+    std::printf("system login: %s\n", from.c_str());
   }
 
-  std::printf("signing in as %s...\n", user.c_str());
-  if (env_token && *env_token) client.sign_in_with_token(user, env_token);
-  else client.sign_in(user, pass);
+  if (!creds.empty()) {
+    std::printf("signing in with the system token...\n");
+    client.sign_in_with_token(creds.username, creds.token);
+  } else if (env_token && *env_token) {
+    std::printf("signing in with a token...\n");
+    client.sign_in_with_token(user, env_token);
+  } else {
+    std::printf("signing in...\n");
+    client.sign_in(user, pass);
+  }
 
   pump(client, [&] { return client.state() != cheevos::State::SigningIn; }, 30);
   std::printf("state:     %s\n", state_name(client.state()));
@@ -102,7 +125,7 @@ int main(int argc, char** argv) {
     client.shutdown();
     return 2;
   }
-  std::printf("user:      %s\n", client.username().c_str());
+  std::printf("user:      %s\n", client.username().empty() ? "(none)" : "(signed in)");
   std::printf("token:     %s\n", client.token().empty() ? "(none)" : "(received, would be saved 0600)");
 
   const char* rom = argc > 3 ? argv[3] : nullptr;
@@ -139,9 +162,28 @@ int main(int argc, char** argv) {
   if (client.state() == cheevos::State::Playing)
     std::printf("game:      %u  %s\n", client.game_id(), client.game_title().c_str());
 
-  // A few hundred frames against un-booted memory: nothing should unlock, and
-  // the point is that do_frame is stable with a real set loaded.
-  for (int i = 0; i < 300; ++i) { client.frame(); show(client); }
+  // What a *real* set costs per frame, which tools/cheevos_bench can only
+  // approximate: it has to invent achievements, and its synthetic addresses have
+  // no locality. Nothing should unlock here either.
+  if (client.state() == cheevos::State::Playing) {
+    constexpr int N = 2000;
+    std::vector<u64> ns(N);
+    for (int i = 0; i < N; ++i) {
+      const u64 t0 = now_ns();
+      client.frame();
+      ns[i] = now_ns() - t0;
+      show(client);
+    }
+    std::sort(ns.begin(), ns.end());
+    u64 total = 0;
+    for (u64 v : ns) total += v;
+    std::printf("do_frame   mean %.1f us  p50 %.1f us  p99 %.1f us  max %.1f us"
+                "  (p99 = %.2f %% of a frame)\n",
+                total / 1000.0 / N, ns[N / 2] / 1000.0, ns[N * 99 / 100] / 1000.0,
+                ns.back() / 1000.0, ns[N * 99 / 100] / 16666667.0 * 100.0);
+    std::printf("note: memory is a console that was never booted, so conditions\n"
+                "      short-circuit differently than in play; treat as indicative\n");
+  }
   client.shutdown();
   return 0;
 }

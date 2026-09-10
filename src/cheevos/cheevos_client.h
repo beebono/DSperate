@@ -176,4 +176,25 @@ bool load_credentials(const std::string& dir, Credentials& out, std::string& err
 bool save_credentials(const std::string& dir, const Credentials& in, std::string& err);
 void clear_credentials(const std::string& dir);
 
+// Credentials the CFW already holds, because the player signed in through its
+// own front end. On ROCKNIX, EmulationStation's sign-in lands in
+// /storage/.config/system/configs/system.cfg as
+// global.retroachievements.username / .token, and RetroArch keeps the same
+// thing as cheevos_username / cheevos_token. Importing it means a player who
+// has already signed in on the device does not have to type a password again on
+// a machine with no keyboard.
+//
+// Only the **token** is ever read. Those files also hold the password in clear
+// text, and we do not want it: the token is all rc_client needs, it can be
+// revoked on its own, and copying somebody's password into a second program is
+// strictly worse than not. Nothing here writes to the CFW's file either -- it
+// is not ours.
+//
+// read_cfw_credentials parses one file, accepting both shapes (`key=value` and
+// `key = "value"`). import_cfw_credentials walks the known locations and
+// reports which one it used in `source`. Both return false when there is
+// nothing usable, which is the ordinary case and not an error.
+bool read_cfw_credentials(const std::string& path, Credentials& out);
+bool import_cfw_credentials(Credentials& out, std::string& source);
+
 } // namespace ds::cheevos

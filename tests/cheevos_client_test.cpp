@@ -133,6 +133,76 @@ void an_incomplete_file_is_rejected() {
   remove_dir(dir);
 }
 
+// Importing the sign-in the CFW's front end already made. Both file shapes,
+// and one hard rule: the password sitting next to the token in those files is
+// never read.
+void the_cfw_sign_in_is_imported() {
+  const std::string dir = make_dir();
+
+  // ROCKNIX / batocera shape: bare key=value.
+  const std::string es = dir + "/system.cfg";
+  std::FILE* f = std::fopen(es.c_str(), "w");
+  CHECK(f != nullptr);
+  std::fputs("global.retroachievements=1\n"
+             "global.retroachievements.username=someplayer\n"
+             "global.retroachievements.password=hunter2secret\n"
+             "global.retroachievements.token=0123456789abcdef\n"
+             "global.retroachievements.hardcore=1\n", f);
+  std::fclose(f);
+
+  cheevos::Credentials c;
+  CHECK(cheevos::read_cfw_credentials(es, c));
+  CHECK(c.username == "someplayer");
+  CHECK(c.token == "0123456789abcdef");
+  // The password is in that file and must not have been picked up anywhere.
+  CHECK(c.token.find("hunter2") == std::string::npos);
+  CHECK(c.username.find("hunter2") == std::string::npos);
+
+  // RetroArch shape: spaces and quotes.
+  const std::string ra = dir + "/retroarch.cfg";
+  f = std::fopen(ra.c_str(), "w");
+  CHECK(f != nullptr);
+  std::fputs("cheevos_username = \"otherplayer\"\n"
+             "cheevos_password = \"alsosecret\"\n"
+             "cheevos_token = \"fedcba9876543210\"\n", f);
+  std::fclose(f);
+  CHECK(cheevos::read_cfw_credentials(ra, c));
+  CHECK(c.username == "otherplayer");
+  CHECK(c.token == "fedcba9876543210");
+
+  // Signed out, or never signed in: RetroArch leaves the keys present and
+  // empty, which must read as "nothing here" rather than as a blank token we
+  // would then try to sign in with.
+  const std::string empty = dir + "/empty.cfg";
+  f = std::fopen(empty.c_str(), "w");
+  CHECK(f != nullptr);
+  std::fputs("cheevos_username = \"\"\ncheevos_token = \"\"\n", f);
+  std::fclose(f);
+  CHECK(!cheevos::read_cfw_credentials(empty, c));
+  CHECK(c.empty());
+
+  // A username with no token is not usable either.
+  const std::string half = dir + "/half.cfg";
+  f = std::fopen(half.c_str(), "w");
+  CHECK(f != nullptr);
+  std::fputs("global.retroachievements.username=someplayer\n", f);
+  std::fclose(f);
+  CHECK(!cheevos::read_cfw_credentials(half, c));
+
+  CHECK(!cheevos::read_cfw_credentials(dir + "/not-there.cfg", c));
+
+  // The probe honours the override, which is also how this is testable.
+  ::setenv("DS_CHEEVOS_CFW_CONFIG", es.c_str(), 1);
+  std::string source;
+  CHECK(cheevos::import_cfw_credentials(c, source));
+  CHECK(source == es);
+  CHECK(c.token == "0123456789abcdef");
+  ::unsetenv("DS_CHEEVOS_CFW_CONFIG");
+
+  ::unlink(es.c_str()); ::unlink(ra.c_str()); ::unlink(empty.c_str()); ::unlink(half.c_str());
+  remove_dir(dir);
+}
+
 } // namespace
 
 int main() {
@@ -143,6 +213,7 @@ int main() {
   signing_out_removes_it();
   a_newline_is_refused();
   an_incomplete_file_is_rejected();
+  the_cfw_sign_in_is_imported();
   std::printf("cheevos_client: ok\n");
   return 0;
 }

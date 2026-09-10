@@ -142,6 +142,10 @@ const char* kUsage =
     "                  menu needs a real clock to appear at all)\n"
     "  --load-state F  start from a save state instead of booting the game\n"
     "  --autosave-png F  with emu.autosave, write a PNG of both screens to F beside the auto state\n"
+#if DSPERATE_CHEEVOS
+    "  --cheevos         RetroAchievements for this run (Casual mode; needs a sign-in)\n"
+    "  --no-cheevos      off for this run, whatever the config says\n"
+#endif
     "  --autoload      start from the auto slot (emu.autosave's state) when there is one\n"
     "  --no-autoload   ignore it for this run, whatever emu.autoload says\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
@@ -840,6 +844,11 @@ int main(int argc, char** argv) {
     else if (arg("--save")) save_arg = argv[++i];
     else if (arg("--load-state")) load_state = argv[++i];
     else if (arg("--autosave-png")) cli.set("emu.autosave_png", argv[++i]);
+#if DSPERATE_CHEEVOS
+    // Turning RetroAchievements on for one run, without editing the config.
+    else if (arg("--cheevos")) cli.set("cheevos.enabled", "true");
+    else if (arg("--no-cheevos")) cli.set("cheevos.enabled", "false");
+#endif
     else if (flag("--autoload")) cli.set("emu.autoload", "true");
     else if (flag("--no-autoload")) cli.set("emu.autoload", "false");
     // A state load starts cold -- every translated block went with the old
@@ -886,7 +895,7 @@ int main(int argc, char** argv) {
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
 
@@ -2042,6 +2051,18 @@ sdl_ready:
       ds::cheevos::Credentials creds;
       if (!ds::cheevos::load_credentials(ds::sdl::Config::dir(), creds, err) && !err.empty())
         std::fprintf(stderr, "cheevos: %s\n", err.c_str());
+      // Failing that, the sign-in the CFW's own front end already did: on
+      // ROCKNIX, EmulationStation writes a token to system.cfg, and a player
+      // who signed in there should not have to type a password again on a
+      // device with no keyboard. Only the token is read, never the password
+      // those files also hold (see cheevos_client.h), and the file is never
+      // written. Ours wins when we have one, so signing in from our own menu
+      // (phase 4) takes over from then on.
+      if (creds.empty() && cfg.flag("cheevos.use_system_login", true)) {
+        std::string from;
+        if (ds::cheevos::import_cfw_credentials(creds, from))
+          std::fprintf(stderr, "cheevos: using the sign-in from %s\n", from.c_str());
+      }
       if (!creds.empty()) cheevos.sign_in_with_token(creds.username, creds.token);
       else std::fprintf(stderr, "cheevos: not signed in\n");
 

@@ -640,13 +640,78 @@ never stored. Tested: the round trip, the permissions, that a missing file is
 not an error, that a half-written file is refused rather than used, and that a
 newline in either field is refused rather than written.
 
+### Importing the CFW's sign-in
+
+Typing a password on a handheld with no keyboard is miserable, and on ROCKNIX
+the player has usually signed in already -- EmulationStation's own
+RetroAchievements sign-in writes to
+`/storage/.config/system/configs/system.cfg`:
+
+```
+global.retroachievements.username=<name>
+global.retroachievements.token=<16 chars>
+global.retroachievements.password=<in clear text>
+```
+
+So `import_cfw_credentials()` reads that (and RetroArch's
+`cheevos_username` / `cheevos_token`, which is the same thing in a different
+shape, `key = "value"` rather than `key=value`). `cheevos.use_system_login`
+controls it, default on, and ours wins whenever DSperate has a sign-in of its
+own -- so signing in from our menu in phase 4 takes over from then on.
+
+Two rules, both deliberate:
+
+- **Only the token is read.** Those files keep the password in clear text
+  beside it, and we do not want it: the token is all `rc_client` needs, it can
+  be revoked on its own, and copying somebody's password into a second program
+  is strictly worse than not. A test asserts the password never ends up in
+  either field.
+- **Their file is never written.** It is not ours, and a token we refreshed
+  into it would be a change the CFW did not ask for.
+
+### Verified end to end on the device
+
+With that, the whole of phase 3 runs on the RG DS against the live server:
+
+```
+transport: libcurl (dlopen)
+system login: /storage/.config/system/configs/system.cfg
+  [info] Signed in to RetroAchievements -- <name>
+hash:      3cd035c8692ec203a85b52d9e0c1938c
+  [info] Sonic Rush -- achievements active
+game:      14806  Sonic Rush
+```
+
+Sign-in from the CFW's token, our own hash, RetroAchievements' own game id, and
+a real achievement set loaded and evaluating. A dump RA has not hashed (Spirit
+Tracks, here) comes back as "No achievements for this game", which is the
+message that has to exist or the feature looks broken.
+
+### What a real set actually costs
+
+The set above, measured on the RG DS over 2000 frames
+(`tools/cheevos_session`):
+
+| | mean | p50 | p99 | max | p99 share of a frame |
+|---|---|---|---|---|---|
+| Sonic Rush, real set | 54.0 us | 39.7 us | 150.2 us | 836 us | **0.90 %** |
+| synthetic 120 x 6 (phase 2) | 100.6 us | 96.2 us | 210.9 us | 482 us | 1.27 % |
+
+So the real set is *cheaper* than the synthetic estimate, which is what phase 2
+guessed would happen and for the reason it gave: the synthetic addresses are
+spread over 1 MB with no locality, where a real set clusters. The phase 2 number
+stands as a pessimistic bound. Caveat on the real one: the console it measured
+against was never booted, so conditions short-circuit differently than in play
+-- it is indicative, not a final figure, and phase 6 should re-measure during
+actual play.
+
 ### Still unverified
 
-The one thing that needs a real account: **whether an unlock from an
-unregistered client is credited.** Sign-in, set loading and unlock submission
-all need credentials, so what phase 3 proves is that the pipe carries requests
-and returns the server's answers, not that a full session succeeds. First thing
-to try once there is an account to try it with.
+**Whether an unlock is credited.** Login and set loading are confirmed, and the
+server served the set to DSperate without complaint, which is encouraging --
+but an unlock needs a condition to actually fire, which needs somebody playing.
+`--cheevos` turns the feature on for one run without touching the config, so
+this is now a matter of playing a game rather than of writing anything.
 
 ## What I expect to go wrong
 

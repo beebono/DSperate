@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -129,6 +130,72 @@ bool save_credentials(const std::string& dir, const Credentials& in, std::string
 void clear_credentials(const std::string& dir) {
   const std::string path = dir + token_name;
   ::unlink(path.c_str());
+}
+
+bool read_cfw_credentials(const std::string& path, Credentials& out) {
+  out = Credentials{};
+  std::FILE* f = std::fopen(path.c_str(), "r");
+  if (!f) return false;
+
+  // The two shapes these files come in, and the only two keys we look for.
+  // Note what is deliberately absent: the password. Both formats keep it in
+  // clear text next to the token and we never read it (see the header).
+  struct Want { const char* key; std::string* into; };
+  const Want wants[] = {
+    {"global.retroachievements.username", &out.username},
+    {"global.retroachievements.token",    &out.token},
+    {"cheevos_username",                  &out.username},
+    {"cheevos_token",                     &out.token},
+  };
+
+  char line[1024];
+  while (std::fgets(line, sizeof line, f)) {
+    std::string s(line);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    const size_t eq = s.find('=');
+    if (eq == std::string::npos) continue;
+    std::string key = s.substr(0, eq);
+    std::string val = s.substr(eq + 1);
+    auto trim = [](std::string& v) {
+      size_t a = v.find_first_not_of(" \t");
+      size_t b = v.find_last_not_of(" \t");
+      v = a == std::string::npos ? std::string{} : v.substr(a, b - a + 1);
+    };
+    trim(key);
+    trim(val);
+    if (key.empty() || key[0] == '#') continue;
+    if (val.size() >= 2 && val.front() == '"' && val.back() == '"') val = val.substr(1, val.size() - 2);
+    if (val.empty()) continue;
+    for (const Want& w : wants) {
+      if (key == w.key) { *w.into = val; break; }
+    }
+  }
+  std::fclose(f);
+  return !out.empty();
+}
+
+bool import_cfw_credentials(Credentials& out, std::string& source) {
+  out = Credentials{};
+  source.clear();
+  std::vector<std::string> paths;
+  // An explicit override first, for a CFW that keeps it somewhere else.
+  if (const char* e = std::getenv("DS_CHEEVOS_CFW_CONFIG")) {
+    if (*e) paths.push_back(e);
+  }
+  // ROCKNIX / batocera-style: what EmulationStation's own sign-in writes.
+  paths.push_back("/storage/.config/system/configs/system.cfg");
+  // RetroArch, which most CFWs also ship. Checked second because on ROCKNIX it
+  // is present but empty unless RetroArch itself signed in.
+  paths.push_back("/storage/.config/retroarch/retroarch.cfg");
+  if (const char* home = std::getenv("HOME")) {
+    if (*home) paths.push_back(std::string(home) + "/.config/retroarch/retroarch.cfg");
+  }
+
+  for (const std::string& p : paths) {
+    if (read_cfw_credentials(p, out)) { source = p; return true; }
+  }
+  out = Credentials{};
+  return false;
 }
 
 // ---------------------------------------------------------------------------
