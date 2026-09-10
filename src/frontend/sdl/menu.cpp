@@ -1334,7 +1334,7 @@ const char* const kCharTables[] = {
   " abcdefghijklmnopqrstuvwxyz",
   " 0123456789.,!?'-&+()/:@",
 };
-const char* const kCharTableNames[] = {"CAPITALS", "LOWER CASE", "NUMBERS"};
+const char* const kCharTableNames[] = {"CAPITALS", "LOWERCASE", "NUM+SYM"};
 constexpr int kCharTableCount = 3;
 // The widest a field is laid out before it wraps, which puts the firmware's
 // 26-character message on two lines as the console's own screen has it.
@@ -1390,7 +1390,7 @@ Menu::Result Menu::handle_text_edit(u32 presses) {
     // table starts the walk at its beginning rather than jumping.
     const char* at = std::strchr(tab, edit_buf_[static_cast<size_t>(edit_pos_)]);
     int i = at ? static_cast<int>(at - tab) : 0;
-    i = (i + (hit(B::BTN_UP) ? n - 1 : 1)) % n;
+    i = (i + (hit(B::BTN_UP) ? 1 : n - 1)) % n;
     edit_buf_[static_cast<size_t>(edit_pos_)] = tab[i];
   }
   if (hit(B::BTN_L) || hit(B::BTN_R)) {
