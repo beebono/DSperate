@@ -127,6 +127,19 @@ public:
   struct Target { u32* px; u32 pitch; u32 h; const u16* xrun; const u8* seam_w; const u16* lin_sx; const u8* lin_wx; bool grid; const u16* xrun_plain; u32 y_lo = 0, y_hi = 0; };
 
   bool scaling() const { return scaled_; }
+  // Panel rotation on the scanline tiers: 0, 90, 180 or 270, the rotation
+  // that takes the DS layout onto the panel, the same DS_ROTATE the
+  // display-engine tier reads (270 on a panel mounted portrait with its top
+  // at the user's left). The layout, the scaling and everything the frontend
+  // draws work in the logical (unrotated) frame, composed into a cached
+  // staging buffer; present() rotates that into the presented buffer. So the
+  // per-line write no longer lands in the panel directly -- the rotate is
+  // one pass over the frame, 64-byte column stores -- but every scanline
+  // tier (fbdev, kms, dmabuf, the window surface) gets it the same way.
+  // Set before open() (open() also reads DS_ROTATE). No effect on the
+  // SDL_Renderer fallback.
+  void set_rotation(int rot) { rot_wanted_ = rot; }
+  int rotation() const { return rot_; }
   // Chunky: each 2x2 block of DS pixels is drawn as one cell from its top-left
   // pixel (with the LCD grid, one seam per block). Set before open().
   // cell: 0 = the 2x2 pair path; N = N panel pixels per cell when N divides
@@ -206,8 +219,10 @@ public:
   // Renderer output size, which is what map_point's coordinates are in (it
   // differs from the window size on scaled displays). Note this is NOT
   // uniformly panel resolution: on the display-engine tier it is the DS-space
-  // canvas the scaler reads. For drawing, ask canvas() instead.
-  void output_size(int& w, int& h) const { out_size(w, h); }
+  // canvas the scaler reads. Under a scanline-tier rotation it is the
+  // presented (panel) size, as the pointer events are; map_point() turns
+  // them back into the logical frame. For drawing, ask canvas() instead.
+  void output_size(int& w, int& h) const;
 
   // The whole output buffer, for the frontend's own drawing (the pause menu,
   // the overlays) in panel pixels rather than DS pixels. Valid between
@@ -266,7 +281,12 @@ private:
   // cell fits, the source-side cell maps (see build_source_scale).
   void build_source_scale();
   void build_scale();          // pick up the window surface and rebuild the x-map
-  bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode
+  bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode (logical under rotation)
+  bool rotated() const { return rot_ == 90 || rot_ == 270; }   // the logical and presented sizes differ
+  // Points the frame at the logical staging buffer under rotation and clears
+  // what the last frame left there; the presented buffer is kept for present().
+  void take_frame(u32* px, u32 stride, int w, int h, int idx, Target out[SCREENS]);
+  void rotate_out(u32* dst, u32 dst_pitch) const;
   void clear_margins(u32* px, u32 pitch, int w, int h) const;
   void targets(u32* px, u32 stride, int w, int h, Target out[SCREENS]);
   void blit_insets();
@@ -284,6 +304,12 @@ private:
   u8            inset_alpha_ = 255;
 
   bool              scaled_ = false;
+  int               rot_wanted_ = 0;      // set_rotation(); DS_ROTATE otherwise
+  int               rot_ = 0;             // in effect on the scanline tiers
+  int               phys_w_ = 0, phys_h_ = 0;   // the presented buffer's size (scaled_w_/h_ are logical)
+  std::vector<u32>  stage_;               // the logical frame under rotation
+  u32*              phys_px_ = nullptr;   // the presented buffer this frame, under rotation
+  u32               phys_pitch_ = 0;
   bool              disp_wanted_ = false;
   u8                disp_grid_ = 0;
   bool              fbdev_wanted_ = false;

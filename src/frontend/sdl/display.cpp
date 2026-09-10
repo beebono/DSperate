@@ -8,7 +8,111 @@
 #include <cstdlib>
 #include <cstring>
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define DS_ROT_NEON 1
+#else
+#define DS_ROT_NEON 0
+#endif
+
 namespace ds::sdl {
+
+// ---- rotation ----------------------------------------------------------------
+// The logical frame (lw x lh, pitch lw) onto the presented buffer (pitch dp),
+// the mapping the display-engine tier uses (display_disp.cpp), so DS_ROTATE
+// means the same on both: 270: dst[py][px] = src[px][lw-1-py]; 90:
+// dst[py][px] = src[lh-1-px][py]; 180: dst[py][px] = src[lh-1-py][lw-1-px].
+// The presented memory is uncached on the scanout tiers, so the 90/270
+// kernels store whole 64-byte lines: 16 source rows x 4 columns per step,
+// four 4x4 NEON transposes, one 16-pixel column store each. Edges that do
+// not fill a block (no handheld panel has them) go scalar.
+namespace {
+
+#if DS_ROT_NEON
+inline void tr4(uint32x4_t r0, uint32x4_t r1, uint32x4_t r2, uint32x4_t r3, uint32x4_t& c0, uint32x4_t& c1, uint32x4_t& c2, uint32x4_t& c3) {
+  const uint32x4x2_t a = vtrnq_u32(r0, r1), b = vtrnq_u32(r2, r3);
+  c0 = vcombine_u32(vget_low_u32(a.val[0]), vget_low_u32(b.val[0]));
+  c1 = vcombine_u32(vget_low_u32(a.val[1]), vget_low_u32(b.val[1]));
+  c2 = vcombine_u32(vget_high_u32(a.val[0]), vget_high_u32(b.val[0]));
+  c3 = vcombine_u32(vget_high_u32(a.val[1]), vget_high_u32(b.val[1]));
+}
+#endif
+
+void rot270(const u32* src, int lw, int lh, u32* dst, int dp) {
+  int sy = 0, sxb = 0;
+#if DS_ROT_NEON
+  const int lh16 = lh & ~15, lw4 = lw & ~3;
+  for (; sy < lh16; sy += 16) {
+    const u32* r = src + static_cast<size_t>(sy) * lw;
+    for (int sx = 0; sx < lw4; sx += 4) {
+      uint32x4_t c[4][4];
+      for (int g = 0; g < 4; ++g) {
+        const u32* p = r + g * 4 * lw + sx;
+        tr4(vld1q_u32(p), vld1q_u32(p + lw), vld1q_u32(p + 2 * lw), vld1q_u32(p + 3 * lw), c[0][g], c[1][g], c[2][g], c[3][g]);
+      }
+      for (int j = 0; j < 4; ++j) {
+        u32* o = dst + static_cast<size_t>(lw - 1 - (sx + j)) * dp + sy;
+        vst1q_u32(o, c[j][0]); vst1q_u32(o + 4, c[j][1]); vst1q_u32(o + 8, c[j][2]); vst1q_u32(o + 12, c[j][3]);
+      }
+    }
+  }
+  sxb = lw4;
+#endif
+  // The rows past the last full block, every column; then the columns past
+  // the last full block, the blocked rows.
+  for (int y = sy; y < lh; ++y) for (int x = 0; x < lw; ++x) dst[static_cast<size_t>(lw - 1 - x) * dp + y] = src[static_cast<size_t>(y) * lw + x];
+  for (int y = 0; y < sy; ++y) for (int x = sxb; x < lw; ++x) dst[static_cast<size_t>(lw - 1 - x) * dp + y] = src[static_cast<size_t>(y) * lw + x];
+}
+
+void rot90(const u32* src, int lw, int lh, u32* dst, int dp) {
+  int sy = 0, sxb = 0;
+#if DS_ROT_NEON
+  const int lh16 = lh & ~15, lw4 = lw & ~3;
+  for (; sy < lh16; sy += 16) {
+    const u32* r = src + static_cast<size_t>(sy) * lw;
+    for (int sx = 0; sx < lw4; sx += 4) {
+      uint32x4_t c[4][4];
+      for (int g = 0; g < 4; ++g) {
+        const u32* p = r + g * 4 * lw + sx;
+        tr4(vld1q_u32(p + 3 * lw), vld1q_u32(p + 2 * lw), vld1q_u32(p + lw), vld1q_u32(p), c[0][g], c[1][g], c[2][g], c[3][g]);
+      }
+      for (int j = 0; j < 4; ++j) {
+        u32* o = dst + static_cast<size_t>(sx + j) * dp + (lh - 16 - sy);
+        vst1q_u32(o, c[j][3]); vst1q_u32(o + 4, c[j][2]); vst1q_u32(o + 8, c[j][1]); vst1q_u32(o + 12, c[j][0]);
+      }
+    }
+  }
+  sxb = lw4;
+#endif
+  for (int y = sy; y < lh; ++y) for (int x = 0; x < lw; ++x) dst[static_cast<size_t>(x) * dp + (lh - 1 - y)] = src[static_cast<size_t>(y) * lw + x];
+  for (int y = 0; y < sy; ++y) for (int x = sxb; x < lw; ++x) dst[static_cast<size_t>(x) * dp + (lh - 1 - y)] = src[static_cast<size_t>(y) * lw + x];
+}
+
+void rot180(const u32* src, int lw, int lh, u32* dst, int dp) {
+  for (int y = 0; y < lh; ++y) {
+    const u32* r = src + static_cast<size_t>(lh - 1 - y) * lw;
+    u32* o = dst + static_cast<size_t>(y) * dp;
+    for (int x = 0; x < lw; ++x) o[x] = r[lw - 1 - x];
+  }
+}
+
+} // namespace
+
+void Display::rotate_out(u32* dst, u32 dst_pitch) const {
+  const u32* src = stage_.data();
+  const int lw = scaled_w_, lh = scaled_h_, dp = static_cast<int>(dst_pitch);
+  switch (rot_) {
+    case 90:  rot90(src, lw, lh, dst, dp); break;
+    case 180: rot180(src, lw, lh, dst, dp); break;
+    case 270: rot270(src, lw, lh, dst, dp); break;
+    default:  for (int y = 0; y < lh; ++y) std::memcpy(dst + static_cast<size_t>(y) * dp, src + static_cast<size_t>(y) * lw, static_cast<size_t>(lw) * sizeof(u32));
+  }
+}
+
+void Display::output_size(int& w, int& h) const {
+  out_size(w, h);
+  if (rotated()) std::swap(w, h);
+}
 
 namespace {
 // The same DS_VERBOSE gate as main.cpp's VLOG.
@@ -78,18 +182,31 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   int w = 0, h = 0;
   if (only_screen_ >= 0) { w = static_cast<int>(SCREEN_W) * scale; h = static_cast<int>(SCREEN_H) * scale; }
   else natural_size(layout_, scale, w, h);
+  {
+    // A windowed window is the presented side: portrait for a rotated layout.
+    int r = rot_wanted_;
+    if (!r) if (const char* e = std::getenv("DS_ROTATE")) r = std::atoi(e);
+    r = ((r % 360) + 360) % 360;
+    if ((r == 90 || r == 270) && !disp_wanted_ && !fbdev_wanted_) std::swap(w, h);
+  }
   const u32 flags = static_cast<u32>(SDL_WINDOW_RESIZABLE) | (fullscreen ? static_cast<u32>(SDL_WINDOW_FULLSCREEN_DESKTOP) : 0u);
   win_ = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED_DISPLAY(display_index), SDL_WINDOWPOS_CENTERED_DISPLAY(display_index), w, h, flags);
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
+
+  // The panel's rotation, for whichever tier presents: set_rotation(), or
+  // DS_ROTATE as the spruce launcher passes it.
+  int rot = rot_wanted_;
+  if (!rot) if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
+  rot = ((rot % 360) + 360) % 360;
+  if (rot != 0 && rot != 90 && rot != 180 && rot != 270) { std::fprintf(stderr, "video: rotation %d not supported; 0\n", rot); rot = 0; }
+  rot_ = 0;
 
   // Display-engine tier: the hardware scales a DS-resolution canvas, so
   // there is no renderer and no scaling here at all; the views are laid out
   // on the canvas (the layout's natural size at scale 1) and draw() draws
   // them into the layer's source.
   if (disp_wanted_ && only_screen_ < 0 && DispOut::available()) {
-    int rot = 0;
-    if (const char* r = std::getenv("DS_ROTATE")) rot = std::atoi(r);
     auto d = std::make_unique<DispOut>();
     d->set_grid(disp_grid_);
     // The menu and the OSD want panel pixels; the layer they share with the
@@ -117,10 +234,11 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     if (fo->open(win_, vsync)) {
       out_ = std::move(fo);
       scaled_ = true;
+      rot_ = rot;
       layout();
       build_scale();
-      std::fprintf(stderr, "video: fbdev scanout %dx%d, %s driver, scanline scaling, vsync %s\n",
-                   out_->width(), out_->height(), SDL_GetCurrentVideoDriver(), vsync ? "on" : "off");
+      std::fprintf(stderr, "video: fbdev scanout %dx%d, %s driver, scanline scaling, rot %d, vsync %s\n",
+                   out_->width(), out_->height(), SDL_GetCurrentVideoDriver(), rot_, vsync ? "on" : "off");
       return true;
     }
     std::fprintf(stderr, "video.fbdev: /dev/fb0 not usable; using SDL\n");
@@ -155,6 +273,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   scaled_ = sl && *sl ? std::strcmp(sl, "0") != 0
                       : (wayland || kms);
   if (scaled_) {
+    rot_ = rot;
     const char* dmenv = std::getenv("DS_DMABUF");
     const bool dm_forbidden = dmenv && !std::strcmp(dmenv, "0");
     const bool dm_required = dmenv && !std::strcmp(dmenv, "1");
@@ -170,7 +289,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
         out_ = std::move(dr);
         layout();
         build_scale();
-        std::fprintf(stderr, "video: kms scanout, %s driver, scanline scaling\n", vd);
+        std::fprintf(stderr, "video: kms scanout, %s driver, scanline scaling, rot %d\n", vd, rot_);
         return true;
       }
       if (dm_required) { std::fprintf(stderr, "DS_DMABUF=1 but the kms scanout path failed\n"); return false; }
@@ -179,6 +298,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
     if (!SDL_GetWindowSurface(win_)) {
       std::fprintf(stderr, "window surface unavailable (%s); using the framebuffer path\n", SDL_GetError());
       scaled_ = false;
+      rot_ = 0;
     } else {
       layout();
       build_scale();
@@ -186,16 +306,18 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
       // pixels land in a CMA dmabuf instead of the shm surface.
       if (scaled_ && wayland && !dm_forbidden) {
         int ow = 0, oh = 0;
-        out_size(ow, oh);
+        output_size(ow, oh);   // the presented size, whatever the rotation
         auto dm = std::make_unique<DmabufOut>();
         if (dm->open(win_, ow, oh, only_screen_ >= 0 ? display_index_ : -1)) out_ = std::move(dm);
         else if (dm_required) { std::fprintf(stderr, "DS_DMABUF=1 but the dmabuf path failed\n"); return false; }
       }
-      std::fprintf(stderr, "video: %s, %s driver, scanline scaling\n",
-                   out_ ? "dmabuf" : "window surface", SDL_GetCurrentVideoDriver());
+      if (!scaled_) rot_ = 0;
+      std::fprintf(stderr, "video: %s, %s driver, scanline scaling, rot %d\n",
+                   out_ ? "dmabuf" : "window surface", SDL_GetCurrentVideoDriver(), rot_);
       return true;
     }
   }
+  if (rot) std::fprintf(stderr, "video: rotation %d is not applied on the renderer path\n", rot);
 
   // The SDL_Renderer fallback: reached only where none of the tiers above
   // applies -- a video driver with no zero-copy destination (X11), --linear,
@@ -416,6 +538,7 @@ void Display::set_layout(const Layout& l) {
     for (int i = 0; i < nviews_; ++i) if (views_[i].shown) pw = std::max(pw, views_[i].rect.w);
     int nw = 0, nh = 0;
     natural_size(l, std::max(1.0, static_cast<double>(pw) / SCREEN_W), nw, nh);
+    if (rotated()) std::swap(nw, nh);   // the window is the presented side
     SDL_SetWindowSize(win_, nw, nh);
   }
   layout();
@@ -424,6 +547,19 @@ void Display::set_layout(const Layout& l) {
 }
 
 bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
+  // Pointer events arrive in presented pixels; the views are laid out in the
+  // logical frame. The inverse of rotate_out()'s mapping.
+  if (rot_ && scaled_) {
+    const int lw = scaled_w_, lh = scaled_h_;
+    int lx = wx, ly = wy;
+    switch (rot_) {
+      case 270: lx = lw - 1 - wy; ly = wx; break;
+      case 90:  lx = wy; ly = lh - 1 - wx; break;
+      case 180: lx = lw - 1 - wx; ly = lh - 1 - wy; break;
+      default: break;
+    }
+    wx = lx; wy = ly;
+  }
   for (int i = nviews_ - 1; i >= 0; --i) {
     const View& v = views_[i];
     if (!v.shown) continue;
@@ -447,10 +583,11 @@ bool Display::out_size(int& w, int& h) const {
   // On a scanout tier the window size is the truth: the shm surface can lag a
   // configure by a frame, and the two must not disagree mid-rebuild. On
   // KMSDRM there is no window surface to ask at all.
-  if (out_) { SDL_GetWindowSize(win_, &w, &h); return w > 0 && h > 0; }
+  if (out_) { SDL_GetWindowSize(win_, &w, &h); if (rotated()) std::swap(w, h); return w > 0 && h > 0; }
   SDL_Surface* s = SDL_GetWindowSurface(win_);
   if (!s) return false;
   w = s->w; h = s->h;
+  if (rotated()) std::swap(w, h);
   return true;
 }
 
@@ -555,7 +692,7 @@ void Display::build_scale() {
     // The scanout buffer is the destination; there may be no window surface
     // to fetch (KMSDRM), and asking for one there would build a renderer.
     surf_ = nullptr;
-    scaled_w_ = out_->width(); scaled_h_ = out_->height();
+    phys_w_ = out_->width(); phys_h_ = out_->height();
   } else {
     surf_ = SDL_GetWindowSurface(win_);      // recreated by SDL on resize
     if (!surf_) { scaled_ = false; return; }
@@ -565,8 +702,14 @@ void Display::build_scale() {
       scaled_ = false;
       return;
     }
-    scaled_w_ = surf_->w; scaled_h_ = surf_->h;
+    phys_w_ = surf_->w; phys_h_ = surf_->h;
   }
+  // The views and the tables are in the logical frame; under rotation that
+  // is the staging buffer, the presented buffer's size turned back.
+  scaled_w_ = phys_w_; scaled_h_ = phys_h_;
+  if (rotated()) std::swap(scaled_w_, scaled_h_);
+  if (rot_) stage_.assign(static_cast<size_t>(scaled_w_) * scaled_h_, 0);
+  else { stage_.clear(); stage_.shrink_to_fit(); }
 
   // Inverse of the dst_x -> src_x = dst_x * SCREEN_W / rect.w map used by
   // draw() and map_point(), so the two paths land pixels in the same places:
@@ -831,26 +974,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
   }
   if (out_) {
     if (u32* px = out_->begin_frame()) {
-      const u32 stride = static_cast<u32>(out_->stride());
-      // Every buffer needs its margins cleared once, not just the one in
-      // hand, or the others keep the old layout and flash it back as they
-      // come round. Tracked per buffer index, not as a count of frames:
-      // the tiers hand out the lowest free buffer, so the same one can
-      // come back three frames running while another holds the old layout
-      // until a hiccup brings it round -- the stale frame seen after a
-      // layout switch.
-      if (margins_dirty_) { out_clean_ = 0; margins_dirty_ = false; }
-      const int idx = out_->current();
-      const u32 bit = idx >= 0 && idx < 32 ? 1u << idx : 0u;
-      if (!(out_clean_ & bit)) { clear_margins(px, stride, out_->width(), out_->height()); out_clean_ |= bit; }
-      // Whatever the frontend drew on this buffer last time round: the views
-      // are redrawn over it, the letterbox is not.
-      if (idx >= 0 && idx < kMaxBufs) {
-        clear_rect(px, stride, out_->width(), out_->height(), canvas_prev_[idx]);
-        canvas_prev_[idx] = SDL_Rect{0, 0, 0, 0};
-      }
-      canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
-      targets(px, stride, out_->width(), out_->height(), out);
+      take_frame(px, static_cast<u32>(out_->stride()), out_->width(), out_->height(), out_->current(), out);
       out_frame_ = true;
       return true;
     }
@@ -866,7 +990,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
   // until then, so it is fetched every frame rather than cached across one.
   SDL_Surface* s = SDL_GetWindowSurface(win_);
   if (!s) return false;
-  if (s != surf_ || s->w != scaled_w_ || s->h != scaled_h_) {
+  if (s != surf_ || s->w != phys_w_ || s->h != phys_h_) {
     layout();
     build_scale();
     if (!scaled_) return false;
@@ -876,16 +1000,40 @@ bool Display::begin_frame(Target out[SCREENS]) {
     std::fprintf(stderr, "SDL_LockSurface: %s\n", SDL_GetError());
     return false;
   }
-  u32* base = static_cast<u32*>(s->pixels);
-  const u32 stride = static_cast<u32>(s->pitch) / sizeof(u32);
-  if (margins_dirty_) { clear_margins(base, stride, s->w, s->h); margins_dirty_ = false; }
   // The window surface is one buffer, but SDL may hand back a different one:
   // treat it as buffer 0 and scrub it the same way.
-  clear_rect(base, stride, s->w, s->h, canvas_prev_[0]);
-  canvas_prev_[0] = SDL_Rect{0, 0, 0, 0};
-  canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
-  targets(base, stride, s->w, s->h, out);
+  take_frame(static_cast<u32*>(s->pixels), static_cast<u32>(s->pitch) / sizeof(u32), s->w, s->h, 0, out);
   return true;
+}
+
+// The frame's destination: the presented buffer itself, or under rotation
+// the staging buffer, with the presented one kept for present().
+void Display::take_frame(u32* px, u32 stride, int w, int h, int idx, Target out[SCREENS]) {
+  if (rot_) {
+    // One logical buffer whatever the tier rotates: the rotate rewrites the
+    // presented buffer in full every frame, so the per-buffer letterbox and
+    // overlay bookkeeping collapses to buffer 0 of the staging frame.
+    phys_px_ = px; phys_pitch_ = stride;
+    px = stage_.data(); stride = static_cast<u32>(scaled_w_); w = scaled_w_; h = scaled_h_; idx = 0;
+  }
+  // Every buffer needs its margins cleared once, not just the one in
+  // hand, or the others keep the old layout and flash it back as they
+  // come round. Tracked per buffer index, not as a count of frames:
+  // the tiers hand out the lowest free buffer, so the same one can
+  // come back three frames running while another holds the old layout
+  // until a hiccup brings it round -- the stale frame seen after a
+  // layout switch.
+  if (margins_dirty_) { out_clean_ = 0; margins_dirty_ = false; }
+  const u32 bit = idx >= 0 && idx < 32 ? 1u << idx : 0u;
+  if (!(out_clean_ & bit)) { clear_margins(px, stride, w, h); out_clean_ |= bit; }
+  // Whatever the frontend drew on this buffer last time round: the views
+  // are redrawn over it, the letterbox is not.
+  if (idx >= 0 && idx < kMaxBufs) {
+    clear_rect(px, stride, w, h, canvas_prev_[idx]);
+    canvas_prev_[idx] = SDL_Rect{0, 0, 0, 0};
+  }
+  canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
+  targets(px, stride, w, h, out);
 }
 
 // The insets go down before anything the frontend draws over the frame, so
@@ -932,10 +1080,11 @@ void Display::present() {
   }
   // Remember what was drawn against the buffer it went into, so the next use
   // of that buffer starts by taking it back out.
-  const int idx = out_frame_ && out_ ? out_->current() : 0;
+  const int idx = rot_ ? 0 : out_frame_ && out_ ? out_->current() : 0;
   if (idx >= 0 && idx < kMaxBufs) canvas_prev_[idx] = canvas_drawn_;
   canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
   frame_px_ = nullptr;
+  if (rot_ && phys_px_) { rotate_out(phys_px_, phys_pitch_); phys_px_ = nullptr; }
   if (out_frame_) { out_frame_ = false; out_->end_frame(); return; }
   if (SDL_MUSTLOCK(surf_)) SDL_UnlockSurface(surf_);
   SDL_UpdateWindowSurface(win_);
