@@ -99,6 +99,8 @@ public:
   void unload_game();
   std::string game_title() const;
   u32 game_id() const;
+  // The hash load_game() was given, which is what identifies the dump.
+  const std::string& game_hash() const { return hash_; }
 
   // Once per emulated frame, from the emulation thread, immediately after
   // NDS::run_frame(). Exactly once -- see the header comment and the test.
@@ -147,6 +149,7 @@ private:
   std::unique_ptr<Backend> http_;
   Memory mem_;
   State state_ = State::Off;
+  std::string hash_;                 // the identity of the dump in the slot
   std::string unavailable_;
 
   std::thread worker_;

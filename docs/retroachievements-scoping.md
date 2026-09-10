@@ -705,6 +705,49 @@ against was never booted, so conditions short-circuit differently than in play
 -- it is indicative, not a final figure, and phase 6 should re-measure during
 actual play.
 
+### A hash identifies a *dump*, not a game
+
+Worth its own section, because it is the first thing that will be reported as a
+bug and it is not one. RetroAchievements' database holds the specific dumps
+somebody has registered, so a ROM dumped from your own cart very often does not
+match even when the game certainly has achievements. Measured over the 46-ROM
+library here, only 3 of 6 tested titles resolved; Super Mario 64 DS
+(`810d47b8b473c425f9559b83cd54b34d`) does not, and it plainly has a set on the
+site.
+
+Things ruled out, so nobody re-investigates them:
+
+- **Not a hash bug.** All 46 ROMs hash identically through the cart
+  (`nds.cart->source()`, after `Cart` has rewritten the secure area) and through
+  a pristine `map_file`. `read_unpatched` is doing its job.
+- **Not the secure area.** Every dump in this library carries a *decrypted*
+  secure area, including the ones RetroAchievements does recognise, so that is
+  not what separates a match from a miss.
+- **Not padding.** These dumps are padded to a power of two rather than trimmed,
+  and the hashed ranges (header, ARM9, ARM7, icon) are unaffected.
+- **Not region.** All USA (`...E`) codes; ROM revision does not split the
+  matches either (two misses are revision 0).
+
+So the difference is simply which dumps are in the database. The remedy is the
+one RetroAchievements provides -- ask for a dump's hash to be added to the game
+-- which is why `on_no_set()` puts the hash **in the message**:
+
+```
+[problem] No achievements for this ROM -- RetroAchievements does not recognise
+          this dump (hash 810d47b8b473c425f9559b83cd54b34d)
+```
+
+Without the hash there is nothing the player can do with that message. What we
+must *not* do is normalise or substitute a hash locally to make a dump match one
+in the database: the hash is a claim about which bytes are being played, and
+fabricating it would put a false claim behind any unlock.
+
+A nicer future answer exists: `rc_client_begin_fetch_game_list()` returns, per
+game, both the supported and unsupported hashes for a console. That would let
+the message say "this game has a set; your dump is not one of its N supported
+hashes", which is the actually useful sentence. It costs a whole-console list,
+so it is a phase 4+ idea, not a phase 3 one.
+
 ### Still unverified
 
 **Whether an unlock is credited.** Login and set loading are confirmed, and the

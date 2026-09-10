@@ -846,8 +846,8 @@ int main(int argc, char** argv) {
     else if (arg("--autosave-png")) cli.set("emu.autosave_png", argv[++i]);
 #if DSPERATE_CHEEVOS
     // Turning RetroAchievements on for one run, without editing the config.
-    else if (arg("--cheevos")) cli.set("cheevos.enabled", "true");
-    else if (arg("--no-cheevos")) cli.set("cheevos.enabled", "false");
+    else if (flag("--cheevos")) cli.set("cheevos.enabled", "true");
+    else if (flag("--no-cheevos")) cli.set("cheevos.enabled", "false");
 #endif
     else if (flag("--autoload")) cli.set("emu.autoload", "true");
     else if (flag("--no-autoload")) cli.set("emu.autoload", "false");

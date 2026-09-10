@@ -460,6 +460,7 @@ void Client::load_game(NDS& nds, const std::string& hash) {
     post(Message::Kind::Problem, "Achievements unavailable", err);
     return;
   }
+  hash_ = hash;
   state_ = State::LoadingGame;
   rc_client_begin_load_game(static_cast<rc_client_t*>(client_), hash.c_str(), &load_done, nullptr);
 }
@@ -507,8 +508,16 @@ void Client::on_game_loaded(const std::string& title, u32 id) {
 
 void Client::on_no_set() {
   state_ = State::NoSet;
-  post(Message::Kind::Problem, "No achievements for this game",
-       "RetroAchievements does not have a set for this ROM");
+  // The hash goes in the message on purpose. RetroAchievements identifies a
+  // *dump*, not a game, and its database holds only the dumps somebody has
+  // registered -- so a ROM dumped from your own cart very often does not match
+  // even when the game certainly has a set. Without the hash there is nothing
+  // the player can do with this message; with it they can check the game's
+  // supported-files list on the site and ask for their dump to be added, which
+  // is the route that exists for exactly this.
+  post(Message::Kind::Problem, "No achievements for this ROM",
+       hash_.empty() ? "RetroAchievements does not recognise this dump"
+                     : "RetroAchievements does not recognise this dump (hash " + hash_ + ")");
 }
 
 void Client::on_game_failed(const std::string& why) {
