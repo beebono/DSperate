@@ -262,8 +262,8 @@ static void test_lcd_grid() {
           if (srow && y == y1 - 1) {
             const u32 dn = fb[(line + 1) * 256 + sx], dnr = fb[(line + 1) * 256 + (sx + 1 < 256 ? sx + 1 : sx)];
             const u32 m = avg(c, dn), mr = avg(r, dnr);
-            exp = (scol && x == xrun[sx + 1] - 1) ? avg(m, mr) : m;
-          } else exp = (scol && x == xrun[sx + 1] - 1) ? avg(c, r) : c;
+            exp = (scol && x + 1 == xrun[sx + 1]) ? avg(m, mr) : m;
+          } else exp = (scol && x + 1 == xrun[sx + 1]) ? avg(c, r) : c;
           if (out[y * W + x] != exp) { if (bad < 8) std::fprintf(stderr, "blend (%u,%u) = %08x, expected %08x\n", x, y, out[y * W + x], exp); ++bad; }
         }
       }
@@ -393,7 +393,7 @@ static void test_bilinear() {
   NDS ref; lazy_setup(ref); run_display_frame(ref, lazy_mid);
   const u32* fb = ref.gpu.framebuffer(0);
   auto lerp = [](u32 a, u32 b, u32 f) { u32 r = 0; for (u32 sh : {0u, 8u, 16u, 24u}) r |= ((((a >> sh) & 255) * (256 - f) + ((b >> sh) & 255) * f + 128) >> 8) << sh; return r; };
-  for (const auto [W, H] : {std::pair<u32, u32>{640, 480}, std::pair<u32, u32>{721, 541}, std::pair<u32, u32>{256, 192}}) {
+  for (const auto& [W, H] : {std::pair<u32, u32>{640, 480}, std::pair<u32, u32>{721, 541}, std::pair<u32, u32>{256, 192}}) {
     std::vector<u16> xrun(257), sx(W); std::vector<u8> wx(W);
     for (u32 x = 0; x <= 256; ++x) xrun[x] = static_cast<u16>((x * W + 255) / 256);
     for (u32 x = 0; x < W; ++x) {

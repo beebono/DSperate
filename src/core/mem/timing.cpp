@@ -13,9 +13,8 @@ namespace ds::mem {
 constexpr u32 CACHE_CODE = 3, CACHE_DATA = 3;   // cycles for a cached fetch/access (line fill approximation)
 
 Timing::Timing()
-    : pu_map(new u8[0x100000]), bus9_(new u8[0x40000 * 8]), regions9_(new u8[0x40000]),
-      tim7_(new u8[COST7_OFFSET + COST7_BYTES]), regions7_(new u8[0x20000]), cpu9_(new u8[CPU9_BYTES + REFILL9_BYTES]),
-      retime_flags_(new u8[0x100000]) {
+    : pu_map(new u8[0x100000]), retime_flags_(new u8[0x100000]), bus9_(new u8[0x40000 * 8]), regions9_(new u8[0x40000]),
+      tim7_(new u8[COST7_OFFSET + COST7_BYTES]), regions7_(new u8[0x20000]), cpu9_(new u8[CPU9_BYTES + REFILL9_BYTES]) {
   std::memset(retime_flags_.get(), 0, 0x100000);
   reset();
 }

@@ -397,20 +397,6 @@ void Gpu3D::set_powcnt(u16 value) {
 
 // ---- timing -------------------------------------------------------------------
 
-void Gpu3D::tm_add_cycles(s32 n) {
-  cycle_count_ += n;
-  if (vertex_pipeline_ > 0) vertex_pipeline_ = vertex_pipeline_ > n ? vertex_pipeline_ - n : 0;
-  if (polygon_pipeline_ > 0) {
-    if (polygon_pipeline_ > n) {
-      polygon_pipeline_ -= n;
-      vertex_slot_counter_ += n;
-      while (vertex_slot_counter_ > 9) { vertex_slot_counter_ -= 9; vertex_slots_free_ >>= 1; }
-    } else {
-      polygon_pipeline_ = 0; vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
-    }
-  }
-}
-
 // A vertex submitted while a polygon is being set up waits for the next free
 // 9-cycle slot.
 void Gpu3D::next_vertex_slot() {
@@ -442,22 +428,6 @@ void Gpu3D::tm_stall_polygon_pipeline(s32 delay, s32 nonstall_delay) {
   else tm_add_cycles(normal_pipeline_ + 1);
 }
 
-void Gpu3D::tm_vtx_cmd_submit() {          // vertex commands
-  if (!(vertex_slots_free_ & 1)) next_vertex_slot(); else tm_add_cycles(1);
-  normal_pipeline_ = 0;
-}
-void Gpu3D::tm_vtx_cmd_delayed6() {        // may run 6 cycles after a vertex
-  if (vertex_pipeline_ > 2) tm_add_cycles((vertex_pipeline_ - 2) + 1); else tm_add_cycles(normal_pipeline_ + 1);
-  normal_pipeline_ = 0;
-}
-void Gpu3D::tm_vtx_cmd_delayed8() {        // may run 8 cycles after a vertex
-  if (vertex_pipeline_ > 0) tm_add_cycles(vertex_pipeline_ + 1); else tm_add_cycles(normal_pipeline_ + 1);
-  normal_pipeline_ = 0;
-}
-void Gpu3D::tm_vtx_cmd_delayed4() {        // everything else: 4 cycles after a vertex
-  tm_add_cycles(normal_pipeline_ + 1);
-  normal_pipeline_ = 0;
-}
 
 void Gpu3D::finish_work(s32 cycles) {
   if (untimed_) {   // Timing OC: the pipelines the setters still write are never consumed; the engine is simply done
@@ -548,22 +518,13 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
 
 // ---- FIFO ---------------------------------------------------------------------
 
-void Gpu3D::fifo_write(const Entry& e) {
-  if (worker_on_ && no_fifo_) { q_push(e); return; }
-  // Order of tests follows frequency: a frame is tens of thousands of words
-  // into a FIFO that is neither empty nor full.
-  if (no_fifo_ && pipe_n_ + fifo_n_ >= RING - 8) drain_all();   // no level: the ring is the only bound
-  if (fifo_n_ - 1 < FIFO_DEPTH - 1) { ring_push(e); ++fifo_n_; }              // 1 <= fifo_n_ < 256
-  else if (fifo_n_ == 0 && pipe_n_ < PIPE_DEPTH) { ring_push(e); ++pipe_n_; }
-  else if (fifo_n_ == FIFO_DEPTH && !no_fifo_) {
-    // The CPU stalls until the FIFO drains; writes already in flight (an
-    // STM's remaining registers) queue up behind it.
-    if (stall_n_ == STALL_DEPTH) { static int n = 0; if (n++ < 8) std::fprintf(stderr, "[gx] stall queue overflow: fifo %u running %d dma %d stalled %d now %llu\n", fifo_n_, nds_.sched.running() ? (nds_.sched.running()->which == Cpu::ARM9 ? 9 : 7) : 0, nds_.sched.in_dma(), stalled_, (unsigned long long)nds_.sched.now()); return; }
-    ring_push(e); ++stall_n_;
-    if (!stalled_) { stalled_ = true; nds_.sched.gx_fifo_full(); }
-    return;
-  } else { ring_push(e); ++fifo_n_; }                                          // FIFO empty, pipe full
-  note_enqueued(e.cmd);
+// fifo_write's cold leg: the FIFO is full and the FIFO is modelled.
+void Gpu3D::fifo_write_full(const Entry& e) {
+  // The CPU stalls until the FIFO drains; writes already in flight (an
+  // STM's remaining registers) queue up behind it.
+  if (stall_n_ == STALL_DEPTH) { static int n = 0; if (n++ < 8) std::fprintf(stderr, "[gx] stall queue overflow: fifo %u running %d dma %d stalled %d now %llu\n", fifo_n_, nds_.sched.running() ? (nds_.sched.running()->which == Cpu::ARM9 ? 9 : 7) : 0, nds_.sched.in_dma(), stalled_, (unsigned long long)nds_.sched.now()); return; }
+  ring_push(e); ++stall_n_;
+  if (!stalled_) { stalled_ = true; nds_.sched.gx_fifo_full(); }
 }
 
 // Stalled writes enter the FIFO (or the pipe, if it has room) now that a pop
@@ -627,7 +588,7 @@ void Gpu3D::check_fifo_dma() {
 // The walk is a template on its sink so the single-word port and the DMA
 // burst below cannot drift apart; `push` receives every entry the word makes.
 template <class Push>
-[[gnu::always_inline]] void Gpu3D::gxfifo_word(u32 value, GxParse& p, Push push) {
+inline void Gpu3D::gxfifo_word(u32 value, GxParse& p, Push push) {
   if (p.num_cmds != 0) {
     // A parameter that does not complete its command: the common word (a
     // 16-parameter matrix load, a vertex pair). Everything else takes the
@@ -1593,28 +1554,6 @@ void Gpu3D::stack_reset() {
 
 // The shadow advances exactly the stack-pointer and overflow arithmetic of
 // exec_single's 0x10-0x14, nothing else; keep the two in step.
-void Gpu3D::shadow_exec(u8 cmd, u32 param) {
-  if (cmd == 0x70) { sh_.box_pending = true; return; }
-  if (static_cast<u8>(cmd - 0x10) > 4) return;
-  switch (cmd) {
-  case 0x10: sh_.mode = param & 3; break;
-  case 0x11:
-    if (sh_.mode == 0) { if (sh_.proj_sp > 0) sh_.err = 1u << 15; sh_.proj_sp = (sh_.proj_sp + 1) & 1; }
-    else if (sh_.mode == 3) { if (sh_.tex_sp > 0) sh_.err = 1u << 15; sh_.tex_sp = (sh_.tex_sp + 1) & 1; }
-    else { if (sh_.pos_sp > 30) sh_.err = 1u << 15; sh_.pos_sp = (sh_.pos_sp + 1) & 0x3F; }
-    break;
-  case 0x12:
-    if (sh_.mode == 0) { if (sh_.proj_sp == 0) sh_.err = 1u << 15; sh_.proj_sp = (sh_.proj_sp - 1) & 1; }
-    else if (sh_.mode == 3) { if (sh_.tex_sp == 0) sh_.err = 1u << 15; sh_.tex_sp = (sh_.tex_sp - 1) & 1; }
-    else { const s32 off = static_cast<s32>(param << 26) >> 26; sh_.pos_sp = (sh_.pos_sp - off) & 0x3F; if (sh_.pos_sp > 30) sh_.err = 1u << 15; }
-    break;
-  case 0x13: case 0x14:
-    if (sh_.mode != 0 && sh_.mode != 3 && (param & 0x1F) > 30) sh_.err = 1u << 15;
-    break;
-  default: break;
-  }
-}
-
 void Gpu3D::set_geometry_worker(bool on) {
   if (on == worker_started_) return;
   if (on) {

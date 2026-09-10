@@ -73,9 +73,21 @@ public:
 
   template <class T> void put(T& v) {   // named like the writer's so sync_state reads the same
     if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) { if (more()) blob(&v, sizeof v); }
-    else if constexpr (std::is_array_v<T>) for (auto& e : v) put(e);
-    else if constexpr (is_std_array<T>::value) for (auto& e : v) put(e);
+    else if constexpr (std::is_array_v<T>) put_n(v, std::extent_v<T>);
+    else if constexpr (is_std_array<T>::value) put_n(v.data(), v.size());
     else static_assert(sizeof(T) == 0, "sync_state: list the struct's fields, not the struct");
+  }
+  // An array element by element, as put() would, but with the whole elements
+  // the chunk still holds copied in one go: the same bytes land in the same
+  // places, and GCC no longer reasons a per-element loop past the array's end.
+  template <class E> void put_n(E* e, size_t n) {
+    if constexpr (std::is_arithmetic_v<E> || std::is_enum_v<E>) {
+      if (!ok_) return;
+      const size_t whole = static_cast<size_t>(chunk_end_ - p_) / sizeof(E);
+      const size_t k = whole < n ? whole : n;
+      if (k) { std::memcpy(e, p_, k * sizeof(E)); p_ += k * sizeof(E); }
+      if (k < n && more()) blob(&e[k], sizeof(E));   // a partial element: a short read, as before
+    } else for (size_t i = 0; i < n; ++i) put(e[i]);
   }
   template <class... T> void fields(T&... v) { (put(v), ...); }
   void blob(void* p, size_t n) {

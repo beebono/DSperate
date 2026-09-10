@@ -203,6 +203,7 @@ std::string display_value(const Setting& s, const std::string& value) {
   }
   const std::string v = value.empty() ? default_value(s) : value;
   switch (s.type) {
+  case T::Text: break;   // handled above
   case T::Bool:
   case T::Pick: {
     const int i = choice_index(s, v);

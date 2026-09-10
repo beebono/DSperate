@@ -980,7 +980,8 @@ void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
   }
   if (width == 32) {
     if (cpu == Cpu::ARM9 && addr >= 0x04000240 && addr < 0x0400024A) { vramcnt_store(addr, value, 4); return; }
-    if (write32_special(cpu, addr, value).handled) return; write16(cpu, addr, static_cast<u16>(value)); write16(cpu, addr + 2, static_cast<u16>(value >> 16)); return;
+    if (write32_special(cpu, addr, value).handled) return;
+    write16(cpu, addr, static_cast<u16>(value)); write16(cpu, addr + 2, static_cast<u16>(value >> 16)); return;
   }
   if (width == 16) { write16(cpu, addr, static_cast<u16>(value)); return; }
   write8(cpu, addr, static_cast<u8>(value));

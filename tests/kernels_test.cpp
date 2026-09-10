@@ -303,7 +303,7 @@ static void test_scale_row_grid() {
     kern::ref::scale_row(src, xrun.data(), plain.data());
     for (u32 x = 0; x < w; ++x) {                       // alpha kept; non-seam pixels untouched
       const u32 s_ = x * 256 / w;
-      const bool dimmed = seam || (xrun[s_ + 1] - xrun[s_] >= std::max(2u, mr) && x == xrun[s_] && s_ % pitch == 0);
+      const bool dimmed = seam || (static_cast<u32>(xrun[s_ + 1] - xrun[s_]) >= std::max(2u, mr) && x == xrun[s_] && s_ % pitch == 0);
       if ((!dimmed && da[x] != plain[x]) || (dimmed && f == 0 && da[x] != 0xFF000000u) || (dimmed && f && (da[x] >> 24) != (plain[x] >> 24))) {
         std::printf("scale_row_grid w=%u f=%u mr=%u pitch=%u seam=%d x=%u: %08x vs %08x\n", w, f, mr, pitch, seam, x, da[x], plain[x]); ++failures; break;
       }

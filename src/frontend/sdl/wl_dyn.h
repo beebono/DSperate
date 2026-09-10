@@ -37,6 +37,7 @@ const char* error();   // why load() failed, for the fallback log line
 // into vendored C code, which sees this header too (force-included).
 extern "C" {
 #endif
+union wl_argument;   // forward: the prototype below must not declare it in its parameter list
 extern struct wl_proxy* (*p_wl_proxy_marshal_flags)(struct wl_proxy*, uint32_t opcode, const struct wl_interface*, uint32_t version, uint32_t flags, ...);
 extern struct wl_proxy* (*p_wl_proxy_marshal_array_flags)(struct wl_proxy*, uint32_t opcode, const struct wl_interface*, uint32_t version, uint32_t flags, union wl_argument*);
 extern int              (*p_wl_proxy_add_listener)(struct wl_proxy*, void (**implementation)(void), void* data);

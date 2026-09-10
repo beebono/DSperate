@@ -427,7 +427,7 @@ int main(int argc, char** argv) {
 #if DSPERATE_JIT
     if (i == stats_from && (jit9 || jit7)) ds::jit::density_reset();
 #endif
-    if (i >= stats_from)
+    if (i >= stats_from) {
       frame_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
       // DS_FRAME_SERIES=<path>: the run-order series ("ms polygons raster_ns gx_ns" per line),
       // for the shape of a tail -- alternation, bursts -- rather than its size.
@@ -435,6 +435,7 @@ int main(int argc, char** argv) {
       // ms polygons raster_ns(serial, last synced frame) gx_worker_busy_ns
       if (series) std::fprintf(series, "%.3f %u %llu %llu\n", frame_ms.back(), nds.gpu3d.render_polygon_count(),
                                (unsigned long long)nds.gpu3d.last_raster_ns(), (unsigned long long)nds.gpu3d.take_worker_busy_ns());
+    }
     // The console has switched itself off. On a firmware boot that is the
     // firmware leaving its settings pages, with the pages it wrote already in
     // the image, so this is the moment to put them on disk -- and then to

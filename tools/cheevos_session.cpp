@@ -49,6 +49,7 @@ const char* state_name(cheevos::State s) {
     case cheevos::State::LoadingGame: return "loading game";
     case cheevos::State::Playing:     return "playing";
     case cheevos::State::NoSet:       return "no achievement set";
+    case cheevos::State::EmptySet:    return "no achievements published";
   }
   return "?";
 }

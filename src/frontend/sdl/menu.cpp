@@ -180,12 +180,6 @@ void pop_char(std::string& s) {
 // default admits everything, and draw sets it around a scrolling row.
 int g_clip_x0 = 0, g_clip_x1 = 1 << 30;
 
-void put(const Canvas& d, int x, int y, u32 colour) {
-  if (x < g_clip_x0 || x >= g_clip_x1) return;
-  if (x < 0 || x >= d.w || y < 0 || y >= d.h) return;
-  d.px[static_cast<size_t>(y) * d.pitch + static_cast<size_t>(x)] = colour;
-}
-
 // Clipped once around the whole span rather than per pixel: a filled row is
 // the commonest thing drawn and the panel is mostly fill.
 void fill_rect(const Canvas& d, int x, int y, int w, int h, u32 colour) {

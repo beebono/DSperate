@@ -312,7 +312,7 @@ private:
   void price_accum(u8 cmd);
   void price_vertex();
   void pricer_resync();                 // mirror the executed state (queue empty)
-  __attribute__((always_inline)) void shadow_exec(u8 cmd, u32 param);
+  inline __attribute__((always_inline)) void shadow_exec(u8 cmd, u32 param);   // body below the class
   // Single-producer single-consumer queue of entries. The producer (parser)
   // writes at q_wr_local_ and publishes to q_wr_ at feed points (run_to per
   // slice, the end of a DMA burst, every join); the worker publishes q_rd_
@@ -494,11 +494,12 @@ private:
   u32 vram_base() const { return bank_ * VRAM_BANK; }
 
   // FIFO.
-  [[gnu::always_inline]] void fifo_write(const Entry& e);   // LTO outlined it out of gxfifo_write: 30 insn + a call per word
+  [[gnu::always_inline]] inline void fifo_write(const Entry& e);   // LTO outlined it out of gxfifo_write: 30 insn + a call per word; body below the class
+  void fifo_write_full(const Entry& e);   // the cold leg: FIFO full, stall the CPU (needs the scheduler)
   // The packed-command walk, shared by the single-word port and the burst.
   // The two differ only in their sink, so the assembly state machine has one
   // copy: a divergence between them would be a silent accuracy bug.
-  template <class Push> [[gnu::always_inline]] static void gxfifo_word(u32 value, GxParse& p, Push push);
+  template <class Push> [[gnu::always_inline]] static inline void gxfifo_word(u32 value, GxParse& p, Push push);
   // The stall queue drains into the FIFO after a pop made room. Out of line:
   // it only runs when the CPU has been stalled by a full FIFO.
   void promote_stalled();
@@ -514,7 +515,7 @@ private:
   void run_to_slow(u64 arm9_time);
   // One call site: the run_to_slow drain loop. Every command goes through this
   // one switch; the multi-parameter ones tail into exec_accum.
-  __attribute__((always_inline)) void exec_single(u8 cmd, u32 param);
+  inline __attribute__((always_inline)) void exec_single(u8 cmd, u32 param);
   void exec_accum(u8 cmd, u32 param);
   void exec_multi(u8 cmd);
 
@@ -528,12 +529,12 @@ private:
   __attribute__((always_inline)) void vtx_cmd_delayed6() { if (exec_timed_) tm_vtx_cmd_delayed6(); }
   __attribute__((always_inline)) void vtx_cmd_delayed8() { if (exec_timed_) tm_vtx_cmd_delayed8(); }
   __attribute__((always_inline)) void vtx_cmd_delayed4() { if (exec_timed_) tm_vtx_cmd_delayed4(); }
-  __attribute__((always_inline)) void tm_add_cycles(s32 n);
+  inline __attribute__((always_inline)) void tm_add_cycles(s32 n);
   void tm_stall_polygon_pipeline(s32 delay, s32 nonstall_delay);
-  __attribute__((always_inline)) void tm_vtx_cmd_submit();
-  __attribute__((always_inline)) void tm_vtx_cmd_delayed6();
-  __attribute__((always_inline)) void tm_vtx_cmd_delayed8();
-  __attribute__((always_inline)) void tm_vtx_cmd_delayed4();
+  inline __attribute__((always_inline)) void tm_vtx_cmd_submit();
+  inline __attribute__((always_inline)) void tm_vtx_cmd_delayed6();
+  inline __attribute__((always_inline)) void tm_vtx_cmd_delayed8();
+  inline __attribute__((always_inline)) void tm_vtx_cmd_delayed4();
   // Polygon pipeline start / survival prices, shared by submit_polygon and the pricer.
   void tm_polygon_start() { polygon_pipeline_ = 8; vertex_slot_counter_ = 1; vertex_slots_free_ = 0b11110; }
   void tm_polygon_kept(int nverts, u32 mode) {
@@ -560,5 +561,73 @@ private:
   void vec_test(u32 param);
   void reset_render_state();
 };
+
+// Forced-inline members called from the inline code above (q_push, write):
+// their bodies must be visible in every translation unit that uses them.
+inline void Gpu3D::fifo_write(const Entry& e) {
+  if (worker_on_ && no_fifo_) { q_push(e); return; }
+  // Order of tests follows frequency: a frame is tens of thousands of words
+  // into a FIFO that is neither empty nor full.
+  if (no_fifo_ && pipe_n_ + fifo_n_ >= RING - 8) drain_all();   // no level: the ring is the only bound
+  if (fifo_n_ - 1 < FIFO_DEPTH - 1) { ring_push(e); ++fifo_n_; }              // 1 <= fifo_n_ < 256
+  else if (fifo_n_ == 0 && pipe_n_ < PIPE_DEPTH) { ring_push(e); ++pipe_n_; }
+  else if (fifo_n_ == FIFO_DEPTH && !no_fifo_) { fifo_write_full(e); return; }
+  else { ring_push(e); ++fifo_n_; }                                          // FIFO empty, pipe full
+  note_enqueued(e.cmd);
+}
+
+inline void Gpu3D::shadow_exec(u8 cmd, u32 param) {
+  if (cmd == 0x70) { sh_.box_pending = true; return; }
+  if (static_cast<u8>(cmd - 0x10) > 4) return;
+  switch (cmd) {
+  case 0x10: sh_.mode = param & 3; break;
+  case 0x11:
+    if (sh_.mode == 0) { if (sh_.proj_sp > 0) sh_.err = 1u << 15; sh_.proj_sp = (sh_.proj_sp + 1) & 1; }
+    else if (sh_.mode == 3) { if (sh_.tex_sp > 0) sh_.err = 1u << 15; sh_.tex_sp = (sh_.tex_sp + 1) & 1; }
+    else { if (sh_.pos_sp > 30) sh_.err = 1u << 15; sh_.pos_sp = (sh_.pos_sp + 1) & 0x3F; }
+    break;
+  case 0x12:
+    if (sh_.mode == 0) { if (sh_.proj_sp == 0) sh_.err = 1u << 15; sh_.proj_sp = (sh_.proj_sp - 1) & 1; }
+    else if (sh_.mode == 3) { if (sh_.tex_sp == 0) sh_.err = 1u << 15; sh_.tex_sp = (sh_.tex_sp - 1) & 1; }
+    else { const s32 off = static_cast<s32>(param << 26) >> 26; sh_.pos_sp = (sh_.pos_sp - off) & 0x3F; if (sh_.pos_sp > 30) sh_.err = 1u << 15; }
+    break;
+  case 0x13: case 0x14:
+    if (sh_.mode != 0 && sh_.mode != 3 && (param & 0x1F) > 30) sh_.err = 1u << 15;
+    break;
+  default: break;
+  }
+}
+
+// The timing helpers, forced inline through the add_cycles / vtx_cmd_* wrappers above.
+inline void Gpu3D::tm_add_cycles(s32 n) {
+  cycle_count_ += n;
+  if (vertex_pipeline_ > 0) vertex_pipeline_ = vertex_pipeline_ > n ? vertex_pipeline_ - n : 0;
+  if (polygon_pipeline_ > 0) {
+    if (polygon_pipeline_ > n) {
+      polygon_pipeline_ -= n;
+      vertex_slot_counter_ += n;
+      while (vertex_slot_counter_ > 9) { vertex_slot_counter_ -= 9; vertex_slots_free_ >>= 1; }
+    } else {
+      polygon_pipeline_ = 0; vertex_slot_counter_ = 0; vertex_slots_free_ = 1;
+    }
+  }
+}
+
+inline void Gpu3D::tm_vtx_cmd_submit() {          // vertex commands
+  if (!(vertex_slots_free_ & 1)) next_vertex_slot(); else tm_add_cycles(1);
+  normal_pipeline_ = 0;
+}
+inline void Gpu3D::tm_vtx_cmd_delayed6() {        // may run 6 cycles after a vertex
+  if (vertex_pipeline_ > 2) tm_add_cycles((vertex_pipeline_ - 2) + 1); else tm_add_cycles(normal_pipeline_ + 1);
+  normal_pipeline_ = 0;
+}
+inline void Gpu3D::tm_vtx_cmd_delayed8() {        // may run 8 cycles after a vertex
+  if (vertex_pipeline_ > 0) tm_add_cycles(vertex_pipeline_ + 1); else tm_add_cycles(normal_pipeline_ + 1);
+  normal_pipeline_ = 0;
+}
+inline void Gpu3D::tm_vtx_cmd_delayed4() {        // everything else: 4 cycles after a vertex
+  tm_add_cycles(normal_pipeline_ + 1);
+  normal_pipeline_ = 0;
+}
 
 } // namespace ds::gpu
