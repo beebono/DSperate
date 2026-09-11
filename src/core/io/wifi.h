@@ -45,6 +45,9 @@ public:
   // for any open network still associates.
   void set_ap_name(const std::string& name) { ap_.name = name; }
 
+  // How many times this console, as MP host, has synced a client (an
+  // association it answered). A test harness keys scripted input on it.
+  u32 host_syncs() const { return host_syncs_; }
   const u8* mac() const { return reinterpret_cast<const u8*>(&io_[W_MACAddr0 / 2]); }
   const u8* bssid() const { return reinterpret_cast<const u8*>(&io_[W_BSSID0 / 2]); }
 
@@ -130,6 +133,7 @@ private:
   std::array<u8, 15 * 1024> mp_client_replies_{};
   u16 mp_last_seqno_ = 0xFFFF;
   bool is_mp_ = false, is_mp_client_ = false;
+  u32  host_syncs_ = 0;
   bool mp_reply_pending_ = false;   // slot 5 holds a reply whose contents are read when its transmission starts
   u64 next_sync_ = 0, rx_timestamp_ = 0;
 

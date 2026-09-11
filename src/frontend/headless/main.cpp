@@ -146,6 +146,10 @@ int main(int argc, char** argv) {
   const char* lan_join = nullptr;      // --lan-join ADDR: join the session at ADDR
   const char* lan_name = "DSperate";   // --lan-name NAME: our player name when joining
   bool netplay = false;                // --netplay: join a session heard on the LAN within 2.5 s, else host one
+  // --tap-after-sync F:x,y[:N[:R]]: as MP host, F frames after a client is
+  // synced, touch (x,y) for N frames, R times 60 frames apart (a Download
+  // Play host's "Cut Off", which is only there while the guest is listed).
+  int tas_after = -1, tas_x = 0, tas_y = 0, tas_n = 8, tas_rep = 1; long tas_frame = -1; ds::u32 tas_seen = 0;
   int lan_players = 16;
   bool pace = false;                   // --pace: sleep to 60 frames a second
   for (int i = 1; i < argc; ++i) {
@@ -156,6 +160,7 @@ int main(int argc, char** argv) {
     else if (arg("--lan-join")) { lan_join = argv[++i]; pace = true; }
     else if (arg("--lan-name")) lan_name = argv[++i];
     else if (flag("--netplay")) { netplay = true; pace = true; }
+    else if (arg("--tap-after-sync")) { std::sscanf(argv[++i], "%d:%d,%d:%d:%d", &tas_after, &tas_x, &tas_y, &tas_n, &tas_rep); }
     else if (arg("--lan-players")) lan_players = std::atoi(argv[++i]);
     else if (flag("--pace")) pace = true;
     else if (arg("--bios9")) bios9 = argv[++i];
@@ -460,6 +465,14 @@ int main(int argc, char** argv) {
 #endif
     if (trace && i == trace_from) { nds.trace = trace_cb; nds.trace_user = &ts; }
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
+    if (tas_after >= 0) {
+      if (nds.io.wifi.host_syncs() > tas_seen) { tas_seen = nds.io.wifi.host_syncs(); tas_frame = i + tas_after; std::fprintf(stderr, "tap-after-sync: client synced at frame %d, tapping from %ld\n", i, tas_frame); }
+      if (tas_frame >= 0 && i >= tas_frame) {
+        const long k = i - tas_frame; const long cycle = 60;
+        if (k / cycle < tas_rep && k % cycle < tas_n) nds.io.set_touch(static_cast<ds::u8>(tas_x), static_cast<ds::u8>(tas_y), true);
+        else if (k / cycle < tas_rep) nds.io.set_touch(0, 0, false);
+      }
+    }
     // The core takes the decision one frame ahead (the 3D raster for a frame
     // runs during the frame before it), so this asks for frame i + 1.
     if (frameskip > 0) {

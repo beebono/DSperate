@@ -514,3 +514,44 @@ question. Open leads, in order:
    points at).
 3. A second Download Play host title, to separate Mario Kart's checks
    from the model's.
+
+### Download Play: the first stage works (2026-09-11, late)
+
+With the host's Cut Off tapped early (within ~40 frames of the guest's
+sync, before the host sends its RSA frame), Mario Kart DS Download Play
+now completes its first stage between two DSperate instances over the
+LAN transport: 2 241 data packets (command 04, 0x1F8 bytes each), the
+guest's DataReply counting up, the child program verified and booted
+(the Nintendo logo on the guest), and the child re-associating for the
+game's own second stage. Three transport findings made that possible:
+
+- **Early fetch of host frames.** A client fetched host packets only when
+  its timeline had reached `next_sync_`, so the host's next CMD sat unread
+  for the whole run-ahead allowance; the host waited on the reply, both
+  clocks slowed, and the two ended up timing out on each other (883
+  bursts of 150 ms frames in the game-data stage). `peek_host_packet`
+  (LanMp; CMD and ack frames only, a beacon at the queue head waits for
+  the old path) lets the client pull them as they arrive and still process
+  each at its own timestamp. Host waits went from 25 ms timeouts by the
+  hundred to a 1.7 ms maximum.
+- **The stale-frame window** (melonDS: 16 ms) is now 250 ms
+  (`DS_LAN_STALE_MS`); it was a second way to drop the host's CMDs once a
+  guest fell a frame behind.
+- **Reply contents at transmission end** (the previous section) and the
+  late-join connect race fix, both already in.
+
+`--tap-after-sync F:x,y[:N[:R]]` on the headless host taps a point F
+frames after the host syncs a client, R times 60 frames apart: the
+reliable way to press Cut Off while the guest is in the racer list.
+
+**Still open, with the reference on the other side of it:** Cut Off
+*after* the host's RSA exchange. melonDS's LocalMP pair (`localmp_pair
+--tap-after-sync 120` and 250) proceeds to data; ours does not: the host
+keeps sending dummies with `0008 0002` and never a data packet, although
+its trace shows the same RsaReply arriving against its RSA command as in
+the runs that work. A second, older failure appears in some runs: the
+guest never produces an RsaReply (empty replies from the RSA frame on).
+Both are the game's DL library reacting to something in the timing the
+LAN path produces and LocalMP does not; the next tool is a CPU-side
+watch on the host's ARM9 after the RsaReply (what it compares), since
+every wire-level quantity has now been matched.

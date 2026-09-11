@@ -38,6 +38,12 @@ public:
   virtual int  send_reply(const u8* data, int len, u64 timestamp, u16 aid) = 0;
   virtual int  send_ack(const u8* data, int len, u64 timestamp) = 0;
   virtual int  recv_host_packet(u8* data, u64* timestamp) = 0;   // < 0: the host is gone
+  // The same without waiting: a host packet already here, or 0. A client
+  // fetches early with this and still processes the frame at its own
+  // timestamp; waiting only when its timeline has caught up with the host
+  // let the host's next CMD sit unread for the whole run-ahead allowance,
+  // and the two ends then slowed each other down until the game gave up.
+  virtual int  peek_host_packet(u8* data, u64* timestamp) { (void)data; (void)timestamp; return 0; }
   // Gather the replies of the clients in aidmask into 15 x 1024-byte slots;
   // returns the mask of clients that answered.
   virtual u16  recv_replies(u8* data, u64 timestamp, u16 aidmask) = 0;

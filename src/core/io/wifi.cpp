@@ -222,6 +222,7 @@ void Wifi::us_timer() {
   if (is_mp_client_ && !com_status_) {
     if (rx_timestamp_ && us_timestamp_ >= rx_timestamp_) { rx_timestamp_ = 0; start_rx(); }
     if (us_timestamp_ >= next_sync_) check_rx(2);   // TODO (melonDS): not every tick when it fails
+    else if (!rx_timestamp_ && !(us_timestamp_ & 0x38)) check_rx(3);   // every 64 us: a host frame already here, held to its timestamp (peek_host_packet)
   }
 
   if (!(us_timestamp_ & 0x3FF & kTimeCheckMask)) ap_ms_timer();
@@ -555,7 +556,7 @@ bool Wifi::process_tx(TxSlot& slot, int num) {
       const u16 framectl = ram16(slot.addr + 0xC);
       if ((framectl & 0x00FF) == 0x0010) {
         const u16 aid = ram16(slot.addr + 0xC + 24 + 4);
-        if (aid) WIFI_LOG("[HOST] syncing client %04X, sync=%016llX\n", aid, static_cast<unsigned long long>(us_timestamp_));
+        if (aid) { host_syncs_++; WIFI_LOG("[HOST] syncing client %04X, sync=%016llX\n", aid, static_cast<unsigned long long>(us_timestamp_)); }
       } else if ((framectl & 0x00FF) == 0x00C0) {
         if (is_mp_client_) { WIFI_LOG("[CLIENT] deauth\n"); is_mp_ = false; is_mp_client_ = false; }
       }
@@ -814,7 +815,7 @@ void Wifi::mp_client_reply_rx(int client) {
   start_rx();
 }
 
-bool Wifi::check_rx(int type) {   // 0 = regular, 1 = MP replies, 2 = MP host frames
+bool Wifi::check_rx(int type) {   // 0 = regular, 1 = MP replies, 2 = MP host frames (wait), 3 = MP host frames (no wait)
   if (reg(W_PowerState) & 0x0200) return false;
   if (!(reg(W_RXCnt) & 0x8000)) return false;
   if (reg(W_RXBufBegin) == reg(W_RXBufEnd)) return false;
@@ -828,7 +829,7 @@ bool Wifi::check_rx(int type) {   // 0 = regular, 1 = MP replies, 2 = MP host fr
       rxlen = mp_ ? mp_->recv_packet(rx_buffer_.data(), &timestamp) : 0;
       if (rxlen <= 0 && !is_mp_) rxlen = ap_recv(rx_buffer_.data());
     } else {
-      rxlen = mp_ ? mp_->recv_host_packet(rx_buffer_.data(), &timestamp) : 0;
+      rxlen = mp_ ? (type == 3 ? mp_->peek_host_packet(rx_buffer_.data(), &timestamp) : mp_->recv_host_packet(rx_buffer_.data(), &timestamp)) : 0;
       if (rxlen < 0) { is_mp_ = false; is_mp_client_ = false; }   // host is gone
     }
     if (rxlen <= 0) return false;

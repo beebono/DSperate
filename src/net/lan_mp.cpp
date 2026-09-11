@@ -56,6 +56,7 @@ u32 get32(const u8* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (u32(p[3]) <
 } // namespace
 
 LanMp::LanMp() {
+  if (const char* e = std::getenv("DS_LAN_STALE_MS")) stale_ms_ = static_cast<u32>(std::atoi(e));
   if (enet_initialize() != 0) { err_ = "enet_initialize failed"; return; }
   inited_ = true;
 }
@@ -398,7 +399,13 @@ void LanMp::process_lan(int type) {
     ENetPacket* pkt = rx_.front();
     auto* h = reinterpret_cast<MpPacketHeader*>(pkt->data);
     const u32 packettime = h->magic;   // overwritten with the receive time on arrival
-    if (packettime > time_last || packettime < time_last - 16) { rx_.pop(); enet_packet_destroy(pkt); continue; }
+    // melonDS drops a queued frame older than 16 ms. That assumes the guest
+    // keeps real time; a guest a frame behind then drops the host's CMDs,
+    // waits 25 ms for the next, falls further behind, and the two time out
+    // on each other until the game gives up (Mario Kart DS Download Play's
+    // game-data stage did exactly that). The emulated timeline orders frames
+    // by their own timestamps anyway, so the window only bounds the backlog.
+    if (packettime > time_last || packettime < time_last - stale_ms_) { rx_.pop(); enet_packet_destroy(pkt); continue; }
     if (type == 2) return;
     if (type == 1) {
       if (h->type == 0) return;
@@ -496,6 +503,29 @@ int LanMp::recv_packet(u8* data, u64* timestamp) { return recv_generic(data, fal
 int LanMp::send_cmd(const u8* data, int len, u64 timestamp) { return send_generic(1, data, len, timestamp); }
 int LanMp::send_reply(const u8* data, int len, u64 timestamp, u16 aid) { return send_generic(2 | (u32(aid) << 16), data, len, timestamp); }
 int LanMp::send_ack(const u8* data, int len, u64 timestamp) { return send_generic(3, data, len, timestamp); }
+int LanMp::peek_host_packet(u8* data, u64* timestamp) {
+  if (!host_) return 0;
+  if (last_host_id_ != -1 && !(connected_mask_ & (1 << last_host_id_))) return -1;
+  process_lan(0);   // poll ENet and the discovery socket, no wait, keep every type
+  if (rx_.empty()) return 0;
+  // Only the MP protocol's frames (CMD, ack) are worth fetching early; a
+  // regular frame (a beacon) at the head waits for the client's own poll,
+  // as it did before -- the download client reacts to beacons, and feeding
+  // them early changed its behaviour.
+  if (reinterpret_cast<MpPacketHeader*>(rx_.front()->data)->type == 0) return 0;
+  ENetPacket* pkt = rx_.front(); rx_.pop();
+  auto* h = reinterpret_cast<MpPacketHeader*>(pkt->data);
+  u32 len = h->length;
+  if (len) {
+    if (len > 2048) len = 2048;
+    std::memcpy(data, pkt->data + sizeof(MpPacketHeader), len);
+    if (h->type == 1) { last_host_id_ = static_cast<int>(h->sender_id); last_host_peer_ = static_cast<ENetPeer*>(pkt->userData); }
+  }
+  if (timestamp) *timestamp = h->timestamp;
+  enet_packet_destroy(pkt);
+  return static_cast<int>(len);
+}
+
 int LanMp::recv_host_packet(u8* data, u64* timestamp) {
   if (last_host_id_ != -1 && !(connected_mask_ & (1 << last_host_id_))) return -1;
   return recv_generic(data, true, timestamp);
