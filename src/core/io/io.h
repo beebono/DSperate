@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
 #include "core/types.h"
+#include "core/io/dsi_aes.h"
 
 #include <array>
 #include <vector>
@@ -149,6 +150,9 @@ struct DsiIo {
   u8  i2c_cnt = 0, i2c_data = 0, i2c_device = 0;
   u8  bptwl_regs[0x100] = {};
   u32 bptwl_pos = 0xFFFFFFFF;
+  // 0x04004D00 (both CPUs, hidden once SCFG_BIOS bit 10 is set): the console
+  // ID, which also seeds AES key slots 1 and 3. Zero until a NAND provides one.
+  u64 console_id = 0;
 };
 
 // IE2/IF2 bit numbers (ARM7).
@@ -193,6 +197,7 @@ public:
 
   CpuIo cpu_io[2];
   DsiIo dsi;               // meaningful only while NDS::dsi
+  DsiAes aes;              // 0x04004400 (ARM7), reset with the DSi block
   void request_irq2(u32 bit);   // ARM7 IE2/IF2
   void bptwl_reset();
   void i2c_write_cnt(u8 value);

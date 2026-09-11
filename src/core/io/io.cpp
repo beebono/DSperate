@@ -26,7 +26,7 @@ inline int ci(Cpu c) { return static_cast<int>(c); }
 inline Cpu other(Cpu c) { return c == Cpu::ARM9 ? Cpu::ARM7 : Cpu::ARM9; }
 }
 
-Io::Io(NDS& nds) : nds_(nds) { reset(); }
+Io::Io(NDS& nds) : aes(nds), nds_(nds) { reset(); }
 
 static void ev_lcd_irq(NDS& nds, u32) { nds.io.flush_lcd_irq(); }
 void Io::lcd_irq(Cpu cpu, u32 bit) {
@@ -1617,6 +1617,7 @@ void Io::dsi_reset() {
   arm7_bios_prot = 0x20;
   bptwl_reset();
   spi_flag_mode_ = true;
+  aes.reset();
   dispstat[0] |= 0x40; dispstat[1] |= 0x40;   // LCD init flag
   extkeyin &= ~(1u << 6);                     // melonDS clears the pen-down key bit on a DSi
   dsi_tsc_reset();
@@ -1663,9 +1664,17 @@ u32 Io::dsi_read(Cpu cpu, u32 addr, u32 width) {
   const bool a9 = cpu == Cpu::ARM9;
   const int c = ci(cpu);
   const u32 r = addr & 0xFFF;
+  if (r >= 0x400 && r < 0x500) {                     // AES (ARM7): 32-bit ports only, the FIFO read pops
+    if (a9 || width != 32) return 0;
+    if (r == 0x400) return aes.read_cnt();
+    if (r == 0x40C) return aes.read_output_fifo();
+    return 0;
+  }
   // Compose from the 32-bit view; every register here reads without side effects.
   auto word = [&](u32 base) -> u32 {
     switch (base) {
+    case 0xD00: return static_cast<u32>(dsi.console_id);
+    case 0xD04: return static_cast<u32>(dsi.console_id >> 32);
     case 0x000: return a9 ? (dsi.scfg_bios & 0xFF) : dsi.scfg_bios;               // ARM7 also sees 0x4002 SCFG_ROMWE as 0
     case 0x004: return a9 ? (dsi.scfg_clock9 | (static_cast<u32>(dsi.scfg_rst) << 16)) : dsi.scfg_clock7;   // ARM7 0x4006 (JTAG) reads 0
     case 0x008: return dsi.scfg_ext[c];
@@ -1693,6 +1702,27 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
   const bool a9 = cpu == Cpu::ARM9;
   const u32 r = addr & 0xFFF;
   if (r >= 0x100 && r < 0x200) { if (width == 32) nds_.ndma.write(cpu, addr, value); return; }   // NDMA: 32-bit ports only
+  if (r >= 0x400 && r < 0x500) {                     // AES: ARM7 only (melonDS DSi::ARM7IOWrite8/16/32)
+    if (a9) return;
+    const u32 shift = (r & (width == 8 ? 3 : width == 16 ? 2 : 0)) * 8;
+    const u32 mask = (width == 32 ? 0xFFFFFFFFu : width == 16 ? 0xFFFFu : 0xFFu) << shift;
+    const u32 v = value << shift, o = r & ~3u;
+    if (o >= 0x420 && o < 0x430) { aes.write_iv(o - 0x420, v, mask); return; }
+    if (o >= 0x430 && o < 0x440) { aes.write_mac(o - 0x430, v, mask); return; }
+    if (o >= 0x440) {
+      const u32 slot = (o - 0x440) / 0x30, k = (o - 0x440) % 0x30;
+      if (k < 0x10) aes.write_key_normal(slot, k, v, mask);
+      else if (k < 0x20) aes.write_key_x(slot, k - 0x10, v, mask);
+      else aes.write_key_y(slot, k - 0x20, v, mask);
+      return;
+    }
+    if (width == 32) {
+      if (r == 0x400) aes.write_cnt(value);
+      else if (r == 0x404) aes.write_blkcnt(value);
+      else if (r == 0x408) aes.write_input_fifo(value);
+    } else if (width == 16 && r == 0x406) aes.write_blkcnt(value << 16);
+    return;
+  }
   if (r >= 0x040 && r < 0x054) {                     // MBK1-5: byte-granular slot maps, ARM9 only
     if (!a9) return;
     for (u32 i = 0; i < width / 8; ++i) {
@@ -1869,6 +1899,8 @@ template <class S> void Io::sync_state(S& s) {
              dsi.i2c_cnt, dsi.i2c_data, dsi.i2c_device, dsi.bptwl_regs, dsi.bptwl_pos);
     s.fields(spi_tsc.dsi_mode, spi_tsc.dsi_bank, spi_tsc.dsi_index, spi_tsc.dsi_pos, spi_tsc.dsi_bank3, spi_tsc.dsi_tx, spi_tsc.dsi_ty, rtc.clock_err);
     nds_.ndma.sync_state(s);
+    s.fields(dsi.console_id);   // appended
+    aes.sync_state(s);          // appended
     s.end();
     if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, grid_cam_event); }
   }

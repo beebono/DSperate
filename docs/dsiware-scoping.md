@@ -465,11 +465,19 @@ timer prescaler phase surviving a control rewrite, DISPSTAT bit 6 read-only
 110-199 is its known timer race (docs: etody-timer-race) and did not follow
 any single change. mlbis and meteos are identical over 1800 frames.
 
-**Found, not changed:** `dma.cpp`'s 32-bit main-RAM *write* burst tables are
-melonDS's 16-bit ones (`MRAMWrite16Bursts[1]/[2]` where `MRAMWrite32Bursts
-[0]/[1]` = `{9, 4x59}` / `{9, 3x79}` belong). Every multi-word DMA into main
-RAM is mispriced on both machines; fixing it moves every DS scene, so it is
-left for its own change with its own hash re-baseline.
+**Found on the way, fixed on main (eb39c68):** `dma.cpp`'s 32-bit main-RAM
+*write* burst tables were melonDS's 16-bit ones (`MRAMWrite16Bursts[1]/[2]`
+where `MRAMWrite32Bursts[0]/[1]` = `{9, 4x59}` / `{9, 3x79}` belong). The
+path fires thousands of times per scene on four of the five DS scenes and
+none of their 1800-frame hashes moved; the DSi trace stayed identical.
+
+**Fixed after the gate (a1e8967):** with the idle skip on (the default; the
+gate turns it off) Shantae's frame 7 took 98 s of host time. On the DSi the
+SPI busy bit is a flag cleared by the SPI event, and the ARM7 can pass
+`spi_ready_at` inside its slice before that event fires; the SPICNT
+poll-streak charge then underflowed, its `s32` cast went negative, and the
+ARM7 was *given* budget every poll. The charge is now taken only while the
+stamp is ahead. No DS hash moved (the DS prices busy by time).
 
 **Not modelled yet (no DSiWare oracle hit them):** NWRAM dual-slot writes,
 the `0x02FE71B0` and SCFG_EXT RAM-size hacks, camera/DSP/mic/SD pages
@@ -496,6 +504,36 @@ falls back to the interpreter for the unmapped DSi ARM7 BIOS).
 
 Gate: a title with modcrypted ARM9i boots (most retail dumps are); the AES
 unit test decrypts the melonDS-vendored test vectors.
+
+#### Phase 2 status (2026-09-11)
+
+Landed on `dsiware`. Modcrypt at load was already in from phase 1 (all four
+oracle dumps -- KS3E, KTUE, KD9E, KZLE -- carry crypto flags `0x03` and boot
+through it). New: `io/dsi_aes.{h,cpp}`, a port of melonDS's `DSi_AES` --
+AES_CNT with the live FIFO levels, BLKCNT, the 16-word in/out FIFOs, IV, MAC,
+the four key slots with the fixed material (slot 0 "Nintendo", slots 1/3 from
+the console ID, slot 2's KeyX from `bios9i[0x8B8C]`), normal-key derivation
+on the last KeyY word, CTR and CCM (MAC verify into bit 21 on decrypt, MAC
+appended to the output on encrypt), blocks processed synchronously on FIFO
+writes, `IRQ2_AES`, NDMA start modes `0x2A`/`0x2B` (every ARM7 NDMA run end
+re-polls the FIFOs as melonDS does), byte/halfword partial writes, ARM7-only
+(the ARM9 reads 0). `AES_ECB_encrypt` added to the vendored tiny-AES-c for
+the CCM MAC. The console ID register at `0x04004D00` reads a new
+`DsiIo::console_id` (zero until phase 3's NAND provides one; it also seeds
+key slots 1 and 3). Both are in the `DSI ` state chunk.
+
+Gate: `tests/aes_test.cpp` (21st unit test) -- NIST SP 800-38A ECB/CTR
+vectors, the scrambler, and the engine through its registers: a CTR block
+against the vector, a CCM encrypt then decrypt with the engine's own MAC
+(verified, then corrupted), the FIFO levels, the IRQ in IF2, KeyX/KeyY
+derivation into a working slot. The 60-frame Shantae trace stays identical
+to melonDS on both CPUs, and a DSi save state round-trips.
+
+What the oracle titles do with it: every one writes AES_CNT once at boot
+(FIFO flush + MAC length) and zeroes key slot 1's normal key, then nothing
+for 300 frames -- the engine is not on their runtime path; the NAND's
+AES-CTR runs above the SD host in software (phase 3). Not modelled: the
+"CCM-DECRYPT MAC from WRFIFO" variant (melonDS logs it as TODO too).
 
 ### Phase 3 -- SD/MMC host and the NAND (~1 800 lines)
 

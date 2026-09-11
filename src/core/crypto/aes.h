@@ -42,6 +42,9 @@ void AES_CBC_decrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
  */
 void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 
+/* One 16-byte block in place (the CCM MAC step). */
+void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf);
+
 #ifdef __cplusplus
 }
 #endif

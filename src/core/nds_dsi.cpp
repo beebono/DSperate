@@ -26,26 +26,6 @@ std::vector<u8> slurp_file(const std::string& path) {
   return std::vector<u8>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
-// The DSi's AES key scrambler (melonDS DSi_AES::DeriveNormalKey): the
-// normal key is ((X ^ Y) + C) rotated left by 42 bits, all 128-bit
-// little-endian arithmetic.
-void rol16(u8* v, u32 n) {
-  const u32 coarse = n >> 3, fine = n & 7;
-  u8 t[16];
-  for (u32 i = 0; i < 16; ++i) t[i] = v[(i - coarse) & 0xF];
-  for (u32 i = 0; i < 16; ++i) v[i] = static_cast<u8>((t[i] << fine) | (t[(i - 1) & 0xF] >> (8 - fine)));
-}
-
-void derive_normal_key(const u8* kx, const u8* ky, u8* out) {
-  static const u8 key_const[16] = {0xFF, 0xFE, 0xFB, 0x4E, 0x29, 0x59, 0x02, 0x58, 0x2A, 0x68, 0x0F, 0x5F, 0x1A, 0x4F, 0x3E, 0x79};
-  u8 t[16];
-  for (int i = 0; i < 16; ++i) t[i] = kx[i] ^ ky[i];
-  u32 carry = 0;
-  for (int i = 0; i < 16; ++i) { const u32 r = t[i] + key_const[15 - i] + carry; t[i] = static_cast<u8>(r); carry = r >> 8; }
-  rol16(t, 42);
-  std::memcpy(out, t, 16);
-}
-
 void bswap128(u8* dst, const u8* src) { for (int i = 0; i < 16; ++i) dst[i] = src[15 - i]; }
 
 // melonDS DSi::DecryptModcryptArea: AES-CTR over the binary the area covers,
@@ -65,7 +45,7 @@ void decrypt_modcrypt_area(NDS& nds, u32 offset, u32 size, const u8* iv) {
     kx[8] = static_cast<u8>(h.game_code[0]); kx[9] = static_cast<u8>(h.game_code[1]); kx[10] = static_cast<u8>(h.game_code[2]); kx[11] = static_cast<u8>(h.game_code[3]);
     kx[12] = static_cast<u8>(h.game_code[3]); kx[13] = static_cast<u8>(h.game_code[2]); kx[14] = static_cast<u8>(h.game_code[1]); kx[15] = static_cast<u8>(h.game_code[0]);
     std::memcpy(ky, t.arm9i_hash, 16);
-    derive_normal_key(kx, ky, tmp);
+    DsiAes::derive_normal_key(kx, ky, tmp);
   }
   bswap128(key, tmp);
   u8 ivr[16]; bswap128(ivr, iv);

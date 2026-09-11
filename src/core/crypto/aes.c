@@ -478,3 +478,8 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
     buf[i] = (buf[i] ^ buffer[bi]);
   }
 }
+
+void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf)
+{
+  Cipher((state_t*)buf, ctx->RoundKey);
+}

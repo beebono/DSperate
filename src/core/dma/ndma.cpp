@@ -146,6 +146,7 @@ u32 Ndma::run_channel(Channel& c, u32 budget) {
     if (c.iter_count == 0) {
       set_running(c, 0);
       if (c.start_mode == 0x0A) nds_.gpu3d.check_fifo_dma();
+      if (c.cpu == Cpu::ARM7) { nds_.io.aes.check_input_dma(); nds_.io.aes.check_output_dma(); }
     }
     return used;
   }
@@ -161,6 +162,7 @@ void Ndma::finished(Channel& c) {
   set_running(c, 0);
   c.in_progress = false;
   nds_.dma.update_armed();
+  if (c.cpu == Cpu::ARM7) { nds_.io.aes.check_input_dma(); nds_.io.aes.check_output_dma(); }   // melonDS: every ARM7 NDMA end re-polls the AES FIFOs
   if (c.start_mode == 0x04 || c.start_mode == 0x24) { if (nds_.io.cart_drq()) start(c); }
 }
 
