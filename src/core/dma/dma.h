@@ -51,11 +51,21 @@ public:
   u32  read_src(Cpu cpu, int ch) const { return channel(cpu, ch).src; }
   u32  read_dst(Cpu cpu, int ch) const { return channel(cpu, ch).dst; }
 
-  // Trigger / cancel channels waiting on a start condition.
+  // Trigger / cancel channels waiting on a start condition. On a DSi the
+  // same condition also reaches the NDMA channels (Ndma), in their numbering.
   void check(Cpu cpu, u32 mode);
   void stop(Cpu cpu, u32 mode);
   bool any_running(Cpu cpu) const { return running_mask_[cpu == Cpu::ARM9 ? 0 : 1] != 0; }
   bool in_mode(Cpu cpu, u32 mode) const;
+  // NDMA glue: its running state occupies bit 4 of the per-CPU mask so the
+  // scheduler's test stays one load; its armed modes fold into the cached
+  // cart/GX answers. melonDS's NDMAModes table translates old modes.
+  void set_ndma_running(Cpu cpu, bool on) { u8& m = running_mask_[cpu == Cpu::ARM9 ? 0 : 1]; if (on) m |= 0x10; else m &= static_cast<u8>(~0x10); }
+  void update_armed() { update_cart_armed(); }
+  static u32 ndma_mode(u32 mode);
+  void set_clock9_shift(u32 s) { shift9_ = s; track_progress_ = s > 1; }   // DSi: report progress to Scheduler::now() (see dma_progress)
+  u32  run_base_ = 0;                 // budget used by earlier channels in this Dma::run (progress base)
+  bool track_progress_ = false;
   // Cached `in_mode(cart)` for either CPU. The cart transfer path asks once
   // per word and once per catch-up, and the eight-channel scan cost more than
   // the events it was there to avoid (178k instructions a frame, measured).
@@ -73,6 +83,7 @@ public:
 
 private:
   void update_cart_armed();
+  u32  shift9_ = 1;           // bus cycles to ARM9 cycles (2 on a DSi at 134 MHz)
   bool cart_armed_ = false;
   bool gx_armed_ = false;
   NDS& nds_;
@@ -87,6 +98,7 @@ private:
   const Channel& channel(Cpu cpu, int n) const { return ch_[static_cast<int>(cpu) * 4 + n]; }
   void start(Channel& c);
   u32  run_channel(Channel& c, u32 budget);
+  u32  run_channel_impl(Channel& c, u32 budget);
   u32  unit_cycles(Channel& c, bool burst_start, bool word);
   struct RunCost; RunCost run_cost(Channel& c, bool word);
 };

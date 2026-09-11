@@ -227,8 +227,12 @@ KNAE with a 10 MB `public.sav` and KDME with 416 KB. They can be extracted
 with `dsi_nand.py extract` for more oracle titles (the user's own console).
 The 3DS-style CIA TMDs (2868 bytes, title-ID high `00048004`) are **not** what
 `melonDS::ImportTitle` wants: it takes the 520-byte DSi TMD with the
-`00030004` ID. For an install into the oracle NAND, take the first 0x208 bytes
-and patch the title ID at 0x18C; melonDS never checks the signature.
+`00030004` ID. For an install into the oracle NAND, keep the first 0x1E4 bytes,
+patch the title ID at 0x18C, fill the save sizes at 0x1A0/0x1A4 from the SRL
+header, and append one 36-byte DSi content record (the 3DS chunk at 0xB04 has
+a SHA-256 and the wrong stride); melonDS never checks the signature.
+`dsperate-research/tools/melonds/cia_to_srl.py` does this, and decrypts
+title-key-encrypted content (3DS common key 0) on the way.
 
 The oracle harness (done 2026-09-10): `dsperate-research/tools/melonds/
 trace_melonds --dsi <bios9i> <bios7i> <nand.bin>` builds a `DSi` with
@@ -314,9 +318,35 @@ staging plus the four items above; the exactness oracle for every DSiWare
 gate is the launcher launch, which the harness scripts, and a direct boot
 with this recipe now matches it in NAND traffic.
 
-Still to do in phase 0: pick the rest of the oracle set from the NAND (KNAE or
-KDME for the large-save path; a DSP user, found by scanning ARM9i binaries for
-`0x04004300`), and record their launcher launches.
+**DSP oracle (2026-09-10).** None of the 15 NAND titles nor the three CIAs
+uses the DSP: no `DSP1` ucode header, no ucode file in any NitroFS, and no
+aligned DSP-register literal in any plain ARM9 binary (the ARM9i binaries are
+fully modcrypted *and* BLZ-compressed, so the "scan ARM9i for `0x04004300`"
+idea only works after both are undone; `dsperate-research` now carries the
+modcrypt/BLZ steps in `tools/melonds/`). melonDS's own DSP HLE knows exactly
+three ucode classes (AAC, G.711, Graphics, 20 CRCs in `DSi_DSP.cpp`) and names
+only Let's Golf (Graphics) and the DSi Sound app (AAC); its issue #2367 is the
+de-facto list of DSP titles, nearly all camera-driven. **Nintendo DSi
+Instrument Tuner (KTUE)** is the exception: mic-only, and its ARM9i embeds the
+**G.711 SDK ucode v4** (`DSP_HLE: CRC = 2A1D7F94`), which melonDS HLEs. The
+user's CIA is title-key encrypted; `tools/melonds/cia_to_srl.py` decrypts it
+and builds the 520-byte DSi TMD, `trace_melonds --install` imports it into the
+NAND copy, and with the hand-off recipe it reads its `.app` and `PUBLIC.SAV`
+and re-loads the ucode on every DSP restart. It is the phase-5 oracle.
+
+**Large-save oracle (2026-09-10): Petit Computer (KNAE, 10 MB `public.sav`,
+the only header with SD-card access bits).** Extracted from the NAND
+(`dsi_nand.py extract`) and direct-booted with the hand-off recipe it reaches
+its home menu by frame 300 with no DSP and no SD-card host traffic (SD/MMC
+port 0 only). The save is not opened at boot: the scripted path
+`--touch 400:80,104` (File Management) then `--touch 700:60,40` (Rename) opens
+it and reads 24 blocks of `PUBLIC.SAV` for the file list. Mario vs. Donkey Kong:
+Minis March Again! (KDME, 416 KB save) is kept as the popular "make sure it
+works" title for later, not an oracle.
+
+Phase 0 is complete: oracle set = Shantae (KS3E, saves), Mighty Flip Champs
+(KMGE, cross-title save read), Instrument Tuner (KTUE, G.711 DSP + mic),
+Petit Computer (KNAE, 10 MB save + SD bits).
 
 ### Phase 1 -- the machine, exact (~1 500 lines)
 
@@ -369,6 +399,84 @@ behind a `dsi_` flag on `NDS`; DS mode must not change a byte.
 
 Gate: a no-save, no-DSP DSiWare title runs to its title screen with the
 melonDS instruction trace matching, and nothing else's hashes moved.
+
+#### Phase 1 status (2026-09-11)
+
+Landed on branch `dsiware` (uncommitted): items 1-11 above, plus what the
+trace gate turned up that the list did not name: the DSi GPIO register file,
+the I2C host with the BPTWL power IC, `WIFIWAITCNT`, `BIOSPROT` and ARM7 BIOS
+protection, melonDS's 8 us Wi-Fi timer (USCOUNT/USCOMPARE, beacon and
+command counters, the power-on countdown), and a long list of scheduler
+behaviours (below).
+
+**Result.** Shantae (KS3E) card-mode direct boot is instruction- and
+register-identical to `trace_melonds --dsi` on both CPUs for the first 60
+frames (23.4 M ARM9 / 0.4 M ARM7 lines with timestamps), and the rendered
+frames are identical for 400 frames. Without a NAND the title reaches its
+"Save Data has been corrupted" prompt (frame ~200 on), on both emulators
+alike -- the title screen proper needs the save file, i.e. phases 2-3.
+Save states round-trip (re-save byte-identical, 100/100 post-load frames
+identical); `test_jit` passes under qemu; the 20 unit tests pass.
+
+**Gate command.** Headless, interpreter, lockstep quantum:
+
+    DS_IDLE_SKIP=0 DS_MELON_STM=1 DS_STORE_BUS=0 TRACE_TIME=1 TRACE_START_FRAME=20 \
+      dsperate-headless --direct --interp --bios9 .. --bios7 .. --firmware dsifirmware.bin \
+      --bios9i biosdsi9.bin --bios7i biosdsi7.bin --dsi-boot dsi-binary/bios/dsiboot.bin \
+      --frames 60 --trace out/ours --max 40000000 "Shantae - Risky's Revenge.nds"
+    TRACE_TIME=1 TRACE_START_FRAME=20 trace_melonds bios9 bios7 dsifirmware.bin out/melon \
+      --dsi biosdsi9.bin biosdsi7.bin dsinand.bin --rom Shantae.nds --direct --frames 60 --max 40000000
+    cmp out/melon.arm9.trace out/ours.arm9.trace; cmp out/melon.arm7.trace out/ours.arm7.trace
+
+The three env knobs are gate-only: `DS_IDLE_SKIP=0` turns the idle-loop
+skips off, `DS_MELON_STM=1` reproduces melonDS's ARM7 STM quirk (a non-first
+base register without writeback stores the slot address), `DS_STORE_BUS=0`
+prices cacheable ARM9 stores as hits the way melonDS does.
+
+**What the DSi machine does differently from the DS (all DSi-only, chosen
+so the DS scene hashes stay put).** The scheduler mirrors melonDS's loop:
+64-ARM7-cycle targets with an 8-cycle margin (an event strictly inside the
+margin extends the slice, equal does not), the ARM9's core time floored to
+ARM7 cycles with the remainder carried, an ARM9 slice cut by an event the
+ARM9 schedules earlier than its end, no idle extension of the slice, RTC
+32768 Hz and camera-IRQ grid events, the SPU mixing one event per sample,
+cart words as events counted from the ARM7's clock, DMA progress folded into
+`now()` (a cart word read by a DMA schedules the next from the DMA's own
+position), an ARM9 DMA given its own iteration (the ARM9 phase ends when the
+DMA stops, the ARM7 catches up to that point, and a DMA the ARM9 starts runs
+in the next iteration -- possibly after a zero-length phase), and the cost
+of an instruction that starts a DMA, halts, or takes a wake-up IRQ charged
+after the next instruction (melonDS's pending `Cycles`). Timers are "soft"
+events stepped at slice ends, an ARM7 overflow being seen from the ARM7's
+overshoot position; an IRQ raised while its CPU is off-slice or DMA-stopped
+is taken after that CPU's next instruction (immediately if it was halted);
+the LCD IRQ delay is 0; the ARM7 BIOS is fetched through the slow path so
+data reads see the protection rules; the Wi-Fi timer runs whenever POWCNT2
+powers the Wi-Fi.
+
+**DS-visible changes made on the way (hardware-correct, they move hashes):**
+SWP charging read N + write N (sm64 from frame 256, dbori frame 243: both
+traced to the `swp` at `020ba874`), `WIFIWAITCNT` wait states and `0x0030`
+at direct boot (sm64 from frame 38), the cart-done IRQ going to the slot
+owner only, a `W_IE` write raising the Wi-Fi IRQ when IF&IE becomes
+non-zero, W_USCOUNT/W_USCOMPARE/W_CMDCOUNT reading back their counters, the
+timer prescaler phase surviving a control rewrite, DISPSTAT bit 6 read-only
+(none of the last five moved a scene). etody's one-frame shift at frames
+110-199 is its known timer race (docs: etody-timer-race) and did not follow
+any single change. mlbis and meteos are identical over 1800 frames.
+
+**Found, not changed:** `dma.cpp`'s 32-bit main-RAM *write* burst tables are
+melonDS's 16-bit ones (`MRAMWrite16Bursts[1]/[2]` where `MRAMWrite32Bursts
+[0]/[1]` = `{9, 4x59}` / `{9, 3x79}` belong). Every multi-word DMA into main
+RAM is mispriced on both machines; fixing it moves every DS scene, so it is
+left for its own change with its own hash re-baseline.
+
+**Not modelled yet (no DSiWare oracle hit them):** NWRAM dual-slot writes,
+the `0x02FE71B0` and SCFG_EXT RAM-size hacks, camera/DSP/mic/SD pages
+(read 0), Wi-Fi frames (a TX request is logged), the BPTWL soft-reset
+request (logged), the DSi frontend/SDL wiring, JIT parity for `code_latch`,
+`irq_skip_once` and `defer_cost` (the interpreter is the gate; the JIT
+falls back to the interpreter for the unmapped DSi ARM7 BIOS).
 
 ### Phase 2 -- AES and modcrypt (~700 lines)
 

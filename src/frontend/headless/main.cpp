@@ -91,8 +91,11 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
   auto mix = [&](ds::u32 v) { h ^= v; h *= 1099511628211ull; h ^= h >> 29; };
   mix(pc); mix(instr); mix(cpu.hot.cpsr);
   for (int r = 0; r < 15; ++r) mix(cpu.hot.regs[r]);
-  for (int k = 0; k < 32; ++k) if (t->recent[i][k] == h) return;
-  t->recent[i][t->recent_pos[i]++ & 31] = h;
+  static const bool nodedup = std::getenv("DS_TRACE_NODEDUP") != nullptr;   // every instruction, repeats included (poll loops)
+  if (!nodedup) {
+    for (int k = 0; k < 32; ++k) if (t->recent[i][k] == h) return;
+    t->recent[i][t->recent_pos[i]++ & 31] = h;
+  }
   t->count[i]++;
   if (t->stamp) std::fprintf(t->out[i], "%llu ", (unsigned long long)t->nds->sched.now());
   std::fprintf(t->out[i], "%08x %08x %08x", pc, instr, cpu.hot.cpsr);
@@ -127,6 +130,8 @@ int main(int argc, char** argv) {
   bool cpu_oc = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr;
+  int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
   for (int i = 1; i < argc; ++i) {
@@ -136,6 +141,11 @@ int main(int argc, char** argv) {
     else if (arg("--bios9")) bios9 = argv[++i];
     else if (arg("--bios7")) bios7 = argv[++i];
     else if (arg("--firmware")) fw = argv[++i];
+    else if (arg("--bios9i")) bios9i = argv[++i];            // the DSi BIOS pair (64 KB each): needed for DSi mode
+    else if (arg("--bios7i")) bios7i = argv[++i];
+    else if (arg("--dsi-boot")) dsi_boot = argv[++i];        // tools/dsi_nand.py bootblobs output: the console data a DSi title starts with
+    else if (flag("--dsi")) dsi_mode = 1;                    // force the DSi machine (default: a DSi-capable header with the DSi BIOS loaded)
+    else if (flag("--no-dsi")) dsi_mode = 0;
     else if (arg("--trace")) trace = argv[++i];
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
@@ -200,6 +210,11 @@ int main(int argc, char** argv) {
     if (!nds.load_bios(bios9 ? bios9 : "", bios7 ? bios7 : "", fw ? fw : "", {}, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
   }
   if (!nds.bios_native) std::fprintf(stderr, "note: --bios9/--bios7 %s; using the built-in FreeBIOS (direct boot only, timing is not Nintendo's)\n", bios9 ? "not found" : "not given");
+  {
+    std::string err;
+    if (!nds.load_dsi_bios(bios9i ? bios9i : "", bios7i ? bios7i : "", &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
+    if (dsi_boot && !nds.load_dsi_boot_blobs(dsi_boot, &err)) { std::fprintf(stderr, "dsi boot: %s\n", err.c_str()); return 1; }
+  }
   if (nds.firmware_synthetic) std::fprintf(stderr, "note: --firmware %s; using a generated firmware\n", fw ? "not found" : "not given");
   if (!direct && !nds.can_boot_firmware()) {
     // FreeBIOS's reset vector is an idle loop, so a firmware boot draws nothing.
@@ -223,6 +238,22 @@ int main(int argc, char** argv) {
     if (done == total) std::fputc('\n', stderr);
   };
   if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
+  // Console type: the DSi machine for a DSi-capable header when the DSi BIOS
+  // pair is loaded (or on request), decided before the reset that builds it.
+  {
+    const bool capable = nds.cart && nds.cart->dsi_capable();
+    const bool want = dsi_mode == 1 || (dsi_mode == -1 && capable && nds.bios_native_dsi);
+    if (want && !nds.bios_native_dsi) { std::fprintf(stderr, "DSi mode needs --bios9i/--bios7i\n"); return 1; }
+    if (want && !capable) std::fprintf(stderr, "warning: --dsi with a DS-only header (unit code %02x)\n", nds.cart ? nds.cart->header().unit_code : 0);
+    if (want) {
+      nds.set_dsi(true);
+      nds.reset();
+      if (rtc_host) nds.io.start_rtc_clock();
+      std::fprintf(stderr, "console: DSi (16 MB, ARM9 at 134 MHz)%s\n", dsi_boot ? "" : "; no --dsi-boot: the console data areas stay zero");
+    } else if (capable && !nds.bios_native_dsi && dsi_mode == -1) {
+      std::fprintf(stderr, "note: DSi-capable ROM without --bios9i/--bios7i: running as a DS\n");
+    }
+  }
   nds.sched.set_quantum(quantum);
   nds.gpu3d.set_timing_oc(timing_oc);
   // Geometry worker + per-frame shape controller, with either inexact tier

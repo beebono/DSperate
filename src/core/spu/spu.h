@@ -39,7 +39,13 @@ public:
   // that observes or changes SPU state between events calls this first: the
   // register paths do, and the result is sample-for-sample what one event
   // per sample produced. Capture forces a batch of one, since it writes RAM.
-  void run_to(u64 t) { while (mix_at_ <= t) { mix(); mix_at_ += MIX_PERIOD; } }
+  void run_to(u64 t) { while (mix_at_ <= t) { mix(); mix_at_ += mix_period_; } }
+  // DSi SNDEXCNT (0x04004700, via Io::dsi_write): bit 15 I2S enable, 14 mute,
+  // 13 selects 47.6 kHz output (only while disabled), bits 0-3 the NITRO/DSP
+  // mix ratio. The DSi ignores SOUNDBIAS. melonDS DSi_I2S::WriteSndExCnt.
+  void write_sndexcnt(u16 value, u16 mask);
+  u32  output_rate() const { return mix_period_ == MIX_PERIOD_47K ? 47605 : SAMPLE_RATE; }
+  void set_apply_bias(bool on) { apply_bias_ = on; }
   void catch_up();
 
   // Output ring (stereo frames). `take` copies up to `max_frames` frames into
@@ -50,7 +56,8 @@ public:
 
   static constexpr u32 SAMPLE_RATE = 32768;
   static constexpr u32 MIX_PERIOD  = 2048;      // ARM9 cycles per output sample
-  static constexpr u32 TIMER_STEP  = 512;       // channel timer ticks per output sample
+  static constexpr u32 MIX_PERIOD_47K = 1408;   // the DSi's 47605 Hz (melonDS: 704 ARM7 cycles)
+  static constexpr u32 TIMER_STEP  = 512;       // channel timer ticks per output sample (mix period / 4)
 
   // Exposed for the tests.
   static const u16 ADPCM_TABLE[89];
@@ -110,6 +117,9 @@ private:
   bool cap_warned_ = false;
   bool dbg_ = false;                     // DS_DEBUG_SPU: log control/key-on writes
   u64  mix_at_ = 0;                      // nominal time of the next sample
+  u32  mix_period_ = MIX_PERIOD;         // MIX_PERIOD, or MIX_PERIOD_47K on a DSi with SNDEXCNT bit 13
+  u32  timer_step_ = TIMER_STEP;         // mix_period_ / 4
+  bool apply_bias_ = true;               // SOUNDBIAS: DS yes, DSi no
   u32  batch_ = 16;                      // samples per mix event (DS_SPU_BATCH)
   u32  cap_batch_ = 1;                   // ... while a capture runs (DS_SPU_CAP_BATCH; 1 = a sample per event, the conservative default)
 

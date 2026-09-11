@@ -78,6 +78,29 @@ struct CpuContext {
   u8  _pad1;
   bool branch_fetch;       // ARM9: the next prefetch is the first after a branch
 
+  // Cycles this CPU owes before it executes anything: melonDS charges its
+  // reset and direct-boot pipeline fills as pending cycles ahead of the first
+  // instruction (136 ARM9 core cycles and 15 ARM7 cycles on a DSi), and a
+  // DSiWare loader measures the ARM7 against the ARM9 at boot. Consumed by
+  // the scheduler out of the first budgets; zero on a DS.
+  s32  boot_stall = 0;
+  // DSi only (melonDS parity): the ARM9's sequential code-fetch cost is
+  // latched at each jump from the page jumped to (melonDS RegionCodeCycles)
+  // and not re-read per instruction, so fetches right after a CP15 write
+  // keep the old price until the next branch. 0 = read the table (DS).
+  u8   code_latch = 0;
+  // DSi (melonDS parity): melonDS tests for a pending IRQ after each
+  // instruction, so one raised while a CPU was not running is taken only
+  // after that CPU's next instruction. irq_offline is set by Io::update_irq
+  // when the request lands off-slice; the scheduler turns it into
+  // irq_skip_once at the CPU's next phase start, and check_irq honours it.
+  bool irq_offline = false, irq_skip_once = false;
+  // DSi: the cost of an instruction that started an immediate DMA is charged
+  // after the next instruction, not before the DMA (melonDS breaks out of
+  // its loop on the DMA stop before adding the instruction's Cycles, which
+  // stay pending until the CPU resumes). Set by Scheduler::run_cpu, charged
+  // by the interpreter loop.
+  s32  defer_cost = 0;
   // Debug single-stepping: when step_limit != 0 the interpreter stops after
   // that many instructions regardless of the cycle budget.
   u32 step_limit, steps;

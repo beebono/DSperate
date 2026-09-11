@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 add_library(dsperate_core STATIC
   nds.cpp
+  nds_dsi.cpp
+  crypto/aes.c
   bios/freebios_data.cpp
   bios/firmware_gen.cpp
   profile.cpp
@@ -8,6 +10,7 @@ add_library(dsperate_core STATIC
   mem/bus.cpp
   mem/timing.cpp
   dma/dma.cpp
+  dma/ndma.cpp
   cart/cart.cpp
   cart/rom_source.cpp
   cart/zip.cpp

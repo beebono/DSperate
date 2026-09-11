@@ -42,7 +42,11 @@ void Spu::reset() {
   for (auto& cp : cap_) cp = Capture{};
   cnt_ = 0; bias_ = 0; master_ = 0; muted_ = true;
   rd_ = wr_ = 0;
-  mix_at_ = nds_.sched.now() + MIX_PERIOD;
+  mix_period_ = MIX_PERIOD; timer_step_ = TIMER_STEP;   // a DSi title re-selects 47.6 kHz through SNDEXCNT
+  // DSi: one mix event per sample, as melonDS, so the slice boundaries it
+  // makes match the oracle's (see EventId::RtcClock); DS_SPU_BATCH still wins.
+  if (nds_.dsi && !std::getenv("DS_SPU_BATCH")) batch_ = 1;
+  mix_at_ = nds_.sched.now() + mix_period_;
   nds_.sched.schedule(EventId::Spu, mix_at_, ev_mix);
 }
 
@@ -57,7 +61,7 @@ void Spu::set_cnt(Channel& c, u32 v) {
   c.pan = (c.cnt >> 16) & 0x7F; if (c.pan == 127) c.pan = 128;
   if ((v & 0x80000000u) && !(old & 0x80000000u)) {
     c.key_on = true;
-    if (dbg_) std::fprintf(stderr, "[spu] mix %llu f%llu line %u keyon ch%d cnt %08x src %08x loop %u len %u timer %04x\n", (unsigned long long)(mix_at_ / MIX_PERIOD), (unsigned long long)nds_.frame_count, nds_.gpu.line(), int(&c - ch_.data()), c.cnt, c.src, c.loop, c.len, c.timer_reload);
+    if (dbg_) std::fprintf(stderr, "[spu] mix %llu f%llu line %u keyon ch%d cnt %08x src %08x loop %u len %u timer %04x\n", (unsigned long long)(mix_at_ / mix_period_), (unsigned long long)nds_.frame_count, nds_.gpu.line(), int(&c - ch_.data()), c.cnt, c.src, c.loop, c.len, c.timer_reload);
   }
 }
 
@@ -96,7 +100,7 @@ u32 Spu::read(u32 addr, u32 width) {
 
 void Spu::write(u32 addr, u32 width, u32 value) {
   catch_up();
-  if (dbg_ && (addr >= 0x04000500 || (width == 32 && (addr & 0xC) == 0 && (value & 0x80000000u)))) std::fprintf(stderr, "[spu] mix %llu f%llu line %u w%u %08x = %08x\n", (unsigned long long)(mix_at_ / MIX_PERIOD), (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
+  if (dbg_ && (addr >= 0x04000500 || (width == 32 && (addr & 0xC) == 0 && (value & 0x80000000u)))) std::fprintf(stderr, "[spu] mix %llu f%llu line %u w%u %08x = %08x\n", (unsigned long long)(mix_at_ / mix_period_), (unsigned long long)nds_.frame_count, nds_.gpu.line(), width, addr, value);
   // Merge narrower writes into the 32-bit register image first; the side
   // effects below see the whole word.
   const u32 base = addr & ~3u;
@@ -297,7 +301,7 @@ template <typename T> void Spu::cap_write(Capture& cp, T v) {
 }
 
 void Spu::cap_run(Capture& cp, s32 sample) {
-  cp.timer += TIMER_STEP;
+  cp.timer += timer_step_;
   const bool eight = cp.cnt & 0x08;
   while (cp.timer >> 16) {
     cp.timer = cp.timer_reload + (cp.timer - 0x10000);
@@ -327,10 +331,27 @@ void Spu::ev_mix(NDS& nds, u32) {
   Spu& s = nds.spu;
   s.run_to(nds.sched.event_time());
   const u32 n = ((s.cap_[0].cnt | s.cap_[1].cnt) & 0x80) ? s.cap_batch_ : s.batch_;
-  nds.sched.schedule(EventId::Spu, s.mix_at_ + (n - 1) * MIX_PERIOD, ev_mix);
+  nds.sched.schedule(EventId::Spu, s.mix_at_ + (n - 1) * s.mix_period_, ev_mix);
 }
 
 void Spu::catch_up() { run_to(nds_.sched.now()); }
+
+void Spu::write_sndexcnt(u16 value, u16 mask) {
+  u16& cur = nds_.io.dsi.sndexcnt;
+  value = static_cast<u16>((value & mask) | (cur & ~mask));
+  // The I2S frequency can only change while the interface is disabled.
+  if (cur & 0x8000) value = static_cast<u16>((value & ~0x2000) | (cur & 0x2000));
+  if ((cur ^ value) & 0x2000) {
+    catch_up();
+    mix_period_ = (value & 0x2000) ? MIX_PERIOD_47K : MIX_PERIOD;
+    timer_step_ = mix_period_ / 4;
+    // The next sample keeps its nominal slot; only the spacing after it changes.
+    if (dbg_) std::fprintf(stderr, "[spu] SNDEXCNT: output %u Hz\n", output_rate());
+  }
+  cur = value & 0xE00F;
+  // Bit 14 (mute) and bits 0-3 (the NITRO/DSP ratio) affect the DSP mix,
+  // which does not exist yet: pure NITRO output either way.
+}
 
 void Spu::push(s16 l, s16 r) {
   ring_[wr_ * 2] = l; ring_[wr_ * 2 + 1] = r;
@@ -355,8 +376,8 @@ void Spu::mix() {
       left  += static_cast<s32>((static_cast<s64>(v) * (128 - c.pan)) >> 10);
       right += static_cast<s32>((static_cast<s64>(v) * c.pan) >> 10);
     };
-    const s32 ch0 = run_channel(ch_[0], TIMER_STEP), ch1 = run_channel(ch_[1], TIMER_STEP);
-    const s32 ch2 = run_channel(ch_[2], TIMER_STEP), ch3 = run_channel(ch_[3], TIMER_STEP);
+    const s32 ch0 = run_channel(ch_[0], timer_step_), ch1 = run_channel(ch_[1], timer_step_);
+    const s32 ch2 = run_channel(ch_[2], timer_step_), ch3 = run_channel(ch_[3], timer_step_);
     pan_out(ch_[0], ch0); pan_out(ch_[2], ch2);
     if (!(cnt_ & 0x1000)) pan_out(ch_[1], ch1);     // bit 12/13: channel 1/3 bypass the mixer
     if (!(cnt_ & 0x2000)) pan_out(ch_[3], ch3);
@@ -365,7 +386,7 @@ void Spu::mix() {
     // Tracks runs 4-5 voices and paid the call and two 64-bit multiplies for
     // each of the other eleven, 32 k times a second.
     for (int i = 4; i < 16; ++i)
-      if (ch_[i].cnt & 0x80000000u) pan_out(ch_[i], run_channel(ch_[i], TIMER_STEP));
+      if (ch_[i].cnt & 0x80000000u) pan_out(ch_[i], run_channel(ch_[i], timer_step_));
 
     for (int k = 0; k < 2; ++k) {
       if (!(cap_[k].cnt & 0x80)) continue;
@@ -388,8 +409,7 @@ void Spu::mix() {
   out_r = static_cast<s32>((static_cast<s64>(out_r) * master_) >> 7) >> 8;
   // SOUNDBIAS centres the 10-bit DAC; commercial games use 0x200, so the bias
   // is applied relative to it and the output stays centred on zero.
-  out_l += (bias_ << 6) - 0x8000;
-  out_r += (bias_ << 6) - 0x8000;
+  if (apply_bias_) { out_l += (bias_ << 6) - 0x8000; out_r += (bias_ << 6) - 0x8000; }
   if (muted_) push(0, 0);
   else push(static_cast<s16>(std::clamp(out_l, -0x8000, 0x7FFF)), static_cast<s16>(std::clamp(out_r, -0x8000, 0x7FFF)));
 }
@@ -403,7 +423,9 @@ template <class S> void Spu::sync_state(S& s) {
   for (Capture& cp : cap_)
     s.fields(cp.cnt, cp.dst, cp.len, cp.timer_reload, cp.timer, cp.pos, cp.fifo, cp.fifo_rd, cp.fifo_wr, cp.fifo_off, cp.fifo_level);
   s.fields(cnt_, bias_, master_, muted_, mix_at_, batch_);
+  s.fields(mix_period_, apply_bias_);   // appended: DS states leave the defaults
   s.end();
+  if constexpr (S::reading) timer_step_ = mix_period_ / 4;
   if constexpr (S::reading) { rd_ = wr_ = 0; nds_.sched.rebind(EventId::Spu, ev_mix); }
 }
 template void Spu::sync_state<state::Writer>(state::Writer&);

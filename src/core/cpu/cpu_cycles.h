@@ -86,7 +86,8 @@ inline void charge_CD(CpuContext& cpu) {
 inline void prefetch_cost9(CpuContext& cpu) {
   const u32 pc = cpu.hot.regs[15];
   if (cpu.thumb() && (pc & 2)) { cpu.code_cycles = 0; return; }
-  const u8 c = cpu.timing9[pc >> 12][0];
+  u8 c = cpu.code_latch ? cpu.code_latch : cpu.timing9[pc >> 12][0];
+  if (cpu.code_latch && pc < cpu.itcm_size) c = 1;   // ITCM fetches are always 1 (melonDS CodeRead32)
   cpu.code_cycles = (c == 0xFF) ? (!(pc & 0x1F) ? 3 : 1) : c;
 }
 

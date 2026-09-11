@@ -43,11 +43,12 @@ bool Scheduler::a9_gx_stalled(const CpuContext& cpu) const {
 void Scheduler::set_quantum(s64 q) {
   if (quantum_forced_) return;
   quantum_ = q <= 0 ? EVENT_BOUND_QUANTUM : q;
+  update_soft_mask();
 }
 
 void Scheduler::reset() {
   now_ = 0;
-  arm7_debt_ = 0;
+  arm7_debt_ = 0; arm9_carry_ = 0;
   armed_ = 0;
   at_.fill(0); fn_.fill(nullptr); param_.fill(0);
   next_ = std::numeric_limits<u64>::max();
@@ -64,8 +65,20 @@ void Scheduler::schedule(EventId id, u64 at, EventFn fn, u32 param) {
   const bool was_next = (armed_ & (1u << i)) && next_id_ == i;
   at_[i] = at; fn_[i] = fn; param_[i] = param;
   armed_ |= 1u << i;
+  if (soft_mask_ & (1u << i)) { if (at < next_soft_) next_soft_ = at; return; }   // soft: fired when due, never a deadline (see soft_mask_)
   if (at < next_) { next_ = at; next_id_ = i; }
   else if (was_next && at > next_) rescan();
+  if (cut_on_schedule_) cut_arm9_at(at);
+}
+
+void Scheduler::cut_arm9_at(u64 at) {
+  CpuContext& a9 = nds_.cpu(Cpu::ARM9);
+  if (running_ != &a9 || at >= slice_end_ || at <= now_) return;
+  const s32 nb = budget9_for(static_cast<s64>(at - now_));
+  if (nb >= budget9_) return;
+  const s32 consumed = budget9_ - a9.hot.cycle_budget;
+  budget9_ = nb; running_start_budget_ = nb; slice_end_ = at;
+  a9.hot.cycle_budget = nb - consumed;   // <= 0: the ARM9 stops after this instruction, as melonDS's loop does
 }
 
 void Scheduler::cancel(EventId id) {
@@ -82,10 +95,12 @@ void Scheduler::cancel(EventId id) {
 void Scheduler::rescan() {
   u64 best = std::numeric_limits<u64>::max();
   u32 best_id = EVENT_COUNT;
-  for (u32 m = armed_; m; m &= m - 1) {
+  for (u32 m = armed_ & ~soft_mask_; m; m &= m - 1) {
     const u32 i = static_cast<u32>(__builtin_ctz(m));
     if (at_[i] < best) { best = at_[i]; best_id = i; }
   }
+  next_soft_ = ~u64{0};
+  for (u32 m = armed_ & soft_mask_; m; m &= m - 1) { const u32 i = static_cast<u32>(__builtin_ctz(m)); if (at_[i] < next_soft_) next_soft_ = at_[i]; }
   next_ = best;
   next_id_ = best_id;
 }
@@ -270,12 +285,18 @@ void Scheduler::count_slice(bool skipped, s64 slice) const {
 // shorter than a slice does — and a single pass would leave it armed in the
 // past, where run_until(next_deadline()) can never reach it.
 void Scheduler::fire_due() {
-  while (now_ >= next_) {
+  // Soft (timer) events are stepped from the CPU's own position, overshoot
+  // included: melonDS's RunTimers(1) runs after the ARM7 slice with cycles
+  // = ARM7Timestamp - TimerTimestamp, so an overflow the ARM7 ran past is
+  // seen at this slice end, not the next. ARM7 timers are ids 6..9.
+  const u64 lim7 = arm7_debt_ < 0 ? now_ + static_cast<u64>(-arm7_debt_) : now_;
+  while (now_ >= next_ || lim7 >= next_soft_) {
     // One walk of the armed set, not one to fire and one to rescan: the pass
     // starts with next_ empty and folds in every event it steps over, while
     // schedule() folds in every event a handler arms (it keeps next_ current
     // against whatever minimum stands). Both leave next_ the true minimum.
     next_ = std::numeric_limits<u64>::max();
+    next_soft_ = std::numeric_limits<u64>::max();
     next_id_ = EVENT_COUNT;
     // Ascending id order, i.e. table order, as when this walked the array.
     // `armed_` is re-read after every handler so an event the handler arms at
@@ -284,13 +305,16 @@ void Scheduler::fire_due() {
     for (u32 m = armed_; m; ) {
       const u32 i = static_cast<u32>(__builtin_ctz(m));
       const u32 bit = 1u << i;
-      if (at_[i] <= now_) {
+      const u64 lim = ((soft_mask_ & bit) && i >= 6 && i <= 9) ? lim7 : now_;
+      if (at_[i] <= lim) {
         armed_ &= ~bit;
         firing_at_ = at_[i];
+        if (debug_slices_) std::fprintf(stderr, "[fire] t %llu event %u at %llu\n", (unsigned long long)now_, i, (unsigned long long)at_[i]);
         fn_[i](nds_, param_[i]);   // may schedule: next_ is kept current by schedule()
         m = armed_ & ~((bit << 1) - 1);
       } else {
-        if (at_[i] < next_) { next_ = at_[i]; next_id_ = i; }
+        if (soft_mask_ & bit) { if (at_[i] < next_soft_) next_soft_ = at_[i]; }     // soft events never bound a slice
+        else if (at_[i] < next_) { next_ = at_[i]; next_id_ = i; }
         m &= ~bit;
       }
     }
@@ -300,11 +324,24 @@ void Scheduler::fire_due() {
 // One CPU's share of a slice: a running DMA goes first (the CPU is stalled),
 // then the CPU runs; a DMA it starts preempts it and the loop hands the
 // remaining budget to the DMA before the CPU continues.
+// DSi: the instruction that started the DMA has driven the budget below the
+// zero preempt() set; that cost is handed back so the DMA starts at the
+// instruction's start time, and charged after the CPU's next instruction
+// (CpuContext::defer_cost), as melonDS's pending Cycles are.
+void Scheduler::defer_preempt_cost(CpuContext& cpu) {
+  if (!shift9_ || cpu.yielded || cpu.hot.cycle_budget >= 0) return;
+  const s32 over = -cpu.hot.cycle_budget;
+  cpu.hot.cycle_budget = 0;
+  cpu.defer_cost += over;
+}
+
 void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
   const Cpu which = cpu.which;
   for (;;) {
     if (nds_.dma.any_running(which)) {
-      { DS_PROF(DMA); in_dma_ = true; cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget))); in_dma_ = false; }
+      const s32 b0 = cpu.hot.cycle_budget;
+      { DS_PROF(DMA); in_dma_ = true; dma_used_ = 0; cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget))); in_dma_ = false; dma_used_ = 0; }
+      if (shift9_ && which == Cpu::ARM9 && cpu.hot.cycle_budget != b0) { a9_dma_iter_ = true; return; }   // see a9_dma_iter_ (a DMA that could not move is not an iteration)
       if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which) || a9_gx_stalled(cpu)) return;
     }
     {
@@ -320,9 +357,11 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
       }
     }
     if (!cpu.preempt_residual) return;
+    defer_preempt_cost(cpu);
     cpu.hot.cycle_budget += cpu.preempt_residual;   // overshoot of the preempted instruction comes off the residual
     cpu.preempt_residual = 0;
     if (cpu.yielded) { cpu.yielded = false; return; }   // yield(): the rest of the slice goes to the other CPU
+    if (shift9_ && which == Cpu::ARM9) { a9_dma_iter_ = true; return; }   // DSi: the DMA runs in the next iteration (see a9_dma_iter_)
     if (cpu.hot.cycle_budget <= 0 || cpu.halted) return;
     if (a9_gx_stalled(cpu)) return;   // gx_fifo_full: sits out until the FIFO drains
   }
@@ -359,8 +398,8 @@ begin:
     if (slice <= 0) slice = 1;
     // With both CPUs asleep the quantum only paces the clock: run to the deadline.
     const bool all_idle = machine_idle(sl_.skip9, sl_.skip7);
-    const bool idle = slice > quantum_ && all_idle;
-    if (slice > quantum_ && !idle) slice = quantum_;
+    const bool idle = slice > quantum_ && all_idle && !shift9_;   // DSi: melonDS steps 64 cycles even with both CPUs asleep (its timers are checked per step)
+    if (slice >= quantum_ + slice_margin_ && !idle) slice = quantum_;   // melonDS: minEvent < max + margin extends, equal does not
     if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
     u64 wake = 0;
     if (!all_idle && !sl_.skip7 && arm7_spi_poll(wake)) {
@@ -371,8 +410,11 @@ begin:
     sl_.slice = slice;
     if (prof::enabled) count_slice(idle, slice);
     if (prof::enabled && (sl_.skip9 || sl_.skip7)) prof::add(prof::C_CYC_IDLE_SKIPPED, static_cast<u64>(slice));
-    a9.hot.cycle_budget = static_cast<s32>(slice);
-    running_ = &a9; running_start_budget_ = static_cast<s32>(slice); running_shift_ = 0;
+    budget9_ = budget9_for(slice); slice_end_ = now_ + static_cast<u64>(slice);
+    a9.hot.cycle_budget = budget9_;
+    if (a9.boot_stall) take_stall(a9);
+    if (a9.irq_offline) { a9.irq_skip_once = !a9.halted; a9.irq_offline = false; }
+    running_ = &a9; running_start_budget_ = budget9_; running_shift_ = 0; running_rshift_ = shift9_; running_base_ = now_; running_carry_ = static_cast<u64>(arm9_carry_);
     sl_.gx_stalled = nds_.gpu3d.stalled();
     sl_.phase = SL_A9; cpu = &a9; run = nds_.run_arm9;
     if (sl_.gx_stalled || sl_.skip9) goto a9_done;
@@ -380,13 +422,15 @@ begin:
 cpu_begin:   // run_cpu loop head
   {
     if (nds_.dma.any_running(cpu->which)) {
-      { DS_PROF(DMA); in_dma_ = true; cpu->hot.cycle_budget -= static_cast<s32>(nds_.dma.run(cpu->which, static_cast<u32>(cpu->hot.cycle_budget))); in_dma_ = false; }
+      const s32 b0 = cpu->hot.cycle_budget;
+      { DS_PROF(DMA); in_dma_ = true; dma_used_ = 0; cpu->hot.cycle_budget -= static_cast<s32>(nds_.dma.run(cpu->which, static_cast<u32>(cpu->hot.cycle_budget))); in_dma_ = false; dma_used_ = 0; }
+      if (shift9_ && cpu == &a9 && cpu->hot.cycle_budget != b0) { a9_dma_iter_ = true; goto cpu_done; }   // see a9_dma_iter_
       if (cpu->hot.cycle_budget <= 0 || nds_.dma.any_running(cpu->which) || a9_gx_stalled(*cpu)) goto cpu_done;
     }
     if (prof::enabled) sl_.t0 = std::chrono::steady_clock::now();
     if (!cpu->jit) { run(*cpu); goto run_returned; }
-    // jit::run up to the first entry
-    if (cpu->hot.irq_pending) cpu->check_irq();
+    // jit::run up to the first entry (check_irq also retires irq_skip_once)
+    if (cpu->hot.irq_pending || cpu->irq_skip_once) cpu->check_irq();
     if (cpu->halted) { cpu->hot.cycle_budget = -1; goto run_returned; }
     if (cpu->step_limit) { interp::run(*cpu); goto run_returned; }
     if (cpu->hot.cycle_budget > 0) return {cpu, jit::lookup(*cpu)};
@@ -408,9 +452,11 @@ run_returned:
                               : (ci == 0 ? prof::C_NS_A9_WORK : prof::C_NS_A7_WORK), el);
     }
     if (cpu->preempt_residual) {
+      defer_preempt_cost(*cpu);
       cpu->hot.cycle_budget += cpu->preempt_residual;
       cpu->preempt_residual = 0;
       if (cpu->yielded) cpu->yielded = false;   // yield(): the rest of the slice goes to the other CPU
+      else if (shift9_ && cpu == &a9) a9_dma_iter_ = true;   // DSi: the DMA runs in the next iteration (see a9_dma_iter_)
       else if (cpu->hot.cycle_budget > 0 && !cpu->halted && !a9_gx_stalled(*cpu)) goto cpu_begin;
     }
   }
@@ -418,16 +464,22 @@ cpu_done:
   if (cpu == &a7) goto a7_done;
 a9_done:
   {
-    s64 ran9 = (a9.halted || sl_.gx_stalled || sl_.skip9) ? sl_.slice : (sl_.slice - a9.hot.cycle_budget);
-    if (ran9 <= 0) ran9 = 1;
+    const bool full9 = (a9.halted || sl_.gx_stalled || sl_.skip9) && !a9_dma_iter_;
+    const bool dma_iter = a9_dma_iter_; a9_dma_iter_ = false;
+    s64 ran9 = full9 ? sl_.slice : ticks9(budget9_ - a9.hot.cycle_budget);
+    if (full9) arm9_carry_ = 0;
+    if (ran9 <= 0) ran9 = dma_iter ? 0 : 1;   // a DMA hand-off phase may be empty (melonDS's zero-length iteration); the DMA runs next
     sl_.ran9 = ran9;
-    running_ = nullptr;
+    running_ = nullptr; running_rshift_ = 0;
     { DS_PROF(GX_RUN); nds_.gpu3d.run_to(now_ + static_cast<u64>(ran9)); }
     arm7_debt_ += ran9;
     sl_.budget7 = static_cast<s32>(arm7_debt_ / 2);
     if (sl_.budget7 <= 0) goto slice_end;
     a7.hot.cycle_budget = sl_.budget7;
-    running_ = &a7; running_start_budget_ = sl_.budget7; running_shift_ = 1;
+    if (a7.boot_stall) take_stall(a7);
+    if (a7.irq_offline) { a7.irq_skip_once = !a7.halted; a7.irq_offline = false; }
+    running_ = &a7; running_start_budget_ = sl_.budget7; running_shift_ = 1; running_rshift_ = 0;
+    running_base_ = shift9_ ? static_cast<u64>(static_cast<s64>(now_) + sl_.ran9 - arm7_debt_) : now_;
     sl_.phase = SL_A7; cpu = &a7; run = nds_.run_arm7;
     if (sl_.skip7) goto a7_done;
     goto cpu_begin;
@@ -485,8 +537,8 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
     if (slice <= 0) slice = 1;
     bool skip9 = false, skip7 = false;
     const bool all_idle = machine_idle(skip9, skip7);
-    const bool idle = slice > quantum_ && all_idle;
-    if (slice > quantum_ && !idle) slice = quantum_;
+    const bool idle = slice > quantum_ && all_idle && !shift9_;   // DSi: melonDS steps 64 cycles even with both CPUs asleep (its timers are checked per step)
+    if (slice >= quantum_ + slice_margin_ && !idle) slice = quantum_;   // melonDS: minEvent < max + margin extends, equal does not
     if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
     u64 wake = 0;
     if (!all_idle && !skip7 && arm7_spi_poll(wake)) {
@@ -500,17 +552,23 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
     // ARM9 gets the whole slice; ARM7 then catches up at half clock.
     CpuContext& a9 = nds_.cpu(Cpu::ARM9);
     CpuContext& a7 = nds_.cpu(Cpu::ARM7);
-    a9.hot.cycle_budget = static_cast<s32>(slice);
-    running_ = &a9; running_start_budget_ = static_cast<s32>(slice); running_shift_ = 0;
+    budget9_ = budget9_for(slice); slice_end_ = now_ + static_cast<u64>(slice);
+    a9.hot.cycle_budget = budget9_;
+    if (a9.boot_stall) take_stall(a9);
+    if (a9.irq_offline) { a9.irq_skip_once = !a9.halted; a9.irq_offline = false; }
+    running_ = &a9; running_start_budget_ = budget9_; running_shift_ = 0; running_rshift_ = shift9_; running_base_ = now_; running_carry_ = static_cast<u64>(arm9_carry_);
     // While the GX FIFO is full the ARM9 (and its DMA) sit out the slice;
     // the geometry engine keeps draining behind it.
     const bool gx_stalled = nds_.gpu3d.stalled();
     if (!gx_stalled && !skip9) run_cpu(a9, nds_.run_arm9);
     // A halted CPU consumes exactly the slice; a running one may overshoot,
     // and the overshoot is real time (it carries into the next slice).
-    s64 ran9 = (a9.halted || gx_stalled || skip9) ? slice : (slice - a9.hot.cycle_budget);
-    if (ran9 <= 0) ran9 = 1;
-    running_ = nullptr;
+    const bool full9 = (a9.halted || gx_stalled || skip9) && !a9_dma_iter_;
+    const bool dma_iter = a9_dma_iter_; a9_dma_iter_ = false;
+    s64 ran9 = full9 ? slice : ticks9(budget9_ - a9.hot.cycle_budget);
+    if (full9) arm9_carry_ = 0;   // melonDS: a halted ARM9 is set to the target exactly
+    if (ran9 <= 0) ran9 = dma_iter ? 0 : 1;   // see above
+    running_ = nullptr; running_rshift_ = 0;
     { DS_PROF(GX_RUN); nds_.gpu3d.run_to(now_ + static_cast<u64>(ran9)); }
 
     // The ARM7 runs at half clock and must cover the same span of time. Its
@@ -520,7 +578,10 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
     const s32 budget7 = static_cast<s32>(arm7_debt_ / 2);
     if (budget7 > 0) {
       a7.hot.cycle_budget = budget7;
-      running_ = &a7; running_start_budget_ = budget7; running_shift_ = 1;
+      if (a7.boot_stall) take_stall(a7);
+      if (a7.irq_offline) { a7.irq_skip_once = !a7.halted; a7.irq_offline = false; }
+      running_ = &a7; running_start_budget_ = budget7; running_shift_ = 1; running_rshift_ = 0;
+      running_base_ = shift9_ ? static_cast<u64>(static_cast<s64>(now_) + ran9 - arm7_debt_) : now_;
       if (!skip7) run_cpu(a7, nds_.run_arm7);
       const s64 consumed7 = (a7.halted || skip7) ? budget7 : (budget7 - a7.hot.cycle_budget);
       arm7_debt_ -= consumed7 * 2;
@@ -538,10 +599,17 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
 
 template <class S> void Scheduler::sync_state(S& s) {
   s.begin("SCHD");
-  s.fields(now_, arm7_debt_, armed_, at_, param_);
+  // The event arrays grew with the DSi's two grid events (FORMAT_VERSION 3);
+  // a version-2 file carries the first 21 of each.
+  constexpr u32 V2_EVENTS = 21;
+  static_assert(EVENT_COUNT == 23, "EVENT_COUNT changed: add a save-state version");
+  s.fields(now_, arm7_debt_, armed_);
+  if (s.version >= 3) s.fields(at_, param_);
+  else { for (u32 i = 0; i < V2_EVENTS; ++i) s.fields(at_[i]); for (u32 i = 0; i < V2_EVENTS; ++i) s.fields(param_[i]); }
   // The idle-skip pre-filter: whether a slice is skipped depends on the
   // recent slice-start PCs, so the ring is part of the timing.
   s.fields(idle_pc_ring_, idle_pc_pos_);
+  s.fields(arm9_carry_);   // appended: DS states leave it 0
   s.end();
   if constexpr (S::reading) { fn_.fill(nullptr); in_dma_ = false; running_ = nullptr; }
 }

@@ -33,7 +33,7 @@ static std::vector<u8> slurp(const std::string& path) {
 NDS::NDS()
     : run_arm9(&interp::run), run_arm7(&interp::run),
       arm9(new CpuContext), arm7(new CpuContext),
-      bus(*this), sched(*this), gpu(*this), gpu3d(*this), spu(*this), io(*this), dma(*this) {
+      bus(*this), sched(*this), gpu(*this), gpu3d(*this), spu(*this), io(*this), dma(*this), ndma(*this) {
   arm9->reset(Cpu::ARM9, this);
   arm7->reset(Cpu::ARM7, this);
   arm9->hot.other_cpu = reinterpret_cast<u64>(arm7.get());
@@ -45,8 +45,10 @@ NDS::~NDS() = default;
 
 void NDS::reset() {
   sched.reset();
+  sched.set_clock9_shift(dsi ? 2 : 1);   // SCFG_CLK9 bit 0 is set at a DSi reset
   io.reset();
   dma.reset();
+  dma.set_clock9_shift(dsi ? 2 : 1); ndma.reset(); ndma.set_clock9_shift(dsi ? 2 : 1);
   if (cart) cart->reset();
   arm9->reset(Cpu::ARM9, this);
   arm7->reset(Cpu::ARM7, this);
@@ -59,6 +61,7 @@ void NDS::reset() {
   gpu3d.reset();
   gpu.reset();
   spu.reset();
+  spu.set_apply_bias(!dsi);   // SOUNDBIAS does nothing on a DSi
   frame_count = 0;
   frame_ready = false;
   power_off = false;
@@ -70,7 +73,7 @@ void NDS::reset() {
 // whatever calibration the dumped firmware's owner happened to save; melonDS
 // does the same at reset, which keeps traces against it comparable.
 void NDS::normalise_touch_calibration() {
-  if (firmware.size() < 0x40000) return;
+  if (firmware.size() < 0x20000) return;   // a DS image is 256 KB, the DSi's 128 KB; the pointer at 0x20 places the settings in either
   const u32 base = static_cast<u32>(firmware[0x20] | (firmware[0x21] << 8)) << 3;
   for (u32 blk = 0; blk < 2; ++blk) {
     const u32 off = base + blk * 0x100;
@@ -355,6 +358,7 @@ bool NDS::load_rom_source(std::unique_ptr<cart::RomSource> src) {
 // GBATEK "DS Firmware Boot" and melonDS's direct-boot setup).
 void NDS::setup_direct_boot() {
   if (!cart) return;
+  if (dsi) { setup_direct_boot_dsi(); return; }
   const cart::Header& h = cart->header();
   auto w32 = [&](u32 a, u32 v) { bus.dma_write32(Cpu::ARM9, a, v); };
   auto w16 = [&](u32 a, u16 v) { bus.dma_write16(Cpu::ARM9, a, v); };
@@ -419,6 +423,7 @@ void NDS::setup_direct_boot() {
   arm9->hot.cycle_budget = 0; arm7->hot.cycle_budget = 0;
 
   io.exmemcnt = 0xE880; bus.update_gba_slot_timings();
+  io.wifiwaitcnt = 0x0030; bus.update_wifi_timings();   // melonDS NDS::SetupDirectBoot (the Wi-Fi is unpowered until POWCNT2 says otherwise)
   io.cpu_io[0].postflg = 1; io.cpu_io[1].postflg = 1;
   io.powcnt1 = 0x820F; gpu.set_powcnt(0x820F);
   io.powcnt2 = 0x0001; spu.set_powcnt2(0x0001);      // sound on, SOUNDBIAS centred, as the firmware leaves them
@@ -491,7 +496,8 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   char magic[4]; r.blob_raw(magic, 4);
   u32 version = 0; r.blob_raw(&version, 4);
   if (std::memcmp(magic, "DSST", 4) != 0) { err = "not a DSperate save state"; return false; }
-  if (version != state::FORMAT_VERSION) { err = "save state format " + std::to_string(version) + ", this build reads " + std::to_string(state::FORMAT_VERSION); return false; }
+  if (version < state::OLDEST_READABLE_VERSION || version > state::FORMAT_VERSION) { err = "save state format " + std::to_string(version) + ", this build reads " + std::to_string(state::OLDEST_READABLE_VERSION) + ".." + std::to_string(state::FORMAT_VERSION); return false; }
+  r.version = version;
   if (!r.begin("HEAD")) { err = r.error(); return false; }
   u32 code = 0; u64 ident = 0, bios = 0, fw = 0, frames = 0; u32 jit_built = 0;
   r.fields(code, ident, bios, fw, frames, jit_built);

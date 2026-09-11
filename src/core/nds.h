@@ -10,6 +10,7 @@
 #include "core/spu/spu.h"
 #include "core/io/io.h"
 #include "core/dma/dma.h"
+#include "core/dma/ndma.h"
 #include "core/cart/cart.h"
 #include "core/cart/zip.h"
 #include "core/cheat/ar_engine.h"
@@ -43,6 +44,24 @@ struct NDS {
   bool load_bios(const std::string& bios9, const std::string& bios7, const std::string& firmware,
                  const bios::UserSettings& user = {}, std::string* err = nullptr);
   bool bios_native = false;          // both BIOS images came from dumps
+  // The DSi BIOS pair (64 KB each, dumps only: there is no DSi FreeBIOS).
+  // Loaded separately since a DS game does not need them; both or neither.
+  bool load_dsi_bios(const std::string& bios9i, const std::string& bios7i, std::string* err = nullptr);
+  bool bios_native_dsi = false;      // the DSi pair is loaded
+  // Console type. A DSi runs the DSi machine (core/nds_dsi.cpp: 16 MB main
+  // RAM, NWRAM, SCFG, NDMA, the doubled ARM9 clock, the DSi BIOS pair, the
+  // DSi TSC). Decided by the frontend before reset(): a DSi-capable header
+  // (cart::Cart::dsi_capable) with the DSi BIOS loaded. Every DS-mode
+  // path is unchanged when this is false.
+  bool dsi = false;
+  void set_dsi(bool on);             // before reset(); needs load_dsi_bios for true
+  // What the launcher leaves in main RAM for a title, taken from the console's
+  // NAND (melonDS DSi::SetupDirectBoot): the user settings block
+  // (TWLCFG, 0x128 bytes at 0x02000400), HWINFO_N (0x14 at 0x02000600) and
+  // HWINFO_S (0x18 at 0x02FFFD68). tools/dsi_nand.py bootblobs writes the
+  // 0x154-byte file; absent, the areas stay zero.
+  bool load_dsi_boot_blobs(const std::string& path, std::string* err = nullptr);
+  std::vector<u8> dsi_boot_blobs;    // 0x154 bytes when loaded, else empty
   bool firmware_synthetic = false;   // the firmware was generated, not dumped (set by load_bios)
   // Direct boot is the only boot the substitutes support: FreeBIOS has no
   // boot code, and the generated firmware has no DS menu to boot into.
@@ -84,6 +103,7 @@ struct NDS {
   u32  user_settings_offset() const;
   bool write_user_settings(UserField field, const bios::UserSettings& in);
   void setup_direct_boot();          // skip the firmware: load the ROM's binaries and jump to them
+  void setup_direct_boot_dsi();      // the DSi machine's version (nds_dsi.cpp)
 
   // Firmware settings persistence.
   //
@@ -149,6 +169,7 @@ struct NDS {
   spu::Spu   spu;
   io::Io     io;
   dma::Dma   dma;
+  dma::Ndma  ndma;                 // DSi only; idle on a DS
   std::unique_ptr<cart::Cart> cart;
 
   // Action Replay codes, run from the ARM7's VBlank IRQ (CpuContext::check_irq)

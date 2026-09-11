@@ -60,7 +60,13 @@ struct SpiFirmware {
 struct SpiTouch { bool hold = false; u32 pos = 0; u8 cmd = 0; u16 sample = 0; u8 data = 0;
   // Last position from the frontend in the TSC's 12-bit ADC units; the
   // firmware's calibration is normalised at load so ADC = pixel << 4 (nds.cpp).
-  u16 x = 0, y = 0xFFF; };
+  u16 x = 0, y = 0xFFF;
+  // The DSi's CODEC (TSC2117-class), a banked register file behind the same
+  // SPI select; ported from melonDS DSi_SPI_TSC. dsi_mode 1 = DSi protocol,
+  // 0 = DS-compatibility mode (the above). Only used while NDS::dsi.
+  u8  dsi_mode = 0, dsi_bank = 0, dsi_index = 0; u32 dsi_pos = 0;
+  std::array<u8, 0x80> dsi_bank3{};
+  u16 dsi_tx = 0, dsi_ty = 0; };
 struct SpiPower { bool hold = false; u32 pos = 0; u8 cmd = 0; std::array<u8, 8> regs{}; u8 data = 0; };
 
 struct Rtc {
@@ -81,6 +87,9 @@ struct Rtc {
   // bit is exactly what sends the firmware into its first-boot setup wizard.
   bool ticking = false;
   u64  next_tick = 0;           // scheduler time of the next one-second carry
+  // DSi: melonDS's RTC clock event error accumulator (RTC::ScheduleTimer):
+  // 33513982 / 32768 cycles a tick, the fraction carried.
+  u32  clock_err = 0;
 };
 
 // Cart bus (Slot-1): ROMCTRL, the transfer timing and the DRQ/FIFO state
@@ -115,6 +124,41 @@ struct MathUnit {
   bool div_pending = false, sqrt_pending = false;
 };
 
+// DSi system registers (0x04004000 page) and the ARM7's second IRQ pair.
+// Reset and direct-boot values follow melonDS DSi::Reset/SetupDirectBoot.
+struct DsiIo {
+  u16 scfg_bios = 0;        // 0x04004000, set-only bits: 0/8 hide the upper BIOS halves, 1/9 select the DS images, 10 hides the console ID
+  u16 scfg_clock9 = 0;      // 0x04004004 (ARM9): bit 0 = ARM9 at 134 MHz
+  u16 scfg_clock7 = 0;      // 0x04004004 (ARM7)
+  u16 scfg_rst = 0;         // 0x04004006 (ARM9): bit 0 = DSP reset line
+  u32 scfg_ext[2] = {0, 0}; // 0x04004008 per CPU: I/O page gates (bits 16-24, 31), NWRAM enable (25), RAM size (14-15)
+  u16 scfg_mc = 0;          // 0x04004010: cart slot power state
+  u16 cart_insert_delay = 0, cart_poweroff_delay = 0;   // 0x04004012/14
+  u32 mbk[2][9] = {};       // 0x04004040-60 per CPU view: [0..4] slot maps (shared), [5..7] this CPU's windows, [8] write protect (shared)
+  u32 ie2 = 0, if2 = 0;     // 0x04000218/1C (ARM7): the DSi IRQ sources, mask 0x7FF7
+  u16 sndexcnt = 0;         // 0x04004700 (ARM7): I2S enable (15), mute (14), 47.6 kHz (13), NITRO/DSP ratio (0-3)
+  // 0x04004C00-05 (ARM7) GPIO: data, direction, IRQ edge select, IRQ enable,
+  // Wi-Fi/board bits. Plain registers as melonDS keeps them (nothing drives
+  // them: the sound-out line is a direction bit, the rest read back).
+  u8  gpio_data = 0xFF, gpio_dir = 0x80, gpio_iedgesel = 0, gpio_ie = 0;
+  u16 gpio_wifi = 0;
+  // 0x04004500/01 (ARM7) I2C host and the BPTWL power-management IC at
+  // device 0x4A (melonDS DSi_I2CHost / DSi_BPTWL: no transfer delay, no
+  // IRQ, ACK always). The cameras (0x78/0x7A) are not present: a transfer
+  // to them gets no ACK and reads 0xFF.
+  u8  i2c_cnt = 0, i2c_data = 0, i2c_device = 0;
+  u8  bptwl_regs[0x100] = {};
+  u32 bptwl_pos = 0xFFFFFFFF;
+};
+
+// IE2/IF2 bit numbers (ARM7).
+enum Irq2 : u32 {
+  IRQ2_GPIO18_0 = 0, IRQ2_GPIO18_1, IRQ2_GPIO18_2, IRQ2_UNUSED3, IRQ2_GPIO33_0, IRQ2_HEADPHONE, IRQ2_BPTWL,
+  IRQ2_GPIO33_3, IRQ2_SDMMC, IRQ2_SD_DATA1, IRQ2_SDIO, IRQ2_SDIO_DATA1, IRQ2_AES, IRQ2_I2C, IRQ2_MIC_EXT,
+};
+// DSi additions to IE/IF.
+enum IrqDsi : u32 { IRQ_DSI_DSP = 24, IRQ_DSI_CAMERA = 25, IRQ_DSI_CART2_DONE = 26, IRQ_DSI_CART2_IREQ = 27, IRQ_DSI_NDMA0 = 28 };
+
 class Io {
 public:
   explicit Io(NDS& nds);
@@ -148,6 +192,12 @@ public:
   void set_vblank(bool on);
 
   CpuIo cpu_io[2];
+  DsiIo dsi;               // meaningful only while NDS::dsi
+  void request_irq2(u32 bit);   // ARM7 IE2/IF2
+  void bptwl_reset();
+  void i2c_write_cnt(u8 value);
+  u8   bptwl_read(bool last);
+  void bptwl_write(u8 value, bool last);
   u8  wramcnt = 0;         // 0x04000247
   u8  vramcnt[9] = {};     // 0x04000240-0x04000249 (skipping 0x247)
   u16 powcnt1 = 0;         // 0x04000304 (ARM9)
@@ -180,6 +230,8 @@ public:
   bool mic_used() const { return mic_used_; }
   void update_key_irq();
   u16 exmemcnt = 0;
+  u16 wifiwaitcnt = 0;       // 0x04000206 (ARM7): Wi-Fi region wait states, live only while POWCNT2 bit 1 powers the Wi-Fi
+  u16 rcnt = 0;                     // 0x04000134 (ARM7): SIO/GPIO control, held for readback (melonDS's direct boot leaves 0x8000)
   u16 spicnt = 0; u8 spidata = 0;   // bit 7 never stored, see spi_busy()
   u64 spi_ready_at = 0;
   SpiFirmware spi_fw; SpiTouch spi_tsc; SpiPower spi_pm;
@@ -209,6 +261,24 @@ public:
   // radio down before loading a save and spin on W_POWERSTATE until the
   // power-off shows (Pokemon Platinum on CONTINUE).
   bool wifi_power_on_pending = false;
+  // DSi: melonDS's Wi-Fi microsecond timer (Wifi::USTimer), one event every
+  // 8 us while POWCNT2 powers the Wi-Fi. It drives the power-on countdown,
+  // W_USCOUNT/W_USCOMPARE, the beacon and command counters -- and its events
+  // bound the slices, which the trace harness sees. The DS keeps the lazy
+  // single power-on event (its scene hashes are gated on that interleave).
+  bool wifi_on_ = false;
+  s32  wifi_timer_err_ = 0;
+  u64  wifi_us_timestamp_ = 0, wifi_us_counter_ = 0, wifi_us_compare_ = 0;
+  s32  wifi_us_until_power_on_ = 0;
+  u32  wifi_cmd_counter_ = 0, wifi_rx_counter_ = 0;
+  bool wifi_block_beacon14_ = false;
+  void wifi_update_power_on();
+  void wifi_schedule_timer(bool first);
+  void wifi_us_timer();
+  void wifi_ms_timer();
+  void wifi_set_irq13();
+  void wifi_set_irq14(int source);
+  void wifi_set_irq15();
   void wifi_reset();
   void wifi_update_power(int power);      // 1 = on, 0 = no change, -1 = off
   void wifi_set_status(u32 status);
@@ -236,7 +306,10 @@ public:
   void spi_done();
   // SPICNT bit 7 (busy) is time-derived like the divider's, for the same
   // reason; the completion event is only armed when the SPI IRQ is enabled.
-  bool spi_busy() const { return nds_sched_now() < spi_ready_at; }
+  // DSi: the busy bit clears when the completion event fires (a slice end),
+  // as melonDS's SPIHost::TransferDone does; the DS compares the ready time.
+  bool spi_busy() const { return spi_flag_mode_ ? spi_busy_ : nds_sched_now() < spi_ready_at; }
+  bool spi_flag_mode_ = false, spi_busy_ = false;
   u16  spicnt_read() const { return static_cast<u16>(spicnt | (spi_busy() ? 0x0080 : 0)); }
   // The ARM7 polling SPICNT's busy bit: after SPI_POLL_STREAK consecutive
   // busy reads with no other I/O access between them, the rest of the wait
@@ -249,7 +322,16 @@ public:
   u32 spi_poll_streak_ = 0;
   u16  spicnt_read_arm7();
 
+  // DSi: the 0x04004xxx page (SCFG, MBK, NDMA, SNDEXCNT; the rest is later phases).
+  u32  dsi_read(Cpu cpu, u32 addr, u32 width);
+  void dsi_write(Cpu cpu, u32 addr, u32 width, u32 value);
+  void dsi_reset();                       // reset values (melonDS DSi::Reset, half-dump BIOS case)
+  void dsi_tsc_reset();
+  void mbk_map_slot(int bank, int slot, u8 value);      // MBK1-5 byte (also the direct-boot mapping from the header)
+  void mbk_map_range(Cpu cpu, int bank, u32 value);     // MBK6-8
 private:
+  bool dsi_io_access(Cpu cpu, u32 addr) const;   // CheckIO9Access/CheckIO7Access: a disabled page reads 0, drops writes
+  u8   dsi_tsc_transfer(u8 value);
   NDS& nds_;
   u32  read16(Cpu cpu, u32 addr);
   void write16(Cpu cpu, u32 addr, u16 value);
@@ -297,6 +379,10 @@ public:
   void start_rtc_clock();
   bool rtc_host_clock() const { return rtc_host_clock_; }
   void rtc_event();
+  // DSi interleave grid (EventId::RtcClock / CamIrq): armed by reset() on a DSi.
+  static void grid_rtc_event(NDS& nds, u32);
+  static void grid_cam_event(NDS& nds, u32);
+  static constexpr u32 CAM_IRQ_INTERVAL = 2234248 * 2;   // melonDS DSi_CamModule::kIRQInterval, in ARM9 cycles
 private:
 
   void cart_write_romctrl(u32 value);

@@ -170,7 +170,15 @@ inline void report(u64 frames) {
 
 void run(CpuContext& cpu) {
   if (census::on() && !g_census_access) g_census_access = &census::note_access;
-  cpu.check_irq();
+  const bool dsi = cpu.nds->dsi;
+  {
+    // An IRQ taken here (before any instruction: a wake from halt, or one
+    // that landed off-slice) has its vector refill charged after the first
+    // instruction on a DSi, as melonDS's TriggerIRQ leaves it pending.
+    const s32 b0 = cpu.hot.cycle_budget;
+    cpu.check_irq();
+    if (dsi && cpu.hot.cycle_budget != b0) { cpu.defer_cost += b0 - cpu.hot.cycle_budget; cpu.hot.cycle_budget = b0; }
+  }
   if (cpu.halted) { cpu.hot.cycle_budget = -1; return; }
   const bool a9 = cpu.which == Cpu::ARM9;
 
@@ -181,6 +189,7 @@ void run(CpuContext& cpu) {
   // Each handler charges its own cycles (cpu_cycles.h) at the point melonDS
   // does; the loop only computes the ARM9 prefetch cost and advances r15.
   while (cpu.hot.cycle_budget > 0) {
+    const s32 b_before = cpu.hot.cycle_budget;
     cpu.data_cycles = 0;
     cpu.jumped = false;
     if (debug_cycles) std::fprintf(stderr, "[cyc%d] %08x %d\n", a9 ? 9 : 7, cpu.hot.regs[15], cpu.hot.cycle_budget);
@@ -201,7 +210,14 @@ void run(CpuContext& cpu) {
       exec_arm(cpu, instr);
       if (!cpu.jumped) cpu.hot.regs[15] += 4;
     }
-    if (cpu.halted) { cpu.budget_at_halt = cpu.hot.cycle_budget; cpu.hot.cycle_budget = -1; return; }
+    if (cpu.defer_cost) { cpu.hot.cycle_budget -= cpu.defer_cost; cpu.defer_cost = 0; }   // see CpuContext::defer_cost
+    if (cpu.halted) {
+      // DSi: the halting instruction's cost stays pending until the wake
+      // (melonDS breaks out before adding its Cycles), charged after the
+      // first instruction that runs then.
+      if (dsi) { cpu.defer_cost += b_before - cpu.hot.cycle_budget; cpu.hot.cycle_budget = b_before; }
+      cpu.budget_at_halt = cpu.hot.cycle_budget; cpu.hot.cycle_budget = -1; return;
+    }
     if (cpu.hot.irq_pending) cpu.check_irq();
     if (cpu.step_limit && ++cpu.steps >= cpu.step_limit) return;
   }

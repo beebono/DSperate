@@ -24,7 +24,8 @@ namespace ds::state {
 // A chunk may grow: a reader that reaches the end of a chunk early stops
 // taking fields (`more()` is false), and a writer that appends fields keeps
 // old files loadable as long as the new fields default sensibly.
-constexpr u32 FORMAT_VERSION = 2;   // 2: HEAD carries bios_id + firmware_id
+constexpr u32 FORMAT_VERSION = 3;   // 2: HEAD carries bios_id + firmware_id; 3: DSi (two more scheduler events, 16 MB main RAM, DSI chunk)
+constexpr u32 OLDEST_READABLE_VERSION = 2;   // a DS state from a version-2 file still loads (Reader::version)
 
 class Writer {
 public:
@@ -45,6 +46,7 @@ public:
 
   std::vector<u8>& data() { return buf_; }
   static constexpr bool reading = false;
+  u32 version = FORMAT_VERSION;   // what this writer produces (mirrors Reader::version for sync_state templates)
 
 private:
   template <class T> struct is_std_array : std::false_type {};
@@ -56,6 +58,9 @@ private:
 class Reader {
 public:
   Reader(const u8* p, size_t n) : p_(p), end_(p + n) {}
+  // The file's format version (set by NDS::load_state before the chunks), for
+  // the few layouts that grew: a version-2 state has 21 scheduler events.
+  u32 version = FORMAT_VERSION;
 
   // Positions on the next chunk, which must carry `tag`; false (and the
   // reader is failed) otherwise. end() skips whatever the chunk still holds.

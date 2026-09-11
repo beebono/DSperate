@@ -41,6 +41,7 @@ void CpuContext::reset(Cpu w, NDS* n) {
   itcm_size = 0; dtcm_base = 0xFFFFFFFF; dtcm_mask = 0;
   code_cycles = data_cycles = 0; code_region = data_region = 0; branch_fetch = true;
   step_limit = steps = 0;
+  boot_stall = 0; code_latch = 0; irq_offline = irq_skip_once = false; defer_cost = 0;
   hot.cpsr = static_cast<u32>(Mode::SVC) | 0xC0;       // IRQ+FIQ masked, ARM state
   hot.regs[15] = exception_base() + 8;                 // reset vector, pipeline-adjusted
 }
@@ -111,7 +112,10 @@ void CpuContext::jump(u32 addr, bool interwork) {
   // ARM7 the code region follows the target.
   u32 code_after = 0;
   hot.cycle_budget -= static_cast<s32>(refill_cycles(*this, addr & ~1u, thumb(), &code_after));
-  if (which == Cpu::ARM9) { code_cycles = code_after; branch_fetch = false; }
+  if (which == Cpu::ARM9) {
+    code_cycles = code_after; branch_fetch = false;
+    if (nds->dsi) code_latch = timing9[(addr & ~1u) >> 12][0];   // see code_latch
+  }
   else { code_cycles = (addr & ~1u) >> 15; code_region = addr >> 24; }
 }
 
@@ -146,6 +150,11 @@ void CpuContext::raise_exception(Exception e) {
 }
 
 void CpuContext::check_irq() {
+  // The off-slice deferral covers exactly the first check of the phase (the
+  // one the run loop makes before its first instruction), whether or not the
+  // IRQ is maskable right now: melonDS checks after every instruction, so an
+  // IRQ that was masked when it landed is taken the instant an MSR unmasks it.
+  if (irq_skip_once) { irq_skip_once = false; return; }   // see irq_offline
   if (hot.irq_pending && !(hot.cpsr & 0x80)) {
     halted = false;
     raise_exception(Exception::Irq);
@@ -178,6 +187,7 @@ template <class S> void CpuContext::sync_state(S& s) {
            bank_r8_r12, bank_r13, bank_r14, bank_spsr,
            cp15_control, cp15_dtcm, cp15_itcm, pu_region, pu_code_cacheable, pu_data_cacheable, pu_data_bufferable, pu_code_perm, pu_data_perm,
            code_cycles, data_cycles, code_region, data_region, branch_fetch, budget_at_halt);
+  s.fields(boot_stall, code_latch, irq_offline, irq_skip_once, defer_cost);   // appended (DSi; zero on a DS)
   s.end();
 }
 template void CpuContext::sync_state<state::Writer>(state::Writer&);

@@ -48,7 +48,8 @@ void Timing::reset() {
   for (u32 g = 0; g < 0x40000; ++g) {
     const u8* b = &bus9_[g * 8];
     u8 slot[8];
-    slot[0] = static_cast<u8>(b[2] << 1); slot[1] = static_cast<u8>(b[0] << 1); slot[2] = static_cast<u8>(b[2] << 1); slot[3] = static_cast<u8>(b[3] << 1);
+    const u32 sh = clock9_shift;
+    slot[0] = static_cast<u8>(b[2] << sh); slot[1] = static_cast<u8>(b[0] << sh); slot[2] = static_cast<u8>(b[2] << sh); slot[3] = static_cast<u8>(b[3] << sh);
     slot[4] = slot[0]; slot[5] = slot[1]; slot[6] = slot[2]; slot[7] = slot[3];
     u64 w; std::memcpy(&w, slot, 8);
     u64* c = reinterpret_cast<u64*>(&cpu9_[g * 4 * 8]);
@@ -195,6 +196,7 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
   // old pricing (stores as cache hits) for comparison.
   static const bool store_bus = [] { const char* e = std::getenv("DS_STORE_BUS"); return !e || std::atoi(e) != 0; }();
   const u32 first = start >> 12, last = (end == 0xFFFFFFFF) ? 0x100000 : (end >> 12);
+  const u32 sh = clock9_shift;
   u32 x_prev = 0, y_prev = 0; bool changed_prev = false;
   for (u32 i = first; i < last; ++i) {
     const u8 pu = pu_map[i];
@@ -208,12 +210,12 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
     const u32 addr = i << 12;
     const bool itcm = addr < cpu.itcm_size;
     const bool dtcm = (addr & cpu.dtcm_mask) == cpu.dtcm_base;
-    c[0] = itcm ? 1 : (pu & 0x40) ? 0xFF : static_cast<u8>(b[2] << 1);
+    c[0] = itcm ? 1 : (pu & 0x40) ? 0xFF : static_cast<u8>(b[2] << sh);
     if (itcm || dtcm) { c[1] = 1; c[2] = 1; c[3] = 1; }
     else if (pu & 0x10) { c[1] = CACHE_DATA; c[2] = CACHE_DATA; c[3] = 1; }
-    else { c[1] = static_cast<u8>(b[0] << 1); c[2] = static_cast<u8>(b[2] << 1); c[3] = static_cast<u8>(b[3] << 1); }
+    else { c[1] = static_cast<u8>(b[0] << sh); c[2] = static_cast<u8>(b[2] << sh); c[3] = static_cast<u8>(b[3] << sh); }
     c[4] = c[0];
-    if (!(itcm || dtcm) && (pu & 0x10) && store_bus) { c[5] = static_cast<u8>(b[0] << 1); c[6] = static_cast<u8>(b[2] << 1); c[7] = static_cast<u8>(b[3] << 1); }
+    if (!(itcm || dtcm) && (pu & 0x10) && store_bus) { c[5] = static_cast<u8>(b[0] << sh); c[6] = static_cast<u8>(b[2] << sh); c[7] = static_cast<u8>(b[3] << sh); }
     else { c[5] = c[1]; c[6] = c[2]; c[7] = c[3]; }
     u64 new_w; std::memcpy(&new_w, c, 8);
     if (new_w != old_w) std::memcpy(slot, &new_w, 8);

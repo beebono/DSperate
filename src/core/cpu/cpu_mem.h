@@ -74,11 +74,11 @@ inline void mem_write32(CpuContext& cpu, u32 addr, u32 v, bool seq = false) {
 // Instruction fetch (no cost: the prefetch cost is charged by the run loop).
 inline u32 fetch32(CpuContext& cpu, u32 addr) {
   if (u8* p = cpu.page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
-  return cpu.nds->bus.read32(cpu.which, addr);
+  return cpu.nds->bus.fetch(cpu.which, addr, 32);
 }
 inline u16 fetch16(CpuContext& cpu, u32 addr) {
   if (u8* p = cpu.page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
-  return cpu.nds->bus.read16(cpu.which, addr);
+  return static_cast<u16>(cpu.nds->bus.fetch(cpu.which, addr, 16));
 }
 
 } // namespace ds

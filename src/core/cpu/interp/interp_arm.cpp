@@ -1,3 +1,4 @@
+#include <cstdlib>
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
@@ -189,6 +190,13 @@ void ldm_stm(CpuContext& cpu, u32 instr, bool load) {
       if (i == 15) v += 4;
       // STM with Rn in list: first register stores the original base, later ones the written-back value.
       if (i == rn && !first && w) v = wb;
+      // DS_MELON_STM=1: melonDS's ARM7 stores the slot's own address for a
+      // non-first base register, writeback or not (A_STM, "checkme"). Not
+      // hardware (GBATEK: old base, or the new base with writeback), so only
+      // for trace comparison against melonDS -- a TwlSDK context save
+      // (stmia r1, {r0-r14}) leaves the resumed thread's r1 4 bytes apart.
+      static const bool melon_stm = std::getenv("DS_MELON_STM") != nullptr;
+      if (melon_stm && i == rn && !first && !is_arm9(cpu)) v = addr;
       mem_write32(cpu, addr, v, !first); addr += 4;
       first = false;
     }
@@ -396,8 +404,11 @@ void exec_arm(CpuContext& cpu, u32 instr) {
   case AOp::Swp: case AOp::Swpb: {
     const u32 rn = (instr >> 16) & 0xF, rd = (instr >> 12) & 0xF, rm = instr & 0xF;
     const u32 addr = R(cpu, rn);
-    if (op == AOp::Swpb) { u8 old = mem_read8(cpu, addr); mem_write8(cpu, addr, static_cast<u8>(R(cpu, rm))); R(cpu, rd) = old; }
-    else { u32 old = rotr32(mem_read32(cpu, addr), (addr & 3) * 8); mem_write32(cpu, addr, R(cpu, rm), true); R(cpu, rd) = old; }
+    // The swap's store is a second non-sequential access, and both are
+    // charged (melonDS A_SWP: read N + write N); a non-sequential data_cost
+    // restarts the count, so the read's cost is carried over by hand.
+    if (op == AOp::Swpb) { u8 old = mem_read8(cpu, addr); const u32 d = cpu.data_cycles; mem_write8(cpu, addr, static_cast<u8>(R(cpu, rm))); cpu.data_cycles += d; R(cpu, rd) = old; }
+    else { u32 old = rotr32(mem_read32(cpu, addr), (addr & 3) * 8); const u32 d = cpu.data_cycles; mem_write32(cpu, addr, R(cpu, rm), false); cpu.data_cycles += d; R(cpu, rd) = old; }
     charge_CDI(cpu);
     return;
   }

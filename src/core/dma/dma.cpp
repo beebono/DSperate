@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/dma/dma.h"
+#include "core/dma/ndma.h"
 #include "core/state/state.h"
 #include "core/nds.h"
 #include "core/profile.h"
 #include "core/mem/timing.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace ds::dma {
@@ -88,6 +90,8 @@ void Dma::write_cnt(Cpu cpu, int n, u32 v) {
 
 void Dma::start(Channel& c) {
   if (c.running) return;
+  static const bool dbg = std::getenv("DS_DEBUG_DMA") != nullptr;   // DS_DEBUG_DMA=1: one line per channel start
+  if (dbg) std::fprintf(stderr, "[dma] t=%llu arm%d ch%d mode %02x cnt %08x src %08x dst %08x rem %u\n", (unsigned long long)nds_.sched.now(), c.cpu == Cpu::ARM9 ? 9 : 7, c.num, c.start_mode, c.cnt, c.cur_src, c.cur_dst, c.in_progress ? c.rem_count : (c.cnt & 0x1FFFFF));
   if (!c.in_progress) {
     const u32 mask = (c.cpu == Cpu::ARM9) ? 0x001FFFFF : (c.num == 3 ? 0x0000FFFF : 0x00003FFF);
     c.rem_count = c.cnt & mask;
@@ -107,11 +111,20 @@ void Dma::start(Channel& c) {
   if (!nds_.sched.in_dma()) nds_.sched.preempt(nds_.cpu(c.cpu));   // an immediate start stalls the CPU that issued it (a re-trigger from inside run() is already in the DMA's share)
 }
 
+// melonDS DSi.cpp NDMAModes: the NDMA start-mode number for an old-DMA mode.
+u32 Dma::ndma_mode(u32 mode) {
+  static const u8 modes9[8] = {0x10, 0x06, 0x07, 0x08, 0x09, 0x04, 0xFF, 0x0A};
+  static const u8 modes7[4] = {0x30, 0x26, 0x24, 0xFF};
+  return mode & 0x10 ? modes7[mode & 3] : modes9[mode & 7];
+}
+
 void Dma::check(Cpu cpu, u32 mode) {
   for (int n = 0; n < 4; ++n) { Channel& c = channel(cpu, n); if (c.start_mode == mode && (c.cnt & 0x80000000)) start(c); }
+  if (nds_.dsi) nds_.ndma.check(cpu, ndma_mode(mode));
 }
 void Dma::stop(Cpu cpu, u32 mode) {
   for (int n = 0; n < 4; ++n) { Channel& c = channel(cpu, n); if (c.start_mode == mode) c.cnt &= ~0x80000000u; }
+  if (nds_.dsi) nds_.ndma.stop(cpu, ndma_mode(mode));
   update_cart_armed();
 }
 void Dma::update_cart_armed() {
@@ -121,6 +134,7 @@ void Dma::update_cart_armed() {
 
 bool Dma::in_mode(Cpu cpu, u32 mode) const {
   for (int n = 0; n < 4; ++n) { const Channel& c = channel(cpu, n); if (c.start_mode == mode && (c.cnt & 0x80000000)) return true; }
+  if (nds_.dsi && nds_.ndma.in_mode(cpu, ndma_mode(mode))) return true;
   return false;
 }
 
@@ -238,6 +252,15 @@ static prof::Counter dma_zone(u32 addr, bool trap) {
 }
 
 u32 Dma::run_channel(Channel& c, u32 budget) {
+  static const int dbg = std::getenv("DS_DEBUG_DMA") ? std::atoi(std::getenv("DS_DEBUG_DMA")) : 0;   // 2: every run's cost
+  if (dbg < 2) return run_channel_impl(c, budget);
+  const u32 before = c.iter_count, bs = c.running;
+  const u32 used = run_channel_impl(c, budget);
+  std::fprintf(stderr, "[dmarun] t=%llu arm%d ch%d units %u cost %u budget %u burst_start %d rem %u\n", (unsigned long long)nds_.sched.now(), c.cpu == Cpu::ARM9 ? 9 : 7, c.num, before - c.iter_count, used, budget, bs == 2, c.iter_count);
+  return used;
+}
+
+u32 Dma::run_channel_impl(Channel& c, u32 budget) {
   const bool a9 = c.cpu == Cpu::ARM9;
   const bool word = c.cnt & (1u << 26);
   bool burst_start = (c.running == 2);
@@ -253,9 +276,10 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
     if (a9 && nds_.gpu3d.stalled()) break;      // a full GX FIFO stalls the ARM9's DMA too
     ++loops;
     u32 cost = unit_cycles(c, burst_start, word);
-    if (a9) cost <<= 1;
+    if (a9) cost <<= shift9_;
     used += cost;
     burst_start = false;
+    if (track_progress_) nds_.sched.dma_progress(run_base_ + used);
     // GXFIFO feed (fixed destination 0x04000400): the word goes straight to
     // the geometry engine. Through the bus it would be dma_write32 ->
     // Bus::io_write -> Io::write -> Gpu3D::write -> gxfifo_write, ~150
@@ -284,17 +308,17 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
                         n0 = lim < cap ? lim : cap;
               n0 >= kBulkMin && rc.closed_form()) {
             u32 tmp, n = n0;
-            if (used + (rc.bulk(c.burst_pos, n0 - 1, tmp) << 1) >= budget) {
+            if (used + (rc.bulk(c.burst_pos, n0 - 1, tmp) << shift9_) >= budget) {
               u32 lo = 1, hi = n0;
               while (lo < hi) {
                 const u32 mid = lo + (hi - lo + 1) / 2;
-                if (used + (rc.bulk(c.burst_pos, mid - 1, tmp) << 1) < budget) lo = mid; else hi = mid - 1;
+                if (used + (rc.bulk(c.burst_pos, mid - 1, tmp) << shift9_) < budget) lo = mid; else hi = mid - 1;
               }
               n = lo;
             }
             if (n >= 2) {
               u32 pos_end;
-              used += rc.bulk(c.burst_pos, n - 1, pos_end) << 1;
+              used += rc.bulk(c.burst_pos, n - 1, pos_end) << shift9_;
               c.burst_pos = pos_end;
               nds_.gpu3d.gxfifo_dma_burst(p, n);
               c.cur_src += 4 * n; c.iter_count -= n; c.rem_count -= n;
@@ -359,7 +383,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
             // it -- and the doubling is the one the per-unit path applies, the
             // tables being in ARM7 system cycles. Anything left over goes round
             // the outer loop, which charges it through the same table walk.
-            const int dbl = a9 ? 1 : 0;
+            const u32 dbl = a9 ? shift9_ : 0;
             u32 lo, tmp;
             // The budget usually covers the run: test that before searching,
             // so the common case costs one bulk() rather than log2(n) of them.
@@ -390,7 +414,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
             prof::add(prof::C_DMA_RUN_W, 1);
             c.cur_src += 4; c.cur_dst += 4; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
-            cost = rc.next(c); if (a9) cost <<= 1; used += cost;
+            cost = rc.next(c); if (a9) cost <<= shift9_; used += cost;
             ps += 4; pd += 4;
           }
           if (prof::enabled) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
@@ -469,7 +493,7 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
             prof::add(prof::C_DMA_RUN_H, 1);
             c.cur_src += 2; c.cur_dst += 2; c.iter_count--; c.rem_count--;
             if (--room == 0 || c.iter_count == 0 || used >= budget || (a9 && nds_.gpu3d.stalled())) break;
-            cost = rc.next(c); if (a9) cost <<= 1; used += cost;
+            cost = rc.next(c); if (a9) cost <<= shift9_; used += cost;
             ps += 2; pd += 2;
           }
           if (prof::enabled) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
@@ -510,8 +534,9 @@ u32 Dma::run(Cpu cpu, u32 budget) {
   do {
     for (int n = 0; n < 4 && used < budget; ++n) {
       Channel& c = channel(cpu, n);
-      if (c.running) used += run_channel(c, budget - used);
+      if (c.running) { run_base_ = used; used += run_channel(c, budget - used); }
     }
+    if (nds_.dsi && used < budget && (running_mask_[cpu == Cpu::ARM9 ? 0 : 1] & 0x10)) { nds_.ndma.run_base_ = used; used += nds_.ndma.run(cpu, budget - used); }
     // A bulk cart transfer re-triggers its channel from inside run_channel
     // (the next word is there as soon as the last was read): keep going in
     // this share instead of ending the slice per word.
@@ -538,7 +563,7 @@ template <class S> void Dma::sync_state(S& s) {
   }
   s.end();
   if constexpr (S::reading) {
-    running_mask_[0] = running_mask_[1] = 0;
+    running_mask_[0] = running_mask_[1] = 0;   // the NDMA bit is re-set by Ndma::sync_state, which follows
     for (Channel& c : ch_) if (c.running) running_mask_[c.cpu == Cpu::ARM9 ? 0 : 1] |= static_cast<u8>(1u << c.num);
     update_cart_armed();
   }

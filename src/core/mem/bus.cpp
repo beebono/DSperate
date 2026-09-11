@@ -18,15 +18,20 @@ constexpr u32 Bus::VRAM_BANK_SIZES[9];
 // Debug watchpoint (DS_WATCH=<hex addr>): the 2 KB main-RAM page holding the
 // address is taken out of both page tables so accesses come through here.
 static u32 watch_addr = 0; static bool watch_on = false; static u32 watch_hits = 0;
+static u8* watch_host[2] = {nullptr, nullptr};   // the watched page's host bytes per CPU (any directly mapped page; main RAM by default)
 
 Bus::Bus(NDS& nds)
-    : main_ram(alloc_page_buf(MAIN_RAM_SIZE)), shared_wram(alloc_page_buf(SHARED_WRAM_SIZE)),
+    : main_ram(alloc_page_buf(MAIN_RAM_SIZE_DSI)), shared_wram(alloc_page_buf(SHARED_WRAM_SIZE)),
       arm7_wram(alloc_page_buf(ARM7_WRAM_SIZE)), itcm(alloc_page_buf(ITCM_SIZE)),
       dtcm(alloc_page_buf(DTCM_SIZE)), vram(alloc_page_buf(VRAM_TOTAL)), palette(alloc_page_buf(PALETTE_SIZE)),
-      oam(alloc_page_buf(OAM_SIZE)), bios9(alloc_page_buf(BIOS9_SIZE)), bios7(alloc_page_buf(BIOS7_SIZE)), nds_(nds) {
+      oam(alloc_page_buf(OAM_SIZE)), bios9(alloc_page_buf(BIOS9_SIZE)), bios7(alloc_page_buf(BIOS7_SIZE)),
+      nwram{alloc_page_buf(NWRAM_BANK_SIZE), alloc_page_buf(NWRAM_BANK_SIZE), alloc_page_buf(NWRAM_BANK_SIZE)},
+      bios9i(alloc_page_buf(BIOS9I_SIZE)), bios7i(alloc_page_buf(BIOS7I_SIZE)), nds_(nds) {
   std::memset(bios9.get(), 0, BIOS9_SIZE);
   std::memset(bios7.get(), 0, BIOS7_SIZE);
 }
+
+u32 Bus::main_ram_size() const { return nds_.dsi ? MAIN_RAM_SIZE_DSI : MAIN_RAM_SIZE; }
 
 Bus::~Bus() = default;
 
@@ -37,7 +42,10 @@ u8* Bus::vram_bank(int i) {
 }
 
 void Bus::reset() {
-  std::memset(main_ram.get(), 0, MAIN_RAM_SIZE);
+  std::memset(main_ram.get(), 0, main_ram_size());
+  for (auto& b : nwram) std::memset(b.get(), 0, NWRAM_BANK_SIZE);
+  std::memset(nwram_map_, 0, sizeof nwram_map_);
+  timing_.clock9_shift = nds_.dsi ? 2 : 1;   // SCFG_CLK9 bit 0 is set at a DSi reset; timing_.reset() builds with it
   std::memset(shared_wram.get(), 0, SHARED_WRAM_SIZE);
   std::memset(arm7_wram.get(), 0, ARM7_WRAM_SIZE);
   std::memset(itcm.get(), 0, ITCM_SIZE);
@@ -46,6 +54,10 @@ void Bus::reset() {
   std::memset(palette.get(), 0, PALETTE_SIZE);
   std::memset(oam.get(), 0, OAM_SIZE);
   timing_.reset();
+  if (nds_.dsi) {
+    timing_.set_region9(0x0C000000, 0x0D000000, REGION_MAIN_RAM, 16, 8, 1);   // the uncached main-RAM alias
+    timing_.set_region7(0x0C000000, 0x0D000000, REGION_MAIN_RAM, 16, 8, 1);
+  }
   vram_hosts_valid_ = false;
   nds_.cpu(Cpu::ARM9).timing9 = timing_.cpu9();
   nds_.cpu(Cpu::ARM9).timing7 = timing_.cpu7();
@@ -54,11 +66,24 @@ void Bus::reset() {
   nds_.cpu(Cpu::ARM7).timing7 = timing_.cpu7();
   nds_.cpu(Cpu::ARM7).cost7 = timing_.cost7();
   map_fixed_regions();
-  update_wram();
+  update_nwram();
   update_vram();
   update_tcm(nds_.cpu(Cpu::ARM9), true);
+  if (nds_.dsi) update_vram_timings();
   gba_slot_applied_ = -1;        // the timing tables were just reset
   update_gba_slot_timings();
+}
+
+void Bus::update_wifi_timings() {
+  if (nds_.io.powcnt2 & 0x0002) {
+    static const int ntimings[4] = {10, 8, 6, 18};
+    const u16 v = nds_.io.wifiwaitcnt;
+    timing_.set_region7(0x04800000, 0x04808000, REGION_WIFI0, 16, ntimings[v & 3], (v & 0x04) ? 4 : 6);
+    timing_.set_region7(0x04808000, 0x04810000, REGION_WIFI1, 16, ntimings[(v >> 3) & 3], (v & 0x20) ? 4 : 10);
+  } else {
+    timing_.set_region7(0x04800000, 0x04808000, REGION_WIFI0, 32, 1, 1);
+    timing_.set_region7(0x04808000, 0x04810000, REGION_WIFI1, 32, 1, 1);
+  }
 }
 
 void Bus::update_gba_slot_timings() {
@@ -102,25 +127,72 @@ void Bus::map_fixed_regions() {
 
   for (PageTable* pt : {&pt9, &pt7}) {
     pt->unmap(0x00000000, 0x10000000);                         // everything below the wifi/cart window
-    map_page_aligned(*pt, 0x02000000, MAIN_RAM_SIZE, main_ram.get(), RW, 0x03000000);
+    map_main_ram(*pt);
     pt->map_mmio(0x04000000, 0x01000000);
   }
   // ARM9: BIOS at FFFF0000 (mirrored over the top 64 KB), palette, OAM.
-  pt9.unmap(0xFFFF0000, 0x10000);
-  map_page_aligned(pt9, 0xFFFF0000, BIOS9_SIZE, bios9.get(), RO, 0xFFFFFFFFu - 0xFFF);
-  pt9.map(0xFFFFF000, 0x1000, bios9.get(), RO);
+  update_bios_map();
   // Palette and OAM read directly but store through the slow path: the 2D
   // engines render lazily from their own copies, and every store has to be
   // journaled (Gpu::palette_store / oam_store).
   map_page_aligned(pt9, 0x05000000, PALETTE_SIZE, palette.get(), RO, 0x06000000);
   map_page_aligned(pt9, 0x07000000, OAM_SIZE, oam.get(), RO, 0x08000000);
-  // ARM7: BIOS at 0, private WRAM at 03800000 (default mapping; WRAMCNT may
-  // put shared WRAM in 03000000-037FFFFF, handled in update_wram).
-  pt7.map(0x00000000, BIOS7_SIZE, bios7.get(), RO);
+  // ARM7: private WRAM at 03800000 (default mapping; WRAMCNT may put shared
+  // WRAM in 03000000-037FFFFF, handled in update_wram; the BIOS is in
+  // update_bios_map).
   map_page_aligned(pt7, 0x03800000, ARM7_WRAM_SIZE, arm7_wram.get(), RW, 0x04000000);
   // GBA slot (no cart): reads return open bus via the slow path.
   pt9.map_mmio(0x08000000, 0x02000000);
   pt7.map_mmio(0x08000000, 0x02000000);
+}
+
+// Main RAM: the DS's 4 MB mirrored over 02000000-02FFFFFF; the DSi's 16 MB
+// once, and again at 0C000000 (the uncached alias both DSi CPUs decode).
+void Bus::map_main_ram(PageTable& pt) {
+  const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
+  map_page_aligned(pt, 0x02000000, main_ram_size(), main_ram.get(), RW, 0x03000000);
+  if (nds_.dsi) pt.map(0x0C000000, MAIN_RAM_SIZE_DSI, main_ram.get(), RW);
+}
+
+// The BIOS pair. DS: 4 KB ARM9 image mirrored over the top 64 KB, 16 KB ARM7
+// image at 0. DSi: the 64 KB images, unless SCFG_BIOS bit 1/9 has switched
+// a CPU back to its DS image; bits 0/8 hide the upper 32 KB of each DSi
+// image (reads come through the slow path as all ones, like hardware).
+void Bus::update_bios_map() {
+  PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
+  PageTable& pt7 = nds_.cpu(Cpu::ARM7).page_table;
+  const u32 RO = PAGE_READABLE;
+  pt9.unmap(0xFFFF0000, 0x10000);
+  pt7.unmap(0x00000000, 0x10000);
+  const u16 scfg_bios = nds_.dsi ? nds_.io.dsi.scfg_bios : 0;
+  if (nds_.dsi && !(scfg_bios & 0x0002)) {
+    pt9.map(0xFFFF0000, (scfg_bios & 0x0001) ? 0x8000 : 0x10000, bios9i.get(), RO);
+  } else {
+    map_page_aligned(pt9, 0xFFFF0000, BIOS9_SIZE, bios9.get(), RO, 0xFFFFFFFFu - 0xFFF);
+    pt9.map(0xFFFFF000, 0x1000, bios9.get(), RO);
+  }
+  // DSi ARM7 BIOS: left unmapped so every access (fetch included) comes
+  // through io_read, which applies the BIOS protection rules (reads from
+  // outside the BIOS, or below BIOSPROT from above it, return all ones).
+  if (!(nds_.dsi && !(scfg_bios & 0x0200))) pt7.map(0x00000000, BIOS7_SIZE, bios7.get(), RO);
+  // The ITCM window over 0 on the ARM9 is re-applied by update_tcm, which
+  // runs after this at reset and relink; a later SCFG_BIOS change (ARM7
+  // only, set-once bits) does not touch the ARM9's low pages.
+}
+
+void Bus::update_vram_timings() {
+  const int width = (nds_.dsi && (nds_.io.dsi.scfg_ext[0] & (1u << 13))) ? 32 : 16;
+  timing_.set_region9(0x06000000, 0x07000000, REGION_VRAM, width, 1, 1);
+  timing_.set_region7(0x06000000, 0x07000000, REGION_VRAM, width, 1, 1);
+  timing_.update_cpu9(nds_.cpu(Cpu::ARM9), 0x06000000, 0x07000000);
+}
+
+void Bus::set_clock9_shift(u32 shift) {
+  if (timing_.clock9_shift == shift) return;
+  timing_.clock9_shift = shift;
+  timing_.update_cpu9(nds_.cpu(Cpu::ARM9), 0, 0xFFFFFFFF);
+  nds_.dma.set_clock9_shift(shift);
+  nds_.sched.set_clock9_shift(shift);
 }
 
 void Bus::update_wram() {
@@ -129,8 +201,10 @@ void Bus::update_wram() {
   const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
   // ARM9 side: 03000000-03FFFFFF.
   pt9.unmap(0x03000000, 0x01000000);
-  // ARM7 side: 03000000-037FFFFF (03800000+ is always ARM7 WRAM, already mapped).
-  pt7.unmap(0x03000000, 0x00800000);
+  // ARM7 side: 03000000-037FFFFF is the shared split; 03800000-03FFFFFF the
+  // private WRAM, re-laid here because a DSi NWRAM window may have covered it.
+  pt7.unmap(0x03000000, 0x01000000);
+  map_page_aligned(pt7, 0x03800000, ARM7_WRAM_SIZE, arm7_wram.get(), RW, 0x04000000);
   u8* half0 = shared_wram.get();
   u8* half1 = shared_wram.get() + 0x4000;
   switch (nds_.io.wramcnt & 3) {
@@ -149,6 +223,56 @@ void Bus::update_wram() {
   default:  // ARM9: none (unmapped -> slow path returns 0); ARM7: all 32K
     map_page_aligned(pt7, 0x03000000, SHARED_WRAM_SIZE, shared_wram.get(), RW, 0x03800000);
     break;
+  }
+}
+
+// The NWRAM slot tables and windows, as melonDS derives them (DSi.cpp
+// MapNWRAM_A/B/C, MapNWRAMRange, ARM9Read/ARM7Read): each MBK1-5 byte assigns
+// its slot to a CPU and a position; a CPU's window (MBK6-8) shows the slots
+// at positions (addr >> 16|15) & mask, A over B over C where they overlap.
+// One hardware quirk is not modelled: two slots mapped to the same position
+// are both written by a store there (melonDS writes every matching part);
+// here the one that reads wins. No title on hand does it.
+void Bus::update_nwram() {
+  update_wram();
+  // The watched page (enable_watch) is re-laid with the rest: take it out again after.
+  struct Retrap { Bus& b; ~Retrap() { if (!watch_on) return; for (int c = 0; c < 2; ++c) if (watch_host[c]) b.nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table.map_mmio(watch_addr & ~0x7FFu, 0x800); } } retrap{*this};
+  if (!nds_.dsi) return;
+  const io::DsiIo& d = nds_.io.dsi;
+  std::memset(nwram_map_, 0, sizeof nwram_map_);
+  for (int part = 3; part >= 0; --part) {
+    const u8 v = static_cast<u8>((d.mbk[0][0] >> (part * 8)) & 0xFD);
+    if (v & 0x80) nwram_map_[0][v & 3][(v >> 2) & 3] = nwram[0].get() + (part << 16);
+  }
+  for (int bank = 1; bank <= 2; ++bank)
+    for (int part = 7; part >= 0; --part) {
+      u8 v = static_cast<u8>((d.mbk[0][(bank == 1 ? 1 : 3) + (part >> 2)] >> ((part & 3) * 8)) & 0xFF);
+      if (!(v & 0x80)) continue;
+      if (v & 0x02) v &= 0xFE;
+      nwram_map_[bank][v & 3][(v >> 2) & 7] = nwram[bank].get() + (part << 15);
+    }
+  const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
+  for (int c = 0; c < 2; ++c) {
+    if (!(d.scfg_ext[c] & (1u << 25))) continue;
+    PageTable& pt = nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table;
+    for (int bank = 2; bank >= 0; --bank) {          // C first, A last: A has priority
+      const u32 v = d.mbk[c][5 + bank];
+      u32 start, end, mask;
+      if (bank == 0) {
+        start = 0x03000000 + (((v >> 4) & 0xFF) << 16); end = 0x03000000 + (((v >> 20) & 0x1FF) << 16);
+        static const u32 masks[4] = {0, 0, 1, 3}; mask = masks[(v >> 12) & 3];
+      } else {
+        start = 0x03000000 + (((v >> 3) & 0x1FF) << 15); end = 0x03000000 + (((v >> 19) & 0x3FF) << 15);
+        static const u32 masks[4] = {0, 1, 3, 7}; mask = masks[(v >> 12) & 3];
+      }
+      if (end > 0x04000000) end = 0x04000000;      // the window is cut at the end of the region
+      const u32 shift = bank == 0 ? 16 : 15, unit = 1u << shift;
+      for (u32 a = start; a < end; a += unit) {
+        u8* host = nwram_map_[bank][c][(a >> shift) & mask];
+        if (host) pt.map(a, unit, host, RW);
+        else pt.unmap(a, unit);                    // shown but unbacked: reads 0, writes dropped (slow path)
+      }
+    }
   }
 }
 
@@ -297,12 +421,13 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
   if (tcm_prev_itcm_) pt.unmap(0, std::min(tcm_prev_itcm_, 0x02000000u));
   if (tcm_prev_dtcm_size_) pt.unmap(tcm_prev_dtcm_base_, tcm_prev_dtcm_size_);
   tcm_prev_itcm_ = 0; tcm_prev_dtcm_size_ = 0;
-  map_page_aligned(pt, 0x02000000, MAIN_RAM_SIZE, main_ram.get(), RW, 0x03000000);
+  map_main_ram(pt);
   pt.map_mmio(0x04000000, 0x01000000);
   map_page_aligned(pt, 0x05000000, PALETTE_SIZE, palette.get(), RO, 0x06000000);   // stores journaled, see map_fixed_regions
   map_page_aligned(pt, 0x07000000, OAM_SIZE, oam.get(), RO, 0x08000000);
   pt.map_mmio(0x08000000, 0x02000000);
-  update_wram();
+  if (force) update_bios_map();   // the ARM9's top pages were unmapped above
+  update_nwram();
   update_vram();
   // The TCM windows are baked into the cost table: rebuild the old and the
   // new windows (a forced rebuild covers everything).
@@ -341,13 +466,41 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
 // ---- slow paths -------------------------------------------------------------
 void Bus::enable_watch(u32 addr) {
   watch_addr = addr; watch_on = true;
-  nds_.cpu(Cpu::ARM9).page_table.map_mmio(addr & ~0x7FFu, 0x800);
-  nds_.cpu(Cpu::ARM7).page_table.map_mmio(addr & ~0x7FFu, 0x800);
+  // Any page the CPUs map directly (main RAM, WRAM, NWRAM): the host bytes are
+  // recorded per CPU before the page is taken out of the tables, and the
+  // slow path serves them below. A later remap of that page (a VRAMCNT /
+  // MBK change) would re-map it and end the watch.
+  for (int c = 0; c < 2; ++c) {
+    PageTable& pt = nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table;
+    u8* p = pt.read_ptr(addr & ~0x7FFu);
+    watch_host[c] = p ? p : ((addr & 0xFF000000) == 0x02000000 ? main_ram.get() + (addr & (main_ram_size() - 1) & ~0x7FFu) : nullptr);
+    if (watch_host[c]) pt.map_mmio(addr & ~0x7FFu, 0x800);
+  }
 }
 
 u32 Bus::io_read(Cpu cpu, u32 addr, u32 width) {
-  if (watch_on && (addr & 0xFF000000) == 0x02000000) { u32 v = 0; std::memcpy(&v, main_ram.get() + (addr & (MAIN_RAM_SIZE - 1)), width / 8); return v; }
+  if (watch_on && (addr & ~0x7FFu) == (watch_addr & ~0x7FFu) && watch_host[cpu == Cpu::ARM9 ? 0 : 1]) {
+    u32 v = 0; std::memcpy(&v, watch_host[cpu == Cpu::ARM9 ? 0 : 1] + (addr & 0x7FF), width / 8);
+    if (addr < watch_addr + 4 && addr + width / 8 > watch_addr)
+      std::fprintf(stderr, "[watch] cpu%d read%u %08x = %08x pc %08x t %llu frame %llu line %u\n", cpu == Cpu::ARM9 ? 9 : 7, width, addr, v, nds_.cpu(cpu).hot.regs[15], (unsigned long long)nds_.sched.now(), (unsigned long long)nds_.frame_count, nds_.gpu.line());
+    return v;
+  }
   if ((addr & 0xFF000000) == 0x04000000) return nds_.io.read(cpu, addr, width);
+  // DSi: the BIOS halves SCFG_BIOS hides (update_bios_map leaves them
+  // unmapped) read as all ones on both CPUs.
+  if (nds_.dsi && (cpu == Cpu::ARM9 ? addr >= 0xFFFF0000 : addr < 0x00010000)) {
+    const u32 ones = width == 32 ? 0xFFFFFFFFu : width == 16 ? 0xFFFFu : 0xFFu;
+    if (cpu == Cpu::ARM9) return ones;
+    // melonDS DSi::ARM7Read*: the hidden upper half, any access from outside
+    // the BIOS, and a protected-range access from above BIOSPROT read as ones.
+    const u16 scfg_bios = nds_.io.dsi.scfg_bios;
+    if (scfg_bios & 0x0200) return ones;                     // DS BIOS selected: mapped directly, never here
+    const u32 pc = nds_.cpu(cpu).hot.regs[15], prot = nds_.io.arm7_bios_prot;
+    if (addr >= 0x8000 && (scfg_bios & 0x0100)) return ones;
+    if (pc >= 0x10000) return ones;
+    if (addr < prot && pc >= prot) return ones;
+    u32 v = 0; std::memcpy(&v, bios7i.get() + (addr & 0xFFFF & ~(width / 8 - 1)), width / 8); return v;
+  }
   if ((addr & 0xFF000000) == 0x06000000) return vram_read(cpu, addr, width);
   if ((addr & 0xFF000000) == 0x08000000 || (addr & 0xFF000000) == 0x09000000) {
     // GBA slot, nothing inserted: open bus pattern per GBATEK.
@@ -357,10 +510,10 @@ u32 Bus::io_read(Cpu cpu, u32 addr, u32 width) {
   return 0;
 }
 void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
-  if (watch_on && (addr & 0xFF000000) == 0x02000000) {
+  if (watch_on && (addr & ~0x7FFu) == (watch_addr & ~0x7FFu) && watch_host[cpu == Cpu::ARM9 ? 0 : 1]) {
     if (addr < watch_addr + 4 && addr + width / 8 > watch_addr)
-      std::fprintf(stderr, "[watch] cpu%d write%u %08x = %08x pc %08x frame %llu line %u\n", cpu == Cpu::ARM9 ? 9 : 7, width, addr, v, nds_.cpu(cpu).hot.regs[15], (unsigned long long)nds_.frame_count, nds_.gpu.line());
-    std::memcpy(main_ram.get() + (addr & (MAIN_RAM_SIZE - 1)), &v, width / 8); return;
+      std::fprintf(stderr, "[watch] cpu%d write%u %08x = %08x pc %08x t %llu frame %llu line %u\n", cpu == Cpu::ARM9 ? 9 : 7, width, addr, v, nds_.cpu(cpu).hot.regs[15], (unsigned long long)nds_.sched.now(), (unsigned long long)nds_.frame_count, nds_.gpu.line());
+    std::memcpy(watch_host[cpu == Cpu::ARM9 ? 0 : 1] + (addr & 0x7FF), &v, width / 8); return;
   }
   switch (addr >> 24) {
   case 0x04:
@@ -456,11 +609,18 @@ u32 Bus::read32(Cpu cpu, u32 addr) { return io_read(cpu, addr, 32); }
 void Bus::write8 (Cpu cpu, u32 addr, u8  v) { io_write(cpu, addr, 8, v); }
 void Bus::write16(Cpu cpu, u32 addr, u16 v) { io_write(cpu, addr, 16, v); }
 void Bus::write32(Cpu cpu, u32 addr, u32 v) { io_write(cpu, addr, 32, v); }
+u32 Bus::fetch(Cpu cpu, u32 addr, u32 width) {
+  if (nds_.dsi && cpu == Cpu::ARM7 && addr < 0x00010000 && !(nds_.io.dsi.scfg_bios & 0x0200)) {
+    if (addr >= 0x8000 && (nds_.io.dsi.scfg_bios & 0x0100)) return width == 32 ? 0xFFFFFFFFu : 0xFFFFu;
+    u32 v = 0; std::memcpy(&v, bios7i.get() + (addr & 0xFFFF & ~(width / 8 - 1)), width / 8); return v;
+  }
+  return io_read(cpu, addr, width);
+}
 
 
 template <class S> void Bus::sync_state(S& s) {
   s.begin("MEM ");
-  s.blob(main_ram.get(), MAIN_RAM_SIZE);
+  s.blob(main_ram.get(), main_ram_size());
   s.blob(shared_wram.get(), SHARED_WRAM_SIZE);
   s.blob(arm7_wram.get(), ARM7_WRAM_SIZE);
   s.blob(itcm.get(), ITCM_SIZE);
@@ -468,6 +628,7 @@ template <class S> void Bus::sync_state(S& s) {
   s.blob(vram.get(), VRAM_TOTAL);
   s.blob(palette.get(), PALETTE_SIZE);
   s.blob(oam.get(), OAM_SIZE);
+  if (nds_.dsi) for (auto& b : nwram) s.blob(b.get(), NWRAM_BANK_SIZE);
   s.end();
 }
 template void Bus::sync_state<state::Writer>(state::Writer&);
@@ -480,7 +641,7 @@ void Bus::relink() {
   a9.timing7 = a7.timing7 = timing_.cpu7();
   a9.cost7 = a7.cost7 = timing_.cost7();
   cp15_update_pu_map(a9);
-  update_tcm(a9, true);          // also update_wram() and update_vram()
+  update_tcm(a9, true);          // also update_bios_map(), update_nwram() and update_vram()
   gba_slot_applied_ = -1;        // the loaded EXMEMCNT is not what the tables hold
   update_gba_slot_timings();
 }

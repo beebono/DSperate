@@ -61,9 +61,13 @@ Cart::Cart(NDS& nds, std::unique_ptr<RomSource> rom) : nds_(nds), rom_(std::move
   const u32 size = rom_->mask() + 1;
   rom_mask_ = rom_->mask();
   rom_->read(0, reinterpret_cast<u8*>(&header_), sizeof header_);
+  rom_->read(TwlHeader::ROM_OFFSET, reinterpret_cast<u8*>(&twl_), sizeof twl_);   // 0xFF past a small image, like the card
   chip_id_ = 0x000000C2;
   if (size >= 1024 * 1024 && size <= 128 * 1024 * 1024) chip_id_ |= ((size >> 20) - 1) << 8;
   else chip_id_ |= (0x100 - (size >> 28)) << 8;
+  // DSi-capable card (unit code bit 1, with a DSi region set -- a zero region
+  // is a bad dump): bit 30, as melonDS reports it on either console.
+  if ((header_.unit_code & 2) && twl_.region_flags != 0) chip_id_ |= 0x40000000;
   u32 sram_size = 0;
   save_type_ = save_type_for(header_.game_code_u32(), sram_size);
   ir_cart_ = (header_.game_code_u32() & 0xFF) == 'I';

@@ -34,6 +34,11 @@ public:
   // never be adopted, whichever halves of the tables it saw.
   std::atomic<u64> stamp{0};
 
+  // Bus cycles to ARM9 cycles: 1 on a DS (the ARM9 runs at twice the bus
+  // clock), 2 on a DSi with SCFG_CLK9 bit 0 set (four times). Read by
+  // reset() and update_cpu9(); Bus::set_clock9_shift changes it live.
+  u32 clock9_shift = 1;
+
   // ARM7 precomputed data-cost table. The ARM7 rule --
   // costs add when code and data share a region, overlap into a max when they
   // do not -- has exactly one dynamic input, the data page; `nc`, `cdi`,
@@ -98,6 +103,12 @@ public:
     return (code_main ? 16u : 0u) + (cdi ? 8u : 0u) + nc_idx * 2u + (word ? 1u : 0u);
   }
   u32 region(bool arm9, u32 addr) const { return arm9 ? regions9_[addr >> 14] : regions7_[addr >> 15]; }
+  // CPU-side N32/S32 bus costs (with the ARM9's non-sequential penalty):
+  // what the DSi's NDMA is priced from (melonDS DSi_NDMA::Run9/Run7).
+  void ndma_cost(bool arm9, u32 addr, u32& n32, u32& s32) const {
+    if (arm9) { const u8* t = &bus9_[(addr >> 14) * 8]; n32 = t[2]; s32 = t[3]; }
+    else      { const u8* t = &bus7()[(addr >> 15) * 4]; n32 = t[2]; s32 = t[3]; }
+  }
   void dma_cost(bool arm9, u32 addr, bool word, u32& n, u32& s) const {
     if (arm9) { const u8* t = &bus9_[(addr >> 14) * 8]; n = t[word ? 6 : 4]; s = t[word ? 7 : 5]; }
     else      { const u8* t = &bus7()[(addr >> 15) * 4]; n = t[word ? 2 : 0]; s = t[word ? 3 : 1]; }

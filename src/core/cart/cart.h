@@ -29,6 +29,34 @@ struct Header {
 };
 static_assert(sizeof(Header) == 0x160, "NDS header layout");
 
+// The DSi extension of the header, ROM bytes 0x180..0x377 (GBATEK "DSi
+// cartridge header"). Read for every ROM and consulted only when the header's
+// unit_code has bit 1 (DSi-capable). Header::reserved2 (0x1C) is the DSi
+// crypto flags byte: bit 0 = has ARM9i/ARM7i, bit 1 = modcrypted, bit 4 =
+// debug (dev key).
+struct TwlHeader {
+  u32 mbk[12];                                  // 0x180: MBK1-5 slot maps, MBK6-8 ARM9 windows, MBK6-8 ARM7 windows, MBK9 (with WRAMCNT in the top byte)
+  u32 region_flags;                             // 0x1B0
+  u32 access_control;                           // 0x1B4
+  u32 scfg_ext7;                                // 0x1B8: the ARM7 SCFG_EXT setting the launcher applies
+  u8  reserved0[3]; u8 app_flags;               // 0x1BF: bit 0 = DSi touchscreen mode, bit 7 = dev key
+  u32 arm9i_rom_offset, reserved1, arm9i_ram_address, arm9i_size;          // 0x1C0
+  u32 arm7i_rom_offset, param_block_address, arm7i_ram_address, arm7i_size;   // 0x1D0 (0x1D4: launcher parameter block in ARM7 WRAM)
+  u32 digest_ntr_offset, digest_ntr_size, digest_twl_offset, digest_twl_size; // 0x1E0
+  u32 digest_sector_ht_offset, digest_sector_ht_size, digest_block_ht_offset, digest_block_ht_size;   // 0x1F0
+  u32 digest_sector_size, digest_block_sectors; // 0x200
+  u32 banner_size, shared2_sizes;               // 0x208
+  u32 total_rom_size; u32 reserved2[3];         // 0x210
+  u32 modcrypt1_offset, modcrypt1_size, modcrypt2_offset, modcrypt2_size;  // 0x220
+  u32 title_id_lo, title_id_hi;                 // 0x230
+  u32 public_sav_size, private_sav_size;        // 0x238
+  u8  reserved3[0xB0];                          // 0x240
+  u8  parental[0x10];                           // 0x2F0
+  u8  arm9_hash[20], arm7_hash[20], digest_master_hash[20], banner_hash[20], arm9i_hash[20], arm7i_hash[20];   // 0x300
+  static constexpr u32 ROM_OFFSET = 0x180;
+};
+static_assert(sizeof(TwlHeader) == 0x378 - 0x180, "TWL header layout");
+
 enum class SaveType : u8 { None, EepromTiny, Eeprom, Flash };
 
 // Retail Slot-1 cartridge: ROM reads through the KEY1/KEY2 command protocol,
@@ -41,6 +69,8 @@ public:
   template <class S> void sync_state(S& s);
 
   const Header& header() const { return header_; }
+  const TwlHeader& twl() const { return twl_; }
+  bool dsi_capable() const { return (header_.unit_code & 2) != 0; }   // unit_code: 0 DS, 2 DS+DSi, 3 DSi only
   // Bounded reads of the image, wherever it lives (see rom_source.h); past
   // the end the bytes are 0xFF, as on a card.
   void rom_read(u32 addr, u8* dst, u32 n) const { rom_->read(addr, dst, n); }
@@ -93,6 +123,7 @@ private:
   // arithmetic and only asks the source when the address leaves it.
   u32 page_base_ = 0xFFFFFFFFu; const u8* page_ = nullptr;
   Header header_{};
+  TwlHeader twl_{};
   u32 chip_id_ = 0;
   u32 rom_mask_ = 0;
 

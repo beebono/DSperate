@@ -8,6 +8,7 @@
     dsi_nand.py titles  nand.bin                 # DSiWare with .app/.sav sizes
     dsi_nand.py extract nand.bin /path/in/nand out-file
     dsi_nand.py map     nand.bin access.log         # trace_melonds --dsi log -> files touched
+    dsi_nand.py bootblobs nand.bin out.bin           # the 0x154 bytes a DSi direct boot copies into main RAM
 
 Key derivation and sector crypto follow melonDS DSi_NAND.cpp:42-112 (FAT
 key from the ConsoleID, IV = SHA-1 of the eMMC CID, AES-CTR with byte-
@@ -130,6 +131,24 @@ def main(argv):
     elif cmd == 'extract':
         cl, attr, size = n.lookup(argv[3])
         open(argv[4], 'wb').write(n.file_data(cl, size)); print(f'{size} bytes -> {argv[4]}')
+    elif cmd == 'bootblobs':
+        # What melonDS DSi::SetupDirectBoot copies from the NAND: the newer
+        # TWLCFG (byte 0x81 is the counter) bytes 0x88..0x1AF -> 0x02000400,
+        # HWINFO_N 0x88..0x9B -> 0x02000600, HWINFO_S 0x88..0x9F -> 0x02FFFD68.
+        # DSperate's --dsi-boot takes the concatenation (NDS::load_dsi_boot_blobs).
+        cfgs = []
+        for i in (0, 1):
+            try:
+                cl, _, size = n.lookup(f'/shared1/TWLCFG{i}.dat'); cfgs.append(n.file_data(cl, size))
+            except Exception: cfgs.append(None)
+        v = [c[0x81] if c else -1 for c in cfgs]
+        cfg = cfgs[1] if v[1] > v[0] else cfgs[0]
+        if cfg is None: sys.exit('no TWLCFG in this NAND')
+        cl, _, size = n.lookup('/sys/HWINFO_N.dat'); hn = n.file_data(cl, size)
+        cl, _, size = n.lookup('/sys/HWINFO_S.dat'); hs = n.file_data(cl, size)
+        out = cfg[0x88:0x88 + 0x128] + hn[0x88:0x88 + 0x14] + hs[0x88:0x88 + 0x18]
+        assert len(out) == 0x154
+        open(argv[3], 'wb').write(out); print(f'TWLCFG{1 if v[1] > v[0] else 0} (counters {v}), {len(out)} bytes -> {argv[3]}')
     elif cmd == 'map':
         idx = n.owner_index(); cs = n.spc * n.bps
         from collections import Counter, defaultdict
