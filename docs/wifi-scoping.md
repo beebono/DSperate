@@ -450,3 +450,36 @@ So this is a fidelity question in the MP model both emulators share
 (melonDS has "implement CMD retries" in its history and the retry path
 disabled as "causes instability"), to be taken up with a hardware-level
 reading of the DL Play name/ack exchange. Not part of phase 2.
+
+### Download Play, read against GBATEK (2026-09-11)
+
+GBATEK's DS Download Play page (gbatek-ds-wifi-nintendo-ds-download-play)
+gives the CMD, REPLY and ACK formats. With the host's outgoing CMD bodies
+and incoming reply bodies traced (`# host CMD out` / `# host reply-in` in
+`DS_WIFI_TRACE`; `DS_WIFI_TRACE_TIME=1` stamps every access with the
+8 us timer), the DSperate-to-DSperate exchange reads as the spec has it:
+
+| host CMD | client reply |
+|----------|--------------|
+| NameRequest (type 01) x N | Username snippets 0..4 (`0007`, `0107 "Bil"`, `0207 "l N"`, `0307 "ye"`, `0407`) |
+| RSA frame (type 03, 0xE4 bytes) x 3 | first: stale snippet; then **RsaReply (type 08)** twice |
+| Dummy (type 00) with `0008 0002` in the spare bytes, forever | RsaReply, forever |
+
+So the host game receives the RsaReply against its RSA command and still
+never sends a Data packet (type 04). melonDS's model does the same. The
+wire is right up to that point; what Mario Kart's host inspects after the
+RsaReply is the next question, and it is inside the game (its ARM9 side
+of the DL library), to be watched with the CPU-side tools.
+
+Two model details settled on the way, both kept:
+
+- The firmware does not answer a CMD within "a few hundred clock cycles"
+  as GBATEK suggests for the reply *contents*; in our emulation it reads
+  the CMD within 200 us, then builds its next reply frame in full 1.4 ms
+  later (median; after the ack, waiting on the ARM9). One CMD of reply
+  lag is therefore inherent and the host tolerates it (the RSA retries).
+- The reply's contents are now copied when its transmission ends, the
+  latest moment the hardware could still be reading them, instead of at
+  the end of the CMD as melonDS does (`mp_reply_pending_`). Which buffer
+  answers stays decided at the CMD, as the REPLY1 -> REPLY2 move is.
+  Latching the buffer itself late was tried and is wrong (replies vanish).

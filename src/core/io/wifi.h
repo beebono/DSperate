@@ -130,6 +130,7 @@ private:
   std::array<u8, 15 * 1024> mp_client_replies_{};
   u16 mp_last_seqno_ = 0xFFFF;
   bool is_mp_ = false, is_mp_client_ = false;
+  bool mp_reply_pending_ = false;   // slot 5 holds a reply whose contents are read when its transmission starts
   u64 next_sync_ = 0, rx_timestamp_ = 0;
 
   // ---- the emulated access point (melonDS WifiAP) ----

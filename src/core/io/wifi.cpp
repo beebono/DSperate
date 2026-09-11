@@ -45,6 +45,7 @@ FILE* wifi_trace_file() {
   static FILE* f = [] { const char* p = std::getenv("DS_WIFI_TRACE"); return p ? std::fopen(p, "w") : nullptr; }();
   return f;
 }
+bool wifi_trace_time() { static const bool on = std::getenv("DS_WIFI_TRACE_TIME") != nullptr; return on; }   // append the 8 us timer to each access
 bool wifi_log_enabled() { static const bool on = std::getenv("DS_WIFI_LOG") != nullptr; return on; }
 #define WIFI_LOG(...) do { if (wifi_log_enabled()) std::fprintf(stderr, "[wifi] " __VA_ARGS__); } while (0)
 } // namespace
@@ -368,6 +369,7 @@ void Wifi::tx_send_frame(const TxSlot& slot, int num) {
     break;
   case 1:
     st16(&tx_buffer_[12 + 24 + 2], mp_client_mask_);
+    if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# host CMD out len %d body %04X %04X %04X %04X %04X %04X us %llX\n", len, ld16(&tx_buffer_[36]), ld16(&tx_buffer_[38]), ld16(&tx_buffer_[40]), ld16(&tx_buffer_[42]), ld16(&tx_buffer_[44]), ld16(&tx_buffer_[46]), (unsigned long long)us_timestamp_);
     if (mp_) mp_->send_cmd(tx_buffer_.data(), 12 + len, us_timestamp_);
     break;
   case 5:
@@ -460,10 +462,17 @@ void Wifi::send_mp_reply(u16 clienttime, u16 clientmask) {
   if (reg(W_TXSlotReply2) & 0x8000) ram16(slot.addr, 0x0001);
   // CHECKME (melonDS): can the reply rate be set, or does it follow the CMD's?
   slot.rate = 2;
-  // Experiment (DS_WIFI_REPLY_KEEP=1): a CMD arriving before the next reply
-  // is armed re-sends the last one instead of an empty reply.
-  static const bool keep = std::getenv("DS_WIFI_REPLY_KEEP") != nullptr;
-  if (!keep || (reg(W_TXSlotReply1) & 0x8000)) { reg(W_TXSlotReply2) = reg(W_TXSlotReply1); reg(W_TXSlotReply1) = 0; }
+  // Which buffer answers this CMD is decided now: W_TXBUF_REPLY1 moves to
+  // REPLY2 as the CMD arrives. What it *contains* is read when the reply
+  // is transmitted, 16 us plus the preamble later (phase 0 below): GBATEK
+  // has the client "update the reply within a few hundred clock cycles of
+  // receiving a command", and the firmware does exactly that, rewriting a
+  // few words of its one reply buffer in place after each CMD. Copying the
+  // buffer out here, as melonDS does, sends every reply's contents one CMD
+  // late; Download Play's host then never sees the RsaReply against its
+  // RSA command (docs/wifi-scoping.md, Download Play).
+  reg(W_TXSlotReply2) = reg(W_TXSlotReply1);
+  reg(W_TXSlotReply1) = 0;
   if (!(reg(W_TXSlotReply2) & 0x8000)) slot.valid = false;
   else {
     slot.valid = true;
@@ -474,7 +483,7 @@ void Wifi::send_mp_reply(u16 clienttime, u16 clientmask) {
     if (duration > clienttime) slot.valid = false;
   }
   if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# reply %s len %u clienttime %u\n", slot.valid ? "data" : "empty", slot.valid ? slot.length : 0u, clienttime);
-  if (slot.valid) { slot.cur_phase = 0; tx_send_frame(slot, 5); }
+  if (slot.valid) { slot.cur_phase = 0; mp_reply_pending_ = true; }   // the frame goes out at phase 0
   else { slot.cur_phase = 10; send_mp_default_reply(); }
   u16 clientnum = 0;
   for (int i = 1; i < reg(W_AIDLow); ++i) if (clientmask & (1 << i)) clientnum++;
@@ -539,7 +548,7 @@ bool Wifi::process_tx(TxSlot& slot, int num) {
     slot.cur_phase = 1;
     slot.cur_phase_time = static_cast<s32>(len);
     reg(W_RXTXAddr) = slot.addr >> 1;
-    if (num != 5) tx_send_frame(slot, num);
+    if (num != 5) tx_send_frame(slot, num);   // slot 5's went out above
     // if the packet is being sent via LOC1..3, send it to the AP
     // any packet sent via CMD/REPLY/BEACON isn't going to have much use outside of local MP
     if (num == 0 || num == 2 || num == 3) {
@@ -579,6 +588,10 @@ bool Wifi::process_tx(TxSlot& slot, int num) {
       break;
     }
     if (num == 5) {
+      // The reply's contents as the hardware would have read them while
+      // sending: the firmware patches its reply buffer in place after the
+      // CMD, and this is the last moment that can still be true of a byte.
+      if (mp_reply_pending_) { mp_reply_pending_ = false; tx_send_frame(slot, 5); }
       if (reg(W_TXStatCnt) & 0x1000) { reg(W_TXStat) = 0x0401; set_irq(1); }
       set_status(1);
       reg(W_TXBusy) &= static_cast<u16>(~0x80);
@@ -786,6 +799,7 @@ void Wifi::mp_client_reply_rx(int client) {
   const u8* reply = &mp_client_replies_[(client - 1) * 1024];
   int framelen = ld16(&reply[10]);
   WIFI_LOG("MP reply from client %d: FC:%04X len=%d\n", client, ld16(&reply[12]), framelen);
+  if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# host reply-in client %d len %d body %04X %04X %04X %04X %04X us %llX\n", client, framelen, ld16(&reply[36]), ld16(&reply[38]), ld16(&reply[40]), ld16(&reply[42]), ld16(&reply[44]), (unsigned long long)us_timestamp_);
   const u8 txrate = reply[8];
   const u16 framectl = ld16(&reply[12]);
   if (framectl & 0x4000) {
@@ -913,7 +927,7 @@ void Wifi::rf_transfer_type3() {
 
 // ---- bus ---------------------------------------------------------------------
 u16 Wifi::read16(u32 addr) {
-  if (FILE* tf = wifi_trace_file()) { const u16 v = read16_inner(addr); std::fprintf(tf, "R %03X %04X\n", addr & 0xFFF, v); return v; }
+  if (FILE* tf = wifi_trace_file()) { const u16 v = read16_inner(addr); if (wifi_trace_time()) std::fprintf(tf, "R %03X %04X @%llX\n", addr & 0xFFF, v, (unsigned long long)us_timestamp_); else std::fprintf(tf, "R %03X %04X\n", addr & 0xFFF, v); return v; }
   return read16_inner(addr);
 }
 u16 Wifi::read16_inner(u32 addr) {
@@ -963,7 +977,7 @@ u16 Wifi::read16_inner(u32 addr) {
 }
 
 void Wifi::write16(u32 addr, u16 val) {
-  if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "W %03X %04X\n", addr & 0xFFF, val);
+  if (FILE* tf = wifi_trace_file()) { if (wifi_trace_time()) std::fprintf(tf, "W %03X %04X @%llX\n", addr & 0xFFF, val, (unsigned long long)us_timestamp_); else std::fprintf(tf, "W %03X %04X\n", addr & 0xFFF, val); }
   const u32 a = addr & 0x7FFE;
   if (a >= 0x4000 && a < 0x6000) { ram16(a, val); return; }
   if (a >= 0x2000 && a < 0x4000) return;
@@ -1067,6 +1081,7 @@ void Wifi::write16(u32 addr, u16 val) {
     return;
   case W_RXBufReadAddr: case W_RXBufGapAddr: val &= 0x1FFE; break;
   case W_RXBufGapSize: case W_RXBufCount: case W_RXBufWriteAddr: case W_RXBufReadCursor: val &= 0x0FFF; break;
+  case W_TXSlotReply1: if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# arm reply1 %04X us %llX\n", val, (unsigned long long)us_timestamp_); break;
   case W_TXReqReset: reg(W_TXReqRead) &= static_cast<u16>(~val); return;
   case W_TXReqSet: reg(W_TXReqRead) |= val; fire_tx(); return;
   case W_TXSlotReset:
@@ -1316,6 +1331,7 @@ template <class S> void Wifi::sync_state_engine(S& s) {
            mp_reply_timer_, mp_client_mask_, mp_client_fail_, mp_client_replies_, mp_last_seqno_,
            is_mp_, is_mp_client_, next_sync_, rx_timestamp_);
   s.fields(ap_.us_counter, ap_.seq_no, ap_.beacon_due, ap_.packet, ap_.packet_len, ap_.rx_num, ap_.client_status);
+  s.fields(mp_reply_pending_);   // appended
 }
 template void Wifi::sync_state_regs<state::Writer>(state::Writer&);
 template void Wifi::sync_state_regs<state::Reader>(state::Reader&);
