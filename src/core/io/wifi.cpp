@@ -38,6 +38,13 @@ inline void st16(u8* p, u16 v) { std::memcpy(p, &v, 2); }
 inline void st32(u8* p, u32 v) { std::memcpy(p, &v, 4); }
 inline void st64(u8* p, u64 v) { std::memcpy(p, &v, 8); }
 
+// DS_WIFI_TRACE=<file>: every register access as "R|W addr value", the same
+// format the melonDS oracle harness writes under TRACE_WIFI_REGS, so the two
+// can be diffed (docs/wifi-scoping.md). Off: one predictable branch per access.
+FILE* wifi_trace_file() {
+  static FILE* f = [] { const char* p = std::getenv("DS_WIFI_TRACE"); return p ? std::fopen(p, "w") : nullptr; }();
+  return f;
+}
 bool wifi_log_enabled() { static const bool on = std::getenv("DS_WIFI_LOG") != nullptr; return on; }
 #define WIFI_LOG(...) do { if (wifi_log_enabled()) std::fprintf(stderr, "[wifi] " __VA_ARGS__); } while (0)
 } // namespace
@@ -898,6 +905,10 @@ void Wifi::rf_transfer_type3() {
 
 // ---- bus ---------------------------------------------------------------------
 u16 Wifi::read16(u32 addr) {
+  if (FILE* tf = wifi_trace_file()) { const u16 v = read16_inner(addr); std::fprintf(tf, "R %03X %04X\n", addr & 0xFFF, v); return v; }
+  return read16_inner(addr);
+}
+u16 Wifi::read16_inner(u32 addr) {
   const u32 a = addr & 0x7FFE;
   if (a >= 0x4000 && a < 0x6000) return ram16(a);
   if (a >= 0x2000 && a < 0x4000) return 0xFFFF;
@@ -944,6 +955,7 @@ u16 Wifi::read16(u32 addr) {
 }
 
 void Wifi::write16(u32 addr, u16 val) {
+  if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "W %03X %04X\n", addr & 0xFFF, val);
   const u32 a = addr & 0x7FFE;
   if (a >= 0x4000 && a < 0x6000) { ram16(a, val); return; }
   if (a >= 0x2000 && a < 0x4000) return;

@@ -153,6 +153,7 @@ private:
   // helpers
   u16& reg(u32 off) { return io_[off / 2]; }
   u16  reg(u32 off) const { return io_[off / 2]; }
+  u16  read16_inner(u32 addr);
   u16  ram16(u32 a) const;
   void ram16(u32 a, u16 v);
   void schedule_timer(bool first);
