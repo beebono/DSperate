@@ -363,3 +363,20 @@ with it pair up, whichever came first hosting. Verified on one box (the
 second instance joined "First's game") and between the dev box and the
 RG DS over Wi-Fi (the rig found "DevBox's game" by broadcast, joined, and
 answered 593 CMD frames).
+
+### Messages did not arrive: it was the MAC, not the pacer
+
+A PictoChat message typed on the guest showed on the guest only. Not the
+reply wait: the host's radio received every reply frame carrying it with
+no failures, and the harness's melonDS failed the same way as host, as
+guest, and with melonDS on both ends. Every console booted from one
+firmware dump has the same MAC, and PictoChat tells users apart by MAC:
+the host saw its own address on the message and dropped it (melonDS's
+frontend randomizes the MAC per instance for this reason; the harness did
+not). `NDS::set_wifi_mac_suffix` now gives every LAN instance a random
+low three bytes, checksum fixed, before the boot. With that the host shows
+both "Now entering" lines and the message, on one box and from the RG DS
+over Wi-Fi ("Now entering: RGDS", the message, "Now leaving: RGDS").
+
+The reply-wait cost is unchanged and still to do (51 ms worst frame on the
+host in that run).
