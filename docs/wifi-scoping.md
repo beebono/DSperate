@@ -420,3 +420,33 @@ the plain pacer absorbs it; slicing trades audio margin for a shorter
 worst wait and stays an experiment. The 51-100 ms worst frames seen on
 the dev-box host earlier were the late-join race (waits timing out on a
 client that had dropped out), not pacing.
+
+### Download Play: where it stops (2026-09-11, open)
+
+Mario Kart DS Simple-mode group, guest in the firmware's DS Download
+Play. Reproduced headless on one box: the guest lists the group, confirms,
+sits at "Downloading..." and the host drops it after a while. The
+register trace (`DS_WIFI_TRACE`, now with `# CMD rx` / `# reply` markers)
+shows a game-level exchange, not a transport one: the guest sends its
+nickname in 4-word chunks as MP replies (`0107 "Bil"`, `0207 "l N"`), the
+host answers the second with three 266-byte CMD frames, and from then on
+the guest re-sends chunk 2 (364 times) while the host polls with an
+unchanging acknowledgement and never streams the program.
+
+It is not ours alone. `tools/melonds/localmp_pair` (new in the research
+repo) runs two melonDS consoles over melonDS's own LocalMP, its canonical
+local-wireless path, with the same scripts and the same trace markers:
+melonDS's guest gets one chunk further (`0308 "ye"`, 9 564 times) and
+stalls the same way, then falls back to "Looking for software". Over the
+LAN transport every host/guest pairing (DSperate or melonDS on either
+end) stalls too. The guest's replies alternate between data and empty in
+both emulators, because the firmware arms the next reply slot only after
+the following CMD has already arrived about half the time; re-sending
+the last reply instead of an empty one (`DS_WIFI_REPLY_KEEP=1`) makes the
+host poll ten times faster and changes nothing else, so that is not the
+blocker either.
+
+So this is a fidelity question in the MP model both emulators share
+(melonDS has "implement CMD retries" in its history and the retry path
+disabled as "causes instability"), to be taken up with a hardware-level
+reading of the DL Play name/ack exchange. Not part of phase 2.
