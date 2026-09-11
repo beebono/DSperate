@@ -26,7 +26,7 @@ inline int ci(Cpu c) { return static_cast<int>(c); }
 inline Cpu other(Cpu c) { return c == Cpu::ARM9 ? Cpu::ARM7 : Cpu::ARM9; }
 }
 
-Io::Io(NDS& nds) : aes(nds), nds_(nds) { reset(); }
+Io::Io(NDS& nds) : aes(nds), wifi(nds), nds_(nds) { reset(); }
 
 static void ev_lcd_irq(NDS& nds, u32) { nds.io.flush_lcd_irq(); }
 void Io::lcd_irq(Cpu cpu, u32 bit) {
@@ -59,7 +59,7 @@ void Io::reset() {
   if (rtc_host_clock_) rtc_seed();
   else if (rtc_power_lost_seen_) rtc.status1 = 0x02;   // a reboot, not a flat battery
   cart = Cart{};
-  wifi_reset();
+  wifi.reset();
   dsi = DsiIo{};
   if (nds_.dsi) dsi_reset();
 }
@@ -816,291 +816,6 @@ u32 Io::cart_read_data() {
   return v;
 }
 
-// ---- Wi-Fi ------------------------------------------------------------------
-namespace {
-constexpr u32 W_ID = 0x000, W_IF = 0x010, W_IE = 0x012, W_PowerUS = 0x036, W_Random = 0x044,
-  W_ModeReset = 0x004, W_ModeWEP = 0x006, W_TRXPower = 0x034, W_PowerTX = 0x038, W_PowerState = 0x03C,
-  W_PowerForce = 0x040, W_PowerDownCtrl = 0x048, W_RFPins = 0x19C, W_RFStatus = 0x214,
-  W_Preamble = 0x0BC, W_USCount0 = 0x0F8, W_USCompare0 = 0x0F0, W_CmdCount = 0x118,
-  W_BBCnt = 0x158, W_BBWrite = 0x15A, W_BBRead = 0x15C, W_BBBusy = 0x15E,
-  W_RFData2 = 0x17C, W_RFData1 = 0x17E, W_RFBusy = 0x180, W_TXBusy = 0x0B6,
-  W_CMDStat0 = 0x1D0, W_IFSet = 0x21C,
-  W_TXSlotBeacon = 0x080, W_ListenCount = 0x088, W_BeaconInterval = 0x08C, W_ListenInterval = 0x08E, W_TXReqRead = 0x0B0,
-  W_USCountCnt = 0x0E8, W_USCompareCnt = 0x0EA, W_CmdCountCnt = 0x0EE, W_ContentFree = 0x10C, W_PreBeacon = 0x110,
-  W_BeaconCount1 = 0x11C, W_BeaconCount2 = 0x134;
-constexpr int WIFI_US_INTERVAL = 8;                       // melonDS kTimerInterval
-constexpr u32 WIFI_TIME_CHECK_MASK = ~u32(WIFI_US_INTERVAL - 1);
-}
-
-void Io::wifi_reset() {
-  wifi_ram.fill(0); wifi_io.fill(0); wifi_bb.fill(0); wifi_bb_ro.fill(0); wifi_rf.fill(0);
-  wifi_random = 1; wifi_power_on_pending = false;
-  wifi_on_ = false; wifi_timer_err_ = 0; wifi_us_timestamp_ = wifi_us_counter_ = wifi_us_compare_ = 0;
-  wifi_us_until_power_on_ = 0; wifi_cmd_counter_ = wifi_rx_counter_ = 0; wifi_block_beacon14_ = false;
-  auto fixed = [&](u32 id, u8 v) { wifi_bb[id] = v; wifi_bb_ro[id] = 1; };
-  fixed(0x00, 0x6D);
-  for (u32 id : {0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x27, 0x4D, 0x5E, 0x5F, 0x60, 0x61, 0x66}) fixed(id, 0x00);
-  fixed(0x5D, 0x01); fixed(0x64, 0xFF);
-  for (u32 id = 0x69; id < 0x100; ++id) fixed(id, 0x00);
-  // Chip ID and RF type from the firmware header.
-  u8 console = 0xFF;
-  if (nds_.firmware.size() > 0x1D) { console = nds_.firmware[0x1D]; wifi_rf_version = nds_.firmware[0x1C]; }
-  wifi_io[W_ID / 2] = (console == 0x20 || console == 0x35) ? 0xC340 : 0x1440;
-  for (u32 a = 0x018; a < 0x01E; a += 2) wifi_io[a / 2] = 0xFFFF;   // MAC
-  for (u32 a = 0x020; a < 0x026; a += 2) wifi_io[a / 2] = 0xFFFF;   // BSSID
-  wifi_io[W_PowerUS / 2] = 0x0001;
-}
-
-// ---- transceiver power (after melonDS Wifi::UpdatePowerStatus) --------------
-void Io::wifi_set_irq(u32 irq) {
-  const u16 old = wifi_io[W_IF / 2] & wifi_io[W_IE / 2];
-  wifi_io[W_IF / 2] |= static_cast<u16>(1u << irq);
-  if (old == 0 && (wifi_io[W_IF / 2] & wifi_io[W_IE / 2])) request_irq(Cpu::ARM7, IRQ_WIFI);
-}
-
-void Io::wifi_set_status(u32 status) {
-  static const u16 rfpins[10] = {0x04, 0x84, 0, 0x46, 0, 0x84, 0x87, 0, 0x46, 0x04};
-  wifi_io[W_RFStatus / 2] = static_cast<u16>(status);
-  wifi_io[W_RFPins / 2] = rfpins[status < 10 ? status : 0];
-}
-
-static void ev_wifi_us(NDS& nds, u32) { nds.io.wifi_us_timer(); }
-
-// melonDS Wifi::UpdatePowerOn / ScheduleTimer / USTimer / MSTimer / SetIRQ13-15.
-void Io::wifi_update_power_on() {
-  // melonDS Wifi::UpdatePowerOn: POWCNT2 bit 1, and on a DS W_POWER_US bit 0
-  // clear (the DSi's DWM-W024 ignores it). The 8 us timer runs only while on.
-  bool on = (powcnt2 & 2) != 0;
-  if (!nds_.dsi) on = on && (wifi_io[W_PowerUS / 2] & 1) == 0;
-  if (on == wifi_on_) return;
-  wifi_on_ = on;
-  if (on) wifi_schedule_timer(true);
-  else nds_.sched.cancel(EventId::Wifi);
-}
-
-void Io::wifi_schedule_timer(bool first) {
-  if (first) wifi_timer_err_ = 0;
-  s32 cycles = 33513982 * WIFI_US_INTERVAL;
-  cycles -= wifi_timer_err_;
-  const s32 delay = (cycles + 999999) / 1000000;
-  wifi_timer_err_ = delay * 1000000 - cycles;
-  const u64 base = first ? nds_.sched.now() : nds_.sched.event_time();
-  nds_.sched.schedule(EventId::Wifi, base + static_cast<u64>(delay) * 2, ev_wifi_us, 0);
-}
-
-void Io::wifi_set_irq13() {
-  wifi_set_irq(13);
-  if ((wifi_io[W_ModeWEP / 2] & 7) == 0 && !(wifi_io[W_PowerTX / 2] & 2)) wifi_update_power(-1);
-}
-void Io::wifi_set_irq14(int source) {   // 0 = USCOMPARE, 1 = BEACONCOUNT, 2 = forced
-  if (source != 2) wifi_io[W_BeaconCount1 / 2] = wifi_io[W_BeaconInterval / 2];
-  if (wifi_block_beacon14_ && source == 1) return;
-  if (!(wifi_io[W_USCompareCnt / 2] & 1)) return;
-  wifi_set_irq(14);
-  wifi_io[W_BeaconCount2 / 2] = 0xFFFF;
-  wifi_io[W_TXReqRead / 2] &= 0xFFF2;
-  if (wifi_io[W_TXSlotBeacon / 2] & 0x8000) std::fprintf(stderr, "[wifi] beacon TX requested (not modelled)\n");
-  if (wifi_io[W_ListenCount / 2] == 0) wifi_io[W_ListenCount / 2] = wifi_io[W_ListenInterval / 2];
-  wifi_io[W_ListenCount / 2]--;
-}
-void Io::wifi_set_irq15() {
-  wifi_set_irq(15);
-  if (wifi_io[W_PowerTX / 2] & 1) wifi_update_power(1);
-}
-
-void Io::wifi_ms_timer() {
-  if (wifi_io[W_USCompareCnt / 2]) {
-    if ((wifi_us_counter_ & ~u64{0x3FF}) == wifi_us_compare_) { wifi_block_beacon14_ = false; wifi_set_irq14(0); }
-  }
-  if (wifi_io[W_BeaconCount1 / 2] != 0) {
-    wifi_io[W_BeaconCount1 / 2]--;
-    if (wifi_io[W_BeaconCount1 / 2] == 0) wifi_set_irq14(1);
-  }
-  if (wifi_io[W_BeaconCount1 / 2] == 0) wifi_io[W_BeaconCount1 / 2] = wifi_io[W_BeaconInterval / 2];
-  if (wifi_io[W_BeaconCount2 / 2] != 0) {
-    wifi_io[W_BeaconCount2 / 2]--;
-    if (wifi_io[W_BeaconCount2 / 2] == 0) wifi_set_irq13();
-  }
-}
-
-void Io::wifi_us_timer() {
-  wifi_us_timestamp_ += WIFI_US_INTERVAL;
-  if (wifi_us_until_power_on_ < 0) {
-    wifi_us_until_power_on_ += WIFI_US_INTERVAL;
-    if (wifi_us_until_power_on_ >= 0) { wifi_us_until_power_on_ = 0; wifi_power_on_done(); }
-  }
-  if (wifi_io[W_USCountCnt / 2]) {
-    wifi_us_counter_ += WIFI_US_INTERVAL;
-    const u32 uspart = static_cast<u32>(wifi_us_counter_ & 0x3FF);
-    if (wifi_io[W_USCompareCnt / 2]) {
-      const u32 beaconus = (static_cast<u32>(wifi_io[W_BeaconCount1 / 2]) << 10) | (0x3FF - uspart);
-      if ((beaconus & WIFI_TIME_CHECK_MASK) == (wifi_io[W_PreBeacon / 2] & WIFI_TIME_CHECK_MASK)) wifi_set_irq15();
-    }
-    if (!(uspart & WIFI_TIME_CHECK_MASK)) wifi_ms_timer();
-  }
-  if (wifi_io[W_CmdCountCnt / 2] & 1) {
-    if (wifi_cmd_counter_ > 0) wifi_cmd_counter_ = wifi_cmd_counter_ < static_cast<u32>(WIFI_US_INTERVAL) ? 0 : wifi_cmd_counter_ - WIFI_US_INTERVAL;
-  }
-  if (wifi_io[W_ContentFree / 2] != 0) {
-    if (wifi_io[W_ContentFree / 2] < WIFI_US_INTERVAL) wifi_io[W_ContentFree / 2] = 0;
-    else wifi_io[W_ContentFree / 2] -= WIFI_US_INTERVAL;
-  }
-  // No frames are modelled: a TX request would start melonDS's ProcessTX
-  // here. Flag it so a title that transmits is not silently different.
-  if (wifi_io[W_TXBusy / 2]) { static bool once = false; if (!once) { once = true; std::fprintf(stderr, "[wifi] TX slot busy: frame transmission is not modelled\n"); } }
-  else wifi_rx_counter_ += WIFI_US_INTERVAL;
-  wifi_schedule_timer(false);
-}
-
-void Io::wifi_power_on_done() {
-  wifi_power_on_pending = false;
-  wifi_io[W_PowerState / 2] = 0;
-  wifi_set_status(1);
-  wifi_update_power(0);
-}
-
-void Io::wifi_update_power(int power) {
-  // W_PowerForce overrides all else; W_ModeReset bit 0 clear forces the
-  // transceiver off; otherwise IRQ13/15 or W_PowerState turn it on or off
-  // per the mode in W_ModeWEP, with W_PowerDownCtrl inhibiting a power-down.
-  int cur = 0;
-  if (wifi_io[W_TRXPower / 2] == 1) cur |= 1;
-  if (!(wifi_io[W_PowerState / 2] & 0x0200)) cur |= 2;
-  int req = cur;
-  if (wifi_io[W_PowerForce / 2] & 0x8000) req = (wifi_io[W_PowerForce / 2] & 1) ? 0 : 3;
-  else if (!(wifi_io[W_ModeReset / 2] & 1)) req = 0;
-  else {
-    if (power == 0) {
-      if ((wifi_io[W_PowerState / 2] & 0x0202) == 0x0202) power = 1;
-      else if ((wifi_io[W_PowerState / 2] & 0x0201) == 0x0001) power = -1;
-    }
-    if (power == -1 && (wifi_io[W_PowerDownCtrl / 2] & 1)) power = 0;
-    if (power == 1) req = 3;
-    else if (power == -1) req = wifi_io[W_PowerDownCtrl / 2] ? 3 : 0;
-    else if (wifi_io[W_PowerDownCtrl / 2] & 2) req = 3;
-  }
-  if (req == cur) return;
-  if (req & 1) { if (!(cur & 1)) { wifi_io[W_TRXPower / 2] = 1; wifi_set_status(1); } }
-  else { wifi_io[W_TRXPower / 2] = 0; wifi_set_status(9); }   // nothing in flight: no frames are modelled
-  if (req & 2) {
-    wifi_io[W_PowerState / 2] |= 0x0100;
-    // The 2048 us power-on delay counts down in the 8 us timer (melonDS
-    // USUntilPowerOn), so it only elapses while the block is powered.
-    if (!(cur & 2) && wifi_us_until_power_on_ == 0) { wifi_us_until_power_on_ = -2048; wifi_set_irq(11); }
-  } else {
-    wifi_io[W_PowerState / 2] &= static_cast<u16>(~0x0101);
-    wifi_io[W_PowerState / 2] |= 0x0200;
-    wifi_us_until_power_on_ = 0;
-  }
-}
-
-u16 Io::wifi_read16(u32 addr) {
-  if (!(powcnt2 & 2)) return 0;
-  const u32 a = addr & 0x7FFE;
-  if (a >= 0x4000 && a < 0x6000) { u16 v; std::memcpy(&v, &wifi_ram[a & 0x1FFE], 2); return v; }
-  if (a >= 0x2000 && a < 0x4000) return 0xFFFF;
-  const u32 r = a & 0xFFF;
-  switch (r) {
-  case W_Random:
-    wifi_random = static_cast<u16>((wifi_random & 1) ^ (((wifi_random & 0x3FF) << 1) | (wifi_random >> 10)));
-    return wifi_random;
-  case W_Preamble: return wifi_io[r / 2] & 3;
-  case W_USCount0: case W_USCount0 + 2: case W_USCount0 + 4: case W_USCount0 + 6: return static_cast<u16>(wifi_us_counter_ >> ((r - W_USCount0) * 8));
-  case W_USCompare0: case W_USCompare0 + 2: case W_USCompare0 + 4: case W_USCompare0 + 6: return static_cast<u16>(wifi_us_compare_ >> ((r - W_USCompare0) * 8));
-  case W_CmdCount: return static_cast<u16>((wifi_cmd_counter_ + 9) / 10);
-  case W_BBRead:
-    if ((wifi_io[W_BBCnt / 2] & 0xF000) != 0x6000) return 0;
-    return wifi_bb[wifi_io[W_BBCnt / 2] & 0xFF];
-  case W_BBBusy: case W_RFBusy: return 0;
-  case W_TXBusy: return wifi_io[r / 2] & 0x1F;
-  case W_CMDStat0: case W_CMDStat0 + 2: case W_CMDStat0 + 4: case W_CMDStat0 + 6:
-  case W_CMDStat0 + 8: case W_CMDStat0 + 10: case W_CMDStat0 + 12: case W_CMDStat0 + 14: {
-    const u16 v = wifi_io[r / 2]; wifi_io[r / 2] = 0; return v;
-  }
-  default: return wifi_io[r / 2];
-  }
-}
-
-void Io::wifi_write16(u32 addr, u16 value) {
-  if (!(powcnt2 & 2)) return;
-  const u32 a = addr & 0x7FFE;
-  if (a >= 0x4000 && a < 0x6000) { std::memcpy(&wifi_ram[a & 0x1FFE], &value, 2); return; }
-  if (a >= 0x2000 && a < 0x4000) return;
-  const u32 r = a & 0xFFF;
-  switch (r) {
-  case W_ID: return;
-  case W_IF: wifi_io[r / 2] &= ~value; return;
-  case W_IFSet: wifi_io[W_IF / 2] |= value & 0xFBFF; return;
-  case W_ModeReset: {
-    const u16 old = wifi_io[r / 2];
-    wifi_io[r / 2] = value & 1;
-    if ((old ^ value) & 1) { wifi_io[0x27C / 2] = (value & 1) ? 0x0005 : 0x000A; wifi_update_power(0); }
-    if (value & 0x4000) wifi_io[W_ModeWEP / 2] = 0;
-    return;
-  }
-  case W_PowerUS: wifi_io[r / 2] = value & 3; wifi_update_power_on(); return;
-  case W_IE: { const u16 old = wifi_io[W_IF / 2] & wifi_io[W_IE / 2]; wifi_io[r / 2] = value; if (old == 0 && (wifi_io[W_IF / 2] & value)) request_irq(Cpu::ARM7, IRQ_WIFI); return; }
-  case W_USCountCnt: wifi_io[r / 2] = value & 1; return;
-  case W_USCompareCnt: if (value & 2) wifi_set_irq14(2); wifi_io[r / 2] = value & 1; return;
-  case W_USCount0: case W_USCount0 + 2: case W_USCount0 + 4: case W_USCount0 + 6: {
-    const u32 sh = (r - W_USCount0) * 8; wifi_us_counter_ = (wifi_us_counter_ & ~(u64{0xFFFF} << sh)) | (static_cast<u64>(value) << sh); return;
-  }
-  case W_USCompare0: {
-    wifi_us_compare_ = (wifi_us_compare_ & ~u64{0xFFFF}) | (value & 0xFC00);
-    if (value & 1) wifi_block_beacon14_ = true;
-    return;
-  }
-  case W_USCompare0 + 2: case W_USCompare0 + 4: case W_USCompare0 + 6: {
-    const u32 sh = (r - W_USCompare0) * 8; wifi_us_compare_ = (wifi_us_compare_ & ~(u64{0xFFFF} << sh)) | (static_cast<u64>(value) << sh); return;
-  }
-  case W_CmdCount: wifi_cmd_counter_ = value * 10u; return;
-  case W_PowerTX:
-    wifi_io[r / 2] = value & 3;
-    if (value & 2) {
-      if ((wifi_io[W_ModeWEP / 2] & 7) == 1) wifi_io[W_PowerDownCtrl / 2] |= 2;
-      else if ((wifi_io[W_ModeWEP / 2] & 7) == 2) wifi_io[W_PowerDownCtrl / 2] = 3;
-      wifi_update_power(0);
-    }
-    return;
-  case W_PowerState: {
-    if ((wifi_io[W_ModeWEP / 2] & 7) != 3) return;
-    u16 v = static_cast<u16>((wifi_io[r / 2] & 0x0300) | (value & 0x0003));
-    if ((v & 0x0300) == 0x0200) v &= ~1; else v &= ~2;
-    if (!(v & 0x0200)) v &= ~0x0100;
-    wifi_io[r / 2] = v;
-    wifi_update_power(0);
-    return;
-  }
-  case W_PowerForce: wifi_io[r / 2] = value & 0x8001; wifi_update_power(0); return;
-  case W_PowerDownCtrl:
-    wifi_io[r / 2] = value & 3;
-    if (wifi_io[W_PowerTX / 2] & 2) {
-      if ((wifi_io[W_ModeWEP / 2] & 7) == 1) wifi_io[r / 2] |= 2;
-      else if ((wifi_io[W_ModeWEP / 2] & 7) == 2) wifi_io[r / 2] = 3;
-    }
-    wifi_update_power(0);
-    return;
-  case W_BBCnt:
-    wifi_io[r / 2] = value;
-    if ((value & 0xF000) == 0x5000) { const u32 id = value & 0xFF; if (!wifi_bb_ro[id]) wifi_bb[id] = static_cast<u8>(wifi_io[W_BBWrite / 2]); }
-    return;
-  case W_RFData2: {
-    wifi_io[r / 2] = value;
-    if (wifi_rf_version == 3) {
-      const u32 id = (wifi_io[W_RFData1 / 2] >> 8) & 0x3F, cmd = value & 0xF;
-      if (cmd == 6) wifi_io[W_RFData1 / 2] = static_cast<u16>((wifi_io[W_RFData1 / 2] & 0xFF00) | (wifi_rf[id] & 0xFF));
-      else if (cmd == 5) wifi_rf[id] = wifi_io[W_RFData1 / 2] & 0xFF;
-    } else {
-      const u32 id = (value >> 2) & 0x1F;
-      if (value & 0x80) { const u32 d = wifi_rf[id]; wifi_io[W_RFData1 / 2] = static_cast<u16>(d); wifi_io[r / 2] = static_cast<u16>((value & 0xFFFC) | ((d >> 16) & 3)); }
-      else wifi_rf[id] = wifi_io[W_RFData1 / 2] | ((value & 3) << 16);
-    }
-    return;
-  }
-  default: wifi_io[r / 2] = value; return;
-  }
-}
-
 // ---- divider / square root --------------------------------------------------
 // Results appear after 18/34 (DIV, 32/64-bit) and 13 (SQRT) system cycles;
 // the busy bit is set meanwhile. Edge cases follow the hardware as documented
@@ -1318,7 +1033,7 @@ Io::Special Io::write32_special(Cpu cpu, u32 addr, u32 value) {
 u32 Io::read16(Cpu cpu, u32 addr) {
   CpuIo& c = cpu_io[ci(cpu)];
   const bool a9 = cpu == Cpu::ARM9;
-  if (!a9 && addr >= 0x04800000 && addr < 0x04810000) return wifi_read16(addr);
+  if (!a9 && addr >= 0x04800000 && addr < 0x04810000) return (powcnt2 & 2) ? wifi.read16(addr) : 0;
   switch ((addr - 0x04000000u) >> 1) {   // dense halfword/word index: GCC emits a jump table (a switch on the full address was a compare tree)
   case 0x2: return dispstat[ci(cpu)];
   case 0x3: return vcount;
@@ -1370,7 +1085,7 @@ u32 Io::read16(Cpu cpu, u32 addr) {
 void Io::write16(Cpu cpu, u32 addr, u16 value) {
   CpuIo& c = cpu_io[ci(cpu)];
   const bool a9 = cpu == Cpu::ARM9;
-  if (!a9 && addr >= 0x04800000 && addr < 0x04810000) { wifi_write16(addr, value); return; }
+  if (!a9 && addr >= 0x04800000 && addr < 0x04810000) { if (powcnt2 & 2) wifi.write16(addr, value); return; }
   switch ((addr - 0x04000000u) >> 1) {   // dense halfword/word index: GCC emits a jump table (a switch on the full address was a compare tree)
   case 0x2: dispstat[ci(cpu)] = (dispstat[ci(cpu)] & 0x0047) | (value & 0xFFB8); return;   // bit 6 (DSi LCD init flag) is read-only, never set on a DS
   case 0x80: case 0x82: case 0x84: case 0x86: c.timers[(addr - 0x04000100) / 4].reload = value; return;
@@ -1441,7 +1156,7 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   case 0x184: if (!a9 && arm7_bios_prot == 0) arm7_bios_prot = value & 0xFFFE; return;   // BIOSPROT: write-once
   case 0x182:
     if (a9) { powcnt1 = value & 0x820F; nds_.gpu.set_powcnt(powcnt1); }
-    else { const u16 old = powcnt2; powcnt2 = value & 0x0003; nds_.spu.set_powcnt2(powcnt2); if ((old ^ powcnt2) & 2) { nds_.bus.update_wifi_timings(); wifi_update_power_on(); } }
+    else { const u16 old = powcnt2; powcnt2 = value & 0x0003; nds_.spu.set_powcnt2(powcnt2); if ((old ^ powcnt2) & 2) { nds_.bus.update_wifi_timings(); wifi.update_power_on(); } }
     return;
   default: break;
   }
@@ -1880,12 +1595,13 @@ template <class S> void Io::sync_state(S& s) {
   s.fields(cart.auxspicnt, cart.auxspidata, cart.romctrl, cart.cmd, cart.transfer_pos, cart.transfer_len, cart.fifo_count, cart.fifo, cart.fifo_head,
            cart.late, cart.next_word_at, cart.event_armed);
   s.fields(math.divcnt, math.sqrtcnt, math.div_num, math.div_den, math.div_quot, math.div_rem, math.sqrt_val, math.sqrt_res);
-  s.fields(wifi_ram, wifi_io, wifi_bb, wifi_bb_ro, wifi_rf, wifi_rf_version, wifi_random);
+  wifi.sync_state_regs(s);
   s.fields(math.div_ready_at, math.sqrt_ready_at, math.div_pending, math.sqrt_pending, spi_ready_at, cart.bulk);   // appended: older states leave them at rest
   s.fields(wifi_power_on_pending);
   s.fields(rcnt);   // appended
   s.fields(wifiwaitcnt);   // appended
-  s.fields(wifi_on_, wifi_timer_err_, wifi_us_timestamp_, wifi_us_counter_, wifi_us_compare_, wifi_us_until_power_on_, wifi_cmd_counter_, wifi_rx_counter_, wifi_block_beacon14_);   // appended (DSi)
+  wifi.sync_state_timer(s);   // appended (DSi)
+  wifi.sync_state_engine(s);  // appended (frames)
   if constexpr (S::reading) nds_.bus.update_wifi_timings();
   s.end();
   if (nds_.dsi) {
@@ -1911,7 +1627,7 @@ template <class S> void Io::sync_state(S& s) {
     nds_.sched.rebind(EventId::Div, ev_div);
     nds_.sched.rebind(EventId::Sqrt, ev_sqrt);
     nds_.sched.rebind(EventId::LcdIrq, ev_lcd_irq);
-    nds_.sched.rebind(EventId::Wifi, ev_wifi_us);
+    nds_.sched.rebind(EventId::Wifi, [](NDS& n, u32) { n.io.wifi.us_timer(); });
     // The clock is a property of the session, not of the state: a state saved
     // on a console with a running clock must not stop it on a harness run, or
     // start one there. Whatever this run was set up with keeps going, rebased

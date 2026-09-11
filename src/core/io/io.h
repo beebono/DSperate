@@ -3,6 +3,7 @@
 #pragma once
 #include "core/types.h"
 #include "core/io/dsi_aes.h"
+#include "core/io/wifi.h"
 
 #include <array>
 #include <vector>
@@ -251,49 +252,13 @@ public:
   // Called from every ROMCTRL and ROMDATA read, so the no-transfer case is a
   // compare and a branch at the call site.
   void cart_catch_up() { if (cart.transfer_pos < cart.transfer_len) cart_catch_up_slow(); }
-  // Wi-Fi (ARM7, 0x04800000-0x0480FFFF). Register file, 8 KB RAM, baseband
-  // and RF register indirection — enough for games' hardware probing. No
-  // frames, timers or interrupts yet. Power-gated by POWCNT2 bit 1.
-  std::array<u8, 0x2000> wifi_ram{};
-  std::array<u16, 0x800> wifi_io{};
-  std::array<u8, 0x100> wifi_bb{}, wifi_bb_ro{};
-  std::array<u32, 0x40> wifi_rf{};
-  u8  wifi_rf_version = 2;
-  u16 wifi_random = 1;
-  // Transceiver power management (melonDS's UpdatePowerStatus): W_POWERFORCE,
-  // W_MODE_RST, W_POWERSTATE and W_POWER_TX drive W_TRXPOWER/W_RFSTATUS and
-  // the W_POWERSTATE flags, with a 2048 us power-on delay. Games shut the
-  // radio down before loading a save and spin on W_POWERSTATE until the
-  // power-off shows (Pokemon Platinum on CONTINUE).
-  // Retired: the delay now counts down in the timer. Kept only so the IO
-  // state chunk keeps its layout; always false.
+  // The Wi-Fi block (ARM7, 0x04800000-0x0480FFFF): wifi.h. Reads and writes
+  // are gated here on POWCNT2 bit 1; the block's timer runs off the Wifi
+  // scheduler event.
+  Wifi wifi;
+  // Retired: the DS's one-shot power-on event, now a countdown in the Wi-Fi
+  // timer. Kept only so the IO state chunk keeps its layout; always false.
   bool wifi_power_on_pending = false;
-  // melonDS's Wi-Fi microsecond timer (Wifi::USTimer), one event every 8 us
-  // while POWCNT2 powers the Wi-Fi (and, on a DS, W_POWER_US bit 0 is clear;
-  // a title that never touches the radio pays nothing). It drives the power-on countdown,
-  // W_USCOUNT/W_USCOMPARE, the beacon and command counters -- and its events
-  // bound the slices, which the trace harness sees. The DS keeps the lazy
-  // single power-on event (its scene hashes are gated on that interleave).
-  bool wifi_on_ = false;
-  s32  wifi_timer_err_ = 0;
-  u64  wifi_us_timestamp_ = 0, wifi_us_counter_ = 0, wifi_us_compare_ = 0;
-  s32  wifi_us_until_power_on_ = 0;
-  u32  wifi_cmd_counter_ = 0, wifi_rx_counter_ = 0;
-  bool wifi_block_beacon14_ = false;
-  void wifi_update_power_on();
-  void wifi_schedule_timer(bool first);
-  void wifi_us_timer();
-  void wifi_ms_timer();
-  void wifi_set_irq13();
-  void wifi_set_irq14(int source);
-  void wifi_set_irq15();
-  void wifi_reset();
-  void wifi_update_power(int power);      // 1 = on, 0 = no change, -1 = off
-  void wifi_set_status(u32 status);
-  void wifi_power_on_done();
-  void wifi_set_irq(u32 irq);
-  u16  wifi_read16(u32 addr);
-  void wifi_write16(u32 addr, u16 value);
   // Level-sensitive IRQ sources (the GX FIFO) set and clear their IF bit.
   void set_irq_line(Cpu cpu, u32 bit, bool on);
   MathUnit math;
