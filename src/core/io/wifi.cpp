@@ -460,8 +460,10 @@ void Wifi::send_mp_reply(u16 clienttime, u16 clientmask) {
   if (reg(W_TXSlotReply2) & 0x8000) ram16(slot.addr, 0x0001);
   // CHECKME (melonDS): can the reply rate be set, or does it follow the CMD's?
   slot.rate = 2;
-  reg(W_TXSlotReply2) = reg(W_TXSlotReply1);
-  reg(W_TXSlotReply1) = 0;
+  // Experiment (DS_WIFI_REPLY_KEEP=1): a CMD arriving before the next reply
+  // is armed re-sends the last one instead of an empty reply.
+  static const bool keep = std::getenv("DS_WIFI_REPLY_KEEP") != nullptr;
+  if (!keep || (reg(W_TXSlotReply1) & 0x8000)) { reg(W_TXSlotReply2) = reg(W_TXSlotReply1); reg(W_TXSlotReply1) = 0; }
   if (!(reg(W_TXSlotReply2) & 0x8000)) slot.valid = false;
   else {
     slot.valid = true;
@@ -471,6 +473,7 @@ void Wifi::send_mp_reply(u16 clienttime, u16 clientmask) {
     const u32 duration = preamble_len(slot.rate) + slot.length * (slot.rate == 2 ? 4 : 8);
     if (duration > clienttime) slot.valid = false;
   }
+  if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# reply %s len %u clienttime %u\n", slot.valid ? "data" : "empty", slot.valid ? slot.length : 0u, clienttime);
   if (slot.valid) { slot.cur_phase = 0; tx_send_frame(slot, 5); }
   else { slot.cur_phase = 10; send_mp_default_reply(); }
   u16 clientnum = 0;
@@ -764,6 +767,7 @@ void Wifi::finish_rx() {
   if ((rxflags & 0x800F) == 0x800C) {
     // reply to CMD frames
     const u16 clientmask = ld16(&rx_buffer_[0xC + 26]);
+    if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# CMD rx seq %04X len %u reply1 %04X reply2 %04X us %llX\n", seqno, ld16(&rx_buffer_[8]), reg(W_TXSlotReply1), reg(W_TXSlotReply2), (unsigned long long)us_timestamp_);
     if (reg(W_AIDLow) && (clientmask & (1 << reg(W_AIDLow)))) send_mp_reply(ld16(&rx_buffer_[0xC + 24]), clientmask);
     else if (mp_) mp_->send_reply(nullptr, 0, us_timestamp_, 0);   // a blank, so the host has something to receive instead of a timeout
   } else if ((rxflags & 0x800F) == 0x8001) {
