@@ -56,6 +56,7 @@
 #include <atomic>
 #include <ctime>
 #include <string>
+#include <random>
 #include <vector>
 
 namespace {
@@ -1110,6 +1111,7 @@ int main(int argc, char** argv) {
   {
     std::string err;
     if (!nds.load_bios(bios9, bios7, fw, user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
+    if (lan_host || lan_join || netplay) { std::random_device rd; nds.set_wifi_mac_suffix(rd() & 0xFFFFFF); }   // a MAC of our own: see NDS::set_wifi_mac_suffix
   }
   // A configured path that names no file falls back the same as none: the
   // stock ini on a handheld points at files the user may never add.

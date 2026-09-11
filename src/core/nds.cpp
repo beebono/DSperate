@@ -9,6 +9,7 @@
 #include "core/cpu/interp/interp.h"
 #include "core/cpu/cp15.h"
 #include "core/cart/zip.h"
+#include "core/bios/freebios.h"
 #include "core/cart/zip_cache.h"
 
 #include <cstdio>
@@ -356,6 +357,13 @@ bool NDS::load_rom_source(std::unique_ptr<cart::RomSource> src) {
 
 // Mirrors what the firmware leaves behind when it launches a card (values per
 // GBATEK "DS Firmware Boot" and melonDS's direct-boot setup).
+void NDS::set_wifi_mac_suffix(u32 suffix) {
+  if (firmware.size() < 0x200) return;
+  firmware[0x39] = static_cast<u8>(suffix >> 16); firmware[0x3A] = static_cast<u8>(suffix >> 8); firmware[0x3B] = static_cast<u8>(suffix);
+  u16 len; std::memcpy(&len, &firmware[0x2C], 2);
+  if (0x2C + len <= firmware.size()) { const u16 crc = bios::crc16(&firmware[0x2C], len, 0x0000); std::memcpy(&firmware[0x2A], &crc, 2); }
+}
+
 void NDS::setup_direct_boot() {
   if (!cart) return;
   if (dsi) { setup_direct_boot_dsi(); return; }

@@ -19,6 +19,7 @@
 
 #include <cstdio>
 #include <thread>
+#include <random>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -227,6 +228,7 @@ int main(int argc, char** argv) {
   {
     std::string err;
     if (!nds.load_bios(bios9 ? bios9 : "", bios7 ? bios7 : "", fw ? fw : "", {}, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
+    if (lan_host || lan_join || netplay) { std::random_device rd; nds.set_wifi_mac_suffix(rd() & 0xFFFFFF); }   // a MAC of our own: see NDS::set_wifi_mac_suffix
   }
   if (!nds.bios_native) std::fprintf(stderr, "note: --bios9/--bios7 %s; using the built-in FreeBIOS (direct boot only, timing is not Nintendo's)\n", bios9 ? "not found" : "not given");
   {

@@ -569,6 +569,7 @@ bool Wifi::process_tx(TxSlot& slot, int num) {
       u16 res = 0;
       if (mp_client_mask_ && mp_) res = mp_->recv_replies(mp_client_replies_.data(), us_timestamp_, mp_client_mask_);
       mp_client_fail_ &= static_cast<u16>(~res);
+      WIFI_LOG("CMD done: clients %04X replied %04X fail %04X cmdcount %u\n", mp_client_mask_, res, mp_client_fail_, cmd_counter_);
       // TODO (melonDS): 112 likely includes the ack preamble
       slot.cur_phase = 2;
       slot.cur_phase_time = 112 + (10 + reg(W_CmdReplyTime)) * static_cast<s32>(num_clients(mp_client_mask_));
@@ -614,6 +615,7 @@ bool Wifi::process_tx(TxSlot& slot, int num) {
     break;
   }
   case 3: {   // MP host ack transfer (reply wait done)
+    WIFI_LOG("CMD result: fail %04X\n", mp_client_fail_);
     ram16(slot.addr, mp_client_fail_ ? 0x0005 : 0x0001);
     // this is set to indicate which clients failed to reply
     ram16(slot.addr + 2, mp_client_fail_);
@@ -779,6 +781,7 @@ void Wifi::mp_client_reply_rx(int client) {
   if (reg(W_RXBufBegin) == reg(W_RXBufEnd)) return;
   const u8* reply = &mp_client_replies_[(client - 1) * 1024];
   int framelen = ld16(&reply[10]);
+  WIFI_LOG("MP reply from client %d: FC:%04X len=%d\n", client, ld16(&reply[12]), framelen);
   const u8 txrate = reply[8];
   const u16 framectl = ld16(&reply[12]);
   if (framectl & 0x4000) {

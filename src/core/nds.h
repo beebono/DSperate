@@ -103,6 +103,12 @@ struct NDS {
   u32  user_settings_offset() const;
   bool write_user_settings(UserField field, const bios::UserSettings& in);
   void setup_direct_boot();          // skip the firmware: load the ROM's binaries and jump to them
+  // Give this console its own Wi-Fi MAC: the firmware's OUI with `suffix`
+  // as the low three bytes, checksum fixed. Every instance booted from one
+  // dump shares a MAC otherwise, and local wireless titles tell players
+  // apart by it (PictoChat drops a message from its own MAC). Call before
+  // the boot; in-memory only, never written back.
+  void set_wifi_mac_suffix(u32 suffix);
   void setup_direct_boot_dsi();      // the DSi machine's version (nds_dsi.cpp)
 
   // Firmware settings persistence.
