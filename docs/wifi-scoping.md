@@ -483,3 +483,34 @@ Two model details settled on the way, both kept:
   the end of the CMD as melonDS does (`mp_reply_pending_`). Which buffer
   answers stays decided at the CMD, as the REPLY1 -> REPLY2 move is.
   Latching the buffer itself late was tried and is wrong (replies vanish).
+
+### Cut Off, and the session's real length (2026-09-11)
+
+The host's "Touch Cut Off to begin racing" was tried while the guest was
+in the racer list (it is, for ~300 frames after joining; the button is at
+(147,166) on the host's bottom screen then). 70 frames after the tap the
+host shows "Communication error. Press the A Button." -- because by then
+the guest had already gone: the session lives only ~5 s of Wi-Fi time on
+both emulators. Sequence, from the host's trace: NameRequests, username
+snippets, the RSA frame three times, the RsaReply (in some runs; in others
+the guest stops arming replies right after the RSA frames), then dummies
+until the host gives the client up. The guest falls back to "Looking for
+software" on its own about 1.5 s after the RSA exchange, so the 15-20 s
+the user saw on the device is the host's patience, not the guest's.
+
+An ARM7/ARM9 PC histogram of the guest in that phase shows no Wi-Fi wait
+loop (idle ARM7, a plain ARM9 loop), so the firmware's DL client has
+decided to abort rather than being stuck. What it checks is the open
+question. Open leads, in order:
+
+1. Does the real melonDS frontend (two instances, LocalMP) complete Mario
+   Kart DS Download Play at all? Not buildable here (no Qt); a five-minute
+   test on a machine with melonDS installed settles whether the model can
+   do it. If it can, the harness differs from the frontend somewhere.
+2. The client-side abort: trace the guest's ARM9 from the RSA frame to
+   the deauth with `--trace` and find the branch that gives up (the
+   firmware's DL client is in the dump; the reads it makes of the RX
+   header words and the beacon's LCD-sync field are the candidates GBATEK
+   points at).
+3. A second Download Play host title, to separate Mario Kart's checks
+   from the model's.
