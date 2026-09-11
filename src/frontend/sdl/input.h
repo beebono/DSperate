@@ -39,7 +39,7 @@ public:
   // take 30 ms) still count as held for this frame: the release lands on
   // the next one, so the game sees every tap.
   input::Frame frame() {
-    const input::Frame f{static_cast<u16>(buttons_ | pressed_ | stick_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_ || touched_ || stylus_down_};
+    const input::Frame f{static_cast<u16>(buttons_ | pressed_ | stick_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_ || touched_ || stylus_down_ != 0};
     pressed_ = 0; stick_pressed_ = 0; touched_ = false;
     // The menu's fallback presses (menu_fallback) never reach the guest, and
     // they die with the frame they happened on: an unbound Escape pressed
@@ -125,6 +125,8 @@ public:
   static const char* mod_default(bool pad);
   static const char* stylus_button_default();
   static const char* stylus_dpad_default();
+  static const char* stick_face_default();
+  static const char* stick_dpad_default();
   static const char* stylus_axis_default(const Config& cfg);
   // A captured stick axis as the stick it belongs to ("left"/"right"), or
   // nullptr when what was captured is not a stick at all.
@@ -136,7 +138,9 @@ public:
   // "<action>.alt" in the config (hotkeys.pause.alt, padhotkeys.pause.alt).
   // It has no built-in default -- the first binding is the layout the device
   // was designed around -- so it starts unset and only exists if the player
-  // sets it. DS buttons have no second binding.
+  // sets it. DS buttons have no second binding; the pen's tap button takes
+  // one too (pad.stylus_button.alt), since a handheld often has two controls
+  // that are comfortable to tap with.
   static constexpr int HOT_SLOTS = 2;
   static const char* hot_suffix(int slot) { return slot == 1 ? ".alt" : ""; }
 
@@ -168,6 +172,9 @@ private:
   bool key_down(SDL_Keycode k, bool down);
   bool pad_down(const Bind& b, bool down);   // a button or axis edge; true if consumed
   void axis(Uint8 which, Sint16 value);
+  // A stick as four DS buttons (the left stick as the d-pad, or either as
+  // X/B/Y/A): held while past the deadzone, with edges for the pause menu.
+  void stick_as_buttons(Sint16 value, io::Io::Button neg, io::Io::Button pos);
   bool capture_event(const SDL_Event& e);
   bool axis_moved(int axis, int value) const;    // past the deadzone this axis needs
   bool is_pad_mod_button(int sdl_button) const;   // the pad's hotkey modifier
@@ -206,9 +213,14 @@ private:
   int  pad_mod_button_ = -1;   // the DS button the pad modifier would otherwise be
   bool axis_state_[SDL_CONTROLLER_AXIS_MAX][2] = {};   // per axis: - and + past the threshold
   enum class StylusAxis : u8 { None, Right, Left };
-  bool stick_dpad_ = true, stylus_down_ = false;
+  // A stick's name as the config spells it: none | left | right. The old
+  // stick_dpad = true/false still parse as left/none.
+  static bool parse_stick(const std::string& s, StylusAxis& out);
   StylusAxis stylus_axis_ = StylusAxis::Right;
-  Bind stylus_button_;         // pressing it touches at the pen's position
+  StylusAxis stick_dpad_ = StylusAxis::Left;   // pad.stick_dpad: a stick that also works the d-pad
+  StylusAxis stick_face_ = StylusAxis::None;   // pad.stick_face: a stick that also works X/B/Y/A (up/down/left/right)
+  Bind stylus_button_[HOT_SLOTS];   // pressing either touches at the pen's position (pad.stylus_button, .alt)
+  u8   stylus_down_ = 0;            // which of them is held, a bit per slot
   Bind stylus_chord_;          // while held, the d-pad moves the pen instead of the game
   bool stylus_chord_down_ = false;
   u32  stylus_dpad_ = 0;       // d-pad directions held under the chord (bit per DS button)

@@ -871,9 +871,15 @@ struct Extra { const char* key_keys; const char* key_pad; const char* label; };
 constexpr Extra kExtras[] = {
   {"hotkeys.modifier", "padhotkeys.modifier", "MODIFIER"},
   {nullptr,            "pad.stylus_button",   "STYLUS TAP"},
+  {nullptr,            "pad.stylus_button.alt", "STYLUS TAP (2)"},
   {nullptr,            "pad.stylus_axis",     "STYLUS STICK"},
   {nullptr,            "pad.stylus_dpad",     "STYLUS DPAD"},
+  {nullptr,            "pad.stick_dpad",      "STICK DPAD"},
+  {nullptr,            "pad.stick_face",      "STICK ABXY"},
 };
+// The rows that hold a stick rather than a control: a captured axis is
+// stored as the stick it belongs to, and the value reads as one.
+bool extra_is_stick(const char* key) { return std::strcmp(key, "pad.stylus_axis") == 0 || std::strcmp(key, "pad.stick_dpad") == 0 || std::strcmp(key, "pad.stick_face") == 0; }
 bool extra_in_column(const Extra& e, bool pad) { return pad || e.key_keys; }
 int extra_count(bool pad) {
   int n = 0;
@@ -892,8 +898,11 @@ const char* extra_key(const Extra& e, bool pad) { return pad ? e.key_pad : e.key
 // resetting it: two would drift the moment a default changed.
 const char* extra_default(const char* key, bool pad, const ds::sdl::Config& cfg) {
   if (std::strcmp(key, "pad.stylus_button") == 0) return ds::sdl::Input::stylus_button_default();
+  if (std::strcmp(key, "pad.stylus_button.alt") == 0) return "none";   // a second binding has no default (input.h)
   if (std::strcmp(key, "pad.stylus_axis") == 0)   return ds::sdl::Input::stylus_axis_default(cfg);
   if (std::strcmp(key, "pad.stylus_dpad") == 0)   return ds::sdl::Input::stylus_dpad_default();
+  if (std::strcmp(key, "pad.stick_face") == 0)    return ds::sdl::Input::stick_face_default();
+  if (std::strcmp(key, "pad.stick_dpad") == 0)    return ds::sdl::Input::stick_dpad_default();
   return ds::sdl::Input::mod_default(pad);
 }
 
@@ -1869,9 +1878,10 @@ sdl_ready:
     std::string extra_value(const Extra& e, bool pad) const {
       const char* key = extra_key(e, pad);
       const std::string v = cfg.str(key, extra_default(key, pad, cfg));
-      // A stick, not an axis: that row names the stick the pen follows.
-      if (std::strcmp(key, "pad.stylus_axis") == 0)
-        return v == "left" ? "LEFT STICK" : v == "right" ? "RIGHT STICK" : "NONE";
+      // A stick, not an axis: that row names the stick the pen follows, or
+      // the one that works the face buttons.
+      if (extra_is_stick(key))   // true/false: stick_dpad's old spellings (Input::parse_stick)
+        return v == "left" || v == "true" || v == "1" ? "LEFT STICK" : v == "right" ? "RIGHT STICK" : "NONE";
       return pad ? ds::sdl::Input::pad_label(v) : upper(v);
     }
 
@@ -1920,10 +1930,11 @@ sdl_ready:
 
     void bind(const std::string& key, const std::string& value0) override {
       std::string value = value0;
-      // The pen follows a stick, so this row stores which one rather than the
-      // axis the player happened to push. Anything that is not a stick says
-      // nothing about that and is left alone -- the row keeps what it had.
-      if (key == "pad.stylus_axis" && value != "none") {
+      // The pen follows a stick, and so do the stick-as-buttons rows, so
+      // these store which one rather than the axis the player happened to
+      // push. Anything that is not a stick says nothing about that and is
+      // left alone -- the row keeps what it had.
+      if (extra_is_stick(key.c_str()) && value != "none") {
         const char* stick = ds::sdl::Input::stylus_axis_of(value);
         if (!stick) return;
         value = stick;
@@ -1932,7 +1943,7 @@ sdl_ready:
       // tap: both are matched by the control alone, so a "mod+" here would
       // simply never fire.
       if ((key == "hotkeys.modifier" || key == "padhotkeys.modifier" ||
-           key == "pad.stylus_button" || key == "pad.stylus_dpad") &&
+           key == "pad.stylus_button" || key == "pad.stylus_button.alt" || key == "pad.stylus_dpad") &&
           value.compare(0, 4, "mod+") == 0)
         value = value.substr(4);
       cfg.set(key, value);

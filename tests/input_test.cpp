@@ -49,6 +49,16 @@ struct InputTestAccess {
     return in.capture_event(e);
   }
   static bool reachable(const Input& in, int b) { return in.reachable(b); }
+  static bool pad(Input& in, SDL_GameControllerButton bt, bool down) {
+    Input::Bind b; b.kind = Input::Bind::PadButton; b.code = bt;
+    return in.pad_down(b, down);
+  }
+  static bool pad_axis(Input& in, SDL_GameControllerAxis a, bool neg, bool down) {
+    Input::Bind b; b.kind = Input::Bind::PadAxis; b.code = a; b.neg = neg;
+    return in.pad_down(b, down);
+  }
+  static void axis(Input& in, SDL_GameControllerAxis a, Sint16 v) { in.axis(a, v); }
+  static bool pen_down(const Input& in) { return in.stylus_down_ != 0; }
   static bool key_free(const Input& in, SDL_Keycode k) { return in.key_control_free(k); }
   static u32 fb_pressed(const Input& in) { return in.menu_fb_pressed_; }
   static u32 fb_held(const Input& in) { return in.menu_fb_held_; }
@@ -289,6 +299,78 @@ void test_pad_labels() {
   for (const auto& p : pairs) CHECK(Input::pad_label(p[0]) == Input::pad_label(p[1]));
 }
 
+// The pen's tap button takes a second binding, pad.stylus_button.alt, and
+// either one taps; releasing one while the other is held keeps the touch.
+void test_stylus_tap_alt_binding() {
+  Rig r; r.set("pad.stylus_button.alt", "+righttrigger"); Input& in = r.go();
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_RIGHTSTICK, true));   // the default tap
+  CHECK(T::pen_down(in));
+  CHECK(T::pad_axis(in, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, false, true));   // the second
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_RIGHTSTICK, false));
+  CHECK(T::pen_down(in));                                       // still held by the alt
+  CHECK(T::pad_axis(in, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, false, false));
+  CHECK(!T::pen_down(in));
+  in.frame();                                                   // the tap itself lasts one frame
+  CHECK(in.frame().down == false);
+  // Unset, the trigger is nobody's: it falls through like any other control.
+  Rig r2; Input& in2 = r2.go();
+  CHECK(!T::pad_axis(in2, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, false, true));
+  CHECK(!T::pen_down(in2));
+}
+
+// pad.stick_face: a stick's four directions are X/B/Y/A, laid out as the DS
+// has them, and the pen's stick is never taken.
+void test_stick_face_buttons() {
+  constexpr u32 kX = 1u << B::BTN_X, kY = 1u << B::BTN_Y;
+  {
+    Rig r; r.set("pad.stick_face", "left"); r.set("pad.stick_dpad", "false"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, -30000);           // up: X
+    CHECK((in.frame().buttons & (kX | kA | kB | kY)) == kX);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, 0);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000);            // right: A
+    CHECK((in.frame().buttons & (kX | kA | kB | kY)) == kA);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, -30000);           // left: Y
+    CHECK((in.frame().buttons & (kX | kA | kB | kY)) == kY);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 0);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, 30000);            // down: B
+    CHECK((in.frame().buttons & (kX | kA | kB | kY)) == kB);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, 0);
+    CHECK((in.frame().buttons & (kX | kA | kB | kY)) == 0);
+    CHECK((in.frame().buttons & (1u << B::BTN_UP)) == 0);   // stick_dpad off: not the d-pad
+  }
+  {
+    // The right stick is the pen by default, so stick_face = right is inert.
+    Rig r; r.set("pad.stick_face", "right"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000);
+    CHECK((in.frame().buttons & (kX | kA | kB | kY)) == 0);
+  }
+  {
+    // Move the pen to the left stick and the right one is free to be ABXY.
+    Rig r; r.set("pad.stick_face", "right"); r.set("pad.stylus_axis", "left"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000);
+    CHECK((in.frame().buttons & (kX | kA | kB | kY)) == kX);
+  }
+  { Config c; CHECK(std::string(Input::stick_face_default()) == "none"); }
+  CHECK(std::string(Input::stick_dpad_default()) == "left");
+}
+
+// pad.stick_dpad names a stick like stick_face does; true/false still read as
+// left/none, so an old config keeps its meaning.
+void test_stick_dpad_names_a_stick() {
+  constexpr u32 kUp = 1u << B::BTN_UP, kDpad = kUp | (1u << B::BTN_DOWN) | (1u << B::BTN_LEFT) | (1u << B::BTN_RIGHT);
+  { Rig r; Input& in = r.go();                                           // default: left
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, -30000); CHECK((in.frame().buttons & kDpad) == kUp); }
+  { Rig r; r.set("pad.stick_dpad", "true"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, -30000); CHECK((in.frame().buttons & kDpad) == kUp); }
+  { Rig r; r.set("pad.stick_dpad", "false"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, -30000); CHECK((in.frame().buttons & kDpad) == 0); }
+  { Rig r; r.set("pad.stick_dpad", "right"); r.set("pad.stylus_axis", "none"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000); CHECK((in.frame().buttons & kDpad) == kUp);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, -30000);  CHECK((in.frame().buttons & kDpad) == kUp); }   // left no longer
+  { Rig r; r.set("pad.stick_dpad", "right"); Input& in = r.go();          // the pen has the right stick
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000); CHECK((in.frame().buttons & kDpad) == 0); }
+}
+
 } // namespace
 } // namespace ds::sdl
 
@@ -306,6 +388,9 @@ int main() {
   ds::sdl::test_stylus_axis_reads_the_stick();
   ds::sdl::test_extra_defaults_match_configure();
   ds::sdl::test_pad_labels();
+  ds::sdl::test_stylus_tap_alt_binding();
+  ds::sdl::test_stick_face_buttons();
+  ds::sdl::test_stick_dpad_names_a_stick();
   std::printf("input tests passed\n");
   return 0;
 }
