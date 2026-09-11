@@ -265,9 +265,12 @@ public:
   // the W_POWERSTATE flags, with a 2048 us power-on delay. Games shut the
   // radio down before loading a save and spin on W_POWERSTATE until the
   // power-off shows (Pokemon Platinum on CONTINUE).
+  // Retired: the delay now counts down in the timer. Kept only so the IO
+  // state chunk keeps its layout; always false.
   bool wifi_power_on_pending = false;
-  // DSi: melonDS's Wi-Fi microsecond timer (Wifi::USTimer), one event every
-  // 8 us while POWCNT2 powers the Wi-Fi. It drives the power-on countdown,
+  // melonDS's Wi-Fi microsecond timer (Wifi::USTimer), one event every 8 us
+  // while POWCNT2 powers the Wi-Fi (and, on a DS, W_POWER_US bit 0 is clear;
+  // a title that never touches the radio pays nothing). It drives the power-on countdown,
   // W_USCOUNT/W_USCOMPARE, the beacon and command counters -- and its events
   // bound the slices, which the trace harness sees. The DS keeps the lazy
   // single power-on event (its scene hashes are gated on that interleave).

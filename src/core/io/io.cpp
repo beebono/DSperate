@@ -864,13 +864,14 @@ void Io::wifi_set_status(u32 status) {
   wifi_io[W_RFPins / 2] = rfpins[status < 10 ? status : 0];
 }
 
-static void ev_wifi_power(NDS& nds, u32) { nds.io.wifi_power_on_done(); }
 static void ev_wifi_us(NDS& nds, u32) { nds.io.wifi_us_timer(); }
 
 // melonDS Wifi::UpdatePowerOn / ScheduleTimer / USTimer / MSTimer / SetIRQ13-15.
 void Io::wifi_update_power_on() {
-  if (!nds_.dsi) return;                                   // the DS keeps the lazy model
-  const bool on = (powcnt2 & 2) != 0;                      // DSi: W_POWER_US has no effect (melonDS)
+  // melonDS Wifi::UpdatePowerOn: POWCNT2 bit 1, and on a DS W_POWER_US bit 0
+  // clear (the DSi's DWM-W024 ignores it). The 8 us timer runs only while on.
+  bool on = (powcnt2 & 2) != 0;
+  if (!nds_.dsi) on = on && (wifi_io[W_PowerUS / 2] & 1) == 0;
   if (on == wifi_on_) return;
   wifi_on_ = on;
   if (on) wifi_schedule_timer(true);
@@ -983,18 +984,13 @@ void Io::wifi_update_power(int power) {
   else { wifi_io[W_TRXPower / 2] = 0; wifi_set_status(9); }   // nothing in flight: no frames are modelled
   if (req & 2) {
     wifi_io[W_PowerState / 2] |= 0x0100;
-    if (nds_.dsi) {
-      if (!(cur & 2) && wifi_us_until_power_on_ == 0) { wifi_us_until_power_on_ = -2048; wifi_set_irq(11); }
-    } else if (!(cur & 2) && !wifi_power_on_pending) {
-      wifi_power_on_pending = true;
-      nds_.sched.schedule(EventId::Wifi, nds_.sched.now() + 2048ull * ARM9_CLOCK_HZ / 1'000'000, ev_wifi_power, 0);   // 2048 us
-      wifi_set_irq(11);
-    }
+    // The 2048 us power-on delay counts down in the 8 us timer (melonDS
+    // USUntilPowerOn), so it only elapses while the block is powered.
+    if (!(cur & 2) && wifi_us_until_power_on_ == 0) { wifi_us_until_power_on_ = -2048; wifi_set_irq(11); }
   } else {
     wifi_io[W_PowerState / 2] &= static_cast<u16>(~0x0101);
     wifi_io[W_PowerState / 2] |= 0x0200;
     wifi_us_until_power_on_ = 0;
-    if (wifi_power_on_pending) { wifi_power_on_pending = false; nds_.sched.cancel(EventId::Wifi); }
   }
 }
 
@@ -1915,7 +1911,7 @@ template <class S> void Io::sync_state(S& s) {
     nds_.sched.rebind(EventId::Div, ev_div);
     nds_.sched.rebind(EventId::Sqrt, ev_sqrt);
     nds_.sched.rebind(EventId::LcdIrq, ev_lcd_irq);
-    nds_.sched.rebind(EventId::Wifi, nds_.dsi ? ev_wifi_us : ev_wifi_power);
+    nds_.sched.rebind(EventId::Wifi, ev_wifi_us);
     // The clock is a property of the session, not of the state: a state saved
     // on a console with a running clock must not stop it on a harness run, or
     // start one there. Whatever this run was set up with keeps going, rebased
