@@ -32,8 +32,8 @@ const Burst READ16       = make({{7,1},{3,1},{2,117},{7,1},{3,1},{2,117},{7,1},{
 const Burst READ32_N2    = make({{9,1},{4,1},{3,77},{9,1}});
 const Burst READ32       = make({{9,1},{3,1},{2,116}});
 const Burst WRITE16      = make({{8,1},{2,119}});
-const Burst WRITE32_N2   = make({{10,1},{5,47}});
-const Burst WRITE32      = make({{9,1},{7,34}});
+const Burst WRITE32_N2   = make({{9,1},{4,59}});
+const Burst WRITE32      = make({{9,1},{3,79}});
 
 // Shorter runs than this are left to the per-unit loop: the closed-form set-up
 // costs more than it saves on them, and scenes whose DMA is mostly short runs
