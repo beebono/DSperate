@@ -199,3 +199,105 @@ other.
   line.
 - **Wiimmfi's rules.** Their DNS, their patched ROMs, their bans for
   modified clients: our job ends at delivering the packets the game sends.
+
+## Phase 0 and 1 as built (2026-09-11, branch wifi-emu)
+
+Branch `wifi-emu` off `dsiware` (its 8 us timer is the spine; see the
+scoping above for why not `main`).
+
+### Phase 0: the timer on the DS
+
+`wifi_update_power_on` lost its DSi gate: the timer runs whenever POWCNT2
+bit 1 is set and, on a DS, W_POWER_US bit 0 is clear (melonDS
+`UpdatePowerOn`); the DS's one-shot 2048 us power-on event became the same
+countdown the DSi used (`USUntilPowerOn`). `wifi_power_on_pending` stays as
+a dead field so the IO chunk keeps its layout.
+
+| check | result |
+|-------|--------|
+| mlbis / meteos / sm64 / etody / dbori, 1800 frames; GSDD state, 300 | hash-identical to the branch tip |
+| timer forced on for sm64, 1200 frames, x86 host | 2.61 -> 2.70 s (+0.08 ms/frame), hashes identical |
+
+None of the bench scenes enables the radio, so the cost line is a bound
+from a forced-on build, not a measurement of a real session. On the A55 it
+will be a few tenths of a millisecond per frame while a game is in a
+Wi-Fi menu; a coarser stride when nothing is armed is the lever if that
+ever shows.
+
+Wi-Fi DMA (mode 7) needs no wiring: melonDS never triggers it either
+(`DMA.cpp` only knows 0x13 for timing), and no title has been seen to
+depend on it.
+
+### Phase 1: the frame engine
+
+`src/core/io/wifi.{h,cpp}` (1 320 + 191 lines) is the block as one class,
+owned by `Io` (`nds.io.wifi`), with the register file, timer and power
+model moved out of `io.cpp` to join the new TX/RX machinery and the
+emulated access point. `wifi_transport.h` is the outside world: an
+`MpTransport` (melonDS's `MPInterface` shape) and a `NetDriver`, both
+optional and both null today. The port is function-for-function against
+melonDS's `Wifi.cpp` / `WifiAP.cpp`, comments included where they explain a
+hardware behaviour.
+
+Two things were not a straight port:
+
+- **RF chip type** was read from firmware byte 0x1C (the build year)
+  instead of 0x40. The real dump on the shelf is type 2 and byte 0x1C
+  happened not to be 3, so nothing had noticed.
+- **Probe requests** are answered under the SSID they name, so a firmware
+  configured for any open network finds "its" AP (melonDS answers only as
+  "melonAP").
+
+### Proof
+
+**Scenes:** the five replays and the GSDD state stay hash-identical (none
+of them enables the radio, so this proves the plumbing, not the engine).
+
+**PictoChat**, firmware boot with a scripted tap (`tools/mkdsin.py`, new:
+writes a `.dsin` from `F:x,y` touches and `kF:mask` key holds, the same
+arguments `trace_melonds` takes): the room list scans channels 1/7/13, the
+AP's channel-6 beacons arrive and are dropped by the channel check,
+joining Chat Room A hosts it and transmits beacons from slot 4 (FC 0x0080,
+88 bytes, channel 1). `DS_WIFI_LOG=1` shows all of it.
+
+**Mario Kart DS against melonDS.** `DS_WIFI_TRACE=<file>` logs every
+register access as `R|W addr value`; the harness's melonDS writes the same
+under `TRACE_WIFI_REGS` (the hook patch in `dsperate-research/tools/melonds`
+is regenerated). Direct boot, one script for both emulators
+(`700:128,70 1150:68,143 1500:68,143 1850:188,143 2200:128,70 2900:150,155
+3300:128,40`: Multiplayer, the first-run prompts, Multiplayer again, Create
+Group, Normal):
+
+| stage | accesses | result |
+|-------|---------:|--------|
+| boot + Multiplayer tap (1 100 frames) | 31 796 each | identical, line for line |
+| lobby scanning (3 300 frames) | 75 283 each under the parity gate | identical except 13 IRQ15 handler blocks that land one channel hop later in melonDS |
+| hosting a group (4 400 frames, 67 beacons) | 110 473 each | identical through access 105 410, then the guest writes different bytes into 0x288 and the timelines separate |
+
+The IRQ15 blocks are the same 15 lines in both traces; only where they
+fall relative to the guest's channel-hop code differs. Their inputs match
+exactly (86 IRQ15 firings each, same W_USCOUNT / BEACONCOUNT / PREBEACON at
+every one), and the first radio power-on already finds the two ARM7
+timelines 1 504 cycles apart at boot, before any Wi-Fi activity. Both
+residuals are the DS-mode ARM7 timing gap with melonDS, which predates
+this work and is not the Wi-Fi block's; every Wi-Fi *read* before the
+0x288 write is identical.
+
+Parity gate used: `DS_IDLE_SKIP=0 DS_MELON_STM=1 DS_STORE_BUS=0`, lockstep
+(no `--quantum 0`), the headless interpreter.
+
+**Firmware-boot oracle: blocked.** The harness's melonDS boots the real
+firmware into the first-boot wizard (its RTC reports power lost, and the
+harness has no `--rtc-host`; the flag is DSperate's), so PictoChat cannot
+be compared against it yet. Direct-boot titles are the oracle route until
+the harness grows a power-good RTC with a fixed date on both sides.
+
+### Not done, on purpose
+
+- No transport is implemented: `nds.io.wifi.set_transport` /
+  `set_net_driver` exist and nothing calls them. Phases 2 and 3 are the
+  ENet LAN transport and libslirp, both of which vendor third-party code
+  and want a decision on that first.
+- Save states carry the engine (appended to the IO chunk); a mid-session
+  state restores a radio with no peer, untested against a real session
+  because there is none yet.

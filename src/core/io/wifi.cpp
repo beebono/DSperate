@@ -121,7 +121,7 @@ void Wifi::update_power_on() {
   if (!nds_.dsi) on = on && (reg(W_PowerUS) & 1) == 0;
   if (on == on_) return;
   on_ = on;
-  if (on) { schedule_timer(true); if (mp_) mp_->begin(); }
+  if (on) { schedule_timer(true); if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "ON %llX\n", (unsigned long long)(nds_.sched.now() >> 1)); if (mp_) mp_->begin(); }
   else { nds_.sched.cancel(EventId::Wifi); if (mp_) mp_->end(); }
 }
 
@@ -150,6 +150,7 @@ void Wifi::set_irq14(int source) {   // 0 = USCOMPARE, 1 = BEACONCOUNT, 2 = forc
   reg(W_ListenCount)--;
 }
 void Wifi::set_irq15() {
+  if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "I15 %llX %04X %04X %llX\n", (unsigned long long)us_counter_, reg(W_BeaconCount1), reg(W_PreBeacon), (unsigned long long)us_timestamp_);
   set_irq(15);
   if (reg(W_PowerTX) & 1) update_power_status(1);
 }
