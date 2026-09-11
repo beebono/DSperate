@@ -263,12 +263,56 @@ parameter block melonDS marks TODO: `"00000009"`, a title-ID list),
 melonDS writes and the launcher does not. The ARM9 also starts in system mode
 (CPSR `0x2000009F`, SP in DTCM at `0x0E003F80`) rather than melonDS's SVC/`0xD3`.
 
-Consequences for our design: our direct boot (phase 1, step 8) is specified by
-the **launcher-launched state**, not by melonDS's `SetupDirectBoot`; the
-remaining unknown (what else the ARM7 needs before its SD thread runs) is the
-first thing phase 1 must settle, with the harness's RAM/state dumps as the
-reference. Until then the exactness oracle for every DSiWare gate is a
-launcher launch recorded from the NAND, which the harness can script.
+**The hand-off, reverse-engineered (2026-09-10, later the same day).** Bisecting
+the launcher state against the direct boot found that none of the RAM blocks,
+entry registers, ITCM contents, SCFG_BIOS/CLK9/MC values, SCFG lock or CPU
+start order matter. Four things do, and with them a direct boot of Shantae
+and of Mighty Flip Champs (KMGE, extracted from the NAND) reads its `.app`
+and `public.sav` from NAND and writes the save back, block for block like the
+launcher launch:
+
+1. **Boot indicator** `0x02FFFC40 = 3` (melonDS writes 1 = card).
+2. **`SCFG_EXT7` bit 18 set** (SDMMC access; melonDS's `0x93FBFB06` has it
+   clear). Locking SCFG (bit 31) is irrelevant: the title's ARM7 crt0 builds
+   its own boot info from SCFG when it finds it unlocked.
+3. **The launcher's parameter block in ARM7 WRAM, at the address in DSi
+   header word `0x1D4`** (GBATEK's "pointer to base address where various
+   structures and parameters are passed to the title"; `0x03800EA8` for
+   Shantae, `0x038023B8` for KMGE). It is a mount table of five 0x54-byte
+   entries -- `u32 header`, 16-byte name, 0x40-byte path -- followed by the
+   title's app path at +0x3C0:
+
+   | header | name | path |
+   |--------|------|------|
+   | `00008141` | `nand` | `/` |
+   | `0000A142` | `nand2` | `/` |
+   | `00041144` | `shared1` | `nand:/shared1` |
+   | `00063146` | `photo` | `nand2:/photo` |
+   | `00060948` | `dataPub` | `nand:/title/<hi>/<lo>/data/public.sav` |
+   | (+0x3C0) | | `nand:/title/<hi>/<lo>/content/<version>.app` |
+
+   The header words are copied verbatim (meaning unknown). A title with a
+   `private.sav` presumably gets a `dataPrv` entry; none of ours has one, so
+   that is unverified. `dsperate-research/tools/melonds/dsiware_params.py`
+   builds this image from a header alone, and the synthesised block boots
+   Shantae identically to the launcher's.
+4. **Eight bytes at `0x0380FFC4`**: the `SCFG_EXT7` value (`0x13FFFF06`) and
+   two flag bytes `0x44 0xF8`. The crt0 checks `[0x0380FFC8] & 0xC == 4` and
+   halts via SWI otherwise; `0x40` there is `SCFG_BIOS` bit 10 as the launcher
+   sets it.
+
+Two facts fall out for the synthetic NAND (section 3.1): the title **reads its
+own `.app` from NAND** through this table (18 859 block reads for Shantae's
+title screen -- overlays and file-system data come from the NAND copy, not
+from the cart image), so the FAT entry for the app must be complete and point
+at the ROM bytes; and the paths are what the title opens, so the synthetic
+image needs exactly `/title/<hi>/<lo>/content/<version>.app` and
+`data/public.sav` (plus `/shared1`, which must exist even if empty).
+
+Consequences for our design: `setup_direct_boot` in DSi mode is melonDS's
+staging plus the four items above; the exactness oracle for every DSiWare
+gate is the launcher launch, which the harness scripts, and a direct boot
+with this recipe now matches it in NAND traffic.
 
 Still to do in phase 0: pick the rest of the oracle set from the NAND (KNAE or
 KDME for the large-save path; a DSP user, found by scanning ARM9i binaries for
