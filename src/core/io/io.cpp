@@ -459,12 +459,19 @@ u16 Io::spicnt_read_arm7() {
       // ARM9 cycles left until ready, in ARM7 cycles rounded up, capped at
       // the slice: past that the loop resumes in the next slice and either
       // the boundary sleep (Scheduler::arm7_spi_poll) or this catches it.
-      const u64 rem9 = spi_ready_at - nds_.sched.now();
-      s32 charge = static_cast<s32>((rem9 + 1) / 2);
-      if (charge > a7.hot.cycle_budget) charge = a7.hot.cycle_budget;
-      a7.hot.cycle_budget -= charge;
-      prof::add(prof::C_CYC_A7_SPI_SLEPT, static_cast<u64>(charge) * 2);
-      prof::add(prof::C_A7_SPI_SLEEP, 1);
+      // On the DSi the busy bit is a flag cleared by the SPI event, and the
+      // ARM7 can run past spi_ready_at inside its slice before that event
+      // fires: charging the (underflowed) remainder would hand the ARM7
+      // budget instead of taking it and spin the loop with time frozen.
+      const u64 now = nds_.sched.now();
+      if (spi_ready_at > now) {
+        const u64 rem9 = spi_ready_at - now;
+        s32 charge = static_cast<s32>((rem9 + 1) / 2);
+        if (charge > a7.hot.cycle_budget) charge = a7.hot.cycle_budget;
+        a7.hot.cycle_budget -= charge;
+        prof::add(prof::C_CYC_A7_SPI_SLEPT, static_cast<u64>(charge) * 2);
+        prof::add(prof::C_A7_SPI_SLEEP, 1);
+      }
     }
   }
   return spicnt_read();
