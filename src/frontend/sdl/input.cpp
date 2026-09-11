@@ -194,7 +194,8 @@ void Input::configure(const Config& cfg) {
       std::fprintf(stderr, "config: pad.stick_dpad and pad.stick_face are both the %s stick; it will work both the d-pad and X/B/Y/A\n", sf.c_str());
   }
   deadzone_ = cfg.num("pad.stick_deadzone", 12000);
-  stick_ = stick_prev_ = 0;   // a stick held across a reconfigure re-asserts itself on its next motion
+  stick_ = stick_prev_ = face_stick_ = 0;   // a stick held across a reconfigure re-asserts itself on its next motion
+  stylus_x_ = stylus_y_ = 0;   // and the pen's tilt is not kept by a stick that is no longer the pen's
   warn_collisions();
 }
 
@@ -465,18 +466,19 @@ void Input::axis(Uint8 which, Sint16 value) {
   };
   // A stick as the d-pad, and a stick as the face buttons laid out as the DS
   // has them: X up, B down, Y left, A right. The pen's stick stays the pen's.
-  if (on_stick(stick_dpad_)) stick_as_buttons(value, x_axis ? B::BTN_LEFT : B::BTN_UP, x_axis ? B::BTN_RIGHT : B::BTN_DOWN);
-  if (on_stick(stick_face_)) stick_as_buttons(value, x_axis ? B::BTN_Y : B::BTN_X, x_axis ? B::BTN_A : B::BTN_B);
+  if (on_stick(stick_dpad_)) stick_as_buttons(stick_, value, x_axis ? B::BTN_LEFT : B::BTN_UP, x_axis ? B::BTN_RIGHT : B::BTN_DOWN);
+  if (on_stick(stick_face_)) stick_as_buttons(face_stick_, value, x_axis ? B::BTN_Y : B::BTN_X, x_axis ? B::BTN_A : B::BTN_B);
   const Uint8 px = pen_left ? SDL_CONTROLLER_AXIS_LEFTX : SDL_CONTROLLER_AXIS_RIGHTX, py = pen_left ? SDL_CONTROLLER_AXIS_LEFTY : SDL_CONTROLLER_AXIS_RIGHTY;
   if (stylus_axis_ != StylusAxis::None && (which == px || which == py)) {
     if (which == px) stylus_x_ = value; else stylus_y_ = value;   // integrated by update_stylus()
   }
 }
 
-void Input::stick_as_buttons(Sint16 value, B neg, B pos) {
-  stick_ &= ~((1u << neg) | (1u << pos));
-  if (value < -deadzone_) stick_ |= 1u << neg;
-  else if (value > deadzone_) stick_ |= 1u << pos;
+void Input::stick_as_buttons(u32& held, Sint16 value, B neg, B pos) {
+  held &= ~((1u << neg) | (1u << pos));
+  if (value < -deadzone_) held |= 1u << neg;
+  else if (value > deadzone_) held |= 1u << pos;
+  if (&held != &stick_) return;               // the face stick is the game's only (input.h)
   stick_pressed_ |= stick_ & ~stick_prev_;   // edges, for the pause menu
   stick_prev_ = stick_;
 }

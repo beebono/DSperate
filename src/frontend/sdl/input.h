@@ -39,7 +39,7 @@ public:
   // take 30 ms) still count as held for this frame: the release lands on
   // the next one, so the game sees every tap.
   input::Frame frame() {
-    const input::Frame f{static_cast<u16>(buttons_ | pressed_ | stick_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_ || touched_ || stylus_down_ != 0};
+    const input::Frame f{static_cast<u16>(buttons_ | pressed_ | stick_ | face_stick_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_ || touched_ || stylus_down_ != 0};
     pressed_ = 0; stick_pressed_ = 0; touched_ = false;
     // The menu's fallback presses (menu_fallback) never reach the guest, and
     // they die with the frame they happened on: an unbound Escape pressed
@@ -174,7 +174,7 @@ private:
   void axis(Uint8 which, Sint16 value);
   // A stick as four DS buttons (the left stick as the d-pad, or either as
   // X/B/Y/A): held while past the deadzone, with edges for the pause menu.
-  void stick_as_buttons(Sint16 value, io::Io::Button neg, io::Io::Button pos);
+  void stick_as_buttons(u32& held, Sint16 value, io::Io::Button neg, io::Io::Button pos);
   bool capture_event(const SDL_Event& e);
   bool axis_moved(int axis, int value) const;    // past the deadzone this axis needs
   bool is_pad_mod_button(int sdl_button) const;   // the pad's hotkey modifier
@@ -196,6 +196,11 @@ private:
 
   u32  buttons_ = 0, pressed_ = 0, stick_ = 0;   // held now; pressed since the last frame; stick as d-pad
   u32  stick_prev_ = 0, stick_pressed_ = 0;      // stick-as-d-pad edges, for the pause menu
+  // The face-button stick is the game's only: on the Controls page X resets
+  // the column and B leaves it, and a stick that fired those while the
+  // player was lining up a binding would undo it. The d-pad stick still
+  // navigates the menu, as it always has.
+  u32  face_stick_ = 0;
   u32  menu_fb_held_ = 0, menu_fb_pressed_ = 0;  // menu-only fallback, for orphaned bindings
   bool touching_ = false, touched_ = false;
   int  touch_x_ = 0, touch_y_ = 0;

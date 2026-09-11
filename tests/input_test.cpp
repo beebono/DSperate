@@ -350,6 +350,22 @@ void test_stick_face_buttons() {
     T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000);
     CHECK((in.frame().buttons & (kX | kA | kB | kY)) == kX);
   }
+  {
+    // Or take the pen off the sticks altogether, as the menu's clear does.
+    Rig r; r.set("pad.stick_face", "right"); r.set("pad.stylus_axis", "none"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000);
+    CHECK((in.frame().buttons & (kX | kA | kB | kY)) == kX);
+    CHECK(!in.stylus_visible_binding());
+    // ...and the menu never sees it: X there resets the column, which would
+    // put the pen back on the stick the player just took it from.
+    CHECK(in.take_menu_presses() == 0 && in.menu_held() == 0);
+  }
+  {
+    // The d-pad stick still drives the menu.
+    Rig r; Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, -30000);
+    CHECK(in.take_menu_presses() == (1u << B::BTN_UP));
+  }
   { Config c; CHECK(std::string(Input::stick_face_default()) == "none"); }
   CHECK(std::string(Input::stick_dpad_default()) == "left");
 }
