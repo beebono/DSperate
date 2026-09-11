@@ -1560,6 +1560,7 @@ sdl_ready:
   // Wall-clock pacing when there is no audio queue to pace against.
   const double frame_ns = 1e9 * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ;
   Uint64 next_frame = SDL_GetPerformanceCounter();
+  double aq_min = 1e9; unsigned aq_under1 = 0, aq_under_half = 0;   // audio-queue depth after a frame (lan stats)
   const double ticks_per_ns = static_cast<double>(SDL_GetPerformanceFrequency()) / 1e9;
 
   const bool show_fps = std::getenv("DS_FPS") != nullptr;
@@ -2950,6 +2951,25 @@ sdl_ready:
     if (last_slice_end) nds.gpu3d.note_external_ns(static_cast<u64>((t0 - last_slice_end) / ticks_per_ns));
 #if DSPERATE_NET
     if (lan) lan->process();   // ENet and discovery, once per frame, on this thread
+    // DS_WIFI_SLICE=1: spread the frame's emulation across its period in
+    // 1 ms slices, ending just before the pacer's deadline, so a peer's CMD
+    // is answered within a slice rather than after this frame's sleep. An
+    // experiment, off by default: on the RG DS hosting PictoChat it halved
+    // the host's longest reply wait (16 -> 8 ms) but left the audio queue
+    // less margin (dips under one frame 37 vs 6 times in 3000), and the
+    // plain pacer never let it run dry (docs/wifi-scoping.md, pacing).
+    if (lan && !fast && std::getenv("DS_WIFI_SLICE")) {
+      // next_frame is this frame's start on the wall-clock pacer, and was
+      // reset to "now" at the last pace when the audio queue is the clock.
+      const Uint64 frame_end = std::max(next_frame, SDL_GetPerformanceCounter() - static_cast<Uint64>(frame_ns * ticks_per_ns / 2)) + static_cast<Uint64>(frame_ns * ticks_per_ns);
+      constexpr u64 slice = ds::ARM9_CLOCK_HZ / 1000;
+      constexpr int slices = static_cast<int>(ds::CYCLES_PER_FRAME / slice) + 1;
+      for (int k = 1; !nds.run_frame_slice(slice); ++k) {
+        const Uint64 due = frame_end - static_cast<Uint64>(frame_ns * ticks_per_ns * (slices - k) / slices);
+        const Uint64 now = SDL_GetPerformanceCounter();
+        if (due > now) { const double ms = (due - now) / (ticks_per_ns * 1e6); if (ms >= 0.5) SDL_Delay(static_cast<Uint32>(ms)); }
+      }
+    } else
 #endif
     nds.run_frame();
 #if DSPERATE_CHEEVOS
@@ -3226,6 +3246,9 @@ sdl_ready:
     ds::prof::frame_mark();   // marks the emu slice: the present is not in a stage, it lands in "untimed" of work_ms
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
+#if DSPERATE_NET
+    if (lan && audio.active()) { const double q = audio.queued_frames(); if (q < aq_min) aq_min = q; if (q < 1.0) ++aq_under1; if (q < 0.5) ++aq_under_half; }
+#endif
     bool on_the_clock = true;
     if (fast && ff_speed <= 0) {
       on_the_clock = false;    // unthrottled
@@ -3304,6 +3327,14 @@ sdl_ready:
   // one, whose whole job is measuring, always does. DS_PROFILE implies it:
   // asking for the stage breakdown without the frame series it annotates
   // would give a table with nothing to read it against.
+#if DSPERATE_NET
+  if (lan) {
+    std::fprintf(stderr, "lan: reply/host waits %u, total %.1f ms, max %.1f ms, timeouts %u\n", lan->wait_count(), lan->wait_total_ms(), lan->wait_max_ms(), lan->wait_timeouts());
+    // The audio queue is the clock on a device: how close it came to running
+    // dry is the stutter a session caused (frame times include the sleeps).
+    std::fprintf(stderr, "lan: audio queue after a frame: min %.2f frames, under 1 frame %u times, under 0.5 %u times\n", aq_min, aq_under1, aq_under_half);
+  }
+#endif
   if (std::getenv("DS_FRAME_STATS") || ds::prof::enabled) {
     // Emulation work only -- see frame_report.h. The two excluded costs are
     // named on their own line so a headless/SDL disagreement can be attributed.

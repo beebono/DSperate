@@ -314,6 +314,11 @@ void LanMp::process_host_event(ENetEvent& ev) {
       }
       LAN_LOG("client %d is \"%s\"\n", p.id, p.name);
       host_update_player_list();
+      // A peer only learns our radio is on from the connect broadcast sent
+      // when it powered up; a player joining a running session missed it,
+      // and its first CMD frame from us would then read as "host gone".
+      // Tell the newcomer now (melonDS clients accept it at any time).
+      if (connected_mask_ & (1 << me_.id)) { const u8 c = Cmd_PlayerConnect; enet_peer_send(ev.peer, Chan_Cmd, enet_packet_create(&c, 1, ENET_PACKET_FLAG_RELIABLE)); }
       break;
     }
     case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) connected_mask_ |= static_cast<u16>(1 << p->id); break;
@@ -338,6 +343,7 @@ void LanMp::process_client_event(ENetEvent& ev) {
     if (pid < 0) { enet_peer_disconnect(ev.peer, 0); break; }
     peers_[pid] = ev.peer;
     ev.peer->data = &players_[pid];
+    if (connected_mask_ & (1 << me_.id)) { const u8 c = Cmd_PlayerConnect; enet_peer_send(ev.peer, Chan_Cmd, enet_packet_create(&c, 1, ENET_PACKET_FLAG_RELIABLE)); }   // as above, client to client
     break;
   }
   case ENET_EVENT_TYPE_DISCONNECT: {
@@ -383,6 +389,10 @@ void LanMp::process_client_event(ENetEvent& ev) {
 // the head of the queue; 2 = wait up to the recv timeout for a frame.
 void LanMp::process_lan(int type) {
   if (!host_) return;
+  struct WaitClock {
+    LanMp& l; int type; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    ~WaitClock() { if (type != 2) return; const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); l.wait_count_++; l.wait_total_ms_ += ms; if (ms > l.wait_max_ms_) l.wait_max_ms_ = ms; if (ms >= l.recv_timeout_ms_ - 1) l.wait_timeouts_++; }
+  } wait_clock{*this, type};
   u32 time_last = ms_now();
   while (!rx_.empty()) {
     ENetPacket* pkt = rx_.front();

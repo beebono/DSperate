@@ -129,6 +129,12 @@ struct NDS {
   bool firmware_override_dirty() const { return fw_dirty_pages > 0; }
   void firmware_written(u32 offset);   // called from the SPI page-write path
   void run_frame();
+  // run_frame() in pieces: runs up to `cycles` (ARM9 clock) of the current
+  // frame and returns true when the frame completed (frame_count then
+  // advanced). Local wireless needs the emulation spread across the frame's
+  // wall-clock period: a peer's CMD is answered within a slice rather than
+  // after the frame's sleep (docs/wifi-scoping.md, pacing).
+  bool run_frame_slice(u64 cycles);
 
   // Save states (core/state/state.h): whole-machine snapshots, taken only
   // where run_frame() returns. save_state does not disturb the run; a
@@ -185,6 +191,7 @@ struct NDS {
 
   u64  frame_count = 0;
   bool frame_ready = false;
+  bool frame_in_slices = false;   // run_frame_slice has begun a frame not yet complete
   // The ARM7 has pulled the power line down (PMIC register 0 bit 6): the
   // console has switched itself off. The firmware does it on the way out of
   // its settings pages, which is the point at which the settings it just

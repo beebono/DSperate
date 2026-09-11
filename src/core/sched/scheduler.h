@@ -148,6 +148,11 @@ public:
   // (~2,100 entries per frame on SM64DS, each with the native loop's register
   // save/restore and a fire_due that had nothing to fire).
   u64 run_until_frame();
+  // Both bounds: stops at the frame flag or at `until`, whichever first. For
+  // a frontend that spreads a frame's emulation across its wall-clock period
+  // (NDS::run_frame_slice); the extra slice ends change the CPU interleave,
+  // so a run paced this way is not the run run_frame() produces.
+  u64 run_until_or_frame(u64 until);
 
   // The same, as a state machine for the recompiler's native slice loop:
   // every call runs the scheduler up to the next entry into translated

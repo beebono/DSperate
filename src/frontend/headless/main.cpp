@@ -471,6 +471,17 @@ int main(int argc, char** argv) {
       const int cycle = skip + period;
       nds.gpu.set_frame_skip(skip > 0 && static_cast<int>((i + 1) % cycle) < skip);
     }
+#if DSPERATE_NET
+    if (lan && pace && !std::getenv("DS_NO_SLICE")) {   // DS_NO_SLICE=1: the plain per-frame pacer, for A/B
+      // Spread the frame across its period in 1 ms slices so a peer's CMD is
+      // answered within a slice, not after this frame's sleep (wifi-scoping).
+      const auto frame_end = pace_start + std::chrono::microseconds(static_cast<long long>((i + 1) * 1000000.0 / 59.8261));
+      constexpr ds::u64 slice = ds::ARM9_CLOCK_HZ / 1000;
+      constexpr int slices = static_cast<int>(ds::CYCLES_PER_FRAME / slice) + 1;
+      for (int k = 1; !nds.run_frame_slice(slice); ++k)
+        std::this_thread::sleep_until(frame_end - std::chrono::microseconds(static_cast<long long>(16700.0 * (slices - k) / slices)));
+    } else
+#endif
     nds.run_frame();
     if (!write_state(i + 1)) return 1;
     if (static const bool fh = std::getenv("DS_FRAME_HASH") != nullptr; fh) {
@@ -562,6 +573,9 @@ int main(int argc, char** argv) {
   ds::prof::report();
 #if DSPERATE_JIT
   if (ds::prof::enabled && (jit9 || jit7)) ds::jit::report(stderr);
+#endif
+#if DSPERATE_NET
+  if (lan) std::fprintf(stderr, "lan: reply/host waits %u, total %.1f ms, max %.1f ms, timeouts %u\n", lan->wait_count(), lan->wait_total_ms(), lan->wait_max_ms(), lan->wait_timeouts());
 #endif
   ds::interp::census_report(nds.frame_count);
   if (std::getenv("DS_STATE_DUMP")) {   // what each CPU is waiting on at the end of the run

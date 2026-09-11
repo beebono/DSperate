@@ -391,7 +391,7 @@ SliceNext Scheduler::slice_next() {
 
 begin:
   {
-    if (sl_.until_frame ? nds_.frame_ready : now_ >= sl_.until) { sl_.phase = SL_BEGIN; return {nullptr, nullptr}; }
+    if ((sl_.until_frame && nds_.frame_ready) || now_ >= sl_.until) { sl_.phase = SL_BEGIN; return {nullptr, nullptr}; }
     u64 deadline = next_;
     if (deadline > sl_.until) deadline = sl_.until;
     s64 slice = static_cast<s64>(deadline - now_);
@@ -517,12 +517,14 @@ u64 Scheduler::run_until_native(u64 until, bool until_frame) {
 // at a slice end, so testing it at the next slice start stops at exactly the
 // point `while (!frame_ready) run_until(next_deadline())` stopped at.
 bool Scheduler::done(u64 until, bool until_frame) const {
-  return until_frame ? nds_.frame_ready : now_ >= until;
+  return (until_frame && nds_.frame_ready) || now_ >= until;
 }
 
 u64 Scheduler::run_until(u64 until) { return run_until_impl(until, false); }
 
 u64 Scheduler::run_until_frame() { return run_until_impl(~u64{0}, true); }
+
+u64 Scheduler::run_until_or_frame(u64 until) { return run_until_impl(until, true); }
 
 u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
 #if DSPERATE_JIT

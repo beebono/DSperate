@@ -442,10 +442,24 @@ void NDS::setup_direct_boot() {
 }
 
 void NDS::run_frame() {
+  if (frame_in_slices) { sched.run_until_frame(); frame_in_slices = false; ++frame_count; return; }   // finish a sliced frame
   if (!gpu.frame_begun()) gpu.begin_frame();   // first frame after reset/direct boot starts at line 0 without a line-0 event
   frame_ready = false;
   sched.run_until_frame();   // one entry into the slice loop per frame, not per event
   ++frame_count;
+}
+
+bool NDS::run_frame_slice(u64 cycles) {
+  if (!frame_in_slices) {
+    if (!gpu.frame_begun()) gpu.begin_frame();
+    frame_ready = false;
+    frame_in_slices = true;
+  }
+  sched.run_until_or_frame(sched.now() + cycles);
+  if (!frame_ready) return false;
+  frame_in_slices = false;
+  ++frame_count;
+  return true;
 }
 
 

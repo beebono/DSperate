@@ -380,3 +380,43 @@ over Wi-Fi ("Now entering: RGDS", the message, "Now leaving: RGDS").
 
 The reply-wait cost is unchanged and still to do (51 ms worst frame on the
 host in that run).
+
+### Pacing, measured (2026-09-11)
+
+The stall the scoping predicted is the MP host's reply wait: the guest
+only answers a CMD frame when its emulation processes it, and a frontend
+that runs a frame's emulation in a few milliseconds and sleeps the rest
+answers up to a frame late. Two things were done and measured with
+`lan: reply/host waits` (count, total, max, timeouts) and, on the device,
+the audio-queue depth after each frame (the queue is the clock there; a
+dip under one frame is the margin going, under zero a stutter):
+
+1. **Sliced frames.** `NDS::run_frame_slice` runs a frame in 1 ms pieces
+   (`Scheduler::run_until_or_frame`), and a frontend sleeps between the
+   pieces towards the frame's deadline, so a CMD is answered within a
+   slice. The headless frontend does this under `--pace`; the SDL one only
+   with `DS_WIFI_SLICE=1`.
+2. **A late-join race, fixed.** A peer learns another's radio is on only
+   from the one-byte connect broadcast sent when it powers up, so a player
+   joining a running session (the rig hosting PictoChat, the box joining
+   12 s later) missed it and dropped out at the first CMD ("host gone").
+   The host now tells a newcomer, and clients tell each other on link-up,
+   with the same message. A DSperate joining a *melonDS* host late still
+   hits melonDS's side of the race.
+
+RG DS hosting PictoChat, dev box guest, 3000 frames, two runs each:
+
+| mode | host waits total | max | audio queue < 1 frame | dry |
+|------|-----------------:|----:|----------------------:|----:|
+| plain pacer | 2.37 s | 9.8-11.0 ms | 5, 8 | never |
+| sliced | 1.55-1.66 s | 8.7-18.8 ms | 37, 39 | never |
+
+Dev box hosting, RG DS guest: the host's wait per CMD is one Wi-Fi round
+trip (3-4 ms, RTT 3 ms by ping) in both modes; slicing cut the *guest's*
+waiting for host frames from 4.3 s to 1.7 s.
+
+So on this hardware the wait is ~0.8 ms a frame on a handheld host and
+the plain pacer absorbs it; slicing trades audio margin for a shorter
+worst wait and stays an experiment. The 51-100 ms worst frames seen on
+the dev-box host earlier were the late-join race (waits timing out on a
+client that had dropped out), not pacing.

@@ -74,6 +74,13 @@ public:
   int my_id() const { return me_.id; }
 
   void process();                          // once per frame
+  // How long the emulation thread has blocked in the MP host's reply wait
+  // (and the client's host-packet wait): the cost local wireless puts on a
+  // frame. docs/wifi-scoping.md, pacing.
+  unsigned wait_count() const { return wait_count_; }
+  double wait_total_ms() const { return wait_total_ms_; }
+  double wait_max_ms() const { return wait_max_ms_; }
+  unsigned wait_timeouts() const { return wait_timeouts_; }   // waits that ran the whole recv timeout
   void set_recv_timeout_ms(int ms) { recv_timeout_ms_ = ms; }
   int  recv_timeout_ms() const { return recv_timeout_ms_; }
 
@@ -118,6 +125,8 @@ private:
   std::queue<_ENetPacket*> rx_;
   u32 frame_count_ = 0;
   std::string peer_name_;
+  unsigned wait_count_ = 0, wait_timeouts_ = 0;
+  double wait_total_ms_ = 0, wait_max_ms_ = 0;
 };
 
 } // namespace ds::net
