@@ -27,6 +27,10 @@
 #include <vector>
 #include <algorithm>
 #include <chrono>
+#include <thread>
+#if DSPERATE_NET
+#include "net/lan_mp.h"
+#endif
 
 namespace {
 
@@ -134,10 +138,23 @@ int main(int argc, char** argv) {
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
+  // Local wireless over the LAN (docs/wifi-scoping.md): host a session or
+  // join one, and pace the run to real time, which the MP protocol's
+  // wall-clock windows need.
+  const char* lan_host = nullptr;      // --lan-host NAME: host as NAME
+  const char* lan_join = nullptr;      // --lan-join ADDR: join the session at ADDR
+  const char* lan_name = "DSperate";   // --lan-name NAME: our player name when joining
+  int lan_players = 16;
+  bool pace = false;                   // --pace: sleep to 60 frames a second
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
     auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };
     if (arg("--frames")) { frames = std::atoi(argv[++i]); frames_given = true; }
+    else if (arg("--lan-host")) { lan_host = argv[++i]; pace = true; }
+    else if (arg("--lan-join")) { lan_join = argv[++i]; pace = true; }
+    else if (arg("--lan-name")) lan_name = argv[++i];
+    else if (arg("--lan-players")) lan_players = std::atoi(argv[++i]);
+    else if (flag("--pace")) pace = true;
     else if (arg("--bios9")) bios9 = argv[++i];
     else if (arg("--bios7")) bios7 = argv[++i];
     else if (arg("--firmware")) fw = argv[++i];
@@ -398,7 +415,28 @@ int main(int argc, char** argv) {
   const char* reboot_rom = reboot_at ? std::strchr(reboot_at, ':') : nullptr;
   if (reboot_rom) ++reboot_rom;
 
+#if DSPERATE_NET
+  std::unique_ptr<ds::net::LanMp> lan;
+  if (lan_host || lan_join) {
+    lan = std::make_unique<ds::net::LanMp>();
+    if (!lan->ok()) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); return 1; }
+    const bool up = lan_host ? lan->start_host(lan_host, lan_players) : lan->start_client(lan_name, lan_join);
+    if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); return 1; }
+    std::fprintf(stderr, "lan: %s, player %d\n", lan_host ? "hosting" : "joined", lan->my_id());
+    nds.io.wifi.set_transport(lan.get());
+  }
+#else
+  if (lan_host || lan_join) { std::fprintf(stderr, "lan: built without DSPERATE_NET\n"); return 1; }
+#endif
+  const auto pace_start = std::chrono::steady_clock::now();
   for (int i = 0; i < frames; ++i) {
+    if (pace) {   // the DS's 59.83 Hz, from the run's start so sleep jitter does not accumulate
+      const auto due = pace_start + std::chrono::microseconds(static_cast<long long>(i * 1000000.0 / 59.8261));
+      std::this_thread::sleep_until(due);
+    }
+#if DSPERATE_NET
+    if (lan) lan->process();
+#endif
     if (reboot_rom && i == reboot_frame) {
       nds.reset();
       if (!nds.load_rom(reboot_rom)) std::fprintf(stderr, "reboot: could not read %s\n", reboot_rom);

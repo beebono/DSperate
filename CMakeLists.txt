@@ -19,6 +19,7 @@ option(DSPERATE_HEADLESS "Build the headless frontend"                          
 option(DSPERATE_SDL      "Build the SDL2 frontend (off when SDL2 is not found)"   ON)
 option(DSPERATE_WAYLAND  "Build the Wayland dmabuf scanout tier (off when SDL2 has no Wayland)" ON)
 option(DSPERATE_CHEEVOS  "Build RetroAchievements support (rcheevos)"                  ON)
+option(DSPERATE_NET      "Build the Wi-Fi transports (local wireless over the LAN; vendored ENet)" ON)
 
 # Host tiers.  These are two independent questions and the build keeps them
 # apart: the recompiler emits A64 and so needs an AArch64 host, while the
@@ -152,6 +153,10 @@ add_subdirectory(src/core)
 # RetroAchievements.
 if(DSPERATE_CHEEVOS)
   add_subdirectory(src/cheevos)
+endif()
+# Wi-Fi transports (docs/wifi-scoping.md).
+if(DSPERATE_NET)
+  add_subdirectory(src/net)
 endif()
 if(DSPERATE_HEADLESS)
   add_subdirectory(src/frontend/headless)
