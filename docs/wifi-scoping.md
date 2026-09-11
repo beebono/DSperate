@@ -301,3 +301,54 @@ the harness grows a power-good RTC with a fixed date on both sides.
 - Save states carry the engine (appended to the IO chunk); a mid-session
   state restores a radio with no peer, untested against a real session
   because there is none yet.
+
+## Phase 2 as built (2026-09-11): local wireless over the LAN
+
+`src/net/` is the transport library: ENet 1.3.18 vendored under
+`enet/` (MIT; `enet/README.md`), and `lan_mp.{h,cpp}`, the `MpTransport`
+that speaks melonDS's `net/LAN.cpp` protocol byte for byte -- the UDP
+discovery beacon on 7063, ENet on 7064 with the control channel (client
+init, player info, the 16-entry player list, connect/disconnect) and the
+MP channel (24-byte `NIFI` header; CMD broadcast, reply to the last host,
+ack), the 16 ms freshness window on queued frames and the 25 ms reply wait.
+It runs on the emulation thread exactly as melonDS runs it: `process()`
+once per frame, the recv calls poll, `recv_replies` waits. `DSPERATE_NET`
+(default ON) builds it; both frontends take `--lan-host NAME`,
+`--lan-join ADDR`, `--lan-name NAME`, and the headless one `--pace`
+(implied by the LAN flags) to run at 59.83 frames a second, which the
+protocol's wall-clock windows need.
+
+### Proof
+
+All PictoChat, firmware boot, scripted with `tools/mkdsin.py` (tap
+PictoChat at frame 500; host joins Chat Room A at 1100, guest at 1500):
+
+| host | guest | result |
+|------|-------|--------|
+| DSperate headless | DSperate headless (same box) | guest lists "Chat Room A 1/16", enters; both show "Now entering: Bill Nye" |
+| melonDS (harness) | DSperate headless | same |
+| DSperate headless | melonDS (harness) | same |
+| DSperate headless (dev box) | **DSperate SDL on the RG DS**, over its Wi-Fi | guest received 2 668 CMD frames, replied to 532, acks back |
+
+The melonDS end is `trace_melonds` with melonDS's own `LAN`, `MPInterface`
+and `LocalMP` compiled in over our vendored ENet, `--lan-host` /
+`--lan-join` / `--pace`, and a new `--rtc-ok` that clears the RTC's
+power-lost bit so the firmware boots to its menu instead of the setup
+wizard (this unblocks the firmware-boot oracle noted in phase 1).
+
+### What the device run showed
+
+The host's frame statistics on the dev box: worst frame 90 ms, 181
+bursts. That is `recv_replies` waiting on the rig's reply over Wi-Fi, the
+stall the scoping predicted. It lands on the *host*, once per CMD frame,
+and PictoChat sends one CMD every few frames while idle. A DS-to-DS
+session on two handhelds will feel it on both sides. The fix is the pacer
+mode from the scoping (the clock pauses while the host waits), not a
+smaller timeout; it is the next piece of phase 2, together with the menu
+page (host / join with the discovery list / leave, and a status line).
+
+### Rig note
+
+`/usr/bin/dsperate` on the RG DS is no longer a bind mount of
+`/storage/dsperate/dsperate` (different md5, no entry in /proc/mounts);
+a pushed build has to be run from `/storage/dsperate/dsperate` by hand.
