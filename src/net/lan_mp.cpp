@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -114,6 +115,10 @@ void LanMp::process_discovery() {
     ::sendto(discovery_fd_, &b, sizeof b, 0, reinterpret_cast<sockaddr*>(&sa), sizeof sa);
     return;
   }
+  poll_discovery(tick);
+}
+
+void LanMp::poll_discovery(u32 tick) {
   std::lock_guard<std::mutex> l(sessions_mutex_);
   for (;;) {
     fd_set fd; FD_ZERO(&fd); FD_SET(discovery_fd_, &fd);
@@ -136,6 +141,29 @@ void LanMp::process_discovery() {
   for (auto it = sessions_.begin(); it != sessions_.end();) {
     if (tick - it->second.first_seen_ms >= 5000) it = sessions_.erase(it); else ++it;
   }
+}
+
+LanMp::Role LanMp::start_auto(const std::string& player_name, int scan_ms, int max_players) {
+  if (!start_discovery()) return Role::None;
+  const u32 start = ms_now();
+  u32 found = 0; std::string found_name;
+  while (static_cast<int>(ms_now() - start) < scan_ms) {
+    poll_discovery(ms_now());
+    {
+      std::lock_guard<std::mutex> l(sessions_mutex_);
+      for (const auto& [ip, s] : sessions_) if (s.num_players < s.max_players) { found = ip; found_name = s.name; break; }
+    }
+    if (found) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  end_discovery();
+  if (found) {
+    char ip[32]; std::snprintf(ip, sizeof ip, "%u.%u.%u.%u", found >> 24, (found >> 16) & 255, (found >> 8) & 255, found & 255);
+    LAN_LOG("found \"%s\" at %s\n", found_name.c_str(), ip);
+    if (start_client(player_name, ip)) { peer_name_ = found_name; return Role::Guest; }
+    LAN_LOG("join failed (%s); hosting instead\n", err_.c_str());
+  }
+  return start_host(player_name, max_players) ? Role::Host : Role::None;
 }
 
 // ---- session -----------------------------------------------------------------

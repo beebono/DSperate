@@ -60,6 +60,11 @@ public:
   bool start_discovery();
   void end_discovery();
   bool start_host(const std::string& player_name, int max_players);
+  // Listen for hosts' discovery beacons for scan_ms (melonDS hosts send one
+  // a second); join the first heard, else host. What --netplay does.
+  enum class Role { None, Host, Guest };
+  Role start_auto(const std::string& player_name, int scan_ms = 2500, int max_players = 16);
+  std::string peer_name() const { return peer_name_; }   // the session joined by start_auto
   bool start_client(const std::string& player_name, const std::string& host);
   void end_session();
   std::map<u32, Session> sessions();      // keyed by host IPv4 (host order)
@@ -85,6 +90,7 @@ public:
 
 private:
   void process_discovery();
+  void poll_discovery(u32 tick);          // read every beacon waiting on the socket
   void host_update_player_list();
   void process_host_event(_ENetEvent& ev);
   void process_client_event(_ENetEvent& ev);
@@ -111,6 +117,7 @@ private:
   _ENetPeer* last_host_peer_ = nullptr;
   std::queue<_ENetPacket*> rx_;
   u32 frame_count_ = 0;
+  std::string peer_name_;
 };
 
 } // namespace ds::net

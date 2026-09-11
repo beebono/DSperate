@@ -352,3 +352,14 @@ page (host / join with the discovery list / leave, and a status line).
 `/usr/bin/dsperate` on the RG DS is no longer a bind mount of
 `/storage/dsperate/dsperate` (different md5, no entry in /proc/mounts);
 a pushed build has to be run from `/storage/dsperate/dsperate` by hand.
+
+### --netplay: host or guest, decided on the LAN
+
+`--netplay` on either frontend listens for hosts' discovery beacons for
+2.5 s (a melonDS or DSperate host sends one a second on UDP 7063), joins
+the first session heard with a free slot, and otherwise hosts one itself
+(`LanMp::start_auto`). No addresses to type: two handhelds both started
+with it pair up, whichever came first hosting. Verified on one box (the
+second instance joined "First's game") and between the dev box and the
+RG DS over Wi-Fi (the rig found "DevBox's game" by broadcast, joined, and
+answered 593 CMD frames).

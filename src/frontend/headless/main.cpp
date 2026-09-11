@@ -144,6 +144,7 @@ int main(int argc, char** argv) {
   const char* lan_host = nullptr;      // --lan-host NAME: host as NAME
   const char* lan_join = nullptr;      // --lan-join ADDR: join the session at ADDR
   const char* lan_name = "DSperate";   // --lan-name NAME: our player name when joining
+  bool netplay = false;                // --netplay: join a session heard on the LAN within 2.5 s, else host one
   int lan_players = 16;
   bool pace = false;                   // --pace: sleep to 60 frames a second
   for (int i = 1; i < argc; ++i) {
@@ -153,6 +154,7 @@ int main(int argc, char** argv) {
     else if (arg("--lan-host")) { lan_host = argv[++i]; pace = true; }
     else if (arg("--lan-join")) { lan_join = argv[++i]; pace = true; }
     else if (arg("--lan-name")) lan_name = argv[++i];
+    else if (flag("--netplay")) { netplay = true; pace = true; }
     else if (arg("--lan-players")) lan_players = std::atoi(argv[++i]);
     else if (flag("--pace")) pace = true;
     else if (arg("--bios9")) bios9 = argv[++i];
@@ -417,16 +419,21 @@ int main(int argc, char** argv) {
 
 #if DSPERATE_NET
   std::unique_ptr<ds::net::LanMp> lan;
-  if (lan_host || lan_join) {
+  if (lan_host || lan_join || netplay) {
     lan = std::make_unique<ds::net::LanMp>();
     if (!lan->ok()) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); return 1; }
-    const bool up = lan_host ? lan->start_host(lan_host, lan_players) : lan->start_client(lan_name, lan_join);
+    bool up;
+    if (netplay) {
+      const auto role = lan->start_auto(lan_name, 2500, lan_players);
+      up = role != ds::net::LanMp::Role::None;
+      if (up) std::fprintf(stderr, "netplay: %s\n", role == ds::net::LanMp::Role::Host ? "no session heard, hosting" : ("joined " + lan->peer_name()).c_str());
+    } else up = lan_host ? lan->start_host(lan_host, lan_players) : lan->start_client(lan_name, lan_join);
     if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); return 1; }
-    std::fprintf(stderr, "lan: %s, player %d\n", lan_host ? "hosting" : "joined", lan->my_id());
+    std::fprintf(stderr, "lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id());
     nds.io.wifi.set_transport(lan.get());
   }
 #else
-  if (lan_host || lan_join) { std::fprintf(stderr, "lan: built without DSPERATE_NET\n"); return 1; }
+  if (lan_host || lan_join || netplay) { std::fprintf(stderr, "lan: built without DSPERATE_NET\n"); return 1; }
 #endif
   const auto pace_start = std::chrono::steady_clock::now();
   for (int i = 0; i < frames; ++i) {

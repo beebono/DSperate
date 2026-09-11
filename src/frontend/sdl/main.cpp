@@ -144,6 +144,10 @@ const char* kUsage =
     "  --rtc-host      run the clock from this machine even under --replay (INEXACT: a game\n"
     "                  that reads the date no longer replays the same, but the firmware's own\n"
     "                  menu needs a real clock to appear at all)\n"
+    "  --netplay       local wireless with whoever is on the LAN: join a session heard within\n"
+    "                  2.5 s, else host one (melonDS's LAN protocol; a melonDS can be the other end)\n"
+    "  --lan-host NAME host a local-wireless session as NAME; --lan-join ADDR joins the one at ADDR;\n"
+    "                  --lan-name NAME is our player name\n"
     "  --load-state F  start from a save state instead of booting the game\n"
     "  --autosave-png F  with emu.autosave, write a PNG of both screens to F beside the auto state\n"
 #if DSPERATE_CHEEVOS
@@ -918,7 +922,7 @@ int main(int argc, char** argv) {
   const char *record = nullptr, *replay = nullptr, *save_arg = nullptr, *load_state = nullptr;
   bool clear_cache = false;
   bool rtc_host = false;              // --rtc-host: a real clock even under a replay (the firmware menu needs one)
-  const char* lan_host = nullptr; const char* lan_join = nullptr; const char* lan_name = "DSperate";
+  const char* lan_host = nullptr; const char* lan_join = nullptr; const char* lan_name = "DSperate"; bool netplay = false;
   long stats_from = 0;   // frames run but left out of the timing statistics
 
   // The game is found before the options are read. A flag whose value is
@@ -964,6 +968,7 @@ int main(int argc, char** argv) {
     else if (arg("--lan-host")) lan_host = argv[++i];
     else if (arg("--lan-join")) lan_join = argv[++i];
     else if (arg("--lan-name")) lan_name = argv[++i];
+    else if (flag("--netplay")) netplay = true;   // join a session heard on the LAN within 2.5 s, else host one
     else if (flag("--clear-cache")) clear_cache = true;
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
@@ -2221,14 +2226,19 @@ sdl_ready:
   const bool cheevos_on = cfg.flag("cheevos.enabled", false);
 #if DSPERATE_NET
   std::unique_ptr<ds::net::LanMp> lan;
-  if (lan_host || lan_join) {
+  if (lan_host || lan_join || netplay) {
     lan = std::make_unique<ds::net::LanMp>();
-    const bool up = lan->ok() && (lan_host ? lan->start_host(lan_host, 16) : lan->start_client(lan_name, lan_join));
+    bool up = lan->ok();
+    if (up && netplay) {
+      const auto role = lan->start_auto(lan_name);
+      up = role != ds::net::LanMp::Role::None;
+      if (up) std::fprintf(stderr, "netplay: %s\n", role == ds::net::LanMp::Role::Host ? "no session heard, hosting" : ("joined " + lan->peer_name()).c_str());
+    } else if (up) up = lan_host ? lan->start_host(lan_host, 16) : lan->start_client(lan_name, lan_join);
     if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); lan.reset(); }
-    else { std::fprintf(stderr, "lan: %s, player %d\n", lan_host ? "hosting" : "joined", lan->my_id()); nds.io.wifi.set_transport(lan.get()); }
+    else { std::fprintf(stderr, "lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id()); nds.io.wifi.set_transport(lan.get()); }
   }
 #else
-  if (lan_host || lan_join) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
+  if (lan_host || lan_join || netplay) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
 #endif
   std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
   bool cheevos_set_asked = false;
