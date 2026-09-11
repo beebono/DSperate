@@ -20,6 +20,9 @@
 #endif
 #if DSPERATE_CHEEVOS
 #include "cheevos/cheevos_client.h"
+#if DSPERATE_NET
+#include "net/lan_mp.h"
+#endif
 #include "cheevos/cheevos_hash.h"
 #endif
 #include "audio.h"
@@ -915,6 +918,7 @@ int main(int argc, char** argv) {
   const char *record = nullptr, *replay = nullptr, *save_arg = nullptr, *load_state = nullptr;
   bool clear_cache = false;
   bool rtc_host = false;              // --rtc-host: a real clock even under a replay (the firmware menu needs one)
+  const char* lan_host = nullptr; const char* lan_join = nullptr; const char* lan_name = "DSperate";
   long stats_from = 0;   // frames run but left out of the timing statistics
 
   // The game is found before the options are read. A flag whose value is
@@ -955,6 +959,11 @@ int main(int argc, char** argv) {
     else if (flag("--integer-scale")) cli.set("video.integer_scale", optional("under"));
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (flag("--rtc-host")) rtc_host = true;
+    // Local wireless over the LAN for this run (docs/wifi-scoping.md): host a
+    // session, or join the one at ADDR. A menu page comes later.
+    else if (arg("--lan-host")) lan_host = argv[++i];
+    else if (arg("--lan-join")) lan_join = argv[++i];
+    else if (arg("--lan-name")) lan_name = argv[++i];
     else if (flag("--clear-cache")) clear_cache = true;
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
@@ -2210,6 +2219,17 @@ sdl_ready:
   // a device with no libcurl, no network, or no account still plays games.
   ds::cheevos::Client cheevos;
   const bool cheevos_on = cfg.flag("cheevos.enabled", false);
+#if DSPERATE_NET
+  std::unique_ptr<ds::net::LanMp> lan;
+  if (lan_host || lan_join) {
+    lan = std::make_unique<ds::net::LanMp>();
+    const bool up = lan->ok() && (lan_host ? lan->start_host(lan_host, 16) : lan->start_client(lan_name, lan_join));
+    if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); lan.reset(); }
+    else { std::fprintf(stderr, "lan: %s, player %d\n", lan_host ? "hosting" : "joined", lan->my_id()); nds.io.wifi.set_transport(lan.get()); }
+  }
+#else
+  if (lan_host || lan_join) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
+#endif
   std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
   bool cheevos_set_asked = false;
 
@@ -2916,6 +2936,9 @@ sdl_ready:
     // the frontend's, not the frame's: the 3D shape controller subtracts it.
     static Uint64 last_slice_end = 0;
     if (last_slice_end) nds.gpu3d.note_external_ns(static_cast<u64>((t0 - last_slice_end) / ticks_per_ns));
+#if DSPERATE_NET
+    if (lan) lan->process();   // ENet and discovery, once per frame, on this thread
+#endif
     nds.run_frame();
 #if DSPERATE_CHEEVOS
     // Exactly once per emulated frame, and only here. rcheevos keeps a delta
