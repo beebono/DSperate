@@ -12,6 +12,21 @@ system menu from a NAND dump, DSi-enhanced retail cartridges in DSi mode,
 cameras, the second card slot, DSi Wi-Fi and the SD card slot are all **out**.
 Each is named below only so the design leaves the door open.
 
+> **Current state (2026-09-12, branch `dsiware` @ `e0b4f79`) -- read this
+> first; parts of the plan below are superseded.** The work turned into a
+> NAND boot rather than a direct boot (section 3.2, and "The NAND boot path"
+> under phase 3), and that pulled three "out of scope" items in: the NAND
+> boot itself, the SDIO host with the Atheros Wi-Fi module, and the cameras.
+> **A real, cartless NAND boot now runs boot2, the launcher and the Health
+> and Safety screen, and after a tap renders the DSi Launcher menu** -- the
+> same top screen as melonDS, with the CPU interleave (slice grid) identical
+> to melonDS up to the tap. Card-mode direct boot is unchanged and still
+> gate-identical to melonDS. What is *not* done yet: launching a title from
+> the launcher, the synthetic NAND (section 3.1), DSP cores, mic, a network
+> backend, a camera image source, and DSi validation of the JIT. The new
+> status sections are "NAND boot to the launcher" (phase 3), phase 4 and
+> phase 5 status; the method that found each bug is in section 6.
+
 ## 1. Verdict in one paragraph
 
 DSiWare is not "a DS with more RAM". A direct-booted title still touches
@@ -29,6 +44,16 @@ closes. The design decision that keeps it tractable is the same one FreeBIOS
 made: **synthesise the NAND** instead of requiring the user to dump one. Real
 `bios7i.bin`/`bios9i.bin` stay required for now; a DSi FreeBIOS is a stretch
 goal at the end, not a premise.
+
+**Update (2026-09-12).** Two parts of that verdict did not survive contact.
+"Direct boot plus a synthetic NAND" stalled at the launcher hand-off (phase
+3), while booting the console's own NAND -- boot2 and the launcher, the path
+melonDS DS uses for DSiWare -- turned out to need no reverse engineering, only
+exactness. And "roughly half of the DSi's new hardware" was an undercount for
+that route: the launcher also initialises the Wi-Fi module over SDIO and
+probes both cameras, and waits on them. The exactness gate held up as the
+right tool: every blocker on the way to the launcher was found by diffing
+against melonDS, not by reading.
 
 ## 2. What we have, what melonDS has
 
@@ -67,7 +92,7 @@ one is VRAM bus width via `SCFG_EXT[0]` bit 13, which is timing).
 | `DSi.cpp/.h` | 3927 | the machine: reset, NAND boot, `SetupDirectBoot`, `SoftReset`, NWRAM/MBK, SCFG, bus overrides, modcrypt |
 | `DSi_NDMA.cpp/.h` | 510 | 4+4 NDMA channels at `0x04004100/4104` |
 | `DSi_AES.cpp/.h` | 697 | AES engine at `0x04004400`: CCM/CTR, 4 key slots, FIFOs with NDMA hooks |
-| `DSi_SD.cpp/.h` | 1407 | two SD hosts (`0x04004800` SDMMC: SD card + NAND; `0x04004900` SDIO: wifi); the MMC card model |
+| `DSi_SD.cpp/.h` | 1407 | two SD hosts (`0x04004800` SDMMC: SD card + NAND; `0x04004A00` SDIO: wifi); the MMC card model |
 | `DSi_NAND.cpp/.h` + `DSi_TMD.h` | 1671 | NAND image: nocash footer, FAT AES-CTR crypto, ES (ticket) crypto, fatfs mount, title import/export, TWLCFG/HWINFO |
 | `DSi_I2C.cpp/.h` | 786 | I2C host + BPTWL power IC (+ cameras) |
 | `DSi_I2S.cpp/.h` | 351 | MICCNT/MICDATA FIFO and **SNDEXCNT** |
@@ -75,7 +100,7 @@ one is VRAM bus width via `SCFG_EXT[0]` bit 13, which is timing).
 | `DSi_DSP.cpp/.h` + `DSP_HLE/` | 2973 | Teak host interface; HLE for AAC/G.711/graphics ucodes, LLE via teakra |
 | `teakra/` | 13 734 | vendored Teak core |
 | `fatfs/` + `sha1/` | ~23 000 | vendored FAT and SHA-1 |
-| `DSi_Camera.cpp/.h`, `DSi_NWifi.cpp/.h` | 2841 | out of our scope |
+| `DSi_Camera.cpp/.h`, `DSi_NWifi.cpp/.h` | 2841 | planned out of scope; **ported 2026-09-12** because the launcher waits on both (`io/dsi_camera.*`, `io/dsi_nwifi.*`) |
 | `NDS_Header.h`, `Args.h`, `MemConstants.h`, `NDS.cpp` bits | -- | DSi header fields, `IE2/IF2`, `ARM9ClockShift`, `MainRAMMask` |
 
 The two facts that shape the plan:
@@ -152,6 +177,14 @@ Our entry is a DSi-flavoured `setup_direct_boot` matching melonDS's DSi
 branch line for line; melonDS-with-the-same-title is then an instruction-trace
 oracle from frame 0.
 
+**Superseded (2026-09-12).** Direct boot runs a title in card mode, and the
+launcher hand-off recipe that gets it onto the NAND wedges (phase 3 status).
+The route that works is the one melonDS DS takes: boot the console from its
+NAND (`--dsi-nand-boot`, melonDS's `!FullBIOSBoot` boot2 shortcut, with half
+BIOS dumps). It now reaches the DSi Launcher; launching a title from there,
+or auto-launching one with the `TLNC` block, is the remaining step. Direct
+boot stays as the card-mode path and the phase-1 exactness gate.
+
 ### 3.3 Real DSi BIOS dumps required (for now)
 
 `bios7i.bin`/`bios9i.bin` (64 KB each). Titles call BIOS SWIs and the ARM7
@@ -187,6 +220,10 @@ Vendoring teakra (13.7 k lines, its own CMake) is a decision for after phase 4
 when we know how many titles in the user's library actually need it. It is not
 a hot loop on our targets either way: a Teak at 134 MHz interpreted on an A55
 is a full core.
+
+**Status (2026-09-12).** The "DSP absent" half is in: `io/dsi_dsp.*` is
+melonDS's host interface with no core attached (see phase 5 status). The
+launcher reads `DSP_PSTS` during boot and only needs that.
 
 ## 4. Phases
 
@@ -480,8 +517,9 @@ ARM7 was *given* budget every poll. The charge is now taken only while the
 stamp is ahead. No DS hash moved (the DS prices busy by time).
 
 **Not modelled yet (no DSiWare oracle hit them):** NWRAM dual-slot writes,
-the `0x02FE71B0` and SCFG_EXT RAM-size hacks, camera/DSP/mic/SD pages
-(read 0), Wi-Fi frames (a TX request is logged), the BPTWL soft-reset
+the `0x02FE71B0` and SCFG_EXT RAM-size hacks, mic and SD-card pages (read
+0; the camera, DSP and SDIO pages have since landed -- phases 3-5 status),
+Wi-Fi frames (a TX request is logged), the BPTWL soft-reset
 request (logged), the DSi frontend/SDL wiring, JIT parity for `code_latch`,
 `irq_skip_once` and `defer_cost` (the interpreter is the gate; the JIT
 falls back to the interpreter for the unmapped DSi ARM7 BIOS).
@@ -568,7 +606,8 @@ FIFOs and the 32-bit one they drain into, `CheckSwapFIFO`, the IRQ and
 card-IRQ masks, `Event_DSi_SDMMCTransfer` as `EventId::SdMmc`, NDMA start
 mode 0x28) with an `MmcStorage` device on port 1 over a `NandImage`. Port 0
 (the SD card slot) is absent and reads as no card; the SDIO host at
-`0x04004A00` is absent entirely. `--dsi-nand` loads a real `nand.bin`,
+`0x04004A00` was absent entirely at this point (it landed with the NAND boot
+work: `SdHost` now takes a controller number). `--dsi-nand` loads a real `nand.bin`,
 whose nocash footer supplies the eMMC CID and the **console ID** -- which had
 been hardcoded zero and seeds AES key slots 1 and 3, so `dsi.console_id` is
 now set *before* `aes.reset()`. Save-state FORMAT_VERSION 4 (one more
@@ -793,15 +832,105 @@ below `0x03800000` (WRAMCNT is 0, so the ARM7 has no shared WRAM and
 `0x0380FFC8`. melonDS runs **the same loop with the same bounds** (its last
 iteration has `r1 = r12 = 0x03800d18` at t=327416) and its byte survives.
 
-**This is where it stands: the measurement and the code reading disagree.**
-melonDS's `DSi::ARM7Write8/32` fall through to `NDS::ARM7Write8/32` for
-`0x037FFFC8` (no ARM7 NWRAM window covers it -- A is empty, B is
-`03000000-03040000`, C is `037B8000-037F8000`), and that fall-through does
-`ARM7WRAM[addr & (ARM7WRAMSize-1)]` with `ARM7WRAMSize == 0x10000`, which is
-exactly the alias we implement. By that reading melonDS should zero the byte
-too, and empirically it does not. Resolving *that* contradiction is the next
-step -- most likely something upstream keeps those stores away from the
-mirror, which would also be the real bug on our side.
+**Resolved: WRAMCNT.** The reading above assumed WRAMCNT = 0 on both sides,
+and it was only 0 on ours. melonDS's `DSi::Reset` calls `MapSharedWRAM(3)`
+after `NDS::Reset` maps 0, so on a DSi the ARM7 owns all 32 KB of shared WRAM
+and `0x037FFFC8` lands in `SharedWRAM[0x7FC8]`, never in the mirror.
+`boot_dsi_nand` now sets WRAMCNT 3. This is the fourth bug of the same class
+as EXMEMCNT and CP15: reset state a direct boot overwrites and real boot code
+reads back (and check `DSi::Reset`, not only `NDS::Reset`).
+
+#### NAND boot to the launcher (2026-09-12, evening)
+
+**Result.** A real NAND boot with no cart attached runs boot2, the launcher,
+the Health and Safety screen and -- after a tap -- the **DSi Launcher menu**.
+At frame 1200 the top screen is pixel-identical to melonDS (the bottom differs
+on its animated elements), and the CPU slice grid is identical to melonDS from
+reset to the tap at frame ~600. Card-mode direct boot is still byte-identical
+to melonDS over the 60-frame gate, all six DS scenes are unmoved over 600
+frames, and the 22 unit tests pass. Commits `f8de6bf`, `50d4f87`, `e0b4f79`.
+
+    cp dsi-binary/bios/dsinand.bin out/n.bin          # always a copy: boot writes to it
+    dsperate-headless --direct --interp --dsi --touch 600:128,100:10 \
+      --bios9 bios9.bin --bios7 bios7.bin --firmware dsifirmware.bin \
+      --bios9i biosdsi9.bin --bios7i biosdsi7.bin --dsi-boot dsiboot.bin \
+      --dsi-nand out/n.bin --dsi-nand-boot --frames 1300 --dump-frames out/o.frames
+
+`--dsi` is required without a ROM (otherwise the machine is a DS and draws
+nothing); a NAND boot no longer needs a cart. `--touch F:x,y[:N]` has the
+same meaning as `trace_melonds --touch`.
+
+**What it took, in the order the diffs found it.** Each item was the first
+divergence from melonDS at the time (section 6 has the method).
+
+*Machine and scheduler*
+
+1. **WRAMCNT reset value** (above).
+2. **Post-jump numC in the interpreter.** An LDM/POP that loads a Thumb pc
+   charges its data cost after `JumpTo`, which leaves `R[15] = target + 2` in
+   melonDS and `target + 4` in `jump()`; the `R[15] & 2` test inverts, so a
+   word-aligned Thumb target is numC 0. Both JITs already did this; DS hashes
+   unmoved.
+3. **An IRQ raised by a DMA that ends mid-phase** is taken after the CPU's
+   next instruction (melonDS resumes `Halt(2)` into `Execute`); the phase-start
+   conversion had already passed.
+4. **The ARM7 re-enters its DMA share while it moves and budget remains**
+   (melonDS `while (ARM7Timestamp < target) RunNDMAs(1)`). The AES NDMA
+   in/out ping-pong otherwise ran one pass per slice and put the ARM7 55 000
+   cycles behind the ARM9 -- invisible in per-CPU traces, fatal for IPC.
+5. **SCFG_CLK9 writes floor the ARM9 clock** to a system cycle every time
+   (melonDS `SetScfgClock9` shifts `ARM9Timestamp` down and back even when the
+   speed does not change), and the store that wrote it is priced from the
+   rebuilt timing table (melonDS reads `DataCycles` after `BusWrite`).
+6. **The launcher drops the ARM9 to 67 MHz** (SCFG_CLK9 `0x0184`, from ITCM,
+   mid-slice). The scheduler used `shift9_` both as the clock conversion and
+   as "is a DSi", so the switch turned every DSi interleave rule off and read
+   quarter cycles as half. Now a `dsi_` flag gates the rules, the ARM9 is
+   floored to system cycles at either speed, and a mid-slice switch rescales
+   the slice (`Scheduler::set_clock9_shift`).
+7. **`fire_due` spun forever** when an ARM9 soft (timer) event fell inside the
+   ARM7's overshoot: one soft minimum was compared against the ARM7's limit
+   while the pass fired ARM9 timers against `now_`. This was the frame-60
+   "hang" of the cartless boot. Soft minima are now per CPU.
+8. **Timer register access runs that CPU's soft timers first** (melonDS
+   `RunTimers` in `TimerStart` / `TimerGetCounter`), so a control write sees
+   an overflow that is already due.
+9. **Halfword bulk DMA runs** were priced with the DS doubling (`<< 1`)
+   instead of `shift9_` (2 at 134 MHz): 16-bit VRAM uploads cost half.
+
+*Devices*
+
+10. **DSP host interface** (`io/dsi_dsp.*`): melonDS `DSi_DSP` without a core.
+    `PSTS` reads `0x0100`.
+11. **SDIO host**: `SdHost` takes a controller number (reset `PortSelect`,
+    IRQ2 lines, NDMA mode `0x29`, card presence `0xA0`, its own transfer
+    event); instance 1 at `0x04004A00`.
+12. **Atheros Wi-Fi module** on SDIO port 0 (`io/dsi_nwifi.*`, melonDS
+    `DSi_NWifi`): SDIO F0/F1, the mailboxes, BMI/HTC/WMI answered instantly,
+    the 1 ms timer. No network backend; a scan reports melonDS's built-in AP.
+    Soft reset resets both ports.
+13. **Cameras** (`io/dsi_camera.*`): the two Aptina sensors on I2C `0x78`/`0x7A`
+    and the camera module at `0x04004200` (frame IRQ, scanline transfer, the
+    two pixel buffers, NDMA `0x0B`). No image source: frames are black, as in
+    melonDS's trace harness.
+14. **SCFG reads** follow melonDS's per-width tables (a 32-bit ARM7 read of
+    `SCFG_MC` had carried the cart insert delay in its top half).
+15. **The DSi CODEC's SPI output latch** persists: an index byte, a write or
+    a read of an unmodelled bank leaves the previous byte in SPIDATA.
+16. **DSi touch coordinates** were stored as pixel `<< 8` -- colliding with the
+    pen-changed bit 15 -- instead of `<< 4`, so the launcher saw every tap at
+    x = 0. This is why Health and Safety ignored the tap.
+
+**Save states** are `FORMAT_VERSION` 5 (SDIO transfer, Wi-Fi timer and camera
+transfer events); the SD/MMC, SDIO, Wi-Fi and camera events rebind on load.
+
+**Still open on this path.** Launching a title from the launcher (tap the
+icon) or auto-launching one (`TLNC`); a cart-present NAND boot (the Shantae
+boot's last known divergence, SPIDATA at frame 37, is plausibly one of fixes
+15-16 but is not re-checked); rendered frames differ from melonDS from about
+frame 25 even while the CPU grid matches (a 2D render/present difference not
+yet looked at); the bottom-screen animation phase after the tap; the JIT and
+the idle skip under DSi are unvalidated.
 
 #### Unlaunch as a boot2 replacement (2026-09-12)
 
@@ -821,8 +950,11 @@ Run as boot2 instead (`--dsi-boot2 <srl>`, which implies `--dsi-nand-boot`)
 it gets further -- 2 NAND block reads -- then stalls: the ARM9 sits in the
 BIOS at 0xFFFF0110 and the ARM7 in the ARM7 BIOS delay loop at
 0x00000170/0x174 (`SUBS r0,#1` / `BGT`), re-entered ~188 k times. The
-EXMEMCNT reset value above is the prime suspect, since a boot2 replacement is
-written against exactly the state real boot2 is entered in.
+EXMEMCNT reset value above was the prime suspect, since a boot2 replacement is
+written against exactly the state real boot2 is entered in -- but with
+EXMEMCNT, CP15, NWRAM and WRAMCNT all fixed the Unlaunch run is **unchanged**
+(2 reads, both CPUs parked). melonDS cannot run Unlaunch either, so there is
+no oracle; the real-boot2 route above is the one being pursued.
 
 **BOOTCODE.DSI needs an SD card, which we do not have.** Phase 3 deliberately
 left SD host port 0 absent (reads as "no card"); the NAND is port 1. Auto-
@@ -831,7 +963,7 @@ image -- the `SyntheticNand`/FAT builder work, pointed at the SD slot.
 
 ### Phase 4 -- I2C, BPTWL, I2S/mic (~900 lines)
 
-- I2C host at `0x04004600` with the BPTWL device: battery level (feed it the
+- I2C host at `0x04004500` with the BPTWL device: battery level (feed it the
   frontend's battery when we have one, else "charged"), volume/backlight
   registers, the power-button state machine only to the extent of "never
   pressed", warmboot flag register 0x70, `IRQ2_DSi_BPTWL`.
@@ -843,6 +975,17 @@ image -- the `SyntheticNand`/FAT builder work, pointed at the SD slot.
 
 Gate: the DSP-free oracle titles are playable end to end; a two-hour
 frame-hash soak against melonDS on the real-NAND backer shows no drift.
+
+#### Phase 4 status (2026-09-12)
+
+- **I2C + BPTWL:** in since phase 1 (register file, boot flag, IRQ flags);
+  the soft-reset request is logged, not acted on.
+- **Cameras:** not a stub -- the launcher configures both sensors over I2C
+  and polls the module, so melonDS's `DSi_Camera` was ported whole (NAND boot
+  item 13). No frontend image source yet.
+- **Mic / I2S (`MICCNT`, `MICDATA`, NDMA `0x2C`):** not started; no
+  divergence has pointed at it so far.
+- **Gate:** not yet run -- it needs a title launched through the NAND boot.
 
 ### Phase 5 -- DSP HLE (~1 500 lines) and the frontend
 
@@ -863,6 +1006,21 @@ frame-hash soak against melonDS on the real-NAND backer shows no drift.
   memory map; the identify step already hashes the ROM bytes we have. The DS
   map's "DSi hole" assertion in `cheevos_memory.cpp` stays for DS games and a
   second table serves the DSi machine.
+
+#### Phase 5 status (2026-09-12)
+
+- **Host interface without a core** (`io/dsi_dsp.{h,cpp}`): PCFG, PSTS
+  (write FIFO always empty, sticky semaphore bit), PSEM, PMASK, PCLEAR,
+  CMD0-2, the PDATA read FIFO and its IRQs, `SCFG_RST` resetting the block,
+  and melonDS's ARM7 32-bit write path into the page. With `TRACE_DSP=1` the
+  melonDS harness shows the launcher never releases the DSP reset in 120
+  frames, so this is all the NAND boot needs.
+- **Not modelled, and logged once when reached:** the core being enabled
+  (`SCFG_CLK9` bit 1, `SCFG_RST` released, PCFG bit 0 clear) -- from then on
+  melonDS runs HLE ucodes or Teakra and schedules a 4096-cycle catch-up event
+  that cuts slices -- and a PCFG bit-0 release, where melonDS would start a
+  core. The G.711 oracle (KTUE) is the place to add them.
+- **Frontend:** no DSi wiring yet (`[paths]`, picker, `.cia`, RA table).
 
 ## 5. Performance notes (why this can be fast on the RG DS)
 
@@ -901,6 +1059,31 @@ frame-hash soak against melonDS on the real-NAND backer shows no drift.
 - Never benchmark or hash under a missing DSi BIOS; `load_bios` refuses DSi
   titles without both `bios7i`/`bios9i` rather than degrading.
 
+**What actually found the NAND-boot bugs (2026-09-12).** Per-CPU instruction
+traces were not enough: two emulators can agree on every instruction of each
+CPU while interleaving them differently (the NDMA ping-pong put the ARM7 55 k
+cycles behind with both traces identical). The loop that worked:
+
+1. **Screenshots** of both (`--dump-frames` on both sides) to see how far each
+   gets.
+2. **Slice-grid diff**, about a minute and no traces: our `DS_DEBUG_SLICES=1`
+   against the harness's `TRACE_SLICES=1` (`[slice] now` / `[fire]` lines in
+   our units), comparing the slice-end column. Gate knobs on ours as above.
+3. At the first split, **full traces** of that frame window on both sides
+   with `TRACE_START_FRAME`, `TRACE_TIME_FINE=1` (the DSi ARM9 in raw core
+   cycles; the normal stamp hides quarter-cycle cost differences) and both
+   `DS_TRACE_NODEDUP=1`/`TRACE_NODEDUP=1`. The CPU whose first difference is
+   earlier in time is the cause.
+4. What the differences turned out to be: an unmodelled I/O page (a register
+   reads 0 on one side), a register at the wrong width, an IRQ taken a slice
+   early or late (read IE&IF in the handler), a cost off by a quarter cycle,
+   or a stall of the wrong length (a timestamp gap on one side;
+   `DS_DEBUG_DMA=2`).
+
+Harness additions for this: `TRACE_SLICES`, `TRACE_TIME_FINE`, `TRACE_DSP`
+(research `5aaa9f6`, `9d5c505`); ours: `TRACE_TIME_FINE`, `DS_WATCH7`, `t=`/pc
+in `DS_IPC_LOG`, `--touch`.
+
 ## 7. Risks and open questions
 
 1. **Test breadth.** We have three CIA titles and fifteen more in one NAND,
@@ -931,14 +1114,32 @@ frame-hash soak against melonDS on the real-NAND backer shows no drift.
    title needs an unlisted ucode, that is the teakra decision.
 8. **Licence.** teakra is MIT-style, fatfs BSD-style; both compatible if
    vendored. We plan to vendor neither in phases 1-4.
+9. **The JIT under DSi (2026-09-12).** Every exactness result above is on the
+   interpreter. The aarch64 build compiles the scheduler changes, and the
+   A64/A32 post-jump numC already matched melonDS, but no DSi run has been
+   checked under qemu -- and the device runs the JIT.
+10. **Idle skip under DSi.** The gates run with `DS_IDLE_SKIP=0`; the default
+    is on. The cartless boot's frame-60 hang looked like an idle-skip fault
+    and was not, but the skip heuristics were built for DS scenes and are
+    untested on the launcher.
+11. **Render/present differences.** Rendered frames differ from melonDS from
+    about frame 25 of the NAND boot even where the CPU interleave matches;
+    the top screen of the launcher agrees, so this is likely a
+    presentation or effect-state detail, but it is unexplained.
+12. **Save-state size.** The Wi-Fi module's mailboxes (about 44 KB) and two
+    32 KB camera MCU register files now travel in every DSi state.
 
 ## 8. Not in scope, and what would reopen it
 
-| feature | why not | what it would need |
-|---------|---------|--------------------|
-| system menu / NAND boot | needs full boot chain, launcher, ticket ES crypto with `bios7i[0x8308]` | boot2 shortcut port, fatfs-level NAND writes, full `SoftReset` |
-| DSi-mode retail carts | DS mode runs them today | the DSi cart-slot power machine (`SetScfgMC`), `SCFG_MC` swap |
-| SD card slot | no DSiWare needs it | a `FATStorage` equivalent on host folder or image |
-| cameras | one or two titles | the Aptina register model + a frontend source |
-| DSi Wi-Fi (AR6002 SDIO) | no networking in DSperate, and DS Wi-Fi is register-only too | SDIO host + 1 645 lines of NWifi + an AP |
-| second card slot | nothing uses it | `NDSCartSlot2` |
+Updated 2026-09-12: three rows moved in scope because the NAND boot needed them.
+
+| feature | status | what remains |
+|---------|--------|--------------|
+| system menu / NAND boot | **in** -- boot2 shortcut ported, reaches the DSi Launcher | launching titles from it; full `SoftReset`; ticket ES crypto only if something needs it (nothing has) |
+| DSi-mode retail carts | out: DS mode runs them today | the DSi cart-slot power machine (`SetScfgMC`), `SCFG_MC` swap |
+| SD card slot | out: no DSiWare needs it (Unlaunch's `BOOTCODE.DSI` would) | a `FATStorage` equivalent on host folder or image, on SD host port 0 |
+| cameras | **in** as hardware (the launcher needs them) | a frontend image source |
+| DSi Wi-Fi (AR6002 SDIO) | **in** as hardware (SDIO host + NWifi) | a network backend / AP for actual connections |
+| second card slot | out: nothing uses it | `NDSCartSlot2` |
+| DSP cores (HLE ucodes, Teakra) | out for now: host interface only | the phase-5 HLE table and the catch-up event |
+| mic / I2S | not started | `MICCNT/MICDATA`, NDMA `0x2C`, capture feed |
