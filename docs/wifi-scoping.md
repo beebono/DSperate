@@ -774,3 +774,36 @@ the child's white holds indefinitely.
 two-instance SDL run -- that needs a scripted walk of the firmware menu into
 Download Play against a Mario Kart host, which nothing here automates yet.
 The real dumps for it are in `dsperate-research/binary/real-bios/`.
+
+### The inexact speed knobs are off during a session (2026-09-12)
+
+**Measured on real hardware, both ends:** a full Mario Kart DS Download Play
+session from the dev box to the RG DS only held together once `fast_load` and
+`cpu_oc` were turned off on the handheld. With either on, the timing stopped
+matching and the session fell apart.
+
+That is what should be expected rather than a surprise. A session couples the
+two consoles' clocks: the guest holds every host frame until its timestamp and
+has to answer inside its own reply slot (the pacing section above), so
+anything that changes how long a console's work *appears* to take pulls the
+pair apart. All three of the inexact knobs do exactly that -- `cpu_oc` prices
+every recompiled memory access as a cached main-RAM load, `timing_oc` drops
+the GX FIFO and geometry timing outright, and `fast_load` reads the card off
+its clock.
+
+So local wireless now forces all three off for the session, wherever they were
+asked for -- `[emu]` in the config, `--cpu-oc` / `--timing-oc` / `--fast-load`
+on the command line -- and says so on stderr, ungated, because it is
+overriding something the player named. `timing_oc` was not one of the two
+measured; it is included because it is the most timing-destructive of the
+three and the same reasoning applies.
+
+The menu says it too: `Dep::NetOff` greys CPU OC, TIMING OC and FAST LOAD with
+NOT WITH NETWORK FEATURES ON while a session is up. The gate is a session
+fact, not a config read -- `Host::net_on` -- so it covers `--netplay` and
+`--lan-*` as well as `net.mode`.
+
+Verified: `--netplay --cpu-oc` overrides the flag; `net.mode = host` with all
+three on in the config overrides all three; `net.mode = off` with `cpu_oc =
+true` says nothing and leaves it alone. 21/21 tests, with the gating asserted
+in `test_network_features_row`.

@@ -147,7 +147,9 @@ const char* kUsage =
     "                  menu needs a real clock to appear at all)\n"
     "  --netplay       local wireless with whoever is on the LAN: join a session heard within\n"
     "                  2.5 s, else host one (melonDS's LAN protocol; a melonDS can be the other end).\n"
-    "                  The menu's NETWORK FEATURES row and net.mode do the same without a flag\n"
+    "                  The menu's NETWORK FEATURES row and net.mode do the same without a flag.\n"
+    "                  Any local wireless forces --cpu-oc, --timing-oc and --fast-load off: the\n"
+    "                  two consoles in a session have to keep the same time as each other\n"
     "  --lan-host NAME host a local-wireless session as NAME; --lan-join ADDR joins the one at ADDR;\n"
     "                  --lan-name NAME is our player name (default: the console's nickname)\n"
     "  --load-state F  start from a save state instead of booting the game\n"
@@ -1128,6 +1130,26 @@ int main(int argc, char** argv) {
     else if (mode == "guest") lan_guest = true;
     else if (mode != "off") std::fprintf(stderr, "net.mode: \"%s\" is not off, auto, host or guest\n", mode.c_str());
   }
+  // Local wireless anywhere means the inexact speed knobs go off, whoever asked
+  // for them. Two consoles in a session keep each other's time: the guest holds
+  // every host frame to its timestamp and has to answer inside its own slot, so
+  // a knob that changes how long its work appears to take desynchronises the
+  // pair. Measured the hard way -- a Mario Kart DS Download Play session from
+  // the dev box to the RG DS only held up once fast_load and cpu_oc were off on
+  // the handheld (2026-09-12), and timing_oc drops the GX FIFO timing outright,
+  // so it goes with them.
+  //
+  // Not gated behind DS_VERBOSE: this overrides something the player asked for
+  // by name, on the command line or in their config, and they should be told.
+  // The rows say so too -- Dep::NetOff greys all three while a session is on.
+  const bool net_on = lan_host || lan_join || netplay || lan_guest;
+  if (net_on) {
+    for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"})
+      if (cfg.flag(k, false)) {
+        std::fprintf(stderr, "net: %s is off for this session -- local wireless needs the two consoles to keep the same time\n", k);
+        cfg.set(k, "false");
+      }
+  }
   {
     std::string err;
     if (!nds.load_bios(bios9, bios7, fw, user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
@@ -1814,6 +1836,7 @@ sdl_ready:
     std::function<void(const char*, const std::string&)> apply;
     std::function<void()> reopen;
     bool per_game = false;
+    bool net_on = false;          // local wireless is on this session (Dep::NetOff)
 
     Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi, ds::sdl::Input& in)
         : cfg(c), nds(n), display(d), vs(v), global_ini(gi), game_ini(pi), input(in) {}
@@ -2179,6 +2202,8 @@ sdl_ready:
 #else
         return "THIS BUILD HAS NO NETWORKING";
 #endif
+      case ds::sdl::Dep::NetOff:
+        return net_on ? "NOT WITH NETWORK FEATURES ON" : "";
       }
       return "";
     }
@@ -2187,6 +2212,7 @@ sdl_ready:
   Host host(cfg, nds, display, vs, global_ini, session.game_ini, input);
   host.reconfigure_input = [&] { input.configure(cfg); };
   host.fw_override = fw_override;
+  host.net_on = net_on;
   host.reopen = [&] { reopen_display(); };
   // The whole layout in one go, re-read from the config: every row on the
   // Layout page is a field of it, so there is nothing per-key to do. The mode

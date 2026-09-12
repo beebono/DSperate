@@ -981,6 +981,31 @@ void test_network_features_row() {
   CHECK(ds::sdl::step_value(*net, "guest", +1, h) == "off");
   CHECK(ds::sdl::step_value(*net, "off", -1, h) == "guest");
   CHECK(ds::sdl::display_value(*net, "guest") == "GUEST");
+  // The three inexact speed knobs hang off local wireless being off: two
+  // consoles in a session have to keep the same time as each other.
+  int gated = 0;
+  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+    if (t[i].depends == ds::sdl::Dep::NetOff) {
+      ++gated;
+      CHECK(t[i].flags & ds::sdl::FlagInexact);
+    }
+  CHECK(gated == 3);
+  for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"}) {
+    const ds::sdl::Setting* row = nullptr;
+    for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+      if (!std::strcmp(t[i].key, k)) row = &t[i];
+    CHECK(row != nullptr);
+    CHECK(row->depends == ds::sdl::Dep::NetOff);
+  }
+  // A host with a session up refuses all three, and says why.
+  struct NetOn final : FakeHost {
+    const char* disabled_reason(const ds::sdl::Setting& s) const override {
+      return s.depends == ds::sdl::Dep::NetOff ? "NOT WITH NETWORK FEATURES ON" : "";
+    }
+    bool enabled(const ds::sdl::Setting& s) const override { return !*disabled_reason(s); }
+  } on;
+  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+    if (t[i].depends == ds::sdl::Dep::NetOff) CHECK(!on.enabled(t[i]));
 }
 
 // A value the file already holds outside the menu's range is shown as it

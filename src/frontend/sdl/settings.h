@@ -49,6 +49,10 @@ enum class Dep : u8 {
   Dominant,           // the layout is dominant_v or dominant_h
   DominantThreshold,  // Dominant, and dominant_ratio is auto
   Net,                // the build has the Wi-Fi transports (DSPERATE_NET)
+  // Local wireless is off this session. The three inexact speed knobs hang off
+  // this: two consoles in a session have to keep the same time as each other,
+  // and these change how long the guest thinks its work took.
+  NetOff,
 };
 
 struct Setting {
