@@ -555,3 +555,67 @@ Both are the game's DL library reacting to something in the timing the
 LAN path produces and LocalMP does not; the next tool is a CPU-side
 watch on the host's ARM9 after the RsaReply (what it compares), since
 every wire-level quantity has now been matched.
+
+### Download Play: the fault is the client clock, not the host (2026-09-12)
+
+Two Opus reviews of melonDS's `Wifi.cpp` and `LocalMP.cpp`/`LAN.cpp`
+against ours, then a decisive experiment, moved this from "somewhere in
+Download Play" to a specific place.
+
+**The decisive test.** A real melonDS guest (the trace harness, its own
+`Wifi.cpp` over our vendored ENet) joins our headless host and completes
+Download Play: 2 448 data commands, and the guest reaches the DS system
+"Downloading... Please wait. Do not turn the power off." screen. So our
+MP **host and the LAN transport are correct**. The remaining fault is in
+our **client** Wi-Fi timing. Symmetrically, our host with our own guest
+still fails about half the time.
+
+**Two client fixes landed** (commit "wifi: MP client reliability"), both
+toward melonDS:
+
+- **Immediate reply send.** `send_mp_reply` now transmits the reply frame
+  at CMD arrival (`tx_send_frame(slot, 5)` there), as melonDS does, rather
+  than deferring the frame's contents to the reply slot's TX end. The
+  deferral (added earlier to catch the firmware's in-place reply patching)
+  made the client's reply timeline drift ~1 ms from the host's.
+- **Reply-queue flush at CMD.** `LanMp::send_cmd` drops queued replies
+  before sending, mirroring `LocalMP` re-basing its reply FIFO on every
+  CMD. This, not the reply deferral, is the real cure for the host reading
+  an RsaReply against the wrong command; the deferral was a symptom patch.
+
+Also: peek is suppressed while the client's own reply is transmitting
+(`W_TXBusy & 0x80`), and `DS_WIFI_NO_PEEK` disables the early fetch for
+A/B.
+
+**Measured, four runs each, late Cut Off (tap 120 frames after sync):**
+
+| client config | data stage reached |
+|---|---|
+| immediate reply, peek on (default) | 2 / 4 |
+| immediate reply, peek off | 0 / 4 |
+| deferred reply, peek off | 1 / 2 |
+| melonDS guest vs our host | reliable |
+
+Immediate-reply + peek-on is the best config and is now the default; peek
+off is worse, so the early fetch stays.
+
+**The residual fault, and the fix.** Every success has the guest blocking
+in lockstep with the host (10k-28k reply/host waits); every failure has it
+decoupled (2.5k-6k waits, the guest running ahead). The DS MP protocol is
+itself the shared clock: the host is the clock master, each command and
+ack carries a timestamp, and the ack grants the client a bounded run-ahead
+before it must stop and wait. Two independent console clocks stay locked
+because the client never free-runs. Our client does not hold to that
+ceiling: its emulated clock is driven by its own wall-clock pacer up to
+`next_sync_`, and because host and guest do different work during a
+transfer their wall clocks drift. When the guest's clock leads, it consumes
+queued host commands early instead of blocking, and the DL library loses
+its request/reply rhythm and reports a communication error. The reference
+avoids this only because melonDS runs both instances as two threads of one
+process sharing a start clock; our two separate processes over sockets are
+looser, as two real consoles are.
+
+The fix is a hard client ceiling: never let the guest's emulated clock pass
+the last host frame's timestamp plus the granted run-ahead, and stall when
+it would. That is the next step, and it is enforcing the protocol's own
+clock, not adding a new network time sync.
