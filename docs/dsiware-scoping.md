@@ -707,13 +707,43 @@ field, differing only by a constant 32-cycle offset from the first
 instruction (the pipeline-fill charge `setup_direct_boot_dsi` applies and
 this path does not yet).
 
-**First real divergence, and it is ours:** the ARM7 spins on
-`LDRH r2,[0x04000204]` / `TST r2,r1` with r1 = 0x6000 -- boot2 waits on
-EXMEMCNT bits 13-14 before going on. melonDS's `NDS::Reset` sets
-`ExMemCnt[0] = ExMemCnt[1] = 0x6000`; ours resets to 0. Direct boot overwrites
-it with 0xE880 (which already carries those bits), so this only ever shows on
-a BIOS or NAND boot. **Not yet applied** -- it changes a reset value the DS
-firmware-boot path also sees, so it wants a DS scene-hash check first.
+**Two reset-state bugs found and fixed by diffing against melonDS's own NAND
+boot.** Both are cases where our reset leaves the state a *direct* boot wants
+(because there is no BIOS to program it) and real BIOS code reads it back:
+
+1. **EXMEMCNT.** boot2's ARM7 spins on `LDRH r2,[0x04000204]` / `TST r2,r1`
+   with r1 = 0x6000. melonDS `NDS::Reset` sets `ExMemCnt[0] = ExMemCnt[1] =
+   0x6000`; we reset to 0. Direct boot masks it by writing 0xE880 (which
+   carries those bits), so it only ever showed here. Fixed in `Io::reset`;
+   all six DS scenes unmoved over 600 frames, so nothing else depended on it.
+2. **CP15.** `NDS::reset` sets the ARM9's control register to 0x00012078
+   (DTCM enabled, vectors high) -- again what a direct boot needs. boot2 does
+   `MRC p15,0,r0,c1,c0,0` and branches on the value, reading 0x00012078 where
+   melonDS reads the ARM9's own reset value 0x00002078. `boot_dsi_nand` now
+   restores control 0x2078 with no TCM before entering boot2. (The comment on
+   that reset line also had it backwards: bit 16 is DTCM enable, bit 18 ITCM.)
+
+With both fixed the ARM9 traces agree 76 instructions further, and the whole
+~19 900-block NAND read now happens in the first two frames rather than
+trickling out.
+
+**Where it stands now:** the remaining first divergence is an IPCSYNC
+handshake at `0x04000180`. The ARM9 loops on `LDRH` / `AND #0x0F` / `CMP r4`
+waiting for the input nibble to reach 3; melonDS reads 0x0300 (input 0) and
+keeps waiting ~11 000 instructions, we read 0x0303 (input 3) and fall
+straight through -- and the ARM7's mirror-image wait at `037b9570` exits
+early for the same reason. Neither CPU is wrong about IPCSYNC; they are out
+of phase with each other at entry. The prime suspect is the entry timing this
+path never got: `setup_direct_boot_dsi` charges melonDS's pipeline-fill via
+`boot_stall` (136 ARM9 / 15 ARM7) and `boot_dsi_nand` charges nothing, which
+is exactly the constant 32-cycle offset measured at the first instruction.
+
+The downstream symptom, for reference: the ARM7 eventually branches into its
+own WRAM data around `0x0380F89C`, executes `00000001 / 00000000 / 00040000 /
+ffffffff` as instructions, and takes the undefined-instruction vector
+(CPSR mode 0x1B at `0x00000004`). That is a consequence of the desync, not a
+missing instruction -- we have no undefined-instruction logging at all, which
+melonDS does have and which would be worth adding.
 
 #### Unlaunch as a boot2 replacement (2026-09-12)
 

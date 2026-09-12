@@ -127,6 +127,20 @@ bool NDS::boot_dsi_nand() {
   if (!dsi_nand.valid()) return false;
   io::DsiIo& d = io.dsi;
 
+  // reset() leaves CP15 in the state a *direct* boot wants -- vectors high,
+  // DTCM enabled -- because there is no BIOS to program it. boot2 is real BIOS
+  // code and programs CP15 itself, so hand it the ARM9's own reset value
+  // (melonDS CP15::Reset: control 0x2078, no TCM). Getting this wrong is not
+  // cosmetic: boot2 reads the control register back and branches on it.
+  {
+    CpuContext& a9 = cpu(Cpu::ARM9);
+    a9.cp15_control = 0x00002078;
+    a9.cp15_itcm = 0;
+    a9.cp15_dtcm = 0;
+    a9.update_tcm_windows();
+    bus.update_tcm(a9);
+  }
+
   // NWRAM has to be reachable before the mapping below means anything; reset
   // leaves these bits at their startup values, which need not include it.
   d.scfg_ext[0] |= 1u << 25;
