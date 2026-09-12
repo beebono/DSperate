@@ -239,6 +239,10 @@ void Bus::update_nwram() {
   struct Retrap { Bus& b; ~Retrap() { if (!watch_on) return; for (int c = 0; c < 2; ++c) if (watch_host[c]) b.nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table.map_mmio(watch_addr & ~0x7FFu, 0x800); } } retrap{*this};
   if (!nds_.dsi) return;
   const io::DsiIo& d = nds_.io.dsi;
+  if (getenv("DS_DEBUG_MBK"))
+    std::fprintf(stderr, "[nwram] rebuild scfg_ext %08x/%08x (bit25 a9=%d a7=%d) t=%llu\n",
+                 d.scfg_ext[0], d.scfg_ext[1], (d.scfg_ext[0] >> 25) & 1, (d.scfg_ext[1] >> 25) & 1,
+                 (unsigned long long)nds_.sched.now());
   std::memset(nwram_map_, 0, sizeof nwram_map_);
   for (int part = 3; part >= 0; --part) {
     const u8 v = static_cast<u8>((d.mbk[0][0] >> (part * 8)) & 0xFD);

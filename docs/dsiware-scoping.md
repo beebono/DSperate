@@ -751,16 +751,36 @@ instruction, which is the right shape. `boot_dsi_nand` now adds 64 (ARM9) and
 because the trace timeline scales each CPU's cycles differently. With them
 the ARM9 reaches the IPCSYNC read site at **t=197628 on both sides, exactly**.
 
-**The real divergence is a memory-contents bug, not a timing one.** At the
-same timestamp (440450) and the same PC (`037d5190`), melonDS fetches
-`e0031001` and we fetch `00000000` -- and every instruction after it. The
-ARM7 is executing from the NWRAM window at `0x037Bxxxx-0x037Dxxxx` where
-boot2's ARM7 image was loaded (0x037B8000, 0x27600 bytes, so this address is
-well inside it), and in our machine that memory has gone empty. The first
-151 871 ARM9 instructions are identical, so the image loaded correctly and
-something *later* -- boot2 reprogramming MBK as it runs -- loses it. The lead
-is our NWRAM remapping (`Bus::update_nwram` / the MBK6-8 window handling)
-when boot2 rewrites the mapping, a path a direct-booted title never takes.
+**The NWRAM bug: a WRAMCNT write was wiping the NWRAM windows.** The symptom
+was the ARM7 fetching `00000000` at `037d5190` where melonDS fetches
+`e0031001`, at the same timestamp. Narrowing it down:
+
+- the boot2 image *loads* correctly -- a read-back at `037d5190` right after
+  `load_boot2` gives `e0031001`, and the window/slot maths all check out
+  (ARM7 NWRAM-C covers `037B8000-037F8000`, the address lands in slot 2);
+- boot2 never writes MBK at all, so it is not a remap by the guest;
+- `SCFG_EXT` bit 25 stays set throughout, so NWRAM is never disabled;
+- with `DS_WATCH` on that address, the *data* read returns the right value --
+  only the instruction fetch reads zero.
+
+The cause: a **WRAMCNT** write called `Bus::update_wram()` directly. On a DSi
+the NWRAM windows sit *on top* of that region, and `update_wram` re-lays
+`0x03000000-0x037FFFFF` as shared WRAM without re-applying them --
+`update_nwram()` does both, in that order. boot2 runs *from* NWRAM, so its own
+WRAMCNT write pulled the code out from under itself and the ARM7 fetched
+zeros mid-routine. A direct-booted title sets WRAMCNT before anything maps
+NWRAM, which is why this never showed before.
+
+With that fixed the **ARM9 is byte-identical to melonDS for the entire first
+frame of a NAND boot** (520 439 instructions, no divergence at all).
+
+**Remaining ARM7 divergence**, now a single localised difference at line
+109115: `LDRB r0,[0x0380FFC8]` reads **0x84** on melonDS and **0x00** here.
+That byte is inside the 0x3C00 ARM7 block written at `0x03FFC400` (offset
+0x3BC8), which is zero in both builds -- the ARM7i BIOS chunks only fill up
+to 0x22E4 -- so melonDS has something *writing* it during boot2, which we do
+not. It is not the ARM9 (it cannot see ARM7-only WRAM), so the next place to
+look is DMA/NDMA or the SD host's write path.
 
 #### Unlaunch as a boot2 replacement (2026-09-12)
 

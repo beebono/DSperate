@@ -1197,7 +1197,13 @@ void Io::vramcnt_store(u32 addr, u32 value, u32 n) {
     if (addr < 0x04000240 || addr >= 0x0400024A) continue;
     const u32 k = addr - 0x04000240;
     const u8 b = static_cast<u8>(value);
-    if (k == 7) { if (wramcnt != (b & 3)) { wramcnt = b & 3; nds_.bus.update_wram(); } continue; }
+    // WRAMCNT. On a DSi the NWRAM windows sit *on top* of this region, so the
+    // shared-WRAM re-lay has to be followed by the NWRAM overlay or it wipes
+    // it -- update_nwram does both, in that order. A direct-booted title sets
+    // WRAMCNT before anything maps NWRAM, so only a NAND boot ever saw this:
+    // boot2 runs from NWRAM and its own WRAMCNT write pulled the code out from
+    // under itself, and the ARM7 then fetched zeros mid-routine.
+    if (k == 7) { if (wramcnt != (b & 3)) { wramcnt = b & 3; if (nds_.dsi) nds_.bus.update_nwram(); else nds_.bus.update_wram(); } continue; }
     const u32 bank = k < 7 ? k : k - 1;                 // 0x248/0x249 are banks H/I
     if (dbg_vramcnt) std::fprintf(stderr, "[vramcnt] %c = %02x frame %llu line %u pc %08x\n", 'A' + bank, b, (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(Cpu::ARM9).hot.regs[15]);
     if (vramcnt[bank] != b) { vramcnt[bank] = b; vram_changed = true; }
@@ -1576,6 +1582,7 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
 // One MBK1-5 byte: slot `slot` of bank A (0), B (1) or C (2). The unsettable
 // bits are dropped, MBK9 write protection honoured, and the map rebuilt.
 void Io::mbk_map_slot(int bank, int slot, u8 value) {
+  if (getenv("DS_DEBUG_MBK")) std::fprintf(stderr, "[mbk] slot %c[%d] = %02x  t=%llu\n", "ABC"[bank], slot, value, (unsigned long long)nds_.sched.now());
   value &= bank == 0 ? ~0x72 : ~0x60;
   const u32 prot_bit = bank == 0 ? slot : bank == 1 ? 8 + slot : 16 + slot;
   if (dsi.mbk[0][8] & (1u << prot_bit)) return;
@@ -1593,6 +1600,13 @@ void Io::mbk_map_range(Cpu cpu, int bank, u32 value) {
   u32& reg = dsi.mbk[ci(cpu)][5 + bank];
   if (reg == value) return;
   reg = value;
+  if (getenv("DS_DEBUG_MBK")) {
+    const u32 start = bank == 0 ? 0x03000000 + (((value >> 4) & 0xFF) << 16) : 0x03000000 + (((value >> 3) & 0x1FF) << 15);
+    const u32 end   = bank == 0 ? 0x03000000 + (((value >> 20) & 0x1FF) << 16) : 0x03000000 + (((value >> 19) & 0x3FF) << 15);
+    std::fprintf(stderr, "[mbk] range %c cpu%d val %08x -> %08x-%08x size %u  t=%llu\n",
+                 "ABC"[bank], cpu == Cpu::ARM9 ? 9 : 7, value, start, end, (value >> 12) & 3,
+                 (unsigned long long)nds_.sched.now());
+  }
   nds_.bus.update_nwram();
 }
 

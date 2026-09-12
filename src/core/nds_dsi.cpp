@@ -218,6 +218,11 @@ bool NDS::boot_dsi_nand() {
     std::fprintf(stderr, "dsi: boot2 replaced by %s\n", dsi_boot2_override.c_str());
   }
 
+  if (getenv("DS_DEBUG_MBK")) {
+    for (u32 a : {0x037B8000u, 0x037C0000u, 0x037D0000u, 0x037D5190u, 0x037D8000u, 0x037DF000u})
+      std::fprintf(stderr, "[boot2] arm7 view %08x = %08x\n", a, bus.dma_read32(Cpu::ARM7, a));
+  }
+
   // What the boot ROM code we do not have would have left behind: the eMMC CID
   // and a handful of constants the ARM7 side reads back, plus the BIOS routines
   // boot2 calls but which live in the missing halves -- copied into ITCM and
