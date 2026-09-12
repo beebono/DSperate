@@ -104,8 +104,13 @@ const Setting kEmuSettings[] = {
   percent("emu.speed", "GAME SPEED", 25, 400, 5, "100", FlagLive, Dep::NetSession,
           "HOW FAST THE GAME RUNS AGAINST THE LIMITER"),
   // From 2: "1X" is real time, which is what not fast-forwarding already is.
+  // A multiple of real time, not of the limiter: it is a floor, so holding
+  // fast forward on a 240 Hz limiter never slows the game down to it.
+  // UNLIMITED uncaps whatever the limiter says, which is why it is still
+  // here now that the limiter has an UNLIMITED of its own -- a 60 Hz game
+  // with a fast forward that goes as fast as the machine will.
   number("emu.ff_speed", "FAST FORWARD SPEED", 2, 16, 1, "0", FlagLive, Dep::NetSession,
-         "HOW MANY TIMES REAL TIME THE FAST FORWARD HOTKEY RUNS AT", "0", "UNLIMITED", "X"),
+         "AT LEAST THIS MANY TIMES REAL TIME WHILE FAST FORWARD IS HELD", "0", "UNLIMITED", "X"),
   number("emu.ff_skip", "FAST FORWARD SKIP", 0, 9, 1, "3", FlagLive, Dep::NetSession,
          "WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE"),
   boolean("emu.autosave", "AUTOSAVE ON QUIT", "false", FlagLive, Dep::None,

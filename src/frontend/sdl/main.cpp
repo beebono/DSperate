@@ -1655,6 +1655,12 @@ sdl_ready:
   int speed_pct = cfg.num("emu.speed", 100);
   std::string limiter_mode = cfg.str("emu.limiter", "60");
   bool limiter_off = false;
+  // Everything that sets the machine's pace ends up here, as one number: how
+  // many times the console's own rate it is running at. The pacer's period
+  // is always one console frame and this scales it, so the limiter, the
+  // speed percent and fast forward are three ways of writing the same thing
+  // rather than three mechanisms.
+  double base_scale = 1.0;
   double frame_budget_ms = frame_ns / 1e6;   // one frame at the rate now in force; adaptive frameskip's budget
   auto apply_limiter = [&] {
     // Anything unrecognised is the console's own rate: an ini that says
@@ -1668,8 +1674,8 @@ sdl_ready:
       hz = parsed >= 1.0 && parsed <= 1000.0 ? parsed : 0.0;
     }
     const double period_ns = hz > 0.0 ? 1e9 / hz : frame_ns;
-    pacer.set_period_ns(period_ns);
     const double scale = speed_pct > 0 ? speed_pct / 100.0 : 1.0;
+    base_scale = frame_ns / period_ns * scale;
     frame_budget_ms = period_ns / 1e6 / scale;
     // The audio has to be stretched or squeezed by however far this is from
     // the console's own rate, or the rate control spends the session pinned
@@ -1677,7 +1683,7 @@ sdl_ready:
     // limiter is the exception: it runs as fast as the machine goes, which
     // is not a number, so the audio keeps the console's rate and the drop
     // path deals with the surplus, exactly as it does for fast forward.
-    audio.set_speed(limiter_off ? 1.0 : frame_ns / period_ns * scale);
+    audio.set_speed(limiter_off ? 1.0 : base_scale);
     pacer.reset();
   };
   apply_limiter();
@@ -1717,8 +1723,9 @@ sdl_ready:
   bool net_live = false;
   int state_slot = 0;
   // Fast forward: the `fast_forward` hotkey while held, or the toggle (also
-  // [emu] fast_forward = true to start that way). ff_speed caps it as a
-  // multiple of real time (0 = as fast as the machine goes); ff_skip presents
+  // [emu] fast_forward = true to start that way). It sets no pace of its own
+  // any more -- it asks the limiter for a floor of ff_speed times real time
+  // (0 = as fast as the machine goes, whatever the limiter says); ff_skip presents
   // one frame in ff_skip+1 -- every frame is still emulated (the display
   // capture and VRAM feedback keep the run exact), only its scaling and
   // present are skipped.
@@ -3766,13 +3773,17 @@ sdl_ready:
 #if DSPERATE_NET
     if (lan && audio.active()) { const double q = audio.queued_frames(); if (q < aq_min) aq_min = q; if (q < 1.0) ++aq_under1; if (q < 0.5) ++aq_under_half; }
 #endif
-    // The limiter. Uncapped fast forward and a limiter switched off are the
-    // only frames not paced at all; everything else -- with audio or without
-    // it -- goes through the one clock (pacer.h). The speeds multiply: the
-    // limiter's rate sets the period, emu.speed scales it, and fast forward
-    // scales it again while it is held.
+    // One clock, one number. base_scale is what the limiter and emu.speed
+    // came to; fast forward, while it is held, asks for a floor under that
+    // rather than a multiple of it -- ff_speed is a multiple of *real time*,
+    // as its row has always said, so holding it at 2x on a 30 Hz limiter
+    // gives 2x and holding it on a 240 Hz one does not slow the game down to
+    // 2x. ff_speed 0 uncaps whatever the limiter says, which is the point of
+    // keeping it: a limiter of 60 with a fast forward that goes as fast as
+    // the machine will.
+    const double scale = fast && ff_speed > 0 ? std::max(base_scale, static_cast<double>(ff_speed)) : base_scale;
     if ((fast && ff_speed <= 0) || limiter_off) pacer.reset();   // unthrottled: do not bank the time it gains
-    else pacer.wait((fast ? static_cast<double>(ff_speed) : 1.0) * (speed_pct > 0 ? speed_pct / 100.0 : 1.0));
+    else pacer.wait(scale);
 
     pace_ticks += SDL_GetPerformanceCounter() - t3;
     fps_pace_ticks += SDL_GetPerformanceCounter() - t3;
