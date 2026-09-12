@@ -1034,61 +1034,57 @@ void test_network_features_row() {
   CHECK(ds::sdl::step_value(*dns, "wiimmfi", +1, h) == "host");
   CHECK(ds::sdl::step_value(*dns, "host", +1, h) == "wiimmfi");
   CHECK(ds::sdl::display_value(*dns, "wiimmfi") == "WIIMMFI");
-  // The DNS row is NOT one of the rows local wireless greys out, and the
-  // speed knobs are not gated on internet: an internet session has no peer
-  // whose clock it must match.
-  CHECK(dns->depends != ds::sdl::Dep::NetOff);
+  // The DNS row is not one of the rows a session greys out: it is a setting
+  // for the session, not one the session forbids.
+  CHECK(dns->depends != ds::sdl::Dep::NetSession);
 
-  // Frameskip and fast forward hang off Dep::NetSession, which is the wider
-  // gate: both let the emulator set its own pace, and under a session of
-  // either kind the pace is set outside it. They are NOT on Dep::NetOff --
-  // that one is only about matching a peer's clock, so it stays local.
+  // Six rows hang off Dep::NetSession, and it is one gate rather than two:
+  // frameskip and fast forward let the emulator set its own pace, the three
+  // inexact speed knobs change how long its work appears to take, and under a
+  // session the pace is kept outside the emulator either way -- by a peer
+  // holding every frame to its timestamp, or by a server with its own
+  // timeouts. It keys on the session having actually started, not on a mode
+  // having been asked for.
   int session_gated = 0;
   for (int i = 0; i < ds::sdl::settings_count(t); ++i)
     if (t[i].depends == ds::sdl::Dep::NetSession) ++session_gated;
-  CHECK(session_gated == 3);
-  for (const char* k : {"emu.frameskip", "emu.ff_speed", "emu.ff_skip"}) {
+  CHECK(session_gated == 6);
+  for (const char* k : {"emu.frameskip", "emu.ff_speed", "emu.ff_skip",
+                        "emu.cpu_oc", "emu.timing_oc", "emu.fast_load"}) {
     const ds::sdl::Setting* row = nullptr;
     for (int i = 0; i < ds::sdl::settings_count(t); ++i)
       if (!std::strcmp(t[i].key, k)) row = &t[i];
     CHECK(row != nullptr);
     CHECK(row->depends == ds::sdl::Dep::NetSession);
-    CHECK(row->depends != ds::sdl::Dep::NetOff);
+    // All six are live -- FlagLive is 0, so that is the absence of the two
+    // flags that defer a change. It is what lets the session revoke them
+    // after the transport comes up rather than having to know before the
+    // machine boots.
+    CHECK(!(row->flags & (ds::sdl::FlagRestart | ds::sdl::FlagDeferred)));
   }
-  // A host with a session up refuses them and says why.
+  // The three speed knobs are the inexact ones, and still say so.
+  for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"}) {
+    const ds::sdl::Setting* row = nullptr;
+    for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+      if (!std::strcmp(t[i].key, k)) row = &t[i];
+    CHECK(row != nullptr);
+    CHECK(row->flags & ds::sdl::FlagInexact);
+  }
+  // A host with a session up refuses all six, and says why.
   struct SessionOn final : FakeHost {
     const char* disabled_reason(const ds::sdl::Setting& s) const override {
       return s.depends == ds::sdl::Dep::NetSession ? "NOT DURING A NETWORK SESSION" : "";
     }
     bool enabled(const ds::sdl::Setting& s) const override { return !*disabled_reason(s); }
   } session;
+  int refused = 0;
   for (int i = 0; i < ds::sdl::settings_count(t); ++i)
-    if (t[i].depends == ds::sdl::Dep::NetSession) CHECK(!session.enabled(t[i]));
-  // The three inexact speed knobs hang off local wireless being off: two
-  // consoles in a session have to keep the same time as each other.
-  int gated = 0;
+    if (t[i].depends == ds::sdl::Dep::NetSession) { CHECK(!session.enabled(t[i])); ++refused; }
+  CHECK(refused == 6);
+  // And with no session up, all six are usable: the gate is the session, so
+  // an ordinary run is untouched by any of this.
   for (int i = 0; i < ds::sdl::settings_count(t); ++i)
-    if (t[i].depends == ds::sdl::Dep::NetOff) {
-      ++gated;
-      CHECK(t[i].flags & ds::sdl::FlagInexact);
-    }
-  CHECK(gated == 3);
-  for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"}) {
-    const ds::sdl::Setting* row = nullptr;
-    for (int i = 0; i < ds::sdl::settings_count(t); ++i)
-      if (!std::strcmp(t[i].key, k)) row = &t[i];
-    CHECK(row != nullptr);
-    CHECK(row->depends == ds::sdl::Dep::NetOff);
-  }
-  // A host with a session up refuses all three, and says why.
-  struct NetOn final : FakeHost {
-    const char* disabled_reason(const ds::sdl::Setting& s) const override {
-      return s.depends == ds::sdl::Dep::NetOff ? "NOT WITH NETWORK FEATURES ON" : "";
-    }
-    bool enabled(const ds::sdl::Setting& s) const override { return !*disabled_reason(s); }
-  } on;
-  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
-    if (t[i].depends == ds::sdl::Dep::NetOff) CHECK(!on.enabled(t[i]));
+    if (t[i].depends == ds::sdl::Dep::NetSession) CHECK(h.enabled(t[i]));
 }
 
 // A value the file already holds outside the menu's range is shown as it

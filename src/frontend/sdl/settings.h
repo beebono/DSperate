@@ -49,15 +49,15 @@ enum class Dep : u8 {
   Dominant,           // the layout is dominant_v or dominant_h
   DominantThreshold,  // Dominant, and dominant_ratio is auto
   Net,                // the build has the Wi-Fi transports (DSPERATE_NET)
-  // Local wireless is off this session. The three inexact speed knobs hang off
-  // this: two consoles in a session have to keep the same time as each other,
-  // and these change how long the guest thinks its work took.
-  NetOff,
   NetInternet,        // net.mode is internet: the DNS choice means nothing otherwise
-  // No network session is up, of either kind. Frameskip and fast forward hang
-  // off this: both let the emulator set its own pace, and under a session the
-  // pace is set outside it. Wider than NetOff, which is local wireless only
-  // because it is about matching one peer's clock.
+  // No network session is up. Frameskip, fast forward and the three inexact
+  // speed knobs all hang off this: each of them either lets the emulator set
+  // its own pace or changes how long its work appears to take, and under a
+  // session the pace is kept outside it -- by a peer that holds every frame to
+  // its timestamp, or by a server with its own timeouts.
+  //
+  // The session, not the request: a --netplay that could not open a socket
+  // leaves an ordinary console, and these rows stay usable.
   NetSession,
 };
 

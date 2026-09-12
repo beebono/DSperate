@@ -808,6 +808,13 @@ three on in the config overrides all three; `net.mode = off` with `cpu_oc =
 true` says nothing and leaves it alone. 21/21 tests, with the gating asserted
 in `test_network_features_row`.
 
+> **Superseded (2026-09-12, phase 3):** `Dep::NetOff` and `Host::net_on` are
+> gone. The three knobs now hang off `Dep::NetSession` with everything else a
+> session takes away, keyed on a transport having actually started rather than
+> on local wireless having been asked for, and they cover internet sessions
+> too. The measurement and the reasoning above still stand; only the gate
+> changed. See "What a session takes away".
+
 ## Phase 3 as built (2026-09-12): internet through the access point
 
 The access point was already there -- `Wifi::ap_send` / `ap_recv` (the
@@ -888,14 +895,16 @@ wireless **mutually exclusive by construction**, which is the intent: one
 radio, one use of it. The flags can still ask for both, so `--internet` with
 any `--lan-*` / `--netplay` is refused outright.
 
-Two things deliberately **not** inherited from local wireless:
+One thing deliberately **not** inherited from local wireless: **the MAC is not
+randomized.** That exists so two instances off one firmware dump do not share
+a MAC; on a service that identifies a console, a new MAC every boot would be a
+new console every boot.
 
-- **The MAC is not randomized.** That exists so two instances off one firmware
-  dump do not share a MAC; on a service that identifies a console, a new MAC
-  every boot would be a new console every boot.
-- **The inexact speed knobs are not forced off.** `Dep::NetOff` and the
-  override both key on the local-wireless flags, and an internet session has
-  no peer whose clock it must match.
+The inexact speed knobs *are* inherited, though they were not at first. They
+were left alone for an internet session on the grounds that the gate was about
+matching one peer's clock -- then the gate became "a session is actually up",
+which an internet session is, and a server has its own timeouts whether or not
+there is a peer. See "What a session takes away".
 
 ### Proof
 
@@ -929,23 +938,45 @@ what is on the other side is the real internet and is not deterministic.
 
 A network session of either kind means something outside the emulator is
 keeping time. Everything that lets the emulator set its own pace, or step
-outside the timeline, goes away for the session -- keyed on `net_live`, which
-is set once a transport has actually started, not from the flags, so a
-session that failed to come up leaves the machine ordinary.
+outside the timeline, goes away for the session.
 
 | what | how | why |
 |------|-----|-----|
 | save / load state, and the autosave on quit | hotkey refused with a line; the rows come off the pause menu | a state freezes this machine and not the one it is talking to, and nothing in a state file restores an ENet session or an open socket |
-| fast forward, held and toggled | refused with a line; `emu.fast_forward` in the config forced off at startup | running ahead of the peer is the desync |
-| frameskip | forced to 0 at startup, said on stderr; rows greyed `Dep::NetSession` | it exists to let a machine that is behind catch up by dropping presents, and under a session "behind" is fixed by running the frame |
+| fast forward, held and toggled | refused with a line; `emu.fast_forward` in the config forced off | running ahead of the peer is the desync |
+| frameskip | forced to 0, said on stderr | it exists to let a machine that is behind catch up by dropping presents, and under a session "behind" is fixed by running the frame |
+| `cpu_oc`, `timing_oc`, `fast_load` | forced off, said on stderr, one line each | all three change how long the machine's work appears to take (see "The inexact speed knobs", below) |
 
-The refusals are ungated on stderr, like the speed-knob override: the player
-pressed a key, or named a setting, and nothing happened.
+All of it keyed on one fact, `net_live`: a transport has **actually started**.
+Not on the flags, and not on `net.mode` -- a `--netplay` that could not open a
+socket, or a `--lan-join` that got no answer, leaves an ordinary console, and
+an ordinary console keeps its speed knobs, its frameskip and its save states.
+Verified: `--lan-join` at an address with nothing on it prints "no answer" and
+then overrides nothing.
 
-`Dep::NetSession` is deliberately wider than `Dep::NetOff`. NetOff greys the
-three inexact speed knobs and is local-wireless-only, because it is about
-matching one peer's clock. NetSession covers internet too, because a server
-has timeouts whether or not there is a peer.
+The refusals are ungated on stderr: the player pressed a key, or named a
+setting, and nothing happened.
+
+The six settings rows -- frameskip, the two fast-forward numbers and the three
+speed knobs -- hang off one `Dep::NetSession`, greyed NOT DURING A NETWORK
+SESSION. It reads `net_live` through the settings host by pointer, because the
+transports come up after the host is built and the menu must see the answer
+rather than the guess.
+
+**The speed knobs moved here from a narrower gate (2026-09-12, later).** They
+were originally forced off before the machine booted, keyed on local wireless
+having been *asked for*, on the grounds that the gate was about matching one
+peer's clock and an internet session has no peer. Two things changed that:
+an active session can be detected, which a request cannot, and a server has
+its own timeouts whether or not there is a peer. So there is now one gate
+instead of two.
+
+That is only possible because all three are `FlagLive`: they are revoked
+through `host.apply`, the same path the menu uses, after the transport is up.
+Safe that late because **no frame has run yet** -- the knobs are applied from
+the config a few hundred lines earlier and nothing steps the machine in
+between -- so it is equivalent to the old pre-boot force, without having to
+guess. `cfg` is set in memory only; the player's file is not rewritten.
 
 Startup `--load-state` and `emu.autoload` are **not** gated: they happen
 before any transport is up, so there is no session to break. Loading into a

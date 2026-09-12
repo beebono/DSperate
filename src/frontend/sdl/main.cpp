@@ -1152,26 +1152,6 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "net: --internet is not local wireless; pick one\n");
     return 1;
   }
-  // Local wireless anywhere means the inexact speed knobs go off, whoever asked
-  // for them. Two consoles in a session keep each other's time: the guest holds
-  // every host frame to its timestamp and has to answer inside its own slot, so
-  // a knob that changes how long its work appears to take desynchronises the
-  // pair. Measured the hard way -- a Mario Kart DS Download Play session from
-  // the dev box to the RG DS only held up once fast_load and cpu_oc were off on
-  // the handheld (2026-09-12), and timing_oc drops the GX FIFO timing outright,
-  // so it goes with them.
-  //
-  // Not gated behind DS_VERBOSE: this overrides something the player asked for
-  // by name, on the command line or in their config, and they should be told.
-  // The rows say so too -- Dep::NetOff greys all three while a session is on.
-  const bool net_on = lan_host || lan_join || netplay || lan_guest;
-  if (net_on) {
-    for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"})
-      if (cfg.flag(k, false)) {
-        std::fprintf(stderr, "net: %s is off for this session -- local wireless needs the two consoles to keep the same time\n", k);
-        cfg.set(k, "false");
-      }
-  }
   {
     std::string err;
     if (!nds.load_bios(bios9, bios7, fw, user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
@@ -1652,12 +1632,11 @@ sdl_ready:
   // not from the flags: a session that failed to come up leaves the machine
   // ordinary, and so should its restrictions.
   //
-  // The emulator cannot stop, rewind or run fast while something outside it
-  // is keeping time. That rules out save states, fast forward and frameskip
-  // for the session, and it is why the pause menu stops pausing (see
-  // `menu_live` below). Distinct from Host::net_on, which greys the three
-  // inexact speed knobs and is local-wireless-only -- those are about
-  // matching a peer's clock, which an internet session has no peer for.
+  // The emulator cannot stop, rewind, run fast or cut corners on timing while
+  // something outside it is keeping time. That rules out save states, fast
+  // forward, frameskip and the three inexact speed knobs for the session, and
+  // it is why the pause menu stops pausing. Everything hangs off this one
+  // fact, and the rows off Dep::NetSession, which reads it through the host.
   bool net_live = false;
   int state_slot = 0;
   // Fast forward: the `fast_forward` hotkey while held, or the toggle (also
@@ -1874,10 +1853,9 @@ sdl_ready:
     std::function<void(const char*, const std::string&)> apply;
     std::function<void()> reopen;
     bool per_game = false;
-    bool net_on = false;          // local wireless is on this session (Dep::NetOff)
-    // A session of either kind is up (Dep::NetSession). A pointer to the
-    // frontend's own flag rather than a copy: the transports come up after
-    // this host is built, and the menu must see the answer, not the guess.
+    // A session is up (Dep::NetSession). A pointer to the frontend's own flag
+    // rather than a copy: the transports come up after this host is built,
+    // and the menu must see the answer, not the guess.
     const bool* net_live = nullptr;
 
     Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi, ds::sdl::Input& in)
@@ -2255,8 +2233,6 @@ sdl_ready:
         return cfg.str("net.mode", "off") == "internet" ? "" : "ONLY WITH NETWORK FEATURES ON INTERNET";
       case ds::sdl::Dep::NetSession:
         return (net_live && *net_live) ? "NOT DURING A NETWORK SESSION" : "";
-      case ds::sdl::Dep::NetOff:
-        return net_on ? "NOT WITH NETWORK FEATURES ON" : "";
       }
       return "";
     }
@@ -2265,7 +2241,6 @@ sdl_ready:
   Host host(cfg, nds, display, vs, global_ini, session.game_ini, input);
   host.reconfigure_input = [&] { input.configure(cfg); };
   host.fw_override = fw_override;
-  host.net_on = net_on;
   host.net_live = &net_live;
   host.reopen = [&] { reopen_display(); };
   // The whole layout in one go, re-read from the config: every row on the
@@ -2426,6 +2401,33 @@ sdl_ready:
   if (net_live && ff_toggle) {
     std::fprintf(stderr, "net: fast forward is off for this session\n");
     ff_toggle = false;
+  }
+  // And the three inexact speed knobs. Two consoles in a session keep each
+  // other's time -- the guest holds every host frame to its timestamp and has
+  // to answer inside its own slot -- and a server has its own timeouts, so a
+  // knob that changes how long the machine's work appears to take has no
+  // business being on either way. Measured the hard way: a Mario Kart DS
+  // Download Play session from the dev box to the RG DS only held up once
+  // fast_load and cpu_oc were off on the handheld (2026-09-12), and timing_oc
+  // drops the GX FIFO timing outright, so it goes with them.
+  //
+  // This runs here, after the transport is up, rather than before the machine
+  // boots: the session is only a fact once something has actually started, and
+  // a --netplay that could not open a socket leaves an ordinary console. It is
+  // safe this late because all three are FlagLive -- host.apply is the same
+  // path the menu uses -- and because no frame has run yet: the knobs are
+  // applied from the config a few hundred lines up and nothing has stepped the
+  // machine since.
+  //
+  // Not gated behind DS_VERBOSE: this overrides something the player asked for
+  // by name, on the command line or in their config, and they should be told.
+  if (net_live) {
+    for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"})
+      if (cfg.flag(k, false)) {
+        std::fprintf(stderr, "net: %s is off for this session -- the network keeps time, so the machine cannot fake it\n", k);
+        cfg.set(k, "false");       // in memory, not in the player's file
+        host.apply(k, "false");    // and into the running machine
+      }
   }
   // The state rows come off the pause menu for a session. Done here, once the
   // transports have actually started, rather than from the flags.
