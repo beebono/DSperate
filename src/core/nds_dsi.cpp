@@ -247,12 +247,16 @@ bool NDS::boot_dsi_nand() {
 
   cpu(Cpu::ARM9).jump(bp[2], false);
   cpu(Cpu::ARM7).jump(bp[6], false);
-  // No boot_stall here. melonDS charges its pipeline fill to the *first
-  // instruction* (its cost is 40 ARM9 / 10 ARM7 where ours is 8 / 2, and
-  // every later instruction already agrees exactly); boot_stall instead
-  // delays the start, which moves our whole timeline off melonDS's t=0.
-  // Tried 32/8: the first divergence did not move at all, so the entry
-  // phase is not what breaks the IPCSYNC handshake below.
+  // melonDS's pipeline fill after JumpTo, charged the way melonDS charges its
+  // pending Cycles: *after* the first instruction, not before it. Its first
+  // instruction costs 40 ARM9 / 10 ARM7 where ours costs 8 / 2, and every
+  // later instruction already agrees exactly. 64 and 4 are calibrated to hit
+  // those costs: defer_cost is in each CPU's own cycles, which the trace
+  // timeline scales differently per CPU, so they are measured, not derived.
+  // boot_stall is the wrong tool here -- it delays the start instead, moving
+  // our timeline off melonDS's t=0 without changing the phase.
+  cpu(Cpu::ARM9).defer_cost += 64;
+  cpu(Cpu::ARM7).defer_cost += 4;
   std::fprintf(stderr, "dsi: boot2 from NAND -- ARM9 %08X (%u bytes), ARM7 %08X (%u bytes)\n",
                bp[2], bp[3], bp[6], bp[7]);
   return true;

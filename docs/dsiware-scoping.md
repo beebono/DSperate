@@ -732,42 +732,35 @@ handshake at `0x04000180`. The ARM9 loops on `LDRH` / `AND #0x0F` / `CMP r4`
 waiting for the input nibble to reach 3; melonDS reads 0x0300 (input 0) and
 keeps waiting ~11 000 instructions, we read 0x0303 (input 3) and fall
 straight through -- and the ARM7's mirror-image wait at `037b9570` exits
-early for the same reason. Neither CPU is wrong about IPCSYNC. Three suspects have been measured and
-**ruled out**:
+early for the same reason. **A tracing mistake to avoid repeating:** our headless tracer deduplicates
+repeated lines unless `DS_TRACE_NODEDUP=1`, and melonDS's needs
+`TRACE_NODEDUP=1`. Setting only the melonDS side makes a polling loop look
+like a huge execution gap and puts the "first divergence" thousands of lines
+too early. **Always set both.** With both set, the real first divergence is
+ARM9 line 151871 / ARM7 line 107571 -- not the line 16505 / line 30 an
+asymmetric comparison reports.
 
-- **Not the perf knobs.** Headless already defaults to `LOCKSTEP_QUANTUM`
-  (128). Re-running the whole comparison under the full gate environment
-  (`DS_IDLE_SKIP=0 DS_MELON_STM=1 DS_STORE_BUS=0`) gives the *same* divergence
-  points, ARM9 16505 and ARM7 30, so the idle skips are not involved.
-- **Not the entry phase.** melonDS charges its pipeline fill to the *first
-  instruction* (cost 40 ARM9 / 10 ARM7 against our 8 / 2; every later
-  instruction's cost already agrees exactly). `boot_stall` instead delays the
-  start, which moves our timeline off melonDS's t=0. Setting it to 32/8 did
-  not move the first divergence at all, so it is not the cause; the path
-  deliberately charges nothing.
-- **Not IPCSYNC itself.** `Io::ipc_sync_write` cross-wires correctly (my
-  output nibble becomes their input), and its `sched.yield` is a no-op at
-  lockstep quantum. `DS_IPC_LOG=1` shows a correctly ordered handshake: ARM9
-  writes out=3 at t=197578, ARM7 at t=224290.
+**Entry phase: fixed.** melonDS charges its post-`JumpTo` pipeline fill to the
+*first instruction* (cost 40 ARM9 / 10 ARM7 against our 8 / 2; every later
+instruction already agreed exactly). `boot_stall` is the wrong tool -- it
+delays the start instead, moving our timeline off melonDS's t=0 and not
+changing the phase at all. `CpuContext::defer_cost`, which the DMA path
+already uses for melonDS's pending `Cycles`, charges *after* the next
+instruction, which is the right shape. `boot_dsi_nand` now adds 64 (ARM9) and
+4 (ARM7); those are calibrated against the oracle rather than derived,
+because the trace timeline scales each CPU's cycles differently. With them
+the ARM9 reaches the IPCSYNC read site at **t=197628 on both sides, exactly**.
 
-**What is left is relative CPU progress over the first ~16 500 ARM9
-instructions** -- our ARM9 simply arrives at the handshake earlier than
-melonDS's. The strongest remaining lead is **ARM9 instruction-fetch timing
-for the region boot2 runs from** (0x037B8000, NWRAM). It fits the measurement
-shape: per-instruction deltas agree because those are cache hits, while the
-very first fetch costs melonDS 40 and us 8 -- a cache-line fill from a region
-we may be pricing too cheaply. Over 16 500 instructions that deficit
-accumulates into exactly this kind of phase error. Phase 1 added a DSi region
-table to `Timing::reset` including NWRAM, but a direct-booted title never
-executes from there, so this is the first time that entry has been
-exercised.
-
-The downstream symptom, for reference: the ARM7 eventually branches into its
-own WRAM data around `0x0380F89C`, executes `00000001 / 00000000 / 00040000 /
-ffffffff` as instructions, and takes the undefined-instruction vector
-(CPSR mode 0x1B at `0x00000004`). That is a consequence of the desync, not a
-missing instruction -- we have no undefined-instruction logging at all, which
-melonDS does have and which would be worth adding.
+**The real divergence is a memory-contents bug, not a timing one.** At the
+same timestamp (440450) and the same PC (`037d5190`), melonDS fetches
+`e0031001` and we fetch `00000000` -- and every instruction after it. The
+ARM7 is executing from the NWRAM window at `0x037Bxxxx-0x037Dxxxx` where
+boot2's ARM7 image was loaded (0x037B8000, 0x27600 bytes, so this address is
+well inside it), and in our machine that memory has gone empty. The first
+151 871 ARM9 instructions are identical, so the image loaded correctly and
+something *later* -- boot2 reprogramming MBK as it runs -- loses it. The lead
+is our NWRAM remapping (`Bus::update_nwram` / the MBK6-8 window handling)
+when boot2 rewrites the mapping, a path a direct-booted title never takes.
 
 #### Unlaunch as a boot2 replacement (2026-09-12)
 
