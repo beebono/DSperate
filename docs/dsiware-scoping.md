@@ -645,6 +645,41 @@ swap a pending RX completion for a TX one when two blocks land inside one
 512-cycle delay. `Scheduler::armed()` plus `SdHost::schedule_transfer` now
 match melonDS. It did not fix the wedge.
 
+**How melonDS DS (libretro) actually does it -- and why our approach differs
+(2026-09-12).** `dsperate-research/melonds-ds-libretro`
+(`src/libretro/console/dsi.cpp`, `SetUpDSiWareDirectBoot`) launches DSiWare
+with *no mount table at all*. It writes a 0x100-byte **`TLNC` autoload block
+at 0x02000300** in main RAM -- ID "TLNC", unknown 01h, length 18h, CRC16 over
+0x18 bytes from +0x08 seed 0xFFFF, PrevTitleID 0 ("anonymous"), NewTitleID =
+this title, flags `0x01 | (3 << 1) | (1 << 4)` (bit 0 valid, bits 1-3 boot
+type 3 = DSiWare, bit 4 undocumented but required) -- and sets the **BPTWL
+boot flag** (register 0x70). Credited there to CasualPokePlayer.
+
+The decisive detail is the branch around it:
+
+    if (isDirectBootConfigured && isDsiMode && header.IsDSiWare())
+        SetUpDSiWareDirectBoot(...);       // TLNC only
+    else if (... && !header.IsDSiWare() && ...)
+        Console->SetupDirectBoot(...);     // never reached for DSiWare
+
+For DSiWare it **never stages a direct boot**. The console boots its real
+BIOS/boot2 chain from the NAND, and the TLNC block tells the boot ROM to
+auto-launch an installed title instead of showing the menu. The core also
+*temporarily installs* the title into the NAND image first
+(`config/console.cpp`, `NANDMount::ImportTitle`) and removes it afterwards.
+
+So melonDS DS's "DSiWare direct boot" is **not direct boot in our sense** --
+it is a full NAND boot with an autoload hint. Implemented here as
+`DS_DSI_HANDOFF=2`, the TLNC block is inert exactly as that predicts: no
+wedge, but no NAND access either, because our direct boot has already staged
+the title from the card image before the boot ROM would ever read it.
+
+**This puts section 3.2 ("Direct boot only") in tension with the one approach
+known to work.** The options are (a) implement the DSi BIOS/boot2 NAND boot
+so TLNC means something -- the path melonDS DS proves out, and the one that
+needs no reverse engineering -- or (b) keep staging a direct boot and keep
+chasing the mount-table wedge. That is a scoping decision, not a code one.
+
 This is the boundary of what the recipe buys. A full launch is a hybrid --
 binaries from the card image, filesystem from the NAND -- and something in
 that seam is inconsistent for both emulators. Note this is *weaker* than the

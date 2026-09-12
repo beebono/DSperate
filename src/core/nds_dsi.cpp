@@ -11,6 +11,7 @@
 
 extern "C" {
 #include "core/crypto/aes.h"
+#include "core/bios/freebios.h"
 }
 
 #include <cstdio>
@@ -159,10 +160,18 @@ void NDS::setup_direct_boot_dsi() {
   // SD controller init instead of mounting, where card mode at least reaches
   // its "Save Data has been corrupted" prompt. Default stays card mode, which
   // is what melonDS's direct boot does and what the trace gate compares.
-  const bool launcher_handoff = dsi_nand.valid() && getenv("DS_DSI_HANDOFF") &&
-                                t.param_block_address >= 0x03800000 &&
+  // DS_DSI_HANDOFF picks which launcher hand-off to stage on top of our direct
+  // boot. Neither is a complete launch; see the phase 3 status block.
+  //   1 = the mount table in ARM7 WRAM (reaches the NAND -- app directory walk
+  //       and save I/O -- then wedges the ARM7 in a dead-end IRQ handler)
+  //   2 = the TLNC autoload block (what melonDS DS actually uses, but it only
+  //       means something to the real boot ROM, which our direct boot skips)
+  const char* handoff_env = getenv("DS_DSI_HANDOFF");
+  const int handoff = (dsi_nand.valid() && handoff_env) ? std::atoi(handoff_env) : 0;
+  const bool launcher_handoff = handoff == 1 && t.param_block_address >= 0x03800000 &&
                                 t.param_block_address < 0x0380FC00;
-  w16(0x02FFFC40, launcher_handoff ? 0x0003 : 0x0001);
+  const bool tlnc_handoff = handoff == 2;
+  w16(0x02FFFC40, 0x0001);
   w8(0x02FFFDFA, 0x80);                              // BPTWL boot flag (0) | 0x80
   w8(0x02FFFDFB, 0x01);
 
@@ -223,60 +232,72 @@ void NDS::setup_direct_boot_dsi() {
   arm7->hot.regs[12] = h.arm7_entry; arm7->hot.regs[13] = 0x0380FD80; arm7->hot.regs[14] = h.arm7_entry;
   arm7->bank_r13[0] = 0x0380FFC0; arm7->bank_r13[2] = 0x0380FF80;
 
-  // ---- the DSi launcher's hand-off ----
-  // What a title gets from the launcher that a card-mode direct boot never
-  // writes, reverse-engineered from launcher launches of KS3E and KMGE
-  // (dsperate-research tools/melonds/dsiware_params.py): the mount table in
-  // ARM7 WRAM at the address in header word 0x1D4, the app path beside it,
-  // and the 8-byte boot info at 0x0380FFC4. Without these the SDK's crt0
-  // mounts nothing -- it halts outright if [0x0380FFC8] & 0xC != 4 -- and the
-  // title falls back to reading the card.
+  // ---- hand-off 1: the launcher's mount table in ARM7 WRAM ----
+  // Reverse-engineered from launcher launches of KS3E and KMGE
+  // (dsperate-research tools/melonds/dsiware_params.py). This one does reach
+  // the NAND: the title mounts nand:/, walks to its own CONTENT/ and DATA/,
+  // and reads and writes PUBLIC.SAV -- then wedges (see the doc).
   if (launcher_handoff) {
-    d.scfg_ext[1] |= 1u << 18;                       // the launcher's SCFG_EXT7: NAND access for the ARM7
+    d.scfg_ext[1] |= 1u << 18;
 
     auto w32_7 = [&](u32 a, u32 v) { bus.dma_write32(Cpu::ARM7, a, v); };
     auto w8_7  = [&](u32 a, u8 v)  { bus.dma_write8(Cpu::ARM7, a, v); };
     const u32 tbl = t.param_block_address;
-    // The oracle loads a zero-filled 0x500-byte window and then the fields,
-    // so every byte of the block the title does not get told about is zero.
-    // Writing only the fields leaves whatever the boot left behind in the
-    // gaps, which the SDK misparses.
     for (u32 z = 0; z < 0x500; z += 4) w32_7(tbl + z, 0);
     auto put_str = [&](u32 addr, const char* str) { for (const char* c = str; *c; ++c) w8_7(addr++, static_cast<u8>(*c)); w8_7(addr, 0); };
     char title[64];
     std::snprintf(title, sizeof title, "nand:/title/%08x/%08x", t.title_id_hi, t.title_id_lo);
-
-    // Five 0x54-byte mount entries. The leading word of each is copied
-    // verbatim from a real launch; its fields are not understood.
+    char pub[96];
+    std::snprintf(pub, sizeof pub, "%s/data/public.sav", title);
     struct { u32 hdr; const char* name; const char* path; } entries[] = {
       {0x00008141, "nand",    "/"},
       {0x0000A142, "nand2",   "/"},
       {0x00041144, "shared1", "nand:/shared1"},
       {0x00063146, "photo",   "nand2:/photo"},
-      {0x00060948, "dataPub", nullptr},              // filled below: <title>/data/public.sav
+      {0x00060948, "dataPub", pub},
     };
-    char pub[96];
-    std::snprintf(pub, sizeof pub, "%s/data/public.sav", title);
-    entries[4].path = pub;
-
     u32 o = tbl;
-    for (const auto& e : entries) {
-      w32_7(o, e.hdr);
-      put_str(o + 4, e.name);
-      put_str(o + 20, e.path);
-      o += 0x54;
-    }
-
-    // The app the title loads itself from. Content version 0 is the name the
-    // installed content carries for every title in our NAND.
+    for (const auto& e : entries) { w32_7(o, e.hdr); put_str(o + 4, e.name); put_str(o + 20, e.path); o += 0x54; }
     char app[96];
     std::snprintf(app, sizeof app, "%s/content/%08x.app", title, 0);
     put_str(tbl + 0x3C0, app);
-
-    // The boot info the crt0 checks: an SCFG_EXT7 snapshot and two flag bytes.
     w32_7(0x0380FFC4, 0x13FFFF06);
     w8_7(0x0380FFC8, 0x44);
     w8_7(0x0380FFC9, 0xF8);
+    w16(0x02FFFC40, 0x0003);
+  }
+
+  // ---- hand-off 2: the TLNC autoload block ----
+  // What the launcher actually leaves behind for a DSiWare title is a 0x100-byte
+  // "TLNC" autoload block at 0x02000300 in main RAM, plus the BPTWL boot flag.
+  // GBATEK "DSi Autoload"; the working reference is melonDS DS (libretro),
+  // console/dsi.cpp SetUpDSiWareDirectBoot, which direct-boots DSiWare with
+  // just these two things.
+  //
+  //   +0x00 "TLNC"   +0x04 unknown (01h)   +0x05 length (18h, from PrevTitleID)
+  //   +0x06 CRC16 over Length bytes from +0x08, seed 0xFFFF
+  //   +0x08 PrevTitleID (0 = anonymous)    +0x10 NewTitleID (this title)
+  //   +0x18 flags: bit 0 valid, bits 1-3 boot type (3 = DSiWare), bit 4 unknown
+  //                but required -- titles error out without it
+  //   +0x1C unused (still checksummed)     +0x20 unused, zero filled
+  if (tlnc_handoff) {
+    d.scfg_ext[1] |= 1u << 18;                       // the launcher's SCFG_EXT7: NAND access for the ARM7
+
+    u8 tlnc[0x100] = {};
+    tlnc[0] = 'T'; tlnc[1] = 'L'; tlnc[2] = 'N'; tlnc[3] = 'C';
+    tlnc[4] = 0x01;
+    tlnc[5] = 0x18;
+    // PrevTitleID stays zero ("anonymous" -- nothing launched us).
+    std::memcpy(&tlnc[0x10], &t.title_id_lo, 4);
+    std::memcpy(&tlnc[0x14], &t.title_id_hi, 4);
+    const u32 flags = 0x01u | (0x03u << 1) | (1u << 4);
+    std::memcpy(&tlnc[0x18], &flags, 4);
+    const u16 crc = bios::crc16(&tlnc[0x08], 0x18, 0xFFFF);
+    std::memcpy(&tlnc[0x06], &crc, 2);
+    for (u32 i = 0; i < sizeof tlnc; ++i) w8(0x02000300 + i, tlnc[i]);
+
+    // The BPTWL boot flag (register 0x70) the launcher sets on its way out.
+    io.dsi.bptwl_regs[0x70] = 1;
   }
   arm9->jump(h.arm9_entry, true);
   arm7->jump(h.arm7_entry, true);
