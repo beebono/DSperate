@@ -160,6 +160,11 @@ bool NDS::boot_dsi_nand() {
     for (int i = 0; i < 3; ++i) d.mbk[c][5 + i] = mbk[(c == 0 ? 5 : 8) + i];
     d.mbk[c][8] = mbk[11] & 0x00FFFF0F;
   }
+  // A DSi resets with all shared WRAM on the ARM7 (melonDS DSi::Reset:
+  // MapSharedWRAM(3)); Io::reset leaves the DS value 0. Not cosmetic: under 0,
+  // 0x03000000-0x037FFFFF mirrors ARM7 WRAM, so boot2's ARM7 memset ending at
+  // 0x03800D18 wraps onto the top of its own 64 KB and wipes 0x0380FFC8.
+  io.wramcnt = 3;
   bus.update_nwram();
 
   // boot2 itself: AES-CTR with a fixed key, the IV derived from the aligned

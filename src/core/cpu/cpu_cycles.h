@@ -67,6 +67,21 @@ inline void charge_CDI(CpuContext& cpu) {
   cpu.hot.cycle_budget -= static_cast<s32>(cost);
 }
 
+// A load that just jumped (LDM pc, POP pc). melonDS charges it after JumpTo,
+// which leaves R[15] = target + 2 in Thumb where jump() leaves target + 4, so
+// its `R[15] & 2` test is bit 1 of the target inverted: a word-aligned Thumb
+// target has its second halfword prefetched and numC is 0. (The A64 JIT's
+// branch_indirect_cdi stub already does this.)
+inline void charge_CDI_after_jump(CpuContext& cpu) {
+  if (cpu.which == Cpu::ARM9) {
+    const s32 numC = (cpu.thumb() && !(cpu.hot.regs[15] & 2)) ? 0 : static_cast<s32>(cpu.code_cycles);
+    const s32 numD = static_cast<s32>(cpu.data_cycles);
+    cpu.hot.cycle_budget -= static_cast<s32>(max3(numC + numD - 6, numC, numD));
+    return;
+  }
+  charge_CDI(cpu);
+}
+
 // Stores.
 inline void charge_CD(CpuContext& cpu) {
   const s32 numD = static_cast<s32>(cpu.data_cycles);

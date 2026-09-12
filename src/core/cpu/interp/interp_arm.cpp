@@ -181,8 +181,8 @@ void ldm_stm(CpuContext& cpu, u32 instr, bool load) {
     if (pc_loaded) {
       if (s) cpu.restore_cpsr();
       cpu.jump(pc_val, is_arm9(cpu) && !s);
-    }
-    charge_CDI(cpu);                // after the jump (melonDS A_LDM): new pc, state, code region
+      charge_CDI_after_jump(cpu);   // after the jump (melonDS A_LDM): new pc, state, code region
+    } else charge_CDI(cpu);
   } else {
     for (u32 i = 0; i < 16; ++i) {
       if (!(list & (1u << i))) continue;

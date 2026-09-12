@@ -342,7 +342,18 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
       const s32 b0 = cpu.hot.cycle_budget;
       { DS_PROF(DMA); in_dma_ = true; dma_used_ = 0; cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget))); in_dma_ = false; dma_used_ = 0; }
       if (shift9_ && which == Cpu::ARM9 && cpu.hot.cycle_budget != b0) { a9_dma_iter_ = true; return; }   // see a9_dma_iter_ (a DMA that could not move is not an iteration)
+      // DSi ARM7: melonDS re-enters its DMAs until the ARM7 reaches the target
+      // (while (ARM7Timestamp < target) { RunNDMAs(1) ... }). A share that
+      // moved and left budget is one pass of a multi-channel hand-off (AES
+      // NDMA in/out ping-pong); returning here banks the rest as ARM7 debt
+      // and the ARM7 falls behind the ARM9 for the whole transfer.
+      if (shift9_ && cpu.hot.cycle_budget > 0 && cpu.hot.cycle_budget != b0 && nds_.dma.any_running(which)) continue;
       if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which) || a9_gx_stalled(cpu)) return;
+      // The DMA ended mid-phase and the CPU resumes now: an IRQ its DMA raised
+      // is off-slice (Io::update_irq), taken after this CPU's next instruction
+      // (melonDS resumes from Halt(2) straight into Execute, which checks IRQs
+      // only after an instruction). The phase-start conversion has passed.
+      if (cpu.irq_offline) { cpu.irq_skip_once = !cpu.halted; cpu.irq_offline = false; }
     }
     {
       std::chrono::steady_clock::time_point t0;
@@ -425,7 +436,9 @@ cpu_begin:   // run_cpu loop head
       const s32 b0 = cpu->hot.cycle_budget;
       { DS_PROF(DMA); in_dma_ = true; dma_used_ = 0; cpu->hot.cycle_budget -= static_cast<s32>(nds_.dma.run(cpu->which, static_cast<u32>(cpu->hot.cycle_budget))); in_dma_ = false; dma_used_ = 0; }
       if (shift9_ && cpu == &a9 && cpu->hot.cycle_budget != b0) { a9_dma_iter_ = true; goto cpu_done; }   // see a9_dma_iter_
+      if (shift9_ && cpu->hot.cycle_budget > 0 && cpu->hot.cycle_budget != b0 && nds_.dma.any_running(cpu->which)) goto cpu_begin;   // see run_cpu
       if (cpu->hot.cycle_budget <= 0 || nds_.dma.any_running(cpu->which) || a9_gx_stalled(*cpu)) goto cpu_done;
+      if (cpu->irq_offline) { cpu->irq_skip_once = !cpu->halted; cpu->irq_offline = false; }   // see run_cpu
     }
     if (prof::enabled) sl_.t0 = std::chrono::steady_clock::now();
     if (!cpu->jit) { run(*cpu); goto run_returned; }

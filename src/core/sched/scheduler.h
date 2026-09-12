@@ -89,6 +89,12 @@ public:
     return running_base_ + (c << running_shift_);
   }
   const CpuContext* running() const { return running_; }
+  // Debug: the running DSi ARM9's clock in its own core cycles (melonDS's
+  // ARM9Timestamp, quarter system cycles), before now()'s flooring.
+  u64 now_fine9() const {
+    const u64 c = static_cast<u64>(running_start_budget_ - running_->hot.cycle_budget - running_->preempt_residual) + dma_used_;
+    return (running_base_ << 1) + c + running_carry_;
+  }
   bool idle_skip_enabled() const { return idle_skip_ != 0; }
 
   // Called when an immediate DMA starts on `cpu`: if that CPU is the one

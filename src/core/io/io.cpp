@@ -176,7 +176,7 @@ void Io::ipc_fifo_send(Cpu cpu, u32 value) {
   if (me.fifo_out.full()) { me.ipc_fifo_cnt |= 0x4000; return; }
   const bool was_empty = me.fifo_out.empty();
   static const bool log = std::getenv("DS_IPC_LOG") != nullptr;
-  if (log) std::fprintf(stderr, "[ipcfifo] %s send %08x frame %llu line %u\n", cpu == Cpu::ARM9 ? "arm9" : "arm7", value, (unsigned long long)nds_.frame_count, nds_.gpu.line());
+  if (log) std::fprintf(stderr, "[ipcfifo] %s send %08x t=%llu frame %llu line %u pc %08x\n", cpu == Cpu::ARM9 ? "arm9" : "arm7", value, (unsigned long long)nds_.sched.now(), (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(cpu).hot.regs[15]);
   me.fifo_out.push(value);
   if (was_empty && (them.ipc_fifo_cnt & 0x0400)) request_irq(other(cpu), IRQ_IPC_RECV);
 }

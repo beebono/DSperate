@@ -175,7 +175,7 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
         u32 pc = mem_read32(cpu, addr, !first); addr += 4;
         R(cpu, 13) = addr;
         cpu.jump(pc, is_arm9(cpu));
-        charge_CDI(cpu);                    // after the jump (melonDS T_POP)
+        charge_CDI_after_jump(cpu);         // after the jump (melonDS T_POP)
         return;
       }
       R(cpu, 13) = addr;
@@ -196,7 +196,7 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
     const bool load = instr & (1 << 11);
     u32 addr = R(cpu, rb);
     if (list == 0) {                        // empty list: r15, base += 0x40
-      if (load) { cpu.jump(mem_read32(cpu, addr), false); R(cpu, rb) = addr + 0x40; charge_CDI(cpu); return; }
+      if (load) { cpu.jump(mem_read32(cpu, addr), false); R(cpu, rb) = addr + 0x40; charge_CDI_after_jump(cpu); return; }
       mem_write32(cpu, addr, R(cpu, 15) + 2);
       R(cpu, rb) = addr + 0x40;
       charge_CD(cpu);
