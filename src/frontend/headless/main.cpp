@@ -123,8 +123,8 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
   }
   t->count[i]++;
   if (t->stamp) {
-    static const bool fine = std::getenv("TRACE_TIME_FINE") != nullptr;   // DSi ARM9 in raw core cycles (quarter system cycles)
-    if (fine && i == 0 && t->nds->dsi && t->nds->sched.running() && t->nds->sched.clock9_shift()) std::fprintf(t->out[i], "%llu ", (unsigned long long)t->nds->sched.now_fine9());
+    static const bool fine = std::getenv("TRACE_TIME_FINE") != nullptr;   // DSi ARM9 in raw core cycles (quarter system cycles at 134 MHz, half at 67)
+    if (fine && i == 0 && t->nds->dsi && t->nds->sched.running() == t->nds->arm9.get()) std::fprintf(t->out[i], "%llu ", (unsigned long long)t->nds->sched.now_fine9());
     else std::fprintf(t->out[i], "%llu ", (unsigned long long)t->nds->sched.now());
   }
   std::fprintf(t->out[i], "%08x %08x %08x", pc, instr, cpu.hot.cpsr);

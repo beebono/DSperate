@@ -26,7 +26,7 @@ inline int ci(Cpu c) { return static_cast<int>(c); }
 inline Cpu other(Cpu c) { return c == Cpu::ARM9 ? Cpu::ARM7 : Cpu::ARM9; }
 }
 
-Io::Io(NDS& nds) : aes(nds), sd(nds), wifi(nds), nds_(nds) { reset(); }
+Io::Io(NDS& nds) : aes(nds), dsp(nds), sd(nds), wifi(nds), nds_(nds) { reset(); }
 
 static void ev_lcd_irq(NDS& nds, u32) { nds.io.flush_lcd_irq(); }
 void Io::lcd_irq(Cpu cpu, u32 bit) {
@@ -1360,6 +1360,7 @@ void Io::dsi_reset() {
   sd.attach_nand(nds_.dsi_nand.valid() ? &nds_.dsi_nand : nullptr);
   sd.reset();
   aes.reset();
+  dsp.set_rst_line(false);   // melonDS DSi::Reset: SetRstLine(false)
   dispstat[0] |= 0x40; dispstat[1] |= 0x40;   // LCD init flag
   extkeyin &= ~(1u << 6);                     // melonDS clears the pen-down key bit on a DSi
   dsi_tsc_reset();
@@ -1420,6 +1421,10 @@ u32 Io::dsi_read(Cpu cpu, u32 addr, u32 width) {
     if (r == 0x400) return aes.read_cnt();
     if (r == 0x40C) return aes.read_output_fifo();
     return 0;
+  }
+  if (r >= 0x300 && r < 0x400) {                     // DSP host interface (ARM9): PDATA reads pop its FIFO
+    if (!a9) return 0;
+    return width == 32 ? dsp.read32(r) : width == 16 ? dsp.read16(r) : dsp.read8(r);
   }
   // Compose from the 32-bit view; every register here reads without side effects.
   auto word = [&](u32 base) -> u32 {
@@ -1486,6 +1491,11 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
     } else if (width == 16 && r == 0x406) aes.write_blkcnt(value << 16);
     return;
   }
+  if (r >= 0x300 && r < 0x400) {                     // DSP host interface: ARM9, plus melonDS's ARM7 32-bit path
+    if (width == 32) dsp.write32(r, value);
+    else if (a9) { if (width == 16) dsp.write16(r, static_cast<u16>(value)); else dsp.write8(r, static_cast<u8>(value)); }
+    return;
+  }
   if (r >= 0x040 && r < 0x054) {                     // MBK1-5: byte-granular slot maps, ARM9 only
     if (!a9) return;
     for (u32 i = 0; i < width / 8; ++i) {
@@ -1525,7 +1535,7 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
     switch (r) {
     case 0x000: if (!a9) dsi.scfg_bios |= value & 0x03; break;
     case 0x001: if (!a9) dsi.scfg_bios |= (value & 0x07) << 8; break;
-    case 0x006: if (a9) dsi.scfg_rst = static_cast<u16>((dsi.scfg_rst & 0xFF00) | (value & 0xFF)); break;
+    case 0x006: if (a9) { dsi.scfg_rst = static_cast<u16>((dsi.scfg_rst & 0xFF00) | (value & 0xFF)); dsp.set_rst_line(value & 1); } break;
     case 0x060: case 0x061: case 0x062: case 0x063:
       if (!a9) { u32 t = dsi.mbk[0][8]; t &= ~(0xFFu << ((r & 3) * 8)); t |= (value & 0xFF) << ((r & 3) * 8); dsi.mbk[0][8] = dsi.mbk[1][8] = t & 0x00FFFF0F; }
       break;
@@ -1539,8 +1549,8 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
   if (width == 16) {
     switch (r) {
     case 0x000: if (!a9) { dsi.scfg_bios |= value & 0x0703; nds_.bus.update_bios_map(); } break;
-    case 0x004: if (a9) { dsi.scfg_clock9 = value & 0x0187; nds_.bus.set_clock9_shift((dsi.scfg_clock9 & 1) ? 2 : 1); } else dsi.scfg_clock7 = value & 0x0187; break;
-    case 0x006: if (a9) dsi.scfg_rst = static_cast<u16>(value); break;
+    case 0x004: if (a9) { nds_.sched.floor_arm9_clock(nds_.cpu(Cpu::ARM9)); dsi.scfg_clock9 = value & 0x0187; nds_.bus.set_clock9_shift((dsi.scfg_clock9 & 1) ? 2 : 1); reprice_clock9_store(1); } else dsi.scfg_clock7 = value & 0x0187; break;
+    case 0x006: if (a9) { dsi.scfg_rst = static_cast<u16>(value); dsp.set_rst_line(value & 1); } break;
     case 0x010: if (!a9) dsi.scfg_mc = static_cast<u16>(value); break;
     case 0x012: if (!a9) dsi.cart_insert_delay = static_cast<u16>(value); break;
     case 0x014: if (!a9) dsi.cart_poweroff_delay = static_cast<u16>(value); break;
@@ -1554,7 +1564,7 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
   }
   switch (r) {
   case 0x000: if (!a9) { dsi.scfg_bios |= value & 0x0703; nds_.bus.update_bios_map(); } break;
-  case 0x004: if (a9) { dsi.scfg_clock9 = value & 0x0187; dsi.scfg_rst = static_cast<u16>(value >> 16); nds_.bus.set_clock9_shift((dsi.scfg_clock9 & 1) ? 2 : 1); } break;
+  case 0x004: if (a9) { nds_.sched.floor_arm9_clock(nds_.cpu(Cpu::ARM9)); dsi.scfg_clock9 = value & 0x0187; dsi.scfg_rst = static_cast<u16>(value >> 16); nds_.bus.set_clock9_shift((dsi.scfg_clock9 & 1) ? 2 : 1); reprice_clock9_store(2); dsp.set_rst_line((value >> 16) & 1); } break;
   case 0x008: {
     const u32 old0 = dsi.scfg_ext[0], old1 = dsi.scfg_ext[1];
     if (a9) {
@@ -1577,6 +1587,16 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
   case 0x700: if (!a9) nds_.spu.write_sndexcnt(static_cast<u16>(value), 0xFFFF); break;
   default: break;
   }
+}
+
+// The ARM9 store that wrote SCFG_CLK9 has already priced its data cycles from
+// the old clock's table; melonDS's DataWrite16/32 read DataCycles *after* the
+// bus write, from the table SetScfgClock9 just rebuilt. `idx` is the store
+// table's width index (1 = 16-bit, 2 = 32-bit), as data_cost reads it.
+void Io::reprice_clock9_store(u32 idx) {
+  CpuContext& a9 = nds_.cpu(Cpu::ARM9);
+  if (nds_.sched.running() != &a9) return;
+  a9.data_cycles = a9.timing9[0x04004004 >> 12][4 + idx];
 }
 
 // One MBK1-5 byte: slot `slot` of bank A (0), B (1) or C (2). The unsettable
@@ -1674,6 +1694,7 @@ template <class S> void Io::sync_state(S& s) {
     s.fields(dsi.console_id);   // appended
     aes.sync_state(s);          // appended
     sd.sync_state(s);           // appended
+    dsp.sync_state(s);          // appended
     s.end();
     if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, grid_cam_event); }
   }

@@ -30,6 +30,29 @@ Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) {
   reset();
 }
 
+// A DSi title can switch the ARM9 between 134 and 67 MHz in the middle of its
+// slice. melonDS rescales ARM9Timestamp at the write (>> old shift, << new:
+// the sub-system-cycle part is dropped) and the target with it; the cycles
+// the switching instruction still has to add were priced under the old clock
+// and go on unscaled. Here the ARM9's slice is re-expressed in the new core
+// cycles: the system cycles it has consumed so far, and the whole slice.
+void Scheduler::set_clock9_shift(u32 timing_shift) {
+  const u32 ns = timing_shift - 1;
+  CpuContext& a9 = nds_.cpu(Cpu::ARM9);
+  if (dsi_ && running_ == &a9 && ns != shift9_) {
+    const s64 consumed = static_cast<s64>(running_start_budget_) - a9.hot.cycle_budget - a9.preempt_residual;
+    const s64 sys = (consumed + arm9_carry_) >> (shift9_ + 1);
+    const s64 slice = (static_cast<s64>(budget9_) + arm9_carry_) >> shift9_;   // ticks
+    budget9_ = static_cast<s32>(slice << ns);
+    running_start_budget_ = budget9_;
+    a9.hot.cycle_budget = static_cast<s32>(budget9_ - (sys << (ns + 1)) - a9.preempt_residual);
+    running_rshift_ = ns + 1;
+    running_carry_ = 0;
+  }
+  shift9_ = ns;
+  arm9_carry_ = 0;
+}
+
 void Scheduler::gx_fifo_full() {
   if (quantum_ <= LOCKSTEP_QUANTUM || in_dma_) return;
   CpuContext& a9 = nds_.cpu(Cpu::ARM9);
@@ -329,7 +352,7 @@ void Scheduler::fire_due() {
 // instruction's start time, and charged after the CPU's next instruction
 // (CpuContext::defer_cost), as melonDS's pending Cycles are.
 void Scheduler::defer_preempt_cost(CpuContext& cpu) {
-  if (!shift9_ || cpu.yielded || cpu.hot.cycle_budget >= 0) return;
+  if (!dsi_ || cpu.yielded || cpu.hot.cycle_budget >= 0) return;
   const s32 over = -cpu.hot.cycle_budget;
   cpu.hot.cycle_budget = 0;
   cpu.defer_cost += over;
@@ -341,13 +364,13 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
     if (nds_.dma.any_running(which)) {
       const s32 b0 = cpu.hot.cycle_budget;
       { DS_PROF(DMA); in_dma_ = true; dma_used_ = 0; cpu.hot.cycle_budget -= static_cast<s32>(nds_.dma.run(which, static_cast<u32>(cpu.hot.cycle_budget))); in_dma_ = false; dma_used_ = 0; }
-      if (shift9_ && which == Cpu::ARM9 && cpu.hot.cycle_budget != b0) { a9_dma_iter_ = true; return; }   // see a9_dma_iter_ (a DMA that could not move is not an iteration)
+      if (dsi_ && which == Cpu::ARM9 && cpu.hot.cycle_budget != b0) { a9_dma_iter_ = true; return; }   // see a9_dma_iter_ (a DMA that could not move is not an iteration)
       // DSi ARM7: melonDS re-enters its DMAs until the ARM7 reaches the target
       // (while (ARM7Timestamp < target) { RunNDMAs(1) ... }). A share that
       // moved and left budget is one pass of a multi-channel hand-off (AES
       // NDMA in/out ping-pong); returning here banks the rest as ARM7 debt
       // and the ARM7 falls behind the ARM9 for the whole transfer.
-      if (shift9_ && cpu.hot.cycle_budget > 0 && cpu.hot.cycle_budget != b0 && nds_.dma.any_running(which)) continue;
+      if (dsi_ && cpu.hot.cycle_budget > 0 && cpu.hot.cycle_budget != b0 && nds_.dma.any_running(which)) continue;
       if (cpu.hot.cycle_budget <= 0 || nds_.dma.any_running(which) || a9_gx_stalled(cpu)) return;
       // The DMA ended mid-phase and the CPU resumes now: an IRQ its DMA raised
       // is off-slice (Io::update_irq), taken after this CPU's next instruction
@@ -372,7 +395,7 @@ void Scheduler::run_cpu(CpuContext& cpu, RunFn run) {
     cpu.hot.cycle_budget += cpu.preempt_residual;   // overshoot of the preempted instruction comes off the residual
     cpu.preempt_residual = 0;
     if (cpu.yielded) { cpu.yielded = false; return; }   // yield(): the rest of the slice goes to the other CPU
-    if (shift9_ && which == Cpu::ARM9) { a9_dma_iter_ = true; return; }   // DSi: the DMA runs in the next iteration (see a9_dma_iter_)
+    if (dsi_ && which == Cpu::ARM9) { a9_dma_iter_ = true; return; }   // DSi: the DMA runs in the next iteration (see a9_dma_iter_)
     if (cpu.hot.cycle_budget <= 0 || cpu.halted) return;
     if (a9_gx_stalled(cpu)) return;   // gx_fifo_full: sits out until the FIFO drains
   }
@@ -409,7 +432,7 @@ begin:
     if (slice <= 0) slice = 1;
     // With both CPUs asleep the quantum only paces the clock: run to the deadline.
     const bool all_idle = machine_idle(sl_.skip9, sl_.skip7);
-    const bool idle = slice > quantum_ && all_idle && !shift9_;   // DSi: melonDS steps 64 cycles even with both CPUs asleep (its timers are checked per step)
+    const bool idle = slice > quantum_ && all_idle && !dsi_;   // DSi: melonDS steps 64 cycles even with both CPUs asleep (its timers are checked per step)
     if (slice >= quantum_ + slice_margin_ && !idle) slice = quantum_;   // melonDS: minEvent < max + margin extends, equal does not
     if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
     u64 wake = 0;
@@ -425,7 +448,7 @@ begin:
     a9.hot.cycle_budget = budget9_;
     if (a9.boot_stall) take_stall(a9);
     if (a9.irq_offline) { a9.irq_skip_once = !a9.halted; a9.irq_offline = false; }
-    running_ = &a9; running_start_budget_ = budget9_; running_shift_ = 0; running_rshift_ = shift9_; running_base_ = now_; running_carry_ = static_cast<u64>(arm9_carry_);
+    running_ = &a9; running_start_budget_ = budget9_; running_shift_ = 0; running_rshift_ = dsi_ ? shift9_ + 1 : 0; running_base_ = now_; running_carry_ = static_cast<u64>(arm9_carry_);
     sl_.gx_stalled = nds_.gpu3d.stalled();
     sl_.phase = SL_A9; cpu = &a9; run = nds_.run_arm9;
     if (sl_.gx_stalled || sl_.skip9) goto a9_done;
@@ -435,8 +458,8 @@ cpu_begin:   // run_cpu loop head
     if (nds_.dma.any_running(cpu->which)) {
       const s32 b0 = cpu->hot.cycle_budget;
       { DS_PROF(DMA); in_dma_ = true; dma_used_ = 0; cpu->hot.cycle_budget -= static_cast<s32>(nds_.dma.run(cpu->which, static_cast<u32>(cpu->hot.cycle_budget))); in_dma_ = false; dma_used_ = 0; }
-      if (shift9_ && cpu == &a9 && cpu->hot.cycle_budget != b0) { a9_dma_iter_ = true; goto cpu_done; }   // see a9_dma_iter_
-      if (shift9_ && cpu->hot.cycle_budget > 0 && cpu->hot.cycle_budget != b0 && nds_.dma.any_running(cpu->which)) goto cpu_begin;   // see run_cpu
+      if (dsi_ && cpu == &a9 && cpu->hot.cycle_budget != b0) { a9_dma_iter_ = true; goto cpu_done; }   // see a9_dma_iter_
+      if (dsi_ && cpu->hot.cycle_budget > 0 && cpu->hot.cycle_budget != b0 && nds_.dma.any_running(cpu->which)) goto cpu_begin;   // see run_cpu
       if (cpu->hot.cycle_budget <= 0 || nds_.dma.any_running(cpu->which) || a9_gx_stalled(*cpu)) goto cpu_done;
       if (cpu->irq_offline) { cpu->irq_skip_once = !cpu->halted; cpu->irq_offline = false; }   // see run_cpu
     }
@@ -469,7 +492,7 @@ run_returned:
       cpu->hot.cycle_budget += cpu->preempt_residual;
       cpu->preempt_residual = 0;
       if (cpu->yielded) cpu->yielded = false;   // yield(): the rest of the slice goes to the other CPU
-      else if (shift9_ && cpu == &a9) a9_dma_iter_ = true;   // DSi: the DMA runs in the next iteration (see a9_dma_iter_)
+      else if (dsi_ && cpu == &a9) a9_dma_iter_ = true;   // DSi: the DMA runs in the next iteration (see a9_dma_iter_)
       else if (cpu->hot.cycle_budget > 0 && !cpu->halted && !a9_gx_stalled(*cpu)) goto cpu_begin;
     }
   }
@@ -492,7 +515,7 @@ a9_done:
     if (a7.boot_stall) take_stall(a7);
     if (a7.irq_offline) { a7.irq_skip_once = !a7.halted; a7.irq_offline = false; }
     running_ = &a7; running_start_budget_ = sl_.budget7; running_shift_ = 1; running_rshift_ = 0;
-    running_base_ = shift9_ ? static_cast<u64>(static_cast<s64>(now_) + sl_.ran9 - arm7_debt_) : now_;
+    running_base_ = dsi_ ? static_cast<u64>(static_cast<s64>(now_) + sl_.ran9 - arm7_debt_) : now_;
     sl_.phase = SL_A7; cpu = &a7; run = nds_.run_arm7;
     if (sl_.skip7) goto a7_done;
     goto cpu_begin;
@@ -552,7 +575,7 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
     if (slice <= 0) slice = 1;
     bool skip9 = false, skip7 = false;
     const bool all_idle = machine_idle(skip9, skip7);
-    const bool idle = slice > quantum_ && all_idle && !shift9_;   // DSi: melonDS steps 64 cycles even with both CPUs asleep (its timers are checked per step)
+    const bool idle = slice > quantum_ && all_idle && !dsi_;   // DSi: melonDS steps 64 cycles even with both CPUs asleep (its timers are checked per step)
     if (slice >= quantum_ + slice_margin_ && !idle) slice = quantum_;   // melonDS: minEvent < max + margin extends, equal does not
     if (slice > LOCKSTEP_QUANTUM && nds_.gpu3d.stalled()) slice = LOCKSTEP_QUANTUM;   // event-bound: poll the FIFO drain
     u64 wake = 0;
@@ -571,7 +594,7 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
     a9.hot.cycle_budget = budget9_;
     if (a9.boot_stall) take_stall(a9);
     if (a9.irq_offline) { a9.irq_skip_once = !a9.halted; a9.irq_offline = false; }
-    running_ = &a9; running_start_budget_ = budget9_; running_shift_ = 0; running_rshift_ = shift9_; running_base_ = now_; running_carry_ = static_cast<u64>(arm9_carry_);
+    running_ = &a9; running_start_budget_ = budget9_; running_shift_ = 0; running_rshift_ = dsi_ ? shift9_ + 1 : 0; running_base_ = now_; running_carry_ = static_cast<u64>(arm9_carry_);
     // While the GX FIFO is full the ARM9 (and its DMA) sit out the slice;
     // the geometry engine keeps draining behind it.
     const bool gx_stalled = nds_.gpu3d.stalled();
@@ -596,7 +619,7 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
       if (a7.boot_stall) take_stall(a7);
       if (a7.irq_offline) { a7.irq_skip_once = !a7.halted; a7.irq_offline = false; }
       running_ = &a7; running_start_budget_ = budget7; running_shift_ = 1; running_rshift_ = 0;
-      running_base_ = shift9_ ? static_cast<u64>(static_cast<s64>(now_) + ran9 - arm7_debt_) : now_;
+      running_base_ = dsi_ ? static_cast<u64>(static_cast<s64>(now_) + ran9 - arm7_debt_) : now_;
       if (!skip7) run_cpu(a7, nds_.run_arm7);
       const s64 consumed7 = (a7.halted || skip7) ? budget7 : (budget7 - a7.hot.cycle_budget);
       arm7_debt_ -= consumed7 * 2;

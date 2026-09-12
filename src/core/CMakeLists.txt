@@ -39,6 +39,7 @@ add_library(dsperate_core STATIC
   io/io.cpp
   io/wifi.cpp
   io/dsi_aes.cpp
+  io/dsi_dsp.cpp
   io/dsi_sd.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

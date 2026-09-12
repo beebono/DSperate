@@ -64,8 +64,23 @@ public:
   // Interleave quantum in ARM9 cycles; 0 = event-bound. DS_QUANTUM in the
   // environment overrides whatever the frontend sets.
   void set_quantum(s64 q);
-  void set_clock9_shift(u32 timing_shift) { shift9_ = timing_shift - 1; arm9_carry_ = 0; slice_margin_ = shift9_ ? 16 : 0; cut_on_schedule_ = shift9_ != 0; update_soft_mask(); }   // Timing::clock9_shift (1 or 2)
-  u32  clock9_shift() const { return shift9_; }
+  // DSi machine: melonDS's interleave rules (slice margin, cut on schedule,
+  // ARM9 DMA iterations, the ARM9 clock floored to system cycles, ...) apply
+  // at either ARM9 clock speed. Set at reset, before set_clock9_shift.
+  void set_dsi(bool dsi) { dsi_ = dsi; arm9_carry_ = 0; slice_margin_ = dsi ? 16 : 0; cut_on_schedule_ = dsi; update_soft_mask(); }
+  // Timing::clock9_shift (1 or 2). On a DSi this can change mid-slice
+  // (SCFG_CLK9): see the definition.
+  void set_clock9_shift(u32 timing_shift);
+  u32  clock9_shift() const { return shift9_; }   // 1 = DSi ARM9 at 134 MHz
+  // DSi: an SCFG_CLK9 write. melonDS's SetScfgClock9 shifts ARM9Timestamp
+  // down to system cycles and back on every write, dropping the ARM9's
+  // sub-cycle remainder even when the clock speed does not change.
+  void floor_arm9_clock(CpuContext& a9) {
+    if (!dsi_) return;
+    if (running_ != &a9) { arm9_carry_ = 0; return; }
+    const s64 c = static_cast<s64>(running_start_budget_ - a9.hot.cycle_budget - a9.preempt_residual) + arm9_carry_;
+    a9.hot.cycle_budget += static_cast<s32>(c & ((s64{1} << (shift9_ + 1)) - 1));   // consumed time comes back down to the system-cycle boundary
+  }
 
   void schedule(EventId id, u64 at, EventFn fn, u32 param = 0);
   void cancel(EventId id);
@@ -83,17 +98,17 @@ public:
     // the CPU timestamp per unit, so a cart word read by a DMA schedules the
     // next from the DMA's own position. DSi only (the DS keeps its lazy model).
     const u64 c = static_cast<u64>(running_start_budget_ - running_->hot.cycle_budget - running_->preempt_residual) + dma_used_;
-    // DSi ARM9 (134 MHz): its core time, carry from the last slice included,
-    // floored to whole ARM7 cycles as melonDS's ARM9Timestamp >> 2 is.
-    if (running_rshift_) return running_base_ + (((c + running_carry_) >> 2) << 1);
+    // DSi ARM9: its core time, carry from the last slice included, floored to
+    // whole ARM7 cycles as melonDS's ARM9Timestamp >> ARM9ClockShift is.
+    if (running_rshift_) return running_base_ + (((c + running_carry_) >> running_rshift_) << 1);
     return running_base_ + (c << running_shift_);
   }
   const CpuContext* running() const { return running_; }
   // Debug: the running DSi ARM9's clock in its own core cycles (melonDS's
-  // ARM9Timestamp, quarter system cycles), before now()'s flooring.
+  // ARM9Timestamp: quarter system cycles at 134 MHz), before now()'s flooring.
   u64 now_fine9() const {
     const u64 c = static_cast<u64>(running_start_budget_ - running_->hot.cycle_budget - running_->preempt_residual) + dma_used_;
-    return (running_base_ << 1) + c + running_carry_;
+    return (running_base_ << (running_rshift_ - 1)) + c + running_carry_;
   }
   bool idle_skip_enabled() const { return idle_skip_ != 0; }
 
@@ -130,7 +145,7 @@ public:
   // stall queue absorbs the rest of the 128-cycle slice, as before.
   void gx_fifo_full();
   bool in_dma() const { return in_dma_; }
-  void dma_progress(u32 used) { if (shift9_) dma_used_ = used; }   // DSi only
+  void dma_progress(u32 used) { if (dsi_) dma_used_ = used; }   // DSi only
   // Event-bound mode: a GX-stalled ARM9 sits out (lockstep keeps queueing, as melonDS's timing assumes).
   bool a9_gx_stalled(const CpuContext& cpu) const;
 
@@ -186,7 +201,7 @@ private:
     int phase = 0, sub = 0;
     s64 slice = 0, ran9 = 0;
     s32 budget7 = 0;
-    s32 budget9 = 0;          // the ARM9's core-cycle budget for the slice (slice << shift9_)
+    s32 budget9 = 0;          // the ARM9's core-cycle budget for the slice (slice << shift9_, less the carry)
     bool gx_stalled = false;
     bool skip9 = false, skip7 = false;   // proven idle loop: do not execute this slice
     CpuContext* cpu = nullptr;
@@ -228,7 +243,7 @@ private:
   const CpuContext* running_ = nullptr;
   s32  running_start_budget_ = 0;
   u32  running_shift_ = 0;           // 0 for ARM9 cycles, 1 for ARM7 (half clock)
-  u32  running_rshift_ = 0;          // DSi: the ARM9 at twice the DS clock runs 2 core cycles per tick (shift9_)
+  u32  running_rshift_ = 0;          // DSi ARM9: core cycles per system cycle as a shift (2 at 134 MHz, 1 at 67); 0 otherwise
   // Where the running CPU's clock starts this phase. The ARM9's is the slice
   // start. The ARM7's is the slice start on a DS (its overshoot into the
   // slice is not visible to now(), which the scene hashes are gated on); on
@@ -237,9 +252,11 @@ private:
   u64  running_base_ = 0;
   u64  running_carry_ = 0;   // the ARM9's arm9_carry_ at the slice start (DSi)
   s64  arm7_debt_ = 0;               // ARM9 cycles the ARM7 still have to cover (carries overshoot and odd cycles)
-  // DSi ARM9 clock: 0 on a DS (a tick is an ARM9 cycle), 1 at 134 MHz (a
-  // tick is two). The ARM9 is budgeted in core cycles and its consumption
-  // converted back to ticks here, the odd cycle carried in arm9_carry_.
+  // ARM9 clock: 0 = a tick is an ARM9 core cycle (DS; DSi at 67 MHz), 1 = a
+  // tick is two (DSi at 134 MHz). The ARM9 is budgeted in core cycles and its
+  // consumption converted back to ticks here; on a DSi the part of a system
+  // cycle it is past the boundary is carried in arm9_carry_.
+  bool dsi_ = false;
   u32  shift9_ = 0;
   s64  arm9_carry_ = 0;
   // A CPU's boot stall (CpuContext::boot_stall) comes off its budget before it runs.
@@ -252,12 +269,13 @@ private:
   // ARM9 core cycles consumed -> scheduler ticks, the remainder carried.
   // melonDS keeps system time in ARM7 cycles and floors the ARM9's core
   // time to it: an overshoot under one ARM7 cycle (4 core cycles at
-  // 134 MHz) does not move the next slice end, and the core cycles the ARM9
-  // is already past the boundary (arm9_carry_, 0..3) come off its next
-  // budget. Ticks are half ARM7 cycles, hence the extra bit.
+  // 134 MHz, 2 at 67) does not move the next slice end, and the core cycles
+  // the ARM9 is already past the boundary (arm9_carry_) come off its next
+  // budget. Ticks are half ARM7 cycles, hence the extra bit. A DS keeps the
+  // unfloored clock its scene hashes were recorded with.
   s32 budget9_for(s64 slice) const { return static_cast<s32>((slice << shift9_) - arm9_carry_); }
   s64 ticks9(s64 consumed9) {
-    if (!shift9_) return consumed9;
+    if (!dsi_) return consumed9;
     arm9_carry_ += consumed9;
     const s64 sys = arm9_carry_ >> (shift9_ + 1);
     arm9_carry_ -= sys << (shift9_ + 1);
@@ -282,7 +300,7 @@ private:
   void update_soft_mask() {
     constexpr u32 timers = (1u << static_cast<u32>(EventId::Timer0)) | (1u << static_cast<u32>(EventId::Timer1)) | (1u << static_cast<u32>(EventId::Timer2)) | (1u << static_cast<u32>(EventId::Timer3)) |
                            (1u << static_cast<u32>(EventId::Timer7_0)) | (1u << static_cast<u32>(EventId::Timer7_1)) | (1u << static_cast<u32>(EventId::Timer7_2)) | (1u << static_cast<u32>(EventId::Timer7_3));
-    soft_mask_ = (shift9_ && quantum_ <= LOCKSTEP_QUANTUM) ? timers : 0;
+    soft_mask_ = (dsi_ && quantum_ <= LOCKSTEP_QUANTUM) ? timers : 0;
     rescan();
   }
   u64  slice_end_ = 0;      // the running slice's end (now_ + slice)

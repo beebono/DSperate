@@ -46,6 +46,7 @@ NDS::~NDS() = default;
 
 void NDS::reset() {
   sched.reset();
+  sched.set_dsi(dsi);
   sched.set_clock9_shift(dsi ? 2 : 1);   // SCFG_CLK9 bit 0 is set at a DSi reset
   io.reset();
   dma.reset();
