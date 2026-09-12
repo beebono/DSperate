@@ -619,3 +619,65 @@ The fix is a hard client ceiling: never let the guest's emulated clock pass
 the last host frame's timestamp plus the granted run-ahead, and stall when
 it would. That is the next step, and it is enforcing the protocol's own
 clock, not adding a new network time sync.
+
+### Download Play: solved -- two bugs, one symptom (2026-09-12)
+
+Mario Kart DS Download Play now completes between two DSperate instances,
+six runs of six, with the host's Cut Off tapped 120 frames after the guest
+syncs (the human-timing case that used to fail). ~2428 data commands each,
+no duplicate commands, the guest coupled to the host throughout.
+
+Both bugs produced the same symptom -- the guest's ARM7 stops arming MP
+replies at a random point, the host's next acks carry a client-failure bit,
+and Mario Kart's download library reports a communication error -- which is
+why fixing the first one only halved the failures.
+
+**Bug 1: the ARM7 halted with an interrupt already pending.** `HALTCNT`
+set `halted` unconditionally. melonDS re-tests the halt condition before
+every instruction (`NDS::HaltInterrupted`, from `ARM::Execute`), so a CPU
+that halts while `IE & IF` is nonzero never actually sleeps. Our only
+un-halt is the IRQ *edge* in `Io::update_irq`, so the ARM7 slept through an
+already-pending interrupt until some later, unrelated one woke it. Caught in
+an ARM7 instruction trace of a failing guest: it halted 1.3 us after a
+command, with a Wi-Fi interrupt pending, and did not wake for 1243 us --
+through the ack and through the window in which it had to arm its next
+reply. The command period is 1728 us.
+
+This is a **general CPU-fidelity fix, not a Wi-Fi one**. Any title whose
+ARM7 halts in a race with its own interrupt could lose up to a frame of
+work. The five scene hashes are unchanged, so those scenes never hit the
+race, but unexplained hitches elsewhere are worth re-checking against it.
+
+**Bug 2: the early fetch could run mid-reception.** `Wifi::us_timer` could
+take the `peek_host_packet` path in the same 8 us tick in which `start_rx()`
+had just begun receiving a held frame: `com_status_` was clear when the
+client block was entered and `start_rx()` sets it, so it has to be re-tested
+in the guard. The fetch overwrote `rx_buffer_` -- the ack being received --
+with the next command; the ack's reception then finished with the command's
+bytes, so the ack was lost and the command was received twice, once early
+and once at its own timestamp. The double reception rotated the reply latch
+and ate the armed reply. melonDS's client fetches only at `next_sync`, after
+its reply slot, and cannot do this. Visible in a guest trace as the *next*
+command arriving 512 us early (the ack's slot) and again 1.2 ms later.
+
+**The method that found bug 1**, worth keeping: a `# frame N` marker in the
+Wi-Fi register trace plus `TRACE_END_FRAME` in the headless frontend let an
+ARM7 instruction trace (`--trace`, `TRACE_TIME=1`, `--max`) be aligned to
+the Wi-Fi trace by scheduler tick, so a command cycle that replied and the
+first that did not can be diffed instruction by instruction. The scripts are
+in the scratchpad (`a7_diff.py`, `cycle_profile.py`). Windowing matters: the
+trace is ~25 MB per emulated frame.
+
+**What this cost.** The ARM7 now does work it previously slept through, so
+a guest under an active transfer is dearer: p90 frame time 16.65 -> 19.62 ms
+and frames over budget 7 % -> 12-17 % on the dev box. That is correct
+behaviour, not a regression to tune away, but it is a real cost and the RG DS
+has less headroom. Non-Wi-Fi scenes are unaffected (hashes identical).
+
+**Hypotheses that were wrong**, recorded so they are not chased again:
+a client clock-ceiling / run-ahead bound (the guest was *behind* the host at
+every failure, and every host frame was already held to its timestamp); the
+CPU interleave (lockstep failed 3 of 3, the full parity gate 1 of 2); idle
+skip; a missing or mis-valued Wi-Fi register (a melonDS guest and ours touch
+exactly the same registers with the same values); and the transport (a real
+melonDS guest completes against our host).
