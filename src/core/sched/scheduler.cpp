@@ -88,7 +88,7 @@ void Scheduler::schedule(EventId id, u64 at, EventFn fn, u32 param) {
   const bool was_next = (armed_ & (1u << i)) && next_id_ == i;
   at_[i] = at; fn_[i] = fn; param_[i] = param;
   armed_ |= 1u << i;
-  if (soft_mask_ & (1u << i)) { if (at < next_soft_) next_soft_ = at; return; }   // soft: fired when due, never a deadline (see soft_mask_)
+  if (soft_mask_ & (1u << i)) { if (at < next_soft(i)) next_soft(i) = at; return; }   // soft: fired when due, never a deadline (see soft_mask_)
   if (at < next_) { next_ = at; next_id_ = i; }
   else if (was_next && at > next_) rescan();
   if (cut_on_schedule_) cut_arm9_at(at);
@@ -102,6 +102,23 @@ void Scheduler::cut_arm9_at(u64 at) {
   const s32 consumed = budget9_ - a9.hot.cycle_budget;
   budget9_ = nb; running_start_budget_ = nb; slice_end_ = at;
   a9.hot.cycle_budget = nb - consumed;   // <= 0: the ARM9 stops after this instruction, as melonDS's loop does
+}
+
+void Scheduler::run_soft_timers(Cpu cpu) {
+  const u32 first = static_cast<u32>(cpu == Cpu::ARM9 ? EventId::Timer0 : EventId::Timer7_0);
+  if (!(soft_mask_ & (0xFu << first))) return;
+  const u64 t = now();
+  bool fired = false;
+  // Timer by timer, each caught up fully, as RunTimers runs RunTimer(0..3).
+  for (u32 i = first; i < first + 4; ++i) {
+    while ((armed_ & (1u << i)) && at_[i] <= t) {
+      armed_ &= ~(1u << i);
+      firing_at_ = at_[i];
+      fired = true;
+      fn_[i](nds_, param_[i]);
+    }
+  }
+  if (fired) rescan();
 }
 
 void Scheduler::cancel(EventId id) {
@@ -122,8 +139,8 @@ void Scheduler::rescan() {
     const u32 i = static_cast<u32>(__builtin_ctz(m));
     if (at_[i] < best) { best = at_[i]; best_id = i; }
   }
-  next_soft_ = ~u64{0};
-  for (u32 m = armed_ & soft_mask_; m; m &= m - 1) { const u32 i = static_cast<u32>(__builtin_ctz(m)); if (at_[i] < next_soft_) next_soft_ = at_[i]; }
+  next_soft9_ = next_soft7_ = ~u64{0};
+  for (u32 m = armed_ & soft_mask_; m; m &= m - 1) { const u32 i = static_cast<u32>(__builtin_ctz(m)); if (at_[i] < next_soft(i)) next_soft(i) = at_[i]; }
   next_ = best;
   next_id_ = best_id;
 }
@@ -313,13 +330,13 @@ void Scheduler::fire_due() {
   // = ARM7Timestamp - TimerTimestamp, so an overflow the ARM7 ran past is
   // seen at this slice end, not the next. ARM7 timers are ids 6..9.
   const u64 lim7 = arm7_debt_ < 0 ? now_ + static_cast<u64>(-arm7_debt_) : now_;
-  while (now_ >= next_ || lim7 >= next_soft_) {
+  while (now_ >= next_ || now_ >= next_soft9_ || lim7 >= next_soft7_) {
     // One walk of the armed set, not one to fire and one to rescan: the pass
     // starts with next_ empty and folds in every event it steps over, while
     // schedule() folds in every event a handler arms (it keeps next_ current
     // against whatever minimum stands). Both leave next_ the true minimum.
     next_ = std::numeric_limits<u64>::max();
-    next_soft_ = std::numeric_limits<u64>::max();
+    next_soft9_ = next_soft7_ = std::numeric_limits<u64>::max();
     next_id_ = EVENT_COUNT;
     // Ascending id order, i.e. table order, as when this walked the array.
     // `armed_` is re-read after every handler so an event the handler arms at
@@ -328,7 +345,7 @@ void Scheduler::fire_due() {
     for (u32 m = armed_; m; ) {
       const u32 i = static_cast<u32>(__builtin_ctz(m));
       const u32 bit = 1u << i;
-      const u64 lim = ((soft_mask_ & bit) && i >= 6 && i <= 9) ? lim7 : now_;
+      const u64 lim = ((soft_mask_ & bit) && soft7(i)) ? lim7 : now_;
       if (at_[i] <= lim) {
         armed_ &= ~bit;
         firing_at_ = at_[i];
@@ -336,7 +353,7 @@ void Scheduler::fire_due() {
         fn_[i](nds_, param_[i]);   // may schedule: next_ is kept current by schedule()
         m = armed_ & ~((bit << 1) - 1);
       } else {
-        if (soft_mask_ & bit) { if (at_[i] < next_soft_) next_soft_ = at_[i]; }     // soft events never bound a slice
+        if (soft_mask_ & bit) { if (at_[i] < next_soft(i)) next_soft(i) = at_[i]; }     // soft events never bound a slice
         else if (at_[i] < next_) { next_ = at_[i]; next_id_ = i; }
         m &= ~bit;
       }
@@ -638,14 +655,15 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
 template <class S> void Scheduler::sync_state(S& s) {
   s.begin("SCHD");
   // The event arrays grew with the DSi's two grid events (FORMAT_VERSION 3)
-  // and again with the SD/MMC transfer event (4); an older file carries only
-  // the events it knew about.
-  constexpr u32 V2_EVENTS = 21, V3_EVENTS = 23;
-  static_assert(EVENT_COUNT == 24, "EVENT_COUNT changed: add a save-state version");
+  // and again with the SD/MMC transfer event (4) and the SDIO host's two and
+  // the camera transfer (5); an
+  // older file carries only the events it knew about.
+  constexpr u32 V2_EVENTS = 21, V3_EVENTS = 23, V4_EVENTS = 24;
+  static_assert(EVENT_COUNT == 27, "EVENT_COUNT changed: add a save-state version");
   s.fields(now_, arm7_debt_, armed_);
-  if (s.version >= 4) s.fields(at_, param_);
+  if (s.version >= 5) s.fields(at_, param_);
   else {
-    const u32 n = s.version >= 3 ? V3_EVENTS : V2_EVENTS;
+    const u32 n = s.version >= 4 ? V4_EVENTS : s.version >= 3 ? V3_EVENTS : V2_EVENTS;
     for (u32 i = 0; i < n; ++i) s.fields(at_[i]);
     for (u32 i = 0; i < n; ++i) s.fields(param_[i]);
   }

@@ -462,7 +462,7 @@ u32 Dma::run_channel_impl(Channel& c, u32 budget) {
             // it -- and the doubling is the one the per-unit path applies, the
             // tables being in ARM7 system cycles. Anything left over goes round
             // the outer loop, which charges it through the same table walk.
-            const int dbl = a9 ? 1 : 0;
+            const u32 dbl = a9 ? shift9_ : 0;   // as the word path: 2 on a DSi at 134 MHz, not the DS's 1
             u32 lo, tmp;
             // The budget usually covers the run: test that before searching,
             // so the common case costs one bulk() rather than log2(n) of them.

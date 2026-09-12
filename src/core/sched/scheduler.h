@@ -27,11 +27,10 @@ enum class EventId : u8 {
   HBlank, VBlank_Scanline, Timer0, Timer1, Timer2, Timer3,
   Timer7_0, Timer7_1, Timer7_2, Timer7_3,
   Dma, Spu, Spi, Rtc, Cart, Gx3D, DisplayFifo, Div, Sqrt, LcdIrq, Wifi,
-  // DSi only: melonDS's periodic RTC clock (32768 Hz) and camera IRQ
-  // (~15 fps) events, kept as slice boundaries so the CPU interleave
-  // matches the oracle's (a DSiWare loader measures one CPU against the
-  // other); neither drives any state yet (Io::grid_rtc_event / grid_cam_event).
-  RtcClock, CamIrq, SdMmc, Count
+  // DSi only: melonDS's periodic RTC clock (32768 Hz, a slice boundary that
+  // drives no state yet: Io::grid_rtc_event), the camera module's frame IRQ
+  // and scanline transfer, and the SD/MMC, SDIO and Wi-Fi module events.
+  RtcClock, CamIrq, SdMmc, Sdio, NWifi, CamTransfer, Count
 };
 
 // CPU interleave quantum in ARM9 cycles: the most one CPU runs before the
@@ -88,6 +87,11 @@ public:
   // live event and keeps the original timestamp; ours overwrites, so a caller
   // that needs melonDS's semantics has to ask first.
   bool armed(EventId id) const { return (armed_ & (1u << static_cast<u32>(id))) != 0; }
+  // DSi: melonDS's RunTimers(cpu) on a timer register access -- the CPU's
+  // due soft (timer) events fire now, at its own clock, rather than at the
+  // slice end, so a control write or counter read sees an overflow that has
+  // already happened. No-op when timers are not soft (the DS).
+  void run_soft_timers(Cpu cpu);
 
   // Current time. While a CPU is executing its slice this includes the cycles
   // it has consumed so far, so events scheduled from inside an instruction
@@ -296,7 +300,14 @@ private:
   // due at a slice end, never a deadline. DSi at the lockstep quantum only:
   // an event-bound slice could hold a timer IRQ for thousands of cycles.
   u32  soft_mask_ = 0;
-  u64  next_soft_ = ~u64{0};   // earliest armed soft event: fire_due scans when one is due, but no slice ends for it
+  // Earliest armed soft event per CPU: fire_due scans when one is due, but no
+  // slice ends for it. Kept apart because an ARM7 timer is due against the
+  // ARM7's own clock (overshoot included) and an ARM9 timer against now_: one
+  // minimum compared against the ARM7 limit spun fire_due forever when an
+  // ARM9 timer fell inside the ARM7's overshoot.
+  u64  next_soft9_ = ~u64{0}, next_soft7_ = ~u64{0};
+  static bool soft7(u32 i) { return i >= 6 && i <= 9; }   // EventId::Timer7_0..3
+  u64& next_soft(u32 i) { return soft7(i) ? next_soft7_ : next_soft9_; }
   void update_soft_mask() {
     constexpr u32 timers = (1u << static_cast<u32>(EventId::Timer0)) | (1u << static_cast<u32>(EventId::Timer1)) | (1u << static_cast<u32>(EventId::Timer2)) | (1u << static_cast<u32>(EventId::Timer3)) |
                            (1u << static_cast<u32>(EventId::Timer7_0)) | (1u << static_cast<u32>(EventId::Timer7_1)) | (1u << static_cast<u32>(EventId::Timer7_2)) | (1u << static_cast<u32>(EventId::Timer7_3));

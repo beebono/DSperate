@@ -180,6 +180,8 @@ int main(int argc, char** argv) {
   // Play host's "Cut Off", which is only there while the guest is listed).
   int tas_after = -1, tas_x = 0, tas_y = 0, tas_n = 8, tas_rep = 1; long tas_frame = -1; ds::u32 tas_seen = 0;
   int lan_players = 16;
+  struct Touch { int frame, x, y, n; };
+  std::vector<Touch> touches;          // --touch F:x,y[:N]: press (x,y) from frame F for N frames (default 10), as trace_melonds --touch
   bool pace = false;                   // --pace: sleep to 60 frames a second
   for (int i = 1; i < argc; ++i) {
     auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
@@ -193,6 +195,7 @@ int main(int argc, char** argv) {
     else if (arg("--dns")) dns_arg = argv[++i];
     else if (arg("--tap-after-sync")) { std::sscanf(argv[++i], "%d:%d,%d:%d:%d", &tas_after, &tas_x, &tas_y, &tas_n, &tas_rep); }
     else if (arg("--lan-players")) lan_players = std::atoi(argv[++i]);
+    else if (arg("--touch")) { Touch t{0, 0, 0, 10}; std::sscanf(argv[++i], "%d:%d,%d:%d", &t.frame, &t.x, &t.y, &t.n); touches.push_back(t); }
     else if (flag("--pace")) pace = true;
     else if (arg("--bios9")) bios9 = argv[++i];
     else if (arg("--bios7")) bios7 = argv[++i];
@@ -367,7 +370,7 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "cheats: %zu enabled\n", on);
     }
   }
-  if (rom && direct) nds.setup_direct_boot();
+  if ((rom && direct) || (nds.dsi && nds.dsi_nand_boot)) nds.setup_direct_boot();   // a NAND boot needs no ROM
   // A recording made with a save present only replays if the save is there:
   // the game otherwise stops to create one. Loaded in the same place the SDL
   // frontend loads it, and never written back -- this is a harness.
@@ -526,6 +529,11 @@ int main(int argc, char** argv) {
     if (trace && trace_end && i == trace_end) { nds.trace = nullptr; nds.trace_user = nullptr; }
     nds.io.wifi.trace_frame(i);   // "# frame N" in the Wi-Fi trace, to align it with --trace
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
+    if (!touches.empty()) {
+      const Touch* on = nullptr;
+      for (const Touch& t : touches) if (i >= t.frame && i < t.frame + t.n) on = &t;
+      if (on) nds.io.set_touch(on->x, on->y, true); else nds.io.set_touch(0, 0, false);
+    }
     if (tas_after >= 0) {
       if (nds.io.wifi.host_syncs() > tas_seen) { tas_seen = nds.io.wifi.host_syncs(); tas_frame = i + tas_after; std::fprintf(stderr, "tap-after-sync: client synced at frame %d, tapping from %ld\n", i, tas_frame); }
       if (tas_frame >= 0 && i >= tas_frame) {

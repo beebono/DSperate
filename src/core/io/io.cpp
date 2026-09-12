@@ -4,6 +4,7 @@
 // I/O register file for both CPUs. Register semantics per GBATEK; melonDS is
 // the behavioural reference where GBATEK is silent.
 #include "core/io/io.h"
+#include "core/io/dsi_nwifi.h"
 #include "core/state/state.h"
 #include "core/nds.h"
 #include "core/dma/dma.h"
@@ -26,7 +27,7 @@ inline int ci(Cpu c) { return static_cast<int>(c); }
 inline Cpu other(Cpu c) { return c == Cpu::ARM9 ? Cpu::ARM7 : Cpu::ARM9; }
 }
 
-Io::Io(NDS& nds) : aes(nds), dsp(nds), sd(nds), wifi(nds), nds_(nds) { reset(); }
+Io::Io(NDS& nds) : aes(nds), dsp(nds), sd(nds, 0), sdio(nds, 1), cam(nds), wifi(nds), nds_(nds) { reset(); }
 
 static void ev_lcd_irq(NDS& nds, u32) { nds.io.flush_lcd_irq(); }
 void Io::lcd_irq(Cpu cpu, u32 bit) {
@@ -197,6 +198,7 @@ static void timer_event(NDS& nds, u32 param) {
 }
 
 u16 Io::timer_value(Cpu cpu, int idx) {
+  nds_.sched.run_soft_timers(cpu);   // melonDS TimerGetCounter: RunTimers first
   Timer& t = cpu_io[ci(cpu)].timers[idx];
   if (!t.running() || t.count_up()) return t.counter;
   u64 elapsed = (nds_.sched.now() - t.start_time) >> 1;   // timers run on the 33 MHz system clock
@@ -229,6 +231,7 @@ void Io::timer_overflow(Cpu cpu, int idx) {
 }
 
 void Io::timer_write_control(Cpu cpu, int idx, u16 value) {
+  nds_.sched.run_soft_timers(cpu);   // melonDS TimerStart: RunTimers first
   Timer& t = cpu_io[ci(cpu)].timers[idx];
   const bool was = t.running();
   const u64 now = nds_.sched.now();
@@ -385,7 +388,7 @@ void Io::set_touch(int x, int y, bool down) {
     SpiTouch& t = spi_tsc;
     const u8 old_up = t.dsi_bank3[0x0E] & 1;
     if (!down) { t.dsi_tx = 0x7000; t.dsi_ty = 0x7000; t.dsi_bank3[0x09] = 0x40; t.dsi_bank3[0x0E] |= 1; }
-    else { t.dsi_tx = static_cast<u16>(x << 8); t.dsi_ty = static_cast<u16>(y << 8); t.dsi_bank3[0x09] = 0x80; t.dsi_bank3[0x0E] &= ~1; }
+    else { t.dsi_tx = static_cast<u16>(x << 4); t.dsi_ty = static_cast<u16>(y << 4); t.dsi_bank3[0x09] = 0x80; t.dsi_bank3[0x0E] &= ~1; }   // 12-bit ADC units: pixel << 4 (melonDS TouchX <<= 4 on the pixel it is given); bit 15 is the pen-changed flag
     if (old_up ^ (t.dsi_bank3[0x0E] & 1)) { t.dsi_tx |= 0x8000; t.dsi_ty |= 0x8000; }
     return;
   }
@@ -1302,18 +1305,25 @@ void Io::bptwl_write(u8 value, bool last) {
 void Io::i2c_write_cnt(u8 value) {
   if (value & 0x80) {
     const bool last = value & 0x01;
-    const bool bptwl = dsi.i2c_device == 0x4A;
+    // melonDS DSi_I2CHost::GetCurDevice: the BPTWL and the two cameras answer.
+    const u8 dev = dsi.i2c_device;
+    DsiCamera* camdev = dev == 0x78 ? &cam.camera(0) : dev == 0x7A ? &cam.camera(1) : nullptr;
     if (value & 0x20) {                       // read
       value &= 0xF7;
-      dsi.i2c_data = bptwl ? bptwl_read(last) : 0xFF;
+      dsi.i2c_data = dev == 0x4A ? bptwl_read(last) : camdev ? camdev->read(last) : 0xFF;
     } else {                                  // write
       value &= 0xE7;
       bool ack = true;
       if (value & 0x02) {                     // start: the byte is the device address
         dsi.i2c_device = dsi.i2c_data & 0xFE;
-        if (dsi.i2c_device != 0x4A) ack = false;   // cameras 0x78/0x7A and the rest: absent
-      } else if (bptwl) bptwl_write(dsi.i2c_data, last);
+        const u8 d = dsi.i2c_device;
+        if (d == 0x78) cam.camera(0).acquire();
+        else if (d == 0x7A) cam.camera(1).acquire();
+        else if (d != 0x4A) ack = false;
+      } else if (dev == 0x4A) bptwl_write(dsi.i2c_data, last);
+      else if (camdev) camdev->write(dsi.i2c_data, last);
       else ack = false;
+
       if (ack) value |= 0x10;
     }
     value &= 0x7F;
@@ -1328,9 +1338,6 @@ void Io::grid_rtc_event(NDS& nds, u32) {
   io.rtc.clock_err = sysclock & 0x7FFF;
   nds.sched.schedule(EventId::RtcClock, nds.sched.event_time() + static_cast<u64>(delay) * 2, grid_rtc_event, 0);
 }
-void Io::grid_cam_event(NDS& nds, u32) {
-  nds.sched.schedule(EventId::CamIrq, nds.sched.event_time() + CAM_IRQ_INTERVAL, grid_cam_event, 0);
-}
 
 void Io::dsi_reset() {
   // melonDS's periodic events, from time 0: the RTC clock's first tick is
@@ -1338,7 +1345,6 @@ void Io::dsi_reset() {
   // one interval out.
   rtc.clock_err = 33513982u & 0x7FFF;
   nds_.sched.schedule(EventId::RtcClock, static_cast<u64>(33513982u >> 15) * 2, grid_rtc_event, 0);
-  nds_.sched.schedule(EventId::CamIrq, CAM_IRQ_INTERVAL, grid_cam_event, 0);
   // melonDS DSi::Reset with a half BIOS dump (the boot2-from-NAND shape;
   // direct boot is the only boot here either way).
   dsi.scfg_bios = 0x0101;
@@ -1351,6 +1357,8 @@ void Io::dsi_reset() {
   dsi.ie2 = dsi.if2 = 0; dsi.sndexcnt = 0;
   arm7_bios_prot = 0x20;
   bptwl_reset();
+  cam.camera(0).reset(); cam.camera(1).reset();   // melonDS: the I2C host resets its cameras
+  cam.reset();                                    // then the module (it arms the camera IRQ)
   spi_flag_mode_ = true;
   // The eMMC and the console ID it carries. With no NAND loaded the host has
   // no device on port 1 (every command is dropped) and the console ID stays
@@ -1359,6 +1367,7 @@ void Io::dsi_reset() {
   dsi.console_id = nds_.dsi_nand.valid() ? nds_.dsi_nand.console_id() : 0;
   sd.attach_nand(nds_.dsi_nand.valid() ? &nds_.dsi_nand : nullptr);
   sd.reset();
+  sdio.reset();
   aes.reset();
   dsp.set_rst_line(false);   // melonDS DSi::Reset: SetRstLine(false)
   dispstat[0] |= 0x40; dispstat[1] |= 0x40;   // LCD init flag
@@ -1374,6 +1383,7 @@ void Io::dsi_tsc_reset() {
   t.dsi_bank3[0x06] = 0x20; t.dsi_bank3[0x09] = 0x40; t.dsi_bank3[0x0E] = 0xAD; t.dsi_bank3[0x0F] = 0xA0;
   t.dsi_bank3[0x10] = 0x88; t.dsi_bank3[0x11] = 0x81;
   t.dsi_tx = t.dsi_ty = 0;
+  t.dsi_data = 0;
 }
 
 bool Io::dsi_io_access(Cpu cpu, u32 addr) const {
@@ -1407,13 +1417,14 @@ u32 Io::dsi_read(Cpu cpu, u32 addr, u32 width) {
   const bool a9 = cpu == Cpu::ARM9;
   const int c = ci(cpu);
   const u32 r = addr & 0xFFF;
-  if (r >= 0x800 && r < 0xA00) {                     // SDMMC host (ARM7); 0xA00-0xBFF is the SDIO host, absent
+  if (r >= 0x800 && r < 0xC00) {                     // SDMMC host (0x800) and SDIO host (0xA00), ARM7 only
     if (a9) return 0;
+    SdHost& h = r < 0xA00 ? sd : sdio;
     if (width == 32) {
-      if (r == 0x90C) return sd.read_fifo32();
-      return sd.read(addr) | (static_cast<u32>(sd.read(addr + 2)) << 16);
+      if ((r & 0x1FF) == 0x10C) return h.read_fifo32();
+      return h.read(addr) | (static_cast<u32>(h.read(addr + 2)) << 16);
     }
-    const u32 v16 = sd.read(addr & ~1u);
+    const u32 v16 = h.read(addr & ~1u);
     return width == 16 ? v16 : ((v16 >> ((addr & 1) * 8)) & 0xFF);
   }
   if (r >= 0x400 && r < 0x500) {                     // AES (ARM7): 32-bit ports only, the FIFO read pops
@@ -1422,9 +1433,28 @@ u32 Io::dsi_read(Cpu cpu, u32 addr, u32 width) {
     if (r == 0x40C) return aes.read_output_fifo();
     return 0;
   }
+  if (r >= 0x200 && r < 0x300) {                     // camera module (ARM9); the image buffer read pops
+    if (!a9) return 0;
+    return width == 32 ? cam.read32(addr) : width == 16 ? cam.read16(addr) : cam.read8(addr);
+  }
   if (r >= 0x300 && r < 0x400) {                     // DSP host interface (ARM9): PDATA reads pop its FIFO
     if (!a9) return 0;
     return width == 32 ? dsp.read32(r) : width == 16 ? dsp.read16(r) : dsp.read8(r);
+  }
+  if (r < 0x040) {
+    // The SCFG block, exactly melonDS's per-width read tables (DSi.cpp
+    // ARM9IORead8/16/32, ARM7IORead8/16/32): what is not listed reads 0 at
+    // that width, and nothing here composes a wider view from narrower ones
+    // (the ARM7's 32-bit SCFG_MC carries no cart-delay half).
+    const u16 bios = dsi.scfg_bios;
+    if (a9) {
+      if (width == 8)  return r == 0x000 ? (bios & 0xFF) : r == 0x006 ? (dsi.scfg_rst & 0xFF) : 0;
+      if (width == 16) return r == 0x000 ? (bios & 0xFF) : r == 0x004 ? dsi.scfg_clock9 : r == 0x006 ? dsi.scfg_rst : r == 0x010 ? dsi.scfg_mc : 0;
+      return r == 0x000 ? (bios & 0xFFu) : r == 0x004 ? (dsi.scfg_clock9 | (static_cast<u32>(dsi.scfg_rst) << 16)) : r == 0x008 ? dsi.scfg_ext[0] : r == 0x010 ? dsi.scfg_mc : 0u;
+    }
+    if (width == 8)  return r == 0x000 ? (bios & 0xFF) : r == 0x001 ? (bios >> 8) : 0;
+    if (width == 16) return r == 0x000 ? bios : r == 0x004 ? dsi.scfg_clock7 : r == 0x010 ? dsi.scfg_mc : 0;
+    return r == 0x000 ? static_cast<u32>(bios) : r == 0x008 ? dsi.scfg_ext[1] : r == 0x010 ? static_cast<u32>(dsi.scfg_mc) : 0u;
   }
   // Compose from the 32-bit view; every register here reads without side effects.
   auto word = [&](u32 base) -> u32 {
@@ -1458,16 +1488,17 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
   const bool a9 = cpu == Cpu::ARM9;
   const u32 r = addr & 0xFFF;
   if (r >= 0x100 && r < 0x200) { if (width == 32) nds_.ndma.write(cpu, addr, value); return; }   // NDMA: 32-bit ports only
-  if (r >= 0x800 && r < 0xA00) {                     // SDMMC host (ARM7)
+  if (r >= 0x800 && r < 0xC00) {                     // SDMMC host (0x800) and SDIO host (0xA00), ARM7 only
     if (a9) return;
+    SdHost& h = r < 0xA00 ? sd : sdio;
     if (width == 32) {
-      if (r == 0x90C) { sd.write_fifo32(value); return; }
-      sd.write(addr, static_cast<u16>(value & 0xFFFF));
-      sd.write(addr + 2, static_cast<u16>(value >> 16));
+      if ((r & 0x1FF) == 0x10C) { h.write_fifo32(value); return; }
+      h.write(addr, static_cast<u16>(value & 0xFFFF));
+      h.write(addr + 2, static_cast<u16>(value >> 16));
       return;
     }
     // melonDS has no 8-bit SD handler; a byte write lands as the 16-bit one.
-    sd.write(addr & ~1u, static_cast<u16>(value));
+    h.write(addr & ~1u, static_cast<u16>(value));
     return;
   }
   if (r >= 0x400 && r < 0x500) {                     // AES: ARM7 only (melonDS DSi::ARM7IOWrite8/16/32)
@@ -1489,6 +1520,11 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
       else if (r == 0x404) aes.write_blkcnt(value);
       else if (r == 0x408) aes.write_input_fifo(value);
     } else if (width == 16 && r == 0x406) aes.write_blkcnt(value << 16);
+    return;
+  }
+  if (r >= 0x200 && r < 0x300) {                     // camera module (ARM9)
+    if (!a9) return;
+    if (width == 32) cam.write32(addr, value); else if (width == 16) cam.write16(addr, static_cast<u16>(value)); else cam.write8(addr, static_cast<u8>(value));
     return;
   }
   if (r >= 0x300 && r < 0x400) {                     // DSP host interface: ARM9, plus melonDS's ARM7 32-bit path
@@ -1636,28 +1672,31 @@ void Io::mbk_map_range(Cpu cpu, int bank, u32 value) {
 // the control/status file, bank 0xFC the coordinate FIFO, bank 0xFF the
 // mode register (writing 0 there drops back to DS-compatibility mode).
 u8 Io::dsi_tsc_transfer(u8 value) {
+  // SPIDATA reads back the CODEC's output latch, which only a read of a
+  // register it models updates: an index byte, a write or a read of an
+  // unmodelled bank leaves the previous byte there (melonDS DSi_TSC::Data).
   SpiTouch& t = spi_tsc;
-  if (t.dsi_pos == 0) { t.dsi_index = value; ++t.dsi_pos; return 0; }
+  if (t.dsi_pos == 0) { t.dsi_index = value; ++t.dsi_pos; return t.dsi_data; }
   const u8 id = t.dsi_index >> 1;
   const bool rd = t.dsi_index & 1;
-  u8 out = 0;
-  if (id == 0) { if (rd) out = t.dsi_bank; else t.dsi_bank = value; }
+  if (id == 0) { if (rd) t.dsi_data = t.dsi_bank; else t.dsi_bank = value; }
   else if (t.dsi_bank == 0x03) {
-    if (rd) out = t.dsi_bank3[id];
+    if (rd) t.dsi_data = t.dsi_bank3[id];
     else if (id == 0x0D || id == 0x0E) t.dsi_bank3[id] = static_cast<u8>((t.dsi_bank3[id] & 0x03) | (value & 0xFC));
   } else if (t.dsi_bank == 0xFC && rd) {
-    if (id < 0x0B) { out = (id & 1) ? static_cast<u8>(t.dsi_tx >> 8) : static_cast<u8>(t.dsi_tx); t.dsi_tx &= 0x7FFF; }
-    else if (id < 0x15) { out = (id & 1) ? static_cast<u8>(t.dsi_ty >> 8) : static_cast<u8>(t.dsi_ty); t.dsi_ty &= 0x7FFF; }
+    if (id < 0x0B) { t.dsi_data = (id & 1) ? static_cast<u8>(t.dsi_tx >> 8) : static_cast<u8>(t.dsi_tx); t.dsi_tx &= 0x7FFF; }
+    else if (id < 0x15) { t.dsi_data = (id & 1) ? static_cast<u8>(t.dsi_ty >> 8) : static_cast<u8>(t.dsi_ty); t.dsi_ty &= 0x7FFF; }
+    else t.dsi_data = 0;
   } else if (t.dsi_bank == 0xFF && id == 0x05) {
-    if (rd) out = t.dsi_mode;
+    if (rd) t.dsi_data = t.dsi_mode;
     else {
       t.dsi_mode = value;
-      if (t.dsi_mode == 0) { t.dsi_pos = 0; extkeyin |= 1u << 6; return 0; }   // DS mode: the pen-down key bit is live again (up until the next touch)
+      if (t.dsi_mode == 0) { t.dsi_pos = 0; extkeyin |= 1u << 6; return t.dsi_data; }   // DS mode: the pen-down key bit is live again (up until the next touch)
     }
   }
   t.dsi_index = static_cast<u8>(t.dsi_index + 2);
   ++t.dsi_pos;
-  return out;
+  return t.dsi_data;
 }
 
 template <class S> void Io::sync_state(S& s) {
@@ -1695,8 +1734,13 @@ template <class S> void Io::sync_state(S& s) {
     aes.sync_state(s);          // appended
     sd.sync_state(s);           // appended
     dsp.sync_state(s);          // appended
+    s.fields(spi_tsc.dsi_data); // appended
+    sdio.sync_state(s);         // appended (FORMAT_VERSION 5)
+    cam.sync_state(s);          // appended (FORMAT_VERSION 5)
     s.end();
-    if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, grid_cam_event); }
+    if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, DsiCamModule::irq_event); nds_.sched.rebind(EventId::CamTransfer, DsiCamModule::transfer_event);
+                                 nds_.sched.rebind(EventId::SdMmc, SdHost::ev_transfer_mmc); nds_.sched.rebind(EventId::Sdio, SdHost::ev_transfer_sdio);
+                                 nds_.sched.rebind(EventId::NWifi, NWifi::ms_timer_event); }
   }
   if constexpr (S::reading) {
     mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;   // the frontend hands a new buffer every frame

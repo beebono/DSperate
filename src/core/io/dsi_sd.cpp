@@ -1,4 +1,5 @@
 #include "core/io/dsi_sd.h"
+#include "core/io/dsi_nwifi.h"
 
 #include <cstring>
 #include <cstdlib>
@@ -95,14 +96,23 @@ void NandImage::log_access(bool write, u64 addr, u32 len) {
 
 // ---- SdHost ------------------------------------------------------------------
 
+SdHost::SdHost(NDS& nds, u32 num) : nds_(nds), num_(num) {
+  if (num_ == 1) wifi_ = std::make_unique<NWifi>(nds, *this);
+}
+SdHost::~SdHost() = default;
+SdDevice* SdHost::port0() { return wifi_.get(); }
+
 void SdHost::attach_nand(NandImage* nand) {
   nand_ = nand;
   storage_.reset();
   if (nand && nand->valid()) storage_ = std::make_unique<MmcStorage>(nds_, *this, *nand);
 }
 
+u32 SdHost::irq2_main() const { return num_ ? IRQ2_SDIO : IRQ2_SDMMC; }
+u32 SdHost::irq2_data1() const { return num_ ? IRQ2_SDIO_DATA1 : IRQ2_SD_DATA1; }
+
 void SdHost::reset() {
-  port_select_ = 0x0200;      // melonDS: the SDMMC host's reset value
+  port_select_ = num_ ? 0x0100 : 0x0200;      // melonDS's reset values (CHECKME there too)
   soft_reset_ = 0x0007;
   sd_clock_ = 0;
   sd_option_ = 0;
@@ -132,6 +142,7 @@ void SdHost::reset() {
   tx_req_ = false;
 
   if (storage_) storage_->reset();
+  if (wifi_) wifi_->reset();
 }
 
 // melonDS's ScheduleEvent drops the request when the event is already live,
@@ -139,13 +150,18 @@ void SdHost::reset() {
 // silently loses the pending completion (and can swap RX for TX) when two
 // blocks land inside one delay. Match melonDS and refuse.
 void SdHost::schedule_transfer(u32 which) {
-  if (nds_.sched.armed(EventId::SdMmc)) return;
-  nds_.sched.schedule(EventId::SdMmc, nds_.sched.now() + TRANSFER_DELAY, ev_transfer, which);
+  const EventId ev = num_ ? EventId::Sdio : EventId::SdMmc;
+  if (nds_.sched.armed(ev)) return;
+  nds_.sched.schedule(ev, nds_.sched.now() + TRANSFER_DELAY, num_ ? ev_transfer_sdio : ev_transfer_mmc, which);
 }
 
-void SdHost::ev_transfer(NDS& nds, u32 param) {
+void SdHost::ev_transfer_mmc(NDS& nds, u32 param) {
   if (param == TRANSFER_RX) nds.io.sd.finish_rx();
   else nds.io.sd.finish_tx();
+}
+void SdHost::ev_transfer_sdio(NDS& nds, u32 param) {
+  if (param == TRANSFER_RX) nds.io.sdio.finish_rx();
+  else nds.io.sdio.finish_tx();
 }
 
 void SdHost::update_data32_irq() {
@@ -161,34 +177,34 @@ void SdHost::update_data32_irq() {
   u32 newflags = ((data32_irq_ >> 8) & 0x1) | (((~data32_irq_) >> 8) & 0x2);
   newflags &= (data32_irq_ >> 11);
 
-  if (oldflags == 0 && newflags != 0) nds_.io.request_irq2(IRQ2_SDMMC);
+  if (oldflags == 0 && newflags != 0) nds_.io.request_irq2(irq2_main());
 }
 
 void SdHost::set_irq(u32 irq) {
   const u32 oldflags = irq_status_ & ~irq_mask_;
   irq_status_ |= 1u << irq;
   const u32 newflags = irq_status_ & ~irq_mask_;
-  if (oldflags == 0 && newflags != 0) nds_.io.request_irq2(IRQ2_SDMMC);
+  if (oldflags == 0 && newflags != 0) nds_.io.request_irq2(irq2_main());
 }
 
 void SdHost::update_irq(u32 oldmask) {
   const u32 oldflags = irq_status_ & ~oldmask;
   const u32 newflags = irq_status_ & ~irq_mask_;
-  if (oldflags == 0 && newflags != 0) nds_.io.request_irq2(IRQ2_SDMMC);
+  if (oldflags == 0 && newflags != 0) nds_.io.request_irq2(irq2_main());
 }
 
 void SdHost::set_card_irq() {
   if (!(card_irq_ctl_ & 1)) return;
 
   const u16 oldflags = card_irq_status_ & ~card_irq_mask_;
-  MmcStorage* dev = device();
+  SdDevice* dev = device();
   if (dev && dev->irq) card_irq_status_ |=  1;
   else                 card_irq_status_ &= ~1;
   const u16 newflags = card_irq_status_ & ~card_irq_mask_;
 
   if (oldflags == 0 && newflags != 0) {
-    nds_.io.request_irq2(IRQ2_SDMMC);
-    nds_.io.request_irq2(IRQ2_SD_DATA1);
+    nds_.io.request_irq2(irq2_main());
+    nds_.io.request_irq2(irq2_data1());
   }
 }
 
@@ -196,8 +212,8 @@ void SdHost::update_card_irq(u16 oldmask) {
   const u16 oldflags = card_irq_status_ & ~oldmask;
   const u16 newflags = card_irq_status_ & ~card_irq_mask_;
   if (oldflags == 0 && newflags != 0) {
-    nds_.io.request_irq2(IRQ2_SDMMC);
-    nds_.io.request_irq2(IRQ2_SD_DATA1);
+    nds_.io.request_irq2(irq2_main());
+    nds_.io.request_irq2(irq2_data1());
   }
 }
 
@@ -231,7 +247,7 @@ u32 SdHost::data_rx(const u8* data, u32 len) {
 }
 
 void SdHost::finish_tx() {
-  MmcStorage* dev = device();
+  SdDevice* dev = device();
   if (block_count_internal_ == 0) {
     if (stop_action_ & (1 << 8)) { if (dev) dev->send_cmd(MmcCmd::StopTransmission, 0); }
     set_irq(2);
@@ -249,7 +265,7 @@ u32 SdHost::data_tx(u8* data, u32 len) {
     if ((data_fifo32_.level << 2) < len) {
       if (data_fifo32_.empty()) {
         set_irq(25);
-        nds_.ndma.check(Cpu::ARM7, 0x28);
+        nds_.ndma.check(Cpu::ARM7, num_ ? 0x29 : 0x28);
       }
       return 0;
     }
@@ -289,7 +305,7 @@ u32 SdHost::transferrable_len(u32 len) const {
 }
 
 void SdHost::check_rx() {
-  MmcStorage* dev = device();
+  SdDevice* dev = device();
   check_swap_fifo();
 
   if (block_count_internal_ <= 1) {
@@ -310,7 +326,7 @@ void SdHost::check_tx() {
     if ((data_fifo_[cur_fifo_].level << 1) < block_len16_) return;
   }
 
-  MmcStorage* dev = device();
+  SdDevice* dev = device();
   if (dev) dev->continue_transfer();
 }
 
@@ -332,11 +348,11 @@ u16 SdHost::read(u32 addr) {
     return response_buffer_[((addr & 0x1FF) - 0x00C) >> 1];
 
   case 0x01C: {
-    u16 ret = static_cast<u16>(irq_status_ & 0x031D);
-    // Card presence for port 0 -- the SD card slot, which is empty here, so
+    u16 ret = static_cast<u16>(irq_status_ & (0x031D | (num_ ? 2 : 0)));
+    // Card presence. Host 0: port 0, the SD card slot, which is empty here, so
     // the "inserted" and "writable" bits stay clear, as melonDS reports it.
-    // (Reporting the eMMC present here was tried and changed nothing: the
-    // SDK's init does not branch on these bits before it stalls.)
+    // Host 1: the Wi-Fi module is soldered on -- always inserted.
+    if (num_) ret |= 0x00A0;
     return ret;
   }
   case 0x01E: return static_cast<u16>((irq_status_ >> 16) & 0x8B7F);
@@ -396,7 +412,7 @@ void SdHost::write(u32 addr, u16 val) {
   case 0x000: {
     command_ = val;
     const u8 cmd = command_ & 0x3F;
-    MmcStorage* dev = device();
+    SdDevice* dev = device();
     if (!dev) return;
     // Command type 1 is "ACMD", which on hardware sends an APP_CMD prefix of
     // its own -- but DSi boot2 sends APP_CMD manually *and* sets the type, so
@@ -460,6 +476,7 @@ void SdHost::write(u32 addr, u16 val) {
       sd_clock_ &= ~0x0500;
       sd_option_ = 0x40EE;
       if (storage_) storage_->reset();
+      if (wifi_) wifi_->reset();
     }
     soft_reset_ = 0x0006 | (val & 1);
     return;
@@ -507,7 +524,7 @@ void SdHost::update_fifo32() {
 
   update_data32_irq();
 
-  if ((data_fifo32_.level << 2) >= block_len32_) nds_.ndma.check(Cpu::ARM7, 0x28);
+  if ((data_fifo32_.level << 2) >= block_len32_) nds_.ndma.check(Cpu::ARM7, num_ ? 0x29 : 0x28);
 }
 
 void SdHost::check_swap_fifo() {
@@ -743,6 +760,7 @@ template <class S> void SdHost::sync_state(S& s) {
            data_fifo_[1].buf, data_fifo_[1].read_pos, data_fifo_[1].write_pos, data_fifo_[1].level,
            data_fifo32_.buf, data_fifo32_.read_pos, data_fifo32_.write_pos, data_fifo32_.level);
   if (storage_) storage_->sync_state(s);
+  if (wifi_) wifi_->sync_state(s);
 }
 template void SdHost::sync_state<state::Writer>(state::Writer&);
 template void SdHost::sync_state<state::Reader>(state::Reader&);

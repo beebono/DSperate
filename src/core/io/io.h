@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/io/dsi_aes.h"
 #include "core/io/dsi_dsp.h"
+#include "core/io/dsi_camera.h"
 #include "core/io/dsi_sd.h"
 #include "core/io/wifi.h"
 
@@ -70,7 +71,9 @@ struct SpiTouch { bool hold = false; u32 pos = 0; u8 cmd = 0; u16 sample = 0; u8
   // 0 = DS-compatibility mode (the above). Only used while NDS::dsi.
   u8  dsi_mode = 0, dsi_bank = 0, dsi_index = 0; u32 dsi_pos = 0;
   std::array<u8, 0x80> dsi_bank3{};
-  u16 dsi_tx = 0, dsi_ty = 0; };
+  u16 dsi_tx = 0, dsi_ty = 0;
+  u8  dsi_data = 0;   // the CODEC's output latch: only a handled read changes it (melonDS DSi_TSC::Data)
+};
 struct SpiPower { bool hold = false; u32 pos = 0; u8 cmd = 0; std::array<u8, 8> regs{}; u8 data = 0; };
 
 struct Rtc {
@@ -203,6 +206,8 @@ public:
   DsiAes aes;              // 0x04004400 (ARM7), reset with the DSi block
   DsiDsp dsp;              // 0x04004300 (ARM9) DSP host interface, no core
   SdHost sd;               // 0x04004800 (ARM7) SDMMC host; the NAND hangs off port 1
+  SdHost sdio;             // 0x04004A00 (ARM7) SDIO host; the Wi-Fi module on port 0
+  DsiCamModule cam;        // 0x04004200 (ARM9) camera module; its sensors on I2C 0x78/0x7A
   void request_irq2(u32 bit);   // ARM7 IE2/IF2
   void bptwl_reset();
   void reprice_clock9_store(u32 idx);
@@ -359,8 +364,6 @@ public:
   void rtc_event();
   // DSi interleave grid (EventId::RtcClock / CamIrq): armed by reset() on a DSi.
   static void grid_rtc_event(NDS& nds, u32);
-  static void grid_cam_event(NDS& nds, u32);
-  static constexpr u32 CAM_IRQ_INTERVAL = 2234248 * 2;   // melonDS DSi_CamModule::kIRQInterval, in ARM9 cycles
 private:
 
   void cart_write_romctrl(u32 value);

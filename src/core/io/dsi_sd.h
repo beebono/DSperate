@@ -4,8 +4,8 @@
 // with its command/response registers, the two 16-bit data FIFOs and the
 // 32-bit one they drain into, the IRQ/card-IRQ masks, and an MMC device on
 // port 1 holding the NAND. Port 0 (the SD card slot) is absent and reads as
-// "no card"; the SDIO host at 0x04004A00 is absent entirely (the Wi-Fi SDIO
-// block is gated off in SCFG_EXT), so that range reads 0.
+// "no card". The same controller, instance 1, is the SDIO host at
+// 0x04004A00 with the Atheros Wi-Fi module on its port 0 (melonDS DSi_NWifi).
 //
 // The guest sees *raw* eMMC sectors here. The NAND's AES-CTR lives in
 // software above this host -- melonDS's NANDImage only decrypts for its own
@@ -81,20 +81,30 @@ class NandImage {
 };
 
 class SdHost;
+class NWifi;
+
+// A device on one of a host's two ports (melonDS DSi_SDDevice).
+class SdDevice {
+ public:
+  virtual ~SdDevice() = default;
+  virtual void reset() = 0;
+  virtual void send_cmd(MmcCmd cmd, u32 param) = 0;
+  virtual void send_acmd(MmcAcmd cmd, u32 param) = 0;
+  virtual void continue_transfer() = 0;
+  bool irq = false;
+  bool read_only = false;
+};
 
 // The eMMC device on port 1. melonDS's DSi_MMCStorage, NAND-only: the SD
 // card variants of each command are the branches we never take.
-class MmcStorage {
+class MmcStorage : public SdDevice {
  public:
   MmcStorage(NDS& nds, SdHost& host, NandImage& nand) : nds_(nds), host_(host), nand_(nand) {}
 
-  void reset();
-  void send_cmd(MmcCmd cmd, u32 param);
-  void send_acmd(MmcAcmd cmd, u32 param);
-  void continue_transfer();
-
-  bool irq = false;
-  bool read_only = false;
+  void reset() override;
+  void send_cmd(MmcCmd cmd, u32 param) override;
+  void send_acmd(MmcAcmd cmd, u32 param) override;
+  void continue_transfer() override;
 
   template <class S> void sync_state(S& s);
 
@@ -119,7 +129,13 @@ class MmcStorage {
 
 class SdHost {
  public:
-  explicit SdHost(NDS& nds) : nds_(nds) {}
+  // num 0: the SDMMC host (0x04004800, NAND on port 1); 1: the SDIO host
+  // (0x04004A00, Wi-Fi on port 0). melonDS DSi_SDHost::Num.
+  SdHost(NDS& nds, u32 num);
+  ~SdHost();
+  NWifi* nwifi() { return wifi_.get(); }
+  void set_card_irq();   // a device's IRQ line changed (melonDS SetCardIRQ)
+  u32 num() const { return num_; }
 
   void reset();
   void attach_nand(NandImage* nand);
@@ -138,8 +154,9 @@ class SdHost {
   u32  data_tx(u8* data, u32 len);
   u32  transferrable_len(u32 len) const;
 
-  // Scheduler callbacks (Event_DSi_SDMMCTransfer's two function ids).
-  static void ev_transfer(NDS& nds, u32 param);
+  // Scheduler callbacks (Event_DSi_SDMMCTransfer / SDIOTransfer's two function ids).
+  static void ev_transfer_mmc(NDS& nds, u32 param);
+  static void ev_transfer_sdio(NDS& nds, u32 param);
   void schedule_transfer(u32 which);
 
   template <class S> void sync_state(S& s);
@@ -154,9 +171,12 @@ class SdHost {
   void update_data32_irq();
   void set_irq(u32 irq);
   void update_irq(u32 oldmask);
-  void set_card_irq();
   void update_card_irq(u16 oldmask);
-  MmcStorage* device() { return (port_select_ & 1) ? storage_.get() : nullptr; }
+  SdDevice* device() { return (port_select_ & 1) ? port1() : port0(); }
+  SdDevice* port0();                                                  // SD card slot (host 0, empty) / Wi-Fi (host 1)
+  SdDevice* port1() { return num_ == 0 ? storage_.get() : nullptr; }  // the eMMC on host 0
+  u32 irq2_main() const;
+  u32 irq2_data1() const;
 
   // melonDS's FIFO<u16,0x100> / FIFO<u32,0x80>, as plain ring buffers.
   template <typename T, u32 N>
@@ -171,8 +191,10 @@ class SdHost {
   };
 
   NDS& nds_;
+  u32 num_ = 0;
   NandImage* nand_ = nullptr;
   std::unique_ptr<MmcStorage> storage_;
+  std::unique_ptr<NWifi> wifi_;
 
   u16 port_select_ = 0, soft_reset_ = 0, sd_clock_ = 0, sd_option_ = 0;
   u32 irq_status_ = 0, irq_mask_ = 0;
