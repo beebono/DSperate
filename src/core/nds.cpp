@@ -361,7 +361,7 @@ void NDS::set_wifi_mac_suffix(u32 suffix) {
   if (firmware.size() < 0x200) return;
   firmware[0x39] = static_cast<u8>(suffix >> 16); firmware[0x3A] = static_cast<u8>(suffix >> 8); firmware[0x3B] = static_cast<u8>(suffix);
   u16 len; std::memcpy(&len, &firmware[0x2C], 2);
-  if (0x2C + len <= firmware.size()) { const u16 crc = bios::crc16(&firmware[0x2C], len, 0x0000); std::memcpy(&firmware[0x2A], &crc, 2); }
+  if (0x2C + static_cast<size_t>(len) <= firmware.size()) { const u16 crc = bios::crc16(&firmware[0x2C], len, 0x0000); std::memcpy(&firmware[0x2A], &crc, 2); }
 }
 
 void NDS::setup_direct_boot() {

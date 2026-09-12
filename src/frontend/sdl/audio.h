@@ -9,7 +9,7 @@
 namespace ds { struct NDS; }
 namespace ds::sdl {
 
-// Audio output and the frame pacer.
+// Audio output.
 //
 // The device is opened at its own rate and the SPU's 32768 Hz stream is
 // resampled here on the way in (linear, two taps: a 32.768 -> 48 kHz step on
@@ -20,9 +20,16 @@ namespace ds::sdl {
 // from a callback: the SPU already buffers a ring, and queueing keeps the
 // whole frontend single-threaded.
 //
-// The queue is also the clock. Emulating a frame produces a fixed 547-odd
-// samples of audio, so holding the queue near a target depth paces the
-// emulator at exactly the DS's frame rate without a timer.
+// The queue used to be the clock: a frame produces a fixed 547-odd samples,
+// so holding the queue at a depth held the emulator at the rate the sound
+// card consumed them. The frame limiter (pacer.h) is the clock now, which
+// leaves the queue a latency buffer and nothing else -- and leaves the two
+// rates free to drift. Phase 1 only bounds the damage: a queue that has run
+// past MAX_FRAMES drops whole frames of audio until it is back at the
+// target. Steering the resampler to hold the depth instead (dynamic rate
+// control -- docs/frame-pacing-scoping.md, phase 2) is what makes this
+// inaudible; until then a slow drift costs an occasional dropped frame of
+// sound, and the other direction runs the queue dry.
 class Audio {
 public:
   bool open(bool native_rate = true);
@@ -32,7 +39,9 @@ public:
 
   // Drains the SPU ring into the queue. With `drop`, whole frames are
   // discarded once the queue is at its target depth (fast forward: the
-  // speakers cannot keep up, so play the newest and stay in sync).
+  // speakers cannot keep up, so play the newest and stay in sync). Whole
+  // frames are dropped without it too, once the queue has drifted past
+  // MAX_FRAMES.
   void push(NDS& nds, bool drop = false);
   void set_volume(int percent);   // 0..100
   int  volume() const { return volume_; }
@@ -48,17 +57,11 @@ public:
   bool open_capture();
   const std::vector<s16>& capture();
   bool capturing() const { return cap_ != 0; }
-  void pace();              // sleep while the queue is above the target depth
-  // True once the device has been found to accept samples without playing
-  // them. The caller must pace on the wall clock while this holds: pace()
-  // deliberately does not wait, so a dead device costs nothing per frame.
-  bool stalled() const { return stalled_; }
   double queued_frames() const;   // how much audio is buffered, in frames
 
 private:
   static constexpr int TARGET_FRAMES = 3;    // ~50 ms of slack
-  static constexpr int STALLED_FRAMES = 30;  // a queue this deep means nothing is playing
-  static constexpr Uint32 STALL_RETRY_MS = 5000;   // how often a stalled device is probed again
+  static constexpr int MAX_FRAMES = 6;       // drifted this far ahead: drop back to the target
   SDL_AudioDeviceID dev_ = 0, cap_ = 0;
   std::vector<s16> mic_;
   u32 frame_bytes_ = 0;
@@ -68,9 +71,7 @@ private:
   s16 prev_l_ = 0, prev_r_ = 0;
   u32 phase_ = 0;
   std::vector<s16> out_;
-  bool stalled_ = false;
-  bool announced_ = false;
-  Uint32 stall_mark_ = 0;
+  bool over_ = false;    // the queue has drifted past MAX_FRAMES; dropping until it is back at the target
   int  volume_ = 100;
   bool muted_ = false;
 };

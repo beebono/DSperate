@@ -34,6 +34,7 @@
 #include "lid.h"
 #include "loader_cart.h"
 #include "menu.h"
+#include "pacer.h"
 
 #include <dirent.h>
 #include <algorithm>
@@ -121,7 +122,7 @@ const char* kUsage =
     "  --fbdev / --no-fbdev  present straight through /dev/fb0 (the mali-fbdev SDL2 of the\n"
     "                  H700 handhelds; the default is auto: when that SDL2 has a mali driver\n"
     "                  and fb0 answers). video.fbdev\n"
-    "  --no-audio      run without sound (frames are paced by the clock)\n"
+    "  --no-audio      run without sound\n"
     "  --volume N      0..100\n"
     "  --no-mic        do not open the microphone (M still fakes one)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
@@ -1628,7 +1629,7 @@ sdl_ready:
 
   // Wall-clock pacing when there is no audio queue to pace against.
   const double frame_ns = 1e9 * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ;
-  Uint64 next_frame = SDL_GetPerformanceCounter();
+  ds::sdl::Pacer pacer(frame_ns);
   double aq_min = 1e9; unsigned aq_under1 = 0, aq_under_half = 0;   // audio-queue depth after a frame (lan stats)
   const double ticks_per_ns = static_cast<double>(SDL_GetPerformanceFrequency()) / 1e9;
 
@@ -1644,7 +1645,7 @@ sdl_ready:
   Uint64 emu_ticks = 0, draw_ticks = 0, wait_ticks = 0, fps_pace_ticks = 0;   // wait: blocked in begin_frame for a free scanout buffer
   u64 frames = 0;
   // Per-frame emulation time, for the same report the headless frontend prints. Only the
-  // run_frame() slice goes in: the present blocks on vsync and audio.pace()
+  // run_frame() slice goes in: the present blocks on vsync and the limiter
   // sleeps, and either one would peg every frame at the refresh interval and
   // hide exactly the clusters this is here to find.
   const double ticks_to_ms = 1e3 / static_cast<double>(SDL_GetPerformanceFrequency());
@@ -2356,7 +2357,7 @@ sdl_ready:
     paused = p;
     audio.pause(p);
     display.set_page(p);
-    if (p) flush_save(); else { next_frame = SDL_GetPerformanceCounter(); fs_debt_ms = 0; }
+    if (p) flush_save(); else { pacer.reset(); fs_debt_ms = 0; }
     VLOG("%s\n", p ? "paused" : "resumed");
   };
   // A toast: the framed, four-second notice drawn over the game. Not an
@@ -2937,7 +2938,7 @@ sdl_ready:
           menu.set_open(false);
           set_paused(false);
           audio.clear();
-          next_frame = SDL_GetPerformanceCounter();
+          pacer.reset();
           fs_debt_ms = 0;
           flush_save();
         } else refresh_slots();
@@ -3072,7 +3073,7 @@ sdl_ready:
         if (load_state_file(nds, state_path(nds, session.states_dir, state_slot), loaded_layout, got_layout)) {
           apply_loaded_layout();
           audio.clear();
-          next_frame = SDL_GetPerformanceCounter();
+          pacer.reset();
           fs_debt_ms = 0;
           flush_save();
           show_slot("STATE " + std::to_string(state_slot) + " LOADED");
@@ -3257,7 +3258,7 @@ sdl_ready:
       if (!said) { said = true; std::fprintf(stderr, "fast forward: not during a network session\n"); }
       fast = false;
     }
-    if (fast != was_fast) { was_fast = fast; next_frame = SDL_GetPerformanceCounter(); }
+    if (fast != was_fast) { was_fast = fast; pacer.reset(); }
     // The policy decides for the frame after the one about to run; what the
     // core settled for this one is what governs the present.
     if (fs_limit > 0) {
@@ -3364,9 +3365,9 @@ sdl_ready:
     // less margin (dips under one frame 37 vs 6 times in 3000), and the
     // plain pacer never let it run dry (docs/wifi-scoping.md, pacing).
     if (lan && !fast && std::getenv("DS_WIFI_SLICE")) {
-      // next_frame is this frame's start on the wall-clock pacer, and was
-      // reset to "now" at the last pace when the audio queue is the clock.
-      const Uint64 frame_end = std::max(next_frame, SDL_GetPerformanceCounter() - static_cast<Uint64>(frame_ns * ticks_per_ns / 2)) + static_cast<Uint64>(frame_ns * ticks_per_ns);
+      // pacer.next() is the deadline this frame was released at, i.e. its
+      // start; the floor covers a frame that ran over and was released late.
+      const Uint64 frame_end = std::max(pacer.next(), SDL_GetPerformanceCounter() - static_cast<Uint64>(frame_ns * ticks_per_ns / 2)) + static_cast<Uint64>(frame_ns * ticks_per_ns);
       constexpr u64 slice = ds::ARM9_CLOCK_HZ / 1000;
       constexpr int slices = static_cast<int>(ds::CYCLES_PER_FRAME / slice) + 1;
       for (int k = 1; !nds.run_frame_slice(slice); ++k) {
@@ -3683,33 +3684,11 @@ sdl_ready:
 #if DSPERATE_NET
     if (lan && audio.active()) { const double q = audio.queued_frames(); if (q < aq_min) aq_min = q; if (q < 1.0) ++aq_under1; if (q < 0.5) ++aq_under_half; }
 #endif
-    bool on_the_clock = true;
-    if (fast && ff_speed <= 0) {
-      on_the_clock = false;    // unthrottled
-    } else if (audio.active() && !fast) {
-      audio.pace();
-      // A device that accepts samples but never plays them is no clock at
-      // all: pace() returns at once and we fall back to the wall clock
-      // rather than paying its probe every frame.
-      on_the_clock = audio.stalled();
-      if (!on_the_clock) next_frame = SDL_GetPerformanceCounter();
-    }
-    if (on_the_clock) {
-      next_frame += static_cast<Uint64>(frame_ns * ticks_per_ns / (fast ? ff_speed : 1));
-      const Uint64 now = SDL_GetPerformanceCounter();
-      if (next_frame > now) {
-        const double wait_ms = (next_frame - now) / (ticks_per_ns * 1e6);
-        if (wait_ms > 1.0) SDL_Delay(static_cast<Uint32>(wait_ms));
-      } else {
-        // Running behind. Keep at most one frame of debt rather than none:
-        // a title that alternates heavy and light frames (Spirit Tracks'
-        // intro, Golden Sun's title: 18 ms then 12 ms) is on time over the
-        // pair, and dropping the debt after the heavy frame made the light
-        // one sleep the difference away -- 57.6 fps from 15 ms of work.
-        const Uint64 budget = static_cast<Uint64>(frame_ns * ticks_per_ns);
-        if (now - next_frame > budget) next_frame = now - budget;
-      }
-    }
+    // The limiter. Uncapped fast forward is the only frame that is not paced
+    // at all; everything else -- with audio or without it -- goes through the
+    // one clock (pacer.h). ff_speed is a multiple of real time.
+    if (fast && ff_speed <= 0) pacer.reset();   // unthrottled: do not bank the time it gains
+    else pacer.wait(fast ? static_cast<double>(ff_speed) : 1.0);
 
     pace_ticks += SDL_GetPerformanceCounter() - t3;
     fps_pace_ticks += SDL_GetPerformanceCounter() - t3;

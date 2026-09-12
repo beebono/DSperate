@@ -80,7 +80,15 @@ const std::vector<s16>& Audio::capture() {
 }
 
 void Audio::push(NDS& nds, bool drop) {
-  if (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * TARGET_FRAMES)) { nds.spu.drain(); return; }
+  // Fast forward drops down to the target depth; ordinary play only drops
+  // once the queue has drifted past MAX_FRAMES, and then keeps dropping
+  // until it is back at the target rather than once per frame at the edge.
+  if (dev_) {
+    const u32 q = SDL_GetQueuedAudioSize(dev_);
+    if (q > frame_bytes_ * MAX_FRAMES) over_ = true;
+    else if (q <= frame_bytes_ * TARGET_FRAMES) over_ = false;
+  }
+  if (over_ || (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * TARGET_FRAMES))) { nds.spu.drain(); return; }
   s16 buf[2048 * 2];
   size_t n;
   while ((n = nds.spu.take(buf, 2048)) != 0) {
@@ -125,48 +133,11 @@ void Audio::set_volume(int percent) {
 void Audio::pause(bool p) {
   if (!dev_) return;
   SDL_PauseAudioDevice(dev_, p ? 1 : 0);
-  if (p) SDL_ClearQueuedAudio(dev_);
+  if (p) { SDL_ClearQueuedAudio(dev_); over_ = false; }
 }
 
 double Audio::queued_frames() const {
   return dev_ ? static_cast<double>(SDL_GetQueuedAudioSize(dev_)) / frame_bytes_ : 0.0;
-}
-
-void Audio::pace() {
-  if (!dev_) return;
-  // Above the target the emulator is ahead of the speakers: wait. Below it the
-  // machine cannot keep up and we let it run flat out. The wait is bounded so
-  // an audio device that accepts samples but never plays them (a broken
-  // PipeWire session, say) slows the emulator down instead of hanging it.
-  const u32 limit = frame_bytes_ * TARGET_FRAMES;
-  if (stalled_) {
-    // A device in this state would otherwise cost the full probe below on
-    // every single frame -- ~100 ms, which is the difference between 60 fps
-    // and 10. Drop what has piled up and return at once; the caller paces on
-    // the wall clock (Audio::stalled()) until a periodic probe finds the
-    // device consuming again.
-    if (!SDL_TICKS_PASSED(SDL_GetTicks(), stall_mark_ + STALL_RETRY_MS)) { SDL_ClearQueuedAudio(dev_); return; }
-    // Probe time: let the queue stand and fall through. If the device is
-    // still dead it takes a few frames to build the backlog again and one
-    // 100 ms probe to re-latch -- ~2 % of the time, not all of it.
-    stalled_ = false;
-  }
-  const Uint32 deadline = SDL_GetTicks() + 100;
-  while (SDL_GetQueuedAudioSize(dev_) > limit) {
-    if (SDL_TICKS_PASSED(SDL_GetTicks(), deadline)) {
-      if (SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * STALLED_FRAMES) {
-        if (!announced_) std::fprintf(stderr, "audio: device is not consuming samples; pacing on the clock instead\n");
-        announced_ = true;
-        stalled_ = true;
-        stall_mark_ = SDL_GetTicks();
-        SDL_ClearQueuedAudio(dev_);
-      }
-      return;
-    }
-    SDL_Delay(1);
-  }
-  stalled_ = false;
-  announced_ = false;
 }
 
 } // namespace ds::sdl
