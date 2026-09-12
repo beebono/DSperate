@@ -8,6 +8,7 @@
 #if defined(__linux__)
 #include <cerrno>
 #include <ctime>
+#include <sys/prctl.h>
 #endif
 
 namespace ds::sdl {
@@ -33,7 +34,17 @@ class Pacer {
 public:
   // The nominal period, in nanoseconds -- CYCLES_PER_FRAME / ARM9_CLOCK_HZ,
   // i.e. 59.8261 Hz, unless something asks for another rate.
-  explicit Pacer(double period_ns) { set_period_ns(period_ns); reset(); }
+  explicit Pacer(double period_ns) {
+#if defined(__linux__)
+    // The kernel rounds a timer up by the thread's slack -- 50 us by default,
+    // which is most of the error a frame wait sees. It costs nothing to ask
+    // for none (an RT thread is already given none, so this is for the
+    // ordinary case). Per-thread, and this runs on the emulation thread.
+    prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
+#endif
+    set_period_ns(period_ns);
+    reset();
+  }
 
   void set_period_ns(double ns) { period_ = ns * ticks_per_ns(); }
   double period_ns() const { return period_ / ticks_per_ns(); }
@@ -61,37 +72,79 @@ public:
     sleep_until(next_, now);
   }
 
+  // What the spin is costing, in microseconds a frame, averaged since the
+  // last call. For the statistics line; the margin tunes itself without it.
+  double spin_us() {
+    const double v = spin_n_ ? spin_ticks_ / ticks_per_ns() / 1e3 / spin_n_ : 0.0;
+    spin_ticks_ = 0; spin_n_ = 0;
+    return v;
+  }
+
 private:
-  // How much of the wait is spun rather than slept. SDL_Delay() rounds up to
-  // whole milliseconds, which on a 16.7 ms frame is 6 % of the period -- no
-  // matter while the audio queue was absorbing it, a visible judder now that
-  // this is the clock. nanosleep() is finer but still only as good as the
-  // timer slack it wakes with, so the last stretch is spun.
-  static constexpr double SPIN_NS = 400'000.0;   // 0.4 ms
+  // A sleep does not end when it was asked to: the kernel wakes the thread
+  // late, by its timer slack plus whatever else wanted the core. Measured on
+  // an idle desktop, ordinary priority: 60 us late at the median but 430 us
+  // at the 99th percentile, and the two do not move together -- a constant
+  // spin margin is therefore either 30x too large most frames or too small
+  // on the ones that matter.
+  //
+  // So the margin is what this thread has actually been seen to overshoot
+  // by, and it is learned: it jumps straight to any lateness bigger than it
+  // has, and decays slowly (1/512 a frame, ~2 s to halve) when frames come
+  // back on time. The asymmetry is the point -- being early costs a few
+  // microseconds of spin, being late costs a missed frame -- and it means
+  // the number tunes itself per device and per scheduling policy rather
+  // than being one guess for a desktop and an RK3566 alike. An RT thread is
+  // given no timer slack at all, so on a device that runs under SCHED_RR
+  // this settles near zero and the spin all but disappears.
+  static constexpr double MARGIN_DECAY = 1.0 - 1.0 / 512.0;
+  static constexpr double MARGIN_MAX_NS = 2e6;    // never hand more than 2 ms to the spin
 
   static double ticks_per_ns() {
     static const double v = static_cast<double>(SDL_GetPerformanceFrequency()) / 1e9;
     return v;
   }
 
-  static void sleep_until(Uint64 deadline, Uint64 now) {
+  void sleep_until(Uint64 deadline, Uint64 now) {
+    const double margin = margin_ticks_;
+    const double left = static_cast<double>(deadline - now);
+    if (left > margin) {
+      const double nap_ns = (left - margin) / ticks_per_ns();
+      const Uint64 asked = deadline - static_cast<Uint64>(margin);
 #if defined(__linux__)
-    const double left_ns = (deadline - now) / ticks_per_ns();
-    if (left_ns > SPIN_NS) {
-      const double nap = left_ns - SPIN_NS;
-      timespec ts{static_cast<time_t>(nap / 1e9), static_cast<long>(nap - static_cast<long long>(nap / 1e9) * 1e9)};
-      // Restarted on a signal: a stray SIGALRM must not shorten the frame.
-      while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {}
-    }
+      // Absolute rather than relative: a signal restarts the wait against
+      // the same instant instead of the remainder, so a stray SIGALRM can
+      // neither shorten nor lengthen the frame. The deadline is built from
+      // the monotonic clock read here, which keeps this independent of
+      // whichever clock SDL's counter is on.
+      timespec mono{};
+      clock_gettime(CLOCK_MONOTONIC, &mono);
+      long long end = mono.tv_sec * 1'000'000'000LL + mono.tv_nsec + static_cast<long long>(nap_ns);
+      timespec until{static_cast<time_t>(end / 1'000'000'000LL), static_cast<long>(end % 1'000'000'000LL)};
+      while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, nullptr) == EINTR) {}
 #else
-    const double left_ms = (deadline - now) / ticks_per_ns() / 1e6;
-    if (left_ms > 1.0) SDL_Delay(static_cast<Uint32>(left_ms));
+      const double nap_ms = nap_ns / 1e6;
+      if (nap_ms > 1.0) SDL_Delay(static_cast<Uint32>(nap_ms));
 #endif
+      // What the sleep actually cost against what was asked for. Only a
+      // real sleep teaches the margin anything; a frame that spun the whole
+      // way has nothing to say about the kernel's wakeups.
+      const Uint64 woke = SDL_GetPerformanceCounter();
+      const double late = static_cast<double>(woke) - static_cast<double>(asked);
+      const double cap = MARGIN_MAX_NS * ticks_per_ns();
+      margin_ticks_ = late > margin_ticks_ ? (late < cap ? late : cap) : margin_ticks_ * MARGIN_DECAY;
+      if (woke >= deadline) return;      // woke past the deadline: nothing left to spin
+      spin_ticks_ += static_cast<double>(deadline - woke);
+    }
+    ++spin_n_;
     while (SDL_GetPerformanceCounter() < deadline) {}
   }
 
-  double period_ = 0;    // in performance-counter ticks
+  double period_ = 0;        // in performance-counter ticks
   Uint64 next_ = 0;
+  double margin_ticks_ = 0;  // learned; starts at zero and grows into the first few frames
+  double spin_ticks_ = 0;    // what the spin has cost since the last spin_us()
+  unsigned spin_n_ = 0;
 };
 
 } // namespace ds::sdl

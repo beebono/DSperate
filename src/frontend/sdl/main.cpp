@@ -3710,9 +3710,9 @@ sdl_ready:
       fps_value = fps >= 999.0 ? 999 : static_cast<int>(fps + 0.5);
       if (show_fps) {
         const double wall_ms = static_cast<double>(now - fps_mark) * to_ms;   // per frame, same unit as the rest
-        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, wait %.1f ms, pace %.1f ms, other %.1f ms, audio queued %.1f frames\n",
+        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, wait %.1f ms, pace %.1f ms (spin %.0f us), other %.1f ms, audio queued %.1f frames\n",
                      fps, 100.0 * fps / (ds::ARM9_CLOCK_HZ / double(ds::CYCLES_PER_FRAME)),
-                     emu_ticks * to_ms, draw_ticks * to_ms, wait_ticks * to_ms, fps_pace_ticks * to_ms,
+                     emu_ticks * to_ms, draw_ticks * to_ms, wait_ticks * to_ms, fps_pace_ticks * to_ms, pacer.spin_us(),
                      wall_ms - (emu_ticks + draw_ticks + wait_ticks + fps_pace_ticks) * to_ms, audio.queued_frames());
         if (fs_limit > 0) std::fprintf(stderr, "  frameskip: %llu frames skipped (%s, limit %d)\n",
                                        static_cast<unsigned long long>(fs_skipped), fs_adaptive ? "adaptive" : "fixed", fs_limit);
