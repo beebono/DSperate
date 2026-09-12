@@ -234,8 +234,15 @@ void NDS::setup_direct_boot_dsi() {
   if (launcher_handoff) {
     d.scfg_ext[1] |= 1u << 18;                       // the launcher's SCFG_EXT7: NAND access for the ARM7
 
+    auto w32_7 = [&](u32 a, u32 v) { bus.dma_write32(Cpu::ARM7, a, v); };
+    auto w8_7  = [&](u32 a, u8 v)  { bus.dma_write8(Cpu::ARM7, a, v); };
     const u32 tbl = t.param_block_address;
-    auto put_str = [&](u32 addr, const char* str) { for (const char* c = str; *c; ++c) w8(addr++, static_cast<u8>(*c)); w8(addr, 0); };
+    // The oracle loads a zero-filled 0x500-byte window and then the fields,
+    // so every byte of the block the title does not get told about is zero.
+    // Writing only the fields leaves whatever the boot left behind in the
+    // gaps, which the SDK misparses.
+    for (u32 z = 0; z < 0x500; z += 4) w32_7(tbl + z, 0);
+    auto put_str = [&](u32 addr, const char* str) { for (const char* c = str; *c; ++c) w8_7(addr++, static_cast<u8>(*c)); w8_7(addr, 0); };
     char title[64];
     std::snprintf(title, sizeof title, "nand:/title/%08x/%08x", t.title_id_hi, t.title_id_lo);
 
@@ -254,7 +261,7 @@ void NDS::setup_direct_boot_dsi() {
 
     u32 o = tbl;
     for (const auto& e : entries) {
-      w32(o, e.hdr);
+      w32_7(o, e.hdr);
       put_str(o + 4, e.name);
       put_str(o + 20, e.path);
       o += 0x54;
@@ -267,9 +274,9 @@ void NDS::setup_direct_boot_dsi() {
     put_str(tbl + 0x3C0, app);
 
     // The boot info the crt0 checks: an SCFG_EXT7 snapshot and two flag bytes.
-    w32(0x0380FFC4, 0x13FFFF06);
-    w8(0x0380FFC8, 0x44);
-    w8(0x0380FFC9, 0xF8);
+    w32_7(0x0380FFC4, 0x13FFFF06);
+    w8_7(0x0380FFC8, 0x44);
+    w8_7(0x0380FFC9, 0xF8);
   }
   arm9->jump(h.arm9_entry, true);
   arm7->jump(h.arm7_entry, true);

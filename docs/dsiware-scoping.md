@@ -586,24 +586,43 @@ tests. Shantae reports `nand: 0 block reads, 0 block writes`, exactly as
 melonDS does -- **direct boot runs the title in card mode, so nothing asks
 the NAND for anything.**
 
-**The launcher hand-off is implemented but UNPROVEN, and off by default**
-(`DS_DSI_HANDOFF=1`). `setup_direct_boot_dsi` writes all four pieces of the
-recipe: boot indicator `0x02FFFC40 = 3`, `SCFG_EXT7` bit 18 (0x93FBFB06 ->
-0x93FFFB06, matching the recipe's value), the five 0x54-byte mount entries at
-header word 0x1D4 (`0x03800ea8` for KS3E, which overlaps neither the ARM7 nor
-the ARM7i binary) with the app path at +0x3C0, and the 8 bytes at
-`0x0380FFC4`. With it on, Shantae *does* newly initialise the SD controller
-(17 register accesses: soft reset, SDOPTION 0x40EA, IRQ status clear, IRQ
-mask 0x0305) and then stalls -- it never writes a command to register 0x000,
-never selects port 1, and the screen stays black, where card mode at least
-reaches its "Save Data has been corrupted" prompt. Reporting the eMMC as
-present in `SD_STATUS` (0x01C bits 0x20/0x80, melonDS's
-`SDPresentBySelectedPort` experiment) was tried and changed nothing, so the
-init does not branch on those bits before stalling. Next step is the oracle:
-run `trace_melonds` with `TRACE_BOOT_INDICATOR=3
-TRACE_SCFG=-1:-1:93fffb06:-1 TRACE_LOAD_WRAM7=...` (the recipe's own knobs,
-via `tools/melonds/dsiware_params.py`) and diff against ours to find what the
-launcher leaves behind that this does not.
+**The launcher hand-off now works, and is still off by default**
+(`DS_DSI_HANDOFF=1`) because it ends in a crash. Two real bugs were found by
+tracing the oracle with the recipe's own knobs
+(`TRACE_BOOT_INDICATOR=3 TRACE_SCFG=-1:-1:93fffb06:-1 TRACE_LOAD_WRAM7=...`):
+
+1. **The param block was written through the ARM9.** `setup_direct_boot_dsi`'s
+   `w32`/`w8` helpers go through `bus.dma_write*(Cpu::ARM9, ...)`, and
+   `0x0380xxxx` is ARM7-only WRAM -- invisible to the ARM9. The mount table
+   was never landing. Fixed with ARM7-side writers.
+2. **The block was not cleared first.** The oracle's `TRACE_LOAD_WRAM7` copies
+   a zero-filled 0x500-byte window, so every byte the title is not told about
+   is zero; writing only the fields left boot residue in the gaps.
+
+With both fixed, Shantae's NAND access **matches the oracle's walk exactly**
+-- 8 sectors before partition 0, the boot sector, the FAT, the root dir, then
+`/TITLE/ -> 00030004 -> 4B533345 -> DATA/ + CONTENT/` -- and then goes
+*further* than the oracle, reading and writing
+`/TITLE/00030004/4B533345/DATA/PUBLIC.SAV` (136 reads, 8 writes, landing in
+exactly two sectors of the pristine image). `DS_NAND_LOG=<file>` writes the
+block log in `trace_melonds`'s format, so `tools/dsi_nand.py map` reads ours
+and the oracle's alike.
+
+**Both emulators then crash, differently, so the recipe is still incomplete.**
+The oracle takes an ARM9 data abort at `020D8444`. Ours: the ARM7 ends up in
+IRQ mode (CPSR `0x...52`) on a `b .` at `037c7164` -- the SDK's dead-end
+handler -- after which the ARM9 sits in its `MCR p15` wait-for-interrupt loop
+at `020e97b0` forever. Frames still tick, so it presents as ~4 fps rather
+than a hang, and the 2.8 M ARM7 instructions per 10 frames are that spin
+(the idle skip cannot collapse an IRQ-mode loop). The SD host is *not*
+implicated: only 3527 register accesses over the whole stall, ending
+cleanly on CMD13 and SD_CLOCK <- 0.
+
+This is the boundary of what the recipe buys. A full launch is a hybrid --
+binaries from the card image, filesystem from the NAND -- and something in
+that seam is inconsistent for both emulators. Note this is *weaker* than the
+scoping note's earlier claim that the recipe was proven end to end; what is
+reproducible today is mount + directory walk (both) and save I/O (ours).
 
 ### Phase 4 -- I2C, BPTWL, I2S/mic (~900 lines)
 

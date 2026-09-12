@@ -69,6 +69,11 @@ class NandImage {
   u64 reads = 0, writes = 0;
 
  private:
+  static void log_access(bool write, u64 addr, u32 len);
+
+ public:
+
+ private:
   std::FILE* file_ = nullptr;
   u64 length_ = 0;
   u8  cid_[16] = {};

@@ -66,7 +66,7 @@ bool NandImage::open(const std::string& path) {
 
 void NandImage::read(u64 addr, u32 len, u8* out) {
   reads++;
-  if (getenv("DS_DEBUG_NAND")) std::fprintf(stderr, "[nand] read  %010llX len %u\n", (unsigned long long)addr, len);
+  log_access(false, addr, len);
   if (!file_) { std::memset(out, 0, len); return; }
   std::fseek(file_, static_cast<long>(addr), SEEK_SET);
   const size_t got = std::fread(out, 1, len, file_);
@@ -75,13 +75,23 @@ void NandImage::read(u64 addr, u32 len, u8* out) {
 
 void NandImage::write(u64 addr, u32 len, const u8* in) {
   writes++;
-  if (getenv("DS_DEBUG_NAND")) std::fprintf(stderr, "[nand] write %010llX len %u\n", (unsigned long long)addr, len);
+  log_access(true, addr, len);
   if (!file_) return;
   std::fseek(file_, static_cast<long>(addr), SEEK_SET);
   std::fwrite(in, 1, len, file_);
 }
 
 void NandImage::flush() { if (file_) std::fflush(file_); }
+
+// DS_NAND_LOG=<file> writes the block log in trace_melonds's format, so
+// tools/dsi_nand.py map reads ours and the oracle's alike.
+void NandImage::log_access(bool write, u64 addr, u32 len) {
+  static std::FILE* log = [] {
+    const char* path = getenv("DS_NAND_LOG");
+    return path ? std::fopen(path, "w") : nullptr;
+  }();
+  if (log) { std::fprintf(log, "%c %llx %u\n", write ? 'w' : 'r', (unsigned long long)addr, len); std::fflush(log); }
+}
 
 // ---- SdHost ------------------------------------------------------------------
 
