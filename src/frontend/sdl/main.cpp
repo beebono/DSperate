@@ -146,9 +146,10 @@ const char* kUsage =
     "                  that reads the date no longer replays the same, but the firmware's own\n"
     "                  menu needs a real clock to appear at all)\n"
     "  --netplay       local wireless with whoever is on the LAN: join a session heard within\n"
-    "                  2.5 s, else host one (melonDS's LAN protocol; a melonDS can be the other end)\n"
+    "                  2.5 s, else host one (melonDS's LAN protocol; a melonDS can be the other end).\n"
+    "                  The menu's NETWORK FEATURES row and net.mode do the same without a flag\n"
     "  --lan-host NAME host a local-wireless session as NAME; --lan-join ADDR joins the one at ADDR;\n"
-    "                  --lan-name NAME is our player name\n"
+    "                  --lan-name NAME is our player name (default: the console's nickname)\n"
     "  --load-state F  start from a save state instead of booting the game\n"
     "  --autosave-png F  with emu.autosave, write a PNG of both screens to F beside the auto state\n"
 #if DSPERATE_CHEEVOS
@@ -924,6 +925,8 @@ int main(int argc, char** argv) {
   bool clear_cache = false;
   bool rtc_host = false;              // --rtc-host: a real clock even under a replay (the firmware menu needs one)
   const char* lan_host = nullptr; const char* lan_join = nullptr; const char* lan_name = "DSperate"; bool netplay = false;
+  bool lan_guest = false;             // net.mode = guest: join a session heard on the LAN, never host one
+  bool lan_name_set = false;          // --lan-name was given, so the nickname must not override it
   long stats_from = 0;   // frames run but left out of the timing statistics
 
   // The game is found before the options are read. A flag whose value is
@@ -965,10 +968,11 @@ int main(int argc, char** argv) {
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (flag("--rtc-host")) rtc_host = true;
     // Local wireless over the LAN for this run (docs/wifi-scoping.md): host a
-    // session, or join the one at ADDR. A menu page comes later.
+    // session, or join the one at ADDR. The menu's NETWORK FEATURES row
+    // (net.mode) does the same without an address; a flag wins over it.
     else if (arg("--lan-host")) lan_host = argv[++i];
     else if (arg("--lan-join")) lan_join = argv[++i];
-    else if (arg("--lan-name")) lan_name = argv[++i];
+    else if (arg("--lan-name")) { lan_name = argv[++i]; lan_name_set = true; }
     else if (flag("--netplay")) netplay = true;   // join a session heard on the LAN within 2.5 s, else host one
     else if (flag("--clear-cache")) clear_cache = true;
     else if (arg("--record")) record = argv[++i];
@@ -1108,10 +1112,26 @@ int main(int argc, char** argv) {
   user.birthday_day = static_cast<ds::u8>(cfg.num("user.birthday_day", user.birthday_day));
   user.favourite_colour = static_cast<ds::u8>(cfg.num("user.colour", user.favourite_colour));
   user.language = static_cast<ds::u8>(cfg.num("user.language", user.language));
+  // [net] net.mode -- the menu's NETWORK FEATURES row, and the only way to
+  // reach local wireless without the command line. A --netplay or --lan-*
+  // flag has already said what to do, so the config only speaks when they are
+  // all silent. The name on the session is the console's own nickname unless
+  // --lan-name overrode it: the name a game shows for this console and the
+  // name its peers see are the same thing to whoever is reading the screen.
+  std::string lan_name_str = lan_name;
+  if (!lan_name_set && !user.nickname.empty()) lan_name_str = user.nickname;
+  lan_name = lan_name_str.c_str();
+  if (!lan_host && !lan_join && !netplay) {
+    const std::string mode = cfg.str("net.mode", "off");
+    if (mode == "auto") netplay = true;
+    else if (mode == "host") lan_host = lan_name;
+    else if (mode == "guest") lan_guest = true;
+    else if (mode != "off") std::fprintf(stderr, "net.mode: \"%s\" is not off, auto, host or guest\n", mode.c_str());
+  }
   {
     std::string err;
     if (!nds.load_bios(bios9, bios7, fw, user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
-    if (lan_host || lan_join || netplay) { std::random_device rd; nds.set_wifi_mac_suffix(rd() & 0xFFFFFF); }   // a MAC of our own: see NDS::set_wifi_mac_suffix
+    if (lan_host || lan_join || netplay || lan_guest) { std::random_device rd; nds.set_wifi_mac_suffix(rd() & 0xFFFFFF); }   // a MAC of our own: see NDS::set_wifi_mac_suffix
   }
   // A configured path that names no file falls back the same as none: the
   // stock ini on a handheld points at files the user may never add.
@@ -2133,6 +2153,12 @@ sdl_ready:
       case ds::sdl::Dep::DominantThreshold:
         if (!dominant) return "DOMINANT LAYOUTS ONLY";
         return cfg.str("video.dominant_ratio", "auto") == "auto" ? "" : "ONLY WHEN THE RATIO IS AUTO";
+      case ds::sdl::Dep::Net:
+#if DSPERATE_NET
+        return "";
+#else
+        return "THIS BUILD HAS NO NETWORKING";
+#endif
       }
       return "";
     }
@@ -2229,19 +2255,21 @@ sdl_ready:
   const bool cheevos_on = cfg.flag("cheevos.enabled", false);
 #if DSPERATE_NET
   std::unique_ptr<ds::net::LanMp> lan;
-  if (lan_host || lan_join || netplay) {
+  if (lan_host || lan_join || netplay || lan_guest) {
     lan = std::make_unique<ds::net::LanMp>();
     bool up = lan->ok();
-    if (up && netplay) {
-      const auto role = lan->start_auto(lan_name);
+    if (up && (netplay || lan_guest)) {
+      // The same scan either way; netplay may fall back to hosting when it
+      // hears nobody, a guest may not (LanMp::start_auto).
+      const auto role = lan->start_auto(lan_name, 2500, 16, netplay);
       up = role != ds::net::LanMp::Role::None;
-      if (up) std::fprintf(stderr, "netplay: %s\n", role == ds::net::LanMp::Role::Host ? "no session heard, hosting" : ("joined " + lan->peer_name()).c_str());
+      if (up) VLOG("netplay: %s\n", role == ds::net::LanMp::Role::Host ? "no session heard, hosting" : ("joined " + lan->peer_name()).c_str());
     } else if (up) up = lan_host ? lan->start_host(lan_host, 16) : lan->start_client(lan_name, lan_join);
     if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); lan.reset(); }
-    else { std::fprintf(stderr, "lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id()); nds.io.wifi.set_transport(lan.get()); }
+    else { VLOG("lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id()); nds.io.wifi.set_transport(lan.get()); }
   }
 #else
-  if (lan_host || lan_join || netplay) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
+  if (lan_host || lan_join || netplay || lan_guest) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
 #endif
   std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
   bool cheevos_set_asked = false;
@@ -3329,10 +3357,10 @@ sdl_ready:
   // would give a table with nothing to read it against.
 #if DSPERATE_NET
   if (lan) {
-    std::fprintf(stderr, "lan: reply/host waits %u, total %.1f ms, max %.1f ms, timeouts %u\n", lan->wait_count(), lan->wait_total_ms(), lan->wait_max_ms(), lan->wait_timeouts());
+    VLOG("lan: reply/host waits %u, total %.1f ms, max %.1f ms, timeouts %u\n", lan->wait_count(), lan->wait_total_ms(), lan->wait_max_ms(), lan->wait_timeouts());
     // The audio queue is the clock on a device: how close it came to running
     // dry is the stutter a session caused (frame times include the sleeps).
-    std::fprintf(stderr, "lan: audio queue after a frame: min %.2f frames, under 1 frame %u times, under 0.5 %u times\n", aq_min, aq_under1, aq_under_half);
+    VLOG("lan: audio queue after a frame: min %.2f frames, under 1 frame %u times, under 0.5 %u times\n", aq_min, aq_under1, aq_under_half);
   }
 #endif
   if (std::getenv("DS_FRAME_STATS") || ds::prof::enabled) {

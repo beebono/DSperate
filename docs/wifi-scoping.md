@@ -157,11 +157,17 @@ via the CFW's `resolv.conf`, which slirp's DNS path uses through
 
 ## UI
 
-One menu page in the pattern of the RetroAchievements pages
-(memory: retroachievements-scoping): mode off / local (host, join with the
-discovery list) / internet; the DNS choice; a status line (peers, dropped
-replies, AP association state). Config keys under `[wifi]` in
-`configs/default.ini`.
+Originally planned as its own page in the pattern of the RetroAchievements
+pages: mode off / local (host, join with the discovery list) / internet; the
+DNS choice; a status line (peers, dropped replies, AP association state).
+
+**Built instead as one row** on the existing Emulation page -- see "The menu
+row as built" below. A whole page turned out to be mostly unbuildable and
+partly unnecessary: a pick row cannot render the dynamic discovery list, the
+setting has to be restart-only anyway (the MAC is randomized pre-boot), and
+the status a page would show is diagnostic rather than something a player
+acts on, so it lives behind `DS_VERBOSE` with the rest of the startup
+chatter. Internet mode and the DNS choice join the same row in phase 3.
 
 ## Phases
 
@@ -169,7 +175,7 @@ replies, AP association state). Config keys under `[wifi]` in
 |------:|-------------|-------|-----:|
 | 0 | the `dsiware` timer on the DS too; Wi-Fi DMA trigger wired | 5 scenes hash-identical; rig cost with a Wi-Fi menu open | small |
 | 1 | TX/RX engine + `WifiAP` + `NoPeer` transport | PictoChat boots to "no one nearby"; a WFC connection test associates and fails at DHCP; `trace_melonds` identical with melonDS's dummy net | ~1 900 lines |
-| 2 | `LanMp` over ENet, melonDS wire format; socket thread; menu page | RG DS <-> melonDS PC in PictoChat, then Mario Kart DS multi-cart; two handhelds; Download Play of a demo | ~800 lines + ENet |
+| 2 | `LanMp` over ENet, melonDS wire format; socket thread; menu row (one row, not a page -- see below) | RG DS <-> melonDS PC in PictoChat, then Mario Kart DS multi-cart; two handhelds; Download Play of a demo | ~800 lines + ENet |
 | 3 | `SlirpDriver` + DNS policy | Mario Kart DS on Wiimmfi from the rig; the A30 static build | ~500 lines + libslirp |
 | -- | DSi NWifi | separate scoping when DSiWare needs it | out |
 | -- | `LocalMP`, Netplay, pcap | out (reasons above) | out |
@@ -681,3 +687,46 @@ CPU interleave (lockstep failed 3 of 3, the full parity gate 1 of 2); idle
 skip; a missing or mis-valued Wi-Fi register (a melonDS guest and ours touch
 exactly the same registers with the same values); and the transport (a real
 melonDS guest completes against our host).
+
+### The menu row as built (2026-09-11)
+
+Local wireless is reachable from the pause menu as a single row, not a page:
+**NETWORK FEATURES** at the foot of the Emulation page, `net.mode` in `[net]`,
+with the values `off` / `auto` / `host` / `guest`.
+
+`auto` is exactly what `--netplay` does: scan 2.5 s, join the first session
+heard, host one if there is none. `host` and `guest` are that same scan with
+the decision already made. `guest` needed a new argument on
+`LanMp::start_auto` (`host_fallback`, default true): heard nobody and it gives
+up rather than becoming the host, which is the whole point of choosing GUEST
+on the second console -- otherwise two consoles both set to join would race,
+and whichever scanned first would silently become the session.
+
+A command-line flag still wins over the row, so `--lan-join ADDR` remains the
+way to reach a host on a network that cannot broadcast to it, and the harness
+invocations in this document are unaffected.
+
+**Why the row is restart-only** (`FlagRestart`, so it says RESTART REQUIRED):
+`NDS::set_wifi_mac_suffix` randomizes the low three bytes of the MAC in the
+firmware image before the console boots. Two instances from one firmware dump
+otherwise share a MAC, and PictoChat drops messages from its own MAC -- the
+fault recorded under "Messages did not arrive" above. A row that started a
+session mid-run would walk straight back into it.
+
+**The player name** is `[user] nickname` unless `--lan-name` overrides it,
+rather than a Wi-Fi setting of its own: the name a game shows for this console
+and the name its peers see are the same thing to whoever is reading the
+screen, and `user.nickname` is already a restart-only text row.
+
+**Status is diagnostic, so it is gated.** The join line, the hosting/joined
+line and the end-of-run reply-wait and audio-queue statistics are now `VLOG`
+(`DS_VERBOSE=1`), alongside the existing `DS_WIFI_LOG=1` session log. Failures
+-- a transport that would not start, a `net.mode` value that is not one of the
+four, a build without `DSPERATE_NET` -- stay ungated, which is the frontend's
+standing rule: the lines you need are the ones printed when something went
+wrong. `Dep::Net` greys the row out with THIS BUILD HAS NO NETWORKING when
+`DSPERATE_NET` is off, rather than offering a setting that does nothing.
+
+What a page would have given and this does not: leaving a session without
+quitting, and a live peer list. `LanMp::players()` and the `wait_*` counters
+are there whenever that is worth building.

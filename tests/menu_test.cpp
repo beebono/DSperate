@@ -959,6 +959,30 @@ void test_layout_page_rows() {
   CHECK(ds::sdl::step_value(box, "true", +1, free) == "false");
 }
 
+// Local wireless is one row on the Emulation page rather than a page of its
+// own (docs/wifi-scoping.md, "The menu row as built"): four values, and
+// restart-only because the console's MAC is randomized before it boots.
+void test_network_features_row() {
+  FakeHost h;
+  const ds::sdl::Setting* t = ds::sdl::kEmuSettings;
+  const ds::sdl::Setting* net = nullptr;
+  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+    if (!std::strcmp(t[i].key, "net.mode")) net = &t[i];
+  CHECK(net != nullptr);
+  CHECK(net->type == ds::sdl::Setting::Type::Pick && net->nchoices == 4);
+  CHECK(net->flags & ds::sdl::FlagRestart);
+  CHECK(net->depends == ds::sdl::Dep::Net);
+  CHECK(ds::sdl::default_value(*net) == "off");
+  // Off heads the list and the three modes follow it in order. A pick wraps,
+  // the way every other short list here does.
+  CHECK(ds::sdl::step_value(*net, "off", +1, h) == "auto");
+  CHECK(ds::sdl::step_value(*net, "auto", +1, h) == "host");
+  CHECK(ds::sdl::step_value(*net, "host", +1, h) == "guest");
+  CHECK(ds::sdl::step_value(*net, "guest", +1, h) == "off");
+  CHECK(ds::sdl::step_value(*net, "off", -1, h) == "guest");
+  CHECK(ds::sdl::display_value(*net, "guest") == "GUEST");
+}
+
 // A value the file already holds outside the menu's range is shown as it
 // stands and stepped from where it is, not clamped the moment the page opens.
 void test_out_of_range_value_is_kept() {
@@ -1373,6 +1397,7 @@ int main() {
   test_setting_steps();
   test_percent_round_trip();
   test_layout_page_rows();
+  test_network_features_row();
   test_out_of_range_value_is_kept();
   test_defaults_are_reachable();
   test_disabled_rows_are_skipped();

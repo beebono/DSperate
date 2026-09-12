@@ -48,6 +48,7 @@ enum class Dep : u8 {
   PipTouchHold,       // Pip, and the inset is not fully opaque (it is a fade timer)
   Dominant,           // the layout is dominant_v or dominant_h
   DominantThreshold,  // Dominant, and dominant_ratio is auto
+  Net,                // the build has the Wi-Fi transports (DSPERATE_NET)
 };
 
 struct Setting {

@@ -144,7 +144,8 @@ void LanMp::poll_discovery(u32 tick) {
   }
 }
 
-LanMp::Role LanMp::start_auto(const std::string& player_name, int scan_ms, int max_players) {
+LanMp::Role LanMp::start_auto(const std::string& player_name, int scan_ms, int max_players,
+                              bool host_fallback) {
   if (!start_discovery()) return Role::None;
   const u32 start = ms_now();
   u32 found = 0; std::string found_name;
@@ -162,7 +163,11 @@ LanMp::Role LanMp::start_auto(const std::string& player_name, int scan_ms, int m
     char ip[32]; std::snprintf(ip, sizeof ip, "%u.%u.%u.%u", found >> 24, (found >> 16) & 255, (found >> 8) & 255, found & 255);
     LAN_LOG("found \"%s\" at %s\n", found_name.c_str(), ip);
     if (start_client(player_name, ip)) { peer_name_ = found_name; return Role::Guest; }
-    LAN_LOG("join failed (%s); hosting instead\n", err_.c_str());
+    LAN_LOG("join failed (%s)%s\n", err_.c_str(), host_fallback ? "; hosting instead" : "");
+  }
+  if (!host_fallback) {
+    if (err_.empty()) err_ = "no session heard on the LAN";
+    return Role::None;
   }
   return start_host(player_name, max_players) ? Role::Host : Role::None;
 }

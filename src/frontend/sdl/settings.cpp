@@ -32,6 +32,12 @@ const Choice kColour[]   = {{"0", "GREY"}, {"1", "BROWN"}, {"2", "RED"}, {"3", "
 const Choice kMonth[]    = {{"1", "JANUARY"}, {"2", "FEBRUARY"}, {"3", "MARCH"}, {"4", "APRIL"},
                             {"5", "MAY"}, {"6", "JUNE"}, {"7", "JULY"}, {"8", "AUGUST"},
                             {"9", "SEPTEMBER"}, {"10", "OCTOBER"}, {"11", "NOVEMBER"}, {"12", "DECEMBER"}};
+// Local wireless, as one row. AUTO is --netplay (join a session heard on the
+// LAN, else host one); HOST and GUEST are the same scan with the decision
+// already made, so a console meant to be the second one cannot quietly become
+// the session everyone joins. The address form stays a command-line flag:
+// a pick row has nowhere to put one, and discovery finds hosts on its own.
+const Choice kNetMode[]  = {{"off", "OFF"}, {"auto", "AUTO"}, {"host", "HOST"}, {"guest", "GUEST"}};
 const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
                             {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
 // A checkbox: the same two values as kOnOff, drawn as a box. Rows that are
@@ -87,6 +93,12 @@ const Setting kEmuSettings[] = {
           "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"),
   boolean("emu.autoload", "AUTOLOAD ON START", "false", FlagRestart, Dep::None,
           "WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE"),
+  // Restart-only because it has to be: the console's MAC is randomized into
+  // the firmware image before it boots (NDS::set_wifi_mac_suffix), and two
+  // instances sharing a MAC is the fault that made PictoChat drop its own
+  // messages. docs/wifi-scoping.md.
+  pick("net.mode", "NETWORK FEATURES", kNetMode, 4, "off", FlagRestart, Dep::Net,
+       "LOCAL WIRELESS OVER THIS NETWORK. AUTO JOINS A SESSION, ELSE HOSTS ONE"),
   end(),
 };
 

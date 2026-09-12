@@ -62,8 +62,14 @@ public:
   bool start_host(const std::string& player_name, int max_players);
   // Listen for hosts' discovery beacons for scan_ms (melonDS hosts send one
   // a second); join the first heard, else host. What --netplay does.
+  //
+  // host_fallback false makes it join-only: heard nobody, or the join failed,
+  // and it gives up rather than becoming the host. That is the difference
+  // between the menu's AUTO and its GUEST -- a second console told to be a
+  // guest must not quietly become the session everyone else then joins.
   enum class Role { None, Host, Guest };
-  Role start_auto(const std::string& player_name, int scan_ms = 2500, int max_players = 16);
+  Role start_auto(const std::string& player_name, int scan_ms = 2500, int max_players = 16,
+                  bool host_fallback = true);
   std::string peer_name() const { return peer_name_; }   // the session joined by start_auto
   bool start_client(const std::string& player_name, const std::string& host);
   void end_session();
