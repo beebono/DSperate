@@ -94,6 +94,7 @@ void Wifi::reset() {
   timer_err_ = 0; us_timestamp_ = us_counter_ = us_compare_ = 0;
   block_beacon_irq14_ = false;
   us_until_power_on_ = 0; cmd_counter_ = rx_counter_ = 0;
+  no_peek_ = std::getenv("DS_WIFI_NO_PEEK") != nullptr;
 
   tx_slots_.fill(TxSlot{}); tx_buffer_.fill(0);
   com_status_ = 0; tx_cur_slot_ = -1;
@@ -222,7 +223,13 @@ void Wifi::us_timer() {
   if (is_mp_client_ && !com_status_) {
     if (rx_timestamp_ && us_timestamp_ >= rx_timestamp_) { rx_timestamp_ = 0; start_rx(); }
     if (us_timestamp_ >= next_sync_) check_rx(2);   // TODO (melonDS): not every tick when it fails
-    else if (!rx_timestamp_ && !(us_timestamp_ & 0x38)) check_rx(3);   // every 64 us: a host frame already here, held to its timestamp (peek_host_packet)
+    // Every 64 us: a host frame already here, held to its timestamp
+    // (peek_host_packet) -- but never while our reply is still going out.
+    // melonDS's client only ever fetches once its clock reaches next_sync,
+    // i.e. after its reply slot; fetching the ack during the reply
+    // transmission hands the firmware an ack-before-TX-end order the
+    // hardware cannot produce.
+    else if (!no_peek_ && !rx_timestamp_ && !(reg(W_TXBusy) & 0x0080) && !(us_timestamp_ & 0x38)) check_rx(3);
   }
 
   if (!(us_timestamp_ & 0x3FF & kTimeCheckMask)) ap_ms_timer();
@@ -375,6 +382,9 @@ void Wifi::tx_send_frame(const TxSlot& slot, int num) {
     break;
   case 5:
     increment_tx_count(slot);
+    // The reply carries the CMD's arrival timestamp (us_timestamp_ here, as
+    // this runs at CMD arrival): the host's reply wait keys on it and both
+    // transports drop a reply stamped more than 32 us before the CMD's end.
     if (mp_) mp_->send_reply(tx_buffer_.data(), 12 + len, us_timestamp_, reg(W_AIDLow));
     break;
   case 4:
@@ -484,7 +494,14 @@ void Wifi::send_mp_reply(u16 clienttime, u16 clientmask) {
     if (duration > clienttime) slot.valid = false;
   }
   if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# reply %s len %u clienttime %u\n", slot.valid ? "data" : "empty", slot.valid ? slot.length : 0u, clienttime);
-  if (slot.valid) { slot.cur_phase = 0; mp_reply_pending_ = true; }   // the frame goes out at phase 0
+  // Transmit now, at the CMD's arrival, exactly as melonDS does: the reply
+  // carries this timestamp and the host's reply wait (at its CMD end) keys on
+  // it. The earlier scheme copied the buffer out at TX-end to catch the
+  // firmware's in-place reply patching, but that made the client's reply
+  // timeline drift from the host's and Download Play's data stage stalled
+  // intermittently; the RsaReply mis-attribution it was working around is
+  // now prevented in the transport (LanMp::send_cmd flushes stale replies).
+  if (slot.valid) { slot.cur_phase = 0; tx_send_frame(slot, 5); }
   else { slot.cur_phase = 10; send_mp_default_reply(); }
   u16 clientnum = 0;
   for (int i = 1; i < reg(W_AIDLow); ++i) if (clientmask & (1 << i)) clientnum++;
@@ -589,10 +606,8 @@ bool Wifi::process_tx(TxSlot& slot, int num) {
       break;
     }
     if (num == 5) {
-      // The reply's contents as the hardware would have read them while
-      // sending: the firmware patches its reply buffer in place after the
-      // CMD, and this is the last moment that can still be true of a byte.
-      if (mp_reply_pending_) { mp_reply_pending_ = false; tx_send_frame(slot, 5); }
+      // The reply frame was already transmitted at CMD arrival (send_mp_reply);
+      // here the reply slot's transfer just completes.
       if (reg(W_TXStatCnt) & 0x1000) { reg(W_TXStat) = 0x0401; set_irq(1); }
       set_status(1);
       reg(W_TXBusy) &= static_cast<u16>(~0x80);
@@ -781,7 +796,7 @@ void Wifi::finish_rx() {
   if ((rxflags & 0x800F) == 0x800C) {
     // reply to CMD frames
     const u16 clientmask = ld16(&rx_buffer_[0xC + 26]);
-    if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# CMD rx seq %04X len %u reply1 %04X reply2 %04X us %llX\n", seqno, ld16(&rx_buffer_[8]), reg(W_TXSlotReply1), reg(W_TXSlotReply2), (unsigned long long)us_timestamp_);
+    if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# CMD rx seq %04X len %u reply1 %04X reply2 %04X us %llX via %d\n", seqno, ld16(&rx_buffer_[8]), reg(W_TXSlotReply1), reg(W_TXSlotReply2), (unsigned long long)us_timestamp_, last_rx_type_);
     if (reg(W_AIDLow) && (clientmask & (1 << reg(W_AIDLow)))) send_mp_reply(ld16(&rx_buffer_[0xC + 24]), clientmask);
     else if (mp_) mp_->send_reply(nullptr, 0, us_timestamp_, 0);   // a blank, so the host has something to receive instead of a timeout
   } else if ((rxflags & 0x800F) == 0x8001) {
@@ -833,6 +848,7 @@ bool Wifi::check_rx(int type) {   // 0 = regular, 1 = MP replies, 2 = MP host fr
       if (rxlen < 0) { is_mp_ = false; is_mp_client_ = false; }   // host is gone
     }
     if (rxlen <= 0) return false;
+    last_rx_type_ = type;
     if (rxlen < 12 + 24) continue;
     framelen = ld16(&rx_buffer_[10]);
     if (framelen != rxlen - 12) { WIFI_LOG("bad frame length %d/%d\n", framelen, rxlen - 12); continue; }
@@ -1332,7 +1348,6 @@ template <class S> void Wifi::sync_state_engine(S& s) {
            mp_reply_timer_, mp_client_mask_, mp_client_fail_, mp_client_replies_, mp_last_seqno_,
            is_mp_, is_mp_client_, next_sync_, rx_timestamp_);
   s.fields(ap_.us_counter, ap_.seq_no, ap_.beacon_due, ap_.packet, ap_.packet_len, ap_.rx_num, ap_.client_status);
-  s.fields(mp_reply_pending_);   // appended
 }
 template void Wifi::sync_state_regs<state::Writer>(state::Writer&);
 template void Wifi::sync_state_regs<state::Reader>(state::Reader&);

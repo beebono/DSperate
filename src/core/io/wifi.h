@@ -134,7 +134,8 @@ private:
   u16 mp_last_seqno_ = 0xFFFF;
   bool is_mp_ = false, is_mp_client_ = false;
   u32  host_syncs_ = 0;
-  bool mp_reply_pending_ = false;   // slot 5 holds a reply whose contents are read when its transmission starts
+  int  last_rx_type_ = 0;            // trace only: which check_rx delivered the frame in rx_buffer_
+  bool no_peek_ = false;            // DS_WIFI_NO_PEEK: never fetch host frames early; pace only at next_sync
   u64 next_sync_ = 0, rx_timestamp_ = 0;
 
   // ---- the emulated access point (melonDS WifiAP) ----

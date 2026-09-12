@@ -500,7 +500,21 @@ int LanMp::recv_generic(u8* data, bool block, u64* timestamp) {
 
 int LanMp::send_packet(const u8* data, int len, u64 timestamp) { return send_generic(0, data, len, timestamp); }
 int LanMp::recv_packet(u8* data, u64* timestamp) { return recv_generic(data, false, timestamp); }
-int LanMp::send_cmd(const u8* data, int len, u64 timestamp) { return send_generic(1, data, len, timestamp); }
+int LanMp::send_cmd(const u8* data, int len, u64 timestamp) {
+  // melonDS's LocalMP re-bases its reply FIFO on every CMD (LocalMP.cpp,
+  // SendPacketGeneric type 1): a reply that answered an earlier CMD can
+  // never be taken for this one's. Its LAN path has only the wall-clock
+  // stale sweep for that, and with our wider window a backlog of old replies
+  // sat at the head of the queue for the host's reply wait to consume.
+  std::queue<ENetPacket*> keep;
+  while (!rx_.empty()) {
+    ENetPacket* pkt = rx_.front(); rx_.pop();
+    if ((reinterpret_cast<MpPacketHeader*>(pkt->data)->type & 0xFFFF) == 2) enet_packet_destroy(pkt);
+    else keep.push(pkt);
+  }
+  rx_.swap(keep);
+  return send_generic(1, data, len, timestamp);
+}
 int LanMp::send_reply(const u8* data, int len, u64 timestamp, u16 aid) { return send_generic(2 | (u32(aid) << 16), data, len, timestamp); }
 int LanMp::send_ack(const u8* data, int len, u64 timestamp) { return send_generic(3, data, len, timestamp); }
 int LanMp::peek_host_packet(u8* data, u64* timestamp) {
