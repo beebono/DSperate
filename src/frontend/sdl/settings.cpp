@@ -84,7 +84,7 @@ constexpr Setting end() { return Setting{nullptr, nullptr, T::Bool, nullptr, 0, 
 } // namespace
 
 const Setting kEmuSettings[] = {
-  number("emu.frameskip", "FRAMESKIP", 0, 3, 1, "0", FlagLive, Dep::None,
+  number("emu.frameskip", "FRAMESKIP", 0, 3, 1, "0", FlagLive, Dep::NetSession,
          "DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL"),
   pick("emu.frameskip_mode", "FRAMESKIP MODE", kSkipMode, 2, "adaptive", FlagLive, Dep::FrameskipMode,
        "ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME"),
@@ -95,9 +95,9 @@ const Setting kEmuSettings[] = {
   boolean("emu.fast_load", "FAST LOAD", "false", FlagLive | FlagInexact, Dep::NetOff,
           "SHORTER LOADING SCREENS. GAMES THAT RACE THE CARD CAN MISBEHAVE"),
   // From 2: "1X" is real time, which is what not fast-forwarding already is.
-  number("emu.ff_speed", "FAST FORWARD SPEED", 2, 16, 1, "0", FlagLive, Dep::None,
+  number("emu.ff_speed", "FAST FORWARD SPEED", 2, 16, 1, "0", FlagLive, Dep::NetSession,
          "HOW MANY TIMES REAL TIME THE FAST FORWARD HOTKEY RUNS AT", "0", "UNLIMITED", "X"),
-  number("emu.ff_skip", "FAST FORWARD SKIP", 0, 9, 1, "3", FlagLive, Dep::None,
+  number("emu.ff_skip", "FAST FORWARD SKIP", 0, 9, 1, "3", FlagLive, Dep::NetSession,
          "WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE"),
   boolean("emu.autosave", "AUTOSAVE ON QUIT", "false", FlagLive, Dep::None,
           "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"),

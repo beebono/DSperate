@@ -306,6 +306,9 @@ void Menu::set_cheats(std::vector<cheat::Code>* codes, const std::vector<cheat::
 // when no database matched, options when the frontend gave no host -- so what
 // is on screen is a subset of the table and the two have to be mapped.
 bool Menu::root_visible(int item) const {
+  if (kRoot[item].result == Result::Save || kRoot[item].result == Result::Load ||
+      item == kSlotRow)
+    return have_states();
   if (item == kCheatRow) return have_cheats();
   if (item == kOptionsRow) return have_options();
   if (item == kCheevosRow) return have_cheevos();
@@ -1621,7 +1624,10 @@ void Menu::draw(const Canvas& d) const {
   const int py0 = (d.h - panel_h) / 2;
   panel(d, px0, py0, panel_w, panel_h);
 
-  const char* title = slots ? "STATE SLOT" : "PAUSED";
+  // Not PAUSED during a network session: the game behind this page is still
+  // running, because a console that stops for the length of a menu visit has
+  // left the session.
+  const char* title = slots ? "STATE SLOT" : (net_session_ ? "MENU" : "PAUSED");
   draw_text(d, px0 + (panel_w - text_width(scale, title)) / 2, py0 + title_y, scale, kInk, title);
   fill_rect(d, px0 + m.pad, py0 + rule_y, panel_w - 2 * m.pad, std::max(1, m.s / 2), kEdge);
 

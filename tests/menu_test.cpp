@@ -37,6 +37,39 @@ void test_root_rows() {
 }
 
 
+// With a network session up the three state rows come off the page entirely
+// (docs/wifi-scoping.md, phase 3): a state freezes this machine and not the
+// one it is talking to, and nothing in a state file restores a session. The
+// rows that remain must still be reachable in order -- hiding rows shifts
+// every index below them, which is exactly the kind of thing that breaks
+// quietly.
+void test_root_rows_without_states() {
+  Menu m;
+  m.set_network_session(true);
+  m.set_open(true);
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::Resume);        // row 0, was row 3
+  m.input(press(B::BTN_DOWN));
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::Quit);          // row 1
+  // The page wraps, as it does with every row visible, and wraps over the
+  // two rows that are left rather than through the hidden ones.
+  m.input(press(B::BTN_DOWN));
+  CHECK(m.input(press(B::BTN_A)) == Menu::Result::Resume);
+  // And neither Save nor Load can be reached at all.
+  Menu m2;
+  m2.set_network_session(true);
+  m2.set_open(true);
+  for (int i = 0; i < 8; ++i) {
+    const Menu::Result r = m2.input(press(B::BTN_A));
+    CHECK(r != Menu::Result::Save && r != Menu::Result::Load);
+    m2.input(press(B::BTN_DOWN));
+  }
+  // Putting them back restores the original page.
+  m2.set_network_session(false);
+  Menu m3;
+  m3.set_open(true);
+  CHECK(m3.input(press(B::BTN_A)) == Menu::Result::Save);
+}
+
 // ---------------------------------------------------------------------------
 // The achievement pages. A fake host, because the point of CheevosHost is that
 // menu.cpp knows nothing about the RetroAchievements library -- so this test
@@ -1005,6 +1038,32 @@ void test_network_features_row() {
   // speed knobs are not gated on internet: an internet session has no peer
   // whose clock it must match.
   CHECK(dns->depends != ds::sdl::Dep::NetOff);
+
+  // Frameskip and fast forward hang off Dep::NetSession, which is the wider
+  // gate: both let the emulator set its own pace, and under a session of
+  // either kind the pace is set outside it. They are NOT on Dep::NetOff --
+  // that one is only about matching a peer's clock, so it stays local.
+  int session_gated = 0;
+  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+    if (t[i].depends == ds::sdl::Dep::NetSession) ++session_gated;
+  CHECK(session_gated == 3);
+  for (const char* k : {"emu.frameskip", "emu.ff_speed", "emu.ff_skip"}) {
+    const ds::sdl::Setting* row = nullptr;
+    for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+      if (!std::strcmp(t[i].key, k)) row = &t[i];
+    CHECK(row != nullptr);
+    CHECK(row->depends == ds::sdl::Dep::NetSession);
+    CHECK(row->depends != ds::sdl::Dep::NetOff);
+  }
+  // A host with a session up refuses them and says why.
+  struct SessionOn final : FakeHost {
+    const char* disabled_reason(const ds::sdl::Setting& s) const override {
+      return s.depends == ds::sdl::Dep::NetSession ? "NOT DURING A NETWORK SESSION" : "";
+    }
+    bool enabled(const ds::sdl::Setting& s) const override { return !*disabled_reason(s); }
+  } session;
+  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+    if (t[i].depends == ds::sdl::Dep::NetSession) CHECK(!session.enabled(t[i]));
   // The three inexact speed knobs hang off local wireless being off: two
   // consoles in a session have to keep the same time as each other.
   int gated = 0;
@@ -1409,6 +1468,7 @@ void test_canvas_sizes() {
 
 int main() {
   test_root_rows();
+  test_root_rows_without_states();
   test_wrap_and_back();
   test_slot_selection();
   test_slot_grid_navigation();

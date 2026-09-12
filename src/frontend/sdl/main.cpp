@@ -1647,6 +1647,18 @@ sdl_ready:
   if (frame_limit > 0) { frame_ms.reserve(static_cast<size_t>(frame_limit)); work_ms.reserve(static_cast<size_t>(frame_limit)); }
   Uint64 pace_ticks = 0, draw_ticks_total = 0;
   bool paused = false;
+  // A network session is actually up -- local wireless with a peer, or the
+  // internet through the access point. Set once the transport has started,
+  // not from the flags: a session that failed to come up leaves the machine
+  // ordinary, and so should its restrictions.
+  //
+  // The emulator cannot stop, rewind or run fast while something outside it
+  // is keeping time. That rules out save states, fast forward and frameskip
+  // for the session, and it is why the pause menu stops pausing (see
+  // `menu_live` below). Distinct from Host::net_on, which greys the three
+  // inexact speed knobs and is local-wireless-only -- those are about
+  // matching a peer's clock, which an internet session has no peer for.
+  bool net_live = false;
   int state_slot = 0;
   // Fast forward: the `fast_forward` hotkey while held, or the toggle (also
   // [emu] fast_forward = true to start that way). ff_speed caps it as a
@@ -1781,7 +1793,11 @@ sdl_ready:
   // and not after a scanline-tier frame, whose lines went to the panel.
   bool fb_current = false;
   auto autosave_now = [&] {
-    if (!autosave || save_readonly || log.writing()) return;
+    // net_live for the same reason the hotkey is refused: quitting out of a
+    // session would otherwise leave a state that resumes into a conversation
+    // whose other end is long gone. Read at call time, so a session that
+    // never came up autosaves as usual.
+    if (!autosave || save_readonly || log.writing() || net_live) return;
     // The thumbnail is the game's picture without the panel effects, like a
     // screenshot, so it comes from fb_. When the last frame went to the
     // panel instead, run one more, unscaled, before the state is taken, so
@@ -1859,6 +1875,10 @@ sdl_ready:
     std::function<void()> reopen;
     bool per_game = false;
     bool net_on = false;          // local wireless is on this session (Dep::NetOff)
+    // A session of either kind is up (Dep::NetSession). A pointer to the
+    // frontend's own flag rather than a copy: the transports come up after
+    // this host is built, and the menu must see the answer, not the guess.
+    const bool* net_live = nullptr;
 
     Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi, ds::sdl::Input& in)
         : cfg(c), nds(n), display(d), vs(v), global_ini(gi), game_ini(pi), input(in) {}
@@ -2190,6 +2210,10 @@ sdl_ready:
       switch (s.depends) {
       case ds::sdl::Dep::None: return "";
       case ds::sdl::Dep::FrameskipMode:
+        // Frameskip itself is forced to 0 for a session, so its mode is moot
+        // there too -- and the config may still say otherwise, which is what
+        // this test would read.
+        if (net_live && *net_live) return "NOT DURING A NETWORK SESSION";
         return cfg.num("emu.frameskip", 0) > 0 ? "" : "ONLY WITH FRAMESKIP ON";
       case ds::sdl::Dep::PanelEffects:
         return panel_effects() ? "" : "THIS SCREEN SCALES IN HARDWARE";
@@ -2229,6 +2253,8 @@ sdl_ready:
         // it hangs off is the value being edited above it, not what this run
         // happens to be doing.
         return cfg.str("net.mode", "off") == "internet" ? "" : "ONLY WITH NETWORK FEATURES ON INTERNET";
+      case ds::sdl::Dep::NetSession:
+        return (net_live && *net_live) ? "NOT DURING A NETWORK SESSION" : "";
       case ds::sdl::Dep::NetOff:
         return net_on ? "NOT WITH NETWORK FEATURES ON" : "";
       }
@@ -2240,6 +2266,7 @@ sdl_ready:
   host.reconfigure_input = [&] { input.configure(cfg); };
   host.fw_override = fw_override;
   host.net_on = net_on;
+  host.net_live = &net_live;
   host.reopen = [&] { reopen_display(); };
   // The whole layout in one go, re-read from the config: every row on the
   // Layout page is a field of it, so there is nothing per-key to do. The mode
@@ -2269,7 +2296,10 @@ sdl_ready:
   host.apply = [&](const char* key, const std::string& v) {
     const auto is = [&](const char* k) { return std::strcmp(key, k) == 0; };
     const bool on = v == "1" || v == "true" || v == "yes" || v == "on";
-    if (is("emu.frameskip")) { fs_limit = std::atoi(v.c_str()); return; }
+    // The rows are greyed during a session (Dep::NetSession), so this is the
+    // belt to that braces: a config file edited under the menu cannot bring
+    // frameskip back mid-session either.
+    if (is("emu.frameskip")) { if (!net_live) fs_limit = std::atoi(v.c_str()); return; }
     if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }
     // ::ds::jit, not ds::jit: a local `jit` (the interpreter switch) shadows
     // the namespace in here. The pricing is baked in when a block is
@@ -2339,7 +2369,11 @@ sdl_ready:
       if (up) VLOG("netplay: %s\n", role == ds::net::LanMp::Role::Host ? "no session heard, hosting" : ("joined " + lan->peer_name()).c_str());
     } else if (up) up = lan_host ? lan->start_host(lan_host, 16) : lan->start_client(lan_name, lan_join);
     if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); lan.reset(); }
-    else { VLOG("lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id()); nds.io.wifi.set_transport(lan.get()); }
+    else {
+      VLOG("lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id());
+      nds.io.wifi.set_transport(lan.get());
+      net_live = true;
+    }
   }
   // The internet through the emulated access point. Nothing to discover and
   // no peer to wait for: the driver is simply attached, and from there the
@@ -2370,6 +2404,7 @@ sdl_ready:
       slirp.reset();
     } else {
       nds.io.wifi.set_net_driver(slirp.get());
+      net_live = true;
       VLOG("internet: up, DNS %s\n", where.c_str());
     }
   }
@@ -2377,6 +2412,24 @@ sdl_ready:
   if (lan_host || lan_join || netplay || lan_guest) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
   if (internet) std::fprintf(stderr, "internet: built without DSPERATE_NET\n");
 #endif
+  // Frameskip goes off for a network session. It does not change what the
+  // emulator computes -- every frame is still emulated -- but the adaptive
+  // policy exists to let a machine that is behind catch up by dropping
+  // presents, and under a session "behind" is a thing to be fixed by running
+  // the frame, not by getting through it faster. Ungated on stderr, like the
+  // speed knobs: it overrides something the player named.
+  if (net_live && fs_limit > 0) {
+    std::fprintf(stderr, "net: frameskip is off for this session -- the emulator cannot set its own pace while the network keeps time\n");
+    fs_limit = 0;
+  }
+  // Likewise a fast forward asked for in the config, before any hotkey.
+  if (net_live && ff_toggle) {
+    std::fprintf(stderr, "net: fast forward is off for this session\n");
+    ff_toggle = false;
+  }
+  // The state rows come off the pause menu for a session. Done here, once the
+  // transports have actually started, rather than from the flags.
+  menu.set_network_session(net_live);
   std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
   bool cheevos_set_asked = false;
 
@@ -2671,6 +2724,114 @@ sdl_ready:
     cheevos_show();
   }
 #endif
+  // One tick of the pause menu: the timing it needs to repeat a held
+  // direction and scroll a long name, then whatever the player chose.
+  // Called from the idle loop while the machine is stopped, and once a
+  // frame while it is not -- under a network session the menu is an
+  // overlay over a running game, because the session cannot be stopped.
+  auto pump_menu = [&] {
+      if (!menu.open()) return;
+      // The menu is ticked every idle pass, not only when a button moves:
+      // holding a direction repeats, and a cheat name too long for its row
+      // scrolls, both of which need to know how much time has gone by.
+      const Uint32 now_ms = SDL_GetTicks();
+      const u32 elapsed = static_cast<u32>(now_ms - menu_ms);
+      menu_ms = now_ms;
+      // A rebinding in progress repaints every tick: the page is showing
+      // "PRESS ANY..." and has to come back to the new value the moment the
+      // menu collects it (Menu::handle_controls).
+      if (host.capturing()) menu_dirty = true;
+      switch (menu.update(input.take_menu_presses(), input.menu_held(), elapsed)) {
+      case Menu::Result::None: break;
+      case Menu::Result::Resume:
+        state_slot = menu.slot();
+        if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
+        menu.set_open(false);
+        display.set_page(false);
+        set_paused(false);
+        break;
+      // Both carry the same guards as the save-state hotkeys: a replay must
+      // stay the run it recorded, and a recording is the inputs from boot,
+      // which a load would leave unreplayable.
+      case Menu::Result::Save:
+        // The rows are hidden during a session, so this is unreachable
+        // there; it is here because the guard belongs with the operation,
+        // not with whatever happens to be able to reach it today.
+        if (net_live) std::fprintf(stderr, "state: not during a network session\n");
+        else if (save_readonly) std::fprintf(stderr, "state: not during a replay\n");
+        else if (save_state_file(nds, state_path(nds, session.states_dir, menu.slot()), display.current_layout())) {
+          g_state_refused.clear();   // the slot now holds a state this build made
+          flush_save();
+        }
+        refresh_slots();
+        break;
+      case Menu::Result::Load:
+        if (net_live) { std::fprintf(stderr, "state: not during a network session\n"); break; }
+        if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
+        if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
+        // A load replaces the picture the menu is drawn over, so it also
+        // leaves the menu: the player wants to see where they landed.
+        if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()), loaded_layout, got_layout)) {
+          apply_loaded_layout();
+          state_slot = menu.slot();
+          menu.set_open(false);
+          set_paused(false);
+          audio.clear();
+          next_frame = SDL_GetPerformanceCounter();
+          fs_debt_ms = 0;
+          flush_save();
+        } else refresh_slots();
+        break;
+      case Menu::Result::Launch: {
+        const std::string pick = menu.chosen();
+        VLOG("launcher: %s\n", pick.c_str());
+        flush_save();
+#if DSPERATE_JIT
+        // Back off the firmware's strict timing: the game wants the speed,
+        // and the environment override still wins if it was asked for.
+        if (jit) { ds::jit::set_strict(std::getenv("DS_JIT_STRICT") != nullptr); ds::jit::flush_all(); }
+#endif
+        nds.reset();
+        discard_session_cache();
+        if (!load_rom_notice(pick)) {
+          // Stay on the list rather than reset into nothing: another game
+          // in the same directory may well be readable, and a cancelled
+          // unpacking is a change of mind, not an error.
+          std::fprintf(stderr, "launcher: could not read %s\n", pick.c_str());
+          break;
+        }
+        nds.setup_direct_boot();
+        // Everything keyed to the ROM follows it, or the game would go on
+        // writing the loader's saves, states, screenshots and cheats under
+        // the loader's game code. --save is deliberately not carried over:
+        // it pins one file, and it was given for the ROM on the command
+        // line, not for whatever the player picks here.
+        launcher = false;
+        session.open(nds, cfg, pick, nullptr);
+        menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
+        session.load_enabled(nds);
+        load_save(nds, session.sav);
+        // The game's own auto slot, now that its code is known: a game
+        // started from the picker resumes exactly as one named on the
+        // command line does. After the battery save, so the state's SRAM
+        // wins, and never during a replay or a recording.
+        if (const std::string a = log.reading() || log.writing()
+                                      ? std::string()
+                                      : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
+            !a.empty() && load_state_file(nds, a, loaded_layout, got_layout)) {
+          std::fprintf(stderr, "state: autoloaded %s\n", a.c_str());
+          apply_loaded_layout();
+        }
+        sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
+        state_slot = 0;
+        refresh_slots();
+        menu.set_open(false);
+        set_paused(false);
+        break;
+      }
+      case Menu::Result::Quit: input.request_quit(); break;
+      }
+  };
   while (!input.quit() && !g_signalled && (frame_limit == 0 || frames < static_cast<u64>(frame_limit))) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
@@ -2678,10 +2839,13 @@ sdl_ready:
       using A = ds::sdl::Action;
       switch (a) {
       case A::Pause:
-        if (paused) {
+        // `paused` is false for the whole of a network session's menu visit,
+        // so the test is "is the menu up", not "is the machine stopped".
+        if (paused || menu.open()) {
           state_slot = menu.slot();
           if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
           menu.set_open(false);
+          display.set_page(false);
           set_paused(false);
         }
         else pause_pending = true;
@@ -2730,6 +2894,10 @@ sdl_ready:
       case A::SlotNext: state_slot = (state_slot + 1) % 10; show_slot(std::to_string(state_slot)); VLOG("state slot %d\n", state_slot); break;
       case A::SlotPrev: state_slot = (state_slot + 9) % 10; show_slot(std::to_string(state_slot)); VLOG("state slot %d\n", state_slot); break;
       case A::SaveState:
+        // A state is a machine frozen mid-conversation: its peer, or the
+        // server, is not frozen with it, and nothing in a state file restores
+        // an ENet session or an open socket. docs/wifi-scoping.md.
+        if (net_live) { std::fprintf(stderr, "state: not during a network session\n"); break; }
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (save_state_file(nds, state_path(nds, session.states_dir, state_slot), display.current_layout())) {
           flush_save();   // the .sav and the state never diverge
@@ -2737,6 +2905,7 @@ sdl_ready:
         }
         break;
       case A::LoadState:
+        if (net_live) { std::fprintf(stderr, "state: not during a network session\n"); break; }
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         // A recording is the inputs from boot; a load would leave it unreplayable.
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
@@ -2756,109 +2925,17 @@ sdl_ready:
         fps_osd = !fps_osd;
         if (fps_osd && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; }
         break;
-      case A::FastForwardToggle: ff_toggle = !ff_toggle; VLOG("fast forward %s\n", ff_toggle ? "on" : "off"); break;
+      case A::FastForwardToggle:
+        if (net_live) { std::fprintf(stderr, "fast forward: not during a network session\n"); break; }
+        ff_toggle = !ff_toggle; VLOG("fast forward %s\n", ff_toggle ? "on" : "off");
+        break;
       default: break;
       }
     }
     if (paused) {
       // Nothing runs behind the menu, so it is composited only when something
       // about it changed -- otherwise this is a plain idle tick.
-      if (menu.open()) {
-        // The menu is ticked every idle pass, not only when a button moves:
-        // holding a direction repeats, and a cheat name too long for its row
-        // scrolls, both of which need to know how much time has gone by.
-        const Uint32 now_ms = SDL_GetTicks();
-        const u32 elapsed = static_cast<u32>(now_ms - menu_ms);
-        menu_ms = now_ms;
-        // A rebinding in progress repaints every tick: the page is showing
-        // "PRESS ANY..." and has to come back to the new value the moment the
-        // menu collects it (Menu::handle_controls).
-        if (host.capturing()) menu_dirty = true;
-        switch (menu.update(input.take_menu_presses(), input.menu_held(), elapsed)) {
-        case Menu::Result::None: break;
-        case Menu::Result::Resume:
-          state_slot = menu.slot();
-          if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
-          menu.set_open(false);
-          set_paused(false);
-          break;
-        // Both carry the same guards as the save-state hotkeys: a replay must
-        // stay the run it recorded, and a recording is the inputs from boot,
-        // which a load would leave unreplayable.
-        case Menu::Result::Save:
-          if (save_readonly) std::fprintf(stderr, "state: not during a replay\n");
-          else if (save_state_file(nds, state_path(nds, session.states_dir, menu.slot()), display.current_layout())) {
-            g_state_refused.clear();   // the slot now holds a state this build made
-            flush_save();
-          }
-          refresh_slots();
-          break;
-        case Menu::Result::Load:
-          if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
-          if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
-          // A load replaces the picture the menu is drawn over, so it also
-          // leaves the menu: the player wants to see where they landed.
-          if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()), loaded_layout, got_layout)) {
-            apply_loaded_layout();
-            state_slot = menu.slot();
-            menu.set_open(false);
-            set_paused(false);
-            audio.clear();
-            next_frame = SDL_GetPerformanceCounter();
-            fs_debt_ms = 0;
-            flush_save();
-          } else refresh_slots();
-          break;
-        case Menu::Result::Launch: {
-          const std::string pick = menu.chosen();
-          VLOG("launcher: %s\n", pick.c_str());
-          flush_save();
-#if DSPERATE_JIT
-          // Back off the firmware's strict timing: the game wants the speed,
-          // and the environment override still wins if it was asked for.
-          if (jit) { ds::jit::set_strict(std::getenv("DS_JIT_STRICT") != nullptr); ds::jit::flush_all(); }
-#endif
-          nds.reset();
-          discard_session_cache();
-          if (!load_rom_notice(pick)) {
-            // Stay on the list rather than reset into nothing: another game
-            // in the same directory may well be readable, and a cancelled
-            // unpacking is a change of mind, not an error.
-            std::fprintf(stderr, "launcher: could not read %s\n", pick.c_str());
-            break;
-          }
-          nds.setup_direct_boot();
-          // Everything keyed to the ROM follows it, or the game would go on
-          // writing the loader's saves, states, screenshots and cheats under
-          // the loader's game code. --save is deliberately not carried over:
-          // it pins one file, and it was given for the ROM on the command
-          // line, not for whatever the player picks here.
-          launcher = false;
-          session.open(nds, cfg, pick, nullptr);
-          menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
-          session.load_enabled(nds);
-          load_save(nds, session.sav);
-          // The game's own auto slot, now that its code is known: a game
-          // started from the picker resumes exactly as one named on the
-          // command line does. After the battery save, so the state's SRAM
-          // wins, and never during a replay or a recording.
-          if (const std::string a = log.reading() || log.writing()
-                                        ? std::string()
-                                        : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
-              !a.empty() && load_state_file(nds, a, loaded_layout, got_layout)) {
-            std::fprintf(stderr, "state: autoloaded %s\n", a.c_str());
-            apply_loaded_layout();
-          }
-          sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
-          state_slot = 0;
-          refresh_slots();
-          menu.set_open(false);
-          set_paused(false);
-          break;
-        }
-        case Menu::Result::Quit: input.request_quit(); break;
-        }
-      }
+      pump_menu();
       if (menu.open() && (menu_dirty || menu.dirty())) {
         menu_dirty = false;
         menu.clear_dirty();
@@ -2946,8 +3023,20 @@ sdl_ready:
       SDL_Delay(10);
       continue;
     }
+    // The menu over a running game (a network session): it is ticked once a
+    // frame here instead of in the idle loop, and it takes the buttons. The
+    // machine still runs, so the game is handed a frame with nothing pressed
+    // and no pen down -- the same as a player with their hands off the
+    // console, which is what is actually happening.
+    const bool menu_over_live = menu.open();
+    if (menu_over_live) { pump_menu(); menu_dirty = menu_dirty || menu.dirty(); }
     input.update_stylus();
     ds::input::Frame in = input.frame();
+    if (menu_over_live) {
+      const bool lid_was = in.lid;
+      in = ds::input::Frame{};
+      in.lid = lid_was;   // the hinge is a state of the console, not an input
+    }
     if (log.reading()) {
       if (!log.read(in)) break;   // the controls still quit; the log ends the run
       ds::input::apply(nds, in);
@@ -3000,7 +3089,14 @@ sdl_ready:
     // texture, so the lock has to happen before the frame runs and the scale
     // cost lands inside run_frame() rather than in the present. DS_FPS's
     // emu/draw split shifts accordingly; the total is what compares.
-    const bool fast = ff_toggle || input.fast_forward_held();
+    // The held hotkey is suppressed the same way the toggle is, but it is
+    // read every frame, so it says so once rather than sixty times a second.
+    bool fast = ff_toggle || input.fast_forward_held();
+    if (net_live && fast) {
+      static bool said = false;
+      if (!said) { said = true; std::fprintf(stderr, "fast forward: not during a network session\n"); }
+      fast = false;
+    }
     if (fast != was_fast) { was_fast = fast; next_frame = SDL_GetPerformanceCounter(); }
     // The policy decides for the frame after the one about to run; what the
     // core settled for this one is what governs the present.
@@ -3210,6 +3306,12 @@ sdl_ready:
           const auto note = [&](const ds::sdl::Rect& r) { display.note_canvas_draw(r.x, r.y, r.w, r.h); };
           if (slot_osd) note(draw_label(c, slot_text.c_str(), false));
           if (fps_field) note(draw_label(c, fps_text.c_str(), true));
+          // The pause menu over a running game: the same draw the stopped
+          // machine does, on the same canvas, only the picture underneath is
+          // moving. Undimmed, deliberately -- the game is still going and the
+          // player may well be watching it (a race finishing, a turn passing)
+          // while they are in here.
+          if (menu_over_live) { menu.draw(c); display.note_canvas_draw_all(); }
 #if DSPERATE_CHEEVOS
           // The toast covers more than a label, and nothing repaints the
           // letterbox, so the area it used has to be handed back even on the
@@ -3244,6 +3346,7 @@ sdl_ready:
           const ds::sdl::Canvas c = tgt_canvas(target[osd_screen]);
           if (slot_osd) draw_label(c, slot_text.c_str(), false);
           if (fps_field) draw_label(c, fps_text.c_str(), true);
+          if (menu_over_live) menu.draw(c);
 #if DSPERATE_CHEEVOS
           if (toast_on()) draw_toast_on(c);
 #endif
@@ -3265,9 +3368,9 @@ sdl_ready:
         // on each of its frames.
         ds::sdl::Display::CanvasView ocv;
 #if DSPERATE_CHEEVOS
-        const bool want_osd = slot_osd || fps_field || toast_on();
+        const bool want_osd = slot_osd || fps_field || toast_on() || menu_over_live;
 #else
-        const bool want_osd = slot_osd || fps_field;
+        const bool want_osd = slot_osd || fps_field || menu_over_live;
 #endif
         const bool osd_on_canvas = display.canvas_capable() && want_osd && display.canvas(ocv);
         if (osd_on_canvas) {
@@ -3277,6 +3380,7 @@ sdl_ready:
 #if DSPERATE_CHEEVOS
           if (toast_on()) draw_toast_on(c);
 #endif
+          if (menu_over_live) menu.draw(c);
           display.note_canvas_draw_all();
         }
         // After the cursor: when the overlays are on the bottom screen this
@@ -3289,6 +3393,7 @@ sdl_ready:
 #if DSPERATE_CHEEVOS
           if (toast_on()) draw_toast_on(od);
 #endif
+          if (menu_over_live) menu.draw(od);
           fb[osd_screen] = osd_fb.data();
         }
         // Last, over whatever the cursor and the overlays left: a screen
@@ -3326,7 +3431,17 @@ sdl_ready:
       }
       menu_dirty = true;
       menu_ms = SDL_GetTicks();
-      set_paused(true);
+      // Under a network session the menu comes up over a running game. The
+      // machine cannot stop: the peer (or the server) does not stop with it,
+      // and a console that goes quiet for the length of a menu visit has left
+      // the session. So the menu is opened and the emulator keeps running --
+      // it takes the player's button presses (the game gets none while it is
+      // up) and is drawn over the live frame instead of over a frozen one.
+      //
+      // display.set_page still goes on: it tells the display-engine tier a
+      // text page is on screen, which is what keeps the glyphs legible.
+      if (net_live) display.set_page(true);
+      else set_paused(true);
     }
     // The loader cart's picker: the console's own launch fade is the signal.
     //

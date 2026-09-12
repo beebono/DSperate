@@ -54,6 +54,11 @@ enum class Dep : u8 {
   // and these change how long the guest thinks its work took.
   NetOff,
   NetInternet,        // net.mode is internet: the DNS choice means nothing otherwise
+  // No network session is up, of either kind. Frameskip and fast forward hang
+  // off this: both let the emulator set its own pace, and under a session the
+  // pace is set outside it. Wider than NetOff, which is local wireless only
+  // because it is about matching one peer's clock.
+  NetSession,
 };
 
 struct Setting {

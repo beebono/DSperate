@@ -924,3 +924,64 @@ A real session against Wiimmfi. That needs the rig and a Wiimmfi-patched ROM
 the acceptance test this phase is still waiting on. There is no trace oracle
 for it either: the melonDS diff method retires at the AP boundary, because
 what is on the other side is the real internet and is not deterministic.
+
+### What a session takes away (2026-09-12)
+
+A network session of either kind means something outside the emulator is
+keeping time. Everything that lets the emulator set its own pace, or step
+outside the timeline, goes away for the session -- keyed on `net_live`, which
+is set once a transport has actually started, not from the flags, so a
+session that failed to come up leaves the machine ordinary.
+
+| what | how | why |
+|------|-----|-----|
+| save / load state, and the autosave on quit | hotkey refused with a line; the rows come off the pause menu | a state freezes this machine and not the one it is talking to, and nothing in a state file restores an ENet session or an open socket |
+| fast forward, held and toggled | refused with a line; `emu.fast_forward` in the config forced off at startup | running ahead of the peer is the desync |
+| frameskip | forced to 0 at startup, said on stderr; rows greyed `Dep::NetSession` | it exists to let a machine that is behind catch up by dropping presents, and under a session "behind" is fixed by running the frame |
+
+The refusals are ungated on stderr, like the speed-knob override: the player
+pressed a key, or named a setting, and nothing happened.
+
+`Dep::NetSession` is deliberately wider than `Dep::NetOff`. NetOff greys the
+three inexact speed knobs and is local-wireless-only, because it is about
+matching one peer's clock. NetSession covers internet too, because a server
+has timeouts whether or not there is a peer.
+
+Startup `--load-state` and `emu.autoload` are **not** gated: they happen
+before any transport is up, so there is no session to break. Loading into a
+game and then joining a session is the player's business.
+
+### The pause menu stops pausing
+
+A console that goes quiet for the length of a menu visit has left the
+session, so under `net_live` the pause menu is an overlay over a running
+game rather than a stop. `set_paused` is not called; the menu is opened,
+`display.set_page(true)` still goes on (it is what keeps the glyphs legible
+on the display-engine tier), and the frontend keeps emulating.
+
+Three things follow:
+
+- **The menu is ticked once a frame** from the live path instead of from the
+  idle loop. The tick was pulled out of the paused branch into `pump_menu`
+  so both paths run the same code -- there is no second copy of the result
+  switch.
+- **The game is handed a frame with nothing pressed and no pen down** while
+  the menu is up (the hinge is kept: it is a state of the console, not an
+  input). The menu takes the buttons; the game sees a player with their
+  hands off it, which is what is actually happening.
+- **The menu is drawn over the live frame** at the four places the OSD
+  already draws -- canvas and scratch, scaled and not -- undimmed, because
+  the game is still going and the player may well be watching it.
+
+The page says MENU rather than PAUSED there, and `Menu::set_network_session`
+is the one call that does both that and hiding the state rows: they are the
+same fact, so they are not two flags.
+
+Verified on the dev box with injected key events, `--internet` against
+Super Mario 64 DS: the FPS counter keeps reporting ~60 fps for the whole of
+a four-second menu visit (the stopped machine prints nothing, the counter
+living in the live path), a state hotkey pressed inside the menu answers
+"state: not during a network session", the fast-forward hotkey likewise, and
+a screenshot shows MENU with only OPTIONS / RESUME / QUIT over a game whose
+pixels are still changing between captures. Control run without `--internet`:
+the menu pauses as before, F5 saves, F9 fast-forwards.

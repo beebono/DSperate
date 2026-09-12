@@ -165,6 +165,15 @@ public:
   // The options pages. Without a host there is no OPTIONS row: the menu has
   // nothing to read a setting from and nowhere to put one.
   void set_settings_host(SettingsHost* host) { host_ = host; }
+  // A network session is up, which changes this menu in two ways. SAVE STATE,
+  // LOAD STATE and the slot row come off it: a state freezes this machine and
+  // not the one it is talking to, and nothing in a state file restores a
+  // session. (Hidden rather than greyed -- the page sizes itself to what is
+  // visible, as it already does for CHEATS and ACHIEVEMENTS, and a row that
+  // can never be chosen is not worth a line.) And the page says MENU rather
+  // than PAUSED, because the machine behind it is still running: the frontend
+  // keeps emulating while this is up, so the session is not dropped.
+  void set_network_session(bool on) { net_session_ = on; }
   // Null when the build has no RetroAchievements support or it is switched
   // off; the root row then does not appear at all.
   void set_cheevos_host(CheevosHost* host) { cheevos_ = host; }
@@ -294,6 +303,7 @@ private:
   // canvas fits, which only draw knows -- the same reason visible_ is mutable.
   mutable int set_top_[4] = {};
   bool have_options() const { return host_ != nullptr; }
+  bool have_states() const { return !net_session_; }
   // The table a settings page shows, and where its row state lives.
   const Setting* table() const;
   int  table_slot() const;
@@ -310,6 +320,7 @@ private:
   Result handle_cheevos_account(u32 presses);
   void move_cheevos_row(int delta);
   bool have_cheevos() const { return cheevos_ != nullptr; }
+  bool net_session_ = false;
   CheevosHost* cheevos_ = nullptr;
   int cheevos_row_ = 0, cheevos_top_ = 0;
   int account_row_ = 0;
