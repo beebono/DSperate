@@ -134,6 +134,15 @@ void SdHost::reset() {
   if (storage_) storage_->reset();
 }
 
+// melonDS's ScheduleEvent drops the request when the event is already live,
+// keeping the first timestamp and function; ours would overwrite it, which
+// silently loses the pending completion (and can swap RX for TX) when two
+// blocks land inside one delay. Match melonDS and refuse.
+void SdHost::schedule_transfer(u32 which) {
+  if (nds_.sched.armed(EventId::SdMmc)) return;
+  nds_.sched.schedule(EventId::SdMmc, nds_.sched.now() + TRANSFER_DELAY, ev_transfer, which);
+}
+
 void SdHost::ev_transfer(NDS& nds, u32 param) {
   if (param == TRANSFER_RX) nds.io.sd.finish_rx();
   else nds.io.sd.finish_tx();
@@ -217,7 +226,7 @@ u32 SdHost::data_rx(const u8* data, u32 len) {
   // The delay is load-bearing, not cosmetic: DSi boot2 sends a command and
   // then polls IRQ0, and an instant IRQ24 would let the handler clear IRQ0
   // before the send-command routine starts looking (melonDS's note).
-  nds_.sched.schedule(EventId::SdMmc, nds_.sched.now() + TRANSFER_DELAY, ev_transfer, TRANSFER_RX);
+  schedule_transfer(TRANSFER_RX);
   return len;
 }
 
@@ -270,7 +279,7 @@ u32 SdHost::data_tx(u8* data, u32 len) {
   cur_fifo_ ^= 1;
   block_count_internal_--;
 
-  nds_.sched.schedule(EventId::SdMmc, nds_.sched.now() + TRANSFER_DELAY, ev_transfer, TRANSFER_TX);
+  schedule_transfer(TRANSFER_TX);
   return len;
 }
 

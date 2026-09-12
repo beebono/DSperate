@@ -140,6 +140,7 @@ class SdHost {
 
   // Scheduler callbacks (Event_DSi_SDMMCTransfer's two function ids).
   static void ev_transfer(NDS& nds, u32 param);
+  void schedule_transfer(u32 which);
 
   template <class S> void sync_state(S& s);
 

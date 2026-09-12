@@ -618,6 +618,33 @@ than a hang, and the 2.8 M ARM7 instructions per 10 frames are that spin
 implicated: only 3527 register accesses over the whole stall, ending
 cleanly on CMD13 and SD_CLOCK <- 0.
 
+**Where the wedge is, and what it is not (2026-09-12).** The ARM7 ends in
+IRQ mode (CPSR mode 0x12) on a `b .` at `037c7164`; the ARM9 then sits in
+its `MCR p15` wait-for-interrupt loop at `020e97b0` forever. Ruled out, each
+by measurement:
+
+- **Not the interleave or the quantum.** melonDS uses the same
+  `kMaxIterationCycles = 64` / `kIterationCycleMargin = 8` in DS and DSi
+  modes; only `ARM9ClockShift` differs (2 at 134 MHz), which phase 1 already
+  models. `DS_IDLE_SKIP=0`, `DS_QUANTUM=0` and `DS_QUANTUM=128` each only
+  move *when* the wedge happens -- at 2000 frames it wedges with idle skip
+  on or off.
+- **Not the SD host.** By frame 100 all NAND I/O is complete and identical
+  between a wedging and a non-wedging config (136 reads, 8 writes), the only
+  IRQ2 source ever raised is `sdmmc` (165 raises, all enabled -- nothing
+  spurious), and the register trace ends cleanly on CMD13 then
+  `SD_CLOCK <- 0`. The wedge is *after* the SD work finishes.
+- **Not a pre-existing DSi fault.** Card mode (no hand-off) runs 2000 frames
+  clean on the same build, both with and without the idle skip.
+
+So the hand-off path specifically leads the ARM7 into a dead-end handler,
+some time after the save I/O completes. One melonDS semantic *was* found and
+fixed on the way: melonDS's `ScheduleEvent` refuses to re-arm a live event
+and keeps the first timestamp, while ours overwrites -- which could silently
+swap a pending RX completion for a TX one when two blocks land inside one
+512-cycle delay. `Scheduler::armed()` plus `SdHost::schedule_transfer` now
+match melonDS. It did not fix the wedge.
+
 This is the boundary of what the recipe buys. A full launch is a hybrid --
 binaries from the card image, filesystem from the NAND -- and something in
 that seam is inconsistent for both emulators. Note this is *weaker* than the

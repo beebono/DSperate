@@ -82,6 +82,7 @@ void Io::update_irq(Cpu cpu) {
   if (any && ctx.halted && (cpu == Cpu::ARM7 || (c.ime & 1))) ctx.halted = false;
 }
 
+
 void Io::request_irq2(u32 bit) { dsi.if2 |= 1u << bit; update_irq(Cpu::ARM7); }
 
 void Io::request_irq(Cpu cpu, u32 bit) {

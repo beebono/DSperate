@@ -69,6 +69,10 @@ public:
 
   void schedule(EventId id, u64 at, EventFn fn, u32 param = 0);
   void cancel(EventId id);
+  // Is this event already armed? melonDS's ScheduleEvent refuses to re-arm a
+  // live event and keeps the original timestamp; ours overwrites, so a caller
+  // that needs melonDS's semantics has to ask first.
+  bool armed(EventId id) const { return (armed_ & (1u << static_cast<u32>(id))) != 0; }
 
   // Current time. While a CPU is executing its slice this includes the cycles
   // it has consumed so far, so events scheduled from inside an instruction
