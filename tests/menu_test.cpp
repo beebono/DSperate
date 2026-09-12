@@ -1051,25 +1051,27 @@ void test_network_features_row() {
   // for the session, not one the session forbids.
   CHECK(dns->depends != ds::sdl::Dep::NetSession);
 
-  // Six rows hang off Dep::NetSession, and it is one gate rather than two:
-  // frameskip and fast forward let the emulator set its own pace, the three
-  // inexact speed knobs change how long its work appears to take, and under a
-  // session the pace is kept outside the emulator either way -- by a peer
-  // holding every frame to its timestamp, or by a server with its own
-  // timeouts. It keys on the session having actually started, not on a mode
-  // having been asked for.
+  // Eight rows hang off Dep::NetSession, and it is one gate rather than two:
+  // the frame limiter and game speed set the emulator's pace outright,
+  // frameskip and fast forward let it set its own, the three inexact speed
+  // knobs change how long its work appears to take, and under a session the
+  // pace is kept outside the emulator either way -- by a peer holding every
+  // frame to its timestamp, or by a server with its own timeouts. It keys on
+  // the session having actually started, not on a mode having been asked
+  // for.
   int session_gated = 0;
   for (int i = 0; i < ds::sdl::settings_count(t); ++i)
     if (t[i].depends == ds::sdl::Dep::NetSession) ++session_gated;
-  CHECK(session_gated == 6);
+  CHECK(session_gated == 8);
   for (const char* k : {"emu.frameskip", "emu.ff_speed", "emu.ff_skip",
-                        "emu.cpu_oc", "emu.timing_oc", "emu.fast_load"}) {
+                        "emu.cpu_oc", "emu.timing_oc", "emu.fast_load",
+                        "emu.limiter", "emu.speed"}) {
     const ds::sdl::Setting* row = nullptr;
     for (int i = 0; i < ds::sdl::settings_count(t); ++i)
       if (!std::strcmp(t[i].key, k)) row = &t[i];
     CHECK(row != nullptr);
     CHECK(row->depends == ds::sdl::Dep::NetSession);
-    // All six are live -- FlagLive is 0, so that is the absence of the two
+    // All of them are live -- FlagLive is 0, so that is the absence of the two
     // flags that defer a change. It is what lets the session revoke them
     // after the transport comes up rather than having to know before the
     // machine boots.
@@ -1083,7 +1085,7 @@ void test_network_features_row() {
     CHECK(row != nullptr);
     CHECK(row->flags & ds::sdl::FlagInexact);
   }
-  // A host with a session up refuses all six, and says why.
+  // A host with a session up refuses every one of them, and says why.
   struct SessionOn final : FakeHost {
     const char* disabled_reason(const ds::sdl::Setting& s) const override {
       return s.depends == ds::sdl::Dep::NetSession ? "NOT DURING A NETWORK SESSION" : "";
@@ -1093,7 +1095,7 @@ void test_network_features_row() {
   int refused = 0;
   for (int i = 0; i < ds::sdl::settings_count(t); ++i)
     if (t[i].depends == ds::sdl::Dep::NetSession) { CHECK(!session.enabled(t[i])); ++refused; }
-  CHECK(refused == 6);
+  CHECK(refused == 8);
   // And with no session up, all six are usable: the gate is the session, so
   // an ordinary run is untouched by any of this.
   for (int i = 0; i < ds::sdl::settings_count(t); ++i)

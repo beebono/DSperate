@@ -142,6 +142,9 @@ const char* kUsage =
     "                  captures every frame -- Pokemon B/W, Golden Sun -- then skips nothing,\n"
     "                  so frameskip does nothing at all on it. On by default (the captured\n"
     "                  VRAM holds the last drawn frame); emu.frameskip_capture\n"
+    "  --limiter HZ    the rate the emulator is held to: auto (the console's 59.8261 Hz), 30, 60\n"
+    "                  (default), 120, 144, 240, or off. emu.limiter\n"
+    "  --speed N       run at N percent of that rate (25..400); emu.speed\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --stats-from N  leave the first N frames out of the frame statistics (DS_FRAME_STATS)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
@@ -1028,6 +1031,8 @@ int main(int argc, char** argv) {
     else if (flag("--no-fbdev")) cli.set("video.fbdev", "false");
     else if (flag("--no-audio")) cli.set("audio.enabled", "false");
     else if (arg("--volume")) cli.set("audio.volume", argv[++i]);
+    else if (arg("--speed")) cli.set("emu.speed", argv[++i]);
+    else if (arg("--limiter")) cli.set("emu.limiter", argv[++i]);
     else if (flag("--no-mic")) cli.set("audio.mic", "false");
     else if (flag("--no-vsync")) cli.set("video.vsync", "false");
     else if (flag("--interp")) cli.set("emu.jit", "false");
@@ -1054,7 +1059,7 @@ int main(int argc, char** argv) {
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.latency_frames", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
 
@@ -1350,6 +1355,7 @@ sdl_ready:
   ds::sdl::Audio audio;
   if (audio_on) audio.open(cfg.flag("audio.native_rate", true));
   audio.set_volume(cfg.num("audio.volume", 100));
+  audio.set_latency_frames(cfg.num("audio.latency_frames", 3));
   // Not during a replay: the log carries the mic, and an open capture device
   // would only add work to a measurement.
   ds::sdl::MicAlsa mic_alsa;
@@ -1630,6 +1636,51 @@ sdl_ready:
   // Wall-clock pacing when there is no audio queue to pace against.
   const double frame_ns = 1e9 * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ;
   ds::sdl::Pacer pacer(frame_ns);
+  // The limiter: what rate the emulator is held to, and how fast the game
+  // runs against it.
+  //
+  // "auto" is the console's own 59.8261 Hz, which is the only value that
+  // plays a game at the speed it was written for. The rest are the rates a
+  // panel comes in: 60 is the default because it is what a player expects a
+  // frame limiter to say and what nearly every display runs at, at the price
+  // of 0.29 % fast -- a third of a second an hour, and a pitch shift of five
+  // cents that the rate control absorbs without complaint. 30 halves the
+  // speed; 120 and up run the game fast, the same axis fast forward uses.
+  // "off" does not pace at all: unlike fast forward it still presents every
+  // frame and still plays sound, so it is a limiter switched off rather than
+  // a mode.
+  //
+  // emu.speed multiplies whatever that comes to, so 60 at 50 % and 30 at
+  // 100 % are the same clock reached two ways.
+  int speed_pct = cfg.num("emu.speed", 100);
+  std::string limiter_mode = cfg.str("emu.limiter", "60");
+  bool limiter_off = false;
+  double frame_budget_ms = frame_ns / 1e6;   // one frame at the rate now in force; adaptive frameskip's budget
+  auto apply_limiter = [&] {
+    // Anything unrecognised is the console's own rate: an ini that says
+    // "59.8261" or "ds" gets what it plainly meant, and a typo gets the
+    // faithful default rather than a wrong number.
+    double hz = 0.0;
+    if (limiter_mode == "off" || limiter_mode == "unlimited") { limiter_off = true; }
+    else {
+      limiter_off = false;
+      const double parsed = std::atof(limiter_mode.c_str());
+      hz = parsed >= 1.0 && parsed <= 1000.0 ? parsed : 0.0;
+    }
+    const double period_ns = hz > 0.0 ? 1e9 / hz : frame_ns;
+    pacer.set_period_ns(period_ns);
+    const double scale = speed_pct > 0 ? speed_pct / 100.0 : 1.0;
+    frame_budget_ms = period_ns / 1e6 / scale;
+    // The audio has to be stretched or squeezed by however far this is from
+    // the console's own rate, or the rate control spends the session pinned
+    // to its clamp trying to make up a factor it cannot reach. An unlimited
+    // limiter is the exception: it runs as fast as the machine goes, which
+    // is not a number, so the audio keeps the console's rate and the drop
+    // path deals with the surplus, exactly as it does for fast forward.
+    audio.set_speed(limiter_off ? 1.0 : frame_ns / period_ns * scale);
+    pacer.reset();
+  };
+  apply_limiter();
   double aq_min = 1e9; unsigned aq_under1 = 0, aq_under_half = 0;   // audio-queue depth after a frame (lan stats)
   const double ticks_per_ns = static_cast<double>(SDL_GetPerformanceFrequency()) / 1e9;
 
@@ -1690,7 +1741,6 @@ sdl_ready:
   const bool fs_capture = cfg.flag("emu.frameskip_capture", true);
   nds.gpu.set_frameskip_capture(fs_capture);
   u64 fs_refused = 0;         // skips the core would not take (capture / display FIFO)
-  const double frame_budget_ms = frame_ns / 1e6;
   // Skipping runs in blocks of a whole display period (see
   // Gpu::display_phase_period), and so does drawing: a game that renders one
   // screen per frame and swaps them needs every phase of a period drawn, or
@@ -2325,6 +2375,9 @@ sdl_ready:
     // to the game afterwards, which is what makes this worth having (there is
     // no way back from PictoChat or Download Play on hardware either way).
     if (is("net.mode")) { if (set_net_mode) set_net_mode(v); return; }
+    if (is("emu.speed")) { speed_pct = std::atoi(v.c_str()); apply_limiter(); return; }
+    if (is("emu.limiter")) { limiter_mode = v; apply_limiter(); return; }
+    if (is("audio.latency_frames")) { audio.set_latency_frames(std::atoi(v.c_str())); return; }
     if (is("emu.ff_speed")) { ff_speed = std::atoi(v.c_str()); return; }
     if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
     if (is("emu.autosave")) { autosave = on; return; }
@@ -2424,6 +2477,7 @@ sdl_ready:
   bool guest_retry_armed = false, radio_was_on = false, scanning = false;
   bool knobs_held = false;
   bool held_cpu_oc = false, held_timing_oc = false, held_fast_load = false;
+  int held_speed = 100; std::string held_limiter = "60";
   int  held_fs_limit = 0;
   bool held_ff_toggle = false;
   auto take_away_for_session = [&] {
@@ -2434,6 +2488,18 @@ sdl_ready:
     held_fast_load = cfg.flag("emu.fast_load", false);
     held_fs_limit = fs_limit;
     held_ff_toggle = ff_toggle;
+    held_speed = speed_pct;
+    held_limiter = limiter_mode;
+    // A console in a session runs at the console's rate, full stop: the peer
+    // (or the server) is keeping time, and a limiter of 30 or 144 -- or any
+    // speed but 100 % -- is this machine deciding to disagree with it.
+    if (speed_pct != 100 || limiter_mode != "auto") {
+      if (speed_pct != 100 || !limiter_off)
+        std::fprintf(stderr, "net: the game runs at the console's own rate for this session -- the network keeps time\n");
+      speed_pct = 100;
+      limiter_mode = "auto";
+      apply_limiter();
+    }
     if (fs_limit > 0) {
       std::fprintf(stderr, "net: frameskip is off for this session -- the emulator cannot set its own pace while the network keeps time\n");
       fs_limit = 0;
@@ -2454,6 +2520,12 @@ sdl_ready:
     knobs_held = false;
     fs_limit = held_fs_limit;
     ff_toggle = held_ff_toggle;
+    if (speed_pct != held_speed || limiter_mode != held_limiter) {
+      speed_pct = held_speed;
+      limiter_mode = held_limiter;
+      apply_limiter();
+      std::fprintf(stderr, "net: the frame limiter is back where it was -- the session is over\n");
+    }
     const std::pair<const char*, bool> knobs[] = {
       {"emu.cpu_oc", held_cpu_oc}, {"emu.timing_oc", held_timing_oc}, {"emu.fast_load", held_fast_load}};
     for (const auto& [k, on] : knobs)
@@ -3569,7 +3641,9 @@ sdl_ready:
         if (dual_window) display2.draw(fb);
       }
     }
-    audio.push(nds, fast);
+    // An unlimited limiter outruns the speakers the same way fast forward
+    // does, so it sheds audio the same way: play the newest and stay in sync.
+    audio.push(nds, fast || limiter_off);
     // An unscaled frame is in fb_: the picture the screenshot wants.
     if (shot_pending && present) {
       shot_pending = false;
@@ -3678,17 +3752,27 @@ sdl_ready:
       const double cap = frame_budget_ms * (fs_limit + 1);
       if (fs_debt_ms > cap) fs_debt_ms = cap;   // a long stall must not buy a run of skips
     }
+    // DS_AUDIO_QUEUE=<path>: queue depth in frames and the controller's trim
+    // in ppm, once a frame -- the acceptance measurement for the rate control
+    // (docs/frame-pacing-scoping.md): a steady depth and a trim that is not
+    // sitting on its clamp.
+    if (audio.active()) {
+      static FILE* aq = [] { const char* p = std::getenv("DS_AUDIO_QUEUE"); return p ? std::fopen(p, "w") : nullptr; }();
+      if (aq) std::fprintf(aq, "%.3f %.0f\n", audio.queued_frames(), audio.rate_trim_ppm());
+    }
     ds::prof::frame_mark();   // marks the emu slice: the present is not in a stage, it lands in "untimed" of work_ms
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
 #if DSPERATE_NET
     if (lan && audio.active()) { const double q = audio.queued_frames(); if (q < aq_min) aq_min = q; if (q < 1.0) ++aq_under1; if (q < 0.5) ++aq_under_half; }
 #endif
-    // The limiter. Uncapped fast forward is the only frame that is not paced
-    // at all; everything else -- with audio or without it -- goes through the
-    // one clock (pacer.h). ff_speed is a multiple of real time.
-    if (fast && ff_speed <= 0) pacer.reset();   // unthrottled: do not bank the time it gains
-    else pacer.wait(fast ? static_cast<double>(ff_speed) : 1.0);
+    // The limiter. Uncapped fast forward and a limiter switched off are the
+    // only frames not paced at all; everything else -- with audio or without
+    // it -- goes through the one clock (pacer.h). The speeds multiply: the
+    // limiter's rate sets the period, emu.speed scales it, and fast forward
+    // scales it again while it is held.
+    if ((fast && ff_speed <= 0) || limiter_off) pacer.reset();   // unthrottled: do not bank the time it gains
+    else pacer.wait((fast ? static_cast<double>(ff_speed) : 1.0) * (speed_pct > 0 ? speed_pct / 100.0 : 1.0));
 
     pace_ticks += SDL_GetPerformanceCounter() - t3;
     fps_pace_ticks += SDL_GetPerformanceCounter() - t3;
@@ -3710,10 +3794,10 @@ sdl_ready:
       fps_value = fps >= 999.0 ? 999 : static_cast<int>(fps + 0.5);
       if (show_fps) {
         const double wall_ms = static_cast<double>(now - fps_mark) * to_ms;   // per frame, same unit as the rest
-        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, wait %.1f ms, pace %.1f ms (spin %.0f us), other %.1f ms, audio queued %.1f frames\n",
+        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, wait %.1f ms, pace %.1f ms (spin %.0f us), other %.1f ms, audio queued %.1f frames (%+.0f ppm)\n",
                      fps, 100.0 * fps / (ds::ARM9_CLOCK_HZ / double(ds::CYCLES_PER_FRAME)),
                      emu_ticks * to_ms, draw_ticks * to_ms, wait_ticks * to_ms, fps_pace_ticks * to_ms, pacer.spin_us(),
-                     wall_ms - (emu_ticks + draw_ticks + wait_ticks + fps_pace_ticks) * to_ms, audio.queued_frames());
+                     wall_ms - (emu_ticks + draw_ticks + wait_ticks + fps_pace_ticks) * to_ms, audio.queued_frames(), audio.rate_trim_ppm());
         if (fs_limit > 0) std::fprintf(stderr, "  frameskip: %llu frames skipped (%s, limit %d)\n",
                                        static_cast<unsigned long long>(fs_skipped), fs_adaptive ? "adaptive" : "fixed", fs_limit);
       }

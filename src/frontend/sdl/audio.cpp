@@ -36,7 +36,9 @@ bool Audio::open(bool native_rate) {
   dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
   if (!dev_) { std::fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError()); return false; }
   rate_ = got.freq > 0 ? static_cast<u32>(got.freq) : spu::Spu::SAMPLE_RATE;
-  frame_bytes_ = (rate_ * 4) / 60;
+  // A DS frame, not 1/60 s: the console runs at 59.8261 Hz, and this number
+  // is what a frame of queue depth means to the controller.
+  frame_bytes_ = static_cast<u32>(static_cast<u64>(rate_) * 4 * CYCLES_PER_FRAME / ARM9_CLOCK_HZ);
   prev_l_ = prev_r_ = 0; phase_ = 0;
   SDL_PauseAudioDevice(dev_, 0);
   std::fprintf(stderr, "audio: %s driver, %d Hz, %d channels, %u-sample buffer%s\n", SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?",
@@ -80,42 +82,61 @@ const std::vector<s16>& Audio::capture() {
 }
 
 void Audio::push(NDS& nds, bool drop) {
-  // Fast forward drops down to the target depth; ordinary play only drops
-  // once the queue has drifted past MAX_FRAMES, and then keeps dropping
-  // until it is back at the target rather than once per frame at the edge.
+  // The SPU's rate is not a constant: a DSi title can select 47.6 kHz
+  // through SNDEXCNT mid-session. Re-reading it here costs nothing and
+  // keeps the resampler honest when it changes.
+  in_rate_ = nds.spu.output_rate();
+
+  // Measure before queueing, so the depth is what the device has left to
+  // play rather than what it has plus this frame.
   if (dev_) {
-    const u32 q = SDL_GetQueuedAudioSize(dev_);
-    if (q > frame_bytes_ * MAX_FRAMES) over_ = true;
-    else if (q <= frame_bytes_ * TARGET_FRAMES) over_ = false;
+    const double now = static_cast<double>(SDL_GetQueuedAudioSize(dev_)) / frame_bytes_;
+    depth_ = depth_ < 0 ? now : depth_ + (now - depth_) * DRC_SMOOTH;
+    if (now > target_frames_ + MAX_FRAMES) over_ = true;
+    else if (now <= target_frames_) over_ = false;
   }
-  if (over_ || (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * TARGET_FRAMES))) { nds.spu.drain(); return; }
+
+  // Fast forward outruns the speakers whatever the rate is, and a queue that
+  // is not being consumed cannot be steered: both drop whole frames. Neither
+  // teaches the controller anything, so its state is left where it is.
+  if (over_ || (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * target_frames_))) { nds.spu.drain(); return; }
+
+  // Steer the queue back to the target. Positive trim plays out faster than
+  // nominal, which drains a deep queue; negative fills a shallow one.
+  if (dev_ && depth_ >= 0) {
+    const double err = depth_ - target_frames_;
+    trim_ = err * DRC_GAIN;
+    if (trim_ > DRC_CLAMP) trim_ = DRC_CLAMP;
+    else if (trim_ < -DRC_CLAMP) trim_ = -DRC_CLAMP;
+  }
+
   s16 buf[2048 * 2];
   size_t n;
   while ((n = nds.spu.take(buf, 2048)) != 0) {
     if (!dev_) continue;
-    s16* out = buf;
-    size_t m = n;
-    if (rate_ != spu::Spu::SAMPLE_RATE) {
-      // Linear interpolation between consecutive input frames; the phase
-      // advances by in/out per output frame, so the rates need share no
-      // factor. Sized for any output rate up to 8x the input.
-      const u32 step = static_cast<u32>((static_cast<u64>(spu::Spu::SAMPLE_RATE) << 16) / rate_);
-      out_.resize((n * rate_ / spu::Spu::SAMPLE_RATE + 2) * 2);
-      m = 0;
-      for (size_t i = 0; i < n; ++i) {
-        const s16 cl = buf[i * 2], cr = buf[i * 2 + 1];
-        while (phase_ < 0x10000) {
-          const u32 f = phase_;
-          out_[m * 2]     = static_cast<s16>(prev_l_ + (((cl - prev_l_) * static_cast<s32>(f)) >> 16));
-          out_[m * 2 + 1] = static_cast<s16>(prev_r_ + (((cr - prev_r_) * static_cast<s32>(f)) >> 16));
-          ++m;
-          phase_ += step;
-        }
-        phase_ -= 0x10000;
-        prev_l_ = cl; prev_r_ = cr;
+    // Always through the resampler, even when the rates match: the trim is
+    // applied here, so a bypass would be a path with no rate control on it.
+    // The step is input frames per output frame, 16.16 -- a larger step
+    // emits fewer output frames from the same input, which is what draining
+    // a deep queue means.
+    const double ratio = static_cast<double>(in_rate_) / rate_ * speed_ * (1.0 + trim_);
+    const u32 step = static_cast<u32>(ratio * 65536.0 + 0.5);
+    out_.resize((static_cast<size_t>(n / ratio) + 2) * 2);
+    size_t m = 0;
+    for (size_t i = 0; i < n; ++i) {
+      const s16 cl = buf[i * 2], cr = buf[i * 2 + 1];
+      while (phase_ < 0x10000) {
+        const u32 f = phase_;
+        if ((m + 1) * 2 > out_.size()) out_.resize(out_.size() * 2);
+        out_[m * 2]     = static_cast<s16>(prev_l_ + (((cl - prev_l_) * static_cast<s32>(f)) >> 16));
+        out_[m * 2 + 1] = static_cast<s16>(prev_r_ + (((cr - prev_r_) * static_cast<s32>(f)) >> 16));
+        ++m;
+        phase_ += step;
       }
-      out = out_.data();
+      phase_ -= 0x10000;
+      prev_l_ = cl; prev_r_ = cr;
     }
+    s16* out = out_.data();
     if (muted_) std::memset(out, 0, m * 4);
     else if (volume_ != 100) {
       // Linear in amplitude; the SPU's own master volume is the game's.
@@ -126,6 +147,16 @@ void Audio::push(NDS& nds, bool drop) {
   }
 }
 
+void Audio::set_speed(double factor) {
+  speed_ = factor > 0.05 ? (factor < 20.0 ? factor : 20.0) : 0.05;
+}
+
+void Audio::set_latency_frames(int frames) {
+  target_frames_ = frames < 1 ? 1 : (frames > 8 ? 8 : frames);
+  depth_ = -1.0;      // the target moved: measure again rather than chase the old error
+  trim_ = 0.0;
+}
+
 void Audio::set_volume(int percent) {
   volume_ = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
 }
@@ -133,7 +164,8 @@ void Audio::set_volume(int percent) {
 void Audio::pause(bool p) {
   if (!dev_) return;
   SDL_PauseAudioDevice(dev_, p ? 1 : 0);
-  if (p) { SDL_ClearQueuedAudio(dev_); over_ = false; }
+  // The queue is gone, so what the controller had learned about it is too.
+  if (p) { SDL_ClearQueuedAudio(dev_); over_ = false; depth_ = -1.0; trim_ = 0.0; }
 }
 
 double Audio::queued_frames() const {

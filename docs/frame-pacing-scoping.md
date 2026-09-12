@@ -96,7 +96,39 @@ proper limiter primitive rather than `SDL_Delay(ms)`:
 After phase 1 the emulator is paced but the sound is wrong: the queue now
 drifts, because nothing holds it at a depth any more. Phase 2 is not optional.
 
-### Phase 2 -- make audio follow the pacer (the real work)
+### Phase 2 -- make audio follow the pacer -- **DONE (2026-09-12, unmerged on `wifi-emu`)**
+
+Dynamic rate control, option 1 below. The depth is measured every frame,
+smoothed (EMA, ~0.5 s), and a proportional term (0.2 % per frame of error,
+clamped to +/-0.5 %) steers the resampler step. Everything now goes through
+the resampler -- the old equal-rates bypass would have been a path with no
+control on it -- and `frame_bytes_` comes from `CYCLES_PER_FRAME /
+ARM9_CLOCK_HZ` with the SPU's live `output_rate()`, so the 47605 Hz DSi mode
+and the 59.8261 Hz frame rate are both accounted for. `audio.latency_frames`
+(default 3) is wired. Frame dropping survives only for what the controller
+cannot answer for: fast forward, and a queue past `MAX_FRAMES` (8) that is
+not being consumed at all.
+
+Measured on the host (PipeWire, 48 kHz), `DS_AUDIO_QUEUE`:
+
+| run | depth min / mean / max | trim | underruns |
+|-----|------------------------|------|-----------|
+| Meteos, 179 s free run | 1.45 / 3.36 / 4.75 | -1200 ppm, steady | none, never under 1 frame |
+| Meteos scene, 30 s | 1.50 / 3.18 / 4.66 | -1665 ppm | none |
+| fast forward 2x | 1.44 / 3.09 / 4.01 | n/a (dropping) | none |
+
+The three-minute run is the one that matters: depth flat at 3.4 from 30 s
+onward, trim stable near -1200 ppm and nowhere near its clamp. That is
+convergence, not drift.
+
+Two things to know. The measured host mismatch is ~1200 ppm, not the ~100 ppm
+this document assumed, so the proportional-only steady-state offset is ~0.4
+frames rather than 0.05 -- 7 ms of latency above the target, harmless, and
+the price of having no integral term to wind up. And the adaptive spin margin
+grows at 2x speed (477 us on an 8.3 ms frame, against ~200 us at 1x), because
+it is chasing the same absolute wakeup tail across a shorter period.
+
+### The original plan for this phase
 
 The device consumes 48000 samples/s of wall time; the emulator now produces
 `547 * limiter_rate` per second of wall time. At 59.8261 Hz nominal these
@@ -139,7 +171,58 @@ Also in phase 2:
   biases the controller. Worth fixing in the same pass -- read `output_rate()`
   and derive `frame_bytes_` from `frame_ns`, not from 60.
 
-### Phase 3 -- the controls
+### Phase 3 -- the controls -- **DONE (2026-09-12, unmerged on `wifi-emu`)**
+
+`emu.limiter` is a choice of the rates a panel comes in rather than a free
+number: `auto` (the console's 59.8261 Hz), 30, 60, 120, 144, 240, `off`.
+**The default is 60**, which is what a player means by a frame limiter and
+what nearly every panel runs at -- and which is 0.29 % fast, a third of a
+second an hour. `auto` is the only exact one; anything unrecognised in the
+ini falls back to it rather than to a wrong number. `emu.speed` is a percent
+(25..400) multiplying whatever that comes to, `--limiter` and `--speed` are
+the flags, and both rows are `FlagLive` under `Dep::NetSession` -- a session
+forces the console's own rate and hands the knobs back when it ends.
+
+`emu.limiter_sync` was **not** built. With the limiter now naming a panel
+rate outright, "pace to the measured refresh" is a much smaller prize than it
+was when the only choice was 59.8261, and it still needs a refresh estimate
+per display tier. Left scoped.
+
+Measured, each value against 300 frames: `auto` 59.8, 30 → 30.0 (50 %), 60 →
+60.0, 120 → 120.0 (201 %), 144 → 144.0 (241 %), 240 → 240.0 (401 %), `off` →
+1187 fps. Speed 50 and 200 land on their multiples of those.
+
+**The interaction with phase 2 is the part that needed work.** A limiter or
+speed away from the console's rate changes how much audio arrives per second
+of wall clock, and that is a factor, not a drift: at `speed = 50` the first
+build ran the queue dry for 880 frames with the trim pinned to its clamp for
+the whole run, and at 200 it piled to 12 frames. The rate control cannot
+answer a factor of two with half a percent of authority. So the resampler's
+*nominal* ratio now follows the speed (`Audio::set_speed`) and the trim is
+left to do what it is for -- the residual drift. The sound slows and drops in
+pitch as a console someone had slowed down would, which is the honest
+rendering of what is being asked for. Fast forward keeps dropping frames
+instead: 2x of pitched-up audio is not what a fast forward is for. An
+unlimited limiter drops too, for the same reason.
+
+After that change, over 1800 frames: nothing clamped at any setting, and
+
+| setting | depth min / mean / max | trim |
+|---------|------------------------|------|
+| `limiter = 60` | 1.43 / 3.19 / 4.62 | -1650 ppm |
+| `limiter = 120` | 0.74 / 2.44 / 3.97 | -2140 ppm |
+| `limiter = off` | 1.44 / 3.37 / 4.00 | +349 ppm |
+| `speed = 50` | 2.73 / 4.34 / 5.68 | -1329 ppm |
+| `speed = 200` | 0.75 / 2.48 / 4.01 | -2052 ppm |
+
+The double-rate settings (120, speed 200) dip under one frame of buffer
+occasionally -- 14 to 18 frames in 1560, never to zero. Worth a look on a
+device, where the margins are thinner.
+
+`audio.latency_frames` is ini-only: the menu has Emu, Video, Layout and User
+pages and no audio page, and adding one for a single row is not worth it.
+
+### The original plan for this phase
 
 The point of the exercise. New keys, following the existing `settings.cpp`
 table pattern (`number()` / `choice()`, `FlagLive`, `Dep::NetSession`):
@@ -176,8 +259,8 @@ vsync" fallback). Ship it behind the knob, default off.
 
 | phase | effort | risk |
 |-------|--------|------|
-| 1 pacer | ~1 day | low -- the wall-clock path already ships and is exercised by `--no-audio` |
-| 2 audio DRC | ~2-3 days | **the risk lives here.** A badly tuned controller is audible; an untuned one underruns |
+| 1 pacer | done | -- |
+| 2 audio DRC | done | the host measurements are clean; the device runs are still owed |
 | 3 controls | ~1 day | low, table-driven |
 
 Total ~1 week including device time. Phase 2 is the one that needs real

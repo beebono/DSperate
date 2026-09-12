@@ -15,6 +15,11 @@ using T = Setting::Type;
 
 const Choice kOnOff[]   = {{"false", "OFF"}, {"true", "ON"}};
 const Choice kSkipMode[] = {{"adaptive", "ADAPTIVE"}, {"fixed", "FIXED"}};
+// The rates a panel comes in, plus the console's own and no limiter at all.
+// "auto" is the only one that plays a game at the speed it was written for;
+// 60 is 0.29 % fast, which is what a player means by "60 fps".
+const Choice kLimiter[] = {{"auto", "CONSOLE (59.8)"}, {"30", "30"}, {"60", "60"}, {"120", "120"},
+                           {"144", "144"}, {"240", "240"}, {"off", "UNLIMITED"}};
 const Choice kIntScale[] = {{"off", "OFF"}, {"under", "UNDER"}, {"over", "OVER"}};
 const Choice kSeam[]     = {{"dark", "DARK"}, {"blend", "BLEND"}, {"blend_linear", "BLEND LINEAR"}};
 // The file's own words on the left. "mean" is the ordinary cell and reads as
@@ -94,6 +99,10 @@ const Setting kEmuSettings[] = {
           "FASTEST AND LEAST SAFE. GAMES THAT PACE ON THE 3D FIFO WILL BREAK"),
   boolean("emu.fast_load", "FAST LOAD", "false", FlagLive | FlagInexact, Dep::NetSession,
           "SHORTER LOADING SCREENS. GAMES THAT RACE THE CARD CAN MISBEHAVE"),
+  pick("emu.limiter", "FRAME LIMITER", kLimiter, 7, "60", FlagLive, Dep::NetSession,
+       "THE RATE THE GAME IS HELD TO. CONSOLE IS THE ONE THE GAME WAS WRITTEN FOR"),
+  percent("emu.speed", "GAME SPEED", 25, 400, 5, "100", FlagLive, Dep::NetSession,
+          "HOW FAST THE GAME RUNS AGAINST THE LIMITER"),
   // From 2: "1X" is real time, which is what not fast-forwarding already is.
   number("emu.ff_speed", "FAST FORWARD SPEED", 2, 16, 1, "0", FlagLive, Dep::NetSession,
          "HOW MANY TIMES REAL TIME THE FAST FORWARD HOTKEY RUNS AT", "0", "UNLIMITED", "X"),
