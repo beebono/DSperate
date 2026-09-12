@@ -112,6 +112,132 @@ bool NDS::load_dsi_nand(const std::string& path, std::string* err) {
   return true;
 }
 
+// Boot the DSi the way the console does, from the NAND, instead of staging a
+// direct boot from the card image. With a *half* BIOS dump -- which is all we
+// have, and all melonDS needs -- the boot ROM's own boot2 loader is not
+// present, so melonDS does its job by hand and so do we (DSi.cpp LoadNAND, the
+// !FullBIOSBoot branch): read boot2's location from the NAND's boot info,
+// apply the NWRAM mapping it wants, decrypt boot2 into place, seed the bits of
+// state the missing BIOS code would have left, and enter boot2 directly.
+//
+// This is the path melonDS DS (libretro) relies on for DSiWare: boot2 brings up
+// the launcher, which reads the TLNC autoload block and launches the installed
+// title itself. Nothing here is reverse-engineered -- the console does it.
+bool NDS::boot_dsi_nand() {
+  if (!dsi_nand.valid()) return false;
+  io::DsiIo& d = io.dsi;
+
+  // NWRAM has to be reachable before the mapping below means anything; reset
+  // leaves these bits at their startup values, which need not include it.
+  d.scfg_ext[0] |= 1u << 25;
+  d.scfg_ext[1] |= 1u << 25;
+  for (int i = 0; i < 3; ++i) std::memset(bus.nwram[i].get(), 0, mem::Bus::NWRAM_BANK_SIZE);
+
+  // The boot info block: where boot2 lives and where it goes. Raw NAND bytes --
+  // this area is outside the AES-CTR'd filesystem.
+  u32 bp[8], mbk[12];
+  dsi_nand.read(0x220, sizeof bp, reinterpret_cast<u8*>(bp));
+  dsi_nand.read(0x380, sizeof mbk, reinterpret_cast<u8*>(mbk));
+
+  // The NWRAM mapping boot2 expects, in our MBK register layout: slots 0-4 are
+  // shared, 5-7 are each CPU's own windows, 8 is the write protect.
+  for (int c = 0; c < 2; ++c) {
+    for (int i = 0; i < 5; ++i) d.mbk[c][i] = mbk[i];
+    for (int i = 0; i < 3; ++i) d.mbk[c][5 + i] = mbk[(c == 0 ? 5 : 8) + i];
+    d.mbk[c][8] = mbk[11] & 0x00FFFF0F;
+  }
+  bus.update_nwram();
+
+  // boot2 itself: AES-CTR with a fixed key, the IV derived from the aligned
+  // size, over byte-reversed 16-byte blocks (the DSi's AES engine works on
+  // big-endian blocks, so every block is swapped in and back out).
+  auto load_boot2 = [&](u32 offset, u32 size_aligned, u32 dst, Cpu cpu) {
+    static const u8 key[16] = {0xAD, 0x34, 0xEC, 0xF9, 0x62, 0x6E, 0xC2, 0x3A,
+                               0xF6, 0xB4, 0x6C, 0x00, 0x80, 0x80, 0xEE, 0x98};
+    u8 tmp[16], iv[16];
+    const u32 sz = size_aligned;
+    std::memcpy(&tmp[0], &sz, 4);
+    const u32 neg = ~sz + 1, inv = ~sz, zero = 0;
+    std::memcpy(&tmp[4], &neg, 4);
+    std::memcpy(&tmp[8], &inv, 4);
+    std::memcpy(&tmp[12], &zero, 4);
+    bswap128(iv, tmp);
+
+    AES_ctx ctx;
+    AES_init_ctx_iv(&ctx, key, iv);
+    for (u32 i = 0; i < size_aligned; i += 16) {
+      u8 blk[16];
+      dsi_nand.read(offset + i, 16, blk);
+      bswap128(tmp, blk);
+      AES_CTR_xcrypt_buffer(&ctx, tmp, 16);
+      bswap128(blk, tmp);
+      for (u32 k = 0; k < 16; k += 4) {
+        u32 v;
+        std::memcpy(&v, &blk[k], 4);
+        bus.dma_write32(cpu, dst, v);
+        dst += 4;
+      }
+    }
+  };
+  if (dsi_boot2_override.empty()) {
+    load_boot2(bp[0], bp[3], bp[2], Cpu::ARM9);
+    load_boot2(bp[4], bp[7], bp[6], Cpu::ARM7);
+  } else {
+    // A boot2 replacement (Unlaunch and friends) ships as a plain DSi
+    // multiboot SRL: unencrypted, no modcrypt, its own ARM9/ARM7 load
+    // addresses in the header. Load those in place of the NAND's boot2 and
+    // enter them the same way -- the entry state below is boot2's, which is
+    // exactly what a replacement is written against.
+    std::vector<u8> img = slurp_file(dsi_boot2_override);
+    if (img.size() < 0x200) { std::fprintf(stderr, "dsi: %s is not an SRL\n", dsi_boot2_override.c_str()); return false; }
+    auto hdr32 = [&](u32 o) { u32 v; std::memcpy(&v, &img[o], 4); return v; };
+    const u32 r9 = hdr32(0x20), e9 = hdr32(0x24), a9 = hdr32(0x28), s9 = hdr32(0x2C);
+    const u32 r7 = hdr32(0x30), e7 = hdr32(0x34), a7 = hdr32(0x38), s7 = hdr32(0x3C);
+    if (static_cast<u64>(r9) + s9 > img.size() || static_cast<u64>(r7) + s7 > img.size()) {
+      std::fprintf(stderr, "dsi: %s: ARM9/ARM7 sections run past the file\n", dsi_boot2_override.c_str());
+      return false;
+    }
+    for (u32 i = 0; i + 3 < s9; i += 4) { u32 v; std::memcpy(&v, &img[r9 + i], 4); bus.dma_write32(Cpu::ARM9, a9 + i, v); }
+    for (u32 i = 0; i + 3 < s7; i += 4) { u32 v; std::memcpy(&v, &img[r7 + i], 4); bus.dma_write32(Cpu::ARM7, a7 + i, v); }
+    bp[2] = e9; bp[6] = e7;
+    bp[3] = s9; bp[7] = s7;
+    std::fprintf(stderr, "dsi: boot2 replaced by %s\n", dsi_boot2_override.c_str());
+  }
+
+  // What the boot ROM code we do not have would have left behind: the eMMC CID
+  // and a handful of constants the ARM7 side reads back, plus the BIOS routines
+  // boot2 calls but which live in the missing halves -- copied into ITCM and
+  // ARM7 WRAM at the addresses melonDS uses.
+  const u8* cid = dsi_nand.emmc_cid();
+  auto w7 = [&](u32 a, u32 v) { bus.dma_write32(Cpu::ARM7, a, v); };
+  auto w7h = [&](u32 a, u16 v) { bus.dma_write16(Cpu::ARM7, a, v); };
+  const u32 e = 0x03FFE6E4;
+  for (u32 i = 0; i < 16; i += 4) { u32 v; std::memcpy(&v, cid + i, 4); w7(e + i, v); }
+  w7h(e + 0x2C, 0x0001); w7h(e + 0x2E, 0x0001);
+  w7h(e + 0x3C, 0x0100); w7h(e + 0x3E, 0x40E0); w7h(e + 0x42, 0x0001);
+
+  const u8* b9 = bus.bios9i.get();
+  u8* itcm = bus.itcm.get();
+  std::memcpy(itcm + 0x4400, b9 + 0x87F4, 0x400);
+  std::memcpy(itcm + 0x4800, b9 + 0x9920, 0x80);
+  std::memcpy(itcm + 0x4894, b9 + 0x99A0, 0x1048);
+  std::memcpy(itcm + 0x58DC, b9 + 0xA9E8, 0x1048);
+
+  const u8* b7 = bus.bios7i.get();
+  std::vector<u8> init(0x3C00, 0);
+  std::memcpy(&init[0x0000], b7 + 0x8188, 0x200);
+  std::memcpy(&init[0x0200], b7 + 0xB5D8, 0x40);
+  std::memcpy(&init[0x0254], b7 + 0xC6D0, 0x1048);
+  std::memcpy(&init[0x129C], b7 + 0xD718, 0x1048);
+  for (u32 i = 0; i < init.size(); i += 4) { u32 v; std::memcpy(&v, &init[i], 4); w7(0x03FFC400 + i, v); }
+
+  cpu(Cpu::ARM9).jump(bp[2], false);
+  cpu(Cpu::ARM7).jump(bp[6], false);
+  std::fprintf(stderr, "dsi: boot2 from NAND -- ARM9 %08X (%u bytes), ARM7 %08X (%u bytes)\n",
+               bp[2], bp[3], bp[6], bp[7]);
+  return true;
+}
+
 void NDS::setup_direct_boot_dsi() {
   const cart::Header& h = cart->header();
   const cart::TwlHeader& t = cart->twl();

@@ -51,7 +51,11 @@ void Io::reset() {
   wramcnt = 0; std::memset(vramcnt, 0, sizeof vramcnt);
   powcnt1 = 0; powcnt2 = 0; math = MathUnit{};
   keyinput = 0x03FF; extkeyin = 0x007F; keycnt[0] = keycnt[1] = 0;
-  exmemcnt = 0; rcnt = 0; wifiwaitcnt = 0;
+  // melonDS NDS::Reset: both CPUs' EXMEMCNT start at 0x6000, not 0. Direct
+  // boot overwrites this with 0xE880 (which already carries those bits), so
+  // it only shows on a BIOS or NAND boot -- where boot2's ARM7 spins on
+  // exactly these bits before it will go on.
+  exmemcnt = 0x6000; rcnt = 0; wifiwaitcnt = 0;
   spicnt = 0; spidata = 0; spi_ready_at = 0; spi_busy_ = false; spi_flag_mode_ = false;
   spi_fw = SpiFirmware{}; spi_tsc = SpiTouch{}; spi_pm = SpiPower{};
   mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;

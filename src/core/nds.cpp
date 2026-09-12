@@ -366,6 +366,9 @@ void NDS::set_wifi_mac_suffix(u32 suffix) {
 
 void NDS::setup_direct_boot() {
   if (!cart) return;
+  // A NAND boot replaces direct boot outright: boot2 brings up the launcher,
+  // which launches the title itself (see boot_dsi_nand).
+  if (dsi && dsi_nand_boot && boot_dsi_nand()) return;
   if (dsi) { setup_direct_boot_dsi(); return; }
   const cart::Header& h = cart->header();
   auto w32 = [&](u32 a, u32 v) { bus.dma_write32(Cpu::ARM9, a, v); };

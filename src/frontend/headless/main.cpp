@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
   bool cpu_oc = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
-  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
@@ -178,6 +178,8 @@ int main(int argc, char** argv) {
     else if (arg("--bios9i")) bios9i = argv[++i];            // the DSi BIOS pair (64 KB each): needed for DSi mode
     else if (arg("--bios7i")) bios7i = argv[++i];
     else if (arg("--dsi-boot")) dsi_boot = argv[++i];        // tools/dsi_nand.py bootblobs output: the console data a DSi title starts with
+    else if (arg("--dsi-boot2")) dsi_boot2 = argv[++i];      // an SRL to run instead of the NAND's boot2 (Unlaunch)
+    else if (arg("--dsi-nand-boot")) dsi_nand_boot = true;   // boot the NAND (boot2 -> launcher) instead of direct-booting the ROM
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];        // a real nand.bin (nocash footer): the eMMC behind the SD/MMC host, and the console ID
     else if (flag("--dsi")) dsi_mode = 1;                    // force the DSi machine (default: a DSi-capable header with the DSi BIOS loaded)
     else if (flag("--no-dsi")) dsi_mode = 0;
@@ -284,6 +286,8 @@ int main(int argc, char** argv) {
     if (want && !capable) std::fprintf(stderr, "warning: --dsi with a DS-only header (unit code %02x)\n", nds.cart ? nds.cart->header().unit_code : 0);
     if (want) {
       nds.set_dsi(true);
+      nds.dsi_nand_boot = dsi_nand_boot || dsi_boot2;
+      if (dsi_boot2) nds.dsi_boot2_override = dsi_boot2;
       nds.reset();
       if (rtc_host) nds.io.start_rtc_clock();
       std::fprintf(stderr, "console: DSi (16 MB, ARM9 at 134 MHz)%s%s\n", dsi_boot ? "" : "; no --dsi-boot: the console data areas stay zero",

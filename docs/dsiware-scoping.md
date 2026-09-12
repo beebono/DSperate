@@ -686,6 +686,61 @@ that seam is inconsistent for both emulators. Note this is *weaker* than the
 scoping note's earlier claim that the recipe was proven end to end; what is
 reproducible today is mount + directory walk (both) and save I/O (ours).
 
+#### The NAND boot path (2026-09-12)
+
+`NDS::boot_dsi_nand()` (`--dsi-nand-boot`) boots the console the way it boots
+itself, instead of staging a direct boot from the card. With a *half* BIOS
+dump -- all we have, and all melonDS needs -- the boot ROM's own boot2 loader
+is absent, so melonDS does its job by hand and so do we (DSi.cpp `LoadNAND`,
+the `!FullBIOSBoot` branch): read boot2's location from the NAND boot info at
+offset 0x220 and the NWRAM mapping at 0x380, apply MBK, AES-CTR boot2 into
+place under a fixed key with the IV derived from the aligned size (over
+byte-reversed 16-byte blocks), seed the eMMC CID block at 0x03FFE6E4 and the
+BIOS routines the missing halves would have left (ARM9 ITCM at 0x4400/0x4800/
+0x4894/0x58DC, a 0x3C00 ARM7 block at 0x03FFC400), then enter boot2 directly.
+None of this is reverse-engineered -- the console does it.
+
+**It works structurally.** boot2 loads and runs (ARM9 and ARM7 both at
+0x037B8000) and the launcher reads ~19 900 NAND blocks. The entry is
+*instruction- and register-identical* to melonDS: the traces agree on every
+field, differing only by a constant 32-cycle offset from the first
+instruction (the pipeline-fill charge `setup_direct_boot_dsi` applies and
+this path does not yet).
+
+**First real divergence, and it is ours:** the ARM7 spins on
+`LDRH r2,[0x04000204]` / `TST r2,r1` with r1 = 0x6000 -- boot2 waits on
+EXMEMCNT bits 13-14 before going on. melonDS's `NDS::Reset` sets
+`ExMemCnt[0] = ExMemCnt[1] = 0x6000`; ours resets to 0. Direct boot overwrites
+it with 0xE880 (which already carries those bits), so this only ever shows on
+a BIOS or NAND boot. **Not yet applied** -- it changes a reset value the DS
+firmware-boot path also sees, so it wants a DS scene-hash check first.
+
+#### Unlaunch as a boot2 replacement (2026-09-12)
+
+`dsi-binary/unlaunch/unlaunch.dsi` is a plain DSi multiboot SRL: unit code 03,
+**no modcrypt**, no ARM9i/ARM7i sections, ARM9 0x02200000 (entry 0x02200800,
+0xAD80) and ARM7 0x02380000 (entry 0x02380000, 0x205F8). Its strings confirm
+it looks for **BOOTCODE.DSI** (fragment "ODE.DSI" at 0xBA47, with "TITLE",
+"0003", "\CONTENT") and builds NAND title paths (`/content`, `/data`,
+`/public.sav` at 0xB9E4).
+
+Direct-booting it as a cart gets nowhere -- forced-white screen, 0 NAND reads
+-- and **melonDS fails the same way** (uniform screen for 600 frames plus an
+`undefined ARM9 instruction DE9302C3 @ 00004400`), because it is a boot2
+replacement and expects boot2's entry state, not a cart's.
+
+Run as boot2 instead (`--dsi-boot2 <srl>`, which implies `--dsi-nand-boot`)
+it gets further -- 2 NAND block reads -- then stalls: the ARM9 sits in the
+BIOS at 0xFFFF0110 and the ARM7 in the ARM7 BIOS delay loop at
+0x00000170/0x174 (`SUBS r0,#1` / `BGT`), re-entered ~188 k times. The
+EXMEMCNT reset value above is the prime suspect, since a boot2 replacement is
+written against exactly the state real boot2 is entered in.
+
+**BOOTCODE.DSI needs an SD card, which we do not have.** Phase 3 deliberately
+left SD host port 0 absent (reads as "no card"); the NAND is port 1. Auto-
+launching a title from the SD root means implementing port 0 over a FAT
+image -- the `SyntheticNand`/FAT builder work, pointed at the SD slot.
+
 ### Phase 4 -- I2C, BPTWL, I2S/mic (~900 lines)
 
 - I2C host at `0x04004600` with the BPTWL device: battery level (feed it the

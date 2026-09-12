@@ -116,6 +116,11 @@ struct NDS {
   // the boot; in-memory only, never written back.
   void set_wifi_mac_suffix(u32 suffix);
   void setup_direct_boot_dsi();      // the DSi machine's version (nds_dsi.cpp)
+  // Boot the DSi from its NAND (boot2 -> launcher) instead of staging a direct
+  // boot from the card. Needs a NAND image; false if there is none.
+  bool boot_dsi_nand();
+  bool dsi_nand_boot = false;        // set before reset() to take that path
+  std::string dsi_boot2_override;    // an SRL to run instead of the NAND's boot2 (e.g. Unlaunch)
 
   // Firmware settings persistence.
   //
