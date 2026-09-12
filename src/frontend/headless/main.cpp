@@ -372,6 +372,8 @@ int main(int argc, char** argv) {
   ts.stamp = std::getenv("TRACE_TIME") != nullptr; ts.nds = &nds;
   const char* trace_start = std::getenv("TRACE_START_FRAME");   // suppress trace output before this frame
   const int trace_from = trace_start ? std::atoi(trace_start) : 0;
+  const char* trace_end_s = std::getenv("TRACE_END_FRAME");     // stop tracing at this frame (0 = never)
+  const int trace_end = trace_end_s ? std::atoi(trace_end_s) : 0;
   // Per-frame host times. Whole-process wall clock on the device turned out to
   // spread 13 % run to run at a flat temperature, which buries any change
   // worth measuring; the median frame rejects the transient stalls that cause
@@ -464,6 +466,8 @@ int main(int argc, char** argv) {
     if (trace && i == 0) ds::jit::set_trace(true);
 #endif
     if (trace && i == trace_from) { nds.trace = trace_cb; nds.trace_user = &ts; }
+    if (trace && trace_end && i == trace_end) { nds.trace = nullptr; nds.trace_user = nullptr; }
+    nds.io.wifi.trace_frame(i);   // "# frame N" in the Wi-Fi trace, to align it with --trace
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
     if (tas_after >= 0) {
       if (nds.io.wifi.host_syncs() > tas_seen) { tas_seen = nds.io.wifi.host_syncs(); tas_frame = i + tas_after; std::fprintf(stderr, "tap-after-sync: client synced at frame %d, tapping from %ld\n", i, tas_frame); }

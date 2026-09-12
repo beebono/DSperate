@@ -48,6 +48,7 @@ public:
   // How many times this console, as MP host, has synced a client (an
   // association it answered). A test harness keys scripted input on it.
   u32 host_syncs() const { return host_syncs_; }
+  void trace_frame(int frame);      // frontend hook: a "# frame N" marker in the register trace
   const u8* mac() const { return reinterpret_cast<const u8*>(&io_[W_MACAddr0 / 2]); }
   const u8* bssid() const { return reinterpret_cast<const u8*>(&io_[W_BSSID0 / 2]); }
 

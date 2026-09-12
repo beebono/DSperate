@@ -1206,7 +1206,20 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
   if (addr == 0x04000300) { write16(cpu, addr, value); return; }
   if (!a9 && addr == 0x04000301) {                       // HALTCNT
     const u8 v = value & 0xC0;
-    if (v == 0x80 || v == 0xC0) nds_.cpu(Cpu::ARM7).halted = true;   // the run loop ends the slice
+    if (v == 0x80 || v == 0xC0) {
+      // Halting with an interrupt already pending is a no-op. melonDS
+      // re-tests the halt condition before every instruction (NDS::
+      // HaltInterrupted, from ARM::Execute), so a CPU that halts while
+      // IE & IF is nonzero never actually sleeps. We only clear `halted` on
+      // the IRQ *edge* in update_irq, so without this test the ARM7 slept
+      // through an already-pending interrupt until some later, unrelated one
+      // woke it -- measured at up to 1.2 ms, long enough for Download Play's
+      // client to miss its reply slot and be dropped by the host.
+      CpuIo& c7 = cpu_io[ci(Cpu::ARM7)];
+      bool pending = (c7.ie & c7.if_) != 0;
+      if (nds_.dsi && (dsi.ie2 & dsi.if2)) pending = true;
+      if (!pending) nds_.cpu(Cpu::ARM7).halted = true;   // the run loop ends the slice
+    }
     else if (v == 0x40) std::fprintf(stderr, "[io] GBA mode requested; not supported\n");
     return;
   }

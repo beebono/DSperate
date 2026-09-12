@@ -224,12 +224,17 @@ void Wifi::us_timer() {
     if (rx_timestamp_ && us_timestamp_ >= rx_timestamp_) { rx_timestamp_ = 0; start_rx(); }
     if (us_timestamp_ >= next_sync_) check_rx(2);   // TODO (melonDS): not every tick when it fails
     // Every 64 us: a host frame already here, held to its timestamp
-    // (peek_host_packet) -- but never while our reply is still going out.
-    // melonDS's client only ever fetches once its clock reaches next_sync,
-    // i.e. after its reply slot; fetching the ack during the reply
-    // transmission hands the firmware an ack-before-TX-end order the
-    // hardware cannot produce.
-    else if (!no_peek_ && !rx_timestamp_ && !(reg(W_TXBusy) & 0x0080) && !(us_timestamp_ & 0x38)) check_rx(3);
+    // (peek_host_packet) -- but never while our reply is still going out,
+    // and never in the tick that just started a held frame's reception:
+    // com_status_ was clear when this block was entered and start_rx() above
+    // has just set it, so it must be re-checked here. Without that, the
+    // fetch overwrote rx_buffer_ (the ack being received) with the next CMD;
+    // the ack's reception then completed with the CMD's bytes, the ack was
+    // lost, the CMD was received twice (once early, once at its own time),
+    // and Download Play's client counted the missed ack and gave up.
+    // melonDS's client fetches only at next_sync, after the reply slot, and
+    // can never do this.
+    else if (!no_peek_ && !com_status_ && !rx_timestamp_ && !(reg(W_TXBusy) & 0x0080) && !(us_timestamp_ & 0x38)) check_rx(3);
   }
 
   if (!(us_timestamp_ & 0x3FF & kTimeCheckMask)) ap_ms_timer();
@@ -340,6 +345,7 @@ void Wifi::increment_tx_count(const TxSlot& slot) {
   if (cnt < 0xFF) cnt++;
   ram16(slot.addr + 4, cnt);
 }
+void Wifi::trace_frame(int frame) { if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# frame %d us %llX\n", frame, (unsigned long long)us_timestamp_); }
 void Wifi::report_mp_reply_errors(u16 clientfail) {
   // TODO (melonDS): do these trigger any IRQ?
   u8* stat = reinterpret_cast<u8*>(io_.data()) + W_CMDStat0;
@@ -531,7 +537,9 @@ void Wifi::send_mp_ack(u16 cmdcount, u16 clientfail) {
     int runahead = static_cast<int>(std::min(cmd_counter_, nextbeacon));
     if (cmd_counter_ < 1000) runahead -= 210;
     st32(&ack[0], static_cast<u32>(std::max(runahead - 32 * (tx_slots_[1].rate == 2 ? 4 : 8), 0)));
+    if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# host ack fail %04X cmdcount %u runahead %u us %llX\n", clientfail, cmdcount, ld32(&ack[0]), (unsigned long long)us_timestamp_);
   } else {
+    if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# host ack fail %04X cmdcount %u runahead 0 us %llX\n", clientfail, cmdcount, (unsigned long long)us_timestamp_);
     st32(&ack[0], static_cast<u32>(preamble_len(tx_slots_[1].rate)));
   }
   if (mp_) mp_->send_ack(ack, 12 + 32, us_timestamp_);
@@ -751,7 +759,10 @@ void Wifi::finish_rx() {
     // the reply check has priority over the others.
     if (mac_equal(&rx_buffer_[12 + 16], kMpReplyMac)) rxflags |= ((framectl & 0xF0) == 0x50) ? 0x000F : 0x000E;
     else if (mac_equal(&rx_buffer_[12 + 4], kMpCmdMac)) { if (seqno == mp_last_seqno_) cmd_dupe = true; mp_last_seqno_ = seqno; rxflags |= 0x000C; }
-    else if (mac_equal(&rx_buffer_[12 + 4], kMpAckMac)) rxflags |= 0x000D;
+    else if (mac_equal(&rx_buffer_[12 + 4], kMpAckMac)) {
+      rxflags |= 0x000D;
+      if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# ack rx fail %04X cmdcount %u seq %04X us %llX via %d\n", ld16(&rx_buffer_[12 + 0x1A]), ld16(&rx_buffer_[12 + 0x18]), seqno, (unsigned long long)us_timestamp_, last_rx_type_);
+    }
     else rxflags |= 0x0008;
     switch ((framectl >> 4) & 0xF) {
     case 0x0: break;
@@ -890,12 +901,14 @@ bool Wifi::check_rx(int type) {   // 0 = regular, 1 = MP replies, 2 = MP host fr
     rx_timestamp_ = 0;
     start_rx();
   } else if (frametype == 0x00C0 && timestamp && macgood && is_mp_client_) {
+    if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# deauth rx us %llX\n", (unsigned long long)us_timestamp_);
     is_mp_ = false; is_mp_client_ = false; next_sync_ = 0;
     rx_timestamp_ = 0;
     start_rx();
   } else if (macgood && is_mp_client_) {
     // as a client, hold this frame until its timestamp, and work out how far
     // we may run after it
+    if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# hf via %d fc %04X len %d ts %llX us %llX\n", type, framectl, framelen, (unsigned long long)timestamp, (unsigned long long)us_timestamp_);
     rx_timestamp_ = std::max(timestamp, us_timestamp_);
     next_sync_ = rx_timestamp_ + framelen * (txrate == 0x14 ? 4 : 8);
     if (mac_equal(&rx_buffer_[12 + 4], kMpCmdMac)) {
