@@ -3,6 +3,7 @@
 #pragma once
 #include "core/types.h"
 #include "core/io/dsi_aes.h"
+#include "core/io/dsi_sd.h"
 #include "core/io/wifi.h"
 
 #include <array>
@@ -199,6 +200,7 @@ public:
   CpuIo cpu_io[2];
   DsiIo dsi;               // meaningful only while NDS::dsi
   DsiAes aes;              // 0x04004400 (ARM7), reset with the DSi block
+  SdHost sd;               // 0x04004800 (ARM7) SDMMC host; the NAND hangs off port 1
   void request_irq2(u32 bit);   // ARM7 IE2/IF2
   void bptwl_reset();
   void i2c_write_cnt(u8 value);

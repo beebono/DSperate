@@ -14,6 +14,7 @@ extern "C" {
 }
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 
@@ -102,6 +103,14 @@ bool NDS::load_dsi_boot_blobs(const std::string& path, std::string* err) {
   return true;
 }
 
+bool NDS::load_dsi_nand(const std::string& path, std::string* err) {
+  if (!dsi_nand.open(path)) {
+    if (err) *err = path + ": not a DSi NAND image (needs the nocash footer holding the eMMC CID and console ID)";
+    return false;
+  }
+  return true;
+}
+
 void NDS::setup_direct_boot_dsi() {
   const cart::Header& h = cart->header();
   const cart::TwlHeader& t = cart->twl();
@@ -141,7 +150,19 @@ void NDS::setup_direct_boot_dsi() {
   if (board == 0x01) { w16(0x020005E2, 0xB57E); w32(0x020005E4, 0x00500400); w32(0x020005E8, 0x00500000); w32(0x020005EC, 0x0002E000); }
   else               { w16(0x020005E2, 0x5BCA); w32(0x020005E4, 0x00520000); w32(0x020005E8, 0x00520000); w32(0x020005EC, 0x00020000); }
   w32(0x02FFFC00, cart->chip_id());
-  w16(0x02FFFC40, 0x0001);                           // boot indicator: card (the launcher's 3 is a later phase)
+  // Boot indicator: 1 = from the card, 3 = handed over by a DSi launcher.
+  // With a NAND attached we stand in for the launcher (below), so the title
+  // mounts nand:/ and reads its own .app and save from there; without one it
+  // runs in card mode, which is what melonDS's direct boot always does.
+  // UNPROVEN, so off by default (DS_DSI_HANDOFF=1 to try it): the pieces are
+  // all written as the recipe describes, but Shantae stalls just after its
+  // SD controller init instead of mounting, where card mode at least reaches
+  // its "Save Data has been corrupted" prompt. Default stays card mode, which
+  // is what melonDS's direct boot does and what the trace gate compares.
+  const bool launcher_handoff = dsi_nand.valid() && getenv("DS_DSI_HANDOFF") &&
+                                t.param_block_address >= 0x03800000 &&
+                                t.param_block_address < 0x0380FC00;
+  w16(0x02FFFC40, launcher_handoff ? 0x0003 : 0x0001);
   w8(0x02FFFDFA, 0x80);                              // BPTWL boot flag (0) | 0x80
   w8(0x02FFFDFB, 0x01);
 
@@ -201,6 +222,55 @@ void NDS::setup_direct_boot_dsi() {
   arm9->bank_r13[0] = 0x03003FC0; arm9->bank_r13[2] = 0x03003F80;
   arm7->hot.regs[12] = h.arm7_entry; arm7->hot.regs[13] = 0x0380FD80; arm7->hot.regs[14] = h.arm7_entry;
   arm7->bank_r13[0] = 0x0380FFC0; arm7->bank_r13[2] = 0x0380FF80;
+
+  // ---- the DSi launcher's hand-off ----
+  // What a title gets from the launcher that a card-mode direct boot never
+  // writes, reverse-engineered from launcher launches of KS3E and KMGE
+  // (dsperate-research tools/melonds/dsiware_params.py): the mount table in
+  // ARM7 WRAM at the address in header word 0x1D4, the app path beside it,
+  // and the 8-byte boot info at 0x0380FFC4. Without these the SDK's crt0
+  // mounts nothing -- it halts outright if [0x0380FFC8] & 0xC != 4 -- and the
+  // title falls back to reading the card.
+  if (launcher_handoff) {
+    d.scfg_ext[1] |= 1u << 18;                       // the launcher's SCFG_EXT7: NAND access for the ARM7
+
+    const u32 tbl = t.param_block_address;
+    auto put_str = [&](u32 addr, const char* str) { for (const char* c = str; *c; ++c) w8(addr++, static_cast<u8>(*c)); w8(addr, 0); };
+    char title[64];
+    std::snprintf(title, sizeof title, "nand:/title/%08x/%08x", t.title_id_hi, t.title_id_lo);
+
+    // Five 0x54-byte mount entries. The leading word of each is copied
+    // verbatim from a real launch; its fields are not understood.
+    struct { u32 hdr; const char* name; const char* path; } entries[] = {
+      {0x00008141, "nand",    "/"},
+      {0x0000A142, "nand2",   "/"},
+      {0x00041144, "shared1", "nand:/shared1"},
+      {0x00063146, "photo",   "nand2:/photo"},
+      {0x00060948, "dataPub", nullptr},              // filled below: <title>/data/public.sav
+    };
+    char pub[96];
+    std::snprintf(pub, sizeof pub, "%s/data/public.sav", title);
+    entries[4].path = pub;
+
+    u32 o = tbl;
+    for (const auto& e : entries) {
+      w32(o, e.hdr);
+      put_str(o + 4, e.name);
+      put_str(o + 20, e.path);
+      o += 0x54;
+    }
+
+    // The app the title loads itself from. Content version 0 is the name the
+    // installed content carries for every title in our NAND.
+    char app[96];
+    std::snprintf(app, sizeof app, "%s/content/%08x.app", title, 0);
+    put_str(tbl + 0x3C0, app);
+
+    // The boot info the crt0 checks: an SCFG_EXT7 snapshot and two flag bytes.
+    w32(0x0380FFC4, 0x13FFFF06);
+    w8(0x0380FFC8, 0x44);
+    w8(0x0380FFC9, 0xF8);
+  }
   arm9->jump(h.arm9_entry, true);
   arm7->jump(h.arm7_entry, true);
   arm9->hot.cycle_budget = 0; arm7->hot.cycle_budget = 0;

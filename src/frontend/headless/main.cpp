@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
   bool cpu_oc = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
-  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
@@ -178,6 +178,7 @@ int main(int argc, char** argv) {
     else if (arg("--bios9i")) bios9i = argv[++i];            // the DSi BIOS pair (64 KB each): needed for DSi mode
     else if (arg("--bios7i")) bios7i = argv[++i];
     else if (arg("--dsi-boot")) dsi_boot = argv[++i];        // tools/dsi_nand.py bootblobs output: the console data a DSi title starts with
+    else if (arg("--dsi-nand")) dsi_nand = argv[++i];        // a real nand.bin (nocash footer): the eMMC behind the SD/MMC host, and the console ID
     else if (flag("--dsi")) dsi_mode = 1;                    // force the DSi machine (default: a DSi-capable header with the DSi BIOS loaded)
     else if (flag("--no-dsi")) dsi_mode = 0;
     else if (arg("--trace")) trace = argv[++i];
@@ -249,6 +250,7 @@ int main(int argc, char** argv) {
     std::string err;
     if (!nds.load_dsi_bios(bios9i ? bios9i : "", bios7i ? bios7i : "", &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (dsi_boot && !nds.load_dsi_boot_blobs(dsi_boot, &err)) { std::fprintf(stderr, "dsi boot: %s\n", err.c_str()); return 1; }
+    if (dsi_nand && !nds.load_dsi_nand(dsi_nand, &err)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
   }
   if (nds.firmware_synthetic) std::fprintf(stderr, "note: --firmware %s; using a generated firmware\n", fw ? "not found" : "not given");
   if (!direct && !nds.can_boot_firmware()) {
@@ -284,7 +286,8 @@ int main(int argc, char** argv) {
       nds.set_dsi(true);
       nds.reset();
       if (rtc_host) nds.io.start_rtc_clock();
-      std::fprintf(stderr, "console: DSi (16 MB, ARM9 at 134 MHz)%s\n", dsi_boot ? "" : "; no --dsi-boot: the console data areas stay zero");
+      std::fprintf(stderr, "console: DSi (16 MB, ARM9 at 134 MHz)%s%s\n", dsi_boot ? "" : "; no --dsi-boot: the console data areas stay zero",
+                   nds.dsi_nand.valid() ? "; NAND attached" : "; no NAND (card mode)");
     } else if (capable && !nds.bios_native_dsi && dsi_mode == -1) {
       std::fprintf(stderr, "note: DSi-capable ROM without --bios9i/--bios7i: running as a DS\n");
     }
@@ -635,6 +638,9 @@ int main(int argc, char** argv) {
   }
   ds::frame_report(frame_ms);
   ds::prof::frame_breakdown(frame_ms);
+  if (nds.dsi_nand.valid())
+    std::fprintf(stderr, "nand: %llu block reads, %llu block writes\n",
+                 (unsigned long long)nds.dsi_nand.reads, (unsigned long long)nds.dsi_nand.writes);
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));

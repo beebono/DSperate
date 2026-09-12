@@ -559,6 +559,52 @@ Gate: the save-heavy oracle title creates and re-reads its save; the same
 title on melonDS with our exported `.pub` imported through its TitleManager
 sees the same data; melonDS trace matches with the real-NAND backer.
 
+#### Phase 3 status (2026-09-12)
+
+Landed on `dsiware`: the SD/MMC host and the real-NAND backer.
+`src/core/io/dsi_sd.{h,cpp}` is a port of melonDS's `DSi_SD.cpp` -- the SDMMC
+host at `0x04004800-0x040049FF` (command/response registers, the two 16-bit
+FIFOs and the 32-bit one they drain into, `CheckSwapFIFO`, the IRQ and
+card-IRQ masks, `Event_DSi_SDMMCTransfer` as `EventId::SdMmc`, NDMA start
+mode 0x28) with an `MmcStorage` device on port 1 over a `NandImage`. Port 0
+(the SD card slot) is absent and reads as no card; the SDIO host at
+`0x04004A00` is absent entirely. `--dsi-nand` loads a real `nand.bin`,
+whose nocash footer supplies the eMMC CID and the **console ID** -- which had
+been hardcoded zero and seeds AES key slots 1 and 3, so `dsi.console_id` is
+now set *before* `aes.reset()`. Save-state FORMAT_VERSION 4 (one more
+scheduler event).
+
+**The guest sees raw eMMC sectors.** melonDS's `ReadBlock`/`WriteBlock` seek
+the backing file directly; its NAND AES-CTR (`SetupFATCrypto`/`ReadFATBlock`)
+serves only the host-side `NANDMount` FAT view. So nothing on the guest path
+encrypts, and the synthetic builder's crypto is still ahead of us.
+
+**Gate.** The phase-1 melonDS gate still passes with the host in and a NAND
+attached: ARM9 and ARM7 traces byte-identical over 60 frames, 400 rendered
+frames byte-identical, all six DS scenes unmoved over 600 frames, 22/22 unit
+tests. Shantae reports `nand: 0 block reads, 0 block writes`, exactly as
+melonDS does -- **direct boot runs the title in card mode, so nothing asks
+the NAND for anything.**
+
+**The launcher hand-off is implemented but UNPROVEN, and off by default**
+(`DS_DSI_HANDOFF=1`). `setup_direct_boot_dsi` writes all four pieces of the
+recipe: boot indicator `0x02FFFC40 = 3`, `SCFG_EXT7` bit 18 (0x93FBFB06 ->
+0x93FFFB06, matching the recipe's value), the five 0x54-byte mount entries at
+header word 0x1D4 (`0x03800ea8` for KS3E, which overlaps neither the ARM7 nor
+the ARM7i binary) with the app path at +0x3C0, and the 8 bytes at
+`0x0380FFC4`. With it on, Shantae *does* newly initialise the SD controller
+(17 register accesses: soft reset, SDOPTION 0x40EA, IRQ status clear, IRQ
+mask 0x0305) and then stalls -- it never writes a command to register 0x000,
+never selects port 1, and the screen stays black, where card mode at least
+reaches its "Save Data has been corrupted" prompt. Reporting the eMMC as
+present in `SD_STATUS` (0x01C bits 0x20/0x80, melonDS's
+`SDPresentBySelectedPort` experiment) was tried and changed nothing, so the
+init does not branch on those bits before stalling. Next step is the oracle:
+run `trace_melonds` with `TRACE_BOOT_INDICATOR=3
+TRACE_SCFG=-1:-1:93fffb06:-1 TRACE_LOAD_WRAM7=...` (the recipe's own knobs,
+via `tools/melonds/dsiware_params.py`) and diff against ours to find what the
+launcher leaves behind that this does not.
+
 ### Phase 4 -- I2C, BPTWL, I2S/mic (~900 lines)
 
 - I2C host at `0x04004600` with the BPTWL device: battery level (feed it the

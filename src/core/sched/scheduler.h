@@ -31,7 +31,7 @@ enum class EventId : u8 {
   // (~15 fps) events, kept as slice boundaries so the CPU interleave
   // matches the oracle's (a DSiWare loader measures one CPU against the
   // other); neither drives any state yet (Io::grid_rtc_event / grid_cam_event).
-  RtcClock, CamIrq, Count
+  RtcClock, CamIrq, SdMmc, Count
 };
 
 // CPU interleave quantum in ARM9 cycles: the most one CPU runs before the

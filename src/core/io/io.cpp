@@ -26,7 +26,7 @@ inline int ci(Cpu c) { return static_cast<int>(c); }
 inline Cpu other(Cpu c) { return c == Cpu::ARM9 ? Cpu::ARM7 : Cpu::ARM9; }
 }
 
-Io::Io(NDS& nds) : aes(nds), wifi(nds), nds_(nds) { reset(); }
+Io::Io(NDS& nds) : aes(nds), sd(nds), wifi(nds), nds_(nds) { reset(); }
 
 static void ev_lcd_irq(NDS& nds, u32) { nds.io.flush_lcd_irq(); }
 void Io::lcd_irq(Cpu cpu, u32 bit) {
@@ -1341,6 +1341,13 @@ void Io::dsi_reset() {
   arm7_bios_prot = 0x20;
   bptwl_reset();
   spi_flag_mode_ = true;
+  // The eMMC and the console ID it carries. With no NAND loaded the host has
+  // no device on port 1 (every command is dropped) and the console ID stays
+  // zero, which is what the card-mode gate runs with. This has to precede
+  // aes.reset(): key slots 1 and 3 are seeded from the console ID.
+  dsi.console_id = nds_.dsi_nand.valid() ? nds_.dsi_nand.console_id() : 0;
+  sd.attach_nand(nds_.dsi_nand.valid() ? &nds_.dsi_nand : nullptr);
+  sd.reset();
   aes.reset();
   dispstat[0] |= 0x40; dispstat[1] |= 0x40;   // LCD init flag
   extkeyin &= ~(1u << 6);                     // melonDS clears the pen-down key bit on a DSi
@@ -1388,6 +1395,15 @@ u32 Io::dsi_read(Cpu cpu, u32 addr, u32 width) {
   const bool a9 = cpu == Cpu::ARM9;
   const int c = ci(cpu);
   const u32 r = addr & 0xFFF;
+  if (r >= 0x800 && r < 0xA00) {                     // SDMMC host (ARM7); 0xA00-0xBFF is the SDIO host, absent
+    if (a9) return 0;
+    if (width == 32) {
+      if (r == 0x90C) return sd.read_fifo32();
+      return sd.read(addr) | (static_cast<u32>(sd.read(addr + 2)) << 16);
+    }
+    const u32 v16 = sd.read(addr & ~1u);
+    return width == 16 ? v16 : ((v16 >> ((addr & 1) * 8)) & 0xFF);
+  }
   if (r >= 0x400 && r < 0x500) {                     // AES (ARM7): 32-bit ports only, the FIFO read pops
     if (a9 || width != 32) return 0;
     if (r == 0x400) return aes.read_cnt();
@@ -1426,6 +1442,18 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
   const bool a9 = cpu == Cpu::ARM9;
   const u32 r = addr & 0xFFF;
   if (r >= 0x100 && r < 0x200) { if (width == 32) nds_.ndma.write(cpu, addr, value); return; }   // NDMA: 32-bit ports only
+  if (r >= 0x800 && r < 0xA00) {                     // SDMMC host (ARM7)
+    if (a9) return;
+    if (width == 32) {
+      if (r == 0x90C) { sd.write_fifo32(value); return; }
+      sd.write(addr, static_cast<u16>(value & 0xFFFF));
+      sd.write(addr + 2, static_cast<u16>(value >> 16));
+      return;
+    }
+    // melonDS has no 8-bit SD handler; a byte write lands as the 16-bit one.
+    sd.write(addr & ~1u, static_cast<u16>(value));
+    return;
+  }
   if (r >= 0x400 && r < 0x500) {                     // AES: ARM7 only (melonDS DSi::ARM7IOWrite8/16/32)
     if (a9) return;
     const u32 shift = (r & (width == 8 ? 3 : width == 16 ? 2 : 0)) * 8;
@@ -1626,6 +1654,7 @@ template <class S> void Io::sync_state(S& s) {
     nds_.ndma.sync_state(s);
     s.fields(dsi.console_id);   // appended
     aes.sync_state(s);          // appended
+    sd.sync_state(s);           // appended
     s.end();
     if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, grid_cam_event); }
   }

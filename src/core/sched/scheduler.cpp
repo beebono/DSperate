@@ -601,13 +601,18 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
 
 template <class S> void Scheduler::sync_state(S& s) {
   s.begin("SCHD");
-  // The event arrays grew with the DSi's two grid events (FORMAT_VERSION 3);
-  // a version-2 file carries the first 21 of each.
-  constexpr u32 V2_EVENTS = 21;
-  static_assert(EVENT_COUNT == 23, "EVENT_COUNT changed: add a save-state version");
+  // The event arrays grew with the DSi's two grid events (FORMAT_VERSION 3)
+  // and again with the SD/MMC transfer event (4); an older file carries only
+  // the events it knew about.
+  constexpr u32 V2_EVENTS = 21, V3_EVENTS = 23;
+  static_assert(EVENT_COUNT == 24, "EVENT_COUNT changed: add a save-state version");
   s.fields(now_, arm7_debt_, armed_);
-  if (s.version >= 3) s.fields(at_, param_);
-  else { for (u32 i = 0; i < V2_EVENTS; ++i) s.fields(at_[i]); for (u32 i = 0; i < V2_EVENTS; ++i) s.fields(param_[i]); }
+  if (s.version >= 4) s.fields(at_, param_);
+  else {
+    const u32 n = s.version >= 3 ? V3_EVENTS : V2_EVENTS;
+    for (u32 i = 0; i < n; ++i) s.fields(at_[i]);
+    for (u32 i = 0; i < n; ++i) s.fields(param_[i]);
+  }
   // The idle-skip pre-filter: whether a slice is skipped depends on the
   // recent slice-start PCs, so the ring is part of the timing.
   s.fields(idle_pc_ring_, idle_pc_pos_);

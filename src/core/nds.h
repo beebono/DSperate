@@ -62,6 +62,12 @@ struct NDS {
   // 0x154-byte file; absent, the areas stay zero.
   bool load_dsi_boot_blobs(const std::string& path, std::string* err = nullptr);
   std::vector<u8> dsi_boot_blobs;    // 0x154 bytes when loaded, else empty
+  // The DSi NAND image (a real nand.bin with its nocash footer). It backs
+  // the eMMC on the SD/MMC host's port 1 and supplies the console ID, which
+  // seeds AES key slots 1 and 3; without one a DSiWare title cannot reach
+  // its save data. Loaded before reset(), like the BIOS pair.
+  bool load_dsi_nand(const std::string& path, std::string* err = nullptr);
+  io::NandImage dsi_nand;
   bool firmware_synthetic = false;   // the firmware was generated, not dumped (set by load_bios)
   // Direct boot is the only boot the substitutes support: FreeBIOS has no
   // boot code, and the generated firmware has no DS menu to boot into.
