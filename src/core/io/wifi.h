@@ -48,6 +48,13 @@ public:
   // How many times this console, as MP host, has synced a client (an
   // association it answered). A test harness keys scripted input on it.
   u32 host_syncs() const { return host_syncs_; }
+  // Whether this console is in a local-wireless (MP) exchange right now, as
+  // either end: the host that armed its beacon slot, or a client that has an
+  // association. A frontend needs it to tell a Download Play child program
+  // booting from the firmware apart from a Slot-1 card launch, which look
+  // identical from the display side (both fade both engines to white).
+  // Cleared by a deauth, a host that vanishes, and reset.
+  bool mp_active() const { return is_mp_ || is_mp_client_; }
   void trace_frame(int frame);      // frontend hook: a "# frame N" marker in the register trace
   const u8* mac() const { return reinterpret_cast<const u8*>(&io_[W_MACAddr0 / 2]); }
   const u8* bssid() const { return reinterpret_cast<const u8*>(&io_[W_BSSID0 / 2]); }

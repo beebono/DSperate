@@ -1681,6 +1681,26 @@ sdl_ready:
   if (launcher) VLOG("launcher: %zu games in %s\n", games.size(), cfg.str("paths.games").c_str());
   bool launching = false;       // the card's launch fade is on screen; the list is going up
   bool launch_latched = false;  // ... and it has already been raised once for this fade
+  // DS Download Play boots its downloaded program through the same fade to
+  // white the card launch uses, so the picker went up over it -- and the pause
+  // that came with it cut the session's timing dead. The Download Play guest
+  // is a firmware boot with the loader cart in the slot, which is precisely
+  // when `launcher` is armed; every Download Play run that proved the
+  // transport was headless, where there is no picker, so nothing caught it.
+  //
+  // So: has this console been in a local-wireless exchange at all since it
+  // booted. It cannot be tested at the white frame itself -- the host's Cut
+  // Off arrives as a deauth, which clears the MP flags (Wifi's 0x00C0 path)
+  // before the child is verified and booted, so by the time the fade lands
+  // there is no live session left to see -- and it does not need to be, since
+  // there is no way back from PictoChat or Download Play to the DS menu on
+  // hardware: the player powers the console down. Once this console has
+  // associated, the next fade to white is Download Play's child program and
+  // not a card launch, for as long as this firmware keeps running.
+  //
+  // Cleared when the firmware reboots (the power-off path below), which is the
+  // one way the DS menu comes back with the picker still armed.
+  bool mp_ever = false;
   bool menu_dirty = false;      // the menu screens need compositing and presenting again
   Uint32 menu_ms = 0;           // SDL_GetTicks at the menu's last tick
   // Pausing waits for one more presented, *unscaled* frame. The fast scaling
@@ -3036,6 +3056,10 @@ sdl_ready:
         if (jit) ds::jit::flush_all();
 #endif
         nds.reset();          // clears power_off, and re-seeds the clock
+        // A fresh firmware: the DS menu is back, so a card launch is a real
+        // possibility again. Forget that this console ever did local wireless
+        // (the picker's Download Play gate above).
+        mp_ever = false;
       } else {
         nds.power_off = false;
       }
@@ -3217,15 +3241,19 @@ sdl_ready:
     }
     // The loader cart's picker: the console's own launch fade is the signal.
     //
-    // Launching the card is the only thing in the DS menu that drives both
-    // engines' MASTER_BRIGHT to white (Gpu::screens_forced_white). PictoChat,
-    // DS Download Play, the settings pages and the shutdown they end in never
-    // touch it, and the white stretch of the firmware's own boot is white
-    // pixels rather than a forced screen -- checked on all of them. So the
-    // register alone says "the card was launched", with no tap, no rectangle
-    // of the menu's layout to keep up to date, and no timeout: it catches the
-    // launch whether the player tapped the panel or selected it with the
-    // D-pad and A, which a tap test cannot see at all.
+    // Launching the card drives both engines' MASTER_BRIGHT to white
+    // (Gpu::screens_forced_white), where PictoChat, the Download Play menus,
+    // the settings pages and the shutdown they end in do not, and the white
+    // stretch of the firmware's own boot is white pixels rather than a forced
+    // screen -- checked on all of them. So the register says "the card was
+    // launched", with no tap and no rectangle of the menu's layout to keep up
+    // to date: it catches the launch whether the player tapped the panel or
+    // selected it with the D-pad and A, which a tap test cannot see at all.
+    //
+    // The one other thing that forces white is Download Play *booting its
+    // downloaded program*, which the original measurements could not see
+    // because Download Play could not get that far then. mp_ever below is
+    // what tells the two apart.
     //
     // The cart read at the loader's arm9_rom_offset would be better still and
     // Cart::launch_read() still offers it, but this firmware never issues it:
@@ -3235,9 +3263,21 @@ sdl_ready:
     //
     // Latched, because the white stays up: the picker would otherwise go
     // straight back up the moment the player closed it.
+    if (nds.io.wifi.mp_active()) mp_ever = true;
     if (launcher) {
       const bool white = nds.gpu.screens_forced_white();
-      if (white && !launch_latched) {
+      if (white && mp_ever) {
+        // Download Play's child program, not a card launch. Raising the list
+        // here would also pause the emulator, and the session's timing does
+        // not survive that. Latched like the launch below, because the child's
+        // white holds for as long as it likes and this would otherwise say so
+        // once a frame for the rest of the boot.
+        if (!launch_latched) {
+          launch_latched = true;
+          VLOG("launcher: forced white after a local-wireless session -- Download Play booting "
+               "its program, not a card launch; the picker stays down\n");
+        }
+      } else if (white && !launch_latched) {
         launch_latched = true;
         launching = true;
         VLOG("launcher: the card was launched; raising the list\n");

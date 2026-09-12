@@ -730,3 +730,47 @@ wrong. `Dep::Net` greys the row out with THIS BUILD HAS NO NETWORKING when
 What a page would have given and this does not: leaving a session without
 quitting, and a live peer list. `LanMp::players()` and the `wait_*` counters
 are there whenever that is worth building.
+
+### The picker went up over Download Play's child boot (2026-09-12)
+
+Reported from a real session: on the SDL frontend, continuing from the
+Download Play menu into the downloaded program raised the loader cart's game
+list, and the pause that comes with it cut the session's timing dead.
+
+**Why it happens.** The picker's signal is `Gpu::screens_forced_white()` --
+both engines' MASTER_BRIGHT driven to white -- and Download Play boots its
+child program through that same fade. The original measurement that said
+Download Play never forces white was taken while Download Play still
+softlocked and could never reach a child boot, so it only ever saw the
+Download Play *menus*, which indeed do not.
+
+**Why nothing caught it.** The Download Play guest is a firmware boot, and a
+firmware boot is exactly when the SDL frontend puts the loader cart in the
+slot and arms `launcher`. Every Download Play run in this document was
+headless, and the headless frontend has no picker at all.
+
+**The gate.** `Wifi::mp_active()` (new, public: `is_mp_ || is_mp_client_`),
+latched in the frontend as `mp_ever`. Once this console has been in an MP
+exchange, the next forced white is the child program rather than a card
+launch, and the picker stays down.
+
+Two things make the latch the right instrument rather than a timer:
+
+- It cannot be tested at the white frame itself. The host's Cut Off arrives
+  as a deauth, which clears both MP flags (the `0x00C0` path in `Wifi`)
+  before the child is verified and booted -- so by the time the fade lands
+  there is no live session left to see.
+- It needs no expiry, because **there is no way back from PictoChat or
+  Download Play to the DS menu on hardware**: the player powers the console
+  down. So "has associated at all" cannot produce a false positive against a
+  later card launch within the same firmware run.
+
+It is cleared on the firmware-reboot path (`nds.power_off` ->
+`nds.reset()`), the one way the DS menu returns with the picker still armed.
+The suppression is latched on `launch_latched` like the launch itself, since
+the child's white holds indefinitely.
+
+**Status:** builds clean, 21/21 tests pass. Not yet confirmed by a
+two-instance SDL run -- that needs a scripted walk of the firmware menu into
+Download Play against a Mario Kart host, which nothing here automates yet.
+The real dumps for it are in `dsperate-research/binary/real-bios/`.
