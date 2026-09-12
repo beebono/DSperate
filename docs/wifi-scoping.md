@@ -1073,3 +1073,63 @@ no session behind it and nothing on screen says the join failed. And
 away): the restrictions stay until the player switches the row off, which now
 at least they can do without quitting. `wifi.dns` is still marked restart --
 accurate, though toggling the row off and on applies it too.
+
+### A guest looks again when the game goes on air (2026-09-12)
+
+A guest that heard nobody used to give up, and said so only on stderr, which
+a handheld has no way to show. It now gets one more go, and the second one is
+timed where it actually has a chance: at startup the player has not reached
+the game's multiplayer menu yet and neither has the person they are trading
+with, whereas a game putting a frame on the air means they just walked into
+the Union Room -- which is about when the other console does too.
+
+**The signal is `Wifi::tx_frames()`, not the radio having power.** That was the
+first attempt and it was wrong: `on_` goes true during the *firmware's* own
+boot-time Wi-Fi init, so the scan ran while the console was still starting and
+the notice was on screen before the player had gone anywhere. (It also made a
+mess of testing it: the toast I first saw inside PictoChat was the boot one
+still up.) `tx_frames()` counts frames past the channel check in
+`tx_send_frame`, so it means a channel was tuned and something was actually
+sent. Diagnostic only: nothing in the machine reads it and it is not in the
+save state.
+
+The scan is **spread across frames**, not blocked like `start_auto`: it now
+runs while a game is running, and stopping the machine for two and a half
+seconds mid-Union-Room would break the audio and, in a session, be the desync.
+`LanMp` grew `scan_step()` (one poll, no session) and `scan_join()` --
+`start_auto`'s second half without the loop -- and both share `first_with_room`
+with it, so there is one copy of "the first session heard with a free slot".
+
+Once only, and only for a guest: auto hosts when it hears nothing, so it has
+nothing to retry. A player who wants another go switches the row off and back
+to GUEST, which arms it again.
+
+### The toast is the frontend's, not the achievements feature's
+
+`draw_toast` was always generic (header, title, detail, points) but everything
+that drove it -- the queue, the clock, the draw calls -- sat inside
+`#if DSPERATE_CHEEVOS`, so a build without RetroAchievements had no way to put
+a notice on screen. The queue and `toast_step` moved out; only
+`cheevos_show`, which builds achievement toasts, stayed in. `toast_step` now
+runs every frame rather than inside `if (cheevos_on)`.
+
+Keep each line to about **24 characters**: `toast_box` caps the panel at two
+thirds of the DS screen and truncates past that. "NOTHING IS HOSTING ON THIS
+NETWORK" came out as "NOTHING IS HOSTING ON TH...".
+
+**Also fixed, and pre-existing:** `DSPERATE_CHEEVOS=OFF` with
+`DSPERATE_NET=ON` did not compile. The `#if DSPERATE_NET` block -- both the
+includes and `lan`/`slirp` themselves -- was nested inside the cheevos guard,
+so it preprocessed away while the frame loop still used it. Networking is not
+part of the achievements feature; the two guards are now siblings. Confirmed
+against `3cbdded` (before this work) that it was already broken, and all four
+combinations build now.
+
+Verified on the dev box, firmware boot into PictoChat with `net.mode = guest`
+and injected clicks: the startup scan fails at t=2.9 s and nothing appears;
+PictoChat goes on air and the second scan runs at t=15.3 s, twelve seconds
+later, putting LOCAL WIRELESS / NO SESSION FOUND / NOBODY IS HOSTING HERE on
+screen with no line truncated. With a host started late -- after the guest had
+already failed -- the same second scan finds it and joins, and the toast reads
+JOINED A SESSION / DEVBOXHOST'S GAME. sm64 300 frames hash-identical, 22/22
+host, 23/23 A30.

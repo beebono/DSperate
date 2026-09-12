@@ -39,6 +39,18 @@ public:
   // Outside world. Null means nobody is listening.
   void set_transport(MpTransport* mp) { mp_ = mp; }
   void set_net_driver(NetDriver* net) { net_ = net; }
+  // How many frames the radio has actually put on the air: past the channel
+  // check in tx_send_frame, so a real channel was tuned and something was
+  // sent. This is what "the game is looking for someone to talk to" looks
+  // like from outside, and a frontend waiting to scan for a session wants
+  // the first one of these.
+  //
+  // NOT the radio having power (`on_`): the DS firmware powers the Wi-Fi
+  // block during its own boot, long before any game asks for it, so a
+  // frontend keying on that fires while the console is still starting up.
+  // Learned the hard way. Diagnostic only -- it is not in the save state,
+  // and nothing in the machine reads it. docs/wifi-scoping.md.
+  u32 tx_frames() const { return tx_frames_; }
   MpTransport* transport() const { return mp_; }
   // The SSID the emulated access point beacons under. Probe requests that
   // name another SSID are answered with that name, so a firmware configured
@@ -114,6 +126,7 @@ private:
 
   // ---- timer ----
   bool on_ = false;
+  u32  tx_frames_ = 0;         // frames actually transmitted; see tx_frames()
   s32  timer_err_ = 0;
   u64  us_timestamp_ = 0, us_counter_ = 0, us_compare_ = 0;
   s32  us_until_power_on_ = 0;

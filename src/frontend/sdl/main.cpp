@@ -20,12 +20,12 @@
 #endif
 #if DSPERATE_CHEEVOS
 #include "cheevos/cheevos_client.h"
+#include "cheevos/cheevos_hash.h"
+#endif
 #if DSPERATE_NET
 #include "net/lan_mp.h"
 #include "net/slirp_driver.h"
 #include <arpa/inet.h>
-#endif
-#include "cheevos/cheevos_hash.h"
 #endif
 #include "audio.h"
 #include "config.h"
@@ -2359,12 +2359,49 @@ sdl_ready:
     if (p) flush_save(); else { next_frame = SDL_GetPerformanceCounter(); fs_debt_ms = 0; }
     VLOG("%s\n", p ? "paused" : "resumed");
   };
+  // A toast: the framed, four-second notice drawn over the game. Not an
+  // achievements feature, though that was the first thing to need one -- it
+  // is also how local wireless tells the player a scan found nobody, which is
+  // the kind of thing that otherwise only reaches a terminal the handheld
+  // does not have. ds::sdl::draw_toast does the drawing.
+  // The toast on screen, and what is waiting behind it. One at a time and
+  // timed like the slot label, because two unlocks can land on the same frame
+  // and stacking them would cover the game.
+  struct Toast { const char* header = nullptr; std::string title, detail; u32 points = 0; int frames = 0; };
+  std::deque<Toast> toast_queue;
+  Toast toast_now;
+  int toast_left = 0;
+  ds::sdl::Rect toast_last{};          // what the canvas has to take back out
+  constexpr int TOAST_FRAMES = 240;    // four seconds: long enough to read two lines
+  constexpr int TOAST_INFO_FRAMES = 150;
+
+  // Advances the toast clock. Called once per frame from the same place the
+  // other per-frame overlay state is stepped.
+  auto toast_step = [&] {
+    if (toast_left > 0) { --toast_left; return; }
+    if (toast_queue.empty()) return;
+    toast_now = std::move(toast_queue.front());
+    toast_queue.pop_front();
+    toast_left = toast_now.frames;
+  };
+  const auto toast_on = [&] { return toast_left > 0; };
+  auto draw_toast_on = [&](const ds::sdl::Canvas& c) {
+    ds::sdl::draw_toast(c, toast_now.header, toast_now.title.c_str(),
+                        toast_now.detail.empty() ? nullptr : toast_now.detail.c_str(),
+                        toast_now.points);
+  };
+
 #if DSPERATE_CHEEVOS
   // RetroAchievements, Casual mode (docs/retroachievements-scoping.md). Off
   // unless asked for, and every failure here is reported once and then ignored:
   // a device with no libcurl, no network, or no account still plays games.
   ds::cheevos::Client cheevos;
   const bool cheevos_on = cfg.flag("cheevos.enabled", false);
+#endif
+// Networking is not a part of the achievements feature, and used to be nested
+// inside its guard: DSPERATE_CHEEVOS=OFF with DSPERATE_NET=ON would not
+// compile, because `lan` was declared in a block that had been preprocessed
+// away while the frame loop still used it.
 #if DSPERATE_NET
   std::unique_ptr<ds::net::LanMp> lan;
   std::unique_ptr<ds::net::SlirpDriver> slirp;
@@ -2382,6 +2419,8 @@ sdl_ready:
   // knobs, frameskip and the fast-forward toggle are remembered as the player
   // had them and restored here, because they never asked for them off -- the
   // session did, and the session is over. docs/wifi-scoping.md.
+  // Set when a guest heard nobody: see begin_guest_scan below.
+  bool guest_retry_armed = false, radio_was_on = false, scanning = false;
   bool knobs_held = false;
   bool held_cpu_oc = false, held_timing_oc = false, held_fast_load = false;
   int  held_fs_limit = 0;
@@ -2476,8 +2515,13 @@ sdl_ready:
         up = mode == "join" ? lan->start_client(lan_name, lan_join)
                             : lan->start_host(lan_host ? lan_host : lan_name, 16);
       }
-      if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); lan.reset(); }
-      else {
+      if (!up) {
+        std::fprintf(stderr, "lan: %s\n", lan->error().c_str());
+        lan.reset();
+        // A guest heard nobody. Try once more when the game asks for its
+        // radio, which is the better moment (see begin_guest_scan below).
+        if (mode == "guest") guest_retry_armed = true;
+      } else {
         VLOG("lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id());
         nds.io.wifi.set_transport(lan.get());
         net_live = true;
@@ -2496,6 +2540,71 @@ sdl_ready:
       menu_dirty = true;
     }
   };
+  // A guest that heard nobody gets one more go, timed far better than the
+  // first: when the game first puts a frame on the air. At startup the player
+  // has not reached the game's multiplayer menu yet and the other console
+  // probably has not either, whereas a transmitted frame means they just
+  // walked into the Union Room -- which is about when the person they are
+  // trading with does the same. Once only, and only for a guest: auto hosts
+  // when it hears nothing, so it has nothing to retry.
+  //
+  // The signal is Wifi::tx_frames(), NOT the radio having power: the firmware
+  // powers the Wi-Fi block during its own boot, so keying on that fired the
+  // scan while the console was still starting and put the notice on screen
+  // before the player had gone anywhere.
+  //
+  // The scan is spread across frames rather than blocking like start_auto: it
+  // now happens while a game is running, and stopping the machine for two and
+  // a half seconds mid-Union-Room would break the audio and, under a session,
+  // be the desync itself.
+  Uint32 scan_began_ms = 0;
+  constexpr Uint32 kScanMs = 2500;   // as start_auto: a host beacons once a second
+  // Keep each line to about 24 characters: toast_box caps the panel at two
+  // thirds of the DS screen and truncates past it, which on a 256-pixel
+  // screen is roughly that. "NOTHING IS HOSTING ON THIS NETWORK" came out as
+  // "NOTHING IS HOSTING ON TH..." the first time.
+  auto net_toast = [&](const char* title, const char* detail, int frames) {
+    Toast t;
+    t.header = "LOCAL WIRELESS";
+    t.title = title;
+    if (detail) t.detail = detail;
+    t.frames = frames;
+    toast_queue.push_back(std::move(t));
+  };
+  auto begin_guest_scan = [&] {
+    guest_retry_armed = false;
+    if (!lan) lan = std::make_unique<ds::net::LanMp>();
+    if (!lan->ok() || !lan->start_discovery()) {
+      std::fprintf(stderr, "lan: %s\n", lan->error().c_str());
+      lan.reset();
+      net_toast("SCAN FAILED", "THE NETWORK REFUSED IT", TOAST_FRAMES);
+      return;
+    }
+    scanning = true;
+    scan_began_ms = SDL_GetTicks();
+    VLOG("lan: the game is on the air; looking for a session\n");
+    net_toast("LOOKING FOR A SESSION", nullptr, static_cast<int>(kScanMs) * 60 / 1000);
+  };
+  auto finish_guest_scan = [&] {
+    scanning = false;
+    if (!lan) return;
+    if (!lan->scan_join(lan_name)) {
+      std::fprintf(stderr, "lan: %s\n", lan->error().c_str());
+      lan.reset();
+      // The one thing a player cannot find out any other way: a handheld has
+      // no terminal, and until now this only ever reached stderr.
+      net_toast("NO SESSION FOUND", "NOBODY IS HOSTING HERE", TOAST_FRAMES);
+      return;
+    }
+    nds.io.wifi.set_transport(lan.get());
+    net_live = true;
+    take_away_for_session();
+    menu.set_network_session(true);
+    VLOG("lan: joined %s as player %d\n", lan->peer_name().c_str(), lan->my_id());
+    // The name goes on the detail line: a session name is as long as its
+    // host's nickname makes it, and truncation there costs nothing.
+    net_toast("JOINED A SESSION", lan->peer_name().c_str(), TOAST_INFO_FRAMES);
+  };
   {
     // What the flags and net.mode asked for, in the words set_net_mode takes.
     const char* mode = lan_join ? "join" : lan_host ? "host" : netplay ? "auto"
@@ -2506,19 +2615,9 @@ sdl_ready:
   if (lan_host || lan_join || netplay || lan_guest) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
   if (internet) std::fprintf(stderr, "internet: built without DSPERATE_NET\n");
 #endif
+#if DSPERATE_CHEEVOS
   std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
   bool cheevos_set_asked = false;
-
-  // The toast on screen, and what is waiting behind it. One at a time and
-  // timed like the slot label, because two unlocks can land on the same frame
-  // and stacking them would cover the game.
-  struct Toast { const char* header = nullptr; std::string title, detail; u32 points = 0; int frames = 0; };
-  std::deque<Toast> toast_queue;
-  Toast toast_now;
-  int toast_left = 0;
-  ds::sdl::Rect toast_last{};          // what the canvas has to take back out
-  constexpr int TOAST_FRAMES = 240;    // four seconds: long enough to read two lines
-  constexpr int TOAST_INFO_FRAMES = 150;
 
   auto cheevos_show = [&] {
     for (const ds::cheevos::Message& m : cheevos.take_messages()) {
@@ -2553,16 +2652,6 @@ sdl_ready:
       toast_queue.push_back(std::move(t));
     }
   };
-  // Advances the toast clock. Called once per frame from the same place the
-  // other per-frame overlay state is stepped.
-  auto toast_step = [&] {
-    if (toast_left > 0) { --toast_left; return; }
-    if (toast_queue.empty()) return;
-    toast_now = std::move(toast_queue.front());
-    toast_queue.pop_front();
-    toast_left = toast_now.frames;
-  };
-  const auto toast_on = [&] { return toast_left > 0; };
   // What the Achievements pages read. The list is cached rather than rebuilt
   // per frame: rc_client_create_achievement_list allocates, and the menu asks
   // for rows on every idle tick it is drawn on.
@@ -2711,11 +2800,6 @@ sdl_ready:
     g_cheevos_state = &cheevos_state;
   }
 
-  auto draw_toast_on = [&](const ds::sdl::Canvas& c) {
-    ds::sdl::draw_toast(c, toast_now.header, toast_now.title.c_str(),
-                        toast_now.detail.empty() ? nullptr : toast_now.detail.c_str(),
-                        toast_now.points);
-  };
   // The set can only be asked for once signed in, and signing in is
   // asynchronous -- so this watches for the moment rather than trying at boot
   // and reporting "Login required", which would read as a bug rather than as
@@ -3260,6 +3344,18 @@ sdl_ready:
     // The stack's own timers and sockets. ap_recv pumps it too whenever the
     // game is listening, but a game between reads still has TCP to retransmit.
     if (slirp) slirp->process();
+    // The guest's second look, driven across frames rather than blocking.
+    // The edge is what matters: the game switching its radio on is the moment
+    // it is about to go looking for someone, so that is when we look too.
+    {
+      const bool on_air = nds.io.wifi.tx_frames() > 0;
+      if (on_air && !radio_was_on && guest_retry_armed && !scanning) begin_guest_scan();
+      radio_was_on = on_air;
+      if (scanning) {
+        lan->scan_step();
+        if (SDL_GetTicks() - scan_began_ms >= kScanMs) finish_guest_scan();
+      }
+    }
     // DS_WIFI_SLICE=1: spread the frame's emulation across its period in
     // 1 ms slices, ending just before the pacer's deadline, so a peer's CMD
     // is answered within a slice rather than after this frame's sleep. An
@@ -3293,9 +3389,11 @@ sdl_ready:
       cheevos_catch_up();
       cheevos_show();
       cheevos_menu_follow();
-      toast_step();
     }
 #endif
+    // Every frame, cheevos or not: the toast is the frontend's, and local
+    // wireless posts one too.
+    toast_step();
 
     // The console has switched itself off. On a firmware boot that is the
     // firmware leaving its settings pages -- the flash writes that saved them
@@ -3388,7 +3486,6 @@ sdl_ready:
           // player may well be watching it (a race finishing, a turn passing)
           // while they are in here.
           if (menu_over_live) { menu.draw(c); display.note_canvas_draw_all(); }
-#if DSPERATE_CHEEVOS
           // The toast covers more than a label, and nothing repaints the
           // letterbox, so the area it used has to be handed back even on the
           // frame it stops being drawn -- hence the note() outside the test.
@@ -3402,7 +3499,6 @@ sdl_ready:
             note(toast_last);
             if (!toast_on()) toast_last = {};
           }
-#endif
           if (flash_alpha) {
             draw_flash(c, flash_alpha);
             display.note_canvas_draw_all();
@@ -3423,9 +3519,7 @@ sdl_ready:
           if (slot_osd) draw_label(c, slot_text.c_str(), false);
           if (fps_field) draw_label(c, fps_text.c_str(), true);
           if (menu_over_live) menu.draw(c);
-#if DSPERATE_CHEEVOS
           if (toast_on()) draw_toast_on(c);
-#endif
           if (flash_alpha) for (int i = 0; i < 2; ++i) if (target[i].px) draw_flash(tgt_canvas(target[i]), flash_alpha);
         }
         display.present();
@@ -3443,19 +3537,13 @@ sdl_ready:
         // every pixel, and on the overlay that would be a panel-sized upload
         // on each of its frames.
         ds::sdl::Display::CanvasView ocv;
-#if DSPERATE_CHEEVOS
         const bool want_osd = slot_osd || fps_field || toast_on() || menu_over_live;
-#else
-        const bool want_osd = slot_osd || fps_field || menu_over_live;
-#endif
         const bool osd_on_canvas = display.canvas_capable() && want_osd && display.canvas(ocv);
         if (osd_on_canvas) {
           const ds::sdl::Canvas c{ocv.px, ocv.pitch, ocv.w, ocv.h};
           if (slot_osd) draw_label(c, slot_text.c_str(), false);
           if (fps_field) draw_label(c, fps_text.c_str(), true);
-#if DSPERATE_CHEEVOS
           if (toast_on()) draw_toast_on(c);
-#endif
           if (menu_over_live) menu.draw(c);
           display.note_canvas_draw_all();
         }
@@ -3466,9 +3554,7 @@ sdl_ready:
           const ds::sdl::Canvas od = ds_canvas(osd_fb.data());
           if (slot_osd) draw_label(od, slot_text.c_str(), false);
           if (fps_field) draw_label(od, fps_text.c_str(), true);
-#if DSPERATE_CHEEVOS
           if (toast_on()) draw_toast_on(od);
-#endif
           if (menu_over_live) menu.draw(od);
           fb[osd_screen] = osd_fb.data();
         }

@@ -80,6 +80,18 @@ public:
   int my_id() const { return me_.id; }
 
   void process();                          // once per frame
+  // One step of a discovery-only scan: no session, just listening for hosts'
+  // beacons, to be called once a frame between start_discovery() and
+  // end_discovery(). process() does this too, but only inside a session;
+  // this is the scan a guest runs while it has none.
+  void scan_step();
+  // The end of such a scan: take the first session heard that has room and
+  // join it, and end the discovery either way. This is start_auto's second
+  // half without its blocking loop -- a frontend that cannot afford to stop
+  // for two and a half seconds drives start_discovery() / scan_step() itself
+  // across that many frames and then calls this. Guest only: there is no
+  // host fallback here, and error() says why when it returns false.
+  bool scan_join(const std::string& player_name);
   // How long the emulation thread has blocked in the MP host's reply wait
   // (and the client's host-packet wait): the cost local wireless puts on a
   // frame. docs/wifi-scoping.md, pacing.
@@ -104,6 +116,7 @@ public:
 
 private:
   void process_discovery();
+  u32  first_with_room(std::string* name);   // the first session heard with a free slot
   void poll_discovery(u32 tick);          // read every beacon waiting on the socket
   void host_update_player_list();
   void process_host_event(_ENetEvent& ev);

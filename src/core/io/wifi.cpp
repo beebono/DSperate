@@ -374,6 +374,7 @@ void Wifi::tx_send_frame(const TxSlot& slot, int num) {
   if (noseqno == 2) st16(&tx_buffer_[0xC], ld16(&tx_buffer_[0xC]) | 0x0800);
   if (cur_channel_ == 0) return;
   tx_buffer_[9] = static_cast<u8>(cur_channel_);
+  ++tx_frames_;
   WIFI_LOG("TX slot %d: FC:%04X len=%d ch=%d\n", num, ld16(&tx_buffer_[0xC]), len, cur_channel_);
 
   switch (num) {

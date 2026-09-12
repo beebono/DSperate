@@ -151,10 +151,7 @@ LanMp::Role LanMp::start_auto(const std::string& player_name, int scan_ms, int m
   u32 found = 0; std::string found_name;
   while (static_cast<int>(ms_now() - start) < scan_ms) {
     poll_discovery(ms_now());
-    {
-      std::lock_guard<std::mutex> l(sessions_mutex_);
-      for (const auto& [ip, s] : sessions_) if (s.num_players < s.max_players) { found = ip; found_name = s.name; break; }
-    }
+    found = first_with_room(&found_name);
     if (found) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
@@ -443,6 +440,31 @@ void LanMp::process_lan(int type) {
       time_last = t;
     }
   }
+}
+
+u32 LanMp::first_with_room(std::string* name) {
+  std::lock_guard<std::mutex> l(sessions_mutex_);
+  for (const auto& [ip, s] : sessions_)
+    if (s.num_players < s.max_players) { if (name) *name = s.name; return ip; }
+  return 0;
+}
+
+bool LanMp::scan_join(const std::string& player_name) {
+  std::string found_name;
+  const u32 found = first_with_room(&found_name);
+  end_discovery();
+  if (!found) { err_ = "no session heard on the LAN"; return false; }
+  char ip[32]; std::snprintf(ip, sizeof ip, "%u.%u.%u.%u", found >> 24, (found >> 16) & 255, (found >> 8) & 255, found & 255);
+  LAN_LOG("found \"%s\" at %s\n", found_name.c_str(), ip);
+  if (!start_client(player_name, ip)) return false;
+  peer_name_ = found_name;
+  return true;
+}
+
+void LanMp::scan_step() {
+  // process_discovery() rate-limits itself to one poll a second, which is how
+  // often a host beacons, so calling this every frame costs nothing.
+  if (!active_) process_discovery();
 }
 
 void LanMp::process() {
