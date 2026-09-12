@@ -173,7 +173,13 @@ public:
   // can never be chosen is not worth a line.) And the page says MENU rather
   // than PAUSED, because the machine behind it is still running: the frontend
   // keeps emulating while this is up, so the session is not dropped.
-  void set_network_session(bool on) { net_session_ = on; }
+  void set_network_session(bool on) {
+    net_session_ = on;
+    // The root page just gained or lost three rows, and the selection may be
+    // sitting past the end of the shorter one.
+    const int n = root_rows();
+    if (row_ >= n) row_ = n - 1;
+  }
   // Null when the build has no RetroAchievements support or it is switched
   // off; the root row then does not appear at all.
   void set_cheevos_host(CheevosHost* host) { cheevos_ = host; }

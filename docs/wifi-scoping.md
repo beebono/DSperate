@@ -1016,3 +1016,60 @@ living in the live path), a state hotkey pressed inside the menu answers
 a screenshot shows MENU with only OPTIONS / RESUME / QUIT over a game whose
 pixels are still changing between captures. Control run without `--internet`:
 the menu pauses as before, F5 saves, F9 fast-forwards.
+
+### Sessions start and stop mid-run (2026-09-12)
+
+NETWORK FEATURES is a live row now, not a restart. The case that earns it is
+Pokemon: play normally, put the radio up for a trade or two, save, take it
+down, carry on playing. That works because the Union Room hands the game back
+to itself afterwards -- unlike PictoChat and Download Play, which have no way
+back on hardware either, so nothing was lost by making those restart-only
+before.
+
+**The MAC is what unlocked it.** It used to be randomized into the firmware
+image only for a run that had asked for a session, which is why the row had to
+be restart-only: starting one later would walk into the shared-MAC trap (two
+instances off one dump, the fault that made PictoChat drop its own messages --
+and the generated firmware's fixed 00:09:BF:11:22:33 collides the same way).
+So it is now settled every run, before boot, and a session can start whenever:
+the game reads the MAC out of firmware when it brings its radio up, which for
+Pokemon is on entering the Union Room, not at boot.
+
+Generated once and kept in the config as `[net] mac_suffix`, rather than
+rolled each boot. The low three bytes are all a DS lets differ, and there is
+one place a DS presents its MAC as identity rather than as an address: the
+`macadr` the NAS login sends beside the user ID held in the game's save.
+Whether Wiimmfi minds that changing between boots is untested -- a stable
+value costs nothing and removes the question. The patch goes straight into the
+firmware image and not through `firmware_written`, so it never reaches the
+sidecar: the player's own firmware settings are untouched.
+
+`set_net_mode` is one function for both ends of it, used for what the flags
+and `net.mode` asked for at startup and for the row later. Down first whatever
+is up -- a guest calls `LanMp::end_session`, so the host drops it from its
+player list rather than waiting out its slot -- then up in the mode named.
+`net_live` follows, and because every restriction reads that one flag, the
+hotkeys, the state rows, the greyed settings and the pause behaviour all
+follow with it and none of them needed a second thought.
+
+**What a session takes away it gives back.** The three speed knobs, frameskip
+and the fast-forward toggle are remembered as the player had them and restored
+when the session ends -- they never asked for them off; the session did, and
+the session is over. A start that fails gives them back too, which falls out
+of the same path.
+
+Verified on the dev box with injected key events, no session at startup:
+NETWORK FEATURES to AUTO hosts, and the three knobs go off with a line each;
+the Emulation page greys six rows live; back to OFF and all three say "is back
+on", read ON again and are usable; the state hotkey saves before the session
+and after it, and is refused in between; the pause menu is a dimmed stop
+before and after, an undimmed overlay over a running game during. sm64 300
+frames still hash-identical, 22/22 host, 23/23 A30.
+
+**Two gaps left, both pre-existing and now more visible.** A guest that hears
+nobody gives up, and says so only on stderr -- so the row can read GUEST with
+no session behind it and nothing on screen says the join failed. And
+`net_live` is still not cleared when a session dies on its own (the host goes
+away): the restrictions stay until the player switches the row off, which now
+at least they can do without quitting. `wifi.dns` is still marked restart --
+accurate, though toggling the row off and on applies it too.

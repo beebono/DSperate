@@ -63,11 +63,22 @@ void test_root_rows_without_states() {
     CHECK(r != Menu::Result::Save && r != Menu::Result::Load);
     m2.input(press(B::BTN_DOWN));
   }
-  // Putting them back restores the original page.
+  // Putting them back restores the original page, on the same menu: a session
+  // that ends mid-run gives the state rows back without a restart.
   m2.set_network_session(false);
+  CHECK(m2.input(press(B::BTN_A)) != Menu::Result::Quit);   // the page grew under it
   Menu m3;
   m3.set_open(true);
   CHECK(m3.input(press(B::BTN_A)) == Menu::Result::Save);
+
+  // Standing on the last row when a session starts: three rows vanish from
+  // under the selection, and it must not be left pointing past the end.
+  Menu m4;
+  m4.set_open(true);
+  for (int i = 0; i < 4; ++i) m4.input(press(B::BTN_DOWN));   // down to QUIT
+  m4.set_network_session(true);
+  const Menu::Result r = m4.input(press(B::BTN_A));
+  CHECK(r == Menu::Result::Quit || r == Menu::Result::Resume);   // a real row, either way
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,7 +1016,9 @@ void test_network_features_row() {
     if (!std::strcmp(t[i].key, "net.mode")) net = &t[i];
   CHECK(net != nullptr);
   CHECK(net->type == ds::sdl::Setting::Type::Pick && net->nchoices == 5);
-  CHECK(net->flags & ds::sdl::FlagRestart);
+  // Live, not restart-only: the radio goes up and comes down mid-run now that
+  // the MAC is settled every run rather than only for a session.
+  CHECK(!(net->flags & (ds::sdl::FlagRestart | ds::sdl::FlagDeferred)));
   CHECK(net->depends == ds::sdl::Dep::Net);
   CHECK(ds::sdl::default_value(*net) == "off");
   // Off heads the list and the three modes follow it in order. A pick wraps,

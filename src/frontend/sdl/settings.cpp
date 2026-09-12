@@ -103,11 +103,13 @@ const Setting kEmuSettings[] = {
           "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"),
   boolean("emu.autoload", "AUTOLOAD ON START", "false", FlagRestart, Dep::None,
           "WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE"),
-  // Restart-only because it has to be: the console's MAC is randomized into
-  // the firmware image before it boots (NDS::set_wifi_mac_suffix), and two
-  // instances sharing a MAC is the fault that made PictoChat drop its own
-  // messages. docs/wifi-scoping.md.
-  pick("net.mode", "NETWORK FEATURES", kNetMode, 5, "off", FlagRestart, Dep::Net,
+  // Live, and it was not always: it used to need a restart because the MAC was
+  // only randomized into the firmware image for a run that asked for a session,
+  // and two instances sharing a dump's MAC is the fault that made PictoChat
+  // drop its own messages. The MAC is settled every run now, so the radio can
+  // go up and come down whenever -- a Pokemon player can trade and then carry
+  // on playing. docs/wifi-scoping.md.
+  pick("net.mode", "NETWORK FEATURES", kNetMode, 5, "off", FlagLive, Dep::Net,
        "LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE"),
   pick("wifi.dns", "DNS", kWifiDns, 2, "wiimmfi", FlagRestart, Dep::NetInternet,
        "WHERE THE GAME LOOKS UP ITS SERVERS. NINTENDO'S ARE GONE; WIIMMFI REPLACES THEM"),

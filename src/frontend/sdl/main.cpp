@@ -54,6 +54,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <thread>
 #include <atomic>
 #include <ctime>
@@ -1155,7 +1156,31 @@ int main(int argc, char** argv) {
   {
     std::string err;
     if (!nds.load_bios(bios9, bios7, fw, user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
-    if (lan_host || lan_join || netplay || lan_guest) { std::random_device rd; nds.set_wifi_mac_suffix(rd() & 0xFFFFFF); }   // a MAC of our own: see NDS::set_wifi_mac_suffix
+    // A MAC of this console's own, always -- not only when a session was asked
+    // for on the command line. Every firmware dump carries the MAC of the
+    // console it came off, and the generated one has a fixed 00:09:BF:11:22:33,
+    // so two DSperate instances sharing either would share a MAC. That is the
+    // fault that made PictoChat drop its own messages, and it is why this was
+    // once done only for a session; doing it every run instead is what lets a
+    // session start at any time, including from the menu mid-game, because the
+    // game reads the MAC out of the firmware when it brings its radio up.
+    //
+    // Generated once and kept in the config, rather than rolled each boot: the
+    // low three bytes are the only part a DS lets differ, and a DS presents its
+    // MAC as identity in one place -- the `macadr` the NAS login sends beside
+    // the user ID held in the game's save. Whether Wiimmfi minds that changing
+    // is untested, and a stable value costs nothing.
+    {
+      u32 suffix = static_cast<u32>(cfg.num("net.mac_suffix", -1));
+      if (suffix > 0xFFFFFF) {
+        std::random_device rd;
+        suffix = rd() & 0xFFFFFF;
+        if (!ds::sdl::Config::store(global_ini, "net.mac_suffix", std::to_string(suffix)))
+          std::fprintf(stderr, "net: could not remember this console's MAC in %s\n", global_ini.c_str());
+        cfg.set("net.mac_suffix", std::to_string(suffix));
+      }
+      nds.set_wifi_mac_suffix(suffix);
+    }
   }
   // A configured path that names no file falls back the same as none: the
   // stock ini on a handheld points at files the user may never add.
@@ -2265,6 +2290,10 @@ sdl_ready:
     if (dual_window) display2.toggle_fullscreen();
     menu_dirty = true;
   };
+  // Starting or stopping a network session, assigned once the transports are
+  // in scope below. Declared here because host.apply needs to call it: the
+  // NETWORK FEATURES row is a live setting now, and this is what it does.
+  std::function<void(const std::string&)> set_net_mode;
   // Push one changed key into the running machine. Anything not named here
   // either needs the display reopened (the picture settings, handled below)
   // or is only read at startup, and its row says so.
@@ -2290,6 +2319,11 @@ sdl_ready:
     }
     if (is("emu.timing_oc")) { nds.gpu3d.set_timing_oc(on); nds.gpu3d.set_geometry_worker(on || cfg.flag("emu.cpu_oc", false)); return; }
     if (is("emu.fast_load")) { nds.io.set_cart_bulk(on); return; }
+    // NETWORK FEATURES. Live, so a player can put the radio up for a trade
+    // and take it down again without quitting: Pokemon's Union Room comes back
+    // to the game afterwards, which is what makes this worth having (there is
+    // no way back from PictoChat or Download Play on hardware either way).
+    if (is("net.mode")) { if (set_net_mode) set_net_mode(v); return; }
     if (is("emu.ff_speed")) { ff_speed = std::atoi(v.c_str()); return; }
     if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
     if (is("emu.autosave")) { autosave = on; return; }
@@ -2333,105 +2367,145 @@ sdl_ready:
   const bool cheevos_on = cfg.flag("cheevos.enabled", false);
 #if DSPERATE_NET
   std::unique_ptr<ds::net::LanMp> lan;
-  if (lan_host || lan_join || netplay || lan_guest) {
-    lan = std::make_unique<ds::net::LanMp>();
-    bool up = lan->ok();
-    if (up && (netplay || lan_guest)) {
-      // The same scan either way; netplay may fall back to hosting when it
-      // hears nobody, a guest may not (LanMp::start_auto).
-      const auto role = lan->start_auto(lan_name, 2500, 16, netplay);
-      up = role != ds::net::LanMp::Role::None;
-      if (up) VLOG("netplay: %s\n", role == ds::net::LanMp::Role::Host ? "no session heard, hosting" : ("joined " + lan->peer_name()).c_str());
-    } else if (up) up = lan_host ? lan->start_host(lan_host, 16) : lan->start_client(lan_name, lan_join);
-    if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); lan.reset(); }
-    else {
-      VLOG("lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id());
-      nds.io.wifi.set_transport(lan.get());
-      net_live = true;
-    }
-  }
-  // The internet through the emulated access point. Nothing to discover and
-  // no peer to wait for: the driver is simply attached, and from there the
-  // game associates with the AP and DHCPs its way onto the network by itself.
   std::unique_ptr<ds::net::SlirpDriver> slirp;
-  if (internet) {
-    // Wiimmfi's resolver, 178.62.43.212: it answers Nintendo's own hostnames
-    // (nas.nintendowifi.net and the rest) with its own servers, which is the
-    // whole mechanism by which a DS still reaches a matchmaking service.
-    // Verified live 2026-09-12. Not a constant the player is stuck with --
-    // wifi.dns takes any address, and this has moved before.
-    constexpr ds::u32 kWiimmfiDns = 0xB23E2BD4;   // 178.62.43.212
-    auto dns = ds::net::SlirpDriver::Dns::Custom;
-    ds::u32 dns_addr = kWiimmfiDns;
-    const std::string where = dns_arg ? dns_arg : cfg.str("wifi.dns", "wiimmfi");
-    if (where == "host") { dns = ds::net::SlirpDriver::Dns::Host; dns_addr = 0; }
-    else if (where != "wiimmfi") {
-      in_addr parsed{};
-      if (inet_pton(AF_INET, where.c_str(), &parsed) == 1) {
-        dns_addr = ntohl(parsed.s_addr);
-      } else {
-        std::fprintf(stderr, "wifi.dns: \"%s\" is not host, wiimmfi or an address; using wiimmfi\n", where.c_str());
-      }
-    }
-    slirp = std::make_unique<ds::net::SlirpDriver>();
-    if (!slirp->start(dns, dns_addr)) {
-      std::fprintf(stderr, "internet: %s\n", slirp->error().c_str());
-      slirp.reset();
-    } else {
-      nds.io.wifi.set_net_driver(slirp.get());
-      net_live = true;
-      VLOG("internet: up, DNS %s\n", where.c_str());
-    }
-  }
-#else
-  if (lan_host || lan_join || netplay || lan_guest) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
-  if (internet) std::fprintf(stderr, "internet: built without DSPERATE_NET\n");
-#endif
-  // Frameskip goes off for a network session. It does not change what the
-  // emulator computes -- every frame is still emulated -- but the adaptive
-  // policy exists to let a machine that is behind catch up by dropping
-  // presents, and under a session "behind" is a thing to be fixed by running
-  // the frame, not by getting through it faster. Ungated on stderr, like the
-  // speed knobs: it overrides something the player named.
-  if (net_live && fs_limit > 0) {
-    std::fprintf(stderr, "net: frameskip is off for this session -- the emulator cannot set its own pace while the network keeps time\n");
-    fs_limit = 0;
-  }
-  // Likewise a fast forward asked for in the config, before any hotkey.
-  if (net_live && ff_toggle) {
-    std::fprintf(stderr, "net: fast forward is off for this session\n");
-    ff_toggle = false;
-  }
-  // And the three inexact speed knobs. Two consoles in a session keep each
-  // other's time -- the guest holds every host frame to its timestamp and has
-  // to answer inside its own slot -- and a server has its own timeouts, so a
-  // knob that changes how long the machine's work appears to take has no
-  // business being on either way. Measured the hard way: a Mario Kart DS
-  // Download Play session from the dev box to the RG DS only held up once
-  // fast_load and cpu_oc were off on the handheld (2026-09-12), and timing_oc
-  // drops the GX FIFO timing outright, so it goes with them.
+  // Starting and stopping a session is one function, used for the mode the
+  // command line and the config asked for at startup and for the menu's
+  // NETWORK FEATURES row later. `mode` is a net.mode value, plus "join" for
+  // --lan-join, which has an address a menu row has nowhere to put.
   //
-  // This runs here, after the transport is up, rather than before the machine
-  // boots: the session is only a fact once something has actually started, and
-  // a --netplay that could not open a socket leaves an ordinary console. It is
-  // safe this late because all three are FlagLive -- host.apply is the same
-  // path the menu uses -- and because no frame has run yet: the knobs are
-  // applied from the config a few hundred lines up and nothing has stepped the
-  // machine since.
+  // It can run at any point in a run because the console's MAC is settled
+  // before it boots, every run (see set_wifi_mac_suffix above): the trap this
+  // used to walk into was two instances sharing one dump's MAC, and that is
+  // now impossible whether or not a session was ever asked for.
   //
-  // Not gated behind DS_VERBOSE: this overrides something the player asked for
-  // by name, on the command line or in their config, and they should be told.
-  if (net_live) {
+  // What a session takes away it gives back on the way out. The three speed
+  // knobs, frameskip and the fast-forward toggle are remembered as the player
+  // had them and restored here, because they never asked for them off -- the
+  // session did, and the session is over. docs/wifi-scoping.md.
+  bool knobs_held = false;
+  bool held_cpu_oc = false, held_timing_oc = false, held_fast_load = false;
+  int  held_fs_limit = 0;
+  bool held_ff_toggle = false;
+  auto take_away_for_session = [&] {
+    if (knobs_held) return;
+    knobs_held = true;
+    held_cpu_oc = cfg.flag("emu.cpu_oc", false);
+    held_timing_oc = cfg.flag("emu.timing_oc", false);
+    held_fast_load = cfg.flag("emu.fast_load", false);
+    held_fs_limit = fs_limit;
+    held_ff_toggle = ff_toggle;
+    if (fs_limit > 0) {
+      std::fprintf(stderr, "net: frameskip is off for this session -- the emulator cannot set its own pace while the network keeps time\n");
+      fs_limit = 0;
+    }
+    if (ff_toggle) {
+      std::fprintf(stderr, "net: fast forward is off for this session\n");
+      ff_toggle = false;
+    }
     for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"})
       if (cfg.flag(k, false)) {
         std::fprintf(stderr, "net: %s is off for this session -- the network keeps time, so the machine cannot fake it\n", k);
         cfg.set(k, "false");       // in memory, not in the player's file
         host.apply(k, "false");    // and into the running machine
       }
+  };
+  auto give_back_after_session = [&] {
+    if (!knobs_held) return;
+    knobs_held = false;
+    fs_limit = held_fs_limit;
+    ff_toggle = held_ff_toggle;
+    const std::pair<const char*, bool> knobs[] = {
+      {"emu.cpu_oc", held_cpu_oc}, {"emu.timing_oc", held_timing_oc}, {"emu.fast_load", held_fast_load}};
+    for (const auto& [k, on] : knobs)
+      if (on) {
+        std::fprintf(stderr, "net: %s is back on -- the session is over\n", k);
+        cfg.set(k, "true");
+        host.apply(k, "true");
+      }
+  };
+  set_net_mode = [&](const std::string& mode) {
+    // Down first, whatever is up. A guest says goodbye (LanMp::end_session
+    // sends the disconnect) rather than just going silent, so the host drops
+    // it from its player list instead of waiting out its slot.
+    if (lan) { lan->end_session(); nds.io.wifi.set_transport(nullptr); lan.reset(); }
+    if (slirp) { nds.io.wifi.set_net_driver(nullptr); slirp->stop(); slirp.reset(); }
+    const bool was_live = net_live;
+    net_live = false;
+
+    if (mode == "internet") {
+      // Wiimmfi's resolver, 178.62.43.212: it answers Nintendo's own hostnames
+      // (nas.nintendowifi.net and the rest) with its own servers, which is the
+      // whole mechanism by which a DS still reaches a matchmaking service.
+      // Verified live 2026-09-12. Not a constant the player is stuck with --
+      // wifi.dns takes any address, and this has moved before.
+      constexpr ds::u32 kWiimmfiDns = 0xB23E2BD4;   // 178.62.43.212
+      auto dns = ds::net::SlirpDriver::Dns::Custom;
+      ds::u32 dns_addr = kWiimmfiDns;
+      const std::string where = dns_arg ? dns_arg : cfg.str("wifi.dns", "wiimmfi");
+      if (where == "host") { dns = ds::net::SlirpDriver::Dns::Host; dns_addr = 0; }
+      else if (where != "wiimmfi") {
+        in_addr parsed{};
+        if (inet_pton(AF_INET, where.c_str(), &parsed) == 1) {
+          dns_addr = ntohl(parsed.s_addr);
+        } else {
+          std::fprintf(stderr, "wifi.dns: \"%s\" is not host, wiimmfi or an address; using wiimmfi\n", where.c_str());
+        }
+      }
+      // The internet through the emulated access point. Nothing to discover
+      // and no peer to wait for: the driver is attached, and from there the
+      // game associates with the AP and DHCPs its way on by itself.
+      slirp = std::make_unique<ds::net::SlirpDriver>();
+      if (!slirp->start(dns, dns_addr)) {
+        std::fprintf(stderr, "internet: %s\n", slirp->error().c_str());
+        slirp.reset();
+      } else {
+        nds.io.wifi.set_net_driver(slirp.get());
+        net_live = true;
+        VLOG("internet: up, DNS %s\n", where.c_str());
+      }
+    } else if (mode == "auto" || mode == "guest" || mode == "host" || mode == "join") {
+      lan = std::make_unique<ds::net::LanMp>();
+      bool up = lan->ok();
+      if (up && (mode == "auto" || mode == "guest")) {
+        // The same scan either way; auto may fall back to hosting when it
+        // hears nobody, a guest may not (LanMp::start_auto).
+        const auto role = lan->start_auto(lan_name, 2500, 16, mode == "auto");
+        up = role != ds::net::LanMp::Role::None;
+        if (up) VLOG("netplay: %s\n", role == ds::net::LanMp::Role::Host ? "no session heard, hosting" : ("joined " + lan->peer_name()).c_str());
+      } else if (up) {
+        up = mode == "join" ? lan->start_client(lan_name, lan_join)
+                            : lan->start_host(lan_host ? lan_host : lan_name, 16);
+      }
+      if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); lan.reset(); }
+      else {
+        VLOG("lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id());
+        nds.io.wifi.set_transport(lan.get());
+        net_live = true;
+      }
+    }
+
+    if (net_live) take_away_for_session();
+    else give_back_after_session();
+    menu.set_network_session(net_live);
+    // The pause menu is a stop with no session and an overlay with one, so a
+    // change while it is open changes what it is. Nothing to do if the menu is
+    // not up: raising it later reads net_live then.
+    if (menu.open() && net_live != was_live) {
+      if (net_live) { set_paused(false); display.set_page(true); }
+      else set_paused(true);
+      menu_dirty = true;
+    }
+  };
+  {
+    // What the flags and net.mode asked for, in the words set_net_mode takes.
+    const char* mode = lan_join ? "join" : lan_host ? "host" : netplay ? "auto"
+                     : lan_guest ? "guest" : internet ? "internet" : "off";
+    if (std::strcmp(mode, "off") != 0) set_net_mode(mode);
   }
-  // The state rows come off the pause menu for a session. Done here, once the
-  // transports have actually started, rather than from the flags.
-  menu.set_network_session(net_live);
+#else
+  if (lan_host || lan_join || netplay || lan_guest) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
+  if (internet) std::fprintf(stderr, "internet: built without DSPERATE_NET\n");
+#endif
   std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
   bool cheevos_set_asked = false;
 
