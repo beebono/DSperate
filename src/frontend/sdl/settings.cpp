@@ -37,7 +37,17 @@ const Choice kMonth[]    = {{"1", "JANUARY"}, {"2", "FEBRUARY"}, {"3", "MARCH"},
 // already made, so a console meant to be the second one cannot quietly become
 // the session everyone joins. The address form stays a command-line flag:
 // a pick row has nowhere to put one, and discovery finds hosts on its own.
-const Choice kNetMode[]  = {{"off", "OFF"}, {"auto", "AUTO"}, {"host", "HOST"}, {"guest", "GUEST"}};
+const Choice kNetMode[]  = {{"off", "OFF"}, {"auto", "AUTO"}, {"host", "HOST"}, {"guest", "GUEST"},
+                            {"internet", "INTERNET"}};
+// Where the game's DNS queries go once it is on the internet. Two values
+// here; the config takes a third form, a plain address, which a pick row has
+// nowhere to put (the same reason the LAN join address stayed a flag).
+//
+// WIIMMFI is the default because it is the only thing a DS can still reach:
+// Nintendo WFC was switched off in 2014, so HOST -- the host's own resolver,
+// which is what a real DS would have used -- resolves the game's servers to
+// nothing. HOST is there for a private server or a local test.
+const Choice kWifiDns[]  = {{"wiimmfi", "WIIMMFI"}, {"host", "HOST"}};
 const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
                             {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
 // A checkbox: the same two values as kOnOff, drawn as a box. Rows that are
@@ -97,8 +107,10 @@ const Setting kEmuSettings[] = {
   // the firmware image before it boots (NDS::set_wifi_mac_suffix), and two
   // instances sharing a MAC is the fault that made PictoChat drop its own
   // messages. docs/wifi-scoping.md.
-  pick("net.mode", "NETWORK FEATURES", kNetMode, 4, "off", FlagRestart, Dep::Net,
-       "LOCAL WIRELESS OVER THIS NETWORK. AUTO JOINS A SESSION, ELSE HOSTS ONE"),
+  pick("net.mode", "NETWORK FEATURES", kNetMode, 5, "off", FlagRestart, Dep::Net,
+       "LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE"),
+  pick("wifi.dns", "DNS", kWifiDns, 2, "wiimmfi", FlagRestart, Dep::NetInternet,
+       "WHERE THE GAME LOOKS UP ITS SERVERS. NINTENDO'S ARE GONE; WIIMMFI REPLACES THEM"),
   end(),
 };
 

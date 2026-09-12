@@ -31,6 +31,8 @@
 #include <thread>
 #if DSPERATE_NET
 #include "net/lan_mp.h"
+#include "net/slirp_driver.h"
+#include <arpa/inet.h>
 #endif
 
 namespace {
@@ -146,6 +148,11 @@ int main(int argc, char** argv) {
   const char* lan_join = nullptr;      // --lan-join ADDR: join the session at ADDR
   const char* lan_name = "DSperate";   // --lan-name NAME: our player name when joining
   bool netplay = false;                // --netplay: join a session heard on the LAN within 2.5 s, else host one
+  // --internet [WHERE]: the emulated access point reaches the real network
+  // through the user-mode stack. WHERE is the DNS: host, wiimmfi (default) or
+  // an address. Exclusive with local wireless, as on the SDL frontend.
+  bool internet = false;
+  const char* dns_arg = nullptr;
   // --tap-after-sync F:x,y[:N[:R]]: as MP host, F frames after a client is
   // synced, touch (x,y) for N frames, R times 60 frames apart (a Download
   // Play host's "Cut Off", which is only there while the guest is listed).
@@ -160,6 +167,8 @@ int main(int argc, char** argv) {
     else if (arg("--lan-join")) { lan_join = argv[++i]; pace = true; }
     else if (arg("--lan-name")) lan_name = argv[++i];
     else if (flag("--netplay")) { netplay = true; pace = true; }
+    else if (flag("--internet")) { internet = true; pace = true; }   // real sockets want real time
+    else if (arg("--dns")) dns_arg = argv[++i];
     else if (arg("--tap-after-sync")) { std::sscanf(argv[++i], "%d:%d,%d:%d:%d", &tas_after, &tas_x, &tas_y, &tas_n, &tas_rep); }
     else if (arg("--lan-players")) lan_players = std::atoi(argv[++i]);
     else if (flag("--pace")) pace = true;
@@ -441,8 +450,26 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id());
     nds.io.wifi.set_transport(lan.get());
   }
+  std::unique_ptr<ds::net::SlirpDriver> slirp;
+  if (internet) {
+    if (lan_host || lan_join || netplay) { std::fprintf(stderr, "net: --internet is not local wireless; pick one\n"); return 1; }
+    auto dns = ds::net::SlirpDriver::Dns::Custom;
+    ds::u32 dns_addr = 0xB23E2BD4;   // 178.62.43.212, Wiimmfi's resolver; see the SDL frontend
+    const std::string where = dns_arg ? dns_arg : "wiimmfi";
+    if (where == "host") { dns = ds::net::SlirpDriver::Dns::Host; dns_addr = 0; }
+    else if (where != "wiimmfi") {
+      in_addr parsed{};
+      if (inet_pton(AF_INET, where.c_str(), &parsed) == 1) dns_addr = ntohl(parsed.s_addr);
+      else { std::fprintf(stderr, "--dns: \"%s\" is not host, wiimmfi or an address\n", where.c_str()); return 1; }
+    }
+    slirp = std::make_unique<ds::net::SlirpDriver>();
+    if (!slirp->start(dns, dns_addr)) { std::fprintf(stderr, "internet: %s\n", slirp->error().c_str()); return 1; }
+    std::fprintf(stderr, "internet: up, DNS %s\n", where.c_str());
+    nds.io.wifi.set_net_driver(slirp.get());
+  }
 #else
   if (lan_host || lan_join || netplay) { std::fprintf(stderr, "lan: built without DSPERATE_NET\n"); return 1; }
+  if (internet) { std::fprintf(stderr, "internet: built without DSPERATE_NET\n"); return 1; }
 #endif
   const auto pace_start = std::chrono::steady_clock::now();
   for (int i = 0; i < frames; ++i) {
@@ -452,6 +479,7 @@ int main(int argc, char** argv) {
     }
 #if DSPERATE_NET
     if (lan) lan->process();
+    if (slirp) slirp->process();
 #endif
     if (reboot_rom && i == reboot_frame) {
       nds.reset();

@@ -53,6 +53,7 @@ enum class Dep : u8 {
   // this: two consoles in a session have to keep the same time as each other,
   // and these change how long the guest thinks its work took.
   NetOff,
+  NetInternet,        // net.mode is internet: the DNS choice means nothing otherwise
 };
 
 struct Setting {

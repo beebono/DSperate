@@ -22,6 +22,8 @@
 #include "cheevos/cheevos_client.h"
 #if DSPERATE_NET
 #include "net/lan_mp.h"
+#include "net/slirp_driver.h"
+#include <arpa/inet.h>
 #endif
 #include "cheevos/cheevos_hash.h"
 #endif
@@ -152,6 +154,10 @@ const char* kUsage =
     "                  two consoles in a session have to keep the same time as each other\n"
     "  --lan-host NAME host a local-wireless session as NAME; --lan-join ADDR joins the one at ADDR;\n"
     "                  --lan-name NAME is our player name (default: the console's nickname)\n"
+    "  --internet      the game reaches the real network through the emulated access point, over a\n"
+    "                  user-mode TCP/IP stack (no privileges, works on wlan0). Not with local wireless\n"
+    "  --dns WHERE     where the game looks up its servers: wiimmfi (the default: Nintendo's own\n"
+    "                  servers were switched off in 2014), host (this machine's resolver), or an address\n"
     "  --load-state F  start from a save state instead of booting the game\n"
     "  --autosave-png F  with emu.autosave, write a PNG of both screens to F beside the auto state\n"
 #if DSPERATE_CHEEVOS
@@ -929,6 +935,8 @@ int main(int argc, char** argv) {
   const char* lan_host = nullptr; const char* lan_join = nullptr; const char* lan_name = "DSperate"; bool netplay = false;
   bool lan_guest = false;             // net.mode = guest: join a session heard on the LAN, never host one
   bool lan_name_set = false;          // --lan-name was given, so the nickname must not override it
+  bool internet = false;              // --internet / net.mode = internet: the emulated AP reaches the real network
+  const char* dns_arg = nullptr;      // --dns: host, wiimmfi, or an address
   long stats_from = 0;   // frames run but left out of the timing statistics
 
   // The game is found before the options are read. A flag whose value is
@@ -976,6 +984,10 @@ int main(int argc, char** argv) {
     else if (arg("--lan-join")) lan_join = argv[++i];
     else if (arg("--lan-name")) { lan_name = argv[++i]; lan_name_set = true; }
     else if (flag("--netplay")) netplay = true;   // join a session heard on the LAN within 2.5 s, else host one
+    // The internet through the emulated access point (docs/wifi-scoping.md).
+    // Exclusive with local wireless: one radio, one use of it per session.
+    else if (flag("--internet")) internet = true;
+    else if (arg("--dns")) dns_arg = argv[++i];
     else if (flag("--clear-cache")) clear_cache = true;
     else if (arg("--record")) record = argv[++i];
     else if (arg("--replay")) replay = argv[++i];
@@ -1123,12 +1135,22 @@ int main(int argc, char** argv) {
   std::string lan_name_str = lan_name;
   if (!lan_name_set && !user.nickname.empty()) lan_name_str = user.nickname;
   lan_name = lan_name_str.c_str();
-  if (!lan_host && !lan_join && !netplay) {
+  if (!lan_host && !lan_join && !netplay && !internet) {
     const std::string mode = cfg.str("net.mode", "off");
     if (mode == "auto") netplay = true;
     else if (mode == "host") lan_host = lan_name;
     else if (mode == "guest") lan_guest = true;
-    else if (mode != "off") std::fprintf(stderr, "net.mode: \"%s\" is not off, auto, host or guest\n", mode.c_str());
+    else if (mode == "internet") internet = true;
+    else if (mode != "off")
+      std::fprintf(stderr, "net.mode: \"%s\" is not off, auto, host, guest or internet\n", mode.c_str());
+  }
+  // One radio, one use of it. The menu cannot ask for both -- NETWORK FEATURES
+  // is a single row -- but the flags can, and a session that tried to be a
+  // local peer and an internet client at once would have the access point
+  // beaconing into a channel the MP transport is also driving.
+  if (internet && (lan_host || lan_join || netplay || lan_guest)) {
+    std::fprintf(stderr, "net: --internet is not local wireless; pick one\n");
+    return 1;
   }
   // Local wireless anywhere means the inexact speed knobs go off, whoever asked
   // for them. Two consoles in a session keep each other's time: the guest holds
@@ -2202,6 +2224,11 @@ sdl_ready:
 #else
         return "THIS BUILD HAS NO NETWORKING";
 #endif
+      case ds::sdl::Dep::NetInternet:
+        // Reads the config, not the session: the row is restart-only, so what
+        // it hangs off is the value being edited above it, not what this run
+        // happens to be doing.
+        return cfg.str("net.mode", "off") == "internet" ? "" : "ONLY WITH NETWORK FEATURES ON INTERNET";
       case ds::sdl::Dep::NetOff:
         return net_on ? "NOT WITH NETWORK FEATURES ON" : "";
       }
@@ -2314,8 +2341,41 @@ sdl_ready:
     if (!up) { std::fprintf(stderr, "lan: %s\n", lan->error().c_str()); lan.reset(); }
     else { VLOG("lan: %s, player %d\n", lan->is_host() ? "hosting" : "joined", lan->my_id()); nds.io.wifi.set_transport(lan.get()); }
   }
+  // The internet through the emulated access point. Nothing to discover and
+  // no peer to wait for: the driver is simply attached, and from there the
+  // game associates with the AP and DHCPs its way onto the network by itself.
+  std::unique_ptr<ds::net::SlirpDriver> slirp;
+  if (internet) {
+    // Wiimmfi's resolver, 178.62.43.212: it answers Nintendo's own hostnames
+    // (nas.nintendowifi.net and the rest) with its own servers, which is the
+    // whole mechanism by which a DS still reaches a matchmaking service.
+    // Verified live 2026-09-12. Not a constant the player is stuck with --
+    // wifi.dns takes any address, and this has moved before.
+    constexpr ds::u32 kWiimmfiDns = 0xB23E2BD4;   // 178.62.43.212
+    auto dns = ds::net::SlirpDriver::Dns::Custom;
+    ds::u32 dns_addr = kWiimmfiDns;
+    const std::string where = dns_arg ? dns_arg : cfg.str("wifi.dns", "wiimmfi");
+    if (where == "host") { dns = ds::net::SlirpDriver::Dns::Host; dns_addr = 0; }
+    else if (where != "wiimmfi") {
+      in_addr parsed{};
+      if (inet_pton(AF_INET, where.c_str(), &parsed) == 1) {
+        dns_addr = ntohl(parsed.s_addr);
+      } else {
+        std::fprintf(stderr, "wifi.dns: \"%s\" is not host, wiimmfi or an address; using wiimmfi\n", where.c_str());
+      }
+    }
+    slirp = std::make_unique<ds::net::SlirpDriver>();
+    if (!slirp->start(dns, dns_addr)) {
+      std::fprintf(stderr, "internet: %s\n", slirp->error().c_str());
+      slirp.reset();
+    } else {
+      nds.io.wifi.set_net_driver(slirp.get());
+      VLOG("internet: up, DNS %s\n", where.c_str());
+    }
+  }
 #else
   if (lan_host || lan_join || netplay || lan_guest) std::fprintf(stderr, "lan: built without DSPERATE_NET\n");
+  if (internet) std::fprintf(stderr, "internet: built without DSPERATE_NET\n");
 #endif
   std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
   bool cheevos_set_asked = false;
@@ -3025,6 +3085,9 @@ sdl_ready:
     if (last_slice_end) nds.gpu3d.note_external_ns(static_cast<u64>((t0 - last_slice_end) / ticks_per_ns));
 #if DSPERATE_NET
     if (lan) lan->process();   // ENet and discovery, once per frame, on this thread
+    // The stack's own timers and sockets. ap_recv pumps it too whenever the
+    // game is listening, but a game between reads still has TCP to retransmit.
+    if (slirp) slirp->process();
     // DS_WIFI_SLICE=1: spread the frame's emulation across its period in
     // 1 ms slices, ending just before the pacer's deadline, so a peer's CMD
     // is answered within a slice rather than after this frame's sleep. An

@@ -112,3 +112,13 @@ if(DSPERATE_CHEEVOS)
   target_link_libraries(test_cheevos_client PRIVATE dsperate_cheevos)
   add_test(NAME cheevos_client COMMAND test_cheevos_client)
 endif()
+
+# The internet driver (docs/wifi-scoping.md, phase 3): the DNS rewrite's
+# checksum arithmetic, and the DS's first conversation with the user-mode
+# stack. Guarded because libslirp is only vendored in with the feature; no
+# traffic leaves the machine.
+if(DSPERATE_NET)
+  add_executable(test_slirp_driver slirp_driver_test.cpp)
+  target_link_libraries(test_slirp_driver PRIVATE dsperate_net)
+  add_test(NAME slirp_driver COMMAND test_slirp_driver)
+endif()

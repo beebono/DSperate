@@ -37,7 +37,52 @@ endforeach()
 # Third-party C: not ours to fix warnings in.
 target_compile_options(dsperate_enet PRIVATE -w)
 
+# slirp/ is vendored too (slirp/README.md), with our own glib shim beside it
+# in slirp/glib -- libslirp's sources #include <glib.h> and that directory is
+# what they find. Upstream builds with meson; this is the same source list.
+set(SLIRP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/slirp)
+add_library(dsperate_slirp STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/arp_table.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/bootp.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/cksum.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/dhcpv6.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/dnssearch.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/if.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/ip6_icmp.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/ip6_input.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/ip6_output.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/ip_icmp.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/ip_input.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/ip_output.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/mbuf.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/misc.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/ncsi.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/ndp_table.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/sbuf.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/slirp.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/socket.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/state.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/stream.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/tcp_input.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/tcp_output.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/tcp_subr.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/tcp_timer.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/tftp.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/udp6.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/udp.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/util.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/version.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/slirp/vmstate.c
+  ${SLIRP_DIR}/glib/glib.c)
+target_include_directories(dsperate_slirp PUBLIC ${SLIRP_DIR} PRIVATE ${SLIRP_DIR}/glib)
+set_target_properties(dsperate_slirp PROPERTIES C_STANDARD 99 C_EXTENSIONS ON)
+# Third-party C: not ours to fix warnings in. Note -w hides nothing the
+# linker needs -- a missing shim symbol still fails the link, which is how
+# this copy is checked (slirp/README.md).
+target_compile_options(dsperate_slirp PRIVATE -w)
+
 add_library(dsperate_net STATIC
-  lan_mp.cpp)
+  lan_mp.cpp
+  slirp_driver.cpp)
 target_include_directories(dsperate_net PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(dsperate_net PUBLIC dsperate_core dsperate_enet)
+target_link_libraries(dsperate_net PUBLIC dsperate_core dsperate_enet dsperate_slirp)

@@ -960,8 +960,10 @@ void test_layout_page_rows() {
 }
 
 // Local wireless is one row on the Emulation page rather than a page of its
-// own (docs/wifi-scoping.md, "The menu row as built"): four values, and
+// own (docs/wifi-scoping.md, "The menu row as built"): five values, and
 // restart-only because the console's MAC is randomized before it boots.
+// INTERNET joined it in phase 3, which is what makes the two exclusive --
+// one row cannot ask for both, and the radio only has one use at a time.
 void test_network_features_row() {
   FakeHost h;
   const ds::sdl::Setting* t = ds::sdl::kEmuSettings;
@@ -969,7 +971,7 @@ void test_network_features_row() {
   for (int i = 0; i < ds::sdl::settings_count(t); ++i)
     if (!std::strcmp(t[i].key, "net.mode")) net = &t[i];
   CHECK(net != nullptr);
-  CHECK(net->type == ds::sdl::Setting::Type::Pick && net->nchoices == 4);
+  CHECK(net->type == ds::sdl::Setting::Type::Pick && net->nchoices == 5);
   CHECK(net->flags & ds::sdl::FlagRestart);
   CHECK(net->depends == ds::sdl::Dep::Net);
   CHECK(ds::sdl::default_value(*net) == "off");
@@ -978,9 +980,31 @@ void test_network_features_row() {
   CHECK(ds::sdl::step_value(*net, "off", +1, h) == "auto");
   CHECK(ds::sdl::step_value(*net, "auto", +1, h) == "host");
   CHECK(ds::sdl::step_value(*net, "host", +1, h) == "guest");
-  CHECK(ds::sdl::step_value(*net, "guest", +1, h) == "off");
-  CHECK(ds::sdl::step_value(*net, "off", -1, h) == "guest");
+  CHECK(ds::sdl::step_value(*net, "guest", +1, h) == "internet");
+  CHECK(ds::sdl::step_value(*net, "internet", +1, h) == "off");
+  CHECK(ds::sdl::step_value(*net, "off", -1, h) == "internet");
   CHECK(ds::sdl::display_value(*net, "guest") == "GUEST");
+  CHECK(ds::sdl::display_value(*net, "internet") == "INTERNET");
+
+  // The DNS row hangs off INTERNET, and only off it: a value that means
+  // nothing for local wireless must not be presented as if it did.
+  const ds::sdl::Setting* dns = nullptr;
+  for (int i = 0; i < ds::sdl::settings_count(t); ++i)
+    if (!std::strcmp(t[i].key, "wifi.dns")) dns = &t[i];
+  CHECK(dns != nullptr);
+  CHECK(dns->type == ds::sdl::Setting::Type::Pick && dns->nchoices == 2);
+  CHECK(dns->depends == ds::sdl::Dep::NetInternet);
+  CHECK(dns->flags & ds::sdl::FlagRestart);
+  // Wiimmfi by default: Nintendo's own servers are gone, so the host's
+  // resolver -- what a real DS used -- reaches nothing.
+  CHECK(ds::sdl::default_value(*dns) == "wiimmfi");
+  CHECK(ds::sdl::step_value(*dns, "wiimmfi", +1, h) == "host");
+  CHECK(ds::sdl::step_value(*dns, "host", +1, h) == "wiimmfi");
+  CHECK(ds::sdl::display_value(*dns, "wiimmfi") == "WIIMMFI");
+  // The DNS row is NOT one of the rows local wireless greys out, and the
+  // speed knobs are not gated on internet: an internet session has no peer
+  // whose clock it must match.
+  CHECK(dns->depends != ds::sdl::Dep::NetOff);
   // The three inexact speed knobs hang off local wireless being off: two
   // consoles in a session have to keep the same time as each other.
   int gated = 0;

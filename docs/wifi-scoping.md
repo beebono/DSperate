@@ -807,3 +807,120 @@ Verified: `--netplay --cpu-oc` overrides the flag; `net.mode = host` with all
 three on in the config overrides all three; `net.mode = off` with `cpu_oc =
 true` says nothing and leaves it alone. 21/21 tests, with the gating asserted
 in `test_network_features_row`.
+
+## Phase 3 as built (2026-09-12): internet through the access point
+
+The access point was already there -- `Wifi::ap_send` / `ap_recv` (the
+`WifiAP` port) have done the 802.11 ⇄ Ethernet rewrite since phase 1, both
+guarded by `if (net_)`. Phase 3 is what sits on the other side of that
+pointer: a `NetDriver` over a user-mode TCP/IP stack, plus the DNS policy that
+makes the result reach anything.
+
+### libslirp, vendored
+
+`src/net/slirp/`: libslirp v4.9.4 (BSD-3), `src/*.c` and `src/*.h` from the
+tag unmodified, `libslirp-version.h` substituted by hand, built by
+`src/net/CMakeLists.txt` as `dsperate_slirp` beside `dsperate_enet`.
+Vendored for the same reason ENet is: the static handheld tiers cannot
+dlopen and have no libslirp in their sysroots.
+
+Upstream needs GLib; `slirp/glib/glib.{h,c}` is ours, about 25 functions over
+libc -- allocation, a few string helpers, an append-only `GString`, the log
+and assert macros, a PRNG. `g_shell_parse_argv` and `g_spawn_async_with_fds`
+are stubs that fail: they serve `fork_exec`, which only runs for a `guestfwd`
+with an `-exec` string, and we configure none.
+
+**The trap, and it is worth remembering beyond this shim:** a GLib *function*
+the shim misses is a link error, but a GLib *macro* it misses is not an error
+at all -- it silently changes what libslirp compiles to, and differently per
+word size. `GLIB_SIZEOF_VOID_P` went undefined at first. It selects
+`cksum.c`'s accumulator loop and, in `ip.h`, whether `struct mbuf_ptr` is
+padded to eight bytes so the overlay over the IP header lines up. The dev
+box was fine. The A30 (armv7l) answered ARP and dropped every IP packet,
+which is exactly the shape of a broken `ip_input` checksum: the ARP path does
+not call `cksum` and the IP path does. So: **re-copies of libslirp are not
+proven by a dev-box build. Run `test_slirp_driver` on the A30 toolchain too.**
+
+### The driver
+
+`src/net/slirp_driver.{h,cpp}`, ~300 lines. The DS is handed 10.0.2.15 by
+DHCP, gateway 10.0.2.2, nameserver 10.0.2.3 -- slirp's conventional numbers,
+the same ones melonDS uses -- and the generated firmware's AP slot is already
+configured for DHCP (`firmware_gen.cpp` writes slot 1 as `DSperate-AP` with
+zeroed address fields), so nothing has to be typed in. With a real dump the
+player's own slots apply; the DS's Nintendo WFC setup writes them, and
+firmware writes go to the sidecar, so it is done once.
+
+Everything runs on the emulation thread. `NetDriver::recv` is called from the
+ARM7's timeline, so **the socket poll is always zero-timeout** -- there is no
+bounded wait here at all, unlike the MP host's reply wait. libslirp is not
+thread-safe and this is the only thread that touches it. A dedicated net
+thread with two locked queues is the fallback if a measurement ever asks for
+one; a DS's real throughput did not.
+
+### The DNS policy
+
+`wifi.dns`: `host`, `wiimmfi` (the default) or an address. Wiimmfi is the
+default because it is the only thing a DS can still reach -- Nintendo WFC was
+switched off in 2014, so the host's own resolver, which is what a real DS
+used, resolves the game's servers to nothing. Verified live 2026-09-12:
+`dig @178.62.43.212 nas.nintendowifi.net` answers with Wiimmfi's own address,
+which is the whole mechanism.
+
+It is applied as a **rewrite, not a DHCP option**: every query the DS makes is
+addressed to whatever its AP slot names, and DHCP names 10.0.2.3, so the
+driver rewrites the destination of UDP/53 traffic bound there. That works
+whatever the firmware slot says, which a DHCP option alone would not.
+
+**Both directions matter.** The reply comes back from the real resolver's
+address and its source must be rewritten back to 10.0.2.3, or the DS's socket
+will not match it. Both rewrites patch the IP *and* UDP checksums
+incrementally (RFC 1624) -- the addresses are inside the UDP checksum through
+the pseudo-header, so patching only the IP header would leave every query to
+be dropped by the first host that checks it. A zero UDP checksum means the
+sender computed none and stays zero.
+
+### The row, and exclusivity
+
+`net.mode` gains a fifth value, INTERNET, and a `wifi.dns` row (`DNS`) hangs
+off it with `Dep::NetInternet`. Being one pick row makes internet and local
+wireless **mutually exclusive by construction**, which is the intent: one
+radio, one use of it. The flags can still ask for both, so `--internet` with
+any `--lan-*` / `--netplay` is refused outright.
+
+Two things deliberately **not** inherited from local wireless:
+
+- **The MAC is not randomized.** That exists so two instances off one firmware
+  dump do not share a MAC; on a service that identifies a console, a new MAC
+  every boot would be a new console every boot.
+- **The inexact speed knobs are not forced off.** `Dep::NetOff` and the
+  override both key on the local-wireless flags, and an internet session has
+  no peer whose clock it must match.
+
+### Proof
+
+`tests/slirp_driver_test.cpp`, 9 cases, no traffic leaving the machine:
+
+- the DNS rewrite out and back, each asserting both checksums still verify
+  against an independent full recomputation, plus a **byte-for-byte round
+  trip** (a patch that is merely self-consistent passes the first and fails
+  this one);
+- a zero UDP checksum stays zero; non-DNS, non-UDP, non-IPv4, wrong-port,
+  later-fragment and truncated frames are left alone;
+- ARP for the gateway, answered by slirp;
+- the whole DHCP conversation -- DISCOVER, OFFER, REQUEST, ACK -- asserting
+  the leased address and that the OFFER's option 6 really is 10.0.2.3, which
+  is what the rewrite keys on.
+
+Tiers: 22/22 on the dev box, 23/23 on the A30 (armv7l, glibc 2.23, under
+qemu), and the aarch64 cross-build links. Exactness gate: sm64, 300 frames,
+hash-identical to the pre-change build -- with no net driver attached nothing
+in the machine moved, which is what `if (net_)` promises.
+
+### Not proven here
+
+A real session against Wiimmfi. That needs the rig and a Wiimmfi-patched ROM
+(their server check is a game-side matter, per the scoping above), and it is
+the acceptance test this phase is still waiting on. There is no trace oracle
+for it either: the melonDS diff method retires at the AP boundary, because
+what is on the other side is the real internet and is not deterministic.
