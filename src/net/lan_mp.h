@@ -127,7 +127,7 @@ private:
   u32 host_address_ = 0;
   u16 connected_mask_ = 0;
   int recv_timeout_ms_ = 25;
-  u32 stale_ms_ = 250;               // queued frames older than this are dropped (melonDS: 16); DS_LAN_STALE_MS
+  u32 stale_ms_ = 64;               // queued frames older than this are dropped (melonDS: 16); DS_LAN_STALE_MS
   int last_host_id_ = -1;
   _ENetPeer* last_host_peer_ = nullptr;
   std::queue<_ENetPacket*> rx_;
