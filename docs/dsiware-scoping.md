@@ -774,13 +774,34 @@ NWRAM, which is why this never showed before.
 With that fixed the **ARM9 is byte-identical to melonDS for the entire first
 frame of a NAND boot** (520 439 instructions, no divergence at all).
 
-**Remaining ARM7 divergence**, now a single localised difference at line
-109115: `LDRB r0,[0x0380FFC8]` reads **0x84** on melonDS and **0x00** here.
-That byte is inside the 0x3C00 ARM7 block written at `0x03FFC400` (offset
-0x3BC8), which is zero in both builds -- the ARM7i BIOS chunks only fill up
-to 0x22E4 -- so melonDS has something *writing* it during boot2, which we do
-not. It is not the ARM9 (it cannot see ARM7-only WRAM), so the next place to
-look is DMA/NDMA or the SD host's write path.
+**Remaining ARM7 divergence**, a single localised difference at line 109115:
+`LDRB r0,[0x0380FFC8]` reads **0x84** on melonDS and **0x00** here. Traced
+with new polled watches on both sides (`DS_WATCH7=<arm7 wram offset>` here,
+`TRACE_WATCH7=<offset>` in the harness -- polled per instruction, which sees
+the byte change however it happened, unlike the `DS_WATCH` page trap that
+only catches CPU accesses through the slow path):
+
+- both emulators write **0x84** there at the same time (t=224412), from ARM7
+  code at `037d85b8` -- identical;
+- **we then zero it at t=324866** and melonDS never does.
+
+The zeroing write is a `STMLTIA r1!,{r0,r2-r8}` memset loop at `037d8540`
+sweeping `r1` up to `r12 = 0x03800D18`. As it passes `0x037FFFC8` that
+address **aliases onto `arm7_wram[0xFFC8]`** through the ARM7-WRAM mirror
+below `0x03800000` (WRAMCNT is 0, so the ARM7 has no shared WRAM and
+`0x03000000-0x037FFFFF` mirrors its own 64 KB) -- the same physical byte as
+`0x0380FFC8`. melonDS runs **the same loop with the same bounds** (its last
+iteration has `r1 = r12 = 0x03800d18` at t=327416) and its byte survives.
+
+**This is where it stands: the measurement and the code reading disagree.**
+melonDS's `DSi::ARM7Write8/32` fall through to `NDS::ARM7Write8/32` for
+`0x037FFFC8` (no ARM7 NWRAM window covers it -- A is empty, B is
+`03000000-03040000`, C is `037B8000-037F8000`), and that fall-through does
+`ARM7WRAM[addr & (ARM7WRAMSize-1)]` with `ARM7WRAMSize == 0x10000`, which is
+exactly the alias we implement. By that reading melonDS should zero the byte
+too, and empirically it does not. Resolving *that* contradiction is the next
+step -- most likely something upstream keeps those stores away from the
+mirror, which would also be the real bug on our side.
 
 #### Unlaunch as a boot2 replacement (2026-09-12)
 

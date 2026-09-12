@@ -89,6 +89,24 @@ struct TraceState {
 void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
   auto* t = static_cast<TraceState*>(user);
   const int i = static_cast<int>(cpu.which);
+  // DS_WATCH7=<hex offset into ARM7 WRAM>: polled once per traced instruction,
+  // so a change is attributed to the instruction that follows it. The DS_WATCH
+  // page trap only sees CPU accesses through the slow path; this sees the byte
+  // change however it happened.
+  {
+    static const char* w7 = std::getenv("DS_WATCH7");
+    static const ds::u32 woff = w7 ? (ds::u32)std::strtoul(w7, nullptr, 16) : 0;
+    static int wlast = -1;
+    if (w7) {
+      const int now = t->nds->bus.arm7_wram.get()[woff & 0xFFFF];
+      if (now != wlast) {
+        std::fprintf(stderr, "[watch7] %04x: %02x -> %02x  after %s pc %08x t=%llu wramcnt=%u\n", woff & 0xFFFF,
+                     wlast < 0 ? 0 : wlast, now, i ? "arm7" : "arm9",
+                     cpu.hot.regs[15] - (cpu.thumb() ? 4 : 8), (unsigned long long)t->nds->sched.now(), t->nds->io.wramcnt);
+        wlast = now;
+      }
+    }
+  }
   t->executed[i]++;
   if (t->pc_hist) t->hist[i][cpu.hot.regs[15] - (cpu.thumb() ? 4 : 8)]++;
   if (t->count[i] >= t->max) return;
