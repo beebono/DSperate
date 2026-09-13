@@ -94,8 +94,11 @@ if(DSPERATE_NEON)
   endif()
 endif()
 
-# DSperate's DSi system font is linked in with .incbin (io/dsi_font.cpp).
+# DSperate's DSi system fonts are linked in with .incbin (io/dsi_font.cpp):
+# the normal table, and China's and Korea's.
 set_property(SOURCE io/dsi_font.cpp APPEND PROPERTY COMPILE_DEFINITIONS
-             DSPERATE_DSI_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable.dat")
+             DSPERATE_DSI_FONT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font")
 set_property(SOURCE io/dsi_font.cpp APPEND PROPERTY OBJECT_DEPENDS
-             "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable.dat")
+             "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable.dat"
+             "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable-cn.dat"
+             "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable-kr.dat")

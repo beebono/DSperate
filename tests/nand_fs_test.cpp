@@ -185,23 +185,40 @@ static void test_synthetic_nand() {
 
 // DSperate's own TWLFontTable.dat (io/dsi_font): the table layout, every
 // SHA-1 a title checks, and the signature marker the SWI 22h HLE keys on.
+// The built-in tables, one per console layout: the TWL SDK's
+// OS_LoadSharedFont takes a resource index under the entry count, and 3 or
+// more only while header byte 0x86 is set (read from a Korean title's code).
 static void test_builtin_font() {
-  const std::vector<u8> f = ds::io::builtin_dsi_font();
-  CHECK(f.size() > 0x100000 / 2);
-  if (f.size() < 0x160) return;
+  struct Layout { u8 region; u32 count, first; u8 region_byte; const char* names[3]; };
+  const Layout layouts[] = {
+    {1, 3, 0, 0, {"TBF1_l.NFTR", "TBF1_m.NFTR", "TBF1_s.NFTR"}},
+    {4, 9, 3, 4, {"TBF1-cn_l.NFTR", "TBF1-cn_m.NFTR", "TBF1-cn_s.NFTR"}},
+    {5, 9, 6, 5, {"TBF1-kr_l.NFTR", "TBF1-kr_m.NFTR", "TBF1-kr_s.NFTR"}},
+  };
+  CHECK(ds::io::builtin_dsi_font(0) == ds::io::builtin_dsi_font(1));   // Japan shares the normal table
+  CHECK(ds::io::builtin_dsi_font(2) == ds::io::builtin_dsi_font(1));
+  for (const Layout& l : layouts) {
+  const std::vector<u8> f = ds::io::builtin_dsi_font(l.region);
+  CHECK(f.size() > 0x100000 / 5);
+  if (f.size() < 0xA0 + 9 * 0x40) continue;
   CHECK(ds::io::is_builtin_font_signature(f.data()));
+  CHECK(ds::io::font_table_region(f) == (l.region == 1 ? 0 : l.region));
   std::vector<u8> other(f.begin(), f.begin() + 0x80);
   other[0x10] ^= 1;
   CHECK(!ds::io::is_builtin_font_signature(other.data()));
   const u32 n = f[0x84];
-  CHECK(n == 3);
+  CHECK(n == l.count && f[0x86] == l.region_byte);
   u8 d[20];
   crypto::sha1(&f[0xA0], n * 0x40, d);
   CHECK(std::memcmp(d, &f[0x8C], 20) == 0);
-  const char* names[3] = {"TBF1_l.NFTR", "TBF1_m.NFTR", "TBF1_s.NFTR"};
-  for (u32 i = 0; i < n && i < 3; ++i) {
+  for (u32 i = 0; i < n; ++i) {
     const u8* e = &f[0xA0 + i * 0x40];
-    CHECK(std::strcmp(reinterpret_cast<const char*>(e), names[i]) == 0);
+    const bool used = i >= l.first && i < l.first + 3;
+    bool zero = true;
+    for (u32 k = 0; k < 0x40; ++k) zero = zero && e[k] == 0;
+    CHECK(used != zero);
+    if (!used) continue;
+    CHECK(std::strcmp(reinterpret_cast<const char*>(e), l.names[i - l.first]) == 0);
     u32 csize, cstart, dsize;
     std::memcpy(&csize, e + 0x20, 4); std::memcpy(&cstart, e + 0x24, 4); std::memcpy(&dsize, e + 0x28, 4);
     CHECK(cstart % 16 == 0 && static_cast<u64>(cstart) + csize <= f.size() && dsize > csize);
@@ -212,6 +229,7 @@ static void test_builtin_font() {
     u32 extra;
     std::memcpy(&extra, &f[cstart + csize - 4], 4);
     CHECK(csize + extra == dsize);
+  }
   }
 }
 

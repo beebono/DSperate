@@ -350,8 +350,14 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
     if (!dsi_font_path.empty()) {
       files.font = slurp_file(dsi_font_path);
       if (files.font.size() < 0x100) return fail(dsi_font_path + ": not a TWLFontTable.dat");
+      // A title finds its fonts only in its own region's layout.
+      const int want = region.region == 4 || region.region == 5 ? region.region : 0;
+      const int have = io::font_table_region(files.font);
+      static const char* kLayout[6] = {"normal", "", "", "", "Chinese", "Korean"};
+      if (have >= 0 && have != want)
+        note(dsi_font_path + " is a " + kLayout[have] + " font table; this title needs the " + kLayout[want] + " one and will not find its fonts");
     } else {
-      files.font = io::builtin_dsi_font();
+      files.font = io::builtin_dsi_font(region.region);
     }
     if (io::is_builtin_font_signature(files.font.data())) {
       crypto::sha1(&files.font[0x80], 0x20, dsi_font_digest);
@@ -398,7 +404,8 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
       }
     }
     note("nand: synthesised in memory (" + std::to_string(srl.size() >> 10) + " KB title)" +
-         (dsi_font_hle ? "; DSperate's own system font" : "; system font from " + dsi_font_path));
+         (dsi_font_hle ? std::string("; DSperate's own ") + (io::font_table_region(files.font) == 4 ? "Chinese " : io::font_table_region(files.font) == 5 ? "Korean " : "") + "system font"
+                       : "; system font from " + dsi_font_path));
   }
   // What a reset derives from the NAND and firmware (Io::dsi_reset), redone so
   // this also works on a machine the frontend has already reset.

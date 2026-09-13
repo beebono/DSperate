@@ -2,7 +2,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Build DSperate's own DSi system font, /sys/TWLFontTable.dat.
 
-    make_dsi_font.py NotoSans-Regular.ttf wqy-microhei.ttc out.dat [control-glyphs/]
+    make_dsi_font.py [--region normal|china|korea] NotoSans-Regular.ttf wqy-microhei.ttc out.dat [control-glyphs/]
+
+A console's table depends on its region. Japan, the Americas, Europe and
+Australia ("normal") carry three fonts as resources 0-2. China and Korea
+carry nine resource entries: the first six zero-filled except for their own
+three, at 3-5 (China) or 6-8 (Korea), with byte 0x86 of the header saying
+which (4 or 5). The TWL SDK's OS_LoadSharedFont refuses an index at or past
+the entry count, and one of 3 or more while that byte is zero, so a title
+built for one region cannot use another region's table.
 
 DSiWare that draws text with the console's shared font reads it from the
 NAND. With no NAND dump DSperate supplies this one instead: the same table
@@ -13,7 +21,10 @@ backwards LZ, rasterised from
   - Noto Sans (SIL Open Font License 1.1) for Latin, Greek, Cyrillic and
     general symbols, and
   - WenQuanYi Micro Hei (GPL-3+ with the font exception, or Apache-2.0) for
-    kana, kanji (JIS X 0208) and full-width forms.
+    kana, kanji (JIS X 0208) and full-width forms; for China the characters
+    of GB 2312, for Korea those of KS X 1001 without its hanja (Hangul,
+    jamo, symbols), as the consoles' own Chinese (7848) and Korean (3679)
+    fonts have about that many.
 
 The characters are the ones those scripts need, not a copy of Nintendo's
 table. Of Nintendo's private-use symbols only the control buttons are
@@ -40,6 +51,25 @@ SIZES = [
     ('TBF1_m.NFTR', 12, 16, 13, 13, 14, 12),
     ('TBF1_s.NFTR', 10, 12, 10, 11, 11, 10),
 ]
+
+# The regional tables: resource names, where they sit among the nine
+# entries, the header's region byte, and their cell sizes. GBATEK gives the
+# cells (the small font is 12x13 in China and 12x12 in Korea); the baselines
+# and pixel sizes follow the normal font's proportions, as no regional font
+# was measured.
+REGIONS = {
+    'normal': (0, 3, 0, SIZES),
+    'china': (3, 9, 4, [
+        ('TBF1-cn_l.NFTR', 16, 21, 17, 17, 18, 15),
+        ('TBF1-cn_m.NFTR', 12, 16, 13, 13, 14, 12),
+        ('TBF1-cn_s.NFTR', 12, 13, 11, 13, 11, 12),
+    ]),
+    'korea': (6, 9, 5, [
+        ('TBF1-kr_l.NFTR', 16, 21, 17, 17, 18, 15),
+        ('TBF1-kr_m.NFTR', 12, 16, 13, 13, 14, 12),
+        ('TBF1-kr_s.NFTR', 12, 12, 10, 13, 11, 11),
+    ]),
+}
 
 
 # Private-use code points (as the console's font assigns them) and the image
@@ -88,28 +118,45 @@ def render_control(ink, wide, w, h, base):
     return rows, 1, gw, gw + 2
 
 
-def coverage():
+def double_byte(codec, leads, trails):
+    """The single characters a double-byte code page encodes."""
+    out = set()
+    for lead in leads:
+        for trail in trails:
+            try:
+                ch = bytes([lead, trail]).decode(codec)
+            except UnicodeDecodeError:
+                continue
+            if len(ch) == 1:
+                out.add(ord(ch))
+    return out
+
+
+def coverage(region='normal'):
     cps = set(range(0x20, 0x7F)) | set(range(0xA0, 0x180))
     cps |= set(range(0x384, 0x3CF)) | set(range(0x400, 0x460))            # Greek, Cyrillic
     cps |= {0x192, 0x2C6, 0x2C7, 0x2D8, 0x2D9, 0x2DA, 0x2DB, 0x2DC, 0x2DD}
     cps |= set(range(0x2010, 0x2027)) | {0x2030, 0x2032, 0x2033, 0x2039, 0x203A, 0x203B, 0x2044, 0x20AC}
     cps |= {0x2103, 0x2116, 0x2122} | set(range(0x2160, 0x216C)) | set(range(0x2190, 0x219A)) | {0x21D2, 0x21D4}
     cps |= set(range(0x3000, 0x3040)) | set(range(0x3041, 0x3097)) | set(range(0x309B, 0x30A0)) | set(range(0x30A1, 0x3100))
-    cps |= set(range(0xFF01, 0xFF5F)) | set(range(0xFF61, 0xFFA0)) | set(range(0xFFE0, 0xFFE7))
-    # JIS X 0208: every double-byte Shift-JIS code (symbols, kana, both kanji levels).
-    for lead in list(range(0x81, 0xA0)) + list(range(0xE0, 0xF0)):
-        for trail in list(range(0x40, 0x7F)) + list(range(0x80, 0xFD)):
-            try:
-                ch = bytes([lead, trail]).decode('shift_jis')
-            except UnicodeDecodeError:
-                continue
-            if len(ch) == 1:
-                cps.add(ord(ch))
+    cps |= set(range(0xFF01, 0xFF5F)) | set(range(0xFFE0, 0xFFE7))
+    if region == 'china':
+        # GB 2312: every EUC-CN double-byte code (symbols, pinyin, both hanzi levels).
+        cps |= double_byte('gb2312', range(0xA1, 0xF8), range(0xA1, 0xFF))
+    elif region == 'korea':
+        # KS X 1001 without the hanja: Hangul syllables, jamo and the symbol rows.
+        cps |= {c for c in double_byte('euc_kr', range(0xA1, 0xFF), range(0xA1, 0xFF))
+                if not (0x4E00 <= c <= 0x9FFF or 0xF900 <= c <= 0xFAFF)}
+    else:
+        cps |= set(range(0xFF61, 0xFFA0))   # half-width katakana
+        # JIS X 0208: every double-byte Shift-JIS code (symbols, kana, both kanji levels).
+        cps |= double_byte('shift_jis', list(range(0x81, 0xA0)) + list(range(0xE0, 0xF0)), list(range(0x40, 0x7F)) + list(range(0x80, 0xFD)))
     return sorted(c for c in cps if not 0xE000 <= c <= 0xF8FF)
 
 
 def cjk(c):
-    return 0x2E80 <= c <= 0x9FFF or 0xF900 <= c <= 0xFAFF or 0xFF00 <= c <= 0xFFEF
+    return (0x1100 <= c <= 0x11FF or 0x2E80 <= c <= 0x9FFF or 0xAC00 <= c <= 0xD7A3 or
+            0xF900 <= c <= 0xFAFF or 0xFF00 <= c <= 0xFFEF)
 
 
 def cmap_of(path):
@@ -314,13 +361,14 @@ def check_in_place(packed, raw_len):
     return True
 
 
-def main(noto_path, cjk_path, out_path, glyph_dir=None):
+def main(noto_path, cjk_path, out_path, glyph_dir=None, region='normal'):
+    first, count, region_byte, sizes = REGIONS[region]
     noto_cmap, cjk_cmap = cmap_of(noto_path), cmap_of(cjk_path)
     controls = load_control_glyphs(glyph_dir) if glyph_dir else {}
-    codes = sorted(set(c for c in coverage() if c in noto_cmap or c in cjk_cmap) | set(controls))
-    entries, blobs = [], []
-    offset = 0xA0 + 0x40 * len(SIZES)
-    for name, w, h, base, maxw, latin_px, cjk_px in SIZES:
+    codes = sorted(set(c for c in coverage(region) if c in noto_cmap or c in cjk_cmap) | set(controls))
+    entries, blobs = [bytes(0x40)] * first, []
+    offset = 0xA0 + 0x40 * count
+    for name, w, h, base, maxw, latin_px, cjk_px in sizes:
         noto = ImageFont.truetype(noto_path, latin_px)
         wqy = ImageFont.truetype(cjk_path, cjk_px, index=0)
         # Put a kanji's ink bottom on the baseline row, as the Latin capitals' is.
@@ -339,8 +387,9 @@ def main(noto_path, cjk_path, out_path, glyph_dir=None):
         blobs.append(packed + b'\0' * (-len(packed) % 16))
         print(f'{name}: {len(codes)} characters, {len(nftr)} bytes, {len(packed)} compressed', file=sys.stderr)
         offset += len(blobs[-1])
+    entries += [bytes(0x40)] * (count - len(entries))
     table = b''.join(entries)
-    header = DATE + bytes([len(SIZES), 0, 0, 0, 0, 0, 0, 0]) + hashlib.sha1(table).digest()
+    header = DATE + bytes([count, 0, region_byte, 0, 0, 0, 0, 0]) + hashlib.sha1(table).digest()
     assert len(header) == 0x20
     data = SIGNATURE_MARKER + header + table + b''.join(blobs)
     open(out_path, 'wb').write(data)
@@ -348,6 +397,11 @@ def main(noto_path, cjk_path, out_path, glyph_dir=None):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) not in (4, 5):
+    args = sys.argv[1:]
+    region = 'normal'
+    if len(args) >= 2 and args[0] == '--region':
+        region = args[1]
+        args = args[2:]
+    if region not in REGIONS or len(args) not in (3, 4):
         sys.exit(__doc__)
-    main(*sys.argv[1:])
+    main(*args, region=region)

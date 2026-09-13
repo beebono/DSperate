@@ -176,6 +176,23 @@ data comes from it. Of the console's private-use symbols only the control
 buttons are present (A/B/X/Y, L/R, D-pad, arrows at U+E000-E006 and
 U+E019-E01C), from images drawn for DSperate (`io/dsi_font/control-glyphs`). `--dsi-font` / `paths.dsi_font` substitutes a console's own file.
 
+**China and Korea have tables of their own** (2026-09-13). A Korean title
+(KUWK, WarioWare: Snapped!) asks `OS_LoadSharedFont` for resources 6, 7 and
+8. The SDK refuses an index at or past the table's entry count, and one of
+3 or more while header byte 0x86 is zero, so no title of those regions can
+use the normal three-entry table; Chinese titles ask for 3-5 the same way.
+`TWLFontTable-cn.dat` and `-kr.dat` have the consoles' layout (GBATEK: nine
+entries, six zero-filled, 0x86 = 4 or 5) with GB 2312 or KS X 1001 Hangul
+glyphs from WenQuanYi Micro Hei, and `prepare_dsi_hle` picks the table for
+the region the title runs in. A `--dsi-font` of another layout is reported.
+Checked: KUWK hashes the nine-entry table and passes the signature check;
+the tables decode (hashes, LZ, NFTR) and render Hangul and hanzi; KEVJ
+(Space Invaders Extreme Z, Japan) reaches its title screen with the normal
+table, frames unchanged. Not checked in the emulator: a Korean or Chinese
+title drawing with its font. KUWK waits on the DSP (the TWL SDK's
+`DSP_ReceiveData` polls PSTS for a reply the unmodelled core never sends)
+before it loads a font.
+
 The table's RSA signature cannot be made. Tamper tests on EA Sudoku showed
 it is the only thing checked: flipped font data or resource hashes still
 ran, a flipped signature byte gave a white screen. The SWI trace (headless
@@ -449,7 +466,7 @@ Not built: JIT and idle skip under DSi (SDL forces them off), `.app` streaming (
 title is held in memory), DSP core, NWRAM dual-slot writes, the
 `0x02FE71B0`/SCFG_EXT RAM-size hacks, JIT parity for `code_latch`/
 `irq_skip_once`/`defer_cost` (the JIT falls back to the interpreter for the
-unmapped DSi ARM7 BIOS), cart-present NAND boot, CN/KR font tables.
+unmapped DSi ARM7 BIOS), cart-present NAND boot.
 
 ## 5. Remaining work to 2.0.0, in order
 
@@ -500,8 +517,9 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
      fade (`NDS::dsi_loader_watch`). A DS game picked there leaves the DSi
      machine for a DS (recompiler, interleave and idle skip given back);
      DSiWare stays on it with the hand-off. The DS menu path is unchanged.
-   - Open: China/Korea font tables (nine resources); the launcher's title
-     list at 0x02FFD800; non-USA titles untested; the JIT under DSi.
+   - China/Korea font tables: done (2.2), unverified in a title's drawing
+     (KUWK needs the DSP first). Open: the launcher's title list at
+     0x02FFD800; the JIT under DSi.
 4. **SD card slot** (done, 2026-09-13). USER DECISIONS: a host folder, not
    an image (`--dsi-sd DIR`, `paths.dsi_sd`); the guest's changes are synced
    back including deletions; the card size is automatic only.
@@ -770,7 +788,7 @@ ping-pong once put the ARM7 55 k cycles behind with both traces identical).
 2. **The hand-off HLE is tuned to 15 USA titles from one console.** It
    replaces Unlaunch as the no-NAND fallback and works for all of them, but
    titles that read `/sys` files we do not synthesise (`cert.sys`), use the
-   launcher title list at 0x02FFD800, or need CN/KR fonts will fail
+   launcher title list at 0x02FFD800, or wait on the DSP will fail
    differently. The synthesised NAND reports a title reading `/sys`; watch
    for that first.
 3. **Installer fidelity.** A wrong FAT or save geometry shows up as "no save
