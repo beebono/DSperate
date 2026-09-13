@@ -136,6 +136,80 @@ void trace_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
   for (int r = 0; r < 15; ++r) std::fprintf(t->out[i], " %08x", cpu.hot.regs[r]);
   std::fputc('\n', t->out[i]);
 }
+// DS_ENTRY_SNAP=<dir>:<arm9 pc>:<arm7 pc> (hex): each time a CPU is about to
+// run the instruction at its PC (at most 4 times each), write the machine's
+// state into <dir>/<cpu>_<n>/ -- the raw memory buffers, the serialised device
+// state and a readable summary. Built to capture what the DSi launcher leaves
+// behind for a title at its entry point, to diff against a direct boot of the
+// same title; any run that reaches a known PC can use it.
+struct EntrySnap {
+  std::string dir;
+  ds::u32 pc[2] = {0, 0};
+  int hits[2] = {0, 0};
+  ds::NDS* nds = nullptr;
+};
+
+void write_blob(const std::string& path, const ds::u8* p, size_t n) {
+  if (FILE* f = std::fopen(path.c_str(), "wb")) { std::fwrite(p, 1, n, f); std::fclose(f); }
+}
+
+void entry_snap_cb(ds::CpuContext& cpu, ds::u32, void* user) {
+  auto* s = static_cast<EntrySnap*>(user);
+  const int i = static_cast<int>(cpu.which);
+  if (cpu.hot.regs[15] - (cpu.thumb() ? 4 : 8) != s->pc[i] || s->hits[i] >= 4) return;
+  ds::NDS& n = *s->nds;
+  const std::string d = s->dir + "/" + (i ? "arm7_" : "arm9_") + std::to_string(s->hits[i]++);
+  std::string mk = "mkdir -p '" + d + "'";
+  if (std::system(mk.c_str()) != 0) return;
+  write_blob(d + "/main.bin", n.bus.main_ram.get(), n.bus.main_ram_size());
+  write_blob(d + "/swram.bin", n.bus.shared_wram.get(), ds::mem::Bus::SHARED_WRAM_SIZE);
+  write_blob(d + "/wram7.bin", n.bus.arm7_wram.get(), ds::mem::Bus::ARM7_WRAM_SIZE);
+  write_blob(d + "/itcm.bin", n.bus.itcm.get(), ds::mem::Bus::ITCM_SIZE);
+  write_blob(d + "/dtcm.bin", n.bus.dtcm.get(), ds::mem::Bus::DTCM_SIZE);
+  for (int b = 0; b < 3; ++b) write_blob(d + "/nwram" + char('a' + b) + ".bin", n.bus.nwram[b].get(), ds::mem::Bus::NWRAM_BANK_SIZE);
+  // Every device's serialised state, chunk-tagged as in a save state (the
+  // memory buffers are in the files above, so the bus chunk is left out).
+  { ds::state::Writer w; n.sched.sync_state(w); n.io.sync_state(w); n.arm9->sync_state(w); n.arm7->sync_state(w); n.dma.sync_state(w);
+    write_blob(d + "/devices.bin", w.data().data(), w.data().size()); }
+  { ds::state::Writer w; n.io.aes.sync_state(w); write_blob(d + "/aes.bin", w.data().data(), w.data().size()); }
+  FILE* f = std::fopen((d + "/summary.txt").c_str(), "w");
+  if (!f) return;
+  std::fprintf(f, "frame %llu now %llu\n", (unsigned long long)n.frame_count, (unsigned long long)n.sched.now());
+  for (ds::Cpu w : {ds::Cpu::ARM9, ds::Cpu::ARM7}) {
+    const ds::CpuContext& c = n.cpu(w);
+    const int k = w == ds::Cpu::ARM9 ? 0 : 1;
+    std::fprintf(f, "%s cpsr %08x spsr %08x halted %d r:", k ? "arm7" : "arm9", c.hot.cpsr, c.hot.spsr, c.halted);
+    for (int r = 0; r < 16; ++r) std::fprintf(f, " %08x", c.hot.regs[r]);
+    std::fprintf(f, "\n%s bank_spsr:", k ? "arm7" : "arm9");
+    for (int b = 0; b < 6; ++b) std::fprintf(f, " %08x", c.bank_spsr[b]);
+    std::fprintf(f, "\n%s bank_r13:", k ? "arm7" : "arm9");
+    for (int b = 0; b < 6; ++b) std::fprintf(f, " %08x", c.bank_r13[b]);
+    std::fprintf(f, "\n%s bank_r14:", k ? "arm7" : "arm9");
+    for (int b = 0; b < 6; ++b) std::fprintf(f, " %08x", c.bank_r14[b]);
+    if (!k) {
+      std::fprintf(f, "\narm9 cp15 control %08x dtcm %08x itcm %08x code_cache %08x data_cache %08x data_buf %08x code_perm %08x data_perm %08x pu:",
+                   c.cp15_control, c.cp15_dtcm, c.cp15_itcm, c.pu_code_cacheable, c.pu_data_cacheable, c.pu_data_bufferable, c.pu_code_perm, c.pu_data_perm);
+      for (ds::u32 v : c.pu_region) std::fprintf(f, " %08x", v);
+    }
+    const ds::io::CpuIo& io = n.io.cpu_io[k];
+    std::fprintf(f, "\n%s ime %u ie %08x if %08x ipcsync %04x ipcfifocnt %04x postflg %u\n", k ? "arm7" : "arm9", io.ime, io.ie, io.if_, io.ipc_sync, io.ipc_fifo_cnt, io.postflg);
+  }
+  std::fprintf(f, "arm9 itcm %u dtcm %08x/%08x\n", n.arm9->itcm_size, n.arm9->dtcm_base, n.arm9->dtcm_mask);
+  const auto& x = n.io.dsi;
+  std::fprintf(f, "wramcnt %02x powcnt1 %04x powcnt2 %04x exmemcnt %04x rcnt %04x spicnt %04x keycnt %04x/%04x\n",
+               n.io.wramcnt, n.io.powcnt1, n.io.powcnt2, n.io.exmemcnt, n.io.rcnt, n.io.spicnt, n.io.keycnt[0], n.io.keycnt[1]);
+  std::fprintf(f, "vramcnt"); for (ds::u8 v : n.io.vramcnt) std::fprintf(f, " %02x", v);
+  std::fprintf(f, "\nscfg_bios %04x clock9 %04x clock7 %04x rst %04x ext9 %08x ext7 %08x mc %04x ie2 %08x if2 %08x sndexcnt %04x console_id %016llx\n",
+               x.scfg_bios, x.scfg_clock9, x.scfg_clock7, x.scfg_rst, x.scfg_ext[0], x.scfg_ext[1], x.scfg_mc, x.ie2, x.if2, x.sndexcnt, (unsigned long long)x.console_id);
+  for (int c = 0; c < 2; ++c) { std::fprintf(f, "mbk[%s]", c ? "arm7" : "arm9"); for (ds::u32 v : x.mbk[c]) std::fprintf(f, " %08x", v); std::fputc('\n', f); }
+  std::fprintf(f, "gpio data %02x dir %02x iedgesel %02x ie %02x wifi %04x\n", x.gpio_data, x.gpio_dir, x.gpio_iedgesel, x.gpio_ie, x.gpio_wifi);
+  std::fprintf(f, "bptwl"); for (int r = 0; r < 0x100; ++r) std::fprintf(f, "%s%02x", r % 16 ? " " : "\n  ", x.bptwl_regs[r]);
+  std::fprintf(f, "\npm"); for (ds::u8 v : n.io.spi_pm.regs) std::fprintf(f, " %02x", v);
+  std::fputc('\n', f);
+  std::fclose(f);
+  std::fprintf(stderr, "entry snap: %s at frame %llu\n", d.c_str(), (unsigned long long)n.frame_count);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -164,7 +238,7 @@ int main(int argc, char** argv) {
   bool cpu_oc = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
-  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; ds::u32 dsi_title_lo = 0;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
@@ -211,7 +285,8 @@ int main(int argc, char** argv) {
     else if (arg("--dsi-boot2")) dsi_boot2 = argv[++i];      // an SRL to run instead of the NAND's boot2 (Unlaunch)
     else if (arg("--dsi-nand-boot")) dsi_nand_boot = true;   // boot the NAND (boot2 -> launcher) instead of direct-booting the ROM
     else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];           // the title's signed DSi TMD for --dsi-install (default: <file>.tmd beside it)
-    else if (arg("--dsi-autoload")) dsi_autoload = true;       // with --dsi-install: the launcher starts that title (TLNC) instead of showing the menu
+    else if (arg("--dsi-autoload")) dsi_autoload = true;
+    else if (arg("--dsi-hle-launch")) dsi_hle = true;         // with --direct: start the DSiWare ROM as the DSi launcher hands a title over, not in card mode       // with --dsi-install: the launcher starts that title (TLNC) instead of showing the menu
     else if (arg("--dsi-offline")) dsi_offline = true;        // --dsi-install never downloads the TMD from Nintendo's update CDN
     else if (arg("--dsi-hide-installed")) dsi_hide_installed = true;   // hide the dump's own DSiWare for this session (the dump is untouched)
     else if (arg("--dsi-install")) dsi_install = argv[++i];   // a DSiWare .nds/.cia put into the session's NAND (not the dump) unless its title ID is already installed
@@ -429,6 +504,14 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "cheats: %zu enabled\n", on);
     }
   }
+  if (dsi_hle) {
+    if (!(nds.dsi && rom && direct && !nds.dsi_nand_boot)) { std::fprintf(stderr, "--dsi-hle-launch needs --dsi, --direct and a DSiWare ROM (not a NAND boot)\n"); return 1; }
+    nds.dsi_hle_launch = true;
+    const ds::u32 lo = nds.cart->twl().title_id_lo;
+    if (nds.dsi_nand.valid() && !ds::io::nand_title_content_id(nds.dsi_nand, nds.bus.bios7i.get(), lo, nds.dsi_hle_content_id))
+      std::fprintf(stderr, "dsi: %08x is not installed on the NAND; its image path names content 00000000\n", lo);
+    std::fprintf(stderr, "dsi: launcher hand-off for %08x, content %08x\n", lo, nds.dsi_hle_content_id);
+  }
   if ((rom && direct) || (nds.dsi && nds.dsi_nand_boot)) nds.setup_direct_boot();   // a NAND boot needs no ROM
   if (dsi_autoload) {
     if (!(nds.dsi && nds.dsi_nand_boot && dsi_title_lo)) { std::fprintf(stderr, "--dsi-autoload needs a NAND boot and --dsi-install\n"); return 1; }
@@ -589,6 +672,15 @@ int main(int argc, char** argv) {
 #if DSPERATE_JIT
     if (trace && i == 0) ds::jit::set_trace(true);
 #endif
+    if (i == 0 && !trace) if (const char* e = std::getenv("DS_ENTRY_SNAP")) {
+      static EntrySnap snap;
+      std::string spec = e; const size_t c1 = spec.rfind(':'), c0 = spec.rfind(':', c1 - 1);
+      if (c1 == std::string::npos || c0 == std::string::npos) { std::fprintf(stderr, "DS_ENTRY_SNAP=<dir>:<arm9 pc>:<arm7 pc>\n"); return 1; }
+      snap.dir = spec.substr(0, c0); snap.nds = &nds;
+      snap.pc[0] = static_cast<ds::u32>(std::strtoul(spec.c_str() + c0 + 1, nullptr, 16));
+      snap.pc[1] = static_cast<ds::u32>(std::strtoul(spec.c_str() + c1 + 1, nullptr, 16));
+      nds.trace = entry_snap_cb; nds.trace_user = &snap;
+    }
     if (trace && i == trace_from) { nds.trace = trace_cb; nds.trace_user = &ts; }
     if (trace && trace_end && i == trace_end) { nds.trace = nullptr; nds.trace_user = nullptr; }
     nds.io.wifi.trace_frame(i);   // "# frame N" in the Wi-Fi trace, to align it with --trace

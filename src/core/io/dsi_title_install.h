@@ -60,6 +60,9 @@ std::vector<u8> find_signed_tmd(const std::vector<u8>& srl, const std::vector<u8
 // Whether the NAND (as the session sees it) already has this DSiWare title
 // installed: then it needs no install, and no TMD.
 bool nand_has_title(NandImage& nand, const u8* bios7i, u32 title_lo);
+// The content ID an installed title's .app is named by (its CONTENT/xxxxxxxx.APP),
+// which the launcher hands the title as the path to its own image.
+bool nand_title_content_id(NandImage& nand, const u8* bios7i, u32 title_lo, u32& content_id);
 
 struct TitleInstall {
   enum class Result { Installed, AlreadyInstalled, Failed } result = Result::Failed;

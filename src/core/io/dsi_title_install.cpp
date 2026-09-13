@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -339,6 +340,19 @@ bool nand_has_title(NandImage& nand, const u8* bios7i, u32 title_lo) {
   NandFs fs;
   FatVolume::Entry e;
   return fs.mount(nand, bios7i) && fs.main().lookup("/title/00030004/" + hex8(title_lo) + "/content/title.tmd", e);
+}
+
+bool nand_title_content_id(NandImage& nand, const u8* bios7i, u32 title_lo, u32& content_id) {
+  NandFs fs;
+  FatVolume::Entry dir;
+  if (!fs.mount(nand, bios7i) || !fs.main().lookup("/title/00030004/" + hex8(title_lo) + "/content", dir) || !dir.dir()) return false;
+  for (const FatVolume::Entry& e : fs.main().list(dir)) {
+    if (e.dir() || e.name.size() != 12 || e.name.compare(8, 4, ".APP") != 0) continue;
+    char* end = nullptr;
+    const unsigned long v = std::strtoul(e.name.substr(0, 8).c_str(), &end, 16);
+    if (end && *end == 0) { content_id = static_cast<u32>(v); return true; }
+  }
+  return false;
 }
 
 }  // namespace ds::io

@@ -116,6 +116,14 @@ struct NDS {
   // the boot; in-memory only, never written back.
   void set_wifi_mac_suffix(u32 suffix);
   void setup_direct_boot_dsi();      // the DSi machine's version (nds_dsi.cpp)
+  // DSiWare without the launcher: set before setup_direct_boot, the DSi direct
+  // boot stages what the DSi Launcher leaves a title at its entry point
+  // (captured from real launches, see nds_dsi.cpp) instead of melonDS's card-
+  // mode direct boot. The title then starts as if launched from the menu:
+  // empty cart slot, nand:/ mounted, its own image read back from
+  // nand:/title/.../content/<dsi_hle_content_id>.app.
+  bool dsi_hle_launch = false;
+  u32  dsi_hle_content_id = 0;
   // Boot the DSi from its NAND (boot2 -> launcher) instead of staging a direct
   // boot from the card. Needs a NAND image; false if there is none.
   bool boot_dsi_nand();

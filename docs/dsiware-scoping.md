@@ -15,12 +15,12 @@ The target is DSperate **2.0.0**.
 |---------|-------|-------|
 | DSiWare, launched from a real `nand.bin` | **in** | NAND boot + TLNC auto-launch (section 2.1) |
 | Booting the DSi menu itself | **in** | same NAND boot with no autoload |
-| No-NAND fallback via Unlaunch | **in** | needs SD port 0 and synthesised boot data (2.2) |
+| No-NAND fallback: the launcher hand-off in HLE | **in** | `--dsi-hle-launch` (2.2); needs a synthesised NAND with stub system files; Unlaunch cannot be the fallback |
 | Title install from `.nds`/`.app`/`.cia` | **in** | at most one virtual title per boot, injected into the read-only dump's in-memory session (2.3) |
 | Save export/import (`.pub`/`.prv`/`.bnr`) | **in** | melonDS TitleManager extensions |
 | Microphone (I2S `MICCNT`/`MICDATA`) | **in** | fed by the existing SDL/ALSA capture |
 | DSi Wi-Fi networking | **in** | Atheros module is modelled; attach it to the `wifi-emu` slirp backend |
-| SD card slot (SD host port 0) | **in** | host folder or image; also carries Unlaunch's `BOOTCODE.DSI` |
+| SD card slot (SD host port 0) | **in** | host folder or image |
 | Frontend | **in** | `--dsi-mode` with the usual firmware boot options; ini paths; picker lists DSiWare only in DSi mode; `.cia` input |
 | JIT + idle skip under DSi, on device | **in** | must work; **slower than DS titles is accepted for 2.0.0** |
 | DSP HLE (G.711, graphics) | after 2.0.0 | one feature commit, together with camera images passed from the CLI |
@@ -54,18 +54,16 @@ Why not direct boot:
 - melonDS's DSi direct boot (and ours, which is trace-identical to it) runs
   DSiWare in **card mode** (`0x02FFFC40 = 1`, SDMMC gate closed). Titles never
   touch the NAND, so there are no saves; Plants vs Zombies refuses to run.
-- The reverse-engineered launcher hand-off (`DS_DSI_HANDOFF=1`: indicator 3,
-  `SCFG_EXT7` bit 18, the mount table at header word 0x1D4, 8 bytes at
-  0x0380FFC4) gets the title onto the NAND. Shantae walks the directory and
-  reads and writes `PUBLIC.SAV`, and then both emulators crash (melonDS: ARM9
-  abort at 020D8444; ours: ARM7 on the SDK's `b .` IRQ handler at 037c7164).
-  It is a card/NAND hybrid, not a launch. The earlier "proven end to end"
-  claim was wrong.
-- TLNC on top of a direct boot (`DS_DSI_HANDOFF=2`) is inert: only the boot
-  ROM reads it.
+- The first reverse-engineered launcher hand-off (indicator 3, `SCFG_EXT7`
+  bit 18, the mount table at header word 0x1D4, 8 bytes at 0x0380FFC4) got
+  the title onto the NAND, then wedged the ARM7 on the SDK's `b .` IRQ
+  handler. It was incomplete; the captured hand-off in 2.2 replaces it and
+  runs.
+- TLNC on top of a direct boot is inert: only the boot ROM reads it.
 
 Direct boot stays for two jobs: the phase-1 card-mode exactness gate
-(section 5.1), and as the entry path Unlaunch-style boots build on.
+(section 5.1), and the launcher hand-off HLE (2.2), which is the no-NAND
+fallback.
 
 ### 2.2 Required files, and the Unlaunch fallback
 
@@ -80,23 +78,63 @@ it is opened read-only and the session's writes are held in memory (2.3).
 0x128, HWINFO_N, HWINFO_S) is a **direct-boot** input only; a NAND boot reads
 the console's own copies.
 
-**Unlaunch fallback (no NAND).** `unlaunch.dsi` is a plain DSi SRL (no
-modcrypt, no ARM9i/ARM7i) that replaces boot2 and runs `BOOTCODE.DSI` from
-the SD root. `--dsi-boot2 <srl>` runs it in boot2's place. At `d30ed62` it did
-2 NAND reads and then parked both CPUs in BIOS delay loops. That was before the
-EXMEMCNT/CP15/NWRAM/WRAMCNT reset fixes and every launcher fix since, so
-**it has not been re-tested at `e0b4f79`**. The only melonDS failure on
-record (a uniform screen, and an undefined instruction at 0x00004400) came
-from running it as a cart, which gets boot2's entry state wrong. **melonDS has
-not been tried with Unlaunch as boot2.** Its `!FullBIOSBoot` path loads boot2
-the same way `boot_dsi_nand` does, so getting `trace_melonds` to load the SRL
-in boot2's place (the harness equivalent of `--dsi-boot2`) could make it the
-oracle. Try that before debugging ours blind. To work without a NAND it needs:
-1. SD host port 0 over a FAT image or host folder, carrying `BOOTCODE.DSI`
-   (the same FAT builder as 2.3);
-2. the three things `boot_dsi_nand` reads from the NAND synthesised instead:
-   the boot info (0x220), the MBK mapping (0x380) and the eMMC CID;
-3. whatever Unlaunch reads from `nand:/` itself (unknown until it runs).
+**Unlaunch is not a fallback.** `dsi-binary/unlaunch/unlaunch.dsi` is the
+*Unlaunch DSi Installer* v2.0, a DSi homebrew app (unit code 3, ARM9 at
+0x02200000). It is not a boot2 image. Unlaunch proper is written into the
+launcher's `TITLE.TMD` and gains control while the NAND's own boot2 parses it,
+so it needs a NAND as much as the stock menu does. `--dsi-boot2
+unlaunch.dsi` still makes 2 NAND reads and stalls at `7e1b954`, as expected
+for an app started with boot2's entry state. The installer stays useful as
+an SD-card test title.
+
+**No-NAND fallback: the launcher hand-off in HLE (`--dsi-hle-launch`).**
+Direct boot stages exactly what the DSi Launcher leaves a title at its entry
+point, instead of melonDS's card mode. The reference was captured, not
+guessed. Real launches (NAND boot + TLNC autoload) of KS3E and KMGE were
+snapshotted when each CPU reached its entry PC (headless
+`DS_ENTRY_SNAP=<dir>:<pc9>:<pc7>`: RAM, device state, register summary) and
+diffed against our direct boot. The gap was the same 18 RAM ranges for both
+titles. `setup_direct_boot_dsi` now closes it under `dsi_hle_launch`:
+
+- main RAM: header copies only at 0x02FFE000/0x02FFFE00; no chip ID;
+  indicator 0x02FFFC40 = 3; 0x02FFFDFA = 0x81; two TWLCFG stretches cleared
+  (0x02000407-0B, 0x02000420-2F, which held the last-launched title); the
+  whole Wi-Fi MAC at 0x02FFFCF4 and channel mask 0x1041;
+- ARM7 WRAM: the mount table at header 0x1D4 (nand, nand2, shared1, photo,
+  dataPub) and the title's own image path, whose content ID is looked up on
+  the NAND (`nand_title_content_id`); locked SCFG_EXT7 + `44 F8` at
+  0x0380FFC4;
+- I/O: SCFG_BIOS 0x0501, SCFG_CLK9 0x0084 (**the title starts at 67 MHz**),
+  SCFG_EXT7 `(0x93FBFB06 | header 0x1B8)` locked, SCFG_MC empty slot,
+  SNDEXCNT 0x800F, EXMEMCNT 0xE88C, RCNT 5, GPIO IE 0x40, BPTWL 0x12 = 3 and
+  0x70 = 1, power-management register 0 = 0x0C, RTC power-lost flag clear;
+  no cart slot setup;
+- CPUs: System mode, IRQs masked, the launcher's stacks (ARM9 SYS 0x0E003F80,
+  IRQ 0x0E003F7C, SVC 0x0E003FC0; ARM7 SYS 0x03FFFF80, IRQ 0x0380FF7C, SVC
+  0x0380FFC0). CP15 already matched;
+- modcrypt decrypts only up to each binary's size (the header's area size is
+  rounded, and melonDS turns the bytes past the binary into keystream).
+
+Left out on purpose:
+- launcher leftovers: the loader's jump code at 0x023FEE00 and 0x0380F600,
+  stack bytes at 0x0380FFB0, AES slots 0 and 2 overwritten with junk, NDMA,
+  SD/SDIO host and DS Wi-Fi state;
+- our normalised touch calibration at 0x02FFFCD8;
+- two blocks not yet understood: `"00000009\0E"` at 0x02FFD7B0 and a
+  launcher title-ID list at 0x02FFD800. The list is a subset of the menu's
+  own data (`shared2/launcher/wrap.bin`, the launcher's `private.sav`).
+
+Result with the real NAND attached: Shantae reaches its title screen, reads
+its NitroFS through `nand:/.../00000001.app` and makes the same 7
+`PUBLIC.SAV` writes as the real launch. 1618 of 2000 frames are identical to
+the real launch at its 224-frame offset, and the rest are fades up to 3
+frames apart. Mighty Flip Champs reaches its title screen too. Still to do
+for the real fallback:
+1. a synthesised NAND (the mount-table paths, the title's image and saves);
+2. stub versions of Nintendo-owned system files (font table, `cert.sys`)
+   that titles read, with a compatibility warning;
+3. region fields (HWINFO_S, TWLCFG) generated from the title header's
+   region instead of the dump's `--dsi-boot` blob.
 
 ### 2.3 The virtual NAND: title injection and persistence
 
@@ -277,7 +315,7 @@ identity (CID + console ID + size), the way `bios_id` is checked.
 | Cameras (2 Aptina sensors on I2C, module at 0x04004200) | `e0b4f79`, `io/dsi_camera.*` | black frames |
 | DSP host interface, no core (`PSTS` 0x0100) | `50d4f87`, `io/dsi_dsp.*` | core enable logged once |
 | NAND boot (boot2 shortcut, reset-state fixes: EXMEMCNT 0x6000, CP15 0x2078, WRAMCNT 3, WRAMCNT write re-applies NWRAM) | `d30ed62`..`e0b4f79` | **no-cart boot reaches the DSi Launcher**; top screen at frame 1200 pixel-identical, slice grid identical to the tap |
-| Launcher hand-off experiments (`DS_DSI_HANDOFF=1/2`) | `nds_dsi.cpp` | diagnostic only; off by default |
+| Launcher hand-off HLE (`--dsi-hle-launch`, `DS_ENTRY_SNAP` capture) | `nds_dsi.cpp` | Shantae and KMGE reach their title screens on the real NAND; no synthesised NAND yet |
 
 Not built: mic/I2S, SD port 0, TLNC launch on the NAND boot, title installer,
 save export, frontend wiring, DSP core, NWRAM dual-slot writes, the
@@ -303,21 +341,23 @@ unmapped DSi ARM7 BIOS).
      diagnosed; the RTC or the time read path is the suspect.
 
    Earlier frames differ in about 900 frames between 25 and 5234 (item 9).
-   (13 scrolls launches Mighty Flip Champs instead; it also matches.) Still
-   to do: the TLNC auto-launch on this boot, and the cart-present NAND boot
+   (13 scrolls launches Mighty Flip Champs instead; it also matches.) TLNC
+   auto-launch is done (item 2). Still to do: the cart-present NAND boot
    (last diverged on SPIDATA at frame 37).
-2. **The virtual NAND** (2.3): read-only dump with in-memory writes (done),
-   then the FAT/crypto layer, save and settings extraction, one-title
-   injection, TLNC.
-3. **Mic / I2S**: `MICCNT`/`MICDATA`, 16-entry FIFO, half-full IRQ,
+2. **The virtual NAND** (2.3): done at `7e1b954` -- read-only dump with
+   in-memory writes, the FAT/crypto layer, save and settings persistence,
+   one-title injection (signed TMD, DSiWare quota) and TLNC auto-launch.
+3. **No-NAND fallback** (2.2): the launcher hand-off HLE is in; next the
+   synthesised NAND, stub system files and region fields (2.2 items 1-3).
+4. **SD card slot** (port 0): FAT image or host folder; `FatVolume` already
+   reads and writes the filesystem. The Unlaunch installer is an SD test
+   title.
+5. **Mic / I2S**: `MICCNT`/`MICDATA`, 16-entry FIFO, half-full IRQ,
    `IRQ2_MicExt`, NDMA 0x2C. Oracle: Instrument Tuner (KTUE) uses the mic,
-   though its DSP half waits for after 2.0.0.
-4. **DSi Wi-Fi networking**: route the NWifi module's frames into the
-   `wifi-emu` slirp backend.
-5. **SD card slot** (port 0): FAT image or host folder.
-6. **Unlaunch fallback**: add a boot2-replacement option to `trace_melonds`
-   and see whether melonDS runs Unlaunch that way; re-run `--dsi-boot2` at
-   current HEAD; then 2.2 items 1-3.
+   though its DSP half waits for after 2.0.0. Pulled forward only if the SD
+   or Unlaunch work turns out to need it.
+6. **DSi Wi-Fi networking**: route the NWifi module's frames into the
+   `wifi-emu` slirp backend. Same condition as 5.
 7. **Frontend** (2.4) and **save states with NAND** (2.5).
 8. **JIT and idle skip under DSi**: `test_jit` and a launcher boot under qemu
    for aarch64 and A32; then measure the oracle set on the RG DS. The goal is
