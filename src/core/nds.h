@@ -179,6 +179,11 @@ struct NDS {
   // Halt(4), which resets at the end of ARM7::Execute.
   bool dsi_soft_reset_pending = false;
   void dsi_soft_reset();
+  // The guest started a program on the DSP (PCFG bit 0 released after the
+  // ucode upload), which DSperate does not emulate: the title will wait for
+  // replies that never come, or go without its DSP audio or image work.
+  // Sticky until reset() or a soft reset; the frontends warn once per start.
+  bool dsi_dsp_started = false;
 
   // Firmware settings persistence.
   //

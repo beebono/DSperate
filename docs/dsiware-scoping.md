@@ -38,7 +38,7 @@ The target is DSperate **2.0.0**.
 | Frontend | **in** -- mostly done | CLI, loader list and loader cart on the DSi Menu done; no ini key for the NAND/DSi firmware, no menu row for hiding titles (2.4) |
 | Save states under DSi | **in** -- done | NAND sectors past the state base, the SD card's in-memory part checked against its folder (2.5) |
 | JIT + idle skip under DSi, on device | **in** -- not started | SDL forces the interpreter and lockstep; **slower than DS titles is accepted for 2.0.0** |
-| DSP HLE (G.711, graphics) | after 2.0.0 | one feature commit, together with camera images passed from the CLI |
+| DSP HLE (G.711, graphics) | after 2.0.0 | one feature commit, together with camera images passed from the CLI. USER DECISION (2026-09-13): no boot-only stub for 2.0.0; a title that starts the DSP gets a warning that it will likely not work (`NDS::dsi_dsp_started`, SDL toast) |
 | Camera image source | after 2.0.0 | the cameras exist as hardware; frames are black until then |
 | DSi-enhanced retail carts in DSi mode | after 2.0.0 | they run in DS mode, as today |
 | DSP LLE (Teakra), AAC ucode | undecided | only if a wanted title needs an unlisted ucode |
@@ -453,7 +453,7 @@ touched backing file. Unit tests: `nand_fs_test` (`test_nand_state`),
 | SDIO host + Atheros module (BMI/HTC/WMI, scan, data frames through the NetDriver) | `e0b4f79`, `io/dsi_nwifi.*` | System Settings' connection test passes on Connection 5 |
 | Microphone (MIC_CNT/MIC_DATA, I2S sample clock) and SNDEXCNT's output stage | `io/io.cpp`, `spu/spu.cpp` | System Settings' Mic Test meters a tone; audio sample-identical to melonDS |
 | Cameras (2 Aptina sensors on I2C, module at 0x04004200) | `e0b4f79`, `io/dsi_camera.*` | black frames |
-| DSP host interface, no core (`PSTS` 0x0100) | `50d4f87`, `io/dsi_dsp.*` | core enable logged once |
+| DSP host interface, no core (`PSTS` 0x0100) | `50d4f87`, `io/dsi_dsp.*` | core enable logged once; a DSP program start sets `NDS::dsi_dsp_started` (cleared by reset and soft reset, in the state's DSIH chunk), which SDL shows as a "GAME LIKELY WON'T WORK / DSP IS NOT EMULATED" toast. Seen on KUWK (stalls in `DSP_ReceiveData`) and DSi Sound; not on the launcher, Shantae or KEVJ |
 | NAND boot (boot2 shortcut, reset-state fixes: EXMEMCNT 0x6000, CP15 0x2078, WRAMCNT 3, WRAMCNT write re-applies NWRAM) | `d30ed62`..`e0b4f79` | **no-cart boot reaches the DSi Launcher**; top screen at frame 1200 pixel-identical, slice grid identical to the tap |
 | Virtual NAND: read-only dump + in-memory writes, FAT12/16 + NAND crypto, persistence, one-title install, TLNC auto-launch | `7e1b954`, `io/dsi_nand_fs.*`, `io/dsi_nand_persist.*`, `io/dsi_title_install.*`, `crypto/sha1.*` | KD9E injected and Shantae launch with no input; saves and settings round-trip; dump MD5 unchanged |
 | Launcher hand-off HLE (`--dsi-hle-launch`, `DS_ENTRY_SNAP` capture) | `1bc7eee`, `nds_dsi.cpp` | Shantae 1618/2000 frames identical to the real launch |

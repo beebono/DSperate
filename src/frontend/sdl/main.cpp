@@ -2723,6 +2723,7 @@ sdl_ready:
     toast_queue.push_back(std::move(t));
   };
   sd_note_toast();   // the state autoloaded at startup, before there were toasts
+  bool dsp_warned = false;   // the DSP warning below has been shown for this start
 
   // Advances the toast clock. Called once per frame from the same place the
   // other per-frame overlay state is stepped.
@@ -3844,6 +3845,21 @@ sdl_ready:
     // Every frame, cheevos or not: the toast is the frontend's, and local
     // wireless posts one too.
     toast_step();
+
+    // A title started the DSP, which is not emulated (NDS::dsi_dsp_started):
+    // say so on screen once per start, since it usually stops there.
+    if (nds.dsi_dsp_started != dsp_warned) {
+      dsp_warned = nds.dsi_dsp_started;
+      if (dsp_warned) {
+        std::fprintf(stderr, "dsi: this title uses the DSi's DSP, which DSperate does not emulate; it will likely not work\n");
+        Toast t;
+        t.header = "DSI DSP";
+        t.title = "GAME LIKELY WON'T WORK";   // toast lines hold about 24 characters
+        t.detail = "DSP IS NOT EMULATED";
+        t.frames = TOAST_FRAMES * 2;
+        toast_queue.push_back(std::move(t));
+      }
+    }
 
     // The console has switched itself off. On a firmware boot that is the
     // firmware leaving its settings pages -- the flash writes that saved them

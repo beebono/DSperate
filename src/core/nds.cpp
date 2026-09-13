@@ -68,6 +68,7 @@ void NDS::reset() {
   frame_ready = false;
   power_off = false;
   exit_requested = false;
+  dsi_dsp_started = false;
   dsi_loader_launched = false;
 }
 
@@ -568,7 +569,7 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   if (cart) cart->sync_state(w);   // a firmware boot has no card to snapshot
   if (dsi) {
     w.begin("DSIH");
-    w.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending);
+    w.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending, dsi_dsp_started);
     w.end();
   }
   return true;
@@ -660,7 +661,7 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   if (cart) cart->sync_state(r);
   if (dsi) {
     r.begin("DSIH");
-    r.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending);
+    r.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending, dsi_dsp_started);
     r.end();
   }
   if (!r.ok()) { err = r.error(); return false; }

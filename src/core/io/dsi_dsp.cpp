@@ -128,7 +128,10 @@ void DsiDsp::write16(u32 addr, u16 value) {
   case 0x04: padr_ = value; break;
   case 0x08:
     // melonDS (HLE) starts a ucode -- or Teakra -- when bit 0 falls; no core here.
-    if ((pcfg_ & 1) && !(value & 1)) { static bool warned = false; if (!warned) { warned = true; std::fprintf(stderr, "[dsp] DSP start requested (PCFG bit 0 released) -- no core\n"); } }
+    if ((pcfg_ & 1) && !(value & 1) && !nds_.dsi_dsp_started) {
+      nds_.dsi_dsp_started = true;
+      std::fprintf(stderr, "[dsp] DSP start requested (PCFG bit 0 released) -- no core\n");
+    }
     pcfg_ = value;
     if (pcfg_ & (1u << 4)) pdata_dma_start();
     else { pdata_dma_len_ = 0; rd_fifo_.clear(); }
