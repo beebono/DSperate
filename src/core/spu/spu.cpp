@@ -348,9 +348,8 @@ void Spu::write_sndexcnt(u16 value, u16 mask) {
     // The next sample keeps its nominal slot; only the spacing after it changes.
     if (dbg_) std::fprintf(stderr, "[spu] SNDEXCNT: output %u Hz\n", output_rate());
   }
-  cur = value & 0xE00F;
-  // Bit 14 (mute) and bits 0-3 (the NITRO/DSP ratio) affect the DSP mix,
-  // which does not exist yet: pure NITRO output either way.
+  catch_up();
+  cur = value & 0xE00F;   // bits 15, 14 and 0-3 are applied per sample in mix()
 }
 
 void Spu::push(s16 l, s16 r) {
@@ -410,8 +409,29 @@ void Spu::mix() {
   // SOUNDBIAS centres the 10-bit DAC; commercial games use 0x200, so the bias
   // is applied relative to it and the output stays centred on zero.
   if (apply_bias_) { out_l += (bias_ << 6) - 0x8000; out_r += (bias_ << 6) - 0x8000; }
-  if (muted_) push(0, 0);
-  else push(static_cast<s16>(std::clamp(out_l, -0x8000, 0x7FFF)), static_cast<s16>(std::clamp(out_r, -0x8000, 0x7FFF)));
+  // On the DSi, POWCNT2 bit 0 only silences the NITRO mixer.
+  s16 l = muted_ ? 0 : static_cast<s16>(std::clamp(out_l, -0x8000, 0x7FFF));
+  s16 r = muted_ ? 0 : static_cast<s16>(std::clamp(out_r, -0x8000, 0x7FFF));
+  if (nds_.dsi) {
+    // The I2S interface (melonDS DSi_I2S::SampleClock): nothing reaches the
+    // output or the microphone while SNDEXCNT disables it. Otherwise each
+    // output sample is a mic sample clock, and the output is the NITRO/DSP
+    // mix (the DSP contributes silence until it exists).
+    const u16 sx = nds_.io.dsi.sndexcnt;
+    if (!(sx & 0x8000)) {
+      l = r = 0;
+    } else {
+      nds_.io.dsi_mic_clock(nds_.io.mic_at(mix_at_));
+      if (sx & 0x4000) {
+        l = r = 0;
+      } else {
+        const int fn = std::min(sx & 0xF, 8);
+        l = static_cast<s16>((l * fn) >> 3);
+        r = static_cast<s16>((r * fn) >> 3);
+      }
+    }
+  }
+  push(l, r);
 }
 
 
