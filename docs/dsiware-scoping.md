@@ -713,8 +713,18 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
    - SDL no longer forces the interpreter, lockstep or idle skip off for DSi
      sessions (USER DECISION, 2026-09-13): `emu.jit`, `emu.quantum` and
      `emu.idle_skip` apply as for a DS game; `--interp`/`--lockstep` give the
-     reference. The DSi Menu (a firmware boot) keeps the recompiler's strict
-     timing, as the DS menu does.
+     reference. Strict timing stays the DS menu's only (`f895c44`): a title
+     the DSi Menu launched kept it for the whole session.
+   - **Found on the device, fixed in `f895c44`:** a NAND title launched from
+     the DSi Menu hung on white whenever a card was in the slot (always, in
+     SDL: the loader card). The launcher powers the card down through
+     SCFG_MC and waits for power state 0, and SCFG_MC writes were stored as
+     written. melonDS's power-state machine and power-off timer are ported.
+     Not a recompiler bug: the interpreter hung the same way.
+   - Known state gap (pre-existing, frames unaffected): a state saved after
+     menu taps differs by ~71 bytes of RAM 141 frames after the load
+     (0x02FFFCD8 and a copy at 0x02183480, raw touch-controller samples
+     by their look); not investigated.
 9. **Open fidelity items**: rendered frames differ from melonDS from about
    frame 25 of the NAND boot even while the CPU grid matches (2D
    render/present, unexamined); the grid splits at the Health and Safety tap
