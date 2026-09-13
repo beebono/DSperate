@@ -380,6 +380,7 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
     if (!io::build_synthetic_nand(dsi_nand, bus.bios7i.get(), srl, files, &why)) return fail("synthesising the NAND: " + why);
     dsi_nand_synthetic = true;
     dsi_nand.mark_baseline();
+    dsi_nand.mark_state_base();   // before any saves go in: a state carries its own
     dsi_hle_content_id = 0;
     // DS_NAND_DUMP=<file>: write the synthesised image out with a nocash
     // footer, so tools/dsi_nand.py can read it (map, ls, extract).

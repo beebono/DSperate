@@ -24,7 +24,7 @@ namespace ds::state {
 // A chunk may grow: a reader that reaches the end of a chunk early stops
 // taking fields (`more()` is false), and a writer that appends fields keeps
 // old files loadable as long as the new fields default sensibly.
-constexpr u32 FORMAT_VERSION = 6;   // 2: HEAD carries bios_id + firmware_id; 3: DSi (two more scheduler events, 16 MB main RAM, DSI chunk); 4: the DSi SD/MMC host (one more scheduler event); 5: the SDIO host, its Wi-Fi module and the camera transfer (three more); 6: the DSi microphone FIFO
+constexpr u32 FORMAT_VERSION = 3;   // 2: HEAD carries bios_id + firmware_id (the last released format); 3: the DSi (HEAD says DSi or DS, NAND and SDCD chunks, 16 MB main RAM, the DSi scheduler events, the DSI and DSIH chunks)
 constexpr u32 OLDEST_READABLE_VERSION = 2;   // a DS state from a version-2 file still loads (Reader::version)
 
 class Writer {
@@ -42,7 +42,11 @@ public:
   template <class... T> void fields(const T&... v) { (put(v), ...); }
   void blob(const void* p, size_t n) { const u8* b = static_cast<const u8*>(p); buf_.insert(buf_.end(), b, b + n); }
   // A vector's live contents; the reader resizes to match.
-  template <class T> void vec(const std::vector<T>& v) { put(static_cast<u32>(v.size())); for (const auto& e : v) put(e); }
+  template <class T> void vec(const std::vector<T>& v) {
+    put(static_cast<u32>(v.size()));
+    if constexpr (std::is_arithmetic_v<T>) { if (!v.empty()) blob(v.data(), v.size() * sizeof(T)); }
+    else for (const auto& e : v) put(e);
+  }
 
   std::vector<u8>& data() { return buf_; }
   static constexpr bool reading = false;
@@ -100,7 +104,14 @@ public:
     if (static_cast<size_t>(chunk_end_ - p_) < n) { fail("short read"); std::memset(p, 0, n); return; }
     std::memcpy(p, p_, n); p_ += n;
   }
-  template <class T> void vec(std::vector<T>& v) { u32 n = 0; put(n); v.resize(n); for (auto& e : v) put(e); }
+  template <class T> void vec(std::vector<T>& v) {
+    u32 n = 0; put(n);
+    // A length the chunk cannot hold is a damaged file, not an allocation.
+    if (!ok_ || static_cast<size_t>(chunk_end_ - p_) / sizeof(T) < n) { if (n) fail("short read"); v.clear(); return; }
+    v.resize(n);
+    if constexpr (std::is_arithmetic_v<T>) { if (n) blob(v.data(), n * sizeof(T)); }
+    else for (auto& e : v) put(e);
+  }
 
   // Bytes outside any chunk (the file magic and version).
   void blob_raw(void* p, size_t n) { if (!ok_) return; if (static_cast<size_t>(end_ - p_) < n) { fail("short file"); std::memset(p, 0, n); return; } std::memcpy(p, p_, n); p_ += n; }

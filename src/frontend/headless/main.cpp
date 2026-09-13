@@ -318,19 +318,19 @@ int main(int argc, char** argv) {
     else if (arg("--bios7i")) bios7i = argv[++i];
     else if (arg("--dsi-boot")) dsi_boot = argv[++i];        // tools/dsi_nand.py bootblobs output: the console data a DSi title starts with
     else if (arg("--dsi-boot2")) dsi_boot2 = argv[++i];      // an SRL to run instead of the NAND's boot2 (Unlaunch)
-    else if (arg("--dsi-nand-boot")) dsi_nand_boot = true;   // boot the NAND (boot2 -> launcher) instead of direct-booting the ROM
+    else if (flag("--dsi-nand-boot")) dsi_nand_boot = true;   // boot the NAND (boot2 -> launcher) instead of direct-booting the ROM
     else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];           // the title's signed DSi TMD for --dsi-install (default: <file>.tmd beside it)
-    else if (arg("--dsi-autoload")) dsi_autoload = true;
+    else if (flag("--dsi-autoload")) dsi_autoload = true;
     else if (arg("--dsi-autoload-id")) { dsi_autoload_id = std::strtoull(argv[++i], nullptr, 16); dsi_autoload = true; }   // 16 hex digits, e.g. 00030005484E4B45: TLNC-launch any installed title (system apps too)
-    else if (arg("--dsi-hle-launch")) dsi_hle = true;         // with --direct: start the DSiWare ROM as the DSi launcher hands a title over, not in card mode
+    else if (flag("--dsi-hle-launch")) dsi_hle = true;         // with --direct: start the DSiWare ROM as the DSi launcher hands a title over, not in card mode
     else if (arg("--dsi-font")) dsi_font = argv[++i];         // with --dsi-hle-launch and no --dsi-nand: the console's /sys/TWLFontTable.dat instead of DSperate's own font
     else if (arg("--user-name")) user.nickname = argv[++i];   // generated firmware / DSi settings: the owner's nickname
     else if (arg("--user-language")) user.language = static_cast<ds::u8>(std::atoi(argv[++i]));   // 0 ja 1 en 2 fr 3 de 4 it 5 es 6 zh 7 ko       // with --dsi-install: the launcher starts that title (TLNC) instead of showing the menu
-    else if (arg("--dsi-offline")) dsi_offline = true;        // --dsi-install never downloads the TMD from Nintendo's update CDN
-    else if (arg("--dsi-hide-installed")) dsi_hide_installed = true;   // hide the dump's own DSiWare for this session (the dump is untouched)
+    else if (flag("--dsi-offline")) dsi_offline = true;        // --dsi-install never downloads the TMD from Nintendo's update CDN
+    else if (flag("--dsi-hide-installed")) dsi_hide_installed = true;   // hide the dump's own DSiWare for this session (the dump is untouched)
     else if (arg("--dsi-install")) dsi_install = argv[++i];   // a DSiWare .nds/.cia put into the session's NAND (not the dump) unless its title ID is already installed
     else if (arg("--dsi-persist")) dsi_persist = argv[++i];   // carry DSi saves (<CODE>.pub/.prv/.bnr), the system sidecar (nand.ovr) and photos (photos/) in and out of DIR
-    else if (arg("--dsi-nand-write")) dsi_nand_write = true;   // write the guest's NAND writes into the file (for diffing against melonDS; use a copy). Default: held in memory
+    else if (flag("--dsi-nand-write")) dsi_nand_write = true;   // write the guest's NAND writes into the file (for diffing against melonDS; use a copy). Default: held in memory
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];        // a real nand.bin (nocash footer): the eMMC behind the SD/MMC host, and the console ID
     else if (arg("--dsi-sd")) dsi_sd = argv[++i];            // a host folder as the DSi's SD card; the guest's changes are synced back into it at exit
     else if (flag("--dsi")) dsi_mode = 1;                    // force the DSi machine (default: a DSi-capable header with the DSi BIOS loaded)
@@ -454,6 +454,8 @@ int main(int argc, char** argv) {
         dsi_title_lo = r.title_lo;
       }
     }
+    // A save state carries the NAND's sectors from here on (NandImage::mark_state_base).
+    if (nds.dsi_nand.valid() && !nds.dsi_nand.write_through()) nds.dsi_nand.mark_state_base();
     if (dsi_persist && nds.dsi_nand.valid()) {
       if (dsi_nand_write) { std::fprintf(stderr, "--dsi-persist and --dsi-nand-write do not mix: the written image is the record there\n"); return 1; }
       const std::string d = dsi_persist;

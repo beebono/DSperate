@@ -675,7 +675,7 @@ template <class S> void NWifi::sync_state(S& s) {
            f1_irq_status_, f1_irq_status_cpu_, f1_irq_status_error_, f1_irq_status_counter_,
            window_data_, window_read_addr_, window_write_addr_, rom_id_, chip_id_, host_int_addr_,
            eeprom_, eeprom_ready_, boot_phase_, error_mask_, scan_timer_, beacon_timer_, connection_status_, send_bss_info_);
-  if (s.version >= 6) s.fields(probed_ssid_);   // appended (FORMAT_VERSION 6)
+  s.fields(probed_ssid_);
 }
 template void NWifi::sync_state<state::Writer>(state::Writer&);
 template void NWifi::sync_state<state::Reader>(state::Reader&);

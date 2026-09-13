@@ -19,7 +19,9 @@
 #include <cstdio>
 #include <string>
 #include <memory>
+#include <optional>
 #include <unordered_map>
+#include <vector>
 #include <unordered_set>
 
 #include "core/types.h"
@@ -90,6 +92,27 @@ class NandImage : public BlockStorage {
   bool changed(u64 sector) const { return baseline_ ? changed_.count(sector) != 0 : written_.count(sector) != 0; }
   bool any_changed() const { return baseline_ ? !changed_.empty() : !written_.empty(); }
 
+  // Save states (docs/dsiware-scoping.md 2.5). A state carries the sectors
+  // written since the state base and the base's identity, and loads only onto
+  // the same base. The base is the image as the session built it before any
+  // saves went in: the dump as opened with its titles hidden or one installed,
+  // or the synthesised NAND. mark_state_base() fixes it; unmarked, the base is
+  // the file (or nothing, in memory) and every written sector is carried.
+  // Imported saves come after the base, so a state brings its own back.
+  void mark_state_base();
+  bool state_base_marked() const { return state_base_; }
+  u64 state_identity() const { return state_id_; }   // 0: no image
+  struct StateDelta {
+    u64 identity = 0;
+    std::vector<u64> sectors;   // ascending
+    std::vector<u8> data;       // 512 bytes per sector
+  };
+  StateDelta state_delta() const;
+  // Back to the base, then the delta's sectors over it. The caller has
+  // checked the identity. Counts as a write (`writes`), so what the loaded
+  // sectors hold is carried out again like the guest's own writes.
+  void apply_state_delta(const StateDelta& d);
+
   u64 console_id() const { return console_id_; }
   const u8* emmc_cid() const { return cid_; }
   u64 length() const { return length_; }
@@ -124,6 +147,12 @@ class NandImage : public BlockStorage {
   std::unordered_map<u64, std::array<u8, 512>> written_;   // sector index -> contents
   std::unordered_set<u64> changed_;                         // written since mark_baseline()
   bool baseline_ = false;
+  // What each sector written since mark_state_base() held at the base: its
+  // written contents, or nothing (the file's, or zero).
+  std::unordered_map<u64, std::optional<std::array<u8, 512>>> since_base_;
+  bool state_base_ = false;
+  u64 state_id_ = 0;
+  void update_state_id();
 };
 
 class SdHost;

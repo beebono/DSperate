@@ -211,6 +211,10 @@ struct NDS {
   // the reason on failure.
   bool save_state(state::Writer& w, std::string& err);
   bool load_state(state::Reader& r, std::string& err);
+  // Set by a DSi load_state that went ahead without the state's SD card (its
+  // folder changed since) or without this session's (the state had none);
+  // empty otherwise. The frontends put it in front of the player.
+  std::string sd_card_note;
 
   CpuContext& cpu(Cpu which) { return which == Cpu::ARM9 ? *arm9 : *arm7; }
 

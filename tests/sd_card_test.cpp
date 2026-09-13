@@ -250,12 +250,56 @@ static void test_card_fat32(const fs::path& dir) {
   CHECK(get_file(dir / "NEW.TXT") == bytes("32"));
 }
 
+// Save states: a snapshot brings back the card's contents as they were, onto
+// the same folder, and stops matching once a file it reads from changes.
+static void test_card_state(const fs::path& dir) {
+  fs::create_directories(dir);
+  const std::vector<u8> big = pattern(700000, 9);
+  put_file(dir / "a.txt", bytes("host a"));
+  put_file(dir / "b.bin", big);
+  SdCard card;
+  std::string err;
+  CHECK(card.open(dir.string(), nullptr, &err));
+  FatVolume v;
+  CHECK(guest_mount(card, v));
+  CHECK(v.write("/a.txt", reinterpret_cast<const u8*>("one"), 3));
+  const SdCard::StateSnapshot snap = card.state_snapshot();
+  CHECK(snap.present && snap.files.size() == 2);
+  CHECK(v.write("/a.txt", reinterpret_cast<const u8*>("two!"), 4));
+  CHECK(v.write("/c.txt", reinterpret_cast<const u8*>("c"), 1));
+
+  std::string why;
+  CHECK(card.state_matches(snap, &why));
+  card.apply_state_snapshot(snap);
+  CHECK(guest_mount(card, v));
+  FatVolume::Entry e;
+  std::vector<u8> back;
+  CHECK(v.lookup("/a.txt", e) && v.read(e, back) && back == bytes("one"));
+  CHECK(!v.lookup("/c.txt", e));
+  CHECK(v.lookup("/b.bin", e) && v.read(e, back) && back == big);
+  // Saved again straight away, it is the same snapshot.
+  const SdCard::StateSnapshot again = card.state_snapshot();
+  CHECK(again.sectors == snap.sectors && again.data == snap.data && again.changed == snap.changed && again.known_key == snap.known_key);
+
+  // The loaded card's unsynced write goes out like any other; a.txt then
+  // no longer backs the snapshot as it was.
+  CHECK(card.sync().files == 1);
+  CHECK(get_file(dir / "a.txt") == bytes("one"));
+  SdCard fresh;
+  CHECK(fresh.open(dir.string(), nullptr, &err));
+  CHECK(!fresh.state_matches(snap, &why) && why.find("a.txt") != std::string::npos);
+  SdCard none;
+  CHECK(!none.state_matches(snap, &why));
+  CHECK(!card.state_matches(SdCard::StateSnapshot{}, &why));
+}
+
 int main() {
   test_fat32();
   const fs::path tmp = fs::temp_directory_path() / ("dsperate-sd-test-" + std::to_string(getpid()));
   fs::remove_all(tmp);
   test_card(tmp / "card");
   test_card_fat32(tmp / "card32");
+  test_card_state(tmp / "cardstate");
   fs::remove_all(tmp);
   if (failures) { std::fprintf(stderr, "sd_card: %d failures\n", failures); return 1; }
   std::fprintf(stderr, "sd_card: ok\n");

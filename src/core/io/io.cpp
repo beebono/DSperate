@@ -1837,9 +1837,9 @@ template <class S> void Io::sync_state(S& s) {
     sd.sync_state(s);           // appended
     dsp.sync_state(s);          // appended
     s.fields(spi_tsc.dsi_data); // appended
-    sdio.sync_state(s);         // appended (FORMAT_VERSION 5)
-    cam.sync_state(s);          // appended (FORMAT_VERSION 5)
-    if (s.version >= 6) s.fields(dsi.mic_cnt, dsi.mic_fifo, dsi.mic_rd, dsi.mic_wr, dsi.mic_level, dsi.mic_divider, dsi.mic_temp_count, dsi.mic_temp);   // appended (FORMAT_VERSION 6)
+    sdio.sync_state(s);         // appended
+    cam.sync_state(s);          // appended
+    s.fields(dsi.mic_cnt, dsi.mic_fifo, dsi.mic_rd, dsi.mic_wr, dsi.mic_level, dsi.mic_divider, dsi.mic_temp_count, dsi.mic_temp);
     s.end();
     if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, DsiCamModule::irq_event); nds_.sched.rebind(EventId::CamTransfer, DsiCamModule::transfer_event);
                                  nds_.sched.rebind(EventId::SdMmc, SdHost::ev_transfer_mmc); nds_.sched.rebind(EventId::Sdio, SdHost::ev_transfer_sdio);

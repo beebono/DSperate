@@ -475,10 +475,50 @@ bool NDS::run_frame_slice(u64 cycles) {
 
 namespace {
 constexpr u32 THUMB_W = 128, THUMB_H = 96;
+
+template <class S, class T> void sync_vec(S& s, std::vector<T>& v) { s.vec(v); }
+template <class S> void sync_strings(S& s, std::vector<std::string>& v) {
+  u32 n = static_cast<u32>(v.size());
+  s.put(n);
+  if constexpr (S::reading) { if (!s.more() && n) { s.fail("short read"); return; } v.resize(n); }
+  for (std::string& str : v) {
+    u32 len = static_cast<u32>(str.size());
+    s.put(len);
+    if constexpr (S::reading) str.resize(len);
+    if (len) s.blob(str.data(), len);
+  }
+}
+
+// What the DSi's NAND holds beyond its state base (NandImage::state_delta).
+template <class S> void sync_nand(S& s, io::NandImage::StateDelta& d) {
+  s.begin("NAND");
+  s.put(d.identity);
+  sync_vec(s, d.sectors);
+  sync_vec(s, d.data);
+  s.end();
+}
+
+// The SD card's in-memory part and its host backing (SdCard::state_snapshot).
+template <class S> void sync_sd(S& s, io::SdCard::StateSnapshot& c) {
+  s.begin("SDCD");
+  u8 present = c.present;
+  s.put(present);
+  c.present = present != 0;
+  if (c.present) {
+    s.fields(c.length, c.part_base, c.fat_bits);
+    sync_vec(s, c.sectors); sync_vec(s, c.data); sync_vec(s, c.changed);
+    sync_vec(s, c.ext_start); sync_vec(s, c.ext_len); sync_vec(s, c.ext_file_off); sync_vec(s, c.ext_file);
+    sync_strings(s, c.files);
+    sync_strings(s, c.known_key); sync_strings(s, c.known_host);
+    sync_vec(s, c.known_dir); sync_vec(s, c.known_size); sync_vec(s, c.known_mtime); sync_vec(s, c.known_mtime_ns);
+  }
+  s.end();
+}
 } // namespace
 
 bool NDS::save_state(state::Writer& w, std::string& err) {
-  if (!cart) { err = "no cartridge"; return false; }
+  if (!cart && !dsi) { err = "no cartridge"; return false; }
+  if (dsi && dsi_nand.write_through()) { err = "the NAND is written through to its file, which a state cannot carry"; return false; }
   if (!sched.at_slice_boundary() || gpu.line() != 0 || !gpu.at_line_start()) { err = "not at a frame boundary"; return false; }
   // Quiesce: nothing here changes what the guest observes.
   gpu.quiesce();
@@ -507,7 +547,14 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
       const u32 p = fb[(y * 2) * SCREEN_W + x * 2];
       w.put(static_cast<u16>(((p >> 8) & 0xF800) | ((p >> 5) & 0x07E0) | ((p >> 3) & 0x001F)));
     }
+  w.put(u32{dsi ? 1u : 0u});   // appended (FORMAT_VERSION 3); a version-2 state reads 0, a DS
   w.end();
+  if (dsi) {
+    io::NandImage::StateDelta nand = dsi_nand.state_delta();
+    sync_nand(w, nand);
+    io::SdCard::StateSnapshot card = io.sd.has_sd() ? dsi_sd.state_snapshot() : io::SdCard::StateSnapshot{};
+    sync_sd(w, card);
+  }
 
   sched.sync_state(w);
   bus.sync_state(w);
@@ -519,6 +566,11 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   gpu3d.sync_state(w);
   gpu.sync_state(w);
   if (cart) cart->sync_state(w);   // a firmware boot has no card to snapshot
+  if (dsi) {
+    w.begin("DSIH");
+    w.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending);
+    w.end();
+  }
   return true;
 }
 
@@ -531,7 +583,11 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   if (!r.begin("HEAD")) { err = r.error(); return false; }
   u32 code = 0; u64 ident = 0, bios = 0, fw = 0, frames = 0; u32 jit_built = 0;
   r.fields(code, ident, bios, fw, frames, jit_built);
+  u32 thumb_w = 0, thumb_h = 0; r.fields(thumb_w, thumb_h);
+  for (u32 i = 0; i < thumb_w * thumb_h && r.more(); ++i) { u16 px; r.put(px); }
+  u32 state_dsi = 0; r.put(state_dsi);
   r.end();
+  if ((state_dsi != 0) != dsi) { err = dsi ? "save state is for a DS, and this is a DSi" : "save state is for a DSi, and this is a DS"; return false; }
   // A state taken on a firmware boot records a zero game code and identity;
   // it only loads back into another firmware boot, and vice versa.
   const u32 want_code = cart ? cart->header().game_code_u32() : 0u;
@@ -555,7 +611,39 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   if (fw != firmware_id)
     std::fprintf(stderr, "state: made with a different firmware; the console identity a game stored in its save may not match\n");
 
+  // The DSi's storage, checked before anything is overwritten. A NAND state
+  // only makes sense on the NAND it was made on; the SD card is taken when
+  // its folder still backs it, and left out (loudly) when not.
+  io::NandImage::StateDelta nand;
+  io::SdCard::StateSnapshot card;
+  bool with_card = false;
+  sd_card_note.clear();
+  if (dsi) {
+    sync_nand(r, nand);
+    sync_sd(r, card);
+    if (!r.ok()) { err = r.error(); return false; }
+    if (nand.identity != dsi_nand.state_identity() || nand.data.size() != nand.sectors.size() * io::MMC_BLOCK_SIZE) {
+      err = !dsi_nand.valid() ? "save state was made with a NAND, and this session has none"
+          : nand.identity == 0 ? "save state was made without a NAND"
+          : dsi_nand_synthetic ? "save state was made on another made-up NAND (the title, the font or the [user] settings differ)"
+                               : "save state was made on another NAND, or with another title installed or hidden";
+      return false;
+    }
+    std::string why;
+    with_card = card.present && dsi_sd.state_matches(card, &why);
+    if (card.present && !with_card) sd_card_note = "the SD card was left out: " + why;
+    else if (!card.present && dsi_sd.valid()) sd_card_note = "the SD card was left out: the state was made without one";
+    if (!sd_card_note.empty()) {
+      std::fprintf(stderr, "\n"
+                           "state: ************************************************************\n"
+                           "state: WARNING: %s\n"
+                           "state: WARNING: the game resumes with an EMPTY SD slot until the next reset\n"
+                           "state: ************************************************************\n\n", sd_card_note.c_str());
+    }
+  }
+
   // From here the machine is being overwritten: a failure leaves it broken.
+  if (dsi) io.sd.attach_sd(with_card ? &dsi_sd : nullptr);
   gpu.prepare_load();
   gpu3d.sync_raster();
   sched.sync_state(r);
@@ -570,7 +658,16 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
   gpu3d.sync_state(r);
   gpu.sync_state(r);
   if (cart) cart->sync_state(r);
+  if (dsi) {
+    r.begin("DSIH");
+    r.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending);
+    r.end();
+  }
   if (!r.ok()) { err = r.error(); return false; }
+  if (dsi) {
+    dsi_nand.apply_state_delta(nand);
+    if (with_card) dsi_sd.apply_state_snapshot(card);
+  }
   gpu.after_load();
 #if DSPERATE_JIT
   if (jit::has_runtime()) jit::flush_all();   // every block was translated from the old memory

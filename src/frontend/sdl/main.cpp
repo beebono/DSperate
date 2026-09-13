@@ -93,7 +93,7 @@ const char* kUsage =
     "  --dsi-mode      boot a DSi from its NAND (boot2, then the DSi Launcher) instead of the DS menu; no\n"
     "                  ROM. Needs --bios9i F --bios7i F (the DSi BIOS pair) and --dsi-nand F (a nand.bin\n"
     "                  with its nocash footer), with --bios9/--bios7 and the DSi's --firmware as usual.\n"
-    "                  EXPERIMENTAL: interpreter only, no idle skip, no save states. The NAND is opened\n"
+    "                  EXPERIMENTAL: interpreter only, no idle skip. The NAND is opened\n"
     "                  read-only; what a session changes is kept as files instead: title saves as\n"
     "                  <GAMECODE>.pub/.prv/.bnr (paths.saves, else beside the dump), system settings in\n"
     "                  <nand>.ovr and photos under <nand>.photos/, put back in at the next boot.\n"
@@ -478,15 +478,8 @@ void read_cheevos_chunk(ds::state::Reader& r) {
   g_cheevos_pending = {true, game_id, std::move(blob)};
 }
 
-// A DSi state does not carry the NAND (scoping doc 2.5), so a resumed one
-// would read a filesystem that no longer matches its RAM. Off until it does.
-bool dsi_states_refused(const NDS& nds) {
-  if (nds.dsi) std::fprintf(stderr, "state: save states are off in DSi mode for now\n");
-  return nds.dsi;
-}
 
 bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
-  if (dsi_states_refused(nds)) return false;
   ds::state::Writer w; std::string err;
   if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
   write_layout_chunk(w, layout);
@@ -513,7 +506,6 @@ std::string g_state_refused;
 
 bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout& layout, bool& layout_loaded) {
   layout_loaded = false;
-  if (dsi_states_refused(nds)) return false;
   std::vector<u8> bytes;
   if (FILE* f = std::fopen(path.c_str(), "rb")) {
     std::fseek(f, 0, SEEK_END); const long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
@@ -1329,7 +1321,7 @@ int main(int argc, char** argv) {
     if (!open_dsi_sd()) return 1;
     nds.set_dsi(true);
     nds.dsi_hle_launch = true;   // the NAND and settings are made once the title is in the slot (below)
-    std::fprintf(stderr, "console: DSi without a NAND (EXPERIMENTAL: interpreter, no save states)\n");
+    std::fprintf(stderr, "console: DSi without a NAND (EXPERIMENTAL: interpreter)\n");
   } else if (dsi_mode) {
     std::string err;
     if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
@@ -1388,7 +1380,10 @@ int main(int argc, char** argv) {
     }
     // What earlier sessions carried out -- title saves, the system sidecar,
     // photos -- goes back in before the boot reads the NAND. Not under a
-    // replay, which has to start from the same console every time.
+    // replay, which has to start from the same console every time. A save
+    // state carries the NAND's sectors from the point before (NandImage::
+    // mark_state_base), so it brings back the saves it was made with.
+    nds.dsi_nand.mark_state_base();
     if (!replay) {
       const ds::io::NandPersistReport r = ds::io::nand_import(nds.dsi_nand, nds.bus.bios7i.get(), pp);
       if (r.saves || r.system_files || r.photos) std::fprintf(stderr, "dsi: restored %d title saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
@@ -1396,7 +1391,7 @@ int main(int argc, char** argv) {
     }
     nds.set_dsi(true);
     nds.dsi_nand_boot = true;   // reset() below builds the DSi machine; setup_direct_boot() then boots the NAND
-    std::fprintf(stderr, "console: DSi (EXPERIMENTAL: interpreter, no idle skip, no save states)\n");
+    std::fprintf(stderr, "console: DSi (EXPERIMENTAL: interpreter, no idle skip)\n");
   }
   nds.reset();
   // The firmware writes its settings pages to flash over SPI. Those go to a
@@ -2716,6 +2711,18 @@ sdl_ready:
   ds::sdl::Rect toast_last{};          // what the canvas has to take back out
   constexpr int TOAST_FRAMES = 240;    // four seconds: long enough to read two lines
   constexpr int TOAST_INFO_FRAMES = 150;
+  // A DSi state that loaded without an SD card (NDS::sd_card_note; the log
+  // has the long form). Twice a toast's time: the game has lost its card.
+  auto sd_note_toast = [&] {
+    if (nds.sd_card_note.empty()) return;
+    Toast t;
+    t.header = "SD CARD";
+    t.title = "LEFT OUT OF THE STATE";
+    t.detail = nds.sd_card_note.find("without one") != std::string::npos ? "THE STATE HAD NO CARD" : "ITS FOLDER HAS CHANGED";
+    t.frames = TOAST_FRAMES * 2;
+    toast_queue.push_back(std::move(t));
+  };
+  sd_note_toast();   // the state autoloaded at startup, before there were toasts
 
   // Advances the toast clock. Called once per frame from the same place the
   // other per-frame overlay state is stepped.
@@ -3346,7 +3353,7 @@ sdl_ready:
       dsi_paths = hle_paths(pick);
       import_dsiware_saves();
       nand_writes_seen = nand_exported = nds.dsi_nand.writes;
-      std::fprintf(stderr, "launcher: %s on the DSi (EXPERIMENTAL: interpreter, no save states)\n", pick.c_str());
+      std::fprintf(stderr, "launcher: %s on the DSi (EXPERIMENTAL: interpreter)\n", pick.c_str());
     }
     // Everything keyed to the ROM follows it, or the game would go on
     // writing the loader's saves, states, screenshots and cheats under
@@ -3368,6 +3375,7 @@ sdl_ready:
         !a.empty() && load_state_file(nds, a, loaded_layout, got_layout)) {
       std::fprintf(stderr, "state: autoloaded %s\n", a.c_str());
       apply_loaded_layout();
+      sd_note_toast();
     }
     sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
     state_slot = 0;
@@ -3419,6 +3427,7 @@ sdl_ready:
         // leaves the menu: the player wants to see where they landed.
         if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()), loaded_layout, got_layout)) {
           apply_loaded_layout();
+          sd_note_toast();
           state_slot = menu.slot();
           menu.set_open(false);
           set_paused(false);
@@ -3516,6 +3525,7 @@ sdl_ready:
           fs_debt_ms = 0;
           flush_save();
           show_slot("STATE " + std::to_string(state_slot) + " LOADED");
+          sd_note_toast();
         }
         break;
       // Without DS_FPS the measurement only runs while the counter is on, so

@@ -75,6 +75,33 @@ class SdCard : public BlockStorage {
   void peek(u64 addr, u32 len, u8* out);
   void poke(u64 addr, u32 len, const u8* in);
 
+  // Save states (docs/dsiware-scoping.md 2.5). The card's file data stays in
+  // the host folder, so a state holds what the card keeps in memory -- the
+  // filesystem's own sectors and the guest's unsynced writes -- and which host
+  // files back the rest, as they were then. It loads onto this session's
+  // folder only while each of those files is unchanged (state_matches);
+  // otherwise the frontend loads the state without a card.
+  struct StateSnapshot {
+    bool present = false;
+    u64 length = 0, part_base = 0;
+    s32 fat_bits = 0;
+    std::vector<u64> sectors;                 // ascending
+    std::vector<u8> data;                     // 512 bytes per sector
+    std::vector<u64> changed;                 // ascending
+    std::vector<u64> ext_start, ext_len, ext_file_off;
+    std::vector<u32> ext_file;
+    std::vector<std::string> files;           // relative to the folder
+    std::vector<std::string> known_key, known_host;
+    std::vector<u8> known_dir;
+    std::vector<u64> known_size;
+    std::vector<s64> known_mtime, known_mtime_ns;
+  };
+  StateSnapshot state_snapshot() const;
+  // Whether this card's folder still holds the host files `snap` reads from;
+  // `why` names the first that does not.
+  bool state_matches(const StateSnapshot& snap, std::string* why) const;
+  void apply_state_snapshot(const StateSnapshot& snap);
+
   // The whole card as an image file (for the melonDS oracle, and inspection).
   bool dump(const std::string& path);
 

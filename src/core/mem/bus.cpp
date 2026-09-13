@@ -648,6 +648,12 @@ void Bus::relink() {
   update_tcm(a9, true);          // also update_bios_map(), update_nwram() and update_vram()
   gba_slot_applied_ = -1;        // the loaded EXMEMCNT is not what the tables hold
   update_gba_slot_timings();
+  if (nds_.dsi) {
+    // The loaded SCFG: the ARM9's clock (a hand-off starts at 67 MHz, a title
+    // may have switched to 134) and the VRAM access width.
+    set_clock9_shift((nds_.io.dsi.scfg_clock9 & 1) ? 2 : 1);
+    update_vram_timings();
+  }
 }
 
 } // namespace ds::mem

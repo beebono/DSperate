@@ -659,18 +659,16 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
 
 template <class S> void Scheduler::sync_state(S& s) {
   s.begin("SCHD");
-  // The event arrays grew with the DSi's two grid events (FORMAT_VERSION 3)
-  // and again with the SD/MMC transfer event (4) and the SDIO host's two and
-  // the camera transfer (5); an
-  // older file carries only the events it knew about.
-  constexpr u32 V2_EVENTS = 21, V3_EVENTS = 23, V4_EVENTS = 24;
+  // The event arrays grew with the DSi's events (FORMAT_VERSION 3: the two
+  // grid events, the SD/MMC and SDIO transfers, the Wi-Fi module's timer and
+  // the camera's two); a version-2 file carries the DS's 21.
+  constexpr u32 V2_EVENTS = 21;
   static_assert(EVENT_COUNT == 27, "EVENT_COUNT changed: add a save-state version");
   s.fields(now_, arm7_debt_, armed_);
-  if (s.version >= 5) s.fields(at_, param_);
+  if (s.version >= 3) s.fields(at_, param_);
   else {
-    const u32 n = s.version >= 4 ? V4_EVENTS : s.version >= 3 ? V3_EVENTS : V2_EVENTS;
-    for (u32 i = 0; i < n; ++i) s.fields(at_[i]);
-    for (u32 i = 0; i < n; ++i) s.fields(param_[i]);
+    for (u32 i = 0; i < V2_EVENTS; ++i) s.fields(at_[i]);
+    for (u32 i = 0; i < V2_EVENTS; ++i) s.fields(param_[i]);
   }
   // The idle-skip pre-filter: whether a slice is skipped depends on the
   // recent slice-start PCs, so the ring is part of the timing.

@@ -33,6 +33,7 @@ void NandImage::close() {
   baseline_ = false; changed_.clear();
   length_ = 0; console_id_ = 0; std::memset(cid_, 0, sizeof(cid_));
   written_.clear();
+  since_base_.clear(); state_base_ = false; state_id_ = 0;
 }
 
 void NandImage::create_in_memory(u64 length, const u8 cid[16], u64 console_id) {
@@ -41,6 +42,70 @@ void NandImage::create_in_memory(u64 length, const u8 cid[16], u64 console_id) {
   length_ = length;
   std::memcpy(cid_, cid, sizeof(cid_));
   console_id_ = console_id;
+  update_state_id();
+}
+
+// FNV-1a over 64-bit words: the console, the size, whether a base was marked,
+// and the base's written sectors in order. A synthesised NAND's base is its
+// title's size; this runs once, when the base is marked.
+void NandImage::update_state_id() {
+  if (!valid()) { state_id_ = 0; return; }
+  u64 h = 1469598103934665603ull;
+  auto mix = [&h](u64 w) { h = (h ^ w) * 1099511628211ull; h ^= h >> 29; };
+  auto mix_bytes = [&mix](const u8* p, size_t n) { for (size_t i = 0; i < n; i += 8) { u64 w = 0; std::memcpy(&w, p + i, std::min<size_t>(8, n - i)); mix(w); } };
+  mix_bytes(cid_, sizeof cid_);
+  mix(console_id_);
+  mix(length_);
+  mix(state_base_ ? 1 : 0);
+  if (state_base_) {
+    std::vector<u64> order;
+    order.reserve(written_.size());
+    for (const auto& [sec, data] : written_) order.push_back(sec);
+    std::sort(order.begin(), order.end());
+    for (u64 sec : order) { mix(sec); mix_bytes(written_.at(sec).data(), MMC_BLOCK_SIZE); }
+  }
+  state_id_ = h ? h : 1;
+}
+
+void NandImage::mark_state_base() {
+  state_base_ = true;
+  since_base_.clear();
+  update_state_id();
+}
+
+NandImage::StateDelta NandImage::state_delta() const {
+  StateDelta d;
+  d.identity = state_id_;
+  if (state_base_) for (const auto& [sec, orig] : since_base_) d.sectors.push_back(sec);
+  else for (const auto& [sec, data] : written_) d.sectors.push_back(sec);
+  std::sort(d.sectors.begin(), d.sectors.end());
+  d.data.resize(d.sectors.size() * MMC_BLOCK_SIZE);
+  for (size_t i = 0; i < d.sectors.size(); ++i) std::memcpy(&d.data[i * MMC_BLOCK_SIZE], written_.at(d.sectors[i]).data(), MMC_BLOCK_SIZE);
+  return d;
+}
+
+void NandImage::apply_state_delta(const StateDelta& d) {
+  std::unordered_set<u64> touched;
+  if (state_base_) {
+    for (const auto& [sec, orig] : since_base_) {
+      if (orig) written_[sec] = *orig;
+      else written_.erase(sec);
+      touched.insert(sec);
+    }
+    since_base_.clear();
+  } else {
+    for (const auto& [sec, data] : written_) touched.insert(sec);
+    written_.clear();
+  }
+  for (size_t i = 0; i < d.sectors.size(); ++i) {
+    const u64 sec = d.sectors[i];
+    auto [it, fresh] = written_.try_emplace(sec);
+    if (state_base_) since_base_.emplace(sec, fresh ? std::nullopt : std::optional<std::array<u8, 512>>(it->second));
+    std::memcpy(it->second.data(), &d.data[i * MMC_BLOCK_SIZE], MMC_BLOCK_SIZE);
+    touched.insert(sec);
+  }
+  if (baseline_) changed_.insert(touched.begin(), touched.end());
+  writes++;
 }
 
 bool NandImage::open(const std::string& path, bool write_through) {
@@ -75,6 +140,7 @@ bool NandImage::open(const std::string& path, bool write_through) {
   file_ = f;
   write_through_ = write_through;
   length_ = static_cast<u64>(len);
+  update_state_id();
   return true;
 }
 
@@ -122,6 +188,10 @@ void NandImage::poke(u64 addr, u32 len, const u8* in) {
   for (u64 s = addr / MMC_BLOCK_SIZE, end = (addr + len + MMC_BLOCK_SIZE - 1) / MMC_BLOCK_SIZE; s < end; ++s) {
     const u64 sec = s * MMC_BLOCK_SIZE;
     if (baseline_) changed_.insert(s);
+    if (state_base_ && !since_base_.count(s)) {
+      const auto w = written_.find(s);
+      since_base_.emplace(s, w == written_.end() ? std::nullopt : std::optional<std::array<u8, 512>>(w->second));
+    }
     auto [it, fresh] = written_.try_emplace(s);
     // A write that covers only part of a sector keeps the rest of it.
     if (fresh && (addr > sec || addr + len < sec + MMC_BLOCK_SIZE)) read_file(sec, MMC_BLOCK_SIZE, it->second.data());
@@ -808,8 +878,8 @@ u32 MmcStorage::write_block(u64 addr) {
 }
 
 // ---- save state ---------------------------------------------------------------
-// Registers and FIFOs only. The NAND's contents are the backing file, which a
-// state does not carry; a dirty-sector journal is phase 3's save work.
+// Registers and FIFOs only. What the NAND and the SD card hold is carried by
+// NDS::save_state (NandImage::state_delta, SdCard::state_snapshot).
 
 template <class S> void MmcStorage::sync_state(S& s) {
   s.fields(cid_, csd_, csr_, ocr_, rca_, scr_, ssr_, block_size_, rw_address_, rw_command_, irq, read_only);
@@ -826,7 +896,20 @@ template <class S> void SdHost::sync_state(S& s) {
            data_fifo_[1].buf, data_fifo_[1].read_pos, data_fifo_[1].write_pos, data_fifo_[1].level,
            data_fifo32_.buf, data_fifo32_.read_pos, data_fifo32_.write_pos, data_fifo32_.level);
   if (storage_) storage_->sync_state(s);
-  if (card_) card_->sync_state(s);
+  // The card's presence is recorded: a state loaded without its card
+  // (NDS::load_state) skips the card's registers.
+  u8 card = card_ != nullptr;
+  s.put(card);
+  if (card && !card_) {
+    struct NoStorage : BlockStorage {
+      void read(u64, u32 len, u8* out) override { std::memset(out, 0, len); }
+      void write(u64, u32, const u8*) override {}
+      const u8* cid() const override { static const u8 z[16] = {}; return z; }
+    } none;
+    MmcStorage(nds_, *this, none, true).sync_state(s);
+  } else if (card_) {
+    card_->sync_state(s);
+  }
   if (wifi_) wifi_->sync_state(s);
 }
 template void SdHost::sync_state<state::Writer>(state::Writer&);

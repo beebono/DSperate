@@ -13,7 +13,8 @@ The SDL frontend runs DSiWare named on the command line or picked from the
 loader's list, and the loader cart works on the real DSi Menu. The remaining
 2.0.0 work is save states with the NAND and the JIT and idle skip under DSi
 on the device (section 5). Since then the SD card slot (5.4), the microphone
-(5.5) and DSi Wi-Fi networking (5.6) have landed. `dsiware` is 68 commits ahead of `main` and
+(5.5), DSi Wi-Fi networking (5.6) and save states under DSi (2.5) have
+landed. `dsiware` is 68 commits ahead of `main` and
 contains all of it (including the Wi-Fi/slirp work); `main` has nothing
 `dsiware` lacks.
 References: melonDS `dsperate-research/melonDS` @ `d3cd6164` (the exactness
@@ -35,7 +36,7 @@ The target is DSperate **2.0.0**.
 | DSi Wi-Fi networking | **in** -- done | both chips reach slirp; the firmware carries DSperate's access point (5.6) |
 | SD card slot (SD host port 0) | **in** -- done | a host folder (`--dsi-sd`, `paths.dsi_sd`), built into a card in memory and synced back (5.4) |
 | Frontend | **in** -- mostly done | CLI, loader list and loader cart on the DSi Menu done; no ini key for the NAND/DSi firmware, no menu row for hiding titles (2.4) |
-| Save states under DSi | **in** -- not started | refused in DSi mode today (2.5) |
+| Save states under DSi | **in** -- done | NAND sectors past the state base, the SD card's in-memory part checked against its folder (2.5) |
 | JIT + idle skip under DSi, on device | **in** -- not started | SDL forces the interpreter and lockstep; **slower than DS titles is accepted for 2.0.0** |
 | DSP HLE (G.711, graphics) | after 2.0.0 | one feature commit, together with camera images passed from the CLI |
 | Camera image source | after 2.0.0 | the cameras exist as hardware; frames are black until then |
@@ -350,28 +351,58 @@ ways: DSiWare needs no `--dsi-mode`, and the picker lists it in every mode.
   **Not yet:** `dsi_nand` and `dsi_firmware` keys (CLI only), and a menu
   row for hiding the dump's titles (CLI only).
 - A DSi session forces `emu.jit=false`, lockstep, and idle skip off on the
-  NAND boot. It prints "EXPERIMENTAL: interpreter, no save states".
+  NAND boot. It prints "EXPERIMENTAL: interpreter".
 - Headless uses `--dsi` (required with no ROM, or the machine is a DS and
   draws nothing), plus `DS_LAUNCH_AT=<frame>:<path>` to script a picker
   launch.
 
 ### 2.5 Save states
 
-`FORMAT_VERSION` 5 carries the DSi chunk, the SD/MMC, SDIO, Wi-Fi and camera
-events, the Wi-Fi mailboxes (~44 KB) and two 32 KB camera register files, but
-**the SDL frontend refuses save states in DSi mode** ("save states are off in
-DSi mode for now"). Missing before they can be turned on:
-- NAND contents. A state must carry the in-memory written sectors
-  (`NandImage::written_sectors`) and refuse to load against a different NAND
-  identity (CID + console ID + size), the way `bios_id` is checked. A
-  synthesised NAND must be carried whole or rebuilt identically.
-- The HLE-only flags (`dsi_font_hle`, `dsi_loader_watch`, `exit_requested`)
-  and the injected title's identity.
-- The SD card's in-memory sectors, and a policy for a folder that changed
-  since the state was made. `SdHost::sync_state` already carries the card
-  device's registers when a card is in, so a state made with a card does not
-  load without one.
-- A round-trip check on a NAND boot and a hand-off launch.
+Done 2026-09-13. `FORMAT_VERSION` 3 holds every DSi addition (none of the
+interim DSi versions shipped; version 2, the last released, still loads, and
+a version-2 state is a DS state). A DSi state is the DS layout plus:
+- **HEAD** says DSi or DS; a state loads only into the same machine.
+- **NAND**: the sectors written since the *state base*, and the base's
+  identity. The base is the NAND as the session built it before any saves
+  went in: the dump as opened, with its titles hidden or one installed, or
+  the synthesised NAND (`NandImage::mark_state_base`, called by
+  `prepare_dsi_hle` and by both frontends before `nand_import`). The
+  identity hashes the CID, console ID, size and the base's written sectors,
+  so a state refuses another dump, another installed or hidden title, and a
+  hand-off NAND made from another title, font or `[user]` settings (a
+  changed nickname invalidates hand-off states). Imported saves come after
+  the base, so a state brings back the saves it was made with: loading
+  reverts every sector written since the base (`since_base_` keeps what the
+  base held) and applies the state's. The loaded sectors count as writes, so
+  the frontend's export carries them out as usual. A `--dsi-nand-write`
+  session cannot save a state.
+- **SDCD**: the SD card's in-memory sectors (filesystem, unsynced guest
+  writes), its extents onto host files and its record of the folder
+  (`SdCard::state_snapshot`). USER DECISION: a state takes the card only if
+  every host file backing it is unchanged (size and mtime to the
+  nanosecond); otherwise, or when the session has no card, it loads anyway
+  with an **empty SD slot until the next reset**, with a boxed warning in the
+  log and a double-length toast in SDL (`NDS::sd_card_note`). A sync that
+  rewrote a backing file after the state was made is enough to leave the
+  card out. The SD host records whether a card was in, so its registers are
+  skipped when the card is left out.
+- **DSIH**: `dsi_loader_launched`, `exit_requested`, `dsi_soft_reset_pending`.
+- `Bus::relink` re-applies SCFG_CLK9 (the ARM9 at 67 or 134 MHz) and the
+  VRAM timing after a load; without it a hand-off state resumed at the wrong
+  clock (the slice grid split 7700 slices in).
+- `state::Reader::vec` now reads arithmetic vectors in one copy and fails on
+  a length the chunk cannot hold; the bytes on disk are unchanged.
+
+Checked, each with frame hashes, RAM/register hashes, save-after-load
+identity and the whole state after the run (`--save-state-at` on both):
+card mode (Shantae @300+200), the hand-off (Shantae @100+400 and @600+400,
+with an SD card), a real-NAND TLNC boot with an SD card (@1500+600); a
+state from before any save, loaded into a session that imported one, ends
+byte-identical to a session that never had it. Refusals checked: another
+NAND base (hidden titles), a hand-off state on a NAND session, other
+`[user]` settings, a DSi state on a DS; the SD fallback for no card and for a
+touched backing file. Unit tests: `nand_fs_test` (`test_nand_state`),
+`sd_card_test` (`test_card_state`). Not checked: the SDL flow on a device.
 
 ## 3. Corrections to the 2026-09-10 plan
 
@@ -414,8 +445,7 @@ DSi mode for now"). Missing before they can be turned on:
 | Soft reset: `NDS::dsi_soft_reset` (NAND), `exit_requested` (synthesised NAND) | `d026ef5`, `6b5e546` | NAND reboot not compared with melonDS |
 | SDL: DSiWare from CLI and loader list, loader cart on the DSi Menu (`dsi_loader_watch`) | `6b5e546`, `cd13967` | picker launches of `.cia`, `.dsi`, DS games checked |
 
-Not built: save states under DSi,
-JIT and idle skip under DSi (SDL forces them off), `.app` streaming (the
+Not built: JIT and idle skip under DSi (SDL forces them off), `.app` streaming (the
 title is held in memory), DSP core, NWRAM dual-slot writes, the
 `0x02FE71B0`/SCFG_EXT RAM-size hacks, JIT parity for `code_latch`/
 `irq_skip_once`/`defer_cost` (the JIT falls back to the interpreter for the
@@ -471,8 +501,7 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
      machine for a DS (recompiler, interleave and idle skip given back);
      DSiWare stays on it with the hand-off. The DS menu path is unchanged.
    - Open: China/Korea font tables (nine resources); the launcher's title
-     list at 0x02FFD800; non-USA titles untested; the JIT and save states
-     under DSi.
+     list at 0x02FFD800; non-USA titles untested; the JIT under DSi.
 4. **SD card slot** (done, 2026-09-13). USER DECISIONS: a host folder, not
    an image (`--dsi-sd DIR`, `paths.dsi_sd`); the guest's changes are synced
    back including deletions; the card size is automatic only.
@@ -560,7 +589,7 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
      same one-bar level in melonDS (trace_melonds `TRACE_MIC_TONE`). Script:
      `--dsi-autoload-id 00030015484E4245`, taps `900:242,93`, `1300:242,93`,
      `1700:128,110`. `DS_MIC_LOG=1` logs MIC_CNT writes.
-   - `FORMAT_VERSION` 6 carries the mic state (older DSi states still load).
+   - The mic state is in the DSI chunk (`FORMAT_VERSION` 3).
 6. **DSi Wi-Fi networking** (done, 2026-09-13).
    - **Two radios.** DSi Connections 1-3 are DS-compatible profiles and use
      the DS Wi-Fi block (`io/wifi.cpp`), already on slirp; Connections 4-6
@@ -621,7 +650,7 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
      reads 00:00); expected, not a bug.
 7. **Frontend leftovers** (2.4): `dsi_nand`/`dsi_firmware` ini keys, a menu
    row for hiding installed titles, streaming the `.app` instead of holding
-   it in memory. **Save states under DSi** (2.5): currently refused.
+   it in memory. **Save states under DSi** (2.5): done.
 8. **JIT and idle skip under DSi**: the SDL frontend forces the interpreter
    and lockstep for every DSi session, and idle skip off on the NAND boot.
    Steps: `test_jit` and a launcher boot and a hand-off launch under qemu

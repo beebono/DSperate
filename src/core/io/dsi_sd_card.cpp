@@ -496,6 +496,72 @@ SdCard::Report SdCard::sync() {
   return r;
 }
 
+SdCard::StateSnapshot SdCard::state_snapshot() const {
+  StateSnapshot st;
+  if (!valid()) return st;
+  st.present = true;
+  st.length = length_;
+  st.part_base = part_base_;
+  st.fat_bits = fat_bits_;
+  for (const auto& [sec, data] : sectors_) st.sectors.push_back(sec);
+  std::sort(st.sectors.begin(), st.sectors.end());
+  st.data.resize(st.sectors.size() * 512);
+  for (size_t i = 0; i < st.sectors.size(); ++i) std::memcpy(&st.data[i * 512], sectors_.at(st.sectors[i]).data(), 512);
+  st.changed.assign(changed_.begin(), changed_.end());
+  std::sort(st.changed.begin(), st.changed.end());
+  for (const Extent& e : extents_) {
+    st.ext_start.push_back(e.start); st.ext_len.push_back(e.len);
+    st.ext_file.push_back(e.file); st.ext_file_off.push_back(e.file_off);
+  }
+  for (const std::string& f : files_) st.files.push_back(f.substr(dir_.size() + 1));
+  for (const auto& [key, k] : known_) {   // std::map: in key order
+    st.known_key.push_back(key); st.known_host.push_back(k.host);
+    st.known_dir.push_back(k.dir ? 1 : 0); st.known_size.push_back(k.size);
+    st.known_mtime.push_back(k.mtime); st.known_mtime_ns.push_back(k.mtime_ns);
+  }
+  return st;
+}
+
+bool SdCard::state_matches(const StateSnapshot& snap, std::string* why) const {
+  auto no = [why](const std::string& m) { if (why) *why = m; return false; };
+  if (!snap.present) return no("the state has no SD card");
+  if (!valid()) return no("this session has no SD card");
+  const size_t n = snap.known_key.size();
+  if (snap.known_host.size() != n || snap.known_dir.size() != n || snap.known_size.size() != n ||
+      snap.known_mtime.size() != n || snap.known_mtime_ns.size() != n || snap.data.size() != snap.sectors.size() * 512)
+    return no("the state's card record is damaged");
+  std::unordered_map<std::string, size_t> by_host;
+  for (size_t i = 0; i < n; ++i) if (!snap.known_dir[i]) by_host[snap.known_host[i]] = i;
+  for (u32 f : snap.ext_file) if (f >= snap.files.size()) return no("the state's card record is damaged");
+  for (const std::string& rel : snap.files) {
+    const auto it = by_host.find(rel);
+    if (it == by_host.end()) return no(rel + " is not in the state's card record");
+    const Known k{rel, false, snap.known_size[it->second], snap.known_mtime[it->second], snap.known_mtime_ns[it->second]};
+    if (!host_unchanged(k)) return no(dir_ + "/" + rel + " has changed since the state was made");
+  }
+  return true;
+}
+
+void SdCard::apply_state_snapshot(const StateSnapshot& snap) {
+  host_in_.reset();
+  open_index_ = ~0u;
+  length_ = snap.length;
+  part_base_ = snap.part_base;
+  fat_bits_ = snap.fat_bits;
+  sectors_.clear();
+  for (size_t i = 0; i < snap.sectors.size(); ++i) std::memcpy(sectors_[snap.sectors[i]].data(), &snap.data[i * 512], 512);
+  changed_.clear();
+  changed_.insert(snap.changed.begin(), snap.changed.end());
+  extents_.clear();
+  for (size_t i = 0; i < snap.ext_start.size(); ++i) extents_.push_back({snap.ext_start[i], snap.ext_len[i], snap.ext_file[i], snap.ext_file_off[i]});
+  files_.clear();
+  for (const std::string& rel : snap.files) files_.push_back(dir_ + "/" + rel);
+  known_.clear();
+  for (size_t i = 0; i < snap.known_key.size(); ++i)
+    known_[snap.known_key[i]] = Known{snap.known_host[i], snap.known_dir[i] != 0, snap.known_size[i], snap.known_mtime[i], snap.known_mtime_ns[i]};
+  writes++;   // the frontend's cue to sync what the state's card had not yet carried out
+}
+
 bool SdCard::dump(const std::string& path) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) return false;

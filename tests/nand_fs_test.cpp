@@ -364,8 +364,58 @@ static void test_persist() {
   std::printf("nand_fs: persistence ok\n");
 }
 
+// Save states (NandImage::state_delta): the sectors written since the state
+// base, applied back over a session that has moved on.
+static void test_nand_state() {
+  const u8 cid[16] = {1, 2, 3};
+  auto sector = [](u8 fill) { std::vector<u8> s(512, fill); return s; };
+  auto at = [](io::NandImage& n, u64 sec) { std::vector<u8> s(512); n.peek(sec * 512, 512, s.data()); return s; };
+  auto build = [&](io::NandImage& n, u8 base_fill) {
+    n.create_in_memory(64 << 20, cid, 0x1234);
+    for (u64 s = 0; s < 4; ++s) n.poke(s * 512, 512, sector(base_fill).data());
+    n.mark_state_base();
+  };
+  io::NandImage nand;
+  build(nand, 0xAA);
+  nand.write(2 * 512, 512, sector(0xB0).data());
+  nand.write(10 * 512, 512, sector(0xC0).data());
+  const io::NandImage::StateDelta d = nand.state_delta();
+  CHECK(d.sectors == std::vector<u64>({2, 10}) && d.data.size() == 1024);
+  nand.write(3 * 512, 512, sector(0xE0).data());
+  nand.write(11 * 512, 512, sector(0xF0).data());
+  nand.write(2 * 512, 512, sector(0xB1).data());
+
+  io::NandImage same, other;
+  build(same, 0xAA);
+  build(other, 0xAB);
+  CHECK(same.state_identity() == nand.state_identity());
+  CHECK(other.state_identity() != nand.state_identity());
+
+  nand.apply_state_delta(d);
+  CHECK(at(nand, 2) == sector(0xB0));
+  CHECK(at(nand, 3) == sector(0xAA));   // back to the base
+  CHECK(at(nand, 10) == sector(0xC0));
+  CHECK(at(nand, 11) == sector(0));
+  CHECK(nand.state_delta().sectors == d.sectors && nand.state_delta().data == d.data);
+  // Onto another session of the same base.
+  same.write(1 * 512, 512, sector(0x11).data());
+  same.apply_state_delta(d);
+  CHECK(at(same, 1) == sector(0xAA) && at(same, 2) == sector(0xB0) && at(same, 10) == sector(0xC0));
+
+  // Unmarked: the base is the image as created, and everything written is carried.
+  io::NandImage plain;
+  plain.create_in_memory(64 << 20, cid, 0x1234);
+  plain.write(5 * 512, 512, sector(0x55).data());
+  const io::NandImage::StateDelta p = plain.state_delta();
+  plain.write(6 * 512, 512, sector(0x66).data());
+  plain.apply_state_delta(p);
+  CHECK(at(plain, 5) == sector(0x55) && at(plain, 6) == sector(0));
+  CHECK(plain.state_identity() != nand.state_identity());
+}
+
 int main() {
   test_sha1();
+  test_nand_state();
   test_fat12();
   test_synthetic_nand();
   test_region();
