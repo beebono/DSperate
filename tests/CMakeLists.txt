@@ -122,3 +122,7 @@ if(DSPERATE_NET)
   target_link_libraries(test_slirp_driver PRIVATE dsperate_net)
   add_test(NAME slirp_driver COMMAND test_slirp_driver)
 endif()
+
+add_executable(test_nand_fs nand_fs_test.cpp)
+target_link_libraries(test_nand_fs PRIVATE dsperate_core)
+add_test(NAME nand_fs COMMAND test_nand_fs)

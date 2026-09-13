@@ -15,9 +15,11 @@
 #ifndef DS_CORE_IO_DSI_SD_H
 #define DS_CORE_IO_DSI_SD_H
 
+#include <array>
 #include <cstdio>
 #include <string>
 #include <memory>
+#include <unordered_map>
 
 #include "core/types.h"
 
@@ -42,9 +44,16 @@ enum class MmcAcmd : u32 {
 
 constexpr u32 MMC_BLOCK_SIZE = 512;
 
-// A NAND image backed by a real nand.bin (the oracle backer). The image
-// carries a 0x40-byte nocash footer holding the eMMC CID and the console ID;
-// without it we cannot key anything, so the open fails loudly.
+// A NAND image backed by a real nand.bin. The image carries a 0x40-byte
+// nocash footer holding the eMMC CID and the console ID; without it we cannot
+// key anything, so the open fails loudly.
+//
+// The dump is opened read-only and every guest write lands in memory, one
+// 512-byte sector at a time, overlaid on the file for later reads: a dump is
+// a file the user cannot regenerate (docs/dsiware-scoping.md 2.3). What
+// persists is pulled back out of the written sectors as files. `write_through`
+// is for the melonDS comparisons, which diff the written image on disk (run
+// them on a copy).
 class NandImage {
  public:
   ~NandImage();
@@ -52,9 +61,12 @@ class NandImage {
   NandImage(const NandImage&) = delete;
   NandImage& operator=(const NandImage&) = delete;
 
-  bool open(const std::string& path);
+  bool open(const std::string& path, bool write_through = false);
   void close();
   bool valid() const { return file_ != nullptr; }
+  bool write_through() const { return write_through_; }
+  // Sectors written this session and held in memory (empty under write_through).
+  const std::unordered_map<u64, std::array<u8, 512>>& written_sectors() const { return written_; }
 
   u64 console_id() const { return console_id_; }
   const u8* emmc_cid() const { return cid_; }
@@ -64,6 +76,10 @@ class NandImage {
   void read(u64 addr, u32 len, u8* out);
   void write(u64 addr, u32 len, const u8* in);
   void flush();
+  // The same, for the emulator's own filesystem work (NandFs): not counted,
+  // not logged, so the guest's access record stays the guest's.
+  void peek(u64 addr, u32 len, u8* out);
+  void poke(u64 addr, u32 len, const u8* in);
 
   // Access counters, for the melonDS gate's "nand: N block reads/writes" line.
   u64 reads = 0, writes = 0;
@@ -74,10 +90,14 @@ class NandImage {
  public:
 
  private:
+  void read_file(u64 addr, u32 len, u8* out);
+
   std::FILE* file_ = nullptr;
+  bool write_through_ = false;
   u64 length_ = 0;
   u8  cid_[16] = {};
   u64 console_id_ = 0;
+  std::unordered_map<u64, std::array<u8, 512>> written_;   // sector index -> contents
 };
 
 class SdHost;

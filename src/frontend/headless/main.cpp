@@ -8,6 +8,11 @@
 // and the SPU output (--dump-audio, raw s16 stereo at 32768 Hz).
 #include "core/nds.h"
 #include "core/state/state.h"
+#include "core/io/dsi_nand_persist.h"
+#include "core/io/dsi_title_install.h"
+#if DSPERATE_CHEEVOS
+#include "cheevos/cheevos_http.h"
+#endif
 #include "core/cpu/interp/interp.h"
 #include "core/input/input_log.h"
 #if DSPERATE_JIT
@@ -159,7 +164,7 @@ int main(int argc, char** argv) {
   bool cpu_oc = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
-  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; ds::u32 dsi_title_lo = 0;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
@@ -205,6 +210,13 @@ int main(int argc, char** argv) {
     else if (arg("--dsi-boot")) dsi_boot = argv[++i];        // tools/dsi_nand.py bootblobs output: the console data a DSi title starts with
     else if (arg("--dsi-boot2")) dsi_boot2 = argv[++i];      // an SRL to run instead of the NAND's boot2 (Unlaunch)
     else if (arg("--dsi-nand-boot")) dsi_nand_boot = true;   // boot the NAND (boot2 -> launcher) instead of direct-booting the ROM
+    else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];           // the title's signed DSi TMD for --dsi-install (default: <file>.tmd beside it)
+    else if (arg("--dsi-autoload")) dsi_autoload = true;       // with --dsi-install: the launcher starts that title (TLNC) instead of showing the menu
+    else if (arg("--dsi-offline")) dsi_offline = true;        // --dsi-install never downloads the TMD from Nintendo's update CDN
+    else if (arg("--dsi-hide-installed")) dsi_hide_installed = true;   // hide the dump's own DSiWare for this session (the dump is untouched)
+    else if (arg("--dsi-install")) dsi_install = argv[++i];   // a DSiWare .nds/.cia put into the session's NAND (not the dump) unless its title ID is already installed
+    else if (arg("--dsi-persist")) dsi_persist = argv[++i];   // carry DSi saves (<CODE>.pub/.prv/.bnr), the system sidecar (nand.ovr) and photos (photos/) in and out of DIR
+    else if (arg("--dsi-nand-write")) dsi_nand_write = true;   // write the guest's NAND writes into the file (for diffing against melonDS; use a copy). Default: held in memory
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];        // a real nand.bin (nocash footer): the eMMC behind the SD/MMC host, and the console ID
     else if (flag("--dsi")) dsi_mode = 1;                    // force the DSi machine (default: a DSi-capable header with the DSi BIOS loaded)
     else if (flag("--no-dsi")) dsi_mode = 0;
@@ -277,7 +289,54 @@ int main(int argc, char** argv) {
     std::string err;
     if (!nds.load_dsi_bios(bios9i ? bios9i : "", bios7i ? bios7i : "", &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (dsi_boot && !nds.load_dsi_boot_blobs(dsi_boot, &err)) { std::fprintf(stderr, "dsi boot: %s\n", err.c_str()); return 1; }
-    if (dsi_nand && !nds.load_dsi_nand(dsi_nand, &err)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
+    if (dsi_nand && !nds.load_dsi_nand(dsi_nand, &err, dsi_nand_write)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
+    if (dsi_hide_installed && nds.dsi_nand.valid()) {
+      const int n = ds::io::nand_hide_installed_dsiware(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr, &err);
+      if (n < 0) { std::fprintf(stderr, "dsi: hiding installed titles: %s\n", err.c_str()); return 1; }
+      std::fprintf(stderr, "dsi: %d installed titles hidden for this session\n", n);
+    }
+    if (dsi_install && nds.dsi_nand.valid()) {
+      std::vector<ds::u8> srl, embedded;
+      if (!ds::io::read_dsiware(dsi_install, srl, &err, &embedded)) { std::fprintf(stderr, "dsi install: %s\n", err.c_str()); return 1; }
+      const ds::u32 lo = static_cast<ds::u32>(srl[0x230] | (srl[0x231] << 8) | (srl[0x232] << 16) | (srl[0x233] << 24));
+      if (ds::io::nand_has_title(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr, lo)) {
+        std::fprintf(stderr, "dsi install: %.4s: already installed on the NAND\n", reinterpret_cast<const char*>(&srl[0x0C]));
+        dsi_title_lo = lo;
+      } else {
+        // The signed TMD: the CIA's own, the --dsi-persist cache, the update CDN, or a file beside the ROM.
+        std::string beside = dsi_tmd ? dsi_tmd : std::string(dsi_install);
+        if (!dsi_tmd) { const size_t dot = beside.find_last_of('.'), slash = beside.find_last_of('/'); beside = (dot != std::string::npos && (slash == std::string::npos || dot > slash) ? beside.substr(0, dot) : beside) + ".tmd"; }
+        const std::string cache = dsi_persist ? std::string(dsi_persist) + "/" + std::string(reinterpret_cast<const char*>(&srl[0x0C]), 4) + ".tmd" : std::string();
+        ds::io::TmdFetch fetch;
+#if DSPERATE_CHEEVOS
+        std::string http_err;
+        std::shared_ptr<ds::cheevos::Backend> http = dsi_offline ? nullptr : std::shared_ptr<ds::cheevos::Backend>(ds::cheevos::make_curl_backend(http_err));
+        if (http) fetch = [http](const std::string& url, std::vector<ds::u8>& body) {
+          const ds::cheevos::Response resp = http->perform({url, {}, {}}, "DSperate");
+          if (resp.status != 200) return false;
+          body.assign(resp.body.begin(), resp.body.end());
+          return true;
+        };
+#endif
+        std::vector<std::string> tmd_log;
+        const std::vector<ds::u8> tmd = ds::io::find_signed_tmd(srl, embedded, cache, beside, fetch, tmd_log);
+        for (const std::string& l : tmd_log) std::fprintf(stderr, "dsi install: %s\n", l.c_str());
+        if (tmd.empty()) { std::fprintf(stderr, "dsi install: no signed DSi TMD for this title; the launcher will not start it without one (pass --dsi-tmd, or allow the download)\n"); return 1; }
+        const auto t0 = std::chrono::steady_clock::now();
+        const ds::io::TitleInstall r = ds::io::nand_install_title(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr, srl, tmd);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::fprintf(stderr, "dsi install: %.4s: %s (%.0f ms)\n", reinterpret_cast<const char*>(&srl[0x0C]), r.message.c_str(), ms);
+        if (r.result == ds::io::TitleInstall::Result::Failed) return 1;
+        dsi_title_lo = r.title_lo;
+      }
+    }
+    if (dsi_persist && nds.dsi_nand.valid()) {
+      if (dsi_nand_write) { std::fprintf(stderr, "--dsi-persist and --dsi-nand-write do not mix: the written image is the record there\n"); return 1; }
+      const std::string d = dsi_persist;
+      const ds::io::NandPersistReport r = ds::io::nand_import(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr, {d, d + "/nand.ovr", d + "/photos"});
+      std::fprintf(stderr, "dsi persist: in %d saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
+      for (const std::string& n : r.notes) std::fprintf(stderr, "dsi persist: %s\n", n.c_str());
+    }
   }
   if (nds.firmware_synthetic) std::fprintf(stderr, "note: --firmware %s; using a generated firmware\n", fw ? "not found" : "not given");
   if (!direct && !nds.can_boot_firmware()) {
@@ -371,6 +430,11 @@ int main(int argc, char** argv) {
     }
   }
   if ((rom && direct) || (nds.dsi && nds.dsi_nand_boot)) nds.setup_direct_boot();   // a NAND boot needs no ROM
+  if (dsi_autoload) {
+    if (!(nds.dsi && nds.dsi_nand_boot && dsi_title_lo)) { std::fprintf(stderr, "--dsi-autoload needs a NAND boot and --dsi-install\n"); return 1; }
+    nds.dsi_autoload(dsi_title_lo);
+    std::fprintf(stderr, "dsi: autoload %08x (TLNC)\n", dsi_title_lo);
+  }
   // A recording made with a save present only replays if the save is there:
   // the game otherwise stops to create one. Loaded in the same place the SDL
   // frontend loads it, and never written back -- this is a harness.
@@ -681,6 +745,12 @@ int main(int argc, char** argv) {
   if (nds.dsi_nand.valid())
     std::fprintf(stderr, "nand: %llu block reads, %llu block writes\n",
                  (unsigned long long)nds.dsi_nand.reads, (unsigned long long)nds.dsi_nand.writes);
+  if (dsi_persist && nds.dsi_nand.valid()) {
+    const std::string d = dsi_persist;
+    const ds::io::NandPersistReport r = ds::io::nand_export(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr, {d, d + "/nand.ovr", d + "/photos"});
+    std::fprintf(stderr, "dsi persist: out %d saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
+    for (const std::string& n : r.notes) std::fprintf(stderr, "dsi persist: %s\n", n.c_str());
+  }
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));

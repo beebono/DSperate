@@ -16,7 +16,7 @@ The target is DSperate **2.0.0**.
 | DSiWare, launched from a real `nand.bin` | **in** | NAND boot + TLNC auto-launch (section 2.1) |
 | Booting the DSi menu itself | **in** | same NAND boot with no autoload |
 | No-NAND fallback via Unlaunch | **in** | needs SD port 0 and synthesised boot data (2.2) |
-| Title install from `.nds`/`.app`/`.cia` | **in** | temporary install into a working copy of the NAND (2.3) |
+| Title install from `.nds`/`.app`/`.cia` | **in** | at most one virtual title per boot, injected into the read-only dump's in-memory session (2.3) |
 | Save export/import (`.pub`/`.prv`/`.bnr`) | **in** | melonDS TitleManager extensions |
 | Microphone (I2S `MICCNT`/`MICDATA`) | **in** | fed by the existing SDL/ALSA capture |
 | DSi Wi-Fi networking | **in** | Atheros module is modelled; attach it to the `wifi-emu` slirp backend |
@@ -27,7 +27,7 @@ The target is DSperate **2.0.0**.
 | Camera image source | after 2.0.0 | the cameras exist as hardware; frames are black until then |
 | DSi-enhanced retail carts in DSi mode | after 2.0.0 | they run in DS mode, as today |
 | DSP LLE (Teakra), AAC ucode | undecided | only if a wanted title needs an unlisted ucode |
-| Second card slot, DSi Shop, ticket/ES crypto | out | nothing needs them |
+| Second card slot, DSi Shop | out | nothing needs them |
 
 ## 2. Design
 
@@ -74,7 +74,7 @@ enough: their low-32 KB CRCs match melonDS's; full-64 KB CRCs do not), the
 DSi firmware (`dsifirmware.bin`), and `nand.bin` (nocash footer, which supplies
 the eMMC CID and the console ID). The console ID seeds AES key slots 1 and 3,
 so it is set **before** `aes.reset()`. The user's `nand.bin` is never written:
-boots run on a working copy (today by hand, `cp` first).
+it is opened read-only and the session's writes are held in memory (2.3).
 
 `--dsi-boot <blob>` (0x154 bytes from `tools/dsi_nand.py bootblobs`: TWLCFG
 0x128, HWINFO_N, HWINFO_S) is a **direct-boot** input only; a NAND boot reads
@@ -98,30 +98,135 @@ oracle. Try that before debugging ours blind. To work without a NAND it needs:
    the boot info (0x220), the MBK mapping (0x380) and the eMMC CID;
 3. whatever Unlaunch reads from `nand:/` itself (unknown until it runs).
 
-### 2.3 Title install and saves
+### 2.3 The virtual NAND: title injection and persistence
 
-melonDS DS imports the title into the NAND before boot and removes it after
-(`NANDMount::ImportTitle`). We do the same against the working copy:
-`title/00030004/<id>/content/title.tmd` + `<ver>.app`, and
-`data/public.sav`/`private.sav`/`banner.sav` sized from header 0x238/0x23C and
-`AppFlags & 4`, each formatted as `CreateSaveFile` does. The NAND FAT is
-AES-CTR encrypted (key from the console ID, `FATIV = bswap128(SHA1(CID))`), so
-this host-side writer is where NAND crypto lives. The SD/MMC host passes
-**raw** sectors, and the guest decrypts them in software; the AES engine is
-not on this path.
+Decided 2026-09-12. A dump-free NAND is not possible on this route (boot2,
+the launcher and the system titles only exist in `nand.bin`), so the NAND is
+the user's dump, never written, with a session layered on top:
 
-Inputs:
-- `.nds`/`.app`, with a TMD built from the header;
-- `.cia`: the DSiWare CIAs people have carry the SRL as the only content;
-  title-key-encrypted content is decrypted with 3DS common key 0.
-  `dsperate-research/tools/melonds/cia_to_srl.py` is the reference, including
-  the 520-byte DSi TMD (not the 3DS one).
+- **Read-only dump, writes in memory.** `NandImage` opens `nand.bin`
+  read-only and holds every guest write as a 512-byte sector in memory,
+  overlaid on later reads. *Landed:* the 7000-frame Shantae menu launch is
+  byte-identical to the write-through run and the dump's MD5 is unchanged.
+  `--dsi-nand-write` (headless) writes through instead, for diffing the image
+  against melonDS (use a copy).
+- **The dump's layout is kept.** Existing files stay on their sectors, so the
+  boot stays comparable to melonDS sector for sector. Injected files take
+  free clusters; the FAT and directory changes are in-memory sectors like any
+  guest write. Free space is the dump's (partition 0 is FAT16, 421 769
+  sectors, about 206 MB; the photo partition about 33 MB).
+- **Titles: the NAND's own plus at most one virtual title per boot.** The
+  dump's installed DSiWare shows by default (an option hides it). A title
+  passed in (`.nds`/`.app`/`.cia`) is injected only when its title ID is not
+  already installed; otherwise the NAND's copy is used. That keeps any
+  install limit (the partition's free space, the launcher's icon grid) out of
+  the way by construction.
+- **What an injection writes** (melonDS `NANDMount::ImportTitle`):
+  `title/00030004/<id>/content/title.tmd` -- the title's **Nintendo-signed**
+  TMD, which the launcher checks at launch (step 4 below) -- and
+  `<content id>.app` (held in memory for now), `data/public.sav`/`private.sav`
+  sized from header 0x238/0x23C and `banner.sav` when `AppFlags & 4`, each
+  formatted as `CreateSaveFile` does, and a fabricated
+  `ticket/00030004/<id>.tik` encrypted under the ES key (from the console ID
+  and `bios7i[0x8308]`; verified: all 20 of the dump's tickets decrypt with
+  it). The install also has to respect the launcher's 1024-block DSiWare
+  quota (step 4). The FAT is
+  AES-CTR under the console-ID key (`FATIV = bswap128(SHA1(CID))`), so a C++
+  FAT16 reader/writer with that crypto is the core of this work;
+  `tools/dsi_nand.py` is the independent reference to test it against.
+- **Inputs:** `.nds`/`.app` with a TMD built from the header; `.cia`, whose
+  single content is the SRL (title-key content decrypted with 3DS common key
+  0; `dsperate-research/tools/melonds/cia_to_srl.py` is the reference,
+  including the 520-byte DSi TMD).
+- **Persistence, pulled out of the written sectors as files:**
+  - DSi system settings (`shared1/TWLCFG*.dat`, `sys/HWINFO*`, and whatever
+    else under `sys/` the settings app writes) to a sidecar beside the dump,
+    the way `firmware.bin.ovr` holds the DS firmware's settings, applied again
+    at the next boot;
+  - title saves to `<saves>/<GAMECODE>.pub/.prv/.bnr`, melonDS TitleManager's
+    export format, for the dump's own titles as much as the virtual one
+    (imported over the NAND's copy at the next boot);
+  - photos (`photo:/` partition) as plain image files in a folder.
 
-Saves persist as `<saves>/<GAMECODE>.pub/.prv/.bnr`, extracted after a session
-and imported at the next install, so they round-trip with melonDS's
-TitleManager. Still to decide: whether the working copy is a full 240 MB copy
-per session or a sector overlay over the read-only dump. The overlay is
-smaller and also makes save states practical (2.5).
+  Extracted on a quiet period and at exit, like `.sav`.
+
+Order:
+1. read-only dump + in-memory writes (done);
+2. C++ FAT16 + NAND crypto layer (done: `io/dsi_nand_fs.*`, `crypto/sha1.*`).
+   `FatVolume` is FAT12/16 over any byte device; `NandFs` adds the MBR, the
+   sector AES-CTR and the ES ticket crypto. The ES key from our `bios7i` is
+   verified: all 20 tickets in the dump decrypt with a good MAC.
+   `tests/nand_fs_test.cpp` covers SHA-1, a FAT12 image, and (with
+   `DS_TEST_DSI_NAND` / `DS_TEST_DSI_BIOS7I`) the real dump. A multi-cluster
+   write into a copy (`DS_TEST_DSI_NAND_COPY`) reads back byte-identical
+   through `tools/dsi_nand.py`. Partition 0 has 3366 free 16 KB clusters
+   (about 54 MB);
+3. persistence (done: `io/dsi_nand_persist.*`). Only files whose data sectors
+   the session wrote are exported, and a host file is only rewritten when it
+   changed. Headless `--dsi-persist DIR` puts everything under DIR; the SDL
+   frontend imports before boot and exports on quiet NAND writes, pause, lid
+   and exit, with saves in `paths.saves` (else beside the dump), `<nand>.ovr`
+   and `<nand>.photos/`.
+   - Gate, headless: session 1 (the Shantae menu launch) exports `KS3E.pub`
+     and TWLCFG0/1. Session 3 imports them, launches Shantae with the same 19
+     writes, and its exported save is identical. The dump's MD5 is unchanged
+     throughout.
+   - The launcher keeps its selected icon in TWLCFG, so an imported sidecar
+     starts the menu where the last session left it; replaying the old
+     14-scroll script then opens Settings instead.
+   - The unit test round-trips a changed save and a changed TWLCFG through
+     export and a fresh import.
+   - TWLCFG is only written on that boot because the headless clock starts at
+     2000-01-01. With the host clock (`--rtc-host`, and always in SDL) a boot
+     with no input writes nothing.
+4. injection of one title (done: `io/dsi_title_install.*`; headless
+   `--dsi-install F [--dsi-tmd F] [--dsi-offline] [--dsi-hide-installed]`, SDL
+   `--dsi-mode <game.nds|.cia>` with the same flags). The ticket, directories,
+   saves (`make_dsi_save`, melonDS `CreateSaveFile`), TMD and `.app` go into
+   the session's memory in about 80-250 ms. Two launcher rules were found the
+   hard way:
+   - **The DSiWare quota: 1024 blocks of 128 KB.** When the files under
+     `/title/00030004` exceed it, the launcher stops right after Health and
+     Safety with "An error has occurred". The dump sits at 1001.5 blocks, so
+     one more 3.8 MB title (KD9E) or 15 MB one (KZLE) triggers it. The same
+     title booted once a 6 MB title was removed, and a forgotten, reinstalled
+     KMGE booted too. The installer now hides the dump's own titles for that
+     session, largest first, until the new one fits, and names them. (The
+     user's first guess, that the CIAs were dumped from a 3DS, was not it: the
+     CIA SRL matches the SHA-1 in Nintendo's own TMD.)
+   - **The launcher checks the TMD's RSA signature when it starts a title**,
+     not when it lists one. A synthesized TMD (field for field identical to
+     the real one apart from the signature) lists and shows the title, then
+     launching logs `menuRedIplManager.cpp RED FATAL ... (000300044b443945)`
+     to `/sys/log/sysmenu.log`. Corrupting one signature byte of Shantae's
+     real TMD fails the same way. So an install needs the title's real TMD.
+     `find_signed_tmd` tries, in order: a DSi-signed TMD embedded in the CIA
+     (ours carry 3DS TMDs), the cache `<saves>/<GAMECODE>.tmd`, the update CDN
+     (`http://nus.cdn.t.shop.nintendowifi.net/ccs/download/00030004XXXXXXXX/tmd`,
+     only the 2.3 KB TMD, through the dlopen'd libcurl RetroAchievements
+     uses), and a user file (`<game>.tmd` or `--dsi-tmd`). `check_signed_tmd`
+     requires the DSi signature type and issuer, this title ID, one content,
+     and the SRL's size and SHA-1.
+   - Title-key-encrypted CIA content is refused: decrypting it needs the 3DS
+     common key, which DSperate does not carry.
+   - Gate: Dr Mario Express (KD9E, CIA-only) appears as a new-title gift,
+     opens, launches to its title screen, and exports `KD9E.pub`. Session 2
+     is offline (cached TMD), imports the save and the sidecar, and boots with
+     it selected. The dump's MD5 is unchanged throughout.
+   - Not yet: gameplay past the title screen, the `.app` streamed from the ROM
+     file instead of held in memory (16 MB of sectors for a large title), the
+     exported `.pub` imported into melonDS, and SDL options/menu for hiding.
+5. TLNC auto-launch (done: `NDS::dsi_autoload`, the block writer shared with
+   the `DS_DSI_HANDOFF=2` experiment). Written after the NAND boot is set up:
+   "TLNC" at 0x02000300 plus BPTWL register 0x70 = 1. The launcher then skips
+   Health and Safety and the menu and starts the title. It works with no
+   input: Dr Mario Express (injected) shows its developer logo by frame 500
+   and its title screen by 700; Shantae (already on the NAND, so no install and
+   no TMD needed, `--dsi-offline`) shows WayForward by 900, "Touch to Start"
+   by 1200, and File Select after one tap. The SDL frontend auto-launches the
+   title given to `--dsi-mode`; `--dsi-menu` boots to the menu with it
+   installed instead. Headless: `--dsi-install F --dsi-autoload`. A title
+   already installed is detected before any TMD lookup (`nand_has_title`).
 
 ### 2.4 Machine selection and frontend
 
@@ -136,9 +241,9 @@ In DSi mode the picker also lists DSiWare (`unit_code & 2` and title-ID high
 
 `FORMAT_VERSION` 5 carries the DSi chunk, the SD/MMC, SDIO, Wi-Fi and camera
 events, the Wi-Fi mailboxes (~44 KB) and two 32 KB camera register files. Not
-covered yet: NAND contents. A state must carry the working copy's dirty
-sectors since install and refuse to load against a different NAND identity
-(CID + console ID + size), the way `bios_id` is checked.
+covered yet: NAND contents. A state must carry the in-memory written sectors
+(`NandImage::written_sectors`) and refuse to load against a different NAND
+identity (CID + console ID + size), the way `bios_id` is checked.
 
 ## 3. Corrections to the 2026-09-10 plan
 
@@ -201,9 +306,9 @@ unmapped DSi ARM7 BIOS).
    (13 scrolls launches Mighty Flip Champs instead; it also matches.) Still
    to do: the TLNC auto-launch on this boot, and the cart-present NAND boot
    (last diverged on SPIDATA at frame 37).
-2. **Title installer + save export** (2.3), NAND working copy/overlay, `.cia`.
-   Gate: an installed CIA title (Dr Mario KD9E, Plants vs Zombies KZLE) boots
-   and saves; the exported `.pub` imports into melonDS with the same data.
+2. **The virtual NAND** (2.3): read-only dump with in-memory writes (done),
+   then the FAT/crypto layer, save and settings extraction, one-title
+   injection, TLNC.
 3. **Mic / I2S**: `MICCNT`/`MICDATA`, 16-entry FIFO, half-full IRQ,
    `IRQ2_MicExt`, NDMA 0x2C. Oracle: Instrument Tuner (KTUE) uses the mic,
    though its DSP half waits for after 2.0.0.
@@ -276,11 +381,11 @@ also has `info`, `titles`, `extract`, `bootblobs`.
 
 ### 7.2 NAND boot to the launcher
 
-    cp dsi-binary/bios/dsinand.bin out/n.bin      # always a copy
+    # the dump is opened read-only; add --dsi-nand-write on a copy to diff the written image
     dsperate-headless --direct --interp --dsi --touch 600:128,100:10 \
       --bios9 bios9.bin --bios7 bios7.bin --firmware dsifirmware.bin \
       --bios9i biosdsi9.bin --bios7i biosdsi7.bin \
-      --dsi-nand out/n.bin --dsi-nand-boot --frames 1300 --dump-frames out/o.frames
+      --dsi-nand dsinand.bin --dsi-nand-boot --frames 1300 --dump-frames out/o.frames
     trace_melonds bios9.bin bios7.bin dsifirmware.bin out/m --touch 600:128,100:10 \
       --dsi biosdsi9.bin biosdsi7.bin out/n2.bin --nand-inplace --frames 1300 --max 1 \
       --dump-frames out/m.frames

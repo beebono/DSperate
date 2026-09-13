@@ -107,8 +107,8 @@ bool NDS::load_dsi_boot_blobs(const std::string& path, std::string* err) {
   return true;
 }
 
-bool NDS::load_dsi_nand(const std::string& path, std::string* err) {
-  if (!dsi_nand.open(path)) {
+bool NDS::load_dsi_nand(const std::string& path, std::string* err, bool write_through) {
+  if (!dsi_nand.open(path, write_through)) {
     if (err) *err = path + ": not a DSi NAND image (needs the nocash footer holding the eMMC CID and console ID)";
     return false;
   }
@@ -315,6 +315,22 @@ void NDS::dsi_soft_reset() {
 #endif
 }
 
+void NDS::dsi_autoload(u32 title_lo, u32 title_hi) {
+  u8 tlnc[0x100] = {};
+  tlnc[0] = 'T'; tlnc[1] = 'L'; tlnc[2] = 'N'; tlnc[3] = 'C';
+  tlnc[4] = 0x01;
+  tlnc[5] = 0x18;
+  // PrevTitleID stays zero ("anonymous": nothing launched us).
+  std::memcpy(&tlnc[0x10], &title_lo, 4);
+  std::memcpy(&tlnc[0x14], &title_hi, 4);
+  const u32 flags = 0x01u | (0x03u << 1) | (1u << 4);
+  std::memcpy(&tlnc[0x18], &flags, 4);
+  const u16 crc = bios::crc16(&tlnc[0x08], 0x18, 0xFFFF);
+  std::memcpy(&tlnc[0x06], &crc, 2);
+  for (u32 i = 0; i < sizeof tlnc; ++i) bus.dma_write8(Cpu::ARM9, 0x02000300 + i, tlnc[i]);
+  io.dsi.bptwl_regs[0x70] = 1;   // the BPTWL boot flag (melonDS SetBootFlag)
+}
+
 void NDS::setup_direct_boot_dsi() {
   const cart::Header& h = cart->header();
   const cart::TwlHeader& t = cart->twl();
@@ -485,22 +501,7 @@ void NDS::setup_direct_boot_dsi() {
   //   +0x1C unused (still checksummed)     +0x20 unused, zero filled
   if (tlnc_handoff) {
     d.scfg_ext[1] |= 1u << 18;                       // the launcher's SCFG_EXT7: NAND access for the ARM7
-
-    u8 tlnc[0x100] = {};
-    tlnc[0] = 'T'; tlnc[1] = 'L'; tlnc[2] = 'N'; tlnc[3] = 'C';
-    tlnc[4] = 0x01;
-    tlnc[5] = 0x18;
-    // PrevTitleID stays zero ("anonymous" -- nothing launched us).
-    std::memcpy(&tlnc[0x10], &t.title_id_lo, 4);
-    std::memcpy(&tlnc[0x14], &t.title_id_hi, 4);
-    const u32 flags = 0x01u | (0x03u << 1) | (1u << 4);
-    std::memcpy(&tlnc[0x18], &flags, 4);
-    const u16 crc = bios::crc16(&tlnc[0x08], 0x18, 0xFFFF);
-    std::memcpy(&tlnc[0x06], &crc, 2);
-    for (u32 i = 0; i < sizeof tlnc; ++i) w8(0x02000300 + i, tlnc[i]);
-
-    // The BPTWL boot flag (register 0x70) the launcher sets on its way out.
-    io.dsi.bptwl_regs[0x70] = 1;
+    dsi_autoload(t.title_id_lo, t.title_id_hi);
   }
   arm9->jump(h.arm9_entry, true);
   arm7->jump(h.arm7_entry, true);

@@ -13,6 +13,8 @@
 #include "core/frame_report.h"
 #include "core/input/input_log.h"
 #include "core/state/state.h"
+#include "core/io/dsi_nand_persist.h"
+#include "core/io/dsi_title_install.h"
 #include "core/cheat/database.h"
 #include "core/cart/miniz/miniz_tdef.h"
 #if DSPERATE_JIT
@@ -21,6 +23,7 @@
 #if DSPERATE_CHEEVOS
 #include "cheevos/cheevos_client.h"
 #include "cheevos/cheevos_hash.h"
+#include "cheevos/cheevos_http.h"
 #endif
 #if DSPERATE_NET
 #include "net/lan_mp.h"
@@ -54,7 +57,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <thread>
@@ -90,8 +92,15 @@ const char* kUsage =
     "  --dsi-mode      boot a DSi from its NAND (boot2, then the DSi Launcher) instead of the DS menu; no\n"
     "                  ROM. Needs --bios9i F --bios7i F (the DSi BIOS pair) and --dsi-nand F (a nand.bin\n"
     "                  with its nocash footer), with --bios9/--bios7 and the DSi's --firmware as usual.\n"
-    "                  EXPERIMENTAL: interpreter only, no idle skip, no save states, and the NAND runs\n"
-    "                  from a fresh copy in the config directory every time, so nothing it writes is kept\n"
+    "                  EXPERIMENTAL: interpreter only, no idle skip, no save states. The NAND is opened\n"
+    "                  read-only; what a session changes is kept as files instead: title saves as\n"
+    "                  <GAMECODE>.pub/.prv/.bnr (paths.saves, else beside the dump), system settings in\n"
+    "                  <nand>.ovr and photos under <nand>.photos/, put back in at the next boot.\n"
+    "                  A DSiWare .nds/.cia given with it is installed into the session (not the dump) unless\n"
+    "                  the NAND has it; it needs its signed DSi TMD: embedded in the CIA, cached beside the\n"
+    "                  saves, downloaded from Nintendo's update CDN, or --dsi-tmd F (default <game>.tmd).\n"
+    "                  --dsi-offline never downloads; --dsi-hide-installed hides the dump's own DSiWare.\n"
+    "                  The title starts straight away; --dsi-menu boots to the DSi Menu with it instead\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) | horizontal | single | pip | dominant_v | dominant_h\n"
@@ -962,6 +971,8 @@ int main(int argc, char** argv) {
   // line. Config keys and the menu come once the rest of the DSi path is in.
   bool dsi_mode = false;
   const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_nand = nullptr;
+  const char* dsi_title = nullptr; const char* dsi_tmd = nullptr; bool dsi_offline = false, dsi_hide_installed = false, dsi_menu = false;
+  u32 dsi_title_lo = 0;   // the title --dsi-mode was given, once it is on the NAND: what the autoload starts
 
   // The game is found before the options are read. A flag whose value is
   // optional (--chunky [M]) takes the next word unless it is another option,
@@ -993,6 +1004,10 @@ int main(int argc, char** argv) {
     else if (arg("--bios9i")) bios9i = argv[++i];
     else if (arg("--bios7i")) bios7i = argv[++i];
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];
+    else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];
+    else if (flag("--dsi-offline")) dsi_offline = true;
+    else if (flag("--dsi-menu")) dsi_menu = true;
+    else if (flag("--dsi-hide-installed")) dsi_hide_installed = true;
     else if (arg("--config")) config_arg = argv[++i];
     else if (arg("--write-config")) { ds::sdl::Config::write_default(argv[++i], true); return 0; }
     else if (arg("--scale")) cli.set("video.scale", argv[++i]);
@@ -1077,10 +1092,12 @@ int main(int argc, char** argv) {
     else rom = argv[i];
   }
   if (dsi_mode) {
-    // A NAND boot to the launcher, and nothing more yet: launching a DSiWare
-    // file needs the title installer (scoping doc 2.3), and a cart in the slot
-    // during a NAND boot has not been checked against melonDS.
-    if (rom) { std::fprintf(stderr, "--dsi-mode boots the DSi Launcher from the NAND and takes no ROM yet\n"); return 2; }
+    // A NAND boot to the launcher. A game named with it is DSiWare, installed
+    // into the session's NAND rather than put in the card slot (a cart during
+    // a NAND boot has not been checked against melonDS), so the rest of the
+    // startup runs as the cartless firmware boot it is.
+    dsi_title = rom;
+    rom = nullptr;
     if (!bios9i || !bios7i || !dsi_nand) { std::fprintf(stderr, "--dsi-mode needs --bios9i, --bios7i and --dsi-nand\n"); return 2; }
     // Every DSi result so far is on the interpreter; the recompilers have never
     // run a DSi. And lockstep, which is the interleave the NAND boot was matched
@@ -1241,15 +1258,65 @@ int main(int argc, char** argv) {
     std::string err;
     if (!nds.load_dsi_bios(bios9i, bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", bios9i, bios7i); return 1; }
-    // The boot writes to the NAND (TWLCFG, title saves), and the dump is a file
-    // the user cannot regenerate. Until the NAND gets a proper working copy
-    // (scoping doc 2.3) it runs from a fresh copy, so nothing is kept between runs.
-    const std::string work = ds::sdl::Config::dir() + "/dsi-nand.session.bin";
-    std::error_code ec;
-    std::filesystem::copy_file(dsi_nand, work, std::filesystem::copy_options::overwrite_existing, ec);
-    if (ec) { std::fprintf(stderr, "dsi nand: cannot copy %s to %s: %s\n", dsi_nand, work.c_str(), ec.message().c_str()); return 1; }
-    if (!nds.load_dsi_nand(work, &err)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
-    VLOG("dsi nand: %s, running from the copy %s\n", dsi_nand, work.c_str());
+    // Opened read-only: the guest's writes (TWLCFG, title saves) are held in
+    // memory (NandImage), so the dump is never written and nothing is kept
+    // between runs until saves and settings are pulled out as files.
+    if (!nds.load_dsi_nand(dsi_nand, &err)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
+    VLOG("dsi nand: %s (read-only; writes held in memory)\n", dsi_nand);
+    const ds::io::NandPersistPaths pp = ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves"));
+    if (dsi_hide_installed) {
+      const int n = ds::io::nand_hide_installed_dsiware(nds.dsi_nand, nds.bus.bios7i.get(), &err);
+      if (n < 0) { std::fprintf(stderr, "dsi: hiding the installed titles: %s\n", err.c_str()); return 1; }
+      std::fprintf(stderr, "dsi: %d installed titles hidden for this session\n", n);
+    }
+    // The DSiWare title named on the command line, into the session: at most
+    // one, and only when the NAND does not have it already. The launcher starts
+    // it only with its Nintendo-signed TMD: the CIA's own, the one cached
+    // beside the saves, a download from the update CDN, or <game>.tmd.
+    if (dsi_title) {
+      std::vector<ds::u8> srl, embedded;
+      if (!ds::io::read_dsiware(dsi_title, srl, &err, &embedded)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); return 2; }
+      const u32 lo = static_cast<u32>(srl[0x230] | (srl[0x231] << 8) | (srl[0x232] << 16) | (srl[0x233] << 24));
+      if (ds::io::nand_has_title(nds.dsi_nand, nds.bus.bios7i.get(), lo)) {
+        std::fprintf(stderr, "dsi: %.4s: already installed on the NAND\n", reinterpret_cast<const char*>(&srl[0x0C]));
+        dsi_title_lo = lo;
+      } else {
+        std::string beside = dsi_tmd ? std::string(dsi_tmd) : rom_stem(std::string(dsi_title)) + ".tmd";
+        const std::string cache = pp.saves_dir + "/" + std::string(reinterpret_cast<const char*>(&srl[0x0C]), 4) + ".tmd";
+        ds::io::TmdFetch fetch;
+#if DSPERATE_CHEEVOS
+        std::string http_err;
+        std::shared_ptr<ds::cheevos::Backend> http = dsi_offline ? nullptr : std::shared_ptr<ds::cheevos::Backend>(ds::cheevos::make_curl_backend(http_err));
+        if (http) fetch = [http](const std::string& url, std::vector<ds::u8>& body) {
+          const ds::cheevos::Response resp = http->perform({url, {}, {}}, "DSperate");
+          if (resp.status != 200) return false;
+          body.assign(resp.body.begin(), resp.body.end());
+          return true;
+        };
+#endif
+        std::vector<std::string> tmd_log;
+        const std::vector<ds::u8> tmd = ds::io::find_signed_tmd(srl, embedded, cache, beside, fetch, tmd_log);
+        for (const std::string& l : tmd_log) VLOG("dsi: %s\n", l.c_str());
+        if (tmd.empty()) {
+          for (const std::string& l : tmd_log) std::fprintf(stderr, "dsi: %s\n", l.c_str());
+          std::fprintf(stderr, "dsi: no signed DSi TMD for %.4s; the launcher cannot start it without one (put it at %s%s)\n",
+                       reinterpret_cast<const char*>(&srl[0x0C]), beside.c_str(), fetch ? "" : ", or allow the download");
+          return 2;
+        }
+        const ds::io::TitleInstall r = ds::io::nand_install_title(nds.dsi_nand, nds.bus.bios7i.get(), srl, tmd);
+        std::fprintf(stderr, "dsi: %.4s: %s\n", reinterpret_cast<const char*>(&srl[0x0C]), r.message.c_str());
+        if (r.result == ds::io::TitleInstall::Result::Failed) return 1;
+        dsi_title_lo = r.title_lo;
+      }
+    }
+    // What earlier sessions carried out -- title saves, the system sidecar,
+    // photos -- goes back in before the boot reads the NAND. Not under a
+    // replay, which has to start from the same console every time.
+    if (!replay) {
+      const ds::io::NandPersistReport r = ds::io::nand_import(nds.dsi_nand, nds.bus.bios7i.get(), pp);
+      if (r.saves || r.system_files || r.photos) std::fprintf(stderr, "dsi: restored %d title saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
+      for (const std::string& n : r.notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
+    }
     nds.set_dsi(true);
     nds.dsi_nand_boot = true;   // reset() below builds the DSi machine; setup_direct_boot() then boots the NAND
     std::fprintf(stderr, "console: DSi (EXPERIMENTAL: interpreter, no idle skip, no save states)\n");
@@ -1609,6 +1676,9 @@ sdl_ready:
   nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
   nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
   if (!boot_firmware || nds.dsi) nds.setup_direct_boot();   // on a DSi this is the NAND boot (NDS::boot_dsi_nand)
+  // A DSiWare title given with --dsi-mode starts straight away (the TLNC
+  // autoload the launcher reads), unless --dsi-menu asks for the menu with it.
+  if (nds.dsi && dsi_title_lo && !dsi_menu) nds.dsi_autoload(dsi_title_lo);
   // A real console's clock, seeded from this machine. Off in the core by
   // default so the verification harness stays reproducible; a frontend
   // showing someone their own DS menu wants the real date on it. Not under
@@ -1907,7 +1977,19 @@ sdl_ready:
   // every point a session could end (pause, lid, quit).
   u32 sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
   u64 sram_quiet_since = 0;
-  auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav); };
+  // DSi mode's equivalent: what the session wrote to the NAND goes out as
+  // title saves, the system sidecar and photos (io/dsi_nand_persist), on the
+  // same occasions and once NAND writes have been quiet for two seconds.
+  const ds::io::NandPersistPaths dsi_paths = dsi_mode ? ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")) : ds::io::NandPersistPaths{};
+  u64 nand_writes_seen = nds.dsi_nand.writes, nand_quiet_since = 0, nand_exported = nds.dsi_nand.writes;
+  auto flush_dsi = [&] {
+    if (!dsi_mode || save_readonly || nds.dsi_nand.writes == nand_exported) return;
+    nand_exported = nds.dsi_nand.writes;
+    const ds::io::NandPersistReport r = ds::io::nand_export(nds.dsi_nand, nds.bus.bios7i.get(), dsi_paths);
+    if (r.saves || r.system_files || r.photos) VLOG("dsi: saved %d title saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
+    for (const std::string& n : r.notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
+  };
+  auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav); flush_dsi(); };
   // The session is ending: leave a state behind. The same two guards the
   // save-state hotkey carries -- a replay must not write, and a recording is
   // the inputs from boot, so a state alongside it would only mislead.
@@ -3859,6 +3941,10 @@ sdl_ready:
     if (nds.cart && nds.cart->sram_dirty()) {
       if (nds.cart->sram_writes() != sram_writes_seen) { sram_writes_seen = nds.cart->sram_writes(); sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
+    }
+    if (dsi_mode && nds.dsi_nand.writes != nand_exported) {
+      if (nds.dsi_nand.writes != nand_writes_seen) { nand_writes_seen = nds.dsi_nand.writes; nand_quiet_since = frames; }
+      else if (frames - nand_quiet_since >= 120) flush_dsi();
     }
 
     if ((show_fps || fps_osd) && frames % 60 == 0) {   // DS_FPS=1 and/or the on-screen counter

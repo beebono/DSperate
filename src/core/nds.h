@@ -66,7 +66,7 @@ struct NDS {
   // the eMMC on the SD/MMC host's port 1 and supplies the console ID, which
   // seeds AES key slots 1 and 3; without one a DSiWare title cannot reach
   // its save data. Loaded before reset(), like the BIOS pair.
-  bool load_dsi_nand(const std::string& path, std::string* err = nullptr);
+  bool load_dsi_nand(const std::string& path, std::string* err = nullptr, bool write_through = false);   // see NandImage
   io::NandImage dsi_nand;
   bool firmware_synthetic = false;   // the firmware was generated, not dumped (set by load_bios)
   // Direct boot is the only boot the substitutes support: FreeBIOS has no
@@ -121,6 +121,11 @@ struct NDS {
   bool boot_dsi_nand();
   bool dsi_nand_boot = false;        // set before reset() to take that path
   std::string dsi_boot2_override;    // an SRL to run instead of the NAND's boot2 (e.g. Unlaunch)
+  // The DSi's autoload hand-off (GBATEK "DSi Autoload", melonDS DS
+  // SetUpDSiWareDirectBoot): a 0x100-byte "TLNC" block at 0x02000300 naming
+  // the title, plus the BPTWL boot flag. Written after a NAND boot is set up,
+  // it makes the launcher start that installed title instead of the menu.
+  void dsi_autoload(u32 title_lo, u32 title_hi = 0x00030004);
   // The BPTWL soft reset (register 0x11 <- 1). The write halts the ARM7, and
   // the scheduler calls dsi_soft_reset() as that CPU's run returns -- melonDS
   // Halt(4), which resets at the end of ARM7::Execute.

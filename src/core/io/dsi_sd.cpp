@@ -1,6 +1,7 @@
 #include "core/io/dsi_sd.h"
 #include "core/io/dsi_nwifi.h"
 
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 
@@ -29,11 +30,12 @@ NandImage::~NandImage() { close(); }
 void NandImage::close() {
   if (file_) { std::fflush(file_); std::fclose(file_); file_ = nullptr; }
   length_ = 0; console_id_ = 0; std::memset(cid_, 0, sizeof(cid_));
+  written_.clear();
 }
 
-bool NandImage::open(const std::string& path) {
+bool NandImage::open(const std::string& path, bool write_through) {
   close();
-  std::FILE* f = std::fopen(path.c_str(), "r+b");
+  std::FILE* f = std::fopen(path.c_str(), write_through ? "r+b" : "rb");
   if (!f) { std::fprintf(stderr, "[nand] cannot open %s\n", path.c_str()); return false; }
   std::fseek(f, 0, SEEK_END);
   const long len = std::ftell(f);
@@ -61,25 +63,59 @@ bool NandImage::open(const std::string& path) {
   }
 
   file_ = f;
+  write_through_ = write_through;
   length_ = static_cast<u64>(len);
   return true;
 }
 
-void NandImage::read(u64 addr, u32 len, u8* out) {
-  reads++;
-  log_access(false, addr, len);
-  if (!file_) { std::memset(out, 0, len); return; }
+void NandImage::read_file(u64 addr, u32 len, u8* out) {
   std::fseek(file_, static_cast<long>(addr), SEEK_SET);
   const size_t got = std::fread(out, 1, len, file_);
   if (got < len) std::memset(out + got, 0, len - got);
 }
 
+void NandImage::read(u64 addr, u32 len, u8* out) {
+  reads++;
+  log_access(false, addr, len);
+  peek(addr, len, out);
+}
+
 void NandImage::write(u64 addr, u32 len, const u8* in) {
   writes++;
   log_access(true, addr, len);
+  poke(addr, len, in);
+}
+
+void NandImage::peek(u64 addr, u32 len, u8* out) {
+  if (!file_) { std::memset(out, 0, len); return; }
+  read_file(addr, len, out);
+  if (written_.empty()) return;
+  // Overlay the sectors written this session. Reads are whole blocks from the
+  // SD host and 16-byte pieces from the boot2 loader; both go through here.
+  for (u64 s = addr / MMC_BLOCK_SIZE, end = (addr + len + MMC_BLOCK_SIZE - 1) / MMC_BLOCK_SIZE; s < end; ++s) {
+    const auto it = written_.find(s);
+    if (it == written_.end()) continue;
+    const u64 sec = s * MMC_BLOCK_SIZE;
+    const u64 from = std::max(sec, addr), to = std::min(sec + MMC_BLOCK_SIZE, addr + len);
+    std::memcpy(out + (from - addr), it->second.data() + (from - sec), static_cast<size_t>(to - from));
+  }
+}
+
+void NandImage::poke(u64 addr, u32 len, const u8* in) {
   if (!file_) return;
-  std::fseek(file_, static_cast<long>(addr), SEEK_SET);
-  std::fwrite(in, 1, len, file_);
+  if (write_through_) {
+    std::fseek(file_, static_cast<long>(addr), SEEK_SET);
+    std::fwrite(in, 1, len, file_);
+    return;
+  }
+  for (u64 s = addr / MMC_BLOCK_SIZE, end = (addr + len + MMC_BLOCK_SIZE - 1) / MMC_BLOCK_SIZE; s < end; ++s) {
+    const u64 sec = s * MMC_BLOCK_SIZE;
+    auto [it, fresh] = written_.try_emplace(s);
+    // A write that covers only part of a sector keeps the rest of it.
+    if (fresh && (addr > sec || addr + len < sec + MMC_BLOCK_SIZE)) read_file(sec, MMC_BLOCK_SIZE, it->second.data());
+    const u64 from = std::max(sec, addr), to = std::min(sec + MMC_BLOCK_SIZE, addr + len);
+    std::memcpy(it->second.data() + (from - sec), in + (from - addr), static_cast<size_t>(to - from));
+  }
 }
 
 void NandImage::flush() { if (file_) std::fflush(file_); }

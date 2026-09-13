@@ -3,6 +3,7 @@ add_library(dsperate_core STATIC
   nds.cpp
   nds_dsi.cpp
   crypto/aes.c
+  crypto/sha1.cpp
   bios/freebios_data.cpp
   bios/firmware_gen.cpp
   profile.cpp
@@ -42,6 +43,9 @@ add_library(dsperate_core STATIC
   io/dsi_dsp.cpp
   io/dsi_camera.cpp
   io/dsi_sd.cpp
+  io/dsi_nand_fs.cpp
+  io/dsi_nand_persist.cpp
+  io/dsi_title_install.cpp
   io/dsi_nwifi.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
