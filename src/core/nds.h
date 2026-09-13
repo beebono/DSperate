@@ -144,6 +144,16 @@ struct NDS {
   // set; true when it handled the call.
   bool dsi_font_hle = false;
   u8   dsi_font_digest[20] = {};
+  // The frontend's loader cart is in the slot of a DSi booted to its launcher
+  // (set by the frontend). The launcher fades to white at its boot splash and
+  // at Health & Safety as well as at a card launch, so the fade alone cannot
+  // tell them apart. What only a card launch does is hash the card's header:
+  // SWI 27h over its first 0x160 bytes, the whitelist key, just before the
+  // fade. That sets dsi_loader_launched (cleared by reset() and a soft reset).
+  // The launcher then refuses the card (it is on no whitelist), but not until
+  // after the fade the frontend stops on.
+  bool dsi_loader_watch = false;
+  bool dsi_loader_launched = false;
   bool dsi_hle_swi(CpuContext& cpu, u32 number);
   // Boot the DSi from its NAND (boot2 -> launcher) instead of staging a direct
   // boot from the card. Needs a NAND image; false if there is none.

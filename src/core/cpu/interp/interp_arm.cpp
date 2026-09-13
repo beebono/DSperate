@@ -417,7 +417,7 @@ void exec_arm(CpuContext& cpu, u32 instr) {
   case AOp::Stm: ldm_stm(cpu, instr, false); return;
 
   case AOp::Swi:
-    if (cpu.nds->dsi_font_hle && cpu.nds->dsi_hle_swi(cpu, (instr >> 16) & 0xFF)) return;   // see NDS::dsi_hle_swi
+    if ((cpu.nds->dsi_font_hle || cpu.nds->dsi_loader_watch) && cpu.nds->dsi_hle_swi(cpu, (instr >> 16) & 0xFF)) return;   // see NDS::dsi_hle_swi
     cpu.raise_exception(CpuContext::Exception::Swi); return;
   case AOp::Bkpt: cpu.raise_exception(CpuContext::Exception::PrefetchAbort); return;
 

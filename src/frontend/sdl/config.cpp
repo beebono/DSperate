@@ -196,8 +196,11 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 #   Loading it lists the codes; none are on until enabled
 
 [loader]
-# The card the DS menu shows on a firmware boot. Built in; a BootMenu.nds next
-# to this file replaces it (tools/mkcart.py makes one with your own icon).
+# The card the DS menu shows on a firmware boot, and the DSi Menu under
+# --dsi-mode. Launching it raises the game list. Built in; a BootMenu.nds next
+# to this file replaces it (tools/mkcart.py makes one with your own icon). The
+# DSi Menu refuses the card once its launch fade is over ("An error has
+# occurred"), which the list covers.
 # title = Game Menu             # first banner line
 # subtitle = Dariragan! Dagozuban!   # second line; empty for one line
 # card = true                   # false boots the firmware with the slot empty

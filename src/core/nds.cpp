@@ -68,6 +68,7 @@ void NDS::reset() {
   frame_ready = false;
   power_off = false;
   exit_requested = false;
+  dsi_loader_launched = false;
 }
 
 // Normalise the touchscreen calibration in both user-settings blocks so that

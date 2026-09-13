@@ -102,6 +102,8 @@ const char* kUsage =
     "                  saves, downloaded from Nintendo's update CDN, or --dsi-tmd F (default <game>.tmd).\n"
     "                  --dsi-offline never downloads; --dsi-hide-installed hides the dump's own DSiWare.\n"
     "                  The title starts straight away; --dsi-menu boots to the DSi Menu with it instead\n"
+    "                  With no title, the loader card is in the slot there as on the DS menu: launching\n"
+    "                  it raises the game list, and a DS game picked from it runs on a DS\n"
     "                  Without --dsi-nand, a DSiWare .nds/.cia given with it runs with only the DSi BIOS\n"
     "                  pair: the launcher's hand-off is emulated, the NAND and the DSi settings are made\n"
     "                  up from [user], and saves go to paths.saves (else beside the game). The DSi system\n"
@@ -1112,6 +1114,10 @@ int main(int argc, char** argv) {
   // DSiWare named without --dsi-mode runs the DSi machine too: as a DS it
   // would not start at all.
   if (!dsi_mode && rom && !dsi_nand && ds::io::file_is_dsiware(rom)) dsi_mode = true;
+  // What the command line asked for before DSi mode overrides it below: a DS
+  // game picked from the loader cart on the DSi launcher gets them back.
+  const std::string ds_cli_jit = cli.has("emu.jit") ? cli.str("emu.jit") : std::string();
+  const std::string ds_cli_quantum = cli.has("emu.quantum") ? cli.str("emu.quantum") : std::string();
   if (dsi_mode) {
     // A NAND boot to the launcher. A game named with it is DSiWare, installed
     // into the session's NAND rather than put in the card slot (a cart during
@@ -1131,9 +1137,18 @@ int main(int argc, char** argv) {
     cli.set("emu.quantum", std::to_string(ds::LOCKSTEP_QUANTUM));
   }
   ds::sdl::Config cfg;
+  [[maybe_unused]] bool ds_jit = true;    // emu.jit and emu.quantum as a DS game would have them (ds_cli_jit)
+  long ds_quantum = 0;
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
+  {
+    ds::sdl::Config t;
+    t.set("emu.jit", ds_cli_jit.empty() ? cfg.str("emu.jit", "true") : ds_cli_jit);
+    t.set("emu.quantum", ds_cli_quantum.empty() ? cfg.str("emu.quantum", "0") : ds_cli_quantum);
+    ds_jit = t.flag("emu.jit", true);
+    ds_quantum = t.num("emu.quantum", 0);
+  }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.latency_frames", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
@@ -1212,7 +1227,8 @@ int main(int argc, char** argv) {
   // (scheduler.cpp), so setting it afterwards left emu.idle_skip a no-op.
   // The idle skips were built for DS scenes and are untested on the DSi
   // launcher, so DSi mode runs without them (an explicit DS_IDLE_SKIP wins).
-  if (dsi_mode && !dsi_hle && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", "0", 1);
+  const bool idle_skip_off_for_dsi = dsi_mode && !dsi_hle && !std::getenv("DS_IDLE_SKIP");
+  if (idle_skip_off_for_dsi) setenv("DS_IDLE_SKIP", "0", 1);
   if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);
 
   NDS nds;
@@ -1389,7 +1405,7 @@ int main(int argc, char** argv) {
   u8& chunky = vs.chunky;
   const u32& chunky_thresh = vs.chunky_thresh;
   bool audio_on = cfg.flag("audio.enabled", true), mic_on = cfg.flag("audio.mic", true);
-  const bool jit = cfg.flag("emu.jit", true);
+  bool jit = cfg.flag("emu.jit", true);   // not const: a DS game picked on the DSi launcher turns it back on
   const bool& dual_window = vs.dual_window;
   const long quantum = cfg.num("emu.quantum", 0);   // event-bound interleave (DraStic's rule): 5-10 % faster than lockstep
   using Disp = ds::sdl::Display;
@@ -1706,7 +1722,11 @@ sdl_ready:
   // memory, so the emulator needs no file shipped alongside it. Its two banner
   // lines are the only part worth configuring; a different icon means building
   // a card with the script.
-  if (boot_firmware && !dsi_mode) {
+  // The DSi launcher takes the same card (its whitelist refuses it, but only
+  // after the launch fade the picker stops on; see NDS::dsi_loader_watch).
+  // Not while a DSiWare title is being autoloaded: a card in the slot of that
+  // boot has not been tried.
+  if (boot_firmware && (!dsi_mode || (!dsi_hle && (!dsi_title || dsi_menu)))) {
     if (nds.load_rom(rom_path.c_str())) {
       VLOG("loader cart: %s\n", rom_path.c_str());
     } else if (cfg.flag("loader.card", true) &&
@@ -1994,6 +2014,7 @@ sdl_ready:
   // Armed until a game is launched: after that the cart in the slot is a real
   // one, and its own reads at its own arm9_rom_offset mean nothing.
   bool launcher = boot_firmware && nds.cart != nullptr;
+  nds.dsi_loader_watch = launcher && nds.dsi;
   if (launcher) VLOG("launcher: %zu games in %s\n", games.size(), cfg.str("paths.games").c_str());
   bool launching = false;       // the card's launch fade is on screen; the list is going up
   bool launch_latched = false;  // ... and it has already been raised once for this fade
@@ -3207,6 +3228,8 @@ sdl_ready:
     // made-up NAND, as `dsperate --dsi-mode game` does. There is no way
     // back to the DS menu from it: the session ends when the title does.
     const bool pick_dsi = ds::io::file_is_dsiware(pick);
+    bool left_dsi = false;                      // a DS pick leaving the DSi machine
+    [[maybe_unused]] bool attach_jit = false;   // ... with the recompiler wanted
     if (pick_dsi && !have_dsi_bios()) {
       std::fprintf(stderr, "launcher: %s is DSiWare and needs the DSi BIOS pair (paths.bios9i/paths.bios7i in %s)\n", pick.c_str(), global_ini.c_str());
       return;
@@ -3227,11 +3250,37 @@ sdl_ready:
       }
       nds.dsi_nand.close();
       nds.dsi_nand_synthetic = false;
+      nds.dsi_nand_boot = false;   // picked from the DSi launcher: the made-up NAND is handed over, not booted
       nds.dsi_boot_blobs.clear();
+      nds.dsi_loader_watch = false;
       nds.set_dsi(true);
       nds.dsi_hle_launch = true;
       dsi_mode = dsi_hle = true;
       nds.sched.set_quantum(ds::LOCKSTEP_QUANTUM);
+    } else if (nds.dsi) {
+      // A DS game picked from the loader cart on the DSi launcher: a DS it
+      // runs on, as the DS menu's picks do, with what DSi mode had turned
+      // off for the launcher (the recompiler, the interleave, idle skip)
+      // given back. The DSi firmware stays loaded; a DSi runs DS games with
+      // it too.
+      nds.dsi_nand.close();
+      nds.dsi_nand_synthetic = false;
+      nds.dsi_nand_boot = false;
+      nds.dsi_boot_blobs.clear();
+      nds.dsi_loader_watch = false;
+      nds.dsi_font_hle = false;
+      nds.set_dsi(false);
+      dsi_mode = dsi_hle = false;
+      left_dsi = true;
+      nds.sched.set_quantum(ds_quantum);
+      if (idle_skip_off_for_dsi) {
+        const std::string e = cfg.str("emu.idle_skip", "1");
+        nds.sched.set_idle_skip(e[0] == '0' ? 0 : (e == "all" || e[0] == '2') ? 2 : 1);
+      }
+#if DSPERATE_JIT
+      jit = ds_jit;
+      attach_jit = ds_jit;
+#endif
     }
     nds.reset();
     discard_session_cache();
@@ -3254,6 +3303,13 @@ sdl_ready:
       return;
     }
     nds.setup_direct_boot();
+#if DSPERATE_JIT
+    if (attach_jit && !ds::jit::attach(nds, true, true)) {
+      std::fprintf(stderr, "launcher: the recompiler would not attach; staying on the interpreter\n");
+      jit = false;
+    }
+#endif
+    if (left_dsi) VLOG("launcher: %s on a DS (%s)\n", pick.c_str(), jit ? "recompiler" : "interpreter");
     if (pick_dsi) {
       dsi_paths = hle_paths(pick);
       import_dsiware_saves();
@@ -3995,7 +4051,10 @@ sdl_ready:
     // straight back up the moment the player closed it.
     if (nds.io.wifi.mp_active()) mp_ever = true;
     if (launcher) {
-      const bool white = nds.gpu.screens_forced_white();
+      // On the DSi launcher the fade also opens its boot splash and closes
+      // Health & Safety, so there only a fade after the launcher hashed the
+      // loader's header for its whitelist counts (NDS::dsi_loader_watch).
+      const bool white = nds.gpu.screens_forced_white() && (!nds.dsi || nds.dsi_loader_launched);
       if (white && mp_ever) {
         // Download Play's child program, not a card launch. Raising the list
         // here would also pause the emulator, and the session's timing does
@@ -4010,7 +4069,7 @@ sdl_ready:
       } else if (white && !launch_latched) {
         launch_latched = true;
         launching = true;
-        VLOG("launcher: the card was launched; raising the list\n");
+        VLOG("launcher: the card was launched (frame %llu); raising the list\n", static_cast<unsigned long long>(frames));
       } else if (!white) {
         launch_latched = false;
       }

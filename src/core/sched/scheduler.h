@@ -115,6 +115,7 @@ public:
     return (running_base_ << (running_rshift_ - 1)) + c + running_carry_;
   }
   bool idle_skip_enabled() const { return idle_skip_ != 0; }
+  void set_idle_skip(u8 mode) { idle_skip_ = mode; }   // DS_IDLE_SKIP's 0/1/2, for a frontend switching machines
 
   // Called when an immediate DMA starts on `cpu`: if that CPU is the one
   // executing, it leaves its run loop after the current instruction and the

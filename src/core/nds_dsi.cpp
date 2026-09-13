@@ -158,6 +158,9 @@ bool NDS::boot_dsi_nand() {
   // leaves these bits at their startup values, which need not include it.
   d.scfg_ext[0] |= 1u << 25;
   d.scfg_ext[1] |= 1u << 25;
+  // The card slot as it is now: a frontend may put a card in after reset()
+  // (the SDL loader cart), which Io::reset would have reported as empty.
+  d.scfg_mc = static_cast<u16>(0x0010 | (cart ? 0 : 1));
   for (int i = 0; i < 3; ++i) std::memset(bus.nwram[i].get(), 0, mem::Bus::NWRAM_BANK_SIZE);
 
   // The boot info block: where boot2 lives and where it goes. Raw NAND bytes --
@@ -292,6 +295,7 @@ bool NDS::boot_dsi_nand() {
 // runs again, which with half BIOS dumps is boot2 loaded from the NAND.
 void NDS::dsi_soft_reset() {
   dsi_soft_reset_pending = false;
+  dsi_loader_launched = false;
   if (dsi_nand_synthetic) {
     // Nothing to reset into (see exit_requested). The ARM7 was halted by the
     // request and stays so.
@@ -405,6 +409,20 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
 }
 
 bool NDS::dsi_hle_swi(CpuContext& cpu, u32 number) {
+  // SWI 27h SHA1_Calc(r0 = digest out, r1 = data, r2 = length), watched
+  // only: the launcher hashing the loader cart's header is its launch (see
+  // dsi_loader_watch). Measured on the USA launcher: once per launch, 44
+  // frames before the fade; nothing else in the boot hashes 0x160 bytes.
+  if (number == 0x27) {
+    if (dsi_loader_watch && cart && cpu.which == Cpu::ARM9 && cpu.hot.regs[2] == 0x160 && (cpu.hot.regs[1] >> 24) == 0x02) {
+      u8 want[0x160];
+      cart->source().read(0, want, sizeof want);
+      u32 i = 0;
+      while (i < sizeof want && bus.dma_read8(cpu.which, cpu.hot.regs[1] + i) == want[i]) ++i;
+      if (i == sizeof want) dsi_loader_launched = true;
+    }
+    return false;
+  }
   // SWI 22h RSA_Decrypt_Unpad(r0 = key heap, r1 = digest out, r2 = signature):
   // 1 and the 20-byte digest on success. Seen in EA Sudoku's font load, after
   // SWI 27h hashed the table header and before SWI 28h compares the two.

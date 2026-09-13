@@ -408,6 +408,17 @@ unmapped DSi ARM7 BIOS).
      `[DSi]` and launches it on the DSi machine (the JIT is detached for it).
      The DSi BIOS pair can be configured as `paths.bios9i`/`paths.bios7i`.
      `DS_LAUNCH_AT=<frame>:<path>` scripts a picker launch.
+   - The loader cart on the DSi Menu (`--dsi-mode`, no title): the menu lists
+     it and fades to white when it is launched, then refuses it
+     (`WHITELIST_NOTFOUND` in /sys/log/sysmenu.log: unsigned and on no
+     whitelist, as a real DSi does with an old flashcart). The fade is the
+     picker's signal as on the DS, but the DSi Menu also fades to white at
+     its boot splash and after Health & Safety, so on the DSi only a fade
+     after the launcher hashed the loader's header counts: DSi BIOS SWI 27h
+     over its first 0x160 bytes, the whitelist key, 44 frames before the
+     fade (`NDS::dsi_loader_watch`). A DS game picked there leaves the DSi
+     machine for a DS (recompiler, interleave and idle skip given back);
+     DSiWare stays on it with the hand-off. The DS menu path is unchanged.
    - Open: China/Korea font tables (nine resources); the launcher's title
      list at 0x02FFD800; non-USA titles untested; the JIT and save states
      under DSi.
