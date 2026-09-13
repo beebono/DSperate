@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Build DSperate's own DSi system font, /sys/TWLFontTable.dat.
 
-    make_dsi_font.py NotoSans-Regular.ttf wqy-microhei.ttc out.dat
+    make_dsi_font.py NotoSans-Regular.ttf wqy-microhei.ttc out.dat [control-glyphs/]
 
 DSiWare that draws text with the console's shared font reads it from the
 NAND. With no NAND dump DSperate supplies this one instead: the same table
@@ -16,7 +16,9 @@ backwards LZ, rasterised from
     kana, kanji (JIS X 0208) and full-width forms.
 
 The characters are the ones those scripts need, not a copy of Nintendo's
-table; Nintendo's private-use symbols (U+E000..) are not included. The
+table. Of Nintendo's private-use symbols only the control buttons are
+included, drawn for DSperate (io/dsi_font/control-glyphs, the fourth
+argument) and put at the code points titles use for them (CONTROL_GLYPHS). The
 table's RSA signature cannot be made, so the first 0x80 bytes hold a plain
 marker instead; the emulator recognises it when a title checks the signature
 through the DSi BIOS (SWI 22h) and answers with this file's header digest.
@@ -38,6 +40,52 @@ SIZES = [
     ('TBF1_m.NFTR', 12, 16, 13, 13, 14, 12),
     ('TBF1_s.NFTR', 10, 12, 10, 11, 11, 10),
 ]
+
+
+# Private-use code points (as the console's font assigns them) and the image
+# drawn for each; the largest image of a name is the one scaled down. `wide`
+# glyphs keep their 3:2 shape.
+CONTROL_GLYPHS = [
+    (0xE000, 'A_light_dark', False), (0xE001, 'B_light_dark', False),
+    (0xE002, 'X_light_dark', False), (0xE003, 'Y_light_dark', False),
+    (0xE004, 'LB_light', True), (0xE005, 'RB_light', True),
+    (0xE006, 'Digipad_light', False),
+    (0xE019, 'Right_light', False), (0xE01A, 'Left_light', False),
+    (0xE01B, 'Up_light', False), (0xE01C, 'Down_light', False),
+]
+
+
+def load_control_glyphs(folder):
+    """{code point: (ink map as an 'L' image, 0 = none .. 255 = solid, wide)}."""
+    import glob, os
+    out = {}
+    for cp, stem, wide in CONTROL_GLYPHS:
+        files = glob.glob(os.path.join(folder, stem + '*.png'))
+        if not files:
+            sys.exit(f'{folder}: no {stem}*.png')
+        img = max((Image.open(f) for f in files), key=lambda i: i.width * i.height).convert('RGBA')
+        # Ink is what is dark and opaque; white or transparent is background.
+        ink = Image.new('L', img.size, 0)
+        ink.putdata([int((255 - (r * 299 + g * 587 + b * 114) // 1000) * a / 255) for r, g, b, a in img.getdata()])
+        box = ink.getbbox()
+        out[cp] = (ink.crop(box) if box else ink, wide)
+    return out
+
+
+def render_control(ink, wide, w, h, base):
+    """A control glyph fitted to the kanji box: bottom on the baseline row,
+    as tall as the cell allows above it and one pixel narrower than the cell."""
+    size = min(w - 1, base - 2)
+    gw, gh = (size, max(1, round(size * ink.height / ink.width))) if wide else (size, size)
+    small = ink.resize((gw, gh), Image.BOX)
+    top = base + 1 - gh - ((size - gh) // 2 if wide else 0)
+    level = [min(3, int(((v / 255) ** 0.7) * 3 + 0.5)) for v in range(256)]
+    rows = [[0] * w for _ in range(h)]
+    for y in range(gh):
+        for x in range(gw):
+            if 0 <= top + y < h:
+                rows[top + y][x] = level[small.getpixel((x, y))]
+    return rows, 1, gw, gw + 2
 
 
 def coverage():
@@ -91,12 +139,15 @@ def pad4(b):
     return b + b'\0' * (-len(b) % 4)
 
 
-def build_nftr(codes, faces, w, h, base, maxw):
+def build_nftr(codes, faces, w, h, base, maxw, controls):
     tile_bytes = (w * h * 2 + 7) // 8
     glyphs, widths = bytearray(), bytearray()
     for c in codes:
-        face, shift, full = faces(c)
-        rows, left, ink, adv = render(face, c, w, h, base, shift, full)
+        if c in controls:
+            rows, left, ink, adv = render_control(*controls[c], w, h, base)
+        else:
+            face, shift, full = faces(c)
+            rows, left, ink, adv = render(face, c, w, h, base, shift, full)
         bits = 0
         for y in range(h):
             for x in range(w):
@@ -263,9 +314,10 @@ def check_in_place(packed, raw_len):
     return True
 
 
-def main(noto_path, cjk_path, out_path):
+def main(noto_path, cjk_path, out_path, glyph_dir=None):
     noto_cmap, cjk_cmap = cmap_of(noto_path), cmap_of(cjk_path)
-    codes = [c for c in coverage() if c in noto_cmap or c in cjk_cmap]
+    controls = load_control_glyphs(glyph_dir) if glyph_dir else {}
+    codes = sorted(set(c for c in coverage() if c in noto_cmap or c in cjk_cmap) | set(controls))
     entries, blobs = [], []
     offset = 0xA0 + 0x40 * len(SIZES)
     for name, w, h, base, maxw, latin_px, cjk_px in SIZES:
@@ -279,7 +331,7 @@ def main(noto_path, cjk_path, out_path):
         def faces(c):
             use_cjk = (cjk(c) and c in cjk_cmap) or c not in noto_cmap
             return (wqy, cjk_shift, cjk(c) and not 0xFF61 <= c <= 0xFFDC) if use_cjk else (noto, 0, False)
-        nftr = build_nftr(codes, faces, w, h, base, maxw)
+        nftr = build_nftr(codes, faces, w, h, base, maxw, controls)
         packed = blz_encode(nftr)
         assert blz_decode(packed) == nftr, name + ': the compressor does not round-trip'
         assert check_in_place(packed, len(nftr)), name + ': not safe to decompress in place'
@@ -296,6 +348,6 @@ def main(noto_path, cjk_path, out_path):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 4:
+    if len(sys.argv) not in (4, 5):
         sys.exit(__doc__)
     main(*sys.argv[1:])

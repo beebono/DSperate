@@ -155,10 +155,11 @@ on a white or black screen.
 `tools/make_dsi_font.py` from Noto Sans (OFL-1.1) and WenQuanYi Micro Hei
 (GPL-3+ with the font exception); provenance and licences beside it). It is
 the retail table layout with three 2-bpp Nitro fonts (16x21, 12x16, 10x12
-cells), 7372 characters each, compressed with the DSi's backwards LZ. The
+cells), 7383 characters each, compressed with the DSi's backwards LZ. The
 cell geometry and baselines were measured from the console's font; no glyph
-data comes from it. Nintendo's private-use button symbols (U+E000-E06B) are
-absent. `--dsi-font` / `paths.dsi_font` substitutes a console's own file.
+data comes from it. Of the console's private-use symbols only the control
+buttons are present (A/B/X/Y, L/R, D-pad, arrows at U+E000-E006 and
+U+E019-E01C), from images drawn for DSperate (`io/dsi_font/control-glyphs`). `--dsi-font` / `paths.dsi_font` substitutes a console's own file.
 
 The table's RSA signature cannot be made. Tamper tests on EA Sudoku showed
 it is the only thing checked: flipped font data or resource hashes still
