@@ -24,7 +24,7 @@ namespace ds::state {
 // A chunk may grow: a reader that reaches the end of a chunk early stops
 // taking fields (`more()` is false), and a writer that appends fields keeps
 // old files loadable as long as the new fields default sensibly.
-constexpr u32 FORMAT_VERSION = 5;   // 2: HEAD carries bios_id + firmware_id; 3: DSi (two more scheduler events, 16 MB main RAM, DSI chunk); 4: the DSi SD/MMC host (one more scheduler event); 5: the SDIO host, its Wi-Fi module and the camera transfer (three more)
+constexpr u32 FORMAT_VERSION = 6;   // 2: HEAD carries bios_id + firmware_id; 3: DSi (two more scheduler events, 16 MB main RAM, DSI chunk); 4: the DSi SD/MMC host (one more scheduler event); 5: the SDIO host, its Wi-Fi module and the camera transfer (three more); 6: the DSi microphone FIFO
 constexpr u32 OLDEST_READABLE_VERSION = 2;   // a DS state from a version-2 file still loads (Reader::version)
 
 class Writer {

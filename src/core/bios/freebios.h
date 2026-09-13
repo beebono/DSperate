@@ -47,6 +47,19 @@ std::vector<u8> generate_firmware(const UserSettings& user);
 // user settings: `language` (0-7) and the region's `language_mask`.
 std::vector<u8> generate_firmware_dsi(const UserSettings& user, u8 language, u16 language_mask);
 
+// The SSID of DSperate's emulated access point: the DS Wi-Fi's (io::Wifi)
+// and the DSi Atheros module's (io::NWifi) both answer under it.
+inline constexpr const char* kAccessPointSsid = "DSperate-AP";
+// One 0x100-byte Wi-Fi access point slot: an open network under
+// kAccessPointSsid with DHCP (MTU 1400 on a DSi), or an unconfigured slot.
+// melonDS Firmware::WifiAccessPoint.
+void fill_access_point(u8* ap, bool configured, bool dsi);
+// Put the emulated access point in a firmware image's first unconfigured
+// slot of the three below the user settings, unless a slot already names
+// it. Returns that slot (0-2), or -1 when every slot holds another network
+// or the image has no settings pages. The image in memory only.
+int stamp_access_point(std::vector<u8>& firmware);
+
 // The DS firmware CRC16 (GBATEK "Firmware Header").
 u16 crc16(const u8* data, u32 len, u16 start);
 

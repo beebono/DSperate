@@ -71,30 +71,51 @@ void fill_user(u8* u, const UserSettings& s) {
   w16(u + 0x72, crc16(u, 0x70, 0xFFFF));
 }
 
-void fill_access_point(u8* ap, bool configured) {
-  std::memset(ap, 0, 0x100);
-  if (configured) {
-    std::strncpy(reinterpret_cast<char*>(ap + 0x40), "DSperate-AP", 32);   // SSID
-    ap[0xE7] = 0x00;                           // status: normal
-    ap[0xEF] = 0x01;                           // connection configured
-  } else {
-    ap[0xE7] = 0xFF;                           // status: not configured
-  }
-  w16(ap + 0xFE, crc16(ap, 0xFE, 0x0000));
-}
-
 std::vector<u8> build(const UserSettings& user, u32 size, u8 console_type) {
   std::vector<u8> fw(size, 0xFF);
   fill_header(fw.data(), size, console_type);
   fw[0x2FF] = 0x80;                            // boot0: NAND as stage-2 medium (as melonDS)
   // Wifi access points sit just below the user settings.
-  fill_access_point(fw.data() + size - 0x600, true);
-  fill_access_point(fw.data() + size - 0x500, false);
-  fill_access_point(fw.data() + size - 0x400, false);
+  fill_access_point(fw.data() + size - 0x600, true, console_type == 0x57);
+  fill_access_point(fw.data() + size - 0x500, false, false);
+  fill_access_point(fw.data() + size - 0x400, false, false);
   for (u32 blk = 0; blk < 2; ++blk) fill_user(fw.data() + size - 0x200 + blk * 0x100, user);
   return fw;
 }
 } // namespace
+
+void fill_access_point(u8* ap, bool configured, bool dsi) {
+  std::memset(ap, 0, 0x100);
+  if (configured) {
+    std::strncpy(reinterpret_cast<char*>(ap + 0x40), kAccessPointSsid, 32);   // SSID
+    ap[0xE7] = 0x00;                           // status: normal
+    if (dsi) w16(ap + 0xEA, 1400);             // MTU
+  } else {
+    ap[0xE7] = 0xFF;                           // status: not configured
+  }
+  ap[0xEF] = 0x01;                             // connection configured (melonDS sets it on both)
+  w16(ap + 0xFE, crc16(ap, 0xFE, 0x0000));
+}
+
+int stamp_access_point(std::vector<u8>& fw) {
+  if (fw.size() < 0x20000) return -1;
+  const u32 user = static_cast<u32>(fw[0x20] | (fw[0x21] << 8)) << 3;
+  if (user < 0x400 || user + 0x100 > fw.size()) return -1;
+  const u32 base = user - 0x400;
+  const bool dsi = fw[0x1D] == 0x57;
+  int free_slot = -1;
+  for (int i = 0; i < 3; ++i) {
+    const u8* ap = fw.data() + base + i * 0x100;
+    const bool valid = crc16(ap, 0xFE, 0x0000) == static_cast<u16>(ap[0xFE] | (ap[0xFF] << 8));
+    if (valid && ap[0xE7] != 0xFF) {
+      if (std::strncmp(reinterpret_cast<const char*>(ap + 0x40), kAccessPointSsid, 32) == 0) return i;
+    } else if (free_slot < 0) {
+      free_slot = i;
+    }
+  }
+  if (free_slot >= 0) fill_access_point(fw.data() + base + free_slot * 0x100, true, dsi);
+  return free_slot;
+}
 
 std::vector<u8> generate_firmware(const UserSettings& user) { return build(user, 0x40000, 0x20); }
 

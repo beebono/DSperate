@@ -362,6 +362,7 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
 
   if (firmware_synthetic && firmware.size() != 0x20000) {
     firmware = bios::generate_firmware_dsi(user, region.language, region.language_mask);
+    firmware_ap_slot = bios::stamp_access_point(firmware);
     firmware_id = 1469598103934665603ull;
     for (u8 b : firmware) firmware_id = (firmware_id ^ b) * 1099511628211ull;
     fw_page_dirty.assign((firmware.size() + FW_PAGE - 1) / FW_PAGE, 0);

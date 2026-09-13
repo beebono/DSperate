@@ -144,6 +144,16 @@ struct DsiIo {
   u32 mbk[2][9] = {};       // 0x04004040-60 per CPU view: [0..4] slot maps (shared), [5..7] this CPU's windows, [8] write protect (shared)
   u32 ie2 = 0, if2 = 0;     // 0x04000218/1C (ARM7): the DSi IRQ sources, mask 0x7FF7
   u16 sndexcnt = 0;         // 0x04004700 (ARM7): I2S enable (15), mute (14), 47.6 kHz (13), NITRO/DSP ratio (0-3)
+  // 0x04004600 MIC_CNT / 0x04004604 MIC_DATA (ARM7): the microphone behind
+  // the I2S interface (melonDS DSi_I2S). Bit 15 runs it, bits 0-1 pick which
+  // of each sample pair to keep, 2-3 the rate divider, 12 clears the FIFO,
+  // 13/14 enable the half-full and overrun IRQs; bit 11 is the overrun latch
+  // and 8-10 the FIFO's empty/half/full status on read.
+  u16 mic_cnt = 0;
+  u32 mic_fifo[16] = {};
+  u8  mic_rd = 0, mic_wr = 0, mic_level = 0;
+  u8  mic_divider = 0, mic_temp_count = 0;
+  s16 mic_temp = 0;
   // 0x04004C00-05 (ARM7) GPIO: data, direction, IRQ edge select, IRQ enable,
   // Wi-Fi/board bits. Plain registers as melonDS keeps them (nothing drives
   // them: the sound-out line is a direction bit, the rest read back).
@@ -239,6 +249,15 @@ public:
   // until the next call or the frame's end.
   void set_mic(const s16* samples, size_t count);
   u16  mic_sample() const;          // 12-bit ADC value after the PMIC amplifier
+  // The frame's microphone sample at time `t` (raw s16, 0 without input):
+  // what the DSi's I2S interface hears at one of its sample clocks.
+  s16  mic_at(u64 t) const;
+  // DSi MIC_CNT / MIC_DATA (DsiIo::mic_cnt), and one I2S sample clock, run
+  // from the SPU mixer while SNDEXCNT enables the interface.
+  u16  dsi_mic_read_cnt() const;
+  void dsi_mic_write_cnt(u16 value, u16 mask);
+  u32  dsi_mic_read_data();
+  void dsi_mic_clock(s16 sample);
   // Whether the game has ever sampled the AUX input. The frontend opens the
   // host capture device only once this turns true: most titles never read the
   // mic, and on some handhelds opening the codec's capture PCM disturbs the
@@ -266,6 +285,9 @@ public:
   // are gated here on POWCNT2 bit 1; the block's timer runs off the Wifi
   // scheduler event.
   Wifi wifi;
+  // The host network behind both radios: the DS Wi-Fi's access point and the
+  // DSi's Atheros module (sdio's port 0). Null detaches it.
+  void set_net_driver(NetDriver* net);
   // Retired: the DS's one-shot power-on event, now a countdown in the Wi-Fi
   // timer. Kept only so the IO state chunk keeps its layout; always false.
   bool wifi_power_on_pending = false;

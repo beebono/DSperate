@@ -2828,7 +2828,7 @@ sdl_ready:
     // sends the disconnect) rather than just going silent, so the host drops
     // it from its player list instead of waiting out its slot.
     if (lan) { lan->end_session(); nds.io.wifi.set_transport(nullptr); lan.reset(); }
-    if (slirp) { nds.io.wifi.set_net_driver(nullptr); slirp->stop(); slirp.reset(); }
+    if (slirp) { nds.io.set_net_driver(nullptr); slirp->stop(); slirp.reset(); }
     const bool was_live = net_live;
     net_live = false;
 
@@ -2859,7 +2859,7 @@ sdl_ready:
         std::fprintf(stderr, "internet: %s\n", slirp->error().c_str());
         slirp.reset();
       } else {
-        nds.io.wifi.set_net_driver(slirp.get());
+        nds.io.set_net_driver(slirp.get());
         net_live = true;
         VLOG("internet: up, DNS %s\n", where.c_str());
       }

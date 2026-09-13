@@ -6,6 +6,7 @@
 #include "check.h"
 
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -187,7 +188,42 @@ void test_sidecar_round_trip() {
 
 } // namespace
 
+// The emulated access point goes into the first free slot of a firmware and
+// nowhere else: not over a player's network, not twice.
+static void test_access_point_stamp() {
+  using namespace ds;
+  bios::UserSettings user;
+  std::vector<u8> fw = bios::generate_firmware_dsi(user, 1, 0x3E);
+  const u32 base = (static_cast<u32>(fw[0x20] | (fw[0x21] << 8)) << 3) - 0x400;
+  auto slot = [&](int i) { return fw.data() + base + i * 0x100; };
+  auto crc_ok = [&](int i) { const u8* a = slot(i); return bios::crc16(a, 0xFE, 0) == static_cast<u16>(a[0xFE] | (a[0xFF] << 8)); };
+  // A generated image already has it in slot 0, with the DSi's MTU.
+  CHECK(bios::stamp_access_point(fw) == 0);
+  CHECK(std::string(reinterpret_cast<const char*>(slot(0) + 0x40)) == bios::kAccessPointSsid);
+  CHECK((slot(0)[0xEA] | (slot(0)[0xEB] << 8)) == 1400);
+  // A player's network in slot 0 and an erased slot 1: slot 1 gets it.
+  std::memset(slot(0) + 0x40, 0, 32);
+  std::strcpy(reinterpret_cast<char*>(slot(0) + 0x40), "HomeNet");
+  const u16 c0 = bios::crc16(slot(0), 0xFE, 0);
+  slot(0)[0xFE] = static_cast<u8>(c0); slot(0)[0xFF] = static_cast<u8>(c0 >> 8);
+  std::memset(slot(1), 0xFF, 0x100);
+  CHECK(bios::stamp_access_point(fw) == 1);
+  CHECK(std::string(reinterpret_cast<const char*>(slot(0) + 0x40)) == "HomeNet");
+  CHECK(std::string(reinterpret_cast<const char*>(slot(1) + 0x40)) == bios::kAccessPointSsid);
+  CHECK(slot(1)[0xE7] == 0x00 && slot(1)[0xEF] == 0x01 && crc_ok(1));
+  // Found again, not stamped a second time.
+  const std::vector<u8> before = fw;
+  CHECK(bios::stamp_access_point(fw) == 1);
+  CHECK(fw == before);
+  // Every slot holding another network: left alone.
+  for (int i = 0; i < 3; ++i) std::memcpy(slot(i), slot(0), 0x100);
+  const std::vector<u8> full = fw;
+  CHECK(bios::stamp_access_point(fw) == -1);
+  CHECK(fw == full);
+}
+
 int main() {
+  test_access_point_stamp();
   test_round_trip();
   test_one_field_at_a_time();
   test_sidecar_round_trip();

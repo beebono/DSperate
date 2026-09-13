@@ -142,8 +142,12 @@ struct SlirpCallbacks {
 
   static void notify(void* opaque) { (void)opaque; }
 
-  static void register_poll_socket(slirp_os_socket fd, void* opaque) { (void)fd; (void)opaque; }
-  static void unregister_poll_socket(slirp_os_socket fd, void* opaque) { (void)fd; (void)opaque; }
+  // Socket registration: nothing to do, since process() hands libslirp a
+  // fresh poll set every call. At config version 4 libslirp calls the fd
+  // variants on every new socket, and a null one crashed the first UDP
+  // socket it opened (DNS through the host resolver).
+  static void register_poll_fd(int fd, void* opaque) { (void)fd; (void)opaque; }
+  static void unregister_poll_fd(int fd, void* opaque) { (void)fd; (void)opaque; }
 
   static int add_poll(slirp_os_socket fd, int events, void* opaque) {
     SlirpDriver* d = self(opaque);
@@ -209,6 +213,15 @@ bool SlirpDriver::start(Dns dns, u32 dns_addr) {
     c.timer_mod = &SlirpCallbacks::timer_mod;
     c.notify = &SlirpCallbacks::notify;
     c.timer_new_opaque = &SlirpCallbacks::timer_new_opaque;
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    c.register_poll_fd = &SlirpCallbacks::register_poll_fd;
+    c.unregister_poll_fd = &SlirpCallbacks::unregister_poll_fd;
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
     return c;
   }();
 

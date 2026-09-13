@@ -26,6 +26,7 @@
 #include <thread>
 #include <random>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -292,6 +293,7 @@ int main(int argc, char** argv) {
   int tas_after = -1, tas_x = 0, tas_y = 0, tas_n = 8, tas_rep = 1; long tas_frame = -1; ds::u32 tas_seen = 0;
   int lan_players = 16;
   struct Touch { int frame, x, y, n; };
+  double mic_tone_hz = 0;
   std::vector<Touch> touches;          // --touch F:x,y[:N]: press (x,y) from frame F for N frames (default 10), as trace_melonds --touch
   bool pace = false;                   // --pace: sleep to 60 frames a second
   for (int i = 1; i < argc; ++i) {
@@ -306,6 +308,7 @@ int main(int argc, char** argv) {
     else if (arg("--dns")) dns_arg = argv[++i];
     else if (arg("--tap-after-sync")) { std::sscanf(argv[++i], "%d:%d,%d:%d:%d", &tas_after, &tas_x, &tas_y, &tas_n, &tas_rep); }
     else if (arg("--lan-players")) lan_players = std::atoi(argv[++i]);
+    else if (arg("--mic-tone")) { mic_tone_hz = std::atof(argv[++i]); }   // a sine at HZ (amplitude DS_MIC_TONE_AMP, default 8000) as the microphone input, every frame
     else if (arg("--touch")) { Touch t{0, 0, 0, 10}; std::sscanf(argv[++i], "%d:%d,%d:%d", &t.frame, &t.x, &t.y, &t.n); touches.push_back(t); }
     else if (flag("--pace")) pace = true;
     else if (arg("--bios9")) bios9 = argv[++i];
@@ -706,7 +709,7 @@ int main(int argc, char** argv) {
     slirp = std::make_unique<ds::net::SlirpDriver>();
     if (!slirp->start(dns, dns_addr)) { std::fprintf(stderr, "internet: %s\n", slirp->error().c_str()); return 1; }
     std::fprintf(stderr, "internet: up, DNS %s\n", where.c_str());
-    nds.io.wifi.set_net_driver(slirp.get());
+    nds.io.set_net_driver(slirp.get());
   }
 #else
   if (lan_host || lan_join || netplay) { std::fprintf(stderr, "lan: built without DSPERATE_NET\n"); return 1; }
@@ -748,6 +751,15 @@ int main(int argc, char** argv) {
     if (trace && trace_end && i == trace_end) { nds.trace = nullptr; nds.trace_user = nullptr; }
     nds.io.wifi.trace_frame(i);   // "# frame N" in the Wi-Fi trace, to align it with --trace
     if (log.reading()) { ds::input::Frame in; if (log.read(in)) ds::input::apply(nds, in); }
+    if (mic_tone_hz > 0) {
+      // 1600 samples a frame (~95.7 kHz): finer than the DSi's 47.6 kHz clock.
+      static std::vector<ds::s16> tone(1600);
+      static const double amp = std::getenv("DS_MIC_TONE_AMP") ? std::atof(std::getenv("DS_MIC_TONE_AMP")) : 8000.0;
+      static double phase = 0;
+      const double step = 2 * 3.14159265358979 * mic_tone_hz / (tone.size() * 59.8261);
+      for (ds::s16& v : tone) { v = static_cast<ds::s16>(amp * std::sin(phase)); phase += step; }
+      nds.io.set_mic(tone.data(), tone.size());
+    }
     if (!touches.empty()) {
       const Touch* on = nullptr;
       for (const Touch& t : touches) if (i >= t.frame && i < t.frame + t.n) on = &t;

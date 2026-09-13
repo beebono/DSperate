@@ -6,11 +6,14 @@
 // the IRQ registers and the diagnostic window), and the firmware protocols
 // the ARM7 driver speaks through mailbox 0 -- BMI while it "uploads" the
 // firmware (accepted and discarded), then HTC service setup, then WMI.
-// Everything is answered instantly, as melonDS does. No network backend
-// (melonDS's trace harness has none either): a scan still reports melonDS's
-// built-in "melonAP", but data frames to it are dropped.
+// Everything is answered instantly, as melonDS does. A scan reports
+// melonDS's built-in AP (named bios::kAccessPointSsid here); once the guest connects to it, data frames
+// go out as Ethernet frames through the NetDriver (the same slirp backend the
+// DS Wi-Fi's access point uses) and come back from it on the 1 ms timer.
+// Without a driver they are dropped (melonDS's trace harness has none either).
 #pragma once
 #include "core/io/dsi_sd.h"
+#include "core/io/wifi_transport.h"
 #include <vector>
 
 namespace ds::io {
@@ -25,6 +28,7 @@ class NWifi : public SdDevice {
   void continue_transfer() override;
 
   static void ms_timer_event(NDS& nds, u32 param);   // EventId::NWifi
+  void set_net_driver(NetDriver* net) { net_ = net; }
   template <class S> void sync_state(S& s);
 
  private:
@@ -69,6 +73,7 @@ class NWifi : public SdDevice {
   void send_wmi_bss_info(u8 type, const u8* data, u32 len);
   void drain_rx_buffer();
   void ms_timer();
+  void check_rx();
 
   u32  window_read(u32 addr);
   void window_write(u32 addr, u32 val);
@@ -81,6 +86,8 @@ class NWifi : public SdDevice {
 
   NDS& nds_;
   SdHost& host_;
+  NetDriver* net_ = nullptr;
+  u8 lan_[2048] = {};
   u32 transfer_cmd_ = 0xFFFFFFFF, transfer_addr_ = 0, rem_size_ = 0;
   Fifo mb_[9];
 
@@ -94,7 +101,8 @@ class NWifi : public SdDevice {
   u32 boot_phase_ = 0, error_mask_ = 0, scan_timer_ = 0;
   u64 beacon_timer_ = 0;
   u32 connection_status_ = 0;
-  bool send_bss_info_ = true;
+  bool send_bss_info_ = true;   // melonDS's filter; always true here (a probe gets an answer under its own name)
+  char probed_ssid_[33] = {};   // the network a directed scan asks for; empty: any
   u8  cis0_[256] = {}, cis1_[256] = {};
 };
 

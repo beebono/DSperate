@@ -98,6 +98,10 @@ struct NDS {
   // The extracted image the current cart was mapped from, empty otherwise.
   std::string rom_cache_path;
   void normalise_touch_calibration();   // see nds.cpp; called by load_bios
+  // Which of the firmware's three Wi-Fi slots holds DSperate's access point
+  // (bios::stamp_access_point, applied in memory at every load), -1 if none:
+  // the player's own networks filled all three.
+  int firmware_ap_slot = -1;
 
   // The console's own settings, as the firmware holds them: the pages the DS
   // menu writes. With a dump these are the dump's, and editing them goes to

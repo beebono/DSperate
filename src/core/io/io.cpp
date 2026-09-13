@@ -408,6 +408,97 @@ void Io::set_lid(bool closed) {
   if (was && !closed) request_irq(Cpu::ARM7, IRQ_LID);
 }
 
+void Io::set_net_driver(NetDriver* net) {
+  wifi.set_net_driver(net);
+  if (NWifi* n = sdio.nwifi()) n->set_net_driver(net);
+}
+
+s16 Io::mic_at(u64 t) const {
+  if (mic_count_ == 0) return 0;
+  const u64 elapsed = t > mic_start_ ? t - mic_start_ : 0;
+  size_t i = static_cast<size_t>((elapsed * mic_count_) / CYCLES_PER_FRAME);
+  if (i >= mic_count_) i = mic_count_ - 1;
+  return mic_[i];
+}
+
+// ---- DSi microphone (melonDS DSi_I2S) ----
+
+u16 Io::dsi_mic_read_cnt() const {
+  u16 v = dsi.mic_cnt;
+  if (dsi.mic_level == 0) v |= 1 << 8;
+  if (dsi.mic_level >= 8) v |= 1 << 9;
+  if (dsi.mic_level == 16) v |= 1 << 10;
+  return v;
+}
+
+void Io::dsi_mic_write_cnt(u16 value, u16 mask) {
+  nds_.spu.catch_up();
+  static const bool log = std::getenv("DS_MIC_LOG") != nullptr;
+  if (log) std::fprintf(stderr, "[mic] MIC_CNT %04x -> %04x (mask %04x), FIFO %u, frame %llu\n", dsi.mic_cnt, value, mask, dsi.mic_level, (unsigned long long)nds_.frame_count);
+  // The data format, rate and FIFO clear only take while the mic is stopped.
+  if (dsi.mic_cnt & 0x8000) mask &= ~0x100F;
+  const u16 v = static_cast<u16>((value & mask) | (dsi.mic_cnt & ~mask));
+  if (v & (1 << 12)) {
+    dsi.mic_cnt &= ~(1 << 11);
+    dsi.mic_rd = dsi.mic_wr = dsi.mic_level = 0;
+    dsi.mic_temp = 0;
+    dsi.mic_temp_count = 0;
+  }
+  if ((v ^ dsi.mic_cnt) & 0x8000 && (v & 0x8000)) {
+    dsi.mic_divider = 0;
+    dsi.mic_temp_count = 0;
+    mic_used_ = true;   // the frontend opens the host capture device now
+  }
+  dsi.mic_cnt = static_cast<u16>((v & 0xE00F) | (dsi.mic_cnt & (1 << 11)));
+}
+
+// Every read, of any width, takes a word; an empty FIFO repeats the last one.
+u32 Io::dsi_mic_read_data() {
+  nds_.spu.catch_up();
+  if (dsi.mic_level == 0) return dsi.mic_fifo[(dsi.mic_rd + 15) & 15];
+  const u32 v = dsi.mic_fifo[dsi.mic_rd];
+  dsi.mic_rd = (dsi.mic_rd + 1) & 15;
+  dsi.mic_level--;
+  return v;
+}
+
+// Each I2S sample arrives twice. Format 0 keeps both, 1 and 2 keep one of the
+// pair (making a word from two clocks), 3 keeps none; the rate field divides
+// the clocks, format 2 taking the last of each divided run.
+void Io::dsi_mic_clock(s16 sample) {
+  DsiIo& d = dsi;
+  if (!(d.mic_cnt & 0x8000) || (d.mic_cnt & (1 << 11))) return;
+  const u8 mode = d.mic_cnt & 3, rate = (d.mic_cnt >> 2) & 3;
+  if (mode == 3) return;
+  const bool capture = d.mic_divider == (mode == 2 ? rate : 0);
+  d.mic_divider = d.mic_divider >= rate ? 0 : d.mic_divider + 1;
+  if (capture) {
+    u32 v;
+    if (mode == 0) {
+      v = static_cast<u16>(sample);
+      v |= v << 16;
+    } else {
+      if (!d.mic_temp_count) { d.mic_temp = sample; d.mic_temp_count = 1; return; }
+      v = static_cast<u16>(d.mic_temp) | (static_cast<u32>(static_cast<u16>(sample)) << 16);
+    }
+    if (d.mic_level == 16) {
+      d.mic_cnt |= 1 << 11;
+    } else {
+      d.mic_fifo[d.mic_wr] = v;
+      d.mic_wr = (d.mic_wr + 1) & 15;
+      d.mic_level++;
+    }
+    d.mic_temp_count = 0;
+  }
+  // The IRQ conditions are not exclusive; bit 14 is overrun, not full.
+  if (d.mic_cnt & (1 << 11)) {
+    if (d.mic_cnt & (1 << 14)) request_irq2(IRQ2_MIC_EXT);
+  } else if (d.mic_level == 8) {
+    if (d.mic_cnt & (1 << 13)) request_irq2(IRQ2_MIC_EXT);
+    nds_.ndma.check(Cpu::ARM7, 0x2C);
+  }
+}
+
 void Io::set_mic(const s16* samples, size_t count) {
   mic_ = samples; mic_count_ = count; mic_start_ = nds_.sched.now();
 }
@@ -1358,6 +1449,7 @@ void Io::dsi_reset() {
   dsi.scfg_rst = 0;
   std::memset(dsi.mbk, 0, sizeof dsi.mbk);
   dsi.ie2 = dsi.if2 = 0; dsi.sndexcnt = 0;
+  dsi.mic_cnt = 0; dsi.mic_rd = dsi.mic_wr = dsi.mic_level = 0; dsi.mic_divider = dsi.mic_temp_count = 0; dsi.mic_temp = 0;
   arm7_bios_prot = 0x20;
   bptwl_reset();
   cam.camera(0).reset(); cam.camera(1).reset();   // melonDS: the I2C host resets its cameras
@@ -1473,6 +1565,7 @@ u32 Io::dsi_read(Cpu cpu, u32 addr, u32 width) {
     case 0x040: case 0x044: case 0x048: case 0x04C: case 0x050: case 0x054: case 0x058: case 0x05C: case 0x060:
       return dsi.mbk[c][(base - 0x040) >> 2];
     case 0x700: return a9 ? 0 : dsi.sndexcnt;
+    case 0x600: return a9 ? 0 : dsi_mic_read_cnt();
     case 0xC00: return (a9 || width == 32) ? 0 : (dsi.gpio_data | (static_cast<u32>(dsi.gpio_dir) << 8) | (static_cast<u32>(dsi.gpio_iedgesel) << 16) | (static_cast<u32>(dsi.gpio_ie) << 24));
     case 0xC04: return (a9 || width == 32) ? 0 : dsi.gpio_wifi;   // melonDS has 8/16-bit GPIO handlers only
     case 0x500: return a9 ? 0 : (dsi.i2c_data | (static_cast<u32>(dsi.i2c_cnt) << 8));   // I2C_DATA / I2C_CNT
@@ -1481,7 +1574,8 @@ u32 Io::dsi_read(Cpu cpu, u32 addr, u32 width) {
     if (r >= 0x100 && r < 0x200) return nds_.ndma.read(cpu, addr & ~3u);
     return 0;
   };
-  const u32 v = word(r & ~3u);
+  // MIC_DATA: every access takes a word from the FIFO, whatever its width.
+  const u32 v = (!a9 && (r & ~3u) == 0x604) ? dsi_mic_read_data() : word(r & ~3u);
   if (width == 32) return v;
   if (width == 16) return (v >> ((addr & 2) * 8)) & 0xFFFF;
   return (v >> ((addr & 3) * 8)) & 0xFF;
@@ -1580,6 +1674,8 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
       if (!a9) { u32 t = dsi.mbk[0][8]; t &= ~(0xFFu << ((r & 3) * 8)); t |= (value & 0xFF) << ((r & 3) * 8); dsi.mbk[0][8] = dsi.mbk[1][8] = t & 0x00FFFF0F; }
       break;
     case 0x700: if (!a9) { const u16 nv = static_cast<u16>((dsi.sndexcnt & 0xFF00) | (value & 0xFF)); nds_.spu.write_sndexcnt(nv, 0x00FF); } break;
+    case 0x600: if (!a9) dsi_mic_write_cnt(static_cast<u16>(value & 0xFF), 0x00FF); break;
+    case 0x601: if (!a9) dsi_mic_write_cnt(static_cast<u16>((value & 0xFF) << 8), 0xFF00); break;
     case 0x701: if (!a9) { const u16 nv = static_cast<u16>((dsi.sndexcnt & 0x00FF) | ((value & 0xFF) << 8)); nds_.spu.write_sndexcnt(nv, 0xFF00); } break;
     default: break;
     }
@@ -1598,6 +1694,7 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
       if (!a9) { u32 t = dsi.mbk[0][8]; t &= ~(0xFFFFu << ((r & 3) * 8)); t |= (value & 0xFFFF) << ((r & 3) * 8); dsi.mbk[0][8] = dsi.mbk[1][8] = t & 0x00FFFF0F; }
       break;
     case 0x700: if (!a9) nds_.spu.write_sndexcnt(static_cast<u16>(value), 0xFFFF); break;
+    case 0x600: if (!a9) dsi_mic_write_cnt(static_cast<u16>(value), 0xFFFF); break;
     default: break;
     }
     return;
@@ -1625,6 +1722,7 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
   case 0x054: case 0x058: case 0x05C: mbk_map_range(cpu, static_cast<int>((r - 0x054) >> 2), value); break;
   case 0x060: if (!a9) dsi.mbk[0][8] = dsi.mbk[1][8] = value & 0x00FFFF0F; break;
   case 0x700: if (!a9) nds_.spu.write_sndexcnt(static_cast<u16>(value), 0xFFFF); break;
+  case 0x600: if (!a9) dsi_mic_write_cnt(static_cast<u16>(value), 0xFFFF); break;
   default: break;
   }
 }
@@ -1741,6 +1839,7 @@ template <class S> void Io::sync_state(S& s) {
     s.fields(spi_tsc.dsi_data); // appended
     sdio.sync_state(s);         // appended (FORMAT_VERSION 5)
     cam.sync_state(s);          // appended (FORMAT_VERSION 5)
+    if (s.version >= 6) s.fields(dsi.mic_cnt, dsi.mic_fifo, dsi.mic_rd, dsi.mic_wr, dsi.mic_level, dsi.mic_divider, dsi.mic_temp_count, dsi.mic_temp);   // appended (FORMAT_VERSION 6)
     s.end();
     if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, DsiCamModule::irq_event); nds_.sched.rebind(EventId::CamTransfer, DsiCamModule::transfer_event);
                                  nds_.sched.rebind(EventId::SdMmc, SdHost::ev_transfer_mmc); nds_.sched.rebind(EventId::Sdio, SdHost::ev_transfer_sdio);

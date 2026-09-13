@@ -124,6 +124,7 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
   fw_page_dirty.assign((firmware.size() + FW_PAGE - 1) / FW_PAGE, 0);
   fw_dirty_pages = 0;
   normalise_touch_calibration();
+  firmware_ap_slot = bios::stamp_access_point(firmware);
   return true;
 }
 
@@ -256,6 +257,7 @@ bool NDS::load_firmware_override(const std::string& path, std::string& err) {
   // the wrong place; normalise again over the top. The console keeps the
   // calibration screen, it just cannot mis-aim the pen with it.
   normalise_touch_calibration();
+  firmware_ap_slot = bios::stamp_access_point(firmware);   // again, over the override's pages
   return true;
 }
 

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/io/dsi_nwifi.h"
+#include "core/bios/freebios.h"
 #include "core/nds.h"
 #include "core/state/state.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -98,6 +100,7 @@ void NWifi::reset() {
   beacon_timer_ = 0x10A2220ULL;
   connection_status_ = 0;
   send_bss_info_ = true;
+  probed_ssid_[0] = 0;
   nds_.sched.cancel(EventId::NWifi);
 }
 
@@ -385,6 +388,8 @@ void NWifi::htc_command() {
   mb_drain(0);
 }
 
+static bool nwifi_debug() { static const bool on = std::getenv("DS_DEBUG_NWIFI") != nullptr; return on; }
+
 void NWifi::wmi_command() {
   const u16 h0 = mb_read16(0);
   const u16 len = mb_read16(0);
@@ -394,6 +399,7 @@ void NWifi::wmi_command() {
     wmi_send_packet(len);
   } else {
     const u16 cmd = mb_read16(0);
+    if (nwifi_debug()) std::fprintf(stderr, "[nwifi] WMI cmd %04x len %u (frame %llu)\n", cmd, len, (unsigned long long)nds_.frame_count);
     switch (cmd) {
     case 0x0001: wmi_connect(); break;
     case 0x0003: {   // disconnect
@@ -422,7 +428,11 @@ void NWifi::wmi_command() {
       const u8 l = mb_[0].read();
       char ssid[33] = {};
       for (int i = 0; i < l && i < 32; ++i) ssid[i] = static_cast<char>(mb_[0].read());
-      send_bss_info_ = flags == 0 || std::strcmp(ssid, "melonAP") == 0;
+      // melonDS hides its AP from a scan for another network. Ours answers
+      // under the probed name instead, as the DS Wi-Fi's access point does,
+      // so a slot configured for any open network still finds it.
+      std::memcpy(probed_ssid_, ssid, sizeof probed_ssid_);
+      if (flags == 0) probed_ssid_[0] = 0;
       break;
     }
     case 0x000D: mb_[0].read(); break;   // set disconnect timeout
@@ -491,10 +501,63 @@ void NWifi::wmi_connect() {
   connection_status_ = 1;
 }
 
-// No network backend (melonDS's trace harness drops them too): consume the frame.
+// A data frame for the AP, as melonDS DSi_NWifi::WMI_SendPacket turns it
+// into Ethernet: a 2-byte header (type 2 is a data sync, other nonzero types
+// are special frames, both dropped), the two MACs, a big-endian 802.3 length,
+// an LLC/SNAP header, the ethertype and the body.
 void NWifi::wmi_send_packet(u16 len) {
   if (connection_status_ != 1) return;
-  for (int i = 0; i < static_cast<int>(len); ++i) mb_[0].read();
+  u16 hdr = mb_read16(0);
+  hdr = static_cast<u16>((hdr >> 8) | (hdr << 8));
+  const u16 type = hdr & 3;
+  if (type == 2) return;
+  if (type) { for (int i = 0; i < static_cast<int>(len) - 2; ++i) mb_[0].read(); return; }
+  u8 dst[6], src[6];
+  put32(&dst[0], mb_read32(0)); put16(&dst[4], mb_read16(0));
+  put32(&src[0], mb_read32(0)); put16(&src[4], mb_read16(0));
+  u16 plen = mb_read16(0);
+  plen = static_cast<u16>((plen >> 8) | (plen << 8));
+  if (plen > len - 16) return;
+  const u32 h0 = mb_read32(0);
+  const u16 h1 = mb_read16(0);
+  if (h0 != 0x0003AAAA || h1 != 0x0000) return;
+  const u16 ethertype = mb_read16(0);
+  const int lan_len = (plen - 8) + 14;
+  if (lan_len < 14 || lan_len > static_cast<int>(sizeof lan_)) return;
+  std::memcpy(&lan_[0], dst, 6);
+  std::memcpy(&lan_[6], src, 6);
+  put16(&lan_[12], ethertype);
+  for (int i = 14; i < lan_len; ++i) lan_[i] = mb_[0].read();
+  if (net_) net_->send(lan_, lan_len);
+}
+
+// melonDS DSi_NWifi::CheckRX: take frames from the driver until one is for
+// this console (or broadcast) and not its own echo, and hand it to the
+// driver's data endpoint in the same framing, one per timer tick.
+void NWifi::check_rx() {
+  if (!net_ || !mb_[8].can_fit(2048)) return;
+  for (int rxlen = net_->recv(lan_); rxlen > 0; rxlen = net_->recv(lan_)) {
+    const bool broadcast = get32(&lan_[0]) == 0xFFFFFFFF && get16(&lan_[4]) == 0xFFFF;
+    if (!broadcast && std::memcmp(&lan_[0], &eeprom_[0x00A], 6)) continue;
+    if (!std::memcmp(&lan_[6], &eeprom_[0x00A], 6)) continue;
+    if (rxlen < 14) continue;
+    const int datalen = rxlen - 14;
+    Fifo& rx = mb_[8];
+    rx.write(2);      // endpoint (melonDS hardcodes it)
+    rx.write(0x00);
+    mb_write16(8, static_cast<u16>(16 + 8 + datalen));
+    rx.write(0); rx.write(0);
+    mb_write16(8, 0x80);
+    mb_write32(8, get32(&lan_[0])); mb_write16(8, get16(&lan_[4]));
+    mb_write32(8, get32(&lan_[6])); mb_write16(8, get16(&lan_[10]));
+    const u16 plen = static_cast<u16>(datalen + 8);
+    mb_write16(8, static_cast<u16>((plen >> 8) | (plen << 8)));
+    mb_write16(8, 0xAAAA); mb_write16(8, 0x0003); mb_write16(8, 0x0000);
+    mb_write16(8, get16(&lan_[12]));
+    for (int i = 0; i < datalen; ++i) rx.write(lan_[14 + i]);
+    drain_rx_buffer();
+    return;
+  }
 }
 
 void NWifi::send_wmi_event(u8 ep, u16 id, const u8* data, u32 len) {
@@ -523,6 +586,7 @@ void NWifi::send_wmi_ack(u8 ep) {
 }
 
 void NWifi::send_wmi_bss_info(u8 type, const u8* data, u32 len) {
+  if (nwifi_debug()) std::fprintf(stderr, "[nwifi] BSS info %s, RX mailbox %u/%u\n", send_bss_info_ ? "sent" : "filtered", mb_[8].occupied, mb_[8].size());
   if (!send_bss_info_) return;
   Fifo& rx = mb_[8];
   if (!rx.can_fit(6 + len + 2 + 16)) return;
@@ -577,22 +641,29 @@ void NWifi::ms_timer() {
   ++beacon_timer_;
   if (scan_timer_ > 0) {
     --scan_timer_;
-    // melonDS reports its built-in AP ("melonAP") to a scan whether or not a
-    // network backend is attached; so does this.
+    // The emulated access point answers a scan whether or not a network
+    // backend is attached (melonDS's "melonAP", under DSperate's name).
     if (!(beacon_timer_ & 0x7F)) {
-      static const u8 beacon[] = {
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x80, 0x00,
-        0x21, 0x00,
-        0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24,
-        0x03, 0x01, 0x06,
-        0x05, 0x04, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x07, 'm', 'e', 'l', 'o', 'n', 'A', 'P',
+      static const u8 head[] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,   // timestamp
+        0x80, 0x00,                                       // beacon interval
+        0x21, 0x00,                                       // capability
+        0x01, 0x08, 0x82, 0x84, 0x8B, 0x96, 0x0C, 0x12, 0x18, 0x24,   // rates
+        0x03, 0x01, 0x06,                                 // channel
+        0x05, 0x04, 0x00, 0x00, 0x00, 0x00,               // TIM
       };
-      send_wmi_bss_info(0x01, beacon, sizeof beacon);
+      const char* name = probed_ssid_[0] ? probed_ssid_ : bios::kAccessPointSsid;
+      const size_t n = std::min<size_t>(std::strlen(name), 32);
+      u8 beacon[sizeof head + 2 + 32];
+      std::memcpy(beacon, head, sizeof head);
+      beacon[sizeof head] = 0x00;                         // SSID element
+      beacon[sizeof head + 1] = static_cast<u8>(n);
+      std::memcpy(beacon + sizeof head + 2, name, n);
+      send_wmi_bss_info(0x01, beacon, static_cast<u32>(sizeof head + 2 + n));
     }
     if (scan_timer_ == 0) { u8 status[4] = {}; send_wmi_event(1, 0x100A, status, 4); }
   }
+  if (connection_status_ == 1) check_rx();
   // Periodic: from the nominal time, as melonDS's ScheduleEvent(periodic) adds to the old timestamp.
   nds_.sched.schedule(EventId::NWifi, nds_.sched.event_time() + MS_TIMER_TICKS, ms_timer_event, 0);
 }
@@ -604,6 +675,7 @@ template <class S> void NWifi::sync_state(S& s) {
            f1_irq_status_, f1_irq_status_cpu_, f1_irq_status_error_, f1_irq_status_counter_,
            window_data_, window_read_addr_, window_write_addr_, rom_id_, chip_id_, host_int_addr_,
            eeprom_, eeprom_ready_, boot_phase_, error_mask_, scan_timer_, beacon_timer_, connection_status_, send_bss_info_);
+  if (s.version >= 6) s.fields(probed_ssid_);   // appended (FORMAT_VERSION 6)
 }
 template void NWifi::sync_state<state::Writer>(state::Writer&);
 template void NWifi::sync_state<state::Reader>(state::Reader&);
