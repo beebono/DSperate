@@ -8,6 +8,9 @@
 // trace harness is the oracle; see docs/dsiware-scoping.md.
 #include "core/nds.h"
 #include "core/cpu/cp15.h"
+#if DSPERATE_JIT
+#include "core/cpu/jit/jit.h"
+#endif
 
 extern "C" {
 #include "core/crypto/aes.h"
@@ -270,6 +273,46 @@ bool NDS::boot_dsi_nand() {
   std::fprintf(stderr, "dsi: boot2 from NAND -- ARM9 %08X (%u bytes), ARM7 %08X (%u bytes)\n",
                bp[2], bp[3], bp[6], bp[7]);
   return true;
+}
+
+// melonDS DSi::SoftReset, in its order. What it leaves alone is as much the
+// model as what it resets: main RAM (a title can be named for the next boot
+// through it), the BPTWL register file (0x70 is the warm-boot flag), the
+// GPU, SPU, timers, IRQ registers, DMA and every armed event. The boot ROM
+// runs again, which with half BIOS dumps is boot2 loaded from the NAND.
+void NDS::dsi_soft_reset() {
+  dsi_soft_reset_pending = false;
+  std::fprintf(stderr, "dsi: soft reset\n");
+
+  // The CPUs, keeping what the recompiler and the sibling link hang off the
+  // hot block (reset() clears it whole).
+  for (CpuContext* c : {arm9.get(), arm7.get()}) {
+    const u64 exit_native = c->hot.exit_native, other = c->hot.other_cpu;
+    c->reset(c->which, this);
+    c->hot.exit_native = exit_native;
+    c->hot.other_cpu = other;
+  }
+  io.dsp.reset();                // melonDS: NWRAM is remapped by the boot ROM, so the DSP presumably resets too
+  boot_dsi_nand();               // LoadNAND: NWRAM, MBK, WRAMCNT 3, boot2, the CPUs' entry points
+  io.sd.reset();
+  io.sdio.reset();
+  io.aes.reset();                // the console ID is unchanged, so key slots 1 and 3 come back the same
+
+  io::DsiIo& d = io.dsi;
+  d.scfg_bios = 0x0101;
+  d.scfg_clock9 = 0x0187; d.scfg_clock7 = 0x0187;
+  bus.set_clock9_shift(2);       // the launcher may have dropped the ARM9 to 67 MHz
+  d.scfg_ext[0] = 0x8307F100; d.scfg_ext[1] = 0x93FFFB06;
+  d.scfg_mc = static_cast<u16>(0x0010 | (cart ? 0 : 1));
+  d.scfg_rst = 0;
+  io.dsp.set_rst_line(false);
+  io.dispstat[0] |= 0x40; io.dispstat[1] |= 0x40;   // LCD init flag
+  bus.update_nwram();            // SCFG_EXT bit 25 (NWRAM) was just rewritten
+  bus.update_vram_timings();
+
+#if DSPERATE_JIT
+  if (jit::has_runtime()) jit::flush_all();   // boot2 went over NWRAM and ITCM
+#endif
 }
 
 void NDS::setup_direct_boot_dsi() {

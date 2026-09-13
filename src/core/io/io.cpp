@@ -1288,9 +1288,12 @@ void Io::bptwl_write(u8 value, bool last) {
   if (dsi.bptwl_pos == 0xFFFFFFFF) { dsi.bptwl_pos = value; return; }
   const u32 p = dsi.bptwl_pos & 0xFF;
   if (p == 0x11 && value == 0x01) {
-    // Soft reset request: melonDS halts the ARM7 (Halt(4)); nothing here
-    // asks for one yet, so only the register file is touched.
-    std::fprintf(stderr, "[bptwl] soft reset requested (not modelled)\n");
+    // Soft reset request: melonDS halts the ARM7 (Halt(4)) and resets the
+    // machine when its run returns. Halting ends the slice here the same way;
+    // the scheduler sees the flag and calls NDS::dsi_soft_reset. The register
+    // file is left alone: 0x70 is the warm-boot flag the reset exists to carry.
+    nds_.dsi_soft_reset_pending = true;
+    nds_.cpu(Cpu::ARM7).halted = true;
     dsi.bptwl_pos = 0xFFFFFFFF;
     return;
   }

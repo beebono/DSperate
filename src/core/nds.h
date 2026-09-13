@@ -121,6 +121,11 @@ struct NDS {
   bool boot_dsi_nand();
   bool dsi_nand_boot = false;        // set before reset() to take that path
   std::string dsi_boot2_override;    // an SRL to run instead of the NAND's boot2 (e.g. Unlaunch)
+  // The BPTWL soft reset (register 0x11 <- 1). The write halts the ARM7, and
+  // the scheduler calls dsi_soft_reset() as that CPU's run returns -- melonDS
+  // Halt(4), which resets at the end of ARM7::Execute.
+  bool dsi_soft_reset_pending = false;
+  void dsi_soft_reset();
 
   // Firmware settings persistence.
   //

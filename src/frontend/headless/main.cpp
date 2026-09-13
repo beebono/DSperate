@@ -564,6 +564,12 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_until(frame_end - std::chrono::microseconds(static_cast<long long>(16700.0 * (slices - k) / slices)));
     } else
 #endif
+    // DS_DSI_SOFT_RESET_AT=<frame>: request the BPTWL soft reset before that
+    // frame, as a guest write of 1 to register 0x11 does (Io::bptwl_write).
+    if (static const int sr = std::getenv("DS_DSI_SOFT_RESET_AT") ? std::atoi(std::getenv("DS_DSI_SOFT_RESET_AT")) : -1; nds.dsi && i == sr) {
+      nds.dsi_soft_reset_pending = true;
+      nds.cpu(ds::Cpu::ARM7).halted = true;
+    }
     nds.run_frame();
     if (!write_state(i + 1)) return 1;
     if (static const bool fh = std::getenv("DS_FRAME_HASH") != nullptr; fh) {

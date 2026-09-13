@@ -164,7 +164,7 @@ sectors since install and refuse to load against a different NAND identity
 
 | area | files / commits | state |
 |------|-----------------|-------|
-| Machine: 16 MB RAM, NWRAM/MBK, SCFG (per-width reads), IE2/IF2, NDMA, DSi CP15, BIOS pairs + protection, SNDEXCNT, DSi CODEC/TSC, GPIO, I2C + BPTWL | phase 1 | trace-exact vs melonDS; BPTWL soft reset only logged |
+| Machine: 16 MB RAM, NWRAM/MBK, SCFG (per-width reads), IE2/IF2, NDMA, DSi CP15, BIOS pairs + protection, SNDEXCNT, DSi CODEC/TSC, GPIO, I2C + BPTWL | phase 1 | trace-exact vs melonDS; BPTWL soft reset modelled on melonDS `DSi::SoftReset` (`NDS::dsi_soft_reset`; `DS_DSI_SOFT_RESET_AT=<frame>` forces one in headless): reboots to Health and Safety and the launcher, not compared with melonDS |
 | Scheduler: melonDS 64/8 slice grid, 134/67 MHz ARM9 (`set_clock9_shift`), DMA iterations, pending cycles, soft timers per CPU, 8 us Wi-Fi timer | phase 1, `f8de6bf`, `50d4f87`, `e0b4f79` | exact through the launcher boot |
 | Modcrypt at load; AES engine (CTR/CCM, 4 slots, FIFOs, NDMA 0x2A/0x2B) | phase 2, `io/dsi_aes.*`, `tests/aes_test.cpp` | unit-tested; unused at runtime by oracles |
 | SD/MMC host (port 1 = NAND over `NandImage`; port 0 absent) | `fe13f0a`, `io/dsi_sd.*` | exact; raw sectors; `DS_NAND_LOG` |
@@ -182,11 +182,25 @@ unmapped DSi ARM7 BIOS).
 
 ## 5. Remaining work to 2.0.0, in order
 
-1. **Launch an installed title from the NAND boot.** Shantae (KS3E) is already
-   in the dump. TLNC first, then a tap from the menu (Shantae is the 14th
-   icon). Gate against melonDS's launcher launch (5.3). Re-check the
-   cart-present NAND boot, which last diverged on SPIDATA at frame 37 (likely
-   fixed by the CODEC latch and touch fixes).
+1. **Launch an installed title from the NAND boot.** *Menu launch works at
+   `e0b4f79`, with no code changes* (2026-09-12). The script: Health and Safety
+   tap `600:128,100`; 14 taps at `60,113`, every 200 frames from 800; launch
+   tap `3600:128,113`; title taps `5000/5600/6200:128,140`; 7000 frames. With
+   it, Shantae boots, reads and writes `PUBLIC.SAV` and reaches File Select /
+   File Copy. Against melonDS on the same script:
+   - rendered frames are identical from frame 5235 to 7000;
+   - the 19 NAND writes are identical in sector and order;
+   - the guest made 31 795 512-byte block reads, against melonDS's 31 859
+     (our log also has 19 904 16-byte boot2-loader reads);
+   - the written images differ in 3 bytes, all FAT modification times
+     (`srrSaveData.bin` inside the save, and both TWLCFG entries): we stamp
+     00:00:00, melonDS 04:16:00. Save data is identical. The cause is not
+     diagnosed; the RTC or the time read path is the suspect.
+
+   Earlier frames differ in about 900 frames between 25 and 5234 (item 9).
+   (13 scrolls launches Mighty Flip Champs instead; it also matches.) Still
+   to do: the TLNC auto-launch on this boot, and the cart-present NAND boot
+   (last diverged on SPIDATA at frame 37).
 2. **Title installer + save export** (2.3), NAND working copy/overlay, `.cia`.
    Gate: an installed CIA title (Dr Mario KD9E, Plants vs Zombies KZLE) boots
    and saves; the exported `.pub` imports into melonDS with the same data.

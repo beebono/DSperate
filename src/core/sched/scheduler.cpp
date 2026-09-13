@@ -539,6 +539,7 @@ a9_done:
   }
 a7_done:
   {
+    if (nds_.dsi_soft_reset_pending) nds_.dsi_soft_reset();   // see run_until_impl
     const s64 consumed7 = (a7.halted || sl_.skip7) ? sl_.budget7 : (sl_.budget7 - a7.hot.cycle_budget);
     arm7_debt_ -= consumed7 * 2;
   }
@@ -638,6 +639,10 @@ u64 Scheduler::run_until_impl(u64 until, bool until_frame) {
       running_ = &a7; running_start_budget_ = budget7; running_shift_ = 1; running_rshift_ = 0;
       running_base_ = dsi_ ? static_cast<u64>(static_cast<s64>(now_) + ran9 - arm7_debt_) : now_;
       if (!skip7) run_cpu(a7, nds_.run_arm7);
+      // A BPTWL soft reset halted the ARM7 mid-slice (Io::bptwl_write). Reset
+      // as its run returns, as melonDS does at the end of ARM7::Execute; the
+      // ARM7 is un-halted with a zero budget, so the slice counts as run.
+      if (nds_.dsi_soft_reset_pending) nds_.dsi_soft_reset();
       const s64 consumed7 = (a7.halted || skip7) ? budget7 : (budget7 - a7.hot.cycle_budget);
       arm7_debt_ -= consumed7 * 2;
     }
