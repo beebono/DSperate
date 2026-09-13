@@ -377,8 +377,9 @@ ways: DSiWare needs no `--dsi-mode`, and the picker lists it in every mode.
     DSIWARE), stands in for `--dsi-hide-installed`.
 - `.app` streaming (the title is held in memory, twice with the synthesised
   NAND): deferred past 2.0.0 (USER DECISION).
-- A DSi session forces `emu.jit=false`, lockstep, and idle skip off on the
-  NAND boot. It prints "EXPERIMENTAL: interpreter".
+- A DSi session runs with the configured recompiler, interleave and idle
+  skip (2026-09-13; before that it forced the interpreter and lockstep).
+  It prints "EXPERIMENTAL".
 - Headless uses `--dsi` (required with no ROM, or the machine is a DS and
   draws nothing), plus `DS_LAUNCH_AT=<frame>:<path>` to script a picker
   launch.
@@ -709,8 +710,11 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
      Petit Computer 5.1 ms 3.1 % / 9.9 ms 5.6 %; Space Invaders Extreme Z
      7.0 ms 7.3 % / 21.1 ms 77.7 %; DSi Menu 9.0 ms 3.5 % / 39.8 ms 69.8 %.
      Title and attract screens, not gameplay.
-   - **Not done:** the SDL frontend still forces the interpreter, lockstep,
-     and idle skip off on the NAND boot for DSi sessions.
+   - SDL no longer forces the interpreter, lockstep or idle skip off for DSi
+     sessions (USER DECISION, 2026-09-13): `emu.jit`, `emu.quantum` and
+     `emu.idle_skip` apply as for a DS game; `--interp`/`--lockstep` give the
+     reference. The DSi Menu (a firmware boot) keeps the recompiler's strict
+     timing, as the DS menu does.
 9. **Open fidelity items**: rendered frames differ from melonDS from about
    frame 25 of the NAND boot even while the CPU grid matches (2D
    render/present, unexamined); the grid splits at the Health and Safety tap
