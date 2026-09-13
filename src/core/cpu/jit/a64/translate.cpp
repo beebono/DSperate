@@ -470,7 +470,10 @@ private:
       if (thumb_) { u16 v; std::memcpy(&v, p, 2); return v; }
       u32 v; std::memcpy(&v, p, 4); return v;
     }
-    return thumb_ ? cpu_.nds->bus.read16(cpu_.which, addr) : cpu_.nds->bus.read32(cpu_.which, addr);
+    // Code the page table does not map (the DSi ARM7 BIOS) is read as the
+    // interpreter fetches it (Bus::fetch), not as data: a data read of the BIOS
+    // from outside it answers the protection's 0xFFFFFFFF.
+    return cpu_.nds->bus.fetch(cpu_.which, addr, thumb_ ? 16 : 32);
   }
   // ---- cycles -----------------------------------------------------------------------------
   // Record that this translation baked byte `kind` (mem::Timing::RETIME_*) of
@@ -1413,7 +1416,8 @@ void Translator::translate_arm(u32 instr) {
     // PC-destination forms, exceptions and coprocessor/MSR side effects.
     bool always = false;
     switch (op) {
-    case AOp::Swi: case AOp::Bkpt: case AOp::Undefined: case AOp::Cdp: case AOp::Ldc: case AOp::Stc:
+    case AOp::Swi: break;   // not a sure jump: see translate_thumb
+    case AOp::Bkpt: case AOp::Undefined: case AOp::Cdp: case AOp::Ldc: case AOp::Stc:
       always = cond == 0xE; break;
     case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift:
     case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg: case AOp::Ldm:
@@ -1625,7 +1629,10 @@ void Translator::translate_thumb(u16 instr) {
   const bool was_prefix = bl_prefix_valid_;
   bl_prefix_valid_ = false;
   if (thumb_needs_fallback(instr, a9_)) {
-    const bool always = op == TOp::Swi || op == TOp::Bkpt || op == TOp::Undefined || op == TOp::BxBlx || op == TOp::BlxSuffix;
+    // A SWI is not a sure jump: NDS::dsi_hle_swi can answer one (the DSi
+    // font check) without taking the exception, and the fallback stub then
+    // returns into the block, which must go on to the next instruction.
+    const bool always = op == TOp::Bkpt || op == TOp::Undefined || op == TOp::BxBlx || op == TOp::BlxSuffix;
     emit_fallback(instr, always);
     return;
   }
@@ -1797,7 +1804,7 @@ void Translator::translate_thumb(u16 instr) {
     emit_branch_indirect(SCRATCH0, true);
     return;
   }
-  case TOp::Swi: emit_fallback(instr, true); return;
+  case TOp::Swi: emit_fallback(instr, false); return;   // not a sure jump: see above
   case TOp::Bkpt: emit_fallback(instr, true); return;
   case TOp::Undefined: emit_fallback(instr, true); return;
   }

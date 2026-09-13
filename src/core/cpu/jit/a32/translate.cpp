@@ -426,7 +426,10 @@ private:
       if (thumb_) { u16 v; std::memcpy(&v, p, 2); return v; }
       u32 v; std::memcpy(&v, p, 4); return v;
     }
-    return thumb_ ? cpu_.nds->bus.read16(cpu_.which, addr) : cpu_.nds->bus.read32(cpu_.which, addr);
+    // Code the page table does not map (the DSi ARM7 BIOS) is read as the
+    // interpreter fetches it (Bus::fetch), not as data: a data read of the BIOS
+    // from outside it answers the protection's 0xFFFFFFFF.
+    return cpu_.nds->bus.fetch(cpu_.which, addr, thumb_ ? 16 : 32);
   }
 
   // ---- cycles ----------------------------------------------------------------------------
@@ -1343,7 +1346,8 @@ void Translator::translate_arm(u32 instr, bool fb) {
     // PC-destination forms, exceptions and coprocessor/MSR side effects.
     bool always = false;
     switch (op) {
-    case AOp::Swi: case AOp::Bkpt: case AOp::Undefined: case AOp::Cdp: case AOp::Ldc: case AOp::Stc:
+    case AOp::Swi: break;   // not a sure jump: NDS::dsi_hle_swi can answer one without the exception
+    case AOp::Bkpt: case AOp::Undefined: case AOp::Cdp: case AOp::Ldc: case AOp::Stc:
     case AOp::Bx: case AOp::BlxReg:
       always = cond == 0xE; break;
     case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift:
@@ -1540,7 +1544,8 @@ void Translator::translate_thumb(u16 instr, bool fb) {
   if (fb) {
     bool always = false;
     switch (op) {
-    case TOp::Swi: case TOp::Bkpt: case TOp::Undefined: case TOp::BxBlx: case TOp::BlSuffix: case TOp::BlxSuffix:
+    case TOp::Swi: break;   // not a sure jump: NDS::dsi_hle_swi can answer one without the exception
+    case TOp::Bkpt: case TOp::Undefined: case TOp::BxBlx: case TOp::BlSuffix: case TOp::BlxSuffix:
       always = true; break;
     case TOp::HiRegOp: always = true; break;          // only the pc-destination forms reach here
     case TOp::PushPop: always = (instr & (1 << 11)) && (instr & (1 << 8)); break;
