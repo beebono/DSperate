@@ -686,6 +686,31 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
    skip on the oracle set; then measure it on the RG DS. The goal is correct
    and playable, not DS-level headroom (the 134 MHz ARM9 doubles the guest
    budget).
+   - **Tested 2026-09-13 (`4a3ba16`).** Two JIT bugs kept every DSi session
+     from running: the translators fetched unmapped code (the DSi ARM7
+     BIOS) as data, getting the protection's 0xFFFFFFFF, and a SWI answered
+     by `NDS::dsi_hle_swi` returned into a block that ended at the SWI.
+   - Method: `func.sh`-style runs of the aarch64 build under qemu, JIT
+     against the interpreter, snapshots at 600/1200/1799 plus NAND I/O
+     counts. All 20 DSiWare titles on hand reach the same screens (NAND
+     I/O identical on 19; Petit Computer's background load differs), and so
+     do the NAND boot to the DSi Menu and a TLNC launch through it, also
+     with quantum 0 and idle skip on against a lockstep, idle-skip-off
+     interpreter. The ARMv7 JIT matches on Shantae.
+   - Strict mode (`DS_JIT_STRICT`) is *not* cycle-exact on a DSi: the
+     DSi-only melonDS parity rules (`code_latch`, the `defer_cost` cases,
+     `irq_skip_once`) are interpreter-only; the first split is 4 cycles in
+     a crt0's CP15 setup (Shantae, card mode). They matter for melonDS
+     traces, not for play; the gate above is functional.
+   - RG DS (PGO build from a partly stale profile, unpaced, quantum 0, idle
+     skip on, 1800 frames from boot), median / over-budget JIT vs interp:
+     Shantae 4.4 ms 9.4 % / 9.3 ms 12.9 %; Mario vs. Donkey Kong 19.0 ms
+     71 % / 37.5 ms 99.6 %; Plants vs. Zombies 3.8 ms 3.2 % / 7.5 ms 8.1 %;
+     Petit Computer 5.1 ms 3.1 % / 9.9 ms 5.6 %; Space Invaders Extreme Z
+     7.0 ms 7.3 % / 21.1 ms 77.7 %; DSi Menu 9.0 ms 3.5 % / 39.8 ms 69.8 %.
+     Title and attract screens, not gameplay.
+   - **Not done:** the SDL frontend still forces the interpreter, lockstep,
+     and idle skip off on the NAND boot for DSi sessions.
 9. **Open fidelity items**: rendered frames differ from melonDS from about
    frame 25 of the NAND boot even while the CPU grid matches (2D
    render/present, unexamined); the grid splits at the Health and Safety tap
