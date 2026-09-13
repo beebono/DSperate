@@ -36,6 +36,7 @@ class FatVolume {
 
   struct Entry {
     std::string name;      // "PUBLIC.SAV", as stored (8.3, upper case)
+    std::string long_name; // "TWLFontTable.dat" when a long-name entry precedes it, else empty
     u8  attr = 0;          // 0x10 directory
     u32 cluster = 0;       // first cluster; 0 for the root and for an empty file
     u32 size = 0;
@@ -52,7 +53,9 @@ class FatVolume {
   u32  free_clusters() const;
 
   // Paths are '/'-separated from the root and matched case-insensitively
-  // against the 8.3 names (long-name entries are skipped, never written).
+  // against the 8.3 names and the long names. A file written under a name
+  // that is not 8.3 gets a NAME~N.EXT short name and long-name entries, as
+  // the DSi's /sys/TWLFontTable.dat has.
   bool lookup(const std::string& path, Entry& out) const;
   std::vector<Entry> list(const Entry& dir) const;
   bool read(const Entry& file, std::vector<u8>& out) const;
@@ -80,7 +83,12 @@ class FatVolume {
   std::vector<u32> chain(u32 first) const;
   u64  cluster_offset(u32 c) const { return data_off_ + static_cast<u64>(c - 2) * bps_ * spc_; }
   std::vector<u8> dir_bytes(const Entry& dir) const;
-  bool add_entry(const Entry& parent, const u8 raw[32], u64& dirent_out);
+  // Store `count` consecutive 32-byte entries (long-name entries, then the
+  // short one); `dirent_out` is the last's offset.
+  bool add_entry(const Entry& parent, const u8* raw, u32 count, u64& dirent_out);
+  // The short name and long-name entries for `name` in `parent`: 1 entry when
+  // it is already 8.3, else the long-name entries first.
+  bool make_entries(const Entry& parent, const std::string& name, std::vector<u8>& raws) const;
   void write_entry(u64 dirent, const u8 raw[32]);
   bool split(const std::string& path, Entry& parent, std::string& name, std::string* err) const;
   static bool to_83(const std::string& name, u8 out[11]);
@@ -100,6 +108,12 @@ class NandFs {
   // `bios7i` (64 KB) supplies the ES key's KeyY at 0x8308; without it tickets
   // cannot be made or read, and everything else still works.
   bool mount(NandImage& nand, const u8* bios7i, std::string* err = nullptr);
+  // Write an empty DSi filesystem over `nand` (for a synthesised image, see
+  // dsi_nand_synth.h) and mount it: the MBR and the two FAT16 partitions with
+  // a retail DSi's geometry, encrypted under the image's console ID and CID.
+  // The image must be at least kImageBytes long.
+  static constexpr u64 kImageBytes = 0xF000000;
+  bool format(NandImage& nand, const u8* bios7i, std::string* err = nullptr);
   bool valid() const { return main_.valid(); }
 
   FatVolume& main() { return main_; }     // partition 0: title/, ticket/, shared1/, sys/
@@ -114,6 +128,7 @@ class NandFs {
   bool es_decrypt(u8* data, u32 len) const;
 
  private:
+  void setup_crypto(NandImage& nand, const u8* bios7i);
   void crypt_read(u64 offset, u32 len, u8* out);
   void crypt_write(u64 offset, u32 len, const u8* in);
   void xcrypt(u64 offset, u8* buf, u32 len) const;

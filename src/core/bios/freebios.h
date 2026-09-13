@@ -42,6 +42,9 @@ struct UserSettings {
 // wifi access-point blocks. No code. Touch calibration is left for
 // NDS::normalise_touch_calibration, as with a real dump.
 std::vector<u8> generate_firmware(const UserSettings& user);
+// The DSi's: 128 KB, console type DSi, the W015 Wi-Fi board, the same user
+// settings and access points in its last pages.
+std::vector<u8> generate_firmware_dsi(const UserSettings& user);
 
 // The DS firmware CRC16 (GBATEK "Firmware Header").
 u16 crc16(const u8* data, u32 len, u16 start);

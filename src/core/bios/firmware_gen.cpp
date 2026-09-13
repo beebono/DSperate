@@ -25,11 +25,11 @@ void w16(u8* p, u16 v) { p[0] = static_cast<u8>(v); p[1] = static_cast<u8>(v >> 
 
 // Field offsets follow GBATEK "DS Firmware Header" / "User Settings" and the
 // values melonDS's generated firmware uses (SPI_Firmware.cpp).
-void fill_header(u8* h) {
+void fill_header(u8* h, u32 size, u8 console_type) {
   std::memset(h, 0, 0x200);
   std::memcpy(h + 0x08, "DSPR", 4);            // identifier: not "MACP", so nothing mistakes it for a dump
-  h[0x1D] = 0x20;                              // console type: DS Lite
-  w16(h + 0x20, 0x3FE00 >> 3);                 // user settings offset (/8)
+  h[0x1D] = console_type;                      // 0x20 DS Lite, 0x57 DSi
+  w16(h + 0x20, static_cast<u16>((size - 0x200) >> 3));   // user settings offset (/8): the last two pages
   w16(h + 0x2C, 0x138);                        // wifi config length
   h[0x2F] = 6;                                 // wifi version W006
   static const u8 unused3[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
@@ -82,17 +82,28 @@ void fill_access_point(u8* ap, bool configured) {
   }
   w16(ap + 0xFE, crc16(ap, 0xFE, 0x0000));
 }
-} // namespace
 
-std::vector<u8> generate_firmware(const UserSettings& user) {
-  std::vector<u8> fw(0x40000, 0xFF);
-  fill_header(fw.data());
+std::vector<u8> build(const UserSettings& user, u32 size, u8 console_type) {
+  std::vector<u8> fw(size, 0xFF);
+  fill_header(fw.data(), size, console_type);
   fw[0x2FF] = 0x80;                            // boot0: NAND as stage-2 medium (as melonDS)
   // Wifi access points sit just below the user settings.
-  fill_access_point(fw.data() + 0x3FA00, true);
-  fill_access_point(fw.data() + 0x3FB00, false);
-  fill_access_point(fw.data() + 0x3FC00, false);
-  for (u32 blk = 0; blk < 2; ++blk) fill_user(fw.data() + 0x3FE00 + blk * 0x100, user);
+  fill_access_point(fw.data() + size - 0x600, true);
+  fill_access_point(fw.data() + size - 0x500, false);
+  fill_access_point(fw.data() + size - 0x400, false);
+  for (u32 blk = 0; blk < 2; ++blk) fill_user(fw.data() + size - 0x200 + blk * 0x100, user);
+  return fw;
+}
+} // namespace
+
+std::vector<u8> generate_firmware(const UserSettings& user) { return build(user, 0x40000, 0x20); }
+
+std::vector<u8> generate_firmware_dsi(const UserSettings& user) {
+  std::vector<u8> fw = build(user, 0x20000, 0x57);
+  // The DSi's Wi-Fi board and flash type (melonDS Firmware: W015, which
+  // NDS::setup_direct_boot_dsi keys the board words at 0x020005E0 on).
+  fw[0x1FD] = 0x01;
+  fw[0x1FE] = 0x20;
   return fw;
 }
 

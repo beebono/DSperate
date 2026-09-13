@@ -124,6 +124,22 @@ struct NDS {
   // nand:/title/.../content/<dsi_hle_content_id>.app.
   bool dsi_hle_launch = false;
   u32  dsi_hle_content_id = 0;
+  // What the launcher hand-off needs beyond the BIOS pair, made up where the
+  // user has no dump (io/dsi_nand_synth.h): with no NAND loaded, an in-memory
+  // NAND holding this cart's title under a made-up console; with no
+  // --dsi-boot data, the console's settings files from `user` in a region the
+  // title's header allows; with a generated firmware, the DSi's. Call after
+  // load_rom and load_dsi_bios, before setup_direct_boot (before or after
+  // reset(): it re-attaches the NAND itself). `report` gets one line per
+  // substitution.
+  bool prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std::vector<std::string>* report = nullptr);
+  bool dsi_nand_synthetic = false;   // dsi_nand was built by prepare_dsi_hle, not loaded
+  // The user's /sys/TWLFontTable.dat for a synthesised NAND (set before
+  // prepare_dsi_hle). Titles that use the DSi system font do not start
+  // without it; see dsi_font_wanted().
+  std::string dsi_font_path;
+  // A title on a synthesised NAND without a font has looked in /sys.
+  bool dsi_font_wanted() const { return dsi_nand_synthetic && dsi_nand.watch_hit(); }
   // Boot the DSi from its NAND (boot2 -> launcher) instead of staging a direct
   // boot from the card. Needs a NAND image; false if there is none.
   bool boot_dsi_nand();

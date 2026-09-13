@@ -14,6 +14,7 @@
 #include "core/crypto/sha1.h"
 #include "core/io/dsi_nand_fs.h"
 #include "core/io/dsi_nand_persist.h"
+#include "core/io/dsi_nand_synth.h"
 #include "core/io/dsi_sd.h"
 
 #include <cstdio>
@@ -117,7 +118,83 @@ static void test_fat12() {
   CHECK(files == 21);
   // 2 directory clusters + 1 more for the spilled directory, 1 for public.sav, 20 one-byte files.
   CHECK(w.free_clusters() == free0 - 3 - 1 - 20);
-  CHECK(!w.write("/title/00030004/toolongname.sav", small.data(), 1, &err));
+
+  // A name that is not 8.3 gets NAME~N.EXT and long-name entries; it is found
+  // by either name, case-insensitively, and survives a re-open.
+  CHECK(w.write("/title/00030004/TWLFontTable.dat", small.data(), static_cast<u32>(small.size()), &err));
+  CHECK(w.write("/title/00030004/TWLFontOther.dat", small.data(), 1, &err));
+  FatVolume x;
+  CHECK(open_on(x, img));
+  CHECK(x.lookup("/title/00030004/twlfonttable.DAT", e) && e.name == "TWLFON~1.DAT" && e.long_name == "TWLFontTable.dat");
+  CHECK(x.lookup("/title/00030004/TWLFON~1.DAT", e) && x.read(e, got) && got == small);
+  CHECK(x.lookup("/title/00030004/TWLFontOther.dat", e) && e.name == "TWLFON~2.DAT" && e.size == 1);
+  // Rewriting through the long name replaces that file, not a third one.
+  CHECK(x.write("/title/00030004/TWLFontTable.dat", big.data(), static_cast<u32>(big.size()), &err));
+  CHECK(x.lookup("/title/00030004/TWLFontTable.dat", e) && x.read(e, got) && got == big);
+  CHECK(!x.lookup("/title/00030004/TWLFON~3.DAT", e));
+}
+
+// A NAND made from nothing (io/dsi_nand_synth): the retail layout, mountable
+// under its made-up console, holding the title where the launcher's mount
+// table points and settings files whose hashes check.
+static void test_synthetic_nand() {
+  std::vector<u8> srl(0x6000);
+  for (size_t i = 0; i < srl.size(); ++i) srl[i] = static_cast<u8>(i * 7);
+  const u32 lo = 0x4B535445, hi = 0x00030004;   // "ETSK"
+  std::memcpy(&srl[0x230], &lo, 4); std::memcpy(&srl[0x234], &hi, 4);
+  const u32 pub = 0x4000, prv = 0;
+  std::memcpy(&srl[0x238], &pub, 4); std::memcpy(&srl[0x23C], &prv, 4);
+  srl[0x1BF] = 0x04;                            // banner.sav
+  ds::bios::UserSettings user;
+  user.nickname = "Tester";
+  const ds::io::DsiRegion region = ds::io::dsi_region_for(0x00000002, 1);
+  ds::io::DsiConsoleFiles files = ds::io::make_dsi_console_files(user, region, ds::io::kSynthConsoleId);
+  files.font = std::vector<u8>(0x300, 0xAB);
+
+  ds::io::NandImage nand;
+  std::string err;
+  CHECK(ds::io::build_synthetic_nand(nand, nullptr, srl, files, &err));
+  CHECK(nand.in_memory() && nand.console_id() == ds::io::kSynthConsoleId);
+  nand.mark_baseline();
+  CHECK(!nand.any_changed());
+
+  ds::io::NandFs fs;
+  CHECK(fs.mount(nand, nullptr, &err));
+  CHECK(fs.main().fat_bits() == 16 && fs.main().cluster_bytes() == 0x4000);
+  CHECK(fs.photo().valid());
+  FatVolume::Entry e;
+  std::vector<u8> got;
+  CHECK(fs.main().lookup("/title/00030004/4b535445/content/00000000.app", e) && fs.main().read(e, got) && got == srl);
+  CHECK(fs.main().lookup("/title/00030004/4b535445/data/public.sav", e) && e.size == pub);
+  CHECK(!fs.main().lookup("/title/00030004/4b535445/data/private.sav", e));
+  CHECK(fs.main().lookup("/title/00030004/4b535445/data/banner.sav", e) && e.size == 0x4000);
+  CHECK(fs.main().lookup("/sys/TWLFontTable.dat", e) && e.name == "TWLFON~1.DAT" && e.size == 0x300);
+  CHECK(fs.main().lookup("/shared1/TWLCFG0.dat", e) && fs.main().read(e, got) && got.size() == 0x4000);
+  u8 digest[20];
+  crypto::sha1(&got[0x88], 0x128, digest);
+  CHECK(std::memcmp(digest, got.data(), 20) == 0);
+  CHECK(got[0x8D] == 0x31 && got[0x8E] == 1 && got[0xD0] == 'T');   // USA, English, the nickname
+  CHECK(fs.main().lookup("/sys/HWINFO_S.dat", e) && fs.main().read(e, got) && got[0x90] == 1 && std::memcmp(&got[0xA0], "EANH", 4) == 0);
+  CHECK(files.boot_blobs().size() == 0x154);
+
+  // A guest write after the baseline is the session's; the build's were not.
+  u8 sec[512] = {};
+  nand.write(0x10EE00ull + 0x200000, 512, sec);
+  CHECK(nand.any_changed() && nand.changed((0x10EE00ull + 0x200000) / 512) && !nand.changed(0));
+}
+
+// The region a title is run in, from its header and the user's language.
+static void test_region() {
+  auto r = ds::io::dsi_region_for(0x00000002, 3);          // USA only, German wanted
+  CHECK(r.region == 1 && r.language == 1 && r.letter == 'E');
+  r = ds::io::dsi_region_for(0x00000004, 3);               // Europe: German is there
+  CHECK(r.region == 2 && r.language == 3 && r.letter == 'P');
+  r = ds::io::dsi_region_for(0xFFFFFFFF, 0);               // region-free, Japanese
+  CHECK(r.region == 0 && r.language == 0);
+  r = ds::io::dsi_region_for(0xFFFFFFFF, 1);               // region-free, English: the USA console
+  CHECK(r.region == 1);
+  r = ds::io::dsi_region_for(0x00000020, 1);               // Korea only
+  CHECK(r.region == 5 && r.language == 7 && r.letter == 'K');
 }
 
 static std::vector<u8> slurp(const char* path) {
@@ -258,6 +335,8 @@ static void test_persist() {
 int main() {
   test_sha1();
   test_fat12();
+  test_synthetic_nand();
+  test_region();
   test_real_nand();
   test_persist();
   if (failures) { std::fprintf(stderr, "nand_fs: %d failure(s)\n", failures); return 1; }

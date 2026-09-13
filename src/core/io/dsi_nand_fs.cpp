@@ -157,11 +157,33 @@ std::vector<FatVolume::Entry> FatVolume::list(const Entry& dir) const {
   const std::vector<u8> d = dir_bytes(dir);
   const std::vector<u32> cl = dir.cluster ? chain(dir.cluster) : std::vector<u32>{};
   const u32 cs = cluster_bytes();
+  std::u16string lfn;
+  u8 lfn_sum = 0;
   for (size_t i = 0; i + 32 <= d.size(); i += 32) {
     const u8* e = &d[i];
     if (e[0] == 0x00) break;
-    if (e[0] == 0xE5 || e[11] == 0x0F || (e[11] & 0x08)) continue;
+    if (e[0] == 0xE5) { lfn.clear(); continue; }
+    if (e[11] == 0x0F) {
+      // Long-name pieces come last-first, 13 UTF-16 units each.
+      std::u16string piece;
+      for (int k : {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30}) {
+        const char16_t ch = static_cast<char16_t>(e[k] | (e[k + 1] << 8));
+        if (ch == 0x0000 || ch == 0xFFFF) break;
+        piece.push_back(ch);
+      }
+      if (e[0] & 0x40) lfn.clear();
+      lfn = piece + lfn;
+      lfn_sum = e[13];
+      continue;
+    }
+    if (e[11] & 0x08) { lfn.clear(); continue; }
     Entry en;
+    if (!lfn.empty()) {
+      u8 sum = 0;
+      for (int k = 0; k < 11; ++k) sum = static_cast<u8>(((sum & 1) << 7) + (sum >> 1) + e[k]);
+      if (sum == lfn_sum) for (char16_t ch : lfn) en.long_name.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+      lfn.clear();
+    }
     std::string base(reinterpret_cast<const char*>(e), 8), ext(reinterpret_cast<const char*>(e + 8), 3);
     if (static_cast<u8>(base[0]) == 0x05) base[0] = static_cast<char>(0xE5);
     base.erase(base.find_last_not_of(' ') + 1);
@@ -184,7 +206,7 @@ bool FatVolume::lookup(const std::string& path, Entry& out) const {
     const std::string want = upper(p);
     bool found = false;
     for (const Entry& e : list(cur)) {
-      if (e.name != want) continue;
+      if (e.name != want && (e.long_name.empty() || upper(e.long_name) != want)) continue;
       cur = e;
       found = true;
       break;
@@ -263,26 +285,76 @@ void FatVolume::write_entry(u64 dirent, const u8 raw[32]) {
   write_(sec, bps_, b);
 }
 
-bool FatVolume::add_entry(const Entry& parent, const u8 raw[32], u64& dirent_out) {
+bool FatVolume::add_entry(const Entry& parent, const u8* raw, u32 count, u64& dirent_out) {
   const std::vector<u8> d = dir_bytes(parent);
   const std::vector<u32> cl = parent.cluster ? chain(parent.cluster) : std::vector<u32>{};
   const u32 cs = cluster_bytes();
   const size_t limit = parent.cluster ? d.size() : static_cast<size_t>(root_entries_) * 32;
+  auto at = [&](size_t i) { return parent.cluster ? cluster_offset(cl[i / cs]) + i % cs : root_off_ + i; };
+  // The first run of `count` free slots. Everything from the first 0x00 entry
+  // on is free, so a run may start there and continue into a new cluster.
+  size_t run = 0;
   for (size_t i = 0; i + 32 <= limit; i += 32) {
-    if (d[i] != 0x00 && d[i] != 0xE5) continue;
-    dirent_out = parent.cluster ? cluster_offset(cl[i / cs]) + i % cs : root_off_ + i;
-    write_entry(dirent_out, raw);
+    if (d[i] != 0x00 && d[i] != 0xE5) { run = 0; continue; }
+    if (++run < count) continue;
+    const size_t first = i + 32 - count * 32;
+    for (u32 k = 0; k < count; ++k) write_entry(at(first + k * 32), raw + k * 32);
+    dirent_out = at(i);
     return true;
   }
   if (!parent.cluster || cl.empty()) return false;   // the root directory is full
-  // Grow the directory by a zeroed cluster and put the entry at its start.
+  // Grow the directory by a zeroed cluster and put the entries at its start
+  // (a run cut by the cluster end is abandoned: those slots stay free).
+  if (count * 32 > cs) return false;
   u32 c;
   if (!alloc_chain(1, c)) return false;
   fat_set(cl.back(), c);
   std::vector<u8> zero(bps_, 0);
   for (u32 s = 0; s < cs; s += bps_) write_(cluster_offset(c) + s, bps_, zero.data());
-  dirent_out = cluster_offset(c);
-  write_entry(dirent_out, raw);
+  for (u32 k = 0; k < count; ++k) write_entry(cluster_offset(c) + k * 32, raw + k * 32);
+  dirent_out = cluster_offset(c) + (count - 1) * 32;
+  return true;
+}
+
+bool FatVolume::make_entries(const Entry& parent, const std::string& name, std::vector<u8>& raws) const {
+  u8 short_name[11];
+  if (to_83(name, short_name)) { raws.assign(short_name, short_name + 11); raws.resize(32, 0); return true; }
+  // NAME~N.EXT from the long name's letters, N the first not in use.
+  std::string base, ext;
+  const size_t dot = name.find_last_of('.');
+  for (char c : name.substr(0, dot)) if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') base.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+  if (dot != std::string::npos) for (char c : name.substr(dot + 1)) if (std::isalnum(static_cast<unsigned char>(c)) && ext.size() < 3) ext.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+  if (base.empty()) base = "FILE";
+  const std::vector<Entry> existing = list(parent);
+  bool found = false;
+  for (int n = 1; n <= 9 && !found; ++n) {
+    std::string sn = base.substr(0, 6) + "~" + std::to_string(n);
+    const std::string full = ext.empty() ? sn : sn + "." + ext;
+    if (std::none_of(existing.begin(), existing.end(), [&](const Entry& e) { return e.name == full; })) {
+      std::memset(short_name, ' ', 11);
+      std::memcpy(short_name, sn.data(), sn.size());
+      std::memcpy(short_name + 8, ext.data(), ext.size());
+      found = true;
+    }
+  }
+  if (!found) return false;
+  u8 sum = 0;
+  for (int k = 0; k < 11; ++k) sum = static_cast<u8>(((sum & 1) << 7) + (sum >> 1) + short_name[k]);
+  const u32 pieces = static_cast<u32>((name.size() + 12) / 13);
+  raws.assign((pieces + 1) * 32, 0);
+  for (u32 p = 0; p < pieces; ++p) {
+    u8* e = &raws[(pieces - 1 - p) * 32];            // stored last piece first
+    e[0] = static_cast<u8>((p + 1) | (p + 1 == pieces ? 0x40 : 0));
+    e[11] = 0x0F;
+    e[13] = sum;
+    int slot = 0;
+    for (int k : {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30}) {
+      const size_t ci = p * 13 + slot++;
+      const u16 ch = ci < name.size() ? static_cast<u8>(name[ci]) : ci == name.size() ? 0x0000 : 0xFFFF;
+      wr16(e + k, ch);
+    }
+  }
+  std::memcpy(&raws[pieces * 32], short_name, 11);
   return true;
 }
 
@@ -291,8 +363,8 @@ bool FatVolume::write(const std::string& path, const u8* data, u32 len, std::str
   Entry parent;
   std::string name;
   if (!split(path, parent, name, err)) return false;
-  u8 raw[32] = {};
-  if (!to_83(name, raw)) return fail("not an 8.3 name");
+  std::vector<u8> raws;
+  if (!make_entries(parent, name, raws)) return fail("no free short name");
 
   Entry existing;
   const bool exists = lookup(path, existing);
@@ -327,6 +399,7 @@ bool FatVolume::write(const std::string& path, const u8* data, u32 len, std::str
     wr32(e + 28, len);
     write_(sec, bps_, b);
   } else {
+    u8* raw = &raws[raws.size() - 32];
     raw[11] = 0x20;   // archive
     wr16(raw + 16, kFatDate);   // created
     wr16(raw + 18, kFatDate);   // accessed
@@ -334,7 +407,7 @@ bool FatVolume::write(const std::string& path, const u8* data, u32 len, std::str
     wr16(raw + 26, static_cast<u16>(first));
     wr32(raw + 28, len);
     u64 dirent;
-    if (!add_entry(parent, raw, dirent)) { free_chain(first); fat_flush(); return fail("directory is full"); }
+    if (!add_entry(parent, raws.data(), static_cast<u32>(raws.size() / 32), dirent)) { free_chain(first); fat_flush(); return fail("directory is full"); }
     fat_flush();
   }
   return true;
@@ -370,7 +443,7 @@ bool FatVolume::mkdir(const std::string& path, std::string* err) {
   wr16(raw + 16, kFatDate); wr16(raw + 18, kFatDate); wr16(raw + 24, kFatDate);
   wr16(raw + 26, static_cast<u16>(c));
   u64 dirent;
-  if (!add_entry(parent, raw, dirent)) { free_chain(c); fat_flush(); return fail("directory is full"); }
+  if (!add_entry(parent, raw, 1, dirent)) { free_chain(c); fat_flush(); return fail("directory is full"); }
   fat_flush();
   return true;
 }
@@ -403,7 +476,7 @@ namespace {
 void bswap16(u8* dst, const u8* src) { for (int i = 0; i < 16; ++i) dst[i] = src[15 - i]; }
 }  // namespace
 
-bool NandFs::mount(NandImage& nand, const u8* bios7i, std::string* err) {
+void NandFs::setup_crypto(NandImage& nand, const u8* bios7i) {
   nand_ = &nand;
   const u64 id = nand.console_id();
   const u32 lo = static_cast<u32>(id), hi = static_cast<u32>(id >> 32);
@@ -427,7 +500,10 @@ bool NandFs::mount(NandImage& nand, const u8* bios7i, std::string* err) {
     DsiAes::derive_normal_key(kx, bios7i + 0x8308, tmp);
     bswap16(es_key_, tmp);
   }
+}
 
+bool NandFs::mount(NandImage& nand, const u8* bios7i, std::string* err) {
+  setup_crypto(nand, bios7i);
   u8 mbr[512];
   crypt_read(0, 512, mbr);
   if (mbr[0x1FE] != 0x55 || mbr[0x1FF] != 0xAA) { if (err) *err = "the MBR did not decrypt (wrong console ID or CID in the footer)"; return false; }
@@ -445,6 +521,57 @@ bool NandFs::mount(NandImage& nand, const u8* bios7i, std::string* err) {
   if (!part(0, main_, true)) return false;
   part(1, photo_, false);
   return true;
+}
+
+bool NandFs::format(NandImage& nand, const u8* bios7i, std::string* err) {
+  if (nand.length() < kImageBytes) { if (err) *err = "the image is smaller than a DSi NAND"; return false; }
+  setup_crypto(nand, bios7i);
+  const std::vector<u8> zero(512, 0);
+
+  // The partition table of a retail DSi (read from a dump): the main FAT16
+  // partition, the photo partition, and a small FAT12 one nothing mounts.
+  // Geometry only; the MBR has no boot code.
+  u8 mbr[512] = {};
+  static const u8 kParts[3][16] = {
+    {0x00, 0x03, 0x18, 0x04, 0x06, 0x0F, 0xE0, 0x3B, 0x77, 0x08, 0x00, 0x00, 0x89, 0x6F, 0x06, 0x00},
+    {0x00, 0x02, 0xCE, 0x3C, 0x06, 0x0F, 0xE0, 0xBE, 0x4D, 0x78, 0x06, 0x00, 0xB3, 0x05, 0x01, 0x00},
+    {0x00, 0x02, 0xDE, 0xBF, 0x01, 0x0F, 0xE0, 0xBF, 0x5D, 0x7E, 0x07, 0x00, 0xA3, 0x01, 0x00, 0x00},
+  };
+  for (int i = 0; i < 3; ++i) std::memcpy(mbr + 0x1BE + i * 16, kParts[i], 16);
+  mbr[0x1FE] = 0x55; mbr[0x1FF] = 0xAA;
+  crypt_write(0, 512, mbr);
+
+  // Each FAT16 partition's boot sector (the DSi's formatter: OEM "TWL", 32
+  // sectors per cluster, 512 root entries, no boot code) and empty FATs and
+  // root directory.
+  auto fat16 = [&](int index, u16 fat_sectors) {
+    const u8* p = kParts[index];
+    const u32 start = rd32(p + 8), sectors = rd32(p + 12);
+    const u64 base = static_cast<u64>(start) * 512;
+    u8 b[512] = {};
+    b[0] = 0xE9;
+    std::memcpy(b + 3, "TWL     ", 8);
+    wr16(b + 0x0B, 512); b[0x0D] = 32; wr16(b + 0x0E, 1); b[0x10] = 2; wr16(b + 0x11, 512);
+    b[0x15] = 0xF8; wr16(b + 0x16, fat_sectors); wr16(b + 0x18, 32); wr16(b + 0x1A, 16);
+    wr32(b + 0x1C, start); wr32(b + 0x20, sectors);
+    b[0x24] = static_cast<u8>(index); b[0x26] = 0x29; wr32(b + 0x27, 0x12345678);
+    std::memset(b + 0x2B, ' ', 11);
+    b[0x1FE] = 0x55; b[0x1FF] = 0xAA;
+    crypt_write(base, 512, b);
+    for (u32 f = 0; f < 2; ++f) {
+      const u64 fat = base + 512 + static_cast<u64>(f) * fat_sectors * 512;
+      for (u32 s = 0; s < fat_sectors; ++s) crypt_write(fat + static_cast<u64>(s) * 512, 512, zero.data());
+      const u8 head[4] = {0xF8, 0xFF, 0xFF, 0xFF};
+      u8 first[512] = {};
+      std::memcpy(first, head, 4);
+      crypt_write(fat, 512, first);
+    }
+    const u64 root = base + 512 + 2ull * fat_sectors * 512;
+    for (u32 s = 0; s < 32; ++s) crypt_write(root + static_cast<u64>(s) * 512, 512, zero.data());
+  };
+  fat16(0, 52);
+  fat16(1, 9);
+  return mount(nand, bios7i, err);
 }
 
 // AES-CTR over byte-reversed 16-byte blocks, the counter the base IV plus the

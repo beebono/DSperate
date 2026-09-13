@@ -55,6 +55,7 @@
 #include <cmath>
 #include <csignal>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -101,6 +102,11 @@ const char* kUsage =
     "                  saves, downloaded from Nintendo's update CDN, or --dsi-tmd F (default <game>.tmd).\n"
     "                  --dsi-offline never downloads; --dsi-hide-installed hides the dump's own DSiWare.\n"
     "                  The title starts straight away; --dsi-menu boots to the DSi Menu with it instead\n"
+    "                  Without --dsi-nand, a DSiWare .nds/.cia given with it runs with only the DSi BIOS\n"
+    "                  pair: the launcher's hand-off is emulated, the NAND and the DSi settings are made\n"
+    "                  up from [user], and saves go to paths.saves (else beside the game). Titles that use\n"
+    "                  the DSi system font also need --dsi-font F (paths.dsi_font): /sys/TWLFontTable.dat\n"
+    "                  from a DSi (tools/dsi_nand.py extract), which cannot be replaced by a made-up one.\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) | horizontal | single | pip | dominant_v | dominant_h\n"
@@ -972,6 +978,8 @@ int main(int argc, char** argv) {
   bool dsi_mode = false;
   const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_nand = nullptr;
   const char* dsi_title = nullptr; const char* dsi_tmd = nullptr; bool dsi_offline = false, dsi_hide_installed = false, dsi_menu = false;
+  bool dsi_hle = false;          // --dsi-mode with a title and no NAND: the launcher hand-off, BIOS pair only
+  const char* dsi_font = nullptr;
   u32 dsi_title_lo = 0;   // the title --dsi-mode was given, once it is on the NAND: what the autoload starts
 
   // The game is found before the options are read. A flag whose value is
@@ -1005,6 +1013,7 @@ int main(int argc, char** argv) {
     else if (arg("--bios7i")) bios7i = argv[++i];
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];
     else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];
+    else if (arg("--dsi-font")) dsi_font = argv[++i];
     else if (flag("--dsi-offline")) dsi_offline = true;
     else if (flag("--dsi-menu")) dsi_menu = true;
     else if (flag("--dsi-hide-installed")) dsi_hide_installed = true;
@@ -1096,9 +1105,12 @@ int main(int argc, char** argv) {
     // into the session's NAND rather than put in the card slot (a cart during
     // a NAND boot has not been checked against melonDS), so the rest of the
     // startup runs as the cartless firmware boot it is.
-    dsi_title = rom;
-    rom = nullptr;
-    if (!bios9i || !bios7i || !dsi_nand) { std::fprintf(stderr, "--dsi-mode needs --bios9i, --bios7i and --dsi-nand\n"); return 2; }
+    dsi_hle = !dsi_nand && rom;
+    if (!bios9i || !bios7i || (!dsi_nand && !rom)) { std::fprintf(stderr, "--dsi-mode needs --bios9i and --bios7i, and --dsi-nand or a DSiWare title\n"); return 2; }
+    if (dsi_hle && dsi_menu) { std::fprintf(stderr, "--dsi-menu needs --dsi-nand: without one there is no DSi Menu to boot\n"); return 2; }
+    // Without a NAND the title goes in the slot and is handed over from there
+    // (NDS::prepare_dsi_hle), so the ROM path stays as for any game.
+    if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
     // Every DSi result so far is on the interpreter; the recompilers have never
     // run a DSi. And lockstep, which is the interleave the NAND boot was matched
     // to melonDS under (the headless default). On the command line, so both win
@@ -1254,7 +1266,14 @@ int main(int argc, char** argv) {
                  nds.firmware_synthetic ? "firmware" : "", global_ini.c_str());
     return 2;
   }
-  if (dsi_mode) {
+  if (dsi_hle) {
+    std::string err;
+    if (!nds.load_dsi_bios(bios9i, bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
+    if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", bios9i, bios7i); return 1; }
+    nds.set_dsi(true);
+    nds.dsi_hle_launch = true;   // the NAND and settings are made once the title is in the slot (below)
+    std::fprintf(stderr, "console: DSi without a NAND (EXPERIMENTAL: interpreter, no idle skip, no save states)\n");
+  } else if (dsi_mode) {
     std::string err;
     if (!nds.load_dsi_bios(bios9i, bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", bios9i, bios7i); return 1; }
@@ -1632,7 +1651,29 @@ sdl_ready:
   // The ROM goes in after the display is open, so a zipped game's first
   // launch -- which unpacks it to the card, seconds to a minute -- can show
   // the notice instead of a black panel.
-  if (!boot_firmware && !load_rom_notice(rom_path)) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); SDL_Quit(); return 1; }
+  const bool rom_is_cia = [&] {
+    if (rom_path.size() < 4) return false;
+    std::string ext = rom_path.substr(rom_path.size() - 4);
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == ".cia";
+  }();
+  if (dsi_hle && rom_is_cia) {
+    // A CIA carries the SRL inside; the slot takes the SRL.
+    std::vector<ds::u8> srl;
+    std::string err;
+    if (!ds::io::read_dsiware(rom_path, srl, &err) || !nds.load_rom_image(std::move(srl))) { std::fprintf(stderr, "dsi: %s: %s\n", rom_path.c_str(), err.c_str()); SDL_Quit(); return 1; }
+  } else if (!boot_firmware && !load_rom_notice(rom_path)) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); SDL_Quit(); return 1; }
+  if (dsi_hle) {
+    std::string err;
+    std::vector<std::string> made;
+    nds.dsi_font_path = dsi_font ? std::string(dsi_font) : cfg.str("paths.dsi_font");
+    if (!nds.dsi_font_path.empty() && !std::filesystem::exists(nds.dsi_font_path)) {
+      std::fprintf(stderr, "dsi: font %s not found; titles that use the DSi system font will not start\n", nds.dsi_font_path.c_str());
+      nds.dsi_font_path.clear();
+    }
+    if (!nds.prepare_dsi_hle(user, &err, &made)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); SDL_Quit(); return 1; }
+    for (const std::string& m : made) std::fprintf(stderr, "dsi: %s\n", m.c_str());
+  }
   // On a firmware boot the loader cart goes in the slot. A BootMenu.nds beside
   // the config wins if there is one -- that is how a hand-made card from
   // tools/mkcart.py is used -- and otherwise the built-in one is assembled in
@@ -1980,7 +2021,21 @@ sdl_ready:
   // DSi mode's equivalent: what the session wrote to the NAND goes out as
   // title saves, the system sidecar and photos (io/dsi_nand_persist), on the
   // same occasions and once NAND writes have been quiet for two seconds.
-  const ds::io::NandPersistPaths dsi_paths = dsi_mode ? ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")) : ds::io::NandPersistPaths{};
+  // Without a NAND there is no dump to sit beside, and no system sidecar: the
+  // DSi settings are [user], made again at every start.
+  const ds::io::NandPersistPaths dsi_paths = dsi_hle ? [&] {
+    ds::io::NandPersistPaths p;
+    p.saves_dir = cfg.str("paths.saves");
+    if (p.saves_dir.empty()) { const std::filesystem::path r(rom_path); p.saves_dir = r.has_parent_path() ? r.parent_path().string() : "."; }
+    p.photos_dir = p.saves_dir + "/dsi-photos";
+    return p;
+  }() : dsi_mode ? ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")) : ds::io::NandPersistPaths{};
+  if (dsi_hle && !replay) {
+    const ds::io::NandPersistReport r = ds::io::nand_import(nds.dsi_nand, nds.bus.bios7i.get(), dsi_paths);
+    nds.dsi_nand.mark_baseline();
+    if (r.saves || r.photos) std::fprintf(stderr, "dsi: restored %d title saves, %d photos\n", r.saves, r.photos);
+    for (const std::string& n : r.notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
+  }
   u64 nand_writes_seen = nds.dsi_nand.writes, nand_quiet_since = 0, nand_exported = nds.dsi_nand.writes;
   auto flush_dsi = [&] {
     if (!dsi_mode || save_readonly || nds.dsi_nand.writes == nand_exported) return;
@@ -3941,6 +3996,10 @@ sdl_ready:
     if (nds.cart && nds.cart->sram_dirty()) {
       if (nds.cart->sram_writes() != sram_writes_seen) { sram_writes_seen = nds.cart->sram_writes(); sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
+    }
+    if (dsi_hle && nds.dsi_font_wanted()) {
+      static bool said = false;
+      if (!said) { said = true; std::fprintf(stderr, "dsi: this title looked for the DSi system font; if it does not start, give --dsi-font (paths.dsi_font)\n"); }
     }
     if (dsi_mode && nds.dsi_nand.writes != nand_exported) {
       if (nds.dsi_nand.writes != nand_writes_seen) { nand_writes_seen = nds.dsi_nand.writes; nand_quiet_since = frames; }

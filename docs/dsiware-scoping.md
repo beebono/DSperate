@@ -128,13 +128,46 @@ Result with the real NAND attached: Shantae reaches its title screen, reads
 its NitroFS through `nand:/.../00000001.app` and makes the same 7
 `PUBLIC.SAV` writes as the real launch. 1618 of 2000 frames are identical to
 the real launch at its 224-frame offset, and the rest are fades up to 3
-frames apart. Mighty Flip Champs reaches its title screen too. Still to do
-for the real fallback:
-1. a synthesised NAND (the mount-table paths, the title's image and saves);
-2. stub versions of Nintendo-owned system files (font table, `cert.sys`)
-   that titles read, with a compatibility warning;
-3. region fields (HWINFO_S, TWLCFG) generated from the title header's
-   region instead of the dump's `--dsi-boot` blob.
+frames apart. Mighty Flip Champs reaches its title screen too.
+
+**With only the BIOS pair** (`--dsi-hle-launch` without `--dsi-nand`,
+`--dsi-boot` or `--firmware`; SDL `--dsi-mode game` without `--dsi-nand`),
+`NDS::prepare_dsi_hle` makes up the rest (`io/dsi_nand_synth`):
+- a DSi firmware (128 KB, console type 0x57, W015 board) carrying `[user]`;
+- TWLCFG, HWINFO_N and HWINFO_S generated from `[user]` in a region the
+  title's header allows (the user's language picks among the regions; a
+  language the region lacks falls back to its own). The RAM copies are their
+  0x154-byte boot blobs;
+- an in-memory NAND (`NandImage::create_in_memory`): the retail MBR and
+  FAT16 geometry (`NandFs::format`) under a made-up console ID and CID, with
+  the settings files, the title as content 00000000 and empty saves.
+  `FatVolume` writes long file names now (`TWLFON~1.DAT`).
+  `NandImage::mark_baseline` keeps the build itself out of the save export;
+  saves persist as `<CODE>.pub/.prv/.bnr` in `paths.saves`.
+
+Results over the 15 installed titles: 11 start with the BIOS pair alone, and
+all 15 with the user's `TWLFontTable.dat` added (`--dsi-font`,
+`paths.dsi_font`). The other 4 (EA Sudoku, Mario vs. Donkey Kong, Paper
+Airplane Chase, Bird & Beans) use the system font. Shantae's frames match
+the real-NAND hand-off (1623/2000) and its save round-trips.
+
+**The font is signature-checked, and only the signature matters.** Tamper
+tests on EA Sudoku: flipping font data or a resource hash still runs, while
+flipping a signature byte gives a white screen. The SWI trace (headless
+`DS_SWI_LOG=1`) shows the title's SDK doing, through the DSi BIOS:
+SWI 0x27 SHA-1 over the header 0x80-0x9F, SWI 0x20 RSA heap init,
+SWI 0x22 `RSA_Decrypt_Unpad(r0=heap, r1=dst, r2=signature)` (writes the
+20-byte digest, returns 1; 0 on a bad signature, after which nothing more is
+read), SWI 0x28 compare, then SWI 0x27/0x28 over the resource headers
+against the table's hash (GBATEK, "DSi SD/MMC Firmware Font File"). A
+generated font can carry correct hashes everywhere but the RSA; an HLE of
+SWI 0x22 that recognises the generated font's signature bytes and returns
+its header digest would make one acceptable (not built yet). Until then a
+title reading `/sys` on a synthesised NAND is flagged
+(`NDS::dsi_font_wanted`).
+
+Not generated: `cert.sys` and the other system files; no title of the 15
+reads them.
 
 ### 2.3 The virtual NAND: title injection and persistence
 
@@ -347,8 +380,10 @@ unmapped DSi ARM7 BIOS).
 2. **The virtual NAND** (2.3): done at `7e1b954` -- read-only dump with
    in-memory writes, the FAT/crypto layer, save and settings persistence,
    one-title injection (signed TMD, DSiWare quota) and TLNC auto-launch.
-3. **No-NAND fallback** (2.2): the launcher hand-off HLE is in; next the
-   synthesised NAND, stub system files and region fields (2.2 items 1-3).
+3. **No-NAND fallback** (2.2): the hand-off HLE, synthesised NAND,
+   generated settings and DSi firmware are in (11/15 titles on the BIOS pair
+   alone, 15/15 with the user's font). Next: a generated system font
+   accepted through an SWI 0x22 HLE.
 4. **SD card slot** (port 0): FAT image or host folder; `FatVolume` already
    reads and writes the filesystem. The Unlaunch installer is an SD test
    title.

@@ -46,6 +46,7 @@ add_library(dsperate_core STATIC
   io/dsi_nand_fs.cpp
   io/dsi_nand_persist.cpp
   io/dsi_title_install.cpp
+  io/dsi_nand_synth.cpp
   io/dsi_nwifi.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)

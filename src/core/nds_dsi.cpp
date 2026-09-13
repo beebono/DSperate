@@ -7,6 +7,7 @@
 // Mirrors melonDS DSi::SetupDirectBoot (DSi-mode branch) so the melonDS
 // trace harness is the oracle; see docs/dsiware-scoping.md.
 #include "core/nds.h"
+#include "core/io/dsi_nand_synth.h"
 #include "core/cpu/cp15.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
@@ -323,6 +324,69 @@ void NDS::dsi_soft_reset() {
 #endif
 }
 
+bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std::vector<std::string>* report) {
+  auto fail = [&](const std::string& m) { if (err) *err = m; return false; };
+  auto note = [&](const std::string& m) { if (report) report->push_back(m); };
+  if (!cart) return fail("the launcher hand-off needs a DSiWare ROM");
+  if (!bios_native_dsi) return fail("the launcher hand-off needs the DSi BIOS pair");
+  const cart::TwlHeader& t = cart->twl();
+  const io::DsiRegion region = io::dsi_region_for(t.region_flags, user.language);
+  u64 console_id = dsi_nand.valid() ? dsi_nand.console_id() : io::kSynthConsoleId;
+  io::DsiConsoleFiles files = io::make_dsi_console_files(user, region, console_id);
+  if (!dsi_font_path.empty() && !dsi_nand.valid()) {
+    files.font = slurp_file(dsi_font_path);
+    if (files.font.size() < 0x100) return fail(dsi_font_path + ": not a TWLFontTable.dat");
+  }
+  static const char* kRegionNames[6] = {"Japan", "USA", "Europe", "Australia", "China", "Korea"};
+
+  if (firmware_synthetic && firmware.size() != 0x20000) {
+    firmware = bios::generate_firmware_dsi(user);
+    firmware_id = 1469598103934665603ull;
+    for (u8 b : firmware) firmware_id = (firmware_id ^ b) * 1099511628211ull;
+    fw_page_dirty.assign((firmware.size() + FW_PAGE - 1) / FW_PAGE, 0);
+    fw_dirty_pages = 0;
+    note("firmware: a generated DSi firmware carrying the user settings");
+  }
+  if (dsi_boot_blobs.empty() && !dsi_nand.valid()) {
+    dsi_boot_blobs = files.boot_blobs();
+    note(std::string("console settings: generated for ") + kRegionNames[region.region] + ", language " + std::to_string(region.language));
+  }
+  if (!dsi_nand.valid()) {
+    std::vector<u8> srl(cart->rom_size());
+    cart->rom_read(0, srl.data(), static_cast<u32>(srl.size()));
+    std::string why;
+    if (!io::build_synthetic_nand(dsi_nand, bus.bios7i.get(), srl, files, &why)) return fail("synthesising the NAND: " + why);
+    dsi_nand_synthetic = true;
+    dsi_nand.mark_baseline();
+    dsi_hle_content_id = 0;
+    // DS_NAND_DUMP=<file>: write the synthesised image out with a nocash
+    // footer, so tools/dsi_nand.py can read it (map, ls, extract).
+    if (const char* dump = getenv("DS_NAND_DUMP")) {
+      if (std::FILE* f = std::fopen(dump, "wb")) {
+        std::vector<u8> sec(512);
+        for (u64 a = 0; a < dsi_nand.length(); a += 512) { dsi_nand.peek(a, 512, sec.data()); std::fwrite(sec.data(), 1, 512, f); }
+        u8 footer[0x40] = {};
+        std::memcpy(footer, "DSi eMMC CID/CPU", 16);
+        std::memcpy(footer + 16, dsi_nand.emmc_cid(), 16);
+        const u64 id = dsi_nand.console_id();
+        std::memcpy(footer + 32, &id, 8);
+        std::fwrite(footer, 1, sizeof footer, f);
+        std::fclose(f);
+      }
+    }
+    note("nand: synthesised in memory (" + std::to_string(srl.size() >> 10) + " KB title)" +
+         (files.font.empty() ? "; no system font: titles that use it will not start" : "; system font from " + dsi_font_path));
+  }
+  // What a reset derives from the NAND and firmware (Io::dsi_reset), redone so
+  // this also works on a machine the frontend has already reset.
+  normalise_touch_calibration();
+  io.dsi.console_id = dsi_nand.console_id();
+  io.sd.attach_nand(&dsi_nand);
+  io.sd.reset();
+  io.aes.reset();
+  return true;
+}
+
 void NDS::dsi_autoload(u32 title_lo, u32 title_hi) {
   u8 tlnc[0x100] = {};
   tlnc[0] = 'T'; tlnc[1] = 'L'; tlnc[2] = 'N'; tlnc[3] = 'C';
@@ -488,7 +552,7 @@ void NDS::setup_direct_boot_dsi() {
     arm7->hot.regs[13] = arm7->bank_r13[0] = 0x03FFFF80; arm7->bank_r13[2] = 0x0380FF7C; arm7->bank_r13[3] = 0x0380FFC0;
     arm7->hot.regs[14] = h.arm7_entry;
 
-    // The launcher's mount table in ARM7 WRAM, at the header's parameter
+    // The launcher's mount table, at the header's parameter
     // block address (0x1D4): five 0x54-byte entries, then the title's own
     // image path at +0x3C0. First decoded in dsperate-research
     // tools/melonds/dsiware_params.py; the entry header words are copied
@@ -496,7 +560,9 @@ void NDS::setup_direct_boot_dsi() {
     auto w32_7 = [&](u32 a, u32 v) { bus.dma_write32(Cpu::ARM7, a, v); };
     auto w8_7  = [&](u32 a, u8 v)  { bus.dma_write8(Cpu::ARM7, a, v); };
     const u32 tbl = t.param_block_address;
-    if (tbl >= 0x03800000 && tbl < 0x0380FC00) {
+    // Either ARM7 WRAM (KS3E 0x03800EA8) or the ARM7's NWRAM window from the
+    // header's MBK map, applied above (KAME 0x037DE050, KAAE 0x037E3C20).
+    if (tbl >= 0x03000000 && tbl + 0x500 <= 0x0380FC00) {
       for (u32 z = 0; z < 0x500; z += 4) w32_7(tbl + z, 0);
       auto put_str = [&](u32 addr, const char* str) { for (const char* c = str; *c; ++c) w8_7(addr++, static_cast<u8>(*c)); w8_7(addr, 0); };
       char title[64];
@@ -516,7 +582,7 @@ void NDS::setup_direct_boot_dsi() {
       std::snprintf(app, sizeof app, "%s/content/%08x.app", title, dsi_hle_content_id);
       put_str(tbl + 0x3C0, app);
     } else {
-      std::fprintf(stderr, "dsi: parameter block address %08x is outside ARM7 WRAM; no mount table\n", tbl);
+      std::fprintf(stderr, "dsi: parameter block address %08x is outside the ARM7's RAM; no mount table\n", tbl);
     }
     // The locked SCFG_EXT7 and two flag bytes at the top of ARM7 WRAM.
     w32_7(0x0380FFC4, d.scfg_ext[1]);

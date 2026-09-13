@@ -20,6 +20,7 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "core/types.h"
 
@@ -62,11 +63,22 @@ class NandImage {
   NandImage& operator=(const NandImage&) = delete;
 
   bool open(const std::string& path, bool write_through = false);
+  // An image with no file behind it: every sector reads zero until written,
+  // and writes are held in memory like a dump's. What a synthesised NAND is
+  // built on (dsi_nand_synth.h).
+  void create_in_memory(u64 length, const u8 cid[16], u64 console_id);
   void close();
-  bool valid() const { return file_ != nullptr; }
+  bool valid() const { return file_ != nullptr || in_memory_; }
+  bool in_memory() const { return in_memory_; }
   bool write_through() const { return write_through_; }
   // Sectors written this session and held in memory (empty under write_through).
   const std::unordered_map<u64, std::array<u8, 512>>& written_sectors() const { return written_; }
+  // What changed since the image was ready. For a dump that is every written
+  // sector; an image built in memory calls mark_baseline() once built (and
+  // once its saves are imported), so only the session's own writes count.
+  void mark_baseline() { baseline_ = true; changed_.clear(); }
+  bool changed(u64 sector) const { return baseline_ ? changed_.count(sector) != 0 : written_.count(sector) != 0; }
+  bool any_changed() const { return baseline_ ? !changed_.empty() : !written_.empty(); }
 
   u64 console_id() const { return console_id_; }
   const u8* emmc_cid() const { return cid_; }
@@ -83,6 +95,10 @@ class NandImage {
 
   // Access counters, for the melonDS gate's "nand: N block reads/writes" line.
   u64 reads = 0, writes = 0;
+  // A byte range whose first guest read is remembered: how a synthesised NAND
+  // tells that a title went looking in /sys (for the system font it lacks).
+  void watch_reads(u64 from, u64 to) { watch_from_ = from; watch_to_ = to; watch_hit_ = false; }
+  bool watch_hit() const { return watch_hit_; }
 
  private:
   static void log_access(bool write, u64 addr, u32 len);
@@ -93,11 +109,16 @@ class NandImage {
   void read_file(u64 addr, u32 len, u8* out);
 
   std::FILE* file_ = nullptr;
+  bool in_memory_ = false;
+  u64  watch_from_ = 0, watch_to_ = 0;
+  bool watch_hit_ = false;
   bool write_through_ = false;
   u64 length_ = 0;
   u8  cid_[16] = {};
   u64 console_id_ = 0;
   std::unordered_map<u64, std::array<u8, 512>> written_;   // sector index -> contents
+  std::unordered_set<u64> changed_;                         // written since mark_baseline()
+  bool baseline_ = false;
 };
 
 class SdHost;

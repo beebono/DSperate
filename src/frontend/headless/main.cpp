@@ -149,6 +149,38 @@ struct EntrySnap {
   ds::NDS* nds = nullptr;
 };
 
+// DS_SWI_LOG=1: every SWI the CPUs take outside the BIOS, with r0-r3 (a
+// diagnostic trace hook, like DS_ENTRY_SNAP).
+void swi_log_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
+  auto* n = static_cast<ds::NDS*>(user);
+  const bool thumb = cpu.thumb();
+  const ds::u32 pc = cpu.hot.regs[15] - (thumb ? 4 : 8);
+  if (pc < 0x01000000) return;   // the BIOS's own
+  static ds::u32 ret_at[2] = {0, 0}, ret_dst[2] = {0, 0};
+  const int ci = cpu.which == ds::Cpu::ARM9 ? 0 : 1;
+  if (ret_at[ci] && pc == ret_at[ci]) {
+    std::fprintf(stderr, "        returned: r0 %08x r1 %08x r2 %08x r3 %08x; dst:", cpu.hot.regs[0], cpu.hot.regs[1], cpu.hot.regs[2], cpu.hot.regs[3]);
+    for (int k = 0; k < 0x30; ++k) std::fprintf(stderr, "%s%02x", k % 4 ? "" : " ", n->bus.dma_read8(cpu.which, ret_dst[ci] + k));
+    std::fputc('\n', stderr);
+    ret_at[ci] = 0;
+  }
+  ds::u32 num;
+  if (thumb) { if ((instr & 0xFF00) != 0xDF00) return; num = instr & 0xFF; }
+  else { if ((instr & 0x0F000000) != 0x0F000000) return; num = (instr >> 16) & 0xFF; }
+  std::fprintf(stderr, "[swi] frame %llu arm%d pc %08x swi %02x r0 %08x r1 %08x r2 %08x r3 %08x\n", (unsigned long long)n->frame_count,
+               cpu.which == ds::Cpu::ARM9 ? 9 : 7, pc, num, cpu.hot.regs[0], cpu.hot.regs[1], cpu.hot.regs[2], cpu.hot.regs[3]);
+  if (num >= 0x20 && num <= 0x2F) { ret_at[ci] = pc + (thumb ? 2 : 4); ret_dst[ci] = cpu.hot.regs[1]; }
+  if (num >= 0x20 && num <= 0x2F) {
+    for (int r = 0; r < 3; ++r) {
+      const ds::u32 a = cpu.hot.regs[r];
+      if ((a >> 24) != 0x02) continue;
+      std::fprintf(stderr, "        r%d@%08x:", r, a);
+      for (int k = 0; k < 0x30; ++k) std::fprintf(stderr, "%s%02x", k % 4 ? "" : " ", n->bus.dma_read8(cpu.which, a + k));
+      std::fputc('\n', stderr);
+    }
+  }
+}
+
 void write_blob(const std::string& path, const ds::u8* p, size_t n) {
   if (FILE* f = std::fopen(path.c_str(), "wb")) { std::fwrite(p, 1, n, f); std::fclose(f); }
 }
@@ -238,7 +270,7 @@ int main(int argc, char** argv) {
   bool cpu_oc = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
-  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
@@ -286,7 +318,10 @@ int main(int argc, char** argv) {
     else if (arg("--dsi-nand-boot")) dsi_nand_boot = true;   // boot the NAND (boot2 -> launcher) instead of direct-booting the ROM
     else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];           // the title's signed DSi TMD for --dsi-install (default: <file>.tmd beside it)
     else if (arg("--dsi-autoload")) dsi_autoload = true;
-    else if (arg("--dsi-hle-launch")) dsi_hle = true;         // with --direct: start the DSiWare ROM as the DSi launcher hands a title over, not in card mode       // with --dsi-install: the launcher starts that title (TLNC) instead of showing the menu
+    else if (arg("--dsi-hle-launch")) dsi_hle = true;         // with --direct: start the DSiWare ROM as the DSi launcher hands a title over, not in card mode
+    else if (arg("--dsi-font")) dsi_font = argv[++i];         // with --dsi-hle-launch and no --dsi-nand: the DSi system font, /sys/TWLFontTable.dat from a console
+    else if (arg("--user-name")) user.nickname = argv[++i];   // generated firmware / DSi settings: the owner's nickname
+    else if (arg("--user-language")) user.language = static_cast<ds::u8>(std::atoi(argv[++i]));   // 0 ja 1 en 2 fr 3 de 4 it 5 es 6 zh 7 ko       // with --dsi-install: the launcher starts that title (TLNC) instead of showing the menu
     else if (arg("--dsi-offline")) dsi_offline = true;        // --dsi-install never downloads the TMD from Nintendo's update CDN
     else if (arg("--dsi-hide-installed")) dsi_hide_installed = true;   // hide the dump's own DSiWare for this session (the dump is untouched)
     else if (arg("--dsi-install")) dsi_install = argv[++i];   // a DSiWare .nds/.cia put into the session's NAND (not the dump) unless its title ID is already installed
@@ -356,7 +391,7 @@ int main(int argc, char** argv) {
   if (hide_screen) nds.gpu.set_screen_visible(!std::strcmp(hide_screen, "bottom") ? 1 : 0, false);
   {
     std::string err;
-    if (!nds.load_bios(bios9 ? bios9 : "", bios7 ? bios7 : "", fw ? fw : "", {}, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
+    if (!nds.load_bios(bios9 ? bios9 : "", bios7 ? bios7 : "", fw ? fw : "", user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
     if (lan_host || lan_join || netplay) { std::random_device rd; nds.set_wifi_mac_suffix(rd() & 0xFFFFFF); }   // a MAC of our own: see NDS::set_wifi_mac_suffix
   }
   if (!nds.bios_native) std::fprintf(stderr, "note: --bios9/--bios7 %s; using the built-in FreeBIOS (direct boot only, timing is not Nintendo's)\n", bios9 ? "not found" : "not given");
@@ -447,10 +482,24 @@ int main(int argc, char** argv) {
       nds.set_dsi(true);
       nds.dsi_nand_boot = dsi_nand_boot || dsi_boot2;
       if (dsi_boot2) nds.dsi_boot2_override = dsi_boot2;
+      if (dsi_hle && rom && !nds.dsi_nand_boot) {
+        std::string why; std::vector<std::string> made;
+        if (dsi_font) nds.dsi_font_path = dsi_font;
+        if (!nds.prepare_dsi_hle(user, &why, &made)) { std::fprintf(stderr, "dsi: %s\n", why.c_str()); return 1; }
+        for (const std::string& m : made) std::fprintf(stderr, "dsi: %s\n", m.c_str());
+        if (dsi_persist && nds.dsi_nand_synthetic) {   // the dump path imported above, before the NAND existed here
+          const std::string d = dsi_persist;
+          const ds::io::NandPersistReport r = ds::io::nand_import(nds.dsi_nand, nds.bus.bios7i.get(), {d, "", d + "/photos"});
+          nds.dsi_nand.mark_baseline();
+          std::fprintf(stderr, "dsi persist: in %d saves, %d photos\n", r.saves, r.photos);
+          for (const std::string& n : r.notes) std::fprintf(stderr, "dsi persist: %s\n", n.c_str());
+        }
+      }
       nds.reset();
       if (rtc_host) nds.io.start_rtc_clock();
-      std::fprintf(stderr, "console: DSi (16 MB, ARM9 at 134 MHz)%s%s\n", dsi_boot ? "" : "; no --dsi-boot: the console data areas stay zero",
-                   nds.dsi_nand.valid() ? "; NAND attached" : "; no NAND (card mode)");
+      std::fprintf(stderr, "console: DSi (16 MB, ARM9 at 134 MHz)%s%s\n",
+                   (dsi_boot || !nds.dsi_boot_blobs.empty()) ? "" : "; no --dsi-boot: the console data areas stay zero",
+                   nds.dsi_nand_synthetic ? "; synthesised NAND" : nds.dsi_nand.valid() ? "; NAND attached" : "; no NAND (card mode)");
     } else if (capable && !nds.bios_native_dsi && dsi_mode == -1) {
       std::fprintf(stderr, "note: DSi-capable ROM without --bios9i/--bios7i: running as a DS\n");
     }
@@ -672,6 +721,7 @@ int main(int argc, char** argv) {
 #if DSPERATE_JIT
     if (trace && i == 0) ds::jit::set_trace(true);
 #endif
+    if (i == 0 && !trace && std::getenv("DS_SWI_LOG")) { nds.trace = swi_log_cb; nds.trace_user = &nds; }
     if (i == 0 && !trace) if (const char* e = std::getenv("DS_ENTRY_SNAP")) {
       static EntrySnap snap;
       std::string spec = e; const size_t c1 = spec.rfind(':'), c0 = spec.rfind(':', c1 - 1);
@@ -837,9 +887,12 @@ int main(int argc, char** argv) {
   if (nds.dsi_nand.valid())
     std::fprintf(stderr, "nand: %llu block reads, %llu block writes\n",
                  (unsigned long long)nds.dsi_nand.reads, (unsigned long long)nds.dsi_nand.writes);
+  if (nds.dsi_font_wanted())
+    std::fprintf(stderr, "dsi: the title looked for the DSi system font, which the synthesised NAND lacks (--dsi-font)\n");
   if (dsi_persist && nds.dsi_nand.valid()) {
     const std::string d = dsi_persist;
-    const ds::io::NandPersistReport r = ds::io::nand_export(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr, {d, d + "/nand.ovr", d + "/photos"});
+    const ds::io::NandPersistReport r = ds::io::nand_export(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr,
+                                                            {d, nds.dsi_nand_synthetic ? std::string() : d + "/nand.ovr", d + "/photos"});
     std::fprintf(stderr, "dsi persist: out %d saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi persist: %s\n", n.c_str());
   }

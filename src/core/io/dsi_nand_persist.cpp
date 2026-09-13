@@ -90,11 +90,10 @@ bool system_file(const std::string& path) {
 // directory sector holds sixteen entries, so one file's size update would mark
 // every neighbour; a new file is caught by its data clusters.
 bool touched(const NandImage& nand, u64 base, const FatVolume& vol, const FatVolume::Entry& e) {
-  const auto& w = nand.written_sectors();
-  if (w.empty()) return false;
+  if (!nand.any_changed()) return false;
   for (u64 off : vol.extents(e))
     for (u64 s = (base + off) / 512, end = (base + off + vol.cluster_bytes()) / 512; s < end; ++s)
-      if (w.count(s)) return true;
+      if (nand.changed(s)) return true;
   return false;
 }
 
@@ -204,7 +203,7 @@ NandPersistReport nand_import(NandImage& nand, const u8* bios7i, const NandPersi
 
 NandPersistReport nand_export(NandImage& nand, const u8* bios7i, const NandPersistPaths& paths) {
   NandPersistReport r;
-  if (nand.written_sectors().empty()) return r;
+  if (!nand.any_changed()) return r;
   NandFs nfs;
   std::string err;
   if (!nfs.mount(nand, bios7i, &err)) { r.notes.push_back("nand: " + err); return r; }
@@ -224,7 +223,7 @@ NandPersistReport nand_export(NandImage& nand, const u8* bios7i, const NandPersi
       if (same_as_file(host, data)) return;
       if (spill(host, data.data(), data.size())) r.saves++;
       else r.notes.push_back(host + ": cannot write");
-    } else if (system_file(path)) {
+    } else if (system_file(path) && !paths.sidecar.empty()) {
       auto it = sidecar.find(path);
       if (it != sidecar.end() && it->second == data) return;
       sidecar[path] = std::move(data);

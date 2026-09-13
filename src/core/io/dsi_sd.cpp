@@ -29,8 +29,18 @@ NandImage::~NandImage() { close(); }
 
 void NandImage::close() {
   if (file_) { std::fflush(file_); std::fclose(file_); file_ = nullptr; }
+  in_memory_ = false;
+  baseline_ = false; changed_.clear();
   length_ = 0; console_id_ = 0; std::memset(cid_, 0, sizeof(cid_));
   written_.clear();
+}
+
+void NandImage::create_in_memory(u64 length, const u8 cid[16], u64 console_id) {
+  close();
+  in_memory_ = true;
+  length_ = length;
+  std::memcpy(cid_, cid, sizeof(cid_));
+  console_id_ = console_id;
 }
 
 bool NandImage::open(const std::string& path, bool write_through) {
@@ -69,6 +79,7 @@ bool NandImage::open(const std::string& path, bool write_through) {
 }
 
 void NandImage::read_file(u64 addr, u32 len, u8* out) {
+  if (!file_) { std::memset(out, 0, len); return; }
   std::fseek(file_, static_cast<long>(addr), SEEK_SET);
   const size_t got = std::fread(out, 1, len, file_);
   if (got < len) std::memset(out + got, 0, len - got);
@@ -77,6 +88,7 @@ void NandImage::read_file(u64 addr, u32 len, u8* out) {
 void NandImage::read(u64 addr, u32 len, u8* out) {
   reads++;
   log_access(false, addr, len);
+  if (addr < watch_to_ && addr + len > watch_from_) watch_hit_ = true;
   peek(addr, len, out);
 }
 
@@ -87,7 +99,7 @@ void NandImage::write(u64 addr, u32 len, const u8* in) {
 }
 
 void NandImage::peek(u64 addr, u32 len, u8* out) {
-  if (!file_) { std::memset(out, 0, len); return; }
+  if (!valid()) { std::memset(out, 0, len); return; }
   read_file(addr, len, out);
   if (written_.empty()) return;
   // Overlay the sectors written this session. Reads are whole blocks from the
@@ -102,14 +114,15 @@ void NandImage::peek(u64 addr, u32 len, u8* out) {
 }
 
 void NandImage::poke(u64 addr, u32 len, const u8* in) {
-  if (!file_) return;
-  if (write_through_) {
+  if (!valid()) return;
+  if (write_through_ && file_) {
     std::fseek(file_, static_cast<long>(addr), SEEK_SET);
     std::fwrite(in, 1, len, file_);
     return;
   }
   for (u64 s = addr / MMC_BLOCK_SIZE, end = (addr + len + MMC_BLOCK_SIZE - 1) / MMC_BLOCK_SIZE; s < end; ++s) {
     const u64 sec = s * MMC_BLOCK_SIZE;
+    if (baseline_) changed_.insert(s);
     auto [it, fresh] = written_.try_emplace(s);
     // A write that covers only part of a sector keeps the rest of it.
     if (fresh && (addr > sec || addr + len < sec + MMC_BLOCK_SIZE)) read_file(sec, MMC_BLOCK_SIZE, it->second.data());
