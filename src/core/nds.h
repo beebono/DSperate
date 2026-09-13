@@ -135,11 +135,16 @@ struct NDS {
   bool prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std::vector<std::string>* report = nullptr);
   bool dsi_nand_synthetic = false;   // dsi_nand was built by prepare_dsi_hle, not loaded
   // The user's /sys/TWLFontTable.dat for a synthesised NAND (set before
-  // prepare_dsi_hle). Titles that use the DSi system font do not start
-  // without it; see dsi_font_wanted().
+  // prepare_dsi_hle); empty, DSperate's own font goes there instead.
   std::string dsi_font_path;
-  // A title on a synthesised NAND without a font has looked in /sys.
-  bool dsi_font_wanted() const { return dsi_nand_synthetic && dsi_nand.watch_hit(); }
+  // The built-in font is on the NAND: a title checking its signature with DSi
+  // BIOS SWI 22h (RSA_Decrypt_Unpad) is answered with the font header's
+  // SHA-1 when the signature it passes is the built-in font's marker. Called
+  // by the interpreter (and the recompilers' fallback) for every SWI while
+  // set; true when it handled the call.
+  bool dsi_font_hle = false;
+  u8   dsi_font_digest[20] = {};
+  bool dsi_hle_swi(CpuContext& cpu, u32 number);
   // Boot the DSi from its NAND (boot2 -> launcher) instead of staging a direct
   // boot from the card. Needs a NAND image; false if there is none.
   bool boot_dsi_nand();

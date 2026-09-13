@@ -172,9 +172,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # bios7 = /path/to/bios7.bin    # games, with a note at start; it cannot boot the DS menu and
                                 # its timing is not hardware accurate
 # firmware = /path/to/firmware.bin  # unset or missing, a generated firmware carrying [user] above
-# dsi_font = /path/to/TWLFontTable.dat  # --dsi-mode without a NAND: the DSi system font, from a
-                                # console's NAND (/sys/TWLFontTable.dat). Titles that use it do not
-                                # start without it; [user] above is the DSi's settings there too
+# dsi_font = /path/to/TWLFontTable.dat  # --dsi-mode without a NAND: a console's DSi system font
+                                # (/sys/TWLFontTable.dat) instead of DSperate's own, which is used
+                                # when this is unset; [user] above is the DSi's settings there too
 # firmware_override = /path/to/firmware.bin.ovr
                                 # settings changed inside the firmware's own menu (nickname, colour,
                                 # language...) are kept here, never in the dump. Delete it to reset.

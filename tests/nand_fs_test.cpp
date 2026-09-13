@@ -183,6 +183,38 @@ static void test_synthetic_nand() {
   CHECK(nand.any_changed() && nand.changed((0x10EE00ull + 0x200000) / 512) && !nand.changed(0));
 }
 
+// DSperate's own TWLFontTable.dat (io/dsi_font): the table layout, every
+// SHA-1 a title checks, and the signature marker the SWI 22h HLE keys on.
+static void test_builtin_font() {
+  const std::vector<u8> f = ds::io::builtin_dsi_font();
+  CHECK(f.size() > 0x100000 / 2);
+  if (f.size() < 0x160) return;
+  CHECK(ds::io::is_builtin_font_signature(f.data()));
+  std::vector<u8> other(f.begin(), f.begin() + 0x80);
+  other[0x10] ^= 1;
+  CHECK(!ds::io::is_builtin_font_signature(other.data()));
+  const u32 n = f[0x84];
+  CHECK(n == 3);
+  u8 d[20];
+  crypto::sha1(&f[0xA0], n * 0x40, d);
+  CHECK(std::memcmp(d, &f[0x8C], 20) == 0);
+  const char* names[3] = {"TBF1_l.NFTR", "TBF1_m.NFTR", "TBF1_s.NFTR"};
+  for (u32 i = 0; i < n && i < 3; ++i) {
+    const u8* e = &f[0xA0 + i * 0x40];
+    CHECK(std::strcmp(reinterpret_cast<const char*>(e), names[i]) == 0);
+    u32 csize, cstart, dsize;
+    std::memcpy(&csize, e + 0x20, 4); std::memcpy(&cstart, e + 0x24, 4); std::memcpy(&dsize, e + 0x28, 4);
+    CHECK(cstart % 16 == 0 && static_cast<u64>(cstart) + csize <= f.size() && dsize > csize);
+    if (static_cast<u64>(cstart) + csize > f.size() || csize < 8) continue;
+    crypto::sha1(&f[cstart], csize, d);
+    CHECK(std::memcmp(d, e + 0x2C, 20) == 0);
+    // The backwards-LZ footer: the decompressed size is the stored one.
+    u32 extra;
+    std::memcpy(&extra, &f[cstart + csize - 4], 4);
+    CHECK(csize + extra == dsize);
+  }
+}
+
 // The region a title is run in, from its header and the user's language.
 static void test_region() {
   auto r = ds::io::dsi_region_for(0x00000002, 3);          // USA only, German wanted
@@ -337,6 +369,7 @@ int main() {
   test_fat12();
   test_synthetic_nand();
   test_region();
+  test_builtin_font();
   test_real_nand();
   test_persist();
   if (failures) { std::fprintf(stderr, "nand_fs: %d failure(s)\n", failures); return 1; }

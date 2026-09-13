@@ -226,7 +226,9 @@ void exec_thumb(CpuContext& cpu, u16 instr) {
     cpu.jump(R(cpu, 15) + static_cast<u32>(off), false);
     return;
   }
-  case TOp::Swi: cpu.raise_exception(CpuContext::Exception::Swi); return;
+  case TOp::Swi:
+    if (cpu.nds->dsi_font_hle && cpu.nds->dsi_hle_swi(cpu, instr & 0xFF)) return;   // see NDS::dsi_hle_swi
+    cpu.raise_exception(CpuContext::Exception::Swi); return;
   case TOp::Bkpt:
     if (!is_arm9(cpu)) break;
     cpu.raise_exception(CpuContext::Exception::PrefetchAbort); return;

@@ -88,7 +88,6 @@ void NandImage::read_file(u64 addr, u32 len, u8* out) {
 void NandImage::read(u64 addr, u32 len, u8* out) {
   reads++;
   log_access(false, addr, len);
-  if (addr < watch_to_ && addr + len > watch_from_) watch_hit_ = true;
   peek(addr, len, out);
 }
 

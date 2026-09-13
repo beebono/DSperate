@@ -95,10 +95,6 @@ class NandImage {
 
   // Access counters, for the melonDS gate's "nand: N block reads/writes" line.
   u64 reads = 0, writes = 0;
-  // A byte range whose first guest read is remembered: how a synthesised NAND
-  // tells that a title went looking in /sys (for the system font it lacks).
-  void watch_reads(u64 from, u64 to) { watch_from_ = from; watch_to_ = to; watch_hit_ = false; }
-  bool watch_hit() const { return watch_hit_; }
 
  private:
   static void log_access(bool write, u64 addr, u32 len);
@@ -110,8 +106,6 @@ class NandImage {
 
   std::FILE* file_ = nullptr;
   bool in_memory_ = false;
-  u64  watch_from_ = 0, watch_to_ = 0;
-  bool watch_hit_ = false;
   bool write_through_ = false;
   u64 length_ = 0;
   u8  cid_[16] = {};

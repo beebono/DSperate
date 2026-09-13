@@ -162,10 +162,6 @@ bool build_synthetic_nand(NandImage& nand, const u8* bios7i, const std::vector<u
   if (prv && !put(title + "/data/private.sav", make_dsi_save(prv))) return fail(why);
   if ((srl[0x1BF] & 0x04) && !put(title + "/data/banner.sav", std::vector<u8>(0x4000, 0))) return fail(why);
   if (!put(title + "/content/00000000.app", srl)) return fail(why);
-  if (files.font.empty()) {
-    const std::vector<u64> sys = [&] { FatVolume::Entry e; return vol.lookup("/sys", e) ? vol.extents(e) : std::vector<u64>{}; }();
-    if (!sys.empty()) nand.watch_reads(fs.main_base() + sys[0], fs.main_base() + sys[0] + vol.cluster_bytes());
-  }
   return true;
 }
 

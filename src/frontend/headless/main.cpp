@@ -319,7 +319,7 @@ int main(int argc, char** argv) {
     else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];           // the title's signed DSi TMD for --dsi-install (default: <file>.tmd beside it)
     else if (arg("--dsi-autoload")) dsi_autoload = true;
     else if (arg("--dsi-hle-launch")) dsi_hle = true;         // with --direct: start the DSiWare ROM as the DSi launcher hands a title over, not in card mode
-    else if (arg("--dsi-font")) dsi_font = argv[++i];         // with --dsi-hle-launch and no --dsi-nand: the DSi system font, /sys/TWLFontTable.dat from a console
+    else if (arg("--dsi-font")) dsi_font = argv[++i];         // with --dsi-hle-launch and no --dsi-nand: the console's /sys/TWLFontTable.dat instead of DSperate's own font
     else if (arg("--user-name")) user.nickname = argv[++i];   // generated firmware / DSi settings: the owner's nickname
     else if (arg("--user-language")) user.language = static_cast<ds::u8>(std::atoi(argv[++i]));   // 0 ja 1 en 2 fr 3 de 4 it 5 es 6 zh 7 ko       // with --dsi-install: the launcher starts that title (TLNC) instead of showing the menu
     else if (arg("--dsi-offline")) dsi_offline = true;        // --dsi-install never downloads the TMD from Nintendo's update CDN
@@ -887,8 +887,6 @@ int main(int argc, char** argv) {
   if (nds.dsi_nand.valid())
     std::fprintf(stderr, "nand: %llu block reads, %llu block writes\n",
                  (unsigned long long)nds.dsi_nand.reads, (unsigned long long)nds.dsi_nand.writes);
-  if (nds.dsi_font_wanted())
-    std::fprintf(stderr, "dsi: the title looked for the DSi system font, which the synthesised NAND lacks (--dsi-font)\n");
   if (dsi_persist && nds.dsi_nand.valid()) {
     const std::string d = dsi_persist;
     const ds::io::NandPersistReport r = ds::io::nand_export(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr,

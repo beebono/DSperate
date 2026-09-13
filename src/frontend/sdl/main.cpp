@@ -104,9 +104,9 @@ const char* kUsage =
     "                  The title starts straight away; --dsi-menu boots to the DSi Menu with it instead\n"
     "                  Without --dsi-nand, a DSiWare .nds/.cia given with it runs with only the DSi BIOS\n"
     "                  pair: the launcher's hand-off is emulated, the NAND and the DSi settings are made\n"
-    "                  up from [user], and saves go to paths.saves (else beside the game). Titles that use\n"
-    "                  the DSi system font also need --dsi-font F (paths.dsi_font): /sys/TWLFontTable.dat\n"
-    "                  from a DSi (tools/dsi_nand.py extract), which cannot be replaced by a made-up one.\n"
+    "                  up from [user], and saves go to paths.saves (else beside the game). The DSi system\n"
+    "                  font is DSperate's own (Noto Sans, WenQuanYi Micro Hei); --dsi-font F\n"
+    "                  (paths.dsi_font) uses a console's /sys/TWLFontTable.dat instead.\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) | horizontal | single | pip | dominant_v | dominant_h\n"
@@ -1668,7 +1668,7 @@ sdl_ready:
     std::vector<std::string> made;
     nds.dsi_font_path = dsi_font ? std::string(dsi_font) : cfg.str("paths.dsi_font");
     if (!nds.dsi_font_path.empty() && !std::filesystem::exists(nds.dsi_font_path)) {
-      std::fprintf(stderr, "dsi: font %s not found; titles that use the DSi system font will not start\n", nds.dsi_font_path.c_str());
+      std::fprintf(stderr, "dsi: font %s not found; using DSperate's own\n", nds.dsi_font_path.c_str());
       nds.dsi_font_path.clear();
     }
     if (!nds.prepare_dsi_hle(user, &err, &made)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); SDL_Quit(); return 1; }
@@ -3996,10 +3996,6 @@ sdl_ready:
     if (nds.cart && nds.cart->sram_dirty()) {
       if (nds.cart->sram_writes() != sram_writes_seen) { sram_writes_seen = nds.cart->sram_writes(); sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
-    }
-    if (dsi_hle && nds.dsi_font_wanted()) {
-      static bool said = false;
-      if (!said) { said = true; std::fprintf(stderr, "dsi: this title looked for the DSi system font; if it does not start, give --dsi-font (paths.dsi_font)\n"); }
     }
     if (dsi_mode && nds.dsi_nand.writes != nand_exported) {
       if (nds.dsi_nand.writes != nand_writes_seen) { nand_writes_seen = nds.dsi_nand.writes; nand_quiet_since = frames; }

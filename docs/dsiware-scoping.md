@@ -145,26 +145,41 @@ frames apart. Mighty Flip Champs reaches its title screen too.
   `NandImage::mark_baseline` keeps the build itself out of the save export;
   saves persist as `<CODE>.pub/.prv/.bnr` in `paths.saves`.
 
-Results over the 15 installed titles: 11 start with the BIOS pair alone, and
-all 15 with the user's `TWLFontTable.dat` added (`--dsi-font`,
-`paths.dsi_font`). The other 4 (EA Sudoku, Mario vs. Donkey Kong, Paper
-Airplane Chase, Bird & Beans) use the system font. Shantae's frames match
-the real-NAND hand-off (1623/2000) and its save round-trips.
+Results over the 15 installed titles: **all 15 start with the BIOS pair
+alone.** Shantae's frames match the real-NAND hand-off (1623/2000) and its
+save round-trips. Four titles use the system font (EA Sudoku, Mario vs.
+Donkey Kong, Paper Airplane Chase, Bird & Beans); without a font they stayed
+on a white or black screen.
 
-**The font is signature-checked, and only the signature matters.** Tamper
-tests on EA Sudoku: flipping font data or a resource hash still runs, while
-flipping a signature byte gives a white screen. The SWI trace (headless
-`DS_SWI_LOG=1`) shows the title's SDK doing, through the DSi BIOS:
-SWI 0x27 SHA-1 over the header 0x80-0x9F, SWI 0x20 RSA heap init,
-SWI 0x22 `RSA_Decrypt_Unpad(r0=heap, r1=dst, r2=signature)` (writes the
-20-byte digest, returns 1; 0 on a bad signature, after which nothing more is
-read), SWI 0x28 compare, then SWI 0x27/0x28 over the resource headers
-against the table's hash (GBATEK, "DSi SD/MMC Firmware Font File"). A
-generated font can carry correct hashes everywhere but the RSA; an HLE of
-SWI 0x22 that recognises the generated font's signature bytes and returns
-its header digest would make one acceptable (not built yet). Until then a
-title reading `/sys` on a synthesised NAND is flagged
-(`NDS::dsi_font_wanted`).
+**The system font is DSperate's own** (`io/dsi_font/`, built by
+`tools/make_dsi_font.py` from Noto Sans (OFL-1.1) and WenQuanYi Micro Hei
+(GPL-3+ with the font exception); provenance and licences beside it). It is
+the retail table layout with three 2-bpp Nitro fonts (16x21, 12x16, 10x12
+cells), 7372 characters each, compressed with the DSi's backwards LZ. The
+cell geometry and baselines were measured from the console's font; no glyph
+data comes from it. Nintendo's private-use button symbols (U+E000-E06B) are
+absent. `--dsi-font` / `paths.dsi_font` substitutes a console's own file.
+
+The table's RSA signature cannot be made. Tamper tests on EA Sudoku showed
+it is the only thing checked: flipped font data or resource hashes still
+ran, a flipped signature byte gave a white screen. The SWI trace (headless
+`DS_SWI_LOG=1`) shows the check going through the DSi BIOS:
+1. SWI 0x27 hashes the header 0x80-0x9F;
+2. SWI 0x20 initialises the RSA heap;
+3. SWI 0x22 `RSA_Decrypt_Unpad(r0=heap, r1=dst, r2=signature)` writes the
+   20-byte digest and returns 1 (0 for a bad signature, after which nothing
+   more is read);
+4. SWI 0x28 compares the two digests;
+5. SWI 0x27/0x28 check the resource headers against the table's hash
+   (GBATEK, "DSi SD/MMC Firmware Font File").
+
+The generated file carries every hash correctly and a plain-text marker in
+the signature's place. `NDS::dsi_hle_swi`, called from the interpreter's SWI
+case (the recompilers fall back to it), answers SWI 0x22 with the header's
+SHA-1 only when the signature buffer is that marker. Everything else goes to
+the BIOS. Compared with the console's font on the same inputs, the titles'
+system-font text (the "Exit / Help / Settings" row in Paper Airplane Chase
+and Bird & Beans) draws at the same positions and weight.
 
 Not generated: `cert.sys` and the other system files; no title of the 15
 reads them.
@@ -380,10 +395,11 @@ unmapped DSi ARM7 BIOS).
 2. **The virtual NAND** (2.3): done at `7e1b954` -- read-only dump with
    in-memory writes, the FAT/crypto layer, save and settings persistence,
    one-title injection (signed TMD, DSiWare quota) and TLNC auto-launch.
-3. **No-NAND fallback** (2.2): the hand-off HLE, synthesised NAND,
-   generated settings and DSi firmware are in (11/15 titles on the BIOS pair
-   alone, 15/15 with the user's font). Next: a generated system font
-   accepted through an SWI 0x22 HLE.
+3. **No-NAND fallback** (2.2): done -- the hand-off HLE, synthesised NAND,
+   generated settings, DSi firmware and DSperate's own system font; all 15
+   oracle titles start on the BIOS pair alone. Open: China/Korea font tables
+   (nine resources) for titles of those regions; the launcher's title list
+   at 0x02FFD800.
 4. **SD card slot** (port 0): FAT image or host folder; `FatVolume` already
    reads and writes the filesystem. The Unlaunch installer is an SD test
    title.

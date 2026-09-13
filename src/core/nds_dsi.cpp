@@ -8,6 +8,7 @@
 // trace harness is the oracle; see docs/dsiware-scoping.md.
 #include "core/nds.h"
 #include "core/io/dsi_nand_synth.h"
+#include "core/crypto/sha1.h"
 #include "core/cpu/cp15.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
@@ -333,9 +334,18 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
   const io::DsiRegion region = io::dsi_region_for(t.region_flags, user.language);
   u64 console_id = dsi_nand.valid() ? dsi_nand.console_id() : io::kSynthConsoleId;
   io::DsiConsoleFiles files = io::make_dsi_console_files(user, region, console_id);
-  if (!dsi_font_path.empty() && !dsi_nand.valid()) {
-    files.font = slurp_file(dsi_font_path);
-    if (files.font.size() < 0x100) return fail(dsi_font_path + ": not a TWLFontTable.dat");
+  dsi_font_hle = false;
+  if (!dsi_nand.valid()) {
+    if (!dsi_font_path.empty()) {
+      files.font = slurp_file(dsi_font_path);
+      if (files.font.size() < 0x100) return fail(dsi_font_path + ": not a TWLFontTable.dat");
+    } else {
+      files.font = io::builtin_dsi_font();
+    }
+    if (io::is_builtin_font_signature(files.font.data())) {
+      crypto::sha1(&files.font[0x80], 0x20, dsi_font_digest);
+      dsi_font_hle = true;
+    }
   }
   static const char* kRegionNames[6] = {"Japan", "USA", "Europe", "Australia", "China", "Korea"};
 
@@ -375,7 +385,7 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
       }
     }
     note("nand: synthesised in memory (" + std::to_string(srl.size() >> 10) + " KB title)" +
-         (files.font.empty() ? "; no system font: titles that use it will not start" : "; system font from " + dsi_font_path));
+         (dsi_font_hle ? "; DSperate's own system font" : "; system font from " + dsi_font_path));
   }
   // What a reset derives from the NAND and firmware (Io::dsi_reset), redone so
   // this also works on a machine the frontend has already reset.
@@ -384,6 +394,21 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
   io.sd.attach_nand(&dsi_nand);
   io.sd.reset();
   io.aes.reset();
+  return true;
+}
+
+bool NDS::dsi_hle_swi(CpuContext& cpu, u32 number) {
+  // SWI 22h RSA_Decrypt_Unpad(r0 = key heap, r1 = digest out, r2 = signature):
+  // 1 and the 20-byte digest on success. Seen in EA Sudoku's font load, after
+  // SWI 27h hashed the table header and before SWI 28h compares the two.
+  if (number != 0x22 || !dsi_font_hle) return false;
+  const u32 sig = cpu.hot.regs[2], dst = cpu.hot.regs[1];
+  if ((sig >> 24) != 0x02 || (dst >> 24) != 0x02) return false;   // main RAM only: no reads with side effects
+  u8 buf[0x80];
+  for (u32 i = 0; i < sizeof buf; ++i) buf[i] = bus.dma_read8(cpu.which, sig + i);
+  if (!io::is_builtin_font_signature(buf)) return false;
+  for (u32 i = 0; i < 20; ++i) bus.dma_write8(cpu.which, dst + i, dsi_font_digest[i]);
+  cpu.hot.regs[0] = 1;
   return true;
 }
 

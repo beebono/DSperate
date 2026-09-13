@@ -47,6 +47,7 @@ add_library(dsperate_core STATIC
   io/dsi_nand_persist.cpp
   io/dsi_title_install.cpp
   io/dsi_nand_synth.cpp
+  io/dsi_font.cpp
   io/dsi_nwifi.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
@@ -91,3 +92,9 @@ if(DSPERATE_NEON)
     message(STATUS "DSperate: NEON kernels restricted to the ARMv7-expressible subset")
   endif()
 endif()
+
+# DSperate's DSi system font is linked in with .incbin (io/dsi_font.cpp).
+set_property(SOURCE io/dsi_font.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+             DSPERATE_DSI_FONT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable.dat")
+set_property(SOURCE io/dsi_font.cpp APPEND PROPERTY OBJECT_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable.dat")
