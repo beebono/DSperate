@@ -11,10 +11,9 @@ settings persistence) and the no-NAND launcher hand-off HLE, which starts all
 15 oracle titles on the DSi BIOS pair alone with DSperate's own system font.
 The SDL frontend runs DSiWare named on the command line or picked from the
 loader's list, and the loader cart works on the real DSi Menu. The remaining
-2.0.0 work is the hardware and platform half: microphone, DSi Wi-Fi
-networking, save states with the NAND, and the JIT and idle skip under DSi on
-the device (section 5). The SD card slot landed next (5.4): a host folder as
-the card, synced back. `dsiware` is 68 commits ahead of `main` and
+2.0.0 work is save states with the NAND and the JIT and idle skip under DSi
+on the device (section 5). Since then the SD card slot (5.4), the microphone
+(5.5) and DSi Wi-Fi networking (5.6) have landed. `dsiware` is 68 commits ahead of `main` and
 contains all of it (including the Wi-Fi/slirp work); `main` has nothing
 `dsiware` lacks.
 References: melonDS `dsperate-research/melonDS` @ `d3cd6164` (the exactness
@@ -32,8 +31,8 @@ The target is DSperate **2.0.0**.
 | No-NAND fallback: the launcher hand-off in HLE | **in** -- done | `--dsi-hle-launch` (2.2): synthesised NAND, generated settings and firmware, own system font; Unlaunch cannot be the fallback |
 | Title install from `.nds`/`.app`/`.cia` | **in** -- done | at most one virtual title per boot, injected into the read-only dump's in-memory session (2.3) |
 | Save export/import (`.pub`/`.prv`/`.bnr`) | **in** -- done | melonDS TitleManager extensions; not yet cross-checked by importing into melonDS |
-| Microphone (I2S `MICCNT`/`MICDATA`) | **in** -- not started | fed by the existing SDL/ALSA capture |
-| DSi Wi-Fi networking | **in** -- not started | Atheros module is modelled (drops frames); attach it to the slirp backend already on `dsiware` |
+| Microphone (I2S `MICCNT`/`MICDATA`) | **in** -- done | melonDS DSi_I2S, fed by the existing SDL/ALSA capture (5.5) |
+| DSi Wi-Fi networking | **in** -- done | both chips reach slirp; the firmware carries DSperate's access point (5.6) |
 | SD card slot (SD host port 0) | **in** -- done | a host folder (`--dsi-sd`, `paths.dsi_sd`), built into a card in memory and synced back (5.4) |
 | Frontend | **in** -- mostly done | CLI, loader list and loader cart on the DSi Menu done; no ini key for the NAND/DSi firmware, no menu row for hiding titles (2.4) |
 | Save states under DSi | **in** -- not started | refused in DSi mode today (2.5) |
@@ -403,7 +402,8 @@ DSi mode for now"). Missing before they can be turned on:
 | Modcrypt at load; AES engine (CTR/CCM, 4 slots, FIFOs, NDMA 0x2A/0x2B) | phase 2, `io/dsi_aes.*`, `tests/aes_test.cpp` | unit-tested; unused at runtime by oracles |
 | SD/MMC host (port 1 = NAND over `NandImage`; port 0 = the SD card) | `fe13f0a`, `io/dsi_sd.*` | exact; raw sectors; `DS_NAND_LOG` / `DS_SD_LOG` |
 | SD card from a host folder; FatVolume FAT32, UTF-8 long names, bulk populate | `io/dsi_sd_card.*`, `io/dsi_nand_fs.*`, `tests/sd_card_test.cpp` | System Settings copies DSiWare to it and reads the export back after a sync; Free Blocks match melonDS on the same image |
-| SDIO host + Atheros module (BMI/HTC/WMI, scan returns melonDS's AP) | `e0b4f79`, `io/dsi_nwifi.*` | no network backend |
+| SDIO host + Atheros module (BMI/HTC/WMI, scan, data frames through the NetDriver) | `e0b4f79`, `io/dsi_nwifi.*` | System Settings' connection test passes on Connection 5 |
+| Microphone (MIC_CNT/MIC_DATA, I2S sample clock) and SNDEXCNT's output stage | `io/io.cpp`, `spu/spu.cpp` | System Settings' Mic Test meters a tone; audio sample-identical to melonDS |
 | Cameras (2 Aptina sensors on I2C, module at 0x04004200) | `e0b4f79`, `io/dsi_camera.*` | black frames |
 | DSP host interface, no core (`PSTS` 0x0100) | `50d4f87`, `io/dsi_dsp.*` | core enable logged once |
 | NAND boot (boot2 shortcut, reset-state fixes: EXMEMCNT 0x6000, CP15 0x2078, WRAMCNT 3, WRAMCNT write re-applies NWRAM) | `d30ed62`..`e0b4f79` | **no-cart boot reaches the DSi Launcher**; top screen at frame 1200 pixel-identical, slice grid identical to the tap |
@@ -414,7 +414,7 @@ DSi mode for now"). Missing before they can be turned on:
 | Soft reset: `NDS::dsi_soft_reset` (NAND), `exit_requested` (synthesised NAND) | `d026ef5`, `6b5e546` | NAND reboot not compared with melonDS |
 | SDL: DSiWare from CLI and loader list, loader cart on the DSi Menu (`dsi_loader_watch`) | `6b5e546`, `cd13967` | picker launches of `.cia`, `.dsi`, DS games checked |
 
-Not built: mic/I2S, NWifi network backend, save states under DSi,
+Not built: save states under DSi,
 JIT and idle skip under DSi (SDL forces them off), `.app` streaming (the
 title is held in memory), DSP core, NWRAM dual-slot writes, the
 `0x02FE71B0`/SCFG_EXT RAM-size hacks, JIT parity for `code_latch`/
@@ -535,14 +535,90 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
      problem, not the card's),
      and melonDS parity of the Settings run past the Data Management tap (our
      frames are a few behind after the tap, as at the Health and Safety tap).
-5. **Mic / I2S** (not started; nothing in `src/core` maps it):
-   `MICCNT`/`MICDATA`, 16-entry FIFO, half-full IRQ, `IRQ2_MicExt`, NDMA
-   0x2C, fed from `mic_alsa`/SDL capture. Oracle: Instrument Tuner (KTUE)
-   uses the mic, though its DSP half waits for after 2.0.0.
-6. **DSi Wi-Fi networking** (not started): `io/dsi_nwifi.cpp` consumes TX
-   frames and has no RX source. Route its frames into the slirp driver
-   (`src/net/slirp_driver.*`, already on `dsiware`) the way the DS Wi-Fi AP
-   does.
+5. **Microphone** (done, 2026-09-13). A port of melonDS DSi_I2S into `Io`:
+   - `MIC_CNT` (0x04004600): bit 15 runs it; format and rate bits and the
+     FIFO clear only take while stopped; bit 11 is the overrun latch; bits
+     8-10 read the FIFO's empty/half/full state. `MIC_DATA` (0x04004604):
+     every access of any width takes a word, an empty FIFO repeats the last.
+     16-word FIFO; half-full raises `IRQ2_MIC_EXT` (bit 13) and NDMA 0x2C;
+     overrun raises it with bit 14.
+   - The sample clock is the SPU mixer's (32.7 or 47.6 kHz, one sample per
+     event on the DSi): each output sample, while SNDEXCNT enables I2S, feeds
+     `Io::mic_at(t)`, the frontend's per-frame capture buffer at that point
+     of the frame. Format 0 keeps both of each duplicated sample, 1/2 one,
+     3 none; the rate field divides the clocks.
+   - The same stage now applies SNDEXCNT to the output as melonDS does:
+     silent while bit 15 is clear, muted by bit 14, and scaled by the
+     NITRO/DSP ratio (DSP output is silence). Shantae's audio stays
+     sample-identical to melonDS over 3000 frames.
+   - The frontend opens the host capture device when MIC_CNT starts
+     (`Io::mic_used`), as for the DS's AUX reads; DS-mode titles on the DSi
+     still read the mic through the TSC's AUX input.
+   - Checked with System Settings' **Mic Test** (`MIC_CNT = E10E`: format 2,
+     rate /4, both IRQs): silence leaves the meter empty, headless
+     `--mic-tone 300` at amplitude 30000 fills it, and an 8000 tone shows the
+     same one-bar level in melonDS (trace_melonds `TRACE_MIC_TONE`). Script:
+     `--dsi-autoload-id 00030015484E4245`, taps `900:242,93`, `1300:242,93`,
+     `1700:128,110`. `DS_MIC_LOG=1` logs MIC_CNT writes.
+   - `FORMAT_VERSION` 6 carries the mic state (older DSi states still load).
+6. **DSi Wi-Fi networking** (done, 2026-09-13).
+   - **Two radios.** DSi Connections 1-3 are DS-compatible profiles and use
+     the DS Wi-Fi block (`io/wifi.cpp`), already on slirp; Connections 4-6
+     (Advanced Setup, WPA) and TWL-SDK titles use the Atheros module.
+     `Io::set_net_driver` attaches the driver to both.
+   - **Atheros data path** (melonDS DSi_NWifi): `wmi_send_packet` rebuilds
+     the Ethernet frame from the WMI data header (MACs, 802.3 length,
+     LLC/SNAP, ethertype) and sends it; the 1 ms timer, while connected,
+     takes one frame for this MAC or broadcast from the driver and frames it
+     back into mailbox 8.
+   - **The access point in the firmware** (USER, 2026-09-13: stamp it at
+     load, as melonDS does for its generated firmware, without writing the
+     firmware file). `bios::stamp_access_point` puts an open, DHCP profile
+     named `DSperate-AP` (`bios::kAccessPointSsid`; MTU 1400 on a DSi) into
+     the first unconfigured of the three slots, unless a slot already names
+     it; a player's own networks are never overwritten. It runs on every
+     firmware load, generated or dumped, and again over a `.ovr` sidecar,
+     in memory only. `NDS::firmware_ap_slot` says where it went.
+   - The Atheros module now advertises the same name, and answers a directed
+     scan under the probed SSID (as the DS access point does) instead of
+     melonDS's filter.
+   - **Bug found on the way:** libslirp at config version 4 calls
+     `register_poll_fd` for every new socket and the driver had left it null,
+     so the first UDP socket (DNS through the host resolver) crashed. This
+     was a latent bug in the DS internet path as well.
+   - Checked on the real NAND, `--internet --dns host`:
+     - Connection 1 (the stamped slot) reads "Setup Complete", and its
+       connection test passes ("Connection test successful", support code
+       11172) through the DS Wi-Fi block. Taps as for the Mic Test, then
+       `1700:128,142` Internet, `2200:128,49` Connection Settings,
+       `2900:175,41` Connection 1, `3500:128,55` Connection Test,
+       `4000:80,152` Yes; 7000 frames.
+     - Connection 5 through the Atheros module: Search for an Access Point
+       lists DSperate-AP; saving it runs the test, which passes the same way
+       (WMI connect, then data through slirp). Taps `2900:128,154` Advanced
+       Setup, `3400:175,96` Connection 5, `4000:128,49` Search,
+       `5200:100,49` DSperate-AP, `6200:175,152` OK, `6900:128,152` OK;
+       11000 frames.
+   - `DS_DEBUG_NWIFI=1` logs WMI commands and scan results.
+   - **Fixed: Search for an Access Point on Connections 1-3 found nothing.**
+     That scan is passive: the DSi powers the DS Wi-Fi block on each of 13
+     channels for about 110 ms and listens, sending no probe requests. The
+     emulated access point (melonDS's WifiAP, as ported) beaconed every
+     0x20000 us, 131 ms, so a visit to its channel 6 saw a beacon only when
+     the phases lined up: melonDS's run happened to, ours never did. Found by
+     diffing the Wi-Fi register traces (`DS_WIFI_TRACE` / `TRACE_WIFI_REGS`):
+     identical up to the channel-6 power-on, after which melonDS takes IRQ 6
+     (receive start) 18 ms later and ours times out at 110 ms. The access
+     point now beacons every 100 TU (102.4 ms, the interval real access
+     points use, advertised in the beacon), which always fits a 110 ms
+     visit. Checked with the search tap at four different frames: all list
+     DSperate-AP; the Connection 1 test still passes. This deliberately
+     departs from melonDS's AP timing, so Wi-Fi register traces against the
+     oracle diverge at the first beacon a guest receives.
+     (Compare on an empty slot: the stamped Connection 1 opens its options
+     menu instead of the search, which invalidated a first comparison.)
+   - Our DSi clock is stopped in headless without `--rtc-host` (status bar
+     reads 00:00); expected, not a bug.
 7. **Frontend leftovers** (2.4): `dsi_nand`/`dsi_firmware` ini keys, a menu
    row for hiding installed titles, streaming the `.app` instead of holding
    it in memory. **Save states under DSi** (2.5): currently refused.

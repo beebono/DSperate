@@ -1183,7 +1183,11 @@ void Wifi::ap_reset() {
 
 void Wifi::ap_ms_timer() {
   ap_.us_counter += 0x400;
-  if (!(static_cast<u32>(ap_.us_counter) & 0x1FC00)) ap_.beacon_due = true;   // a beacon every 128 ms
+  // A beacon every 100 TU (102.4 ms), as real access points send them.
+  // melonDS's AP beacons every 0x20000 us (131 ms), which is longer than the
+  // ~110 ms a passive scan stays on each channel (the DSi's legacy "Search
+  // for an Access Point"): whether a scan saw it at all came down to phase.
+  if (static_cast<u32>(ap_.us_counter) % (100 * 0x400) == 0) ap_.beacon_due = true;
 }
 
 int Wifi::ap_handle_management(const u8* data, int len) {
@@ -1304,7 +1308,7 @@ int Wifi::ap_recv(u8* data) {
     w.mac(bcast); w.mac(kApMac); w.mac(kApMac);
     w.u16_(ap_.seq_no); ap_.seq_no += 0x10;
     w.u64_(ap_.us_counter);
-    w.u16_(128); w.u16_(0x0021);
+    w.u16_(100); w.u16_(0x0021);   // beacon interval (TU), capability
     w.u8_(0x01); w.u8_(0x02); w.u8_(0x82); w.u8_(0x84);
     w.u8_(0x03); w.u8_(0x01); w.u8_(kApChannel);
     w.u8_(0x05); w.u8_(0x04); w.u8_(0); w.u8_(0); w.u8_(0); w.u8_(0);   // TIM
