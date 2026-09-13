@@ -248,6 +248,11 @@ struct NDS {
   // wrote are complete. Cleared by reset(); what a power-off means is the
   // frontend's decision -- SDL saves the settings sidecar and reboots.
   bool power_off = false;
+  // The guest asked for something only the DSi Launcher could do: a soft
+  // reset (back to the DSi Menu, the power button, an application jump) on a
+  // synthesised NAND, which has no boot2 or launcher to reset into. The ARM7
+  // stays halted; the frontend ends the session. Cleared by reset().
+  bool exit_requested = false;
 
   TraceFn trace = nullptr;
   void*   trace_user = nullptr;

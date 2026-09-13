@@ -172,6 +172,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # bios7 = /path/to/bios7.bin    # games, with a note at start; it cannot boot the DS menu and
                                 # its timing is not hardware accurate
 # firmware = /path/to/firmware.bin  # unset or missing, a generated firmware carrying [user] above
+# bios9i = /path/to/biosdsi9.bin  # the DSi BIOS pair: DSiWare (a .nds/.dsi/.cia marked [DSi] in the
+# bios7i = /path/to/biosdsi7.bin  # game list, or named on the command line) runs on the DSi machine
+                                # and needs both; without them it is refused
 # dsi_font = /path/to/TWLFontTable.dat  # --dsi-mode without a NAND: a console's DSi system font
                                 # (/sys/TWLFontTable.dat) instead of DSperate's own, which is used
                                 # when this is unset; [user] above is the DSi's settings there too
@@ -180,7 +183,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # language...) are kept here, never in the dump. Delete it to reset.
                                 # Default: <firmware>.ovr
 # games = /path/to/games        # the library the loader card lists on a firmware boot (.nds and .zip,
-                                # one level). Unset, the picker says so.
+                                # one level; DSiWare .nds/.dsi/.cia too, marked [DSi]). Unset, the
+                                # picker says so.
 # saves = /path/to/saves        # battery saves. Default: next to the ROM
 # states = /path/to/states      # save states (and the autosave's PNG). Default: next to the ROM
 # screenshots = /path/to/shots  # the screenshot hotkey. Default: the states directory

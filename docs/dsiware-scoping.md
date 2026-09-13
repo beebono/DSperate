@@ -397,10 +397,20 @@ unmapped DSi ARM7 BIOS).
    in-memory writes, the FAT/crypto layer, save and settings persistence,
    one-title injection (signed TMD, DSiWare quota) and TLNC auto-launch.
 3. **No-NAND fallback** (2.2): done -- the hand-off HLE, synthesised NAND,
-   generated settings, DSi firmware and DSperate's own system font; all 15
-   oracle titles start on the BIOS pair alone. Open: China/Korea font tables
-   (nine resources) for titles of those regions; the launcher's title list
-   at 0x02FFD800.
+   generated settings, DSi firmware (with the DSi's extended user settings:
+   without them Shantae shows "Localization not found") and DSperate's own
+   system font; all 15 oracle titles start on the BIOS pair alone.
+   - A soft reset on a synthesised NAND (DSi Menu button, power button,
+     application jump) has nothing to reset into: `NDS::exit_requested`, and
+     the frontends end the session (user decision, 2026-09-13).
+   - SDL: DSiWare (`.nds`/`.dsi` by header, `.cia`) named on the command line
+     runs this way without `--dsi-mode`, and the loader's game list marks it
+     `[DSi]` and launches it on the DSi machine (the JIT is detached for it).
+     The DSi BIOS pair can be configured as `paths.bios9i`/`paths.bios7i`.
+     `DS_LAUNCH_AT=<frame>:<path>` scripts a picker launch.
+   - Open: China/Korea font tables (nine resources); the launcher's title
+     list at 0x02FFD800; non-USA titles untested; the JIT and save states
+     under DSi.
 4. **SD card slot** (port 0): FAT image or host folder; `FatVolume` already
    reads and writes the filesystem. The Unlaunch installer is an SD test
    title.

@@ -826,6 +826,7 @@ int main(int argc, char** argv) {
     // would do next. A cart session is left alone: a game is not expected to
     // reach here, and quitting a benchmark on one stray write would be worse
     // than running on.
+    if (nds.exit_requested) { std::fprintf(stderr, "exit requested at frame %d: ending the run\n", i); break; }
     if (nds.power_off) {
       std::fprintf(stderr, "power off at frame %d%s\n", i, nds.cart ? "" : "; saving settings and rebooting");
       if (!nds.cart) {

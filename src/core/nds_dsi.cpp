@@ -292,6 +292,13 @@ bool NDS::boot_dsi_nand() {
 // runs again, which with half BIOS dumps is boot2 loaded from the NAND.
 void NDS::dsi_soft_reset() {
   dsi_soft_reset_pending = false;
+  if (dsi_nand_synthetic) {
+    // Nothing to reset into (see exit_requested). The ARM7 was halted by the
+    // request and stays so.
+    std::fprintf(stderr, "dsi: soft reset on a synthesised NAND: the title is leaving\n");
+    exit_requested = true;
+    return;
+  }
   std::fprintf(stderr, "dsi: soft reset\n");
 
   // The CPUs, keeping what the recompiler and the sibling link hang off the
@@ -350,7 +357,7 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
   static const char* kRegionNames[6] = {"Japan", "USA", "Europe", "Australia", "China", "Korea"};
 
   if (firmware_synthetic && firmware.size() != 0x20000) {
-    firmware = bios::generate_firmware_dsi(user);
+    firmware = bios::generate_firmware_dsi(user, region.language, region.language_mask);
     firmware_id = 1469598103934665603ull;
     for (u8 b : firmware) firmware_id = (firmware_id ^ b) * 1099511628211ull;
     fw_page_dirty.assign((firmware.size() + FW_PAGE - 1) / FW_PAGE, 0);

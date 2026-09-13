@@ -342,6 +342,19 @@ bool nand_has_title(NandImage& nand, const u8* bios7i, u32 title_lo) {
   return fs.mount(nand, bios7i) && fs.main().lookup("/title/00030004/" + hex8(title_lo) + "/content/title.tmd", e);
 }
 
+bool file_is_dsiware(const std::string& path) {
+  const size_t dot = path.find_last_of('.');
+  if (dot == std::string::npos) return false;
+  std::string ext = path.substr(dot + 1);
+  for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (ext == "cia") return true;
+  if (ext != "nds" && ext != "dsi" && ext != "srl") return false;
+  std::ifstream f(path, std::ios::binary);
+  std::vector<u8> head(0x1000);
+  if (!f.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head.size()))) return false;
+  return is_dsiware(head, nullptr);
+}
+
 bool nand_title_content_id(NandImage& nand, const u8* bios7i, u32 title_lo, u32& content_id) {
   NandFs fs;
   FatVolume::Entry dir;

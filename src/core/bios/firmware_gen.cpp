@@ -98,12 +98,26 @@ std::vector<u8> build(const UserSettings& user, u32 size, u8 console_type) {
 
 std::vector<u8> generate_firmware(const UserSettings& user) { return build(user, 0x40000, 0x20); }
 
-std::vector<u8> generate_firmware_dsi(const UserSettings& user) {
+std::vector<u8> generate_firmware_dsi(const UserSettings& user, u8 language, u16 language_mask) {
   std::vector<u8> fw = build(user, 0x20000, 0x57);
-  // The DSi's Wi-Fi board and flash type (melonDS Firmware: W015, which
-  // NDS::setup_direct_boot_dsi keys the board words at 0x020005E0 on).
-  fw[0x1FD] = 0x01;
+  // The Wi-Fi board and flash type as a retail DSi's (read from a dump: board
+  // 2, which NDS::setup_direct_boot_dsi keys the board words at 0x020005E0 on).
+  fw[0x1FD] = 0x02;
   fw[0x1FE] = 0x20;
+  // Both user-settings copies as a DSi keeps them: the settings word with its
+  // "set" flags (bits 10-15) and the extended block at 0x74 -- version 1, the
+  // language (which may be Chinese or Korean, past the 3-bit field) and the
+  // region's supported-language mask, under its own CRC. DSi titles take
+  // their language from it: without it Shantae finds no localisation.
+  for (u32 blk = 0; blk < 2; ++blk) {
+    u8* u = fw.data() + 0x20000 - 0x200 + blk * 0x100;
+    w16(u + 0x64, static_cast<u16>((language & 7) | 0xFC00));
+    w16(u + 0x72, crc16(u, 0x70, 0xFFFF));
+    u[0x74] = 0x01;
+    u[0x75] = language;
+    w16(u + 0x76, language_mask);
+    w16(u + 0xFE, crc16(u + 0x74, 0x8A, 0xFFFF));
+  }
   return fw;
 }
 

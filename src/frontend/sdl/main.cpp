@@ -107,6 +107,9 @@ const char* kUsage =
     "                  up from [user], and saves go to paths.saves (else beside the game). The DSi system\n"
     "                  font is DSperate's own (Noto Sans, WenQuanYi Micro Hei); --dsi-font F\n"
     "                  (paths.dsi_font) uses a console's /sys/TWLFontTable.dat instead.\n"
+    "                  A DSiWare .nds/.dsi/.cia named without --dsi-mode runs this way too, and so does one\n"
+    "                  picked from the loader's game list (marked [DSi]); the DSi BIOS pair can be set as\n"
+    "                  paths.bios9i/paths.bios7i. When the title leaves (a soft reset), the session ends.\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) | horizontal | single | pip | dominant_v | dominant_h\n"
@@ -549,13 +552,19 @@ std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
     if (dot == std::string::npos) continue;
     std::string ext = name.substr(dot + 1);
     for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (ext != "nds" && ext != "zip") continue;
-    games.push_back({rom_stem(name), dir + "/" + name});
+    if (ext != "nds" && ext != "zip" && ext != "dsi" && ext != "cia") continue;
+    // DSiWare runs on the DSi machine (the launcher hand-off, see the Launch
+    // result below); it is marked so it is not mistaken for a card game.
+    const std::string path = dir + "/" + name;
+    const bool dsi = ds::io::file_is_dsiware(path);
+    if (!dsi && ext != "nds" && ext != "zip") continue;
+    games.push_back({dsi ? "[DSi] " + rom_stem(name) : rom_stem(name), path});
   }
   closedir(d);
-  // By what the list shows, so the order on screen is the order it is read in.
-  std::sort(games.begin(), games.end(), [](const ds::sdl::Menu::GameEntry& a, const ds::sdl::Menu::GameEntry& b) {
-    return a.title < b.title;
+  // By name, the label aside, so a DSiWare title sits among the rest.
+  auto key = [](const std::string& t) { return t.compare(0, 6, "[DSi] ") == 0 ? t.substr(6) : t; };
+  std::sort(games.begin(), games.end(), [&](const ds::sdl::Menu::GameEntry& a, const ds::sdl::Menu::GameEntry& b) {
+    return key(a.title) < key(b.title);
   });
   return games;
 }
@@ -1100,13 +1109,16 @@ int main(int argc, char** argv) {
     else if (argv[i][0] == '-' && argv[i][1] == '-') { std::fprintf(stderr, "unknown option %s\n", argv[i]); std::fputs(kUsage, stderr); return 2; }
     else rom = argv[i];
   }
+  // DSiWare named without --dsi-mode runs the DSi machine too: as a DS it
+  // would not start at all.
+  if (!dsi_mode && rom && !dsi_nand && ds::io::file_is_dsiware(rom)) dsi_mode = true;
   if (dsi_mode) {
     // A NAND boot to the launcher. A game named with it is DSiWare, installed
     // into the session's NAND rather than put in the card slot (a cart during
     // a NAND boot has not been checked against melonDS), so the rest of the
     // startup runs as the cartless firmware boot it is.
     dsi_hle = !dsi_nand && rom;
-    if (!bios9i || !bios7i || (!dsi_nand && !rom)) { std::fprintf(stderr, "--dsi-mode needs --bios9i and --bios7i, and --dsi-nand or a DSiWare title\n"); return 2; }
+    if (!dsi_nand && !rom) { std::fprintf(stderr, "--dsi-mode needs --dsi-nand or a DSiWare title\n"); return 2; }
     if (dsi_hle && dsi_menu) { std::fprintf(stderr, "--dsi-menu needs --dsi-nand: without one there is no DSi Menu to boot\n"); return 2; }
     // Without a NAND the title goes in the slot and is handed over from there
     // (NDS::prepare_dsi_hle), so the ROM path stays as for any game.
@@ -1127,6 +1139,16 @@ int main(int argc, char** argv) {
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.latency_frames", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
+  // The DSi BIOS pair: needed for DSi mode, and for DSiWare picked from the
+  // game list. A path that names no file counts as unset.
+  const std::string dsi_bios9i = bios9i ? std::string(bios9i) : cfg.str("paths.bios9i");
+  const std::string dsi_bios7i = bios7i ? std::string(bios7i) : cfg.str("paths.bios7i");
+  auto have_dsi_bios = [&] { return !dsi_bios9i.empty() && !dsi_bios7i.empty() && std::filesystem::exists(dsi_bios9i) && std::filesystem::exists(dsi_bios7i); };
+  if (dsi_mode && !have_dsi_bios()) {
+    std::fprintf(stderr, "%s needs the DSi BIOS pair: --bios9i/--bios7i, or paths.bios9i/paths.bios7i in %s\n",
+                 dsi_hle ? (std::string(rom) + " is DSiWare and").c_str() : "--dsi-mode", global_ini.c_str());
+    return 2;
+  }
 
   // No ROM boots the firmware's own menu. A file called BootMenu.nds selects
   // the same thing without a command line -- a launcher that only knows how to
@@ -1190,7 +1212,7 @@ int main(int argc, char** argv) {
   // (scheduler.cpp), so setting it afterwards left emu.idle_skip a no-op.
   // The idle skips were built for DS scenes and are untested on the DSi
   // launcher, so DSi mode runs without them (an explicit DS_IDLE_SKIP wins).
-  if (dsi_mode && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", "0", 1);
+  if (dsi_mode && !dsi_hle && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", "0", 1);
   if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);
 
   NDS nds;
@@ -1268,15 +1290,15 @@ int main(int argc, char** argv) {
   }
   if (dsi_hle) {
     std::string err;
-    if (!nds.load_dsi_bios(bios9i, bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
-    if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", bios9i, bios7i); return 1; }
+    if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
+    if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", dsi_bios9i.c_str(), dsi_bios7i.c_str()); return 1; }
     nds.set_dsi(true);
     nds.dsi_hle_launch = true;   // the NAND and settings are made once the title is in the slot (below)
-    std::fprintf(stderr, "console: DSi without a NAND (EXPERIMENTAL: interpreter, no idle skip, no save states)\n");
+    std::fprintf(stderr, "console: DSi without a NAND (EXPERIMENTAL: interpreter, no save states)\n");
   } else if (dsi_mode) {
     std::string err;
-    if (!nds.load_dsi_bios(bios9i, bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
-    if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", bios9i, bios7i); return 1; }
+    if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
+    if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", dsi_bios9i.c_str(), dsi_bios7i.c_str()); return 1; }
     // Opened read-only: the guest's writes (TWLCFG, title saves) are held in
     // memory (NandImage), so the dump is never written and nothing is kept
     // between runs until saves and settings are pulled out as files.
@@ -1663,7 +1685,9 @@ sdl_ready:
     std::string err;
     if (!ds::io::read_dsiware(rom_path, srl, &err) || !nds.load_rom_image(std::move(srl))) { std::fprintf(stderr, "dsi: %s: %s\n", rom_path.c_str(), err.c_str()); SDL_Quit(); return 1; }
   } else if (!boot_firmware && !load_rom_notice(rom_path)) { std::fprintf(stderr, "could not read %s\n", rom_path.c_str()); SDL_Quit(); return 1; }
-  if (dsi_hle) {
+  // The launcher hand-off's made-up console for the DSiWare in the slot:
+  // settings from [user], the font, the NAND (NDS::prepare_dsi_hle).
+  auto prepare_dsiware = [&]() -> bool {
     std::string err;
     std::vector<std::string> made;
     nds.dsi_font_path = dsi_font ? std::string(dsi_font) : cfg.str("paths.dsi_font");
@@ -1671,9 +1695,11 @@ sdl_ready:
       std::fprintf(stderr, "dsi: font %s not found; using DSperate's own\n", nds.dsi_font_path.c_str());
       nds.dsi_font_path.clear();
     }
-    if (!nds.prepare_dsi_hle(user, &err, &made)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); SDL_Quit(); return 1; }
+    if (!nds.prepare_dsi_hle(user, &err, &made)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); return false; }
     for (const std::string& m : made) std::fprintf(stderr, "dsi: %s\n", m.c_str());
-  }
+    return true;
+  };
+  if (dsi_hle && !prepare_dsiware()) { SDL_Quit(); return 1; }
   // On a firmware boot the loader cart goes in the slot. A BootMenu.nds beside
   // the config wins if there is one -- that is how a hand-made card from
   // tools/mkcart.py is used -- and otherwise the built-in one is assembled in
@@ -2023,19 +2049,25 @@ sdl_ready:
   // same occasions and once NAND writes have been quiet for two seconds.
   // Without a NAND there is no dump to sit beside, and no system sidecar: the
   // DSi settings are [user], made again at every start.
-  const ds::io::NandPersistPaths dsi_paths = dsi_hle ? [&] {
+  auto hle_paths = [&](const std::string& game) {
     ds::io::NandPersistPaths p;
     p.saves_dir = cfg.str("paths.saves");
-    if (p.saves_dir.empty()) { const std::filesystem::path r(rom_path); p.saves_dir = r.has_parent_path() ? r.parent_path().string() : "."; }
+    if (p.saves_dir.empty()) { const std::filesystem::path r(game); p.saves_dir = r.has_parent_path() ? r.parent_path().string() : "."; }
     p.photos_dir = p.saves_dir + "/dsi-photos";
     return p;
-  }() : dsi_mode ? ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")) : ds::io::NandPersistPaths{};
-  if (dsi_hle && !replay) {
+  };
+  ds::io::NandPersistPaths dsi_paths = dsi_hle ? hle_paths(rom_path)
+                                     : dsi_mode ? ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")) : ds::io::NandPersistPaths{};
+  // The saves an earlier session carried out go back into a made-up NAND
+  // before the title reads it; then that is the baseline the export compares.
+  auto import_dsiware_saves = [&] {
+    if (replay) return;
     const ds::io::NandPersistReport r = ds::io::nand_import(nds.dsi_nand, nds.bus.bios7i.get(), dsi_paths);
     nds.dsi_nand.mark_baseline();
     if (r.saves || r.photos) std::fprintf(stderr, "dsi: restored %d title saves, %d photos\n", r.saves, r.photos);
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
-  }
+  };
+  if (dsi_hle) import_dsiware_saves();
   u64 nand_writes_seen = nds.dsi_nand.writes, nand_quiet_since = 0, nand_exported = nds.dsi_nand.writes;
   auto flush_dsi = [&] {
     if (!dsi_mode || save_readonly || nds.dsi_nand.writes == nand_exported) return;
@@ -3167,6 +3199,94 @@ sdl_ready:
   // Called from the idle loop while the machine is stopped, and once a
   // frame while it is not -- under a network session the menu is an
   // overlay over a running game, because the session cannot be stopped.
+  // Starting a game from the loader cart's picker (and DS_LAUNCH_AT, which
+  // does the same from a script).
+  auto launch_game = [&](const std::string& pick) {
+    VLOG("launcher: %s\n", pick.c_str());
+    // DSiWare runs on the DSi machine with the launcher hand-off and a
+    // made-up NAND, as `dsperate --dsi-mode game` does. There is no way
+    // back to the DS menu from it: the session ends when the title does.
+    const bool pick_dsi = ds::io::file_is_dsiware(pick);
+    if (pick_dsi && !have_dsi_bios()) {
+      std::fprintf(stderr, "launcher: %s is DSiWare and needs the DSi BIOS pair (paths.bios9i/paths.bios7i in %s)\n", pick.c_str(), global_ini.c_str());
+      return;
+    }
+    flush_save();
+#if DSPERATE_JIT
+    // Back off the firmware's strict timing: the game wants the speed,
+    // and the environment override still wins if it was asked for.
+    if (jit) { ds::jit::set_strict(std::getenv("DS_JIT_STRICT") != nullptr); ds::jit::flush_all(); }
+    // Every DSi result is on the interpreter; the recompilers have never run one.
+    if (jit && pick_dsi) ds::jit::detach(nds);
+#endif
+    if (pick_dsi) {
+      std::string err;
+      if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err) || !nds.bios_native_dsi) {
+        std::fprintf(stderr, "launcher: dsi bios: %s\n", err.empty() ? "not found" : err.c_str());
+        return;
+      }
+      nds.dsi_nand.close();
+      nds.dsi_nand_synthetic = false;
+      nds.dsi_boot_blobs.clear();
+      nds.set_dsi(true);
+      nds.dsi_hle_launch = true;
+      dsi_mode = dsi_hle = true;
+      nds.sched.set_quantum(ds::LOCKSTEP_QUANTUM);
+    }
+    nds.reset();
+    discard_session_cache();
+    bool loaded;
+    if (pick_dsi && pick.size() > 4 && (pick.compare(pick.size() - 4, 4, ".cia") == 0 || pick.compare(pick.size() - 4, 4, ".CIA") == 0)) {
+      std::vector<ds::u8> srl;
+      std::string err;
+      loaded = ds::io::read_dsiware(pick, srl, &err) && nds.load_rom_image(std::move(srl));
+      if (!loaded) std::fprintf(stderr, "launcher: %s\n", err.c_str());
+    } else {
+      loaded = load_rom_notice(pick);
+    }
+    if (loaded && pick_dsi && !prepare_dsiware()) { input.request_quit(); return; }   // the DS machine is gone: nothing to go back to
+    if (!loaded && pick_dsi) { input.request_quit(); return; }
+    if (!loaded) {
+      // Stay on the list rather than reset into nothing: another game
+      // in the same directory may well be readable, and a cancelled
+      // unpacking is a change of mind, not an error.
+      std::fprintf(stderr, "launcher: could not read %s\n", pick.c_str());
+      return;
+    }
+    nds.setup_direct_boot();
+    if (pick_dsi) {
+      dsi_paths = hle_paths(pick);
+      import_dsiware_saves();
+      nand_writes_seen = nand_exported = nds.dsi_nand.writes;
+      std::fprintf(stderr, "launcher: %s on the DSi (EXPERIMENTAL: interpreter, no save states)\n", pick.c_str());
+    }
+    // Everything keyed to the ROM follows it, or the game would go on
+    // writing the loader's saves, states, screenshots and cheats under
+    // the loader's game code. --save is deliberately not carried over:
+    // it pins one file, and it was given for the ROM on the command
+    // line, not for whatever the player picks here.
+    launcher = false;
+    session.open(nds, cfg, pick, nullptr);
+    menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
+    session.load_enabled(nds);
+    load_save(nds, session.sav);
+    // The game's own auto slot, now that its code is known: a game
+    // started from the picker resumes exactly as one named on the
+    // command line does. After the battery save, so the state's SRAM
+    // wins, and never during a replay or a recording.
+    if (const std::string a = log.reading() || log.writing()
+                                  ? std::string()
+                                  : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
+        !a.empty() && load_state_file(nds, a, loaded_layout, got_layout)) {
+      std::fprintf(stderr, "state: autoloaded %s\n", a.c_str());
+      apply_loaded_layout();
+    }
+    sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
+    state_slot = 0;
+    refresh_slots();
+    menu.set_open(false);
+    set_paused(false);
+  };
   auto pump_menu = [&] {
       if (!menu.open()) return;
       // The menu is ticked every idle pass, not only when a button moves:
@@ -3220,53 +3340,7 @@ sdl_ready:
           flush_save();
         } else refresh_slots();
         break;
-      case Menu::Result::Launch: {
-        const std::string pick = menu.chosen();
-        VLOG("launcher: %s\n", pick.c_str());
-        flush_save();
-#if DSPERATE_JIT
-        // Back off the firmware's strict timing: the game wants the speed,
-        // and the environment override still wins if it was asked for.
-        if (jit) { ds::jit::set_strict(std::getenv("DS_JIT_STRICT") != nullptr); ds::jit::flush_all(); }
-#endif
-        nds.reset();
-        discard_session_cache();
-        if (!load_rom_notice(pick)) {
-          // Stay on the list rather than reset into nothing: another game
-          // in the same directory may well be readable, and a cancelled
-          // unpacking is a change of mind, not an error.
-          std::fprintf(stderr, "launcher: could not read %s\n", pick.c_str());
-          break;
-        }
-        nds.setup_direct_boot();
-        // Everything keyed to the ROM follows it, or the game would go on
-        // writing the loader's saves, states, screenshots and cheats under
-        // the loader's game code. --save is deliberately not carried over:
-        // it pins one file, and it was given for the ROM on the command
-        // line, not for whatever the player picks here.
-        launcher = false;
-        session.open(nds, cfg, pick, nullptr);
-        menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
-        session.load_enabled(nds);
-        load_save(nds, session.sav);
-        // The game's own auto slot, now that its code is known: a game
-        // started from the picker resumes exactly as one named on the
-        // command line does. After the battery save, so the state's SRAM
-        // wins, and never during a replay or a recording.
-        if (const std::string a = log.reading() || log.writing()
-                                      ? std::string()
-                                      : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
-            !a.empty() && load_state_file(nds, a, loaded_layout, got_layout)) {
-          std::fprintf(stderr, "state: autoloaded %s\n", a.c_str());
-          apply_loaded_layout();
-        }
-        sram_writes_seen = nds.cart ? nds.cart->sram_writes() : 0;
-        state_slot = 0;
-        refresh_slots();
-        menu.set_open(false);
-        set_paused(false);
-        break;
-      }
+      case Menu::Result::Launch: launch_game(menu.chosen()); break;
       case Menu::Result::Quit: input.request_quit(); break;
       }
   };
@@ -3680,6 +3754,13 @@ sdl_ready:
     // power button would do next. A game reaching here is left running: it is
     // not expected to, and quitting on one stray write would lose more than
     // it saved.
+    // A DSiWare title leaving (NDS::exit_requested): the session ends with it.
+    if (nds.exit_requested) {
+      std::fprintf(stderr, "dsi: the title has left (a soft reset); quitting\n");
+      flush_save();
+      input.request_quit();
+      nds.exit_requested = false;
+    }
     if (nds.power_off) {
       if (boot_firmware) {
         std::string err;
@@ -3993,6 +4074,9 @@ sdl_ready:
     // DS_SHOT_AT=N: a screenshot (the hotkey's, into paths.screenshots) after
     // frame N -- for offscreen/replay runs, where no hotkey can fire.
     if (static const long shot_at = [] { const char* v = std::getenv("DS_SHOT_AT"); return v ? std::atol(v) : -1L; }(); shot_at >= 0 && frames == static_cast<u64>(shot_at)) shot_pending = true;
+    // DS_LAUNCH_AT=<frame>:<path>: start that game at that frame as the
+    // picker would (for scripted tests of the loader's launch path).
+    if (static const char* la = std::getenv("DS_LAUNCH_AT"); la && std::strchr(la, ':') && frames == std::strtoull(la, nullptr, 10)) launch_game(std::strchr(la, ':') + 1);
     if (nds.cart && nds.cart->sram_dirty()) {
       if (nds.cart->sram_writes() != sram_writes_seen) { sram_writes_seen = nds.cart->sram_writes(); sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
@@ -4025,7 +4109,9 @@ sdl_ready:
   autosave_now();
   flush_save();
   discard_session_cache();
-  if (!fw_override.empty() && nds.firmware_override_dirty()) {
+  // Not after a DSiWare session: what a DSi title wrote to the flash is not a
+  // DS menu setting to keep beside the DS firmware.
+  if (!fw_override.empty() && nds.firmware_override_dirty() && !nds.dsi) {
     std::string err;
     if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
     else std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
