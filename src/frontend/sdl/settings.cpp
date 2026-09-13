@@ -101,8 +101,11 @@ const Setting kEmuSettings[] = {
           "SHORTER LOADING SCREENS. GAMES THAT RACE THE CARD CAN MISBEHAVE"),
   pick("emu.limiter", "FRAME LIMITER", kLimiter, 7, "60", FlagLive, Dep::NetSession,
        "THE RATE THE GAME IS HELD TO. CONSOLE IS THE ONE THE GAME WAS WRITTEN FOR"),
-  percent("emu.speed", "GAME SPEED", 25, 400, 5, "100", FlagLive, Dep::NetSession,
-          "HOW FAST THE GAME RUNS AGAINST THE LIMITER"),
+  // A whole percent in the file ("100"), as --speed and the frontend read it --
+  // not a percent row, which keeps a 0..1 fraction: that showed the default as
+  // 10000% and wrote 1 (one percent) for what it displayed as 100%.
+  number("emu.speed", "GAME SPEED", 25, 400, 5, "100", FlagLive, Dep::NetSession,
+         "HOW FAST THE GAME RUNS AGAINST THE LIMITER", nullptr, nullptr, "%"),
   // From 2: "1X" is real time, which is what not fast-forwarding already is.
   // A multiple of real time, not of the limiter: it is a floor, so holding
   // fast forward on a 240 Hz limiter never slows the game down to it.

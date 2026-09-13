@@ -54,6 +54,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <thread>
@@ -86,6 +87,11 @@ const char* kUsage =
     "                  option below has a key there; games/<rom name>.ini and games/<CODE>.ini\n"
     "                  override it per game, the filename one winning)\n"
     "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
+    "  --dsi-mode      boot a DSi from its NAND (boot2, then the DSi Launcher) instead of the DS menu; no\n"
+    "                  ROM. Needs --bios9i F --bios7i F (the DSi BIOS pair) and --dsi-nand F (a nand.bin\n"
+    "                  with its nocash footer), with --bios9/--bios7 and the DSi's --firmware as usual.\n"
+    "                  EXPERIMENTAL: interpreter only, no idle skip, no save states, and the NAND runs\n"
+    "                  from a fresh copy in the config directory every time, so nothing it writes is kept\n"
     "  --scale N       window scale (default 2)\n"
     "  --fullscreen    start fullscreen\n"
     "  --layout L      vertical (default) | horizontal | single | pip | dominant_v | dominant_h\n"
@@ -450,7 +456,15 @@ void read_cheevos_chunk(ds::state::Reader& r) {
   g_cheevos_pending = {true, game_id, std::move(blob)};
 }
 
+// A DSi state does not carry the NAND (scoping doc 2.5), so a resumed one
+// would read a filesystem that no longer matches its RAM. Off until it does.
+bool dsi_states_refused(const NDS& nds) {
+  if (nds.dsi) std::fprintf(stderr, "state: save states are off in DSi mode for now\n");
+  return nds.dsi;
+}
+
 bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& layout) {
+  if (dsi_states_refused(nds)) return false;
   ds::state::Writer w; std::string err;
   if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
   write_layout_chunk(w, layout);
@@ -477,6 +491,7 @@ std::string g_state_refused;
 
 bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout& layout, bool& layout_loaded) {
   layout_loaded = false;
+  if (dsi_states_refused(nds)) return false;
   std::vector<u8> bytes;
   if (FILE* f = std::fopen(path.c_str(), "rb")) {
     std::fseek(f, 0, SEEK_END); const long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
@@ -943,6 +958,10 @@ int main(int argc, char** argv) {
   bool internet = false;              // --internet / net.mode = internet: the emulated AP reaches the real network
   const char* dns_arg = nullptr;      // --dns: host, wiimmfi, or an address
   long stats_from = 0;   // frames run but left out of the timing statistics
+  // DSi mode (docs/dsiware-scoping.md): the plumbing only, from the command
+  // line. Config keys and the menu come once the rest of the DSi path is in.
+  bool dsi_mode = false;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_nand = nullptr;
 
   // The game is found before the options are read. A flag whose value is
   // optional (--chunky [M]) takes the next word unless it is another option,
@@ -970,6 +989,10 @@ int main(int argc, char** argv) {
     if (arg("--bios9")) cli.set("paths.bios9", argv[++i]);
     else if (arg("--bios7")) cli.set("paths.bios7", argv[++i]);
     else if (arg("--firmware")) cli.set("paths.firmware", argv[++i]);
+    else if (flag("--dsi-mode")) dsi_mode = true;
+    else if (arg("--bios9i")) bios9i = argv[++i];
+    else if (arg("--bios7i")) bios7i = argv[++i];
+    else if (arg("--dsi-nand")) dsi_nand = argv[++i];
     else if (arg("--config")) config_arg = argv[++i];
     else if (arg("--write-config")) { ds::sdl::Config::write_default(argv[++i], true); return 0; }
     else if (arg("--scale")) cli.set("video.scale", argv[++i]);
@@ -1053,6 +1076,19 @@ int main(int argc, char** argv) {
     else if (argv[i][0] == '-' && argv[i][1] == '-') { std::fprintf(stderr, "unknown option %s\n", argv[i]); std::fputs(kUsage, stderr); return 2; }
     else rom = argv[i];
   }
+  if (dsi_mode) {
+    // A NAND boot to the launcher, and nothing more yet: launching a DSiWare
+    // file needs the title installer (scoping doc 2.3), and a cart in the slot
+    // during a NAND boot has not been checked against melonDS.
+    if (rom) { std::fprintf(stderr, "--dsi-mode boots the DSi Launcher from the NAND and takes no ROM yet\n"); return 2; }
+    if (!bios9i || !bios7i || !dsi_nand) { std::fprintf(stderr, "--dsi-mode needs --bios9i, --bios7i and --dsi-nand\n"); return 2; }
+    // Every DSi result so far is on the interpreter; the recompilers have never
+    // run a DSi. And lockstep, which is the interleave the NAND boot was matched
+    // to melonDS under (the headless default). On the command line, so both win
+    // over the config files.
+    cli.set("emu.jit", "false");
+    cli.set("emu.quantum", std::to_string(ds::LOCKSTEP_QUANTUM));
+  }
   ds::sdl::Config cfg;
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
@@ -1123,6 +1159,9 @@ int main(int argc, char** argv) {
   // Core knobs the core reads from the environment. These must be set before
   // the NDS is constructed: Scheduler's constructor reads DS_IDLE_SKIP once
   // (scheduler.cpp), so setting it afterwards left emu.idle_skip a no-op.
+  // The idle skips were built for DS scenes and are untested on the DSi
+  // launcher, so DSi mode runs without them (an explicit DS_IDLE_SKIP wins).
+  if (dsi_mode && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", "0", 1);
   if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);
 
   NDS nds;
@@ -1198,13 +1237,32 @@ int main(int argc, char** argv) {
                  nds.firmware_synthetic ? "firmware" : "", global_ini.c_str());
     return 2;
   }
+  if (dsi_mode) {
+    std::string err;
+    if (!nds.load_dsi_bios(bios9i, bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
+    if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", bios9i, bios7i); return 1; }
+    // The boot writes to the NAND (TWLCFG, title saves), and the dump is a file
+    // the user cannot regenerate. Until the NAND gets a proper working copy
+    // (scoping doc 2.3) it runs from a fresh copy, so nothing is kept between runs.
+    const std::string work = ds::sdl::Config::dir() + "/dsi-nand.session.bin";
+    std::error_code ec;
+    std::filesystem::copy_file(dsi_nand, work, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) { std::fprintf(stderr, "dsi nand: cannot copy %s to %s: %s\n", dsi_nand, work.c_str(), ec.message().c_str()); return 1; }
+    if (!nds.load_dsi_nand(work, &err)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
+    VLOG("dsi nand: %s, running from the copy %s\n", dsi_nand, work.c_str());
+    nds.set_dsi(true);
+    nds.dsi_nand_boot = true;   // reset() below builds the DSi machine; setup_direct_boot() then boots the NAND
+    std::fprintf(stderr, "console: DSi (EXPERIMENTAL: interpreter, no idle skip, no save states)\n");
+  }
   nds.reset();
   // The firmware writes its settings pages to flash over SPI. Those go to a
   // sidecar beside the firmware rather than into the dump itself, so a rename
   // in the DS menu survives a restart without the emulator ever writing to a
   // file the user cannot regenerate. See NDS::load_firmware_override.
-  const std::string fw_override = cfg.str("paths.firmware_override", fw + ".ovr");
-  if (!nds.firmware_synthetic) {
+  // None in DSi mode: like its NAND copy, a DSi session keeps nothing yet, and
+  // the DSi firmware's sidecar would otherwise land beside the user's dump.
+  const std::string fw_override = dsi_mode ? std::string() : cfg.str("paths.firmware_override", fw + ".ovr");
+  if (!nds.firmware_synthetic && !fw_override.empty()) {
     std::string err;
     if (!nds.load_firmware_override(fw_override, err)) {
       if (err != "cannot open") std::fprintf(stderr, "firmware settings: %s: %s\n", fw_override.c_str(), err.c_str());
@@ -1514,7 +1572,7 @@ sdl_ready:
   // memory, so the emulator needs no file shipped alongside it. Its two banner
   // lines are the only part worth configuring; a different icon means building
   // a card with the script.
-  if (boot_firmware) {
+  if (boot_firmware && !dsi_mode) {
     if (nds.load_rom(rom_path.c_str())) {
       VLOG("loader cart: %s\n", rom_path.c_str());
     } else if (cfg.flag("loader.card", true) &&
@@ -1550,7 +1608,7 @@ sdl_ready:
   nds.gpu3d.set_geometry_worker(cfg.flag("emu.timing_oc", false) || cfg.flag("emu.cpu_oc", false));   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
   nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
   nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
-  if (!boot_firmware) nds.setup_direct_boot();
+  if (!boot_firmware || nds.dsi) nds.setup_direct_boot();   // on a DSi this is the NAND boot (NDS::boot_dsi_nand)
   // A real console's clock, seeded from this machine. Off in the core by
   // default so the verification harness stays reproducible; a frontend
   // showing someone their own DS menu wants the real date on it. Not under
@@ -1674,7 +1732,10 @@ sdl_ready:
       hz = parsed >= 1.0 && parsed <= 1000.0 ? parsed : 0.0;
     }
     const double period_ns = hz > 0.0 ? 1e9 / hz : frame_ns;
-    const double scale = speed_pct > 0 ? speed_pct / 100.0 : 1.0;
+    // Held to the documented 25..400. The menu once wrote 1 for what it showed
+    // as 100%, and one percent looks like a machine that does not boot.
+    speed_pct = speed_pct > 0 ? std::clamp(speed_pct, 25, 400) : 100;
+    const double scale = speed_pct / 100.0;
     base_scale = frame_ns / period_ns * scale;
     frame_budget_ms = period_ns / 1e6 / scale;
     // The audio has to be stretched or squeezed by however far this is from
@@ -2226,7 +2287,7 @@ sdl_ready:
       // Written out now rather than at exit: this is a setting the player has
       // just changed, and a kill would otherwise lose it.
       std::string err;
-      if (!nds.save_firmware_override(fw_override, err))
+      if (!fw_override.empty() && !nds.save_firmware_override(fw_override, err))
         std::fprintf(stderr, "firmware settings: %s: %s\n", fw_override.c_str(), err.c_str());
     }
 
@@ -3485,7 +3546,9 @@ sdl_ready:
     if (nds.power_off) {
       if (boot_firmware) {
         std::string err;
-        if (nds.firmware_override_dirty() && !nds.save_firmware_override(fw_override, err))
+        if (fw_override.empty()) {
+          // DSi mode: nothing is kept (see fw_override)
+        } else if (nds.firmware_override_dirty() && !nds.save_firmware_override(fw_override, err))
           std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
         else if (nds.firmware_override_dirty())
           std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
@@ -3495,6 +3558,7 @@ sdl_ready:
         if (jit) ds::jit::flush_all();
 #endif
         nds.reset();          // clears power_off, and re-seeds the clock
+        if (nds.dsi) nds.setup_direct_boot();   // the DSi boots from its NAND again
         // A fresh firmware: the DS menu is back, so a card launch is a real
         // possibility again. Forget that this console ever did local wireless
         // (the picker's Download Play gate above).
@@ -3820,7 +3884,7 @@ sdl_ready:
   autosave_now();
   flush_save();
   discard_session_cache();
-  if (nds.firmware_override_dirty()) {
+  if (!fw_override.empty() && nds.firmware_override_dirty()) {
     std::string err;
     if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
     else std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());

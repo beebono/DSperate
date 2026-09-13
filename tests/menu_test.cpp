@@ -951,6 +951,12 @@ void test_setting_steps() {
   const ds::sdl::Setting& oc = find("emu.cpu_oc");
   CHECK(ds::sdl::step_value(oc, "false", +1, h) == "true");
   CHECK(ds::sdl::step_value(oc, "true", +1, h) == "false");
+  // GAME SPEED is a whole percent in the file, as --speed and the frontend
+  // read it. As a 0..1 percent row it showed 100 as 10000% and wrote 1.
+  const ds::sdl::Setting& sp = find("emu.speed");
+  CHECK(ds::sdl::display_value(sp, "") == "100%");
+  CHECK(ds::sdl::step_value(sp, "100", -1, h) == "95");
+  CHECK(ds::sdl::step_value(sp, "1", +1, h) == "25");           // a bad file value steps back into range
 }
 
 // A percent row keeps a 0..1 double in the file: stepping it must not creep,
