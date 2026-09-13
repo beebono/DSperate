@@ -29,8 +29,9 @@ enum class EventId : u8 {
   Dma, Spu, Spi, Rtc, Cart, Gx3D, DisplayFifo, Div, Sqrt, LcdIrq, Wifi,
   // DSi only: melonDS's periodic RTC clock (32768 Hz, a slice boundary that
   // drives no state yet: Io::grid_rtc_event), the camera module's frame IRQ
-  // and scanline transfer, and the SD/MMC, SDIO and Wi-Fi module events.
-  RtcClock, CamIrq, SdMmc, Sdio, NWifi, CamTransfer, Count
+  // and scanline transfer, and the SD/MMC, SDIO and Wi-Fi module events;
+  // the two card slots' power-off timers (SCFG_MC state 3).
+  RtcClock, CamIrq, SdMmc, Sdio, NWifi, CamTransfer, CartPower1, CartPower2, Count
 };
 
 // CPU interleave quantum in ARM9 cycles: the most one CPU runs before the

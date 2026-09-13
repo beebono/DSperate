@@ -1670,6 +1670,8 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
     case 0x000: if (!a9) dsi.scfg_bios |= value & 0x03; break;
     case 0x001: if (!a9) dsi.scfg_bios |= (value & 0x07) << 8; break;
     case 0x006: if (a9) { dsi.scfg_rst = static_cast<u16>((dsi.scfg_rst & 0xFF00) | (value & 0xFF)); dsp.set_rst_line(value & 1); } break;
+    case 0x010: if (!a9) dsi_write_scfg_mc(static_cast<u16>(value & 0xFF), 0x00FF); break;
+    case 0x011: if (!a9) dsi_write_scfg_mc(static_cast<u16>((value & 0xFF) << 8), 0xFF00); break;
     case 0x060: case 0x061: case 0x062: case 0x063:
       if (!a9) { u32 t = dsi.mbk[0][8]; t &= ~(0xFFu << ((r & 3) * 8)); t |= (value & 0xFF) << ((r & 3) * 8); dsi.mbk[0][8] = dsi.mbk[1][8] = t & 0x00FFFF0F; }
       break;
@@ -1687,7 +1689,7 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
     case 0x000: if (!a9) { dsi.scfg_bios |= value & 0x0703; nds_.bus.update_bios_map(); } break;
     case 0x004: if (a9) { nds_.sched.floor_arm9_clock(nds_.cpu(Cpu::ARM9)); dsi.scfg_clock9 = value & 0x0187; nds_.bus.set_clock9_shift((dsi.scfg_clock9 & 1) ? 2 : 1); reprice_clock9_store(1); } else dsi.scfg_clock7 = value & 0x0187; break;
     case 0x006: if (a9) { dsi.scfg_rst = static_cast<u16>(value); dsp.set_rst_line(value & 1); } break;
-    case 0x010: if (!a9) dsi.scfg_mc = static_cast<u16>(value); break;
+    case 0x010: if (!a9) dsi_write_scfg_mc(static_cast<u16>(value), 0xFFFF); break;
     case 0x012: if (!a9) dsi.cart_insert_delay = static_cast<u16>(value); break;
     case 0x014: if (!a9) dsi.cart_poweroff_delay = static_cast<u16>(value); break;
     case 0x060: case 0x062:
@@ -1717,7 +1719,7 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
     if (((old0 ^ dsi.scfg_ext[0]) | (old1 ^ dsi.scfg_ext[1])) & (1u << 25)) nds_.bus.update_nwram();
     break;
   }
-  case 0x010: if (!a9) { dsi.cart_insert_delay = static_cast<u16>(value >> 16); dsi.scfg_mc = static_cast<u16>(value); } break;
+  case 0x010: if (!a9) { dsi.cart_insert_delay = static_cast<u16>(value >> 16); dsi_write_scfg_mc(static_cast<u16>(value), 0xFFFF); } break;
   case 0x014: if (!a9) dsi.cart_poweroff_delay = static_cast<u16>(value); break;
   case 0x054: case 0x058: case 0x05C: mbk_map_range(cpu, static_cast<int>((r - 0x054) >> 2), value); break;
   case 0x060: if (!a9) dsi.mbk[0][8] = dsi.mbk[1][8] = value & 0x00FFFF0F; break;
@@ -1753,6 +1755,36 @@ void Io::mbk_map_slot(int bank, int slot, u8 value) {
 }
 
 // MBK6-8 for one CPU: its window over bank A/B/C.
+void Io::dsi_write_scfg_mc(u16 value, u16 mask) {
+  const u16 old = dsi.scfg_mc;
+  u16 mc = static_cast<u16>((old & (~mask | 0x0011)) | (value & mask & 0x80CC));
+  for (int i = 0; i < 2; ++i) {
+    const int shift = 2 + 4 * i;
+    u16 oldpower = (old >> shift) & 3, newpower = (mc >> shift) & 3;
+    if (newpower == oldpower) continue;
+    const EventId ev = i == 0 ? EventId::CartPower1 : EventId::CartPower2;
+    nds_.sched.cancel(ev);
+    const bool inserted = i == 0 && nds_.cart != nullptr;   // the DSi has no second slot to fill
+    if ((newpower == 1 || newpower == 2) && !inserted) { oldpower = newpower; newpower = 3; }
+    // melonDS counts the delay in ARM7 cycles; ours are ARM9's.
+    if (newpower == 3) nds_.sched.schedule(ev, nds_.sched.now() + (static_cast<u64>(dsi.cart_poweroff_delay) << 10), cart_power_event, static_cast<u32>(i));
+    if (newpower == 0 && i == 0) cart.romctrl &= ~(1u << 29);   // power state 0 releases the card's reset line
+    // Slot 1 leaving the powered states raises the card IRQ (not slot 2, as on melonDS).
+    if (i == 0 && (oldpower == 1 || oldpower == 2) && (newpower == 3 || newpower == 0)) {
+      request_irq(Cpu::ARM9, IRQ_CART_IREQ);
+      request_irq(Cpu::ARM7, IRQ_CART_IREQ);
+    }
+    mc = static_cast<u16>((mc & ~(3u << shift)) | (newpower << shift));
+  }
+  dsi.scfg_mc = mc;
+}
+
+void Io::cart_power_event(NDS& nds, u32 slot) {
+  const int shift = 2 + 4 * static_cast<int>(slot);
+  nds.io.dsi.scfg_mc = static_cast<u16>(nds.io.dsi.scfg_mc & ~(3u << shift));
+  if (slot == 0) nds.io.cart.romctrl &= ~(1u << 29);
+}
+
 void Io::mbk_map_range(Cpu cpu, int bank, u32 value) {
   value &= bank == 0 ? ~0xE00FC00Fu : ~0xE007C007u;
   u32& reg = dsi.mbk[ci(cpu)][5 + bank];
@@ -1843,7 +1875,8 @@ template <class S> void Io::sync_state(S& s) {
     s.end();
     if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, DsiCamModule::irq_event); nds_.sched.rebind(EventId::CamTransfer, DsiCamModule::transfer_event);
                                  nds_.sched.rebind(EventId::SdMmc, SdHost::ev_transfer_mmc); nds_.sched.rebind(EventId::Sdio, SdHost::ev_transfer_sdio);
-                                 nds_.sched.rebind(EventId::NWifi, NWifi::ms_timer_event); }
+                                 nds_.sched.rebind(EventId::NWifi, NWifi::ms_timer_event);
+                                 nds_.sched.rebind(EventId::CartPower1, cart_power_event); nds_.sched.rebind(EventId::CartPower2, cart_power_event); }
   }
   if constexpr (S::reading) {
     mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;   // the frontend hands a new buffer every frame

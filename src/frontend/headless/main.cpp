@@ -818,10 +818,10 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, " %08x a7", a9.cpsr);
       for (int r = 0; r < 16; ++r) std::fprintf(stderr, " %08x", a7.regs[r]);
       std::fprintf(stderr, " %08x\n", a7.cpsr);
-      static const char* dumpf = std::getenv("DS_FRAME_DUMP");   // "<frame>:<path>": write main RAM + WRAM + DTCM after that frame
+      static const char* dumpf = std::getenv("DS_FRAME_DUMP");   // "<frame>:<path>": write main RAM (16 MB on a DSi) + WRAM + DTCM after that frame
       if (dumpf && std::atoi(dumpf) == i) {
         FILE* f = std::fopen(std::strchr(dumpf, ':') + 1, "wb");
-        std::fwrite(nds.bus.main_ram.get(), 1, 4u << 20, f); std::fwrite(nds.bus.shared_wram.get(), 1, 32u << 10, f);
+        std::fwrite(nds.bus.main_ram.get(), 1, nds.bus.main_ram_size(), f); std::fwrite(nds.bus.shared_wram.get(), 1, 32u << 10, f);
         std::fwrite(nds.bus.arm7_wram.get(), 1, 64u << 10, f); std::fwrite(nds.bus.dtcm.get(), 1, 16u << 10, f); std::fclose(f);
       }
     }

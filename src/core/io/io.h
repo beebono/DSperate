@@ -256,6 +256,13 @@ public:
   // from the SPU mixer while SNDEXCNT enables the interface.
   u16  dsi_mic_read_cnt() const;
   void dsi_mic_write_cnt(u16 value, u16 mask);
+  // SCFG_MC (melonDS DSi::SetScfgMC): the card slots' power states -- 0 off,
+  // 1 on with reset held, 2 on, 3 off after SCFG_CartPowerOffDelay. A slot
+  // with no card goes from any power-on state to 3. The DSi Launcher powers
+  // an inserted card down before it starts a NAND title and waits for state
+  // 0: stored as written, that never came and the launch stayed white.
+  void dsi_write_scfg_mc(u16 value, u16 mask);
+  static void cart_power_event(NDS& nds, u32 slot);
   u32  dsi_mic_read_data();
   void dsi_mic_clock(s16 sample);
   // Whether the game has ever sampled the AUX input. The frontend opens the

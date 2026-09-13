@@ -1795,7 +1795,11 @@ sdl_ready:
   // every time, which is what a timing race looks like -- and the console is
   // idle enough there that the cost of checking does not show. It is dropped
   // again the moment a game is launched, where it very much would.
-  if (jit && boot_firmware) { ds::jit::set_strict(true); VLOG("jit: strict timing for the firmware\n"); }
+  // The DS menu needs the recompiler's strict timing until a game launches.
+  // Not the DSi Menu: it runs, and launches its titles, without it (checked
+  // against the interpreter), and a title it starts would otherwise keep it
+  // for the whole session -- nothing turns it off there.
+  if (jit && boot_firmware && !nds.dsi) { ds::jit::set_strict(true); VLOG("jit: strict timing for the firmware\n"); }
 #else
   (void)jit;
 #endif
