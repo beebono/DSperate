@@ -35,7 +35,7 @@ The target is DSperate **2.0.0**.
 | Microphone (I2S `MICCNT`/`MICDATA`) | **in** -- done | melonDS DSi_I2S, fed by the existing SDL/ALSA capture (5.5) |
 | DSi Wi-Fi networking | **in** -- done | both chips reach slirp; the firmware carries DSperate's access point (5.6) |
 | SD card slot (SD host port 0) | **in** -- done | a host folder (`--dsi-sd`, `paths.dsi_sd`), built into a card in memory and synced back (5.4) |
-| Frontend | **in** -- mostly done | CLI, loader list and loader cart on the DSi Menu done; no ini key for the NAND/DSi firmware, no menu row for hiding titles (2.4) |
+| Frontend | **in** -- done | CLI, loader list, loader cart on the DSi Menu, ini keys for the NAND and DSi firmware, a row for hiding the NAND's titles; `.app` streaming after 2.0.0 (2.4) |
 | Save states under DSi | **in** -- done | NAND sectors past the state base, the SD card's in-memory part checked against its folder (2.5) |
 | JIT + idle skip under DSi, on device | **in** -- not started | SDL forces the interpreter and lockstep; **slower than DS titles is accepted for 2.0.0** |
 | DSP HLE (G.711, graphics) | after 2.0.0 | one feature commit, together with camera images passed from the CLI. USER DECISION (2026-09-13): no boot-only stub for 2.0.0; a title that starts the DSP gets a warning that it will likely not work (`NDS::dsi_dsp_started`, SDL toast) |
@@ -363,10 +363,20 @@ ways: DSiWare needs no `--dsi-mode`, and the picker lists it in every mode.
   loader cart in the slot (the whitelist gate in section 5, item 3). A DS game
   picked there leaves the DSi machine for a DS.
 - DSi-enhanced carts (title-ID high `0x00030000`) stay in DS mode.
-- Ini paths that exist: `paths.bios9i`, `paths.bios7i`, `paths.dsi_font`,
-  `paths.dsi_sd` (`--dsi-sd DIR`).
-  **Not yet:** `dsi_nand` and `dsi_firmware` keys (CLI only), and a menu
-  row for hiding the dump's titles (CLI only).
+- Ini paths: `paths.bios9i`, `paths.bios7i`, `paths.dsi_font`,
+  `paths.dsi_sd` (`--dsi-sd DIR`), and (2026-09-13):
+  - `paths.dsi_nand` stands in for `--dsi-nand` **only under `--dsi-mode`**
+    (USER DECISION): DSiWare named alone or picked from the list keeps the
+    hand-off, which needs no signed TMD.
+  - `paths.dsi_firmware` is loaded instead of `paths.firmware` whenever the
+    machine is a DSi from the start (`--dsi-mode`, DSiWare on the command
+    line), and swapped in when DSiWare is picked from a DS session's list
+    (the DS firmware's settings sidecar is then left alone). `--firmware`
+    wins over it; a missing file counts as unset.
+  - `emu.dsi_hide_installed`, a restart-only settings row (HIDE NAND
+    DSIWARE), stands in for `--dsi-hide-installed`.
+- `.app` streaming (the title is held in memory, twice with the synthesised
+  NAND): deferred past 2.0.0 (USER DECISION).
 - A DSi session forces `emu.jit=false`, lockstep, and idle skip off on the
   NAND boot. It prints "EXPERIMENTAL: interpreter".
 - Headless uses `--dsi` (required with no ROM, or the machine is a DS and
@@ -666,9 +676,9 @@ Items 1-3 are done and kept as the record. Items 4-9 are open.
      menu instead of the search, which invalidated a first comparison.)
    - Our DSi clock is stopped in headless without `--rtc-host` (status bar
      reads 00:00); expected, not a bug.
-7. **Frontend leftovers** (2.4): `dsi_nand`/`dsi_firmware` ini keys, a menu
-   row for hiding installed titles, streaming the `.app` instead of holding
-   it in memory. **Save states under DSi** (2.5): done.
+7. **Frontend leftovers** (2.4): done 2026-09-13 (`paths.dsi_nand`,
+   `paths.dsi_firmware`, `emu.dsi_hide_installed` and its row); `.app`
+   streaming deferred past 2.0.0. **Save states under DSi** (2.5): done.
 8. **JIT and idle skip under DSi**: the SDL frontend forces the interpreter
    and lockstep for every DSi session, and idle skip off on the NAND boot.
    Steps: `test_jit` and a launcher boot and a hand-off launch under qemu

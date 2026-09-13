@@ -120,6 +120,9 @@ const Setting kEmuSettings[] = {
           "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"),
   boolean("emu.autoload", "AUTOLOAD ON START", "false", FlagRestart, Dep::None,
           "WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE"),
+  // Applied when the NAND is opened, so only a new DSi session sees it.
+  boolean("emu.dsi_hide_installed", "HIDE NAND DSIWARE", "false", FlagRestart, Dep::None,
+          "DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED"),
   // Live, and it was not always: it used to need a restart because the MAC was
   // only randomized into the firmware image for a run that asked for a session,
   // and two instances sharing a dump's MAC is the fault that made PictoChat

@@ -92,7 +92,8 @@ const char* kUsage =
     "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
     "  --dsi-mode      boot a DSi from its NAND (boot2, then the DSi Launcher) instead of the DS menu; no\n"
     "                  ROM. Needs --bios9i F --bios7i F (the DSi BIOS pair) and --dsi-nand F (a nand.bin\n"
-    "                  with its nocash footer), with --bios9/--bios7 and the DSi's --firmware as usual.\n"
+    "                  with its nocash footer; paths.dsi_nand), with --bios9/--bios7 as usual and the DSi's\n"
+    "                  firmware (--firmware, or paths.dsi_firmware for every DSi session).\n"
     "                  EXPERIMENTAL: interpreter only, no idle skip. The NAND is opened\n"
     "                  read-only; what a session changes is kept as files instead: title saves as\n"
     "                  <GAMECODE>.pub/.prv/.bnr (paths.saves, else beside the dump), system settings in\n"
@@ -100,7 +101,8 @@ const char* kUsage =
     "                  A DSiWare .nds/.cia given with it is installed into the session (not the dump) unless\n"
     "                  the NAND has it; it needs its signed DSi TMD: embedded in the CIA, cached beside the\n"
     "                  saves, downloaded from Nintendo's update CDN, or --dsi-tmd F (default <game>.tmd).\n"
-    "                  --dsi-offline never downloads; --dsi-hide-installed hides the dump's own DSiWare.\n"
+    "                  --dsi-offline never downloads; --dsi-hide-installed (emu.dsi_hide_installed) hides\n"
+    "                  the dump's own DSiWare.\n"
     "                  The title starts straight away; --dsi-menu boots to the DSi Menu with it instead\n"
     "                  With no title, the loader card is in the slot there as on the DS menu: launching\n"
     "                  it raises the game list, and a DS game picked from it runs on a DS\n"
@@ -1109,29 +1111,12 @@ int main(int argc, char** argv) {
   }
   // DSiWare named without --dsi-mode runs the DSi machine too: as a DS it
   // would not start at all.
+  const bool dsi_mode_asked = dsi_mode;   // --dsi-mode itself, not a DSiWare title implying it
   if (!dsi_mode && rom && !dsi_nand && ds::io::file_is_dsiware(rom)) dsi_mode = true;
   // What the command line asked for before DSi mode overrides it below: a DS
   // game picked from the loader cart on the DSi launcher gets them back.
   const std::string ds_cli_jit = cli.has("emu.jit") ? cli.str("emu.jit") : std::string();
   const std::string ds_cli_quantum = cli.has("emu.quantum") ? cli.str("emu.quantum") : std::string();
-  if (dsi_mode) {
-    // A NAND boot to the launcher. A game named with it is DSiWare, installed
-    // into the session's NAND rather than put in the card slot (a cart during
-    // a NAND boot has not been checked against melonDS), so the rest of the
-    // startup runs as the cartless firmware boot it is.
-    dsi_hle = !dsi_nand && rom;
-    if (!dsi_nand && !rom) { std::fprintf(stderr, "--dsi-mode needs --dsi-nand or a DSiWare title\n"); return 2; }
-    if (dsi_hle && dsi_menu) { std::fprintf(stderr, "--dsi-menu needs --dsi-nand: without one there is no DSi Menu to boot\n"); return 2; }
-    // Without a NAND the title goes in the slot and is handed over from there
-    // (NDS::prepare_dsi_hle), so the ROM path stays as for any game.
-    if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
-    // Every DSi result so far is on the interpreter; the recompilers have never
-    // run a DSi. And lockstep, which is the interleave the NAND boot was matched
-    // to melonDS under (the headless default). On the command line, so both win
-    // over the config files.
-    cli.set("emu.jit", "false");
-    cli.set("emu.quantum", std::to_string(ds::LOCKSTEP_QUANTUM));
-  }
   ds::sdl::Config cfg;
   [[maybe_unused]] bool ds_jit = true;    // emu.jit and emu.quantum as a DS game would have them (ds_cli_jit)
   long ds_quantum = 0;
@@ -1145,11 +1130,41 @@ int main(int argc, char** argv) {
     ds_jit = t.flag("emu.jit", true);
     ds_quantum = t.num("emu.quantum", 0);
   }
+  // paths.dsi_nand stands in for --dsi-nand, but only under --dsi-mode: DSiWare
+  // named on its own or picked from the game list keeps the hand-off, which
+  // needs no signed TMD and starts sooner. emu.dsi_hide_installed likewise
+  // stands in for --dsi-hide-installed.
+  const std::string dsi_nand_cfg = dsi_mode_asked && !dsi_nand ? cfg.str("paths.dsi_nand") : std::string();
+  if (!dsi_nand_cfg.empty()) dsi_nand = dsi_nand_cfg.c_str();
+  if (!dsi_hide_installed) dsi_hide_installed = cfg.flag("emu.dsi_hide_installed", false);
+  if (dsi_mode) {
+    // A NAND boot to the launcher. A game named with it is DSiWare, installed
+    // into the session's NAND rather than put in the card slot (a cart during
+    // a NAND boot has not been checked against melonDS), so the rest of the
+    // startup runs as the cartless firmware boot it is.
+    dsi_hle = !dsi_nand && rom;
+    if (!dsi_nand && !rom) { std::fprintf(stderr, "--dsi-mode needs --dsi-nand (or paths.dsi_nand in %s) or a DSiWare title\n", global_ini.c_str()); return 2; }
+    if (dsi_hle && dsi_menu) { std::fprintf(stderr, "--dsi-menu needs --dsi-nand: without one there is no DSi Menu to boot\n"); return 2; }
+    // Without a NAND the title goes in the slot and is handed over from there
+    // (NDS::prepare_dsi_hle), so the ROM path stays as for any game.
+    if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
+    // Every DSi result so far is on the interpreter; the recompilers have never
+    // run a DSi. And lockstep, which is the interleave the NAND boot was matched
+    // to melonDS under (the headless default). On the command line, so both win
+    // over the config files.
+    cli.set("emu.jit", "false");
+    cli.set("emu.quantum", std::to_string(ds::LOCKSTEP_QUANTUM));
+  }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.latency_frames", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
-  const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7"), fw = cfg.str("paths.firmware");
+  const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
+  // The DSi's own firmware, for a session that is a DSi from the start, unless
+  // --firmware named one; a path that names no file counts as unset.
+  const std::string dsi_fw = cfg.str("paths.dsi_firmware");
+  const bool have_dsi_fw = !dsi_fw.empty() && std::filesystem::exists(dsi_fw);
+  const std::string fw = dsi_mode && have_dsi_fw && !cli.has("paths.firmware") ? dsi_fw : cfg.str("paths.firmware");
   // The DSi BIOS pair: needed for DSi mode, and for DSiWare picked from the
   // game list. A path that names no file counts as unset.
   const std::string dsi_bios9i = bios9i ? std::string(bios9i) : cfg.str("paths.bios9i");
@@ -1264,6 +1279,7 @@ int main(int argc, char** argv) {
   {
     std::string err;
     if (!nds.load_bios(bios9, bios7, fw, user, &err)) { std::fprintf(stderr, "bios: %s\n", err.c_str()); return 1; }
+    if (!nds.firmware_synthetic) VLOG("firmware: %s\n", fw.c_str());
     // A MAC of this console's own, always -- not only when a session was asked
     // for on the command line. Every firmware dump carries the MAC of the
     // console it came off, and the generated one has a fixed 00:09:BF:11:22:33,
@@ -1400,7 +1416,7 @@ int main(int argc, char** argv) {
   // file the user cannot regenerate. See NDS::load_firmware_override.
   // None in DSi mode: like its NAND copy, a DSi session keeps nothing yet, and
   // the DSi firmware's sidecar would otherwise land beside the user's dump.
-  const std::string fw_override = dsi_mode ? std::string() : cfg.str("paths.firmware_override", fw + ".ovr");
+  std::string fw_override = dsi_mode ? std::string() : cfg.str("paths.firmware_override", fw + ".ovr");
   if (!nds.firmware_synthetic && !fw_override.empty()) {
     std::string err;
     if (!nds.load_firmware_override(fw_override, err)) {
@@ -3287,6 +3303,19 @@ sdl_ready:
         return;
       }
       if (!open_dsi_sd()) return;
+      // paths.dsi_firmware replaces the DS firmware this session booted with,
+      // and the DS firmware's settings sidecar is left alone from here on.
+      if (have_dsi_fw && !cli.has("paths.firmware") && fw != dsi_fw) {
+        if (!nds.load_bios(bios9, bios7, dsi_fw, user, &err)) {
+          std::fprintf(stderr, "launcher: dsi firmware: %s\n", err.c_str());
+          input.request_quit();   // the DS firmware is gone: nothing to go back to
+          return;
+        }
+        nds.set_wifi_mac_suffix(static_cast<u32>(cfg.num("net.mac_suffix", 0)));
+        fw_override.clear();
+        host.fw_override.clear();
+        VLOG("launcher: DSi firmware %s\n", dsi_fw.c_str());
+      }
       nds.dsi_nand.close();
       nds.dsi_nand_synthetic = false;
       nds.dsi_nand_boot = false;   // picked from the DSi launcher: the made-up NAND is handed over, not booted

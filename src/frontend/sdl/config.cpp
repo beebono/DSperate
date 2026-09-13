@@ -175,6 +175,12 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # bios9i = /path/to/biosdsi9.bin  # the DSi BIOS pair: DSiWare (a .nds/.dsi/.cia marked [DSi] in the
 # bios7i = /path/to/biosdsi7.bin  # game list, or named on the command line) runs on the DSi machine
                                 # and needs both; without them it is refused
+# dsi_nand = /path/to/nand.bin  # --dsi-mode's NAND (a dump with its nocash footer) when --dsi-nand
+                                # is not given. Only --dsi-mode uses it: DSiWare named on the command
+                                # line or picked from the game list still runs without the NAND
+# dsi_firmware = /path/to/dsifirmware.bin  # the DSi's firmware, used instead of firmware above
+                                # whenever the machine is a DSi (--dsi-mode, DSiWare) and --firmware
+                                # is not given; unset or missing, firmware above as before
 # dsi_font = /path/to/TWLFontTable.dat  # --dsi-mode without a NAND: a console's DSi system font
                                 # (/sys/TWLFontTable.dat) instead of DSperate's own, which is used
                                 # when this is unset; [user] above is the DSi's settings there too
@@ -302,6 +308,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # SIGTERM, not SIGKILL. Resume with autoload below (or --load-state
                                 # <that path>); the slot never shows in the menu. Skipped during a
                                 # replay or recording
+# dsi_hide_installed = false    # --dsi-mode: hide the NAND dump's own DSiWare from the DSi Menu for
+                                # the session (the dump is never changed); --dsi-hide-installed
 # autoload = false              # when a game starts and its auto slot exists, resume from it instead
                                 # of booting. Applies to a game named on the command line and to one
                                 # launched from the loader cart's picker; never to a cart-less
