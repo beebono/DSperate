@@ -377,6 +377,22 @@ ways: DSiWare needs no `--dsi-mode`, and the picker lists it in every mode.
     DSIWARE), stands in for `--dsi-hide-installed`.
 - `.app` streaming (the title is held in memory, twice with the synthesised
   NAND): deferred past 2.0.0 (USER DECISION).
+- **NAND title shortcuts** (2026-09-13, USER DECISIONS): launching from the
+  DSi Menu is slow on a handheld because the launcher reads the `.app`
+  through the emulated eMMC. `emu.dsi_nand_shortcuts` (a live row, NAND
+  DSIWARE SHORTCUTS, greyed out without `paths.games`) keeps a
+  `<banner title>.dspr.nds` file in the games folder for every DSiWare title
+  on `paths.dsi_nand`: written when switched on and at every start (new
+  titles added, removed ones cleared), every `.dspr.nds` deleted when
+  switched off. A shortcut is 64 bytes: `DSPRSTUB`, version, title ID, and
+  the NAND's CID and console ID (one from another NAND is refused). Opening
+  one -- from the command line, the loader's list or a frontend such as
+  EmulationStation -- runs the launcher hand-off with the real NAND behind
+  it (`NDS::load_dsi_nand_title`: the `.app` read out of the NAND once, its
+  content ID, the console data from the NAND's TWLCFG/HWINFO), saving where
+  that NAND's DSi Menu sessions do. Core: `io/dsi_nand_launch`; headless:
+  a `.dspr.nds` ROM with `--dsi-nand`, `--dsi-shortcuts DIR`,
+  `--dsi-shortcuts-clear DIR`.
 - A DSi session runs with the configured recompiler, interleave and idle
   skip (2026-09-13; before that it forced the interpreter and lockstep).
   It prints "EXPERIMENTAL".

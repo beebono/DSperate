@@ -90,6 +90,9 @@ class FatVolume {
   bool lookup(const std::string& path, Entry& out) const;
   std::vector<Entry> list(const Entry& dir) const;
   bool read(const Entry& file, std::vector<u8>& out) const;
+  // `len` bytes of a file from `offset`, reading only the sectors that hold
+  // them (a DSiWare banner without the whole .app); false past its end.
+  bool read_part(const Entry& file, u64 offset, u32 len, u8* out) const;
 
   // Replace a file's contents (existing file: its chain is grown or trimmed;
   // otherwise created in its parent directory, which must exist).

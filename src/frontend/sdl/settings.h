@@ -59,6 +59,7 @@ enum class Dep : u8 {
   // The session, not the request: a --netplay that could not open a socket
   // leaves an ordinary console, and these rows stay usable.
   NetSession,
+  GamesPath,          // paths.games is set: rows that write into the games folder
 };
 
 struct Setting {

@@ -8,6 +8,7 @@
 // trace harness is the oracle; see docs/dsiware-scoping.md.
 #include "core/nds.h"
 #include "core/io/dsi_nand_synth.h"
+#include "core/io/dsi_nand_launch.h"
 #include "core/crypto/sha1.h"
 #include "core/cpu/cp15.h"
 #if DSPERATE_JIT
@@ -335,6 +336,19 @@ void NDS::dsi_soft_reset() {
 #if DSPERATE_JIT
   if (jit::has_runtime()) jit::flush_all();   // boot2 went over NWRAM and ITCM
 #endif
+}
+
+bool NDS::load_dsi_nand_title(u32 title_lo, std::string* err) {
+  if (!dsi_nand.valid()) { if (err) *err = "no NAND is loaded"; return false; }
+  if (!bios_native_dsi) { if (err) *err = "the DSi BIOS pair is not loaded"; return false; }
+  std::vector<u8> srl;
+  u32 content_id = 0;
+  if (!io::nand_read_title_app(dsi_nand, bus.bios7i.get(), title_lo, srl, content_id, err)) return false;
+  if (dsi_boot_blobs.empty() && !io::nand_boot_blobs(dsi_nand, bus.bios7i.get(), dsi_boot_blobs, err)) return false;
+  if (!load_rom_image(std::move(srl))) { if (err) *err = "the title's .app is not a ROM this can load"; return false; }
+  dsi_hle_content_id = content_id;
+  dsi_nand.mark_state_base();
+  return true;
 }
 
 bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std::vector<std::string>* report) {

@@ -308,6 +308,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # SIGTERM, not SIGKILL. Resume with autoload below (or --load-state
                                 # <that path>); the slot never shows in the menu. Skipped during a
                                 # replay or recording
+# dsi_nand_shortcuts = false    # a <title>.dspr.nds file in paths.games for each DSiWare title on
+                                # paths.dsi_nand: opening one starts the title straight from the NAND
+                                # (its saves and settings), skipping the DSi Menu and its slow load.
+                                # Kept up to date at every start; false removes every .dspr.nds there
 # dsi_hide_installed = false    # --dsi-mode: hide the NAND dump's own DSiWare from the DSi Menu for
                                 # the session (the dump is never changed); --dsi-hide-installed
 # autoload = false              # when a game starts and its auto slot exists, resume from it instead

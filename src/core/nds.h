@@ -142,6 +142,13 @@ struct NDS {
   // reset(): it re-attaches the NAND itself). `report` gets one line per
   // substitution.
   bool prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std::vector<std::string>* report = nullptr);
+  // A DSiWare title installed on the loaded NAND into the slot for the
+  // hand-off (io/dsi_nand_launch.h): its .app read out of the NAND, its content
+  // ID, and -- unless a file supplied them -- the console data from the NAND's
+  // TWLCFG/HWINFO. Marks the NAND's state base, so saves imported after this
+  // are carried by a state. Call after load_dsi_nand and load_dsi_bios, before
+  // prepare_dsi_hle.
+  bool load_dsi_nand_title(u32 title_lo, std::string* err);
   bool dsi_nand_synthetic = false;   // dsi_nand was built by prepare_dsi_hle, not loaded
   // The user's /sys/TWLFontTable.dat for a synthesised NAND (set before
   // prepare_dsi_hle); empty, DSperate's own font goes there instead.

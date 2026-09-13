@@ -15,6 +15,7 @@
 #include "core/state/state.h"
 #include "core/io/dsi_nand_persist.h"
 #include "core/io/dsi_title_install.h"
+#include "core/io/dsi_nand_launch.h"
 #include "core/cheat/database.h"
 #include "core/cart/miniz/miniz_tdef.h"
 #if DSPERATE_JIT
@@ -554,6 +555,12 @@ std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
     // DSiWare runs on the DSi machine (the launcher hand-off, see the Launch
     // result below); it is marked so it is not mistaken for a card game.
     const std::string path = dir + "/" + name;
+    // A NAND title shortcut (io/dsi_nand_launch.h): the title installed on
+    // paths.dsi_nand, started without the DSi Menu.
+    if (ds::io::is_shortcut_name(name)) {
+      games.push_back({"[DSi] " + name.substr(0, name.size() - std::strlen(ds::io::kShortcutSuffix)), path});
+      continue;
+    }
     const bool dsi = ds::io::file_is_dsiware(path);
     if (!dsi && ext != "nds" && ext != "zip") continue;
     games.push_back({dsi ? "[DSi] " + rom_stem(name) : rom_stem(name), path});
@@ -1112,7 +1119,9 @@ int main(int argc, char** argv) {
   // DSiWare named without --dsi-mode runs the DSi machine too: as a DS it
   // would not start at all.
   const bool dsi_mode_asked = dsi_mode;   // --dsi-mode itself, not a DSiWare title implying it
-  if (!dsi_mode && rom && !dsi_nand && ds::io::file_is_dsiware(rom)) dsi_mode = true;
+  // A NAND title shortcut runs the title from the NAND with the hand-off.
+  const bool rom_shortcut = rom && ds::io::is_shortcut_name(rom);
+  if (!dsi_mode && rom && !dsi_nand && (rom_shortcut || ds::io::file_is_dsiware(rom))) dsi_mode = true;
   ds::sdl::Config cfg;
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
@@ -1124,6 +1133,9 @@ int main(int argc, char** argv) {
   const std::string dsi_nand_cfg = dsi_mode_asked && !dsi_nand ? cfg.str("paths.dsi_nand") : std::string();
   if (!dsi_nand_cfg.empty()) dsi_nand = dsi_nand_cfg.c_str();
   if (!dsi_hide_installed) dsi_hide_installed = cfg.flag("emu.dsi_hide_installed", false);
+  // The NAND a shortcut's title comes from: --dsi-nand, else paths.dsi_nand
+  // (whether or not --dsi-mode was given).
+  const std::string shortcut_nand = dsi_nand ? std::string(dsi_nand) : cfg.str("paths.dsi_nand");
   if (dsi_mode) {
     // A NAND boot to the launcher. A game named with it is DSiWare, installed
     // into the session's NAND rather than put in the card slot (a cart during
@@ -1316,9 +1328,13 @@ int main(int argc, char** argv) {
     if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", dsi_bios9i.c_str(), dsi_bios7i.c_str()); return 1; }
     if (!open_dsi_sd()) return 1;
+    if (rom_shortcut) {
+      if (shortcut_nand.empty()) { std::fprintf(stderr, "%s is a NAND title shortcut and needs the NAND: --dsi-nand or paths.dsi_nand in %s\n", rom, global_ini.c_str()); return 1; }
+      if (!nds.load_dsi_nand(shortcut_nand, &err)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
+    }
     nds.set_dsi(true);
     nds.dsi_hle_launch = true;   // the NAND and settings are made once the title is in the slot (below)
-    std::fprintf(stderr, "console: DSi without a NAND (EXPERIMENTAL)\n");
+    std::fprintf(stderr, rom_shortcut ? "console: DSi, a title from its NAND without the DSi Menu (EXPERIMENTAL)\n" : "console: DSi without a NAND (EXPERIMENTAL)\n");
   } else if (dsi_mode) {
     std::string err;
     if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
@@ -1707,7 +1723,18 @@ sdl_ready:
     for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return ext == ".cia";
   }();
-  if (dsi_hle && rom_is_cia) {
+  // A shortcut's title comes out of the NAND loaded above.
+  auto load_shortcut_title = [&](const std::string& path) -> bool {
+    ds::io::NandShortcut sc;
+    std::string err;
+    if (!ds::io::read_shortcut(path, sc)) { std::fprintf(stderr, "dsi: %s is not a NAND title shortcut\n", path.c_str()); return false; }
+    if (!sc.from(nds.dsi_nand)) { std::fprintf(stderr, "dsi: %s was made from another NAND than %s\n", path.c_str(), shortcut_nand.c_str()); return false; }
+    if (!nds.load_dsi_nand_title(sc.title_lo, &err)) { std::fprintf(stderr, "dsi: %s: %s\n", path.c_str(), err.c_str()); return false; }
+    return true;
+  };
+  if (dsi_hle && rom_shortcut) {
+    if (!load_shortcut_title(rom_path)) { SDL_Quit(); return 1; }
+  } else if (dsi_hle && rom_is_cia) {
     // A CIA carries the SRL inside; the slot takes the SRL.
     std::vector<ds::u8> srl;
     std::string err;
@@ -2024,7 +2051,33 @@ sdl_ready:
   session.load_enabled(nds);
   // The library the loader cart's picker offers. Only read when there is a
   // loader cart to raise it: a normal session never shows the list.
-  const std::vector<ds::sdl::Menu::GameEntry> games =
+  // NAND DSIWARE SHORTCUTS (emu.dsi_nand_shortcuts): a .dspr.nds file in the
+  // games folder for every DSiWare title on paths.dsi_nand while it is on,
+  // none while it is off (io/dsi_nand_launch.h). Brought up to date at every
+  // start, so a title installed or removed since is picked up, and when the
+  // row is changed. Reads its own copy of the NAND: the session's is not
+  // touched. Returns a one-line summary for the toast.
+  auto sync_nand_shortcuts = [&](bool on) -> std::string {
+    const std::string dir = cfg.str("paths.games");
+    if (dir.empty()) return "NO GAMES FOLDER";
+    ds::io::NandImage nand;
+    std::vector<ds::u8> b7;
+    if (on) {
+      if (shortcut_nand.empty() || !std::filesystem::exists(shortcut_nand)) return "NO DSI NAND (PATHS.DSI_NAND)";
+      if (!have_dsi_bios()) return "NO DSI BIOS";
+      if (!nand.open(shortcut_nand)) return "THE DSI NAND CANNOT BE READ";
+      std::ifstream f(dsi_bios7i, std::ios::binary);
+      b7.assign(std::istreambuf_iterator<char>(f), {});
+      if (b7.size() < 0x10000) return "THE DSI BIOS CANNOT BE READ";
+    }
+    const ds::io::ShortcutSync r = ds::io::sync_shortcuts(dir, on ? &nand : nullptr, on ? b7.data() : nullptr, on);
+    if (r.written || r.removed) std::fprintf(stderr, "dsi shortcuts: %d written, %d removed in %s\n", r.written, r.removed, dir.c_str());
+    for (const std::string& n : r.notes) std::fprintf(stderr, "dsi shortcuts: %s\n", n.c_str());
+    return std::to_string(r.written) + " ADDED, " + std::to_string(r.removed) + " REMOVED";
+  };
+  if (cfg.flag("emu.dsi_nand_shortcuts", false)) sync_nand_shortcuts(true);
+  std::string shortcuts_note;   // what the last change of the row did, for a toast
+  std::vector<ds::sdl::Menu::GameEntry> games =
       boot_firmware && nds.cart ? enumerate_games(cfg.str("paths.games")) : std::vector<ds::sdl::Menu::GameEntry>{};
   menu.set_games(&games);
   // Armed until a game is launched: after that the cart in the slot is a real
@@ -2093,7 +2146,9 @@ sdl_ready:
     p.photos_dir = p.saves_dir + "/dsi-photos";
     return p;
   };
-  ds::io::NandPersistPaths dsi_paths = dsi_hle ? hle_paths(rom_path)
+  // A shortcut's title saves where a session on that NAND's DSi Menu does.
+  ds::io::NandPersistPaths dsi_paths = rom_shortcut ? ds::io::NandPersistPaths::beside(shortcut_nand, cfg.str("paths.saves"))
+                                     : dsi_hle ? hle_paths(rom_path)
                                      : dsi_mode ? ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")) : ds::io::NandPersistPaths{};
   // The saves an earlier session carried out go back into a made-up NAND
   // before the title reads it; then that is the baseline the export compares.
@@ -2593,6 +2648,8 @@ sdl_ready:
         return cfg.str("net.mode", "off") == "internet" ? "" : "ONLY WITH NETWORK FEATURES ON INTERNET";
       case ds::sdl::Dep::NetSession:
         return (net_live && *net_live) ? "NOT DURING A NETWORK SESSION" : "";
+      case ds::sdl::Dep::GamesPath:
+        return cfg.str("paths.games").empty() ? "NEEDS A GAMES FOLDER (PATHS.GAMES)" : "";
       }
       return "";
     }
@@ -2654,6 +2711,11 @@ sdl_ready:
     }
     if (is("emu.timing_oc")) { nds.gpu3d.set_timing_oc(on); nds.gpu3d.set_geometry_worker(on || cfg.flag("emu.cpu_oc", false)); return; }
     if (is("emu.fast_load")) { nds.io.set_cart_bulk(on); return; }
+    if (is("emu.dsi_nand_shortcuts")) {
+      shortcuts_note = sync_nand_shortcuts(on);   // shown by the frame loop's toast
+      if (boot_firmware && nds.cart) games = enumerate_games(cfg.str("paths.games"));
+      return;
+    }
     // NETWORK FEATURES. Live, so a player can put the radio up for a trade
     // and take it down again without quitting: Pokemon's Union Room comes back
     // to the game afterwards, which is what makes this worth having (there is
@@ -3266,7 +3328,12 @@ sdl_ready:
     // DSiWare runs on the DSi machine with the launcher hand-off and a
     // made-up NAND, as `dsperate --dsi-mode game` does. There is no way
     // back to the DS menu from it: the session ends when the title does.
-    const bool pick_dsi = ds::io::file_is_dsiware(pick);
+    const bool pick_shortcut = ds::io::is_shortcut_name(pick);
+    const bool pick_dsi = pick_shortcut || ds::io::file_is_dsiware(pick);
+    if (pick_shortcut && shortcut_nand.empty()) {
+      std::fprintf(stderr, "launcher: %s needs the NAND (paths.dsi_nand in %s)\n", pick.c_str(), global_ini.c_str());
+      return;
+    }
     bool left_dsi = false;                      // a DS pick leaving the DSi machine
     if (pick_dsi && !have_dsi_bios()) {
       std::fprintf(stderr, "launcher: %s is DSiWare and needs the DSi BIOS pair (paths.bios9i/paths.bios7i in %s)\n", pick.c_str(), global_ini.c_str());
@@ -3299,6 +3366,11 @@ sdl_ready:
         VLOG("launcher: DSi firmware %s\n", dsi_fw.c_str());
       }
       nds.dsi_nand.close();
+      if (pick_shortcut && !nds.load_dsi_nand(shortcut_nand, &err)) {
+        std::fprintf(stderr, "launcher: dsi nand: %s\n", err.c_str());
+        input.request_quit();
+        return;
+      }
       nds.dsi_nand_synthetic = false;
       nds.dsi_nand_boot = false;   // picked from the DSi launcher: the made-up NAND is handed over, not booted
       nds.dsi_boot_blobs.clear();
@@ -3324,7 +3396,9 @@ sdl_ready:
     nds.reset();
     discard_session_cache();
     bool loaded;
-    if (pick_dsi && pick.size() > 4 && (pick.compare(pick.size() - 4, 4, ".cia") == 0 || pick.compare(pick.size() - 4, 4, ".CIA") == 0)) {
+    if (pick_shortcut) {
+      loaded = load_shortcut_title(pick);
+    } else if (pick_dsi && pick.size() > 4 && (pick.compare(pick.size() - 4, 4, ".cia") == 0 || pick.compare(pick.size() - 4, 4, ".CIA") == 0)) {
       std::vector<ds::u8> srl;
       std::string err;
       loaded = ds::io::read_dsiware(pick, srl, &err) && nds.load_rom_image(std::move(srl));
@@ -3344,7 +3418,7 @@ sdl_ready:
     nds.setup_direct_boot();
     if (left_dsi) VLOG("launcher: %s on a DS (%s)\n", pick.c_str(), jit ? "recompiler" : "interpreter");
     if (pick_dsi) {
-      dsi_paths = hle_paths(pick);
+      dsi_paths = pick_shortcut ? ds::io::NandPersistPaths::beside(shortcut_nand, cfg.str("paths.saves")) : hle_paths(pick);
       import_dsiware_saves();
       nand_writes_seen = nand_exported = nds.dsi_nand.writes;
       std::fprintf(stderr, "launcher: %s on the DSi (EXPERIMENTAL)\n", pick.c_str());
@@ -3839,6 +3913,14 @@ sdl_ready:
     // wireless posts one too.
     toast_step();
 
+    if (!shortcuts_note.empty()) {
+      Toast t;
+      t.header = "NAND SHORTCUTS";
+      t.title = std::move(shortcuts_note);
+      t.frames = TOAST_INFO_FRAMES;
+      toast_queue.push_back(std::move(t));
+      shortcuts_note.clear();
+    }
     // A title started the DSP, which is not emulated (NDS::dsi_dsp_started):
     // say so on screen once per start, since it usually stops there.
     if (nds.dsi_dsp_started != dsp_warned) {

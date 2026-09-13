@@ -406,6 +406,28 @@ bool FatVolume::read(const Entry& file, std::vector<u8>& out) const {
   return true;
 }
 
+bool FatVolume::read_part(const Entry& file, u64 offset, u32 len, u8* out) const {
+  if (file.dir() || offset + len > file.size) return false;
+  if (!len) return true;
+  const u32 cs = cluster_bytes();
+  const std::vector<u32> cl = chain(file.cluster);
+  if (static_cast<u64>(cl.size()) * cs < file.size) return false;
+  std::vector<u8> sec(bps_);
+  u64 done = 0;
+  while (done < len) {
+    const u64 at = offset + done;
+    const u64 k = at / cs;
+    const u32 in_cluster = static_cast<u32>(at % cs);
+    const u32 s = in_cluster / bps_ * bps_;
+    read_(cluster_offset(cl[static_cast<size_t>(k)]) + s, bps_, sec.data());
+    const u32 from = in_cluster - s;
+    const u32 take = static_cast<u32>(std::min<u64>(bps_ - from, len - done));
+    std::memcpy(out + done, sec.data() + from, take);
+    done += take;
+  }
+  return true;
+}
+
 void FatVolume::walk(const std::function<void(const std::string&, const Entry&)>& fn) const {
   std::vector<std::pair<std::string, Entry>> stack;
   stack.emplace_back("", root());

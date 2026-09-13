@@ -15,6 +15,7 @@
 #include "core/io/dsi_nand_fs.h"
 #include "core/io/dsi_nand_persist.h"
 #include "core/io/dsi_nand_synth.h"
+#include "core/io/dsi_nand_launch.h"
 #include "core/io/dsi_sd.h"
 
 #include <cstdio>
@@ -431,8 +432,54 @@ static void test_nand_state() {
   CHECK(plain.state_identity() != nand.state_identity());
 }
 
+// NAND title shortcuts (io/dsi_nand_launch.h): the titles, their banner
+// names, the .app and console data read back, and the .dspr.nds sync.
+static void test_nand_shortcuts() {
+  std::vector<u8> srl(0x6000, 0);
+  const u32 lo = 0x4B535445, hi = 0x00030004;   // "ETSK"
+  std::memcpy(&srl[0x230], &lo, 4); std::memcpy(&srl[0x234], &hi, 4);
+  const u32 banner = 0x5000;
+  std::memcpy(&srl[0x68], &banner, 4);
+  const char16_t en[] = u"Test: Title\nPublisher";
+  for (size_t i = 0; en[i]; ++i) { srl[banner + 0x340 + i * 2] = static_cast<u8>(en[i]); srl[banner + 0x341 + i * 2] = static_cast<u8>(en[i] >> 8); }
+  ds::bios::UserSettings user;
+  ds::io::DsiConsoleFiles files = ds::io::make_dsi_console_files(user, ds::io::dsi_region_for(0x00000002, 1), ds::io::kSynthConsoleId);
+  files.font = std::vector<u8>(0x300, 0xAB);
+  ds::io::NandImage nand;
+  std::string err;
+  CHECK(ds::io::build_synthetic_nand(nand, nullptr, srl, files, &err));
+
+  const std::vector<ds::io::NandTitle> titles = ds::io::nand_dsiware_titles(nand, nullptr);
+  CHECK(titles.size() == 1);
+  if (titles.size() != 1) return;
+  CHECK(titles[0].title_lo == lo && titles[0].code == "KSTE" && titles[0].name == "Test Title");   // the first line, made file-safe
+  std::vector<u8> app, blobs;
+  u32 cid = 99;
+  CHECK(ds::io::nand_read_title_app(nand, nullptr, lo, app, cid, &err) && app == srl && cid == 0);
+  CHECK(!ds::io::nand_read_title_app(nand, nullptr, 0x4B585858, app, cid, &err));
+  CHECK(ds::io::nand_boot_blobs(nand, nullptr, blobs, &err) && blobs == files.boot_blobs());
+
+  const std::filesystem::path dir = std::filesystem::temp_directory_path() / ("dsperate-shortcuts-" + std::to_string(getpid()));
+  std::filesystem::create_directories(dir);
+  { std::ofstream(dir / "game.nds") << "x"; std::ofstream(dir / "Gone Title.dspr.nds") << "stale"; }
+  ds::io::ShortcutSync r = ds::io::sync_shortcuts(dir.string(), &nand, nullptr, true);
+  CHECK(r.written == 1 && r.removed == 1);
+  ds::io::NandShortcut sc;
+  CHECK(ds::io::is_shortcut_name((dir / "Test Title.dspr.nds").string()) && ds::io::is_shortcut_name("A.DSPR.NDS") && !ds::io::is_shortcut_name("a.nds"));
+  CHECK(ds::io::read_shortcut((dir / "Test Title.dspr.nds").string(), sc) && sc.title_lo == lo && sc.from(nand));
+  ds::io::NandImage other;
+  other.create_in_memory(64 << 20, files.hwinfo_s.data(), 0x1234);
+  CHECK(!sc.from(other));
+  r = ds::io::sync_shortcuts(dir.string(), &nand, nullptr, true);
+  CHECK(r.written == 0 && r.removed == 0);   // already up to date
+  r = ds::io::sync_shortcuts(dir.string(), nullptr, nullptr, false);
+  CHECK(r.removed == 1 && !std::filesystem::exists(dir / "Test Title.dspr.nds") && std::filesystem::exists(dir / "game.nds"));
+  std::filesystem::remove_all(dir);
+}
+
 int main() {
   test_sha1();
+  test_nand_shortcuts();
   test_nand_state();
   test_fat12();
   test_synthetic_nand();

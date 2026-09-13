@@ -10,6 +10,7 @@
 #include "core/state/state.h"
 #include "core/io/dsi_nand_persist.h"
 #include "core/io/dsi_title_install.h"
+#include "core/io/dsi_nand_launch.h"
 #if DSPERATE_CHEEVOS
 #include "cheevos/cheevos_http.h"
 #endif
@@ -271,7 +272,7 @@ int main(int argc, char** argv) {
   bool cpu_oc = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
-  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr; const char* dsi_sd = nullptr; ds::u64 dsi_autoload_id = 0;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr; const char* dsi_sd = nullptr; ds::u64 dsi_autoload_id = 0; const char* dsi_shortcuts = nullptr; bool dsi_shortcuts_on = true;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
@@ -332,7 +333,9 @@ int main(int argc, char** argv) {
     else if (arg("--dsi-persist")) dsi_persist = argv[++i];   // carry DSi saves (<CODE>.pub/.prv/.bnr), the system sidecar (nand.ovr) and photos (photos/) in and out of DIR
     else if (flag("--dsi-nand-write")) dsi_nand_write = true;   // write the guest's NAND writes into the file (for diffing against melonDS; use a copy). Default: held in memory
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];        // a real nand.bin (nocash footer): the eMMC behind the SD/MMC host, and the console ID
-    else if (arg("--dsi-sd")) dsi_sd = argv[++i];            // a host folder as the DSi's SD card; the guest's changes are synced back into it at exit
+    else if (arg("--dsi-sd")) dsi_sd = argv[++i];
+    else if (arg("--dsi-shortcuts")) dsi_shortcuts = argv[++i];                                         // with --dsi-nand: a .dspr.nds shortcut in DIR for each installed DSiWare title, then exit
+    else if (arg("--dsi-shortcuts-clear")) { dsi_shortcuts = argv[++i]; dsi_shortcuts_on = false; }   // remove every .dspr.nds in DIR, then exit            // a host folder as the DSi's SD card; the guest's changes are synced back into it at exit
     else if (flag("--dsi")) dsi_mode = 1;                    // force the DSi machine (default: a DSi-capable header with the DSi BIOS loaded)
     else if (flag("--no-dsi")) dsi_mode = 0;
     else if (arg("--trace")) trace = argv[++i];
@@ -405,6 +408,13 @@ int main(int argc, char** argv) {
     if (!nds.load_dsi_bios(bios9i ? bios9i : "", bios7i ? bios7i : "", &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (dsi_boot && !nds.load_dsi_boot_blobs(dsi_boot, &err)) { std::fprintf(stderr, "dsi boot: %s\n", err.c_str()); return 1; }
     if (dsi_nand && !nds.load_dsi_nand(dsi_nand, &err, dsi_nand_write)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
+    if (dsi_shortcuts) {
+      if (dsi_shortcuts_on && (!nds.dsi_nand.valid() || !nds.bios_native_dsi)) { std::fprintf(stderr, "--dsi-shortcuts needs --dsi-nand and --bios9i/--bios7i\n"); return 1; }
+      const ds::io::ShortcutSync r = ds::io::sync_shortcuts(dsi_shortcuts, &nds.dsi_nand, nds.bus.bios7i.get(), dsi_shortcuts_on);
+      std::fprintf(stderr, "dsi shortcuts: %d written, %d removed in %s\n", r.written, r.removed, dsi_shortcuts);
+      for (const std::string& n : r.notes) std::fprintf(stderr, "dsi shortcuts: %s\n", n.c_str());
+      return 0;
+    }
     if (dsi_sd) {
       ds::io::SdCard::Report r;
       if (!nds.dsi_sd.open(dsi_sd, &r, &err)) { std::fprintf(stderr, "dsi sd: %s\n", err.c_str()); return 1; }
@@ -486,7 +496,17 @@ int main(int argc, char** argv) {
     if (pct / 10 != last / 10 || done == total) { std::fprintf(stderr, "\rzip: extracting %llu%%", static_cast<unsigned long long>(pct)); last = pct; }
     if (done == total) std::fputc('\n', stderr);
   };
-  if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
+  if (rom && ds::io::is_shortcut_name(rom)) {
+    // A NAND title shortcut (io/dsi_nand_launch.h): the title comes out of --dsi-nand
+    // and is handed over, as --dsi-hle-launch does for a ROM file.
+    ds::io::NandShortcut sc;
+    std::string err;
+    if (!ds::io::read_shortcut(rom, sc)) { std::fprintf(stderr, "%s: not a NAND title shortcut\n", rom); return 1; }
+    if (!sc.from(nds.dsi_nand)) { std::fprintf(stderr, "%s: made from another NAND than --dsi-nand\n", rom); return 1; }
+    if (!nds.load_dsi_nand_title(sc.title_lo, &err)) { std::fprintf(stderr, "%s: %s\n", rom, err.c_str()); return 1; }
+    dsi_hle = true;
+    dsi_mode = 1;
+  } else if (rom && !nds.load_rom(rom)) { std::fprintf(stderr, "could not read %s\n", rom); return 1; }
   // Console type: the DSi machine for a DSi-capable header when the DSi BIOS
   // pair is loaded (or on request), decided before the reset that builds it.
   {
