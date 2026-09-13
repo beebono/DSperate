@@ -148,12 +148,19 @@ SdHost::SdHost(NDS& nds, u32 num) : nds_(nds), num_(num) {
   if (num_ == 1) wifi_ = std::make_unique<NWifi>(nds, *this);
 }
 SdHost::~SdHost() = default;
-SdDevice* SdHost::port0() { return wifi_.get(); }
+SdDevice* SdHost::port0() { return num_ == 0 ? static_cast<SdDevice*>(card_.get()) : wifi_.get(); }
 
 void SdHost::attach_nand(NandImage* nand) {
   nand_ = nand;
   storage_.reset();
-  if (nand && nand->valid()) storage_ = std::make_unique<MmcStorage>(nds_, *this, *nand);
+  if (nand && nand->valid()) storage_ = std::make_unique<MmcStorage>(nds_, *this, *nand, false);
+}
+
+void SdHost::attach_sd(BlockStorage* card, bool read_only) {
+  card_.reset();
+  if (!card || num_ != 0) return;
+  card_ = std::make_unique<MmcStorage>(nds_, *this, *card, true);
+  card_->read_only = read_only;
 }
 
 u32 SdHost::irq2_main() const { return num_ ? IRQ2_SDIO : IRQ2_SDMMC; }
@@ -190,6 +197,7 @@ void SdHost::reset() {
   tx_req_ = false;
 
   if (storage_) storage_->reset();
+  if (card_) card_->reset();
   if (wifi_) wifi_->reset();
 }
 
@@ -397,10 +405,11 @@ u16 SdHost::read(u32 addr) {
 
   case 0x01C: {
     u16 ret = static_cast<u16>(irq_status_ & (0x031D | (num_ ? 2 : 0)));
-    // Card presence. Host 0: port 0, the SD card slot, which is empty here, so
-    // the "inserted" and "writable" bits stay clear, as melonDS reports it.
+    // Card presence. Host 0: port 0, the SD card slot, whichever port is
+    // selected (melonDS checks Ports[0]); "writable" unless it is read-only.
     // Host 1: the Wi-Fi module is soldered on -- always inserted.
     if (num_) ret |= 0x00A0;
+    else if (card_) ret |= card_->read_only ? 0x0020 : 0x00A0;
     return ret;
   }
   case 0x01E: return static_cast<u16>((irq_status_ >> 16) & 0x8B7F);
@@ -524,6 +533,7 @@ void SdHost::write(u32 addr, u16 val) {
       sd_clock_ &= ~0x0500;
       sd_option_ = 0x40EE;
       if (storage_) storage_->reset();
+      if (card_) card_->reset();
       if (wifi_) wifi_->reset();
     }
     soft_reset_ = 0x0006 | (val & 1);
@@ -584,7 +594,7 @@ void SdHost::check_swap_fifo() {
 // ---- MmcStorage --------------------------------------------------------------
 
 void MmcStorage::reset() {
-  std::memcpy(cid_, nand_.emmc_cid(), sizeof(cid_));
+  std::memcpy(cid_, storage_.cid(), sizeof(cid_));
 
   csr_ = 0x00000100;
   ocr_ = 0x80FF8000;
@@ -618,6 +628,8 @@ void MmcStorage::send_cmd(MmcCmd cmd, u32 param) {
     return;
 
   case MmcCmd::GetOcr:
+    // CMD1 is MMC-only; an SD card does not answer it (melonDS logs and drops it).
+    if (sd_card_) return;
     // The eMMC is not high-capacity addressed: bit 30 never sets.
     param &= ~(1u << 30);
     ocr_ &= 0xBF000000;
@@ -636,6 +648,12 @@ void MmcStorage::send_cmd(MmcCmd cmd, u32 param) {
     return;
 
   case MmcCmd::GetRca:
+    if (sd_card_) {
+      // An SD card makes up its own address; melonDS answers with the R6 layout
+      // (status bits folded down under an RCA of 1).
+      host_.send_response((csr_ & 0x1FFF) | ((csr_ >> 6) & 0x2000) | ((csr_ >> 8) & 0xC000) | (1u << 16), true);
+      return;
+    }
     rca_ = param >> 16;
     host_.send_response(csr_ | 0x10000, true);
     return;
@@ -661,7 +679,7 @@ void MmcStorage::send_cmd(MmcCmd cmd, u32 param) {
 
   case MmcCmd::StopTransmission:
     set_state(0x04);
-    nand_.flush();
+    storage_.flush();
     rw_command_ = MmcCmd::Reset;
     host_.send_response(csr_, true);
     return;
@@ -721,8 +739,8 @@ void MmcStorage::send_acmd(MmcAcmd cmd, u32 param) {
 
   case MmcAcmd::SetOcr:
     // boot2 hardcodes 0x40100000 and branches on whether bit 30 took; on the
-    // eMMC it does not.
-    param &= ~(1u << 30);
+    // eMMC it does not. An SD card takes it (and is then block-addressed).
+    if (!sd_card_) param &= ~(1u << 30);
     ocr_ &= 0xBF000000;
     ocr_ |= param & 0x40FFFFFF;
     host_.send_response(ocr_, true);
@@ -776,7 +794,7 @@ u32 MmcStorage::read_block(u64 addr) {
   // makes is sector-aligned, so this is 0, but clamp rather than smash the
   // stack if a title ever asks for something else.
   if ((addr & 0x1FF) + len > MMC_BLOCK_SIZE) len = MMC_BLOCK_SIZE - (addr & 0x1FF);
-  nand_.read(addr, len, &data[addr & 0x1FF]);
+  storage_.read(addr, len, &data[addr & 0x1FF]);
   return host_.data_rx(&data[addr & 0x1FF], len);
 }
 
@@ -785,7 +803,7 @@ u32 MmcStorage::write_block(u64 addr) {
   u8 data[MMC_BLOCK_SIZE];
   if ((addr & 0x1FF) + len > MMC_BLOCK_SIZE) len = MMC_BLOCK_SIZE - (addr & 0x1FF);
   len = host_.data_tx(&data[addr & 0x1FF], len);
-  if (len && !read_only) nand_.write(addr, len, &data[addr & 0x1FF]);
+  if (len && !read_only) storage_.write(addr, len, &data[addr & 0x1FF]);
   return len;
 }
 
@@ -808,6 +826,7 @@ template <class S> void SdHost::sync_state(S& s) {
            data_fifo_[1].buf, data_fifo_[1].read_pos, data_fifo_[1].write_pos, data_fifo_[1].level,
            data_fifo32_.buf, data_fifo32_.read_pos, data_fifo32_.write_pos, data_fifo32_.level);
   if (storage_) storage_->sync_state(s);
+  if (card_) card_->sync_state(s);
   if (wifi_) wifi_->sync_state(s);
 }
 template void SdHost::sync_state<state::Writer>(state::Writer&);

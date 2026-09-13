@@ -1369,6 +1369,7 @@ void Io::dsi_reset() {
   // aes.reset(): key slots 1 and 3 are seeded from the console ID.
   dsi.console_id = nds_.dsi_nand.valid() ? nds_.dsi_nand.console_id() : 0;
   sd.attach_nand(nds_.dsi_nand.valid() ? &nds_.dsi_nand : nullptr);
+  sd.attach_sd(nds_.dsi_sd.valid() ? &nds_.dsi_sd : nullptr);
   sd.reset();
   sdio.reset();
   aes.reset();

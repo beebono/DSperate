@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <unordered_set>
 
 namespace ds::io {
 namespace {
@@ -37,6 +38,67 @@ std::vector<std::string> parts_of(const std::string& path) {
   return out;
 }
 
+// Long names are UTF-16 on disk and UTF-8 everywhere else.
+bool utf8_to_16(const std::string& in, std::u16string& out) {
+  out.clear();
+  for (size_t i = 0; i < in.size();) {
+    const u8 c = static_cast<u8>(in[i]);
+    u32 cp;
+    int n;
+    if (c < 0x80)                { cp = c;        n = 0; }
+    else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 1; }
+    else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 2; }
+    else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 3; }
+    else return false;
+    if (n && i + n >= in.size()) return false;
+    for (int k = 1; k <= n; ++k) {
+      const u8 d = static_cast<u8>(in[i + k]);
+      if ((d & 0xC0) != 0x80) return false;
+      cp = (cp << 6) | (d & 0x3F);
+    }
+    i += n + 1;
+    if (cp >= 0x10000) {
+      if (cp > 0x10FFFF) return false;
+      cp -= 0x10000;
+      out.push_back(static_cast<char16_t>(0xD800 + (cp >> 10)));
+      out.push_back(static_cast<char16_t>(0xDC00 + (cp & 0x3FF)));
+    } else {
+      if (cp >= 0xD800 && cp < 0xE000) return false;
+      out.push_back(static_cast<char16_t>(cp));
+    }
+  }
+  return true;
+}
+
+std::string utf16_to_8(const std::u16string& in) {
+  std::string out;
+  for (size_t i = 0; i < in.size(); ++i) {
+    u32 cp = in[i];
+    if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < in.size() && in[i + 1] >= 0xDC00 && in[i + 1] < 0xE000) {
+      cp = 0x10000 + ((cp - 0xD800) << 10) + (in[i + 1] - 0xDC00);
+      ++i;
+    } else if (cp >= 0xD800 && cp < 0xE000) {
+      cp = '?';
+    }
+    if (cp < 0x80) {
+      out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+      out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+      out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+      out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+  }
+  return out;
+}
+
 }  // namespace
 
 // ---- FatVolume ---------------------------------------------------------------
@@ -49,24 +111,107 @@ bool FatVolume::open(ReadFn read, WriteFn write, std::string* err) {
   read_(0, 512, b);
   if (b[0x1FE] != 0x55 || b[0x1FF] != 0xAA) return fail("no boot sector signature");
   const u32 bps = rd16(b + 0x0B), spc = b[0x0D], rsv = rd16(b + 0x0E);
-  const u32 nfats = b[0x10], root = rd16(b + 0x11), spf = rd16(b + 0x16);
-  const u32 total = rd16(b + 0x13) ? rd16(b + 0x13) : rd32(b + 0x20);
-  if (bps != 512 || spc == 0 || (spc & (spc - 1)) || nfats == 0 || spf == 0 || root == 0) return fail("not a FAT12/FAT16 volume");
+  const u32 nfats = b[0x10], root = rd16(b + 0x11);
+  // FAT32 has no 16-bit FAT size and no fixed root directory.
+  const bool fat32 = rd16(b + 0x16) == 0;
+  const u32 spf = fat32 ? rd32(b + 0x24) : rd16(b + 0x16);
+  const u64 total = rd16(b + 0x13) ? rd16(b + 0x13) : rd32(b + 0x20);
+  if (bps != 512 || spc == 0 || (spc & (spc - 1)) || nfats == 0 || spf == 0 || rsv == 0 || (fat32 ? root != 0 : root == 0))
+    return fail("not a FAT volume");
   const u32 root_sectors = (root * 32 + bps - 1) / bps;
-  const u32 data_sector = rsv + nfats * spf + root_sectors;
+  const u64 data_sector = rsv + static_cast<u64>(nfats) * spf + root_sectors;
   if (total <= data_sector) return fail("volume smaller than its own metadata");
-  const u32 clusters = (total - data_sector) / spc;
-  if (clusters >= 65525) return fail("FAT32 is not used on the DSi");
+  const u64 clusters = (total - data_sector) / spc;
+  if (!fat32 && clusters >= 65525) return fail("too many clusters for FAT16");
+  if (fat32 && clusters > 0x0FFFFFF5) return fail("too many clusters for FAT32");
   bps_ = bps; spc_ = spc; nfats_ = nfats; fat_sectors_ = spf; root_entries_ = root;
-  clusters_ = clusters;
-  fat_bits_ = clusters < 4085 ? 12 : 16;
+  clusters_ = static_cast<u32>(clusters);
+  fat_bits_ = fat32 ? 32 : clusters < 4085 ? 12 : 16;
+  root_cluster_ = fat32 ? rd32(b + 0x2C) : 0;
   fat_off_ = static_cast<u64>(rsv) * bps;
   root_off_ = fat_off_ + static_cast<u64>(nfats) * spf * bps;
-  data_off_ = static_cast<u64>(data_sector) * bps;
+  data_off_ = data_sector * bps;
   fat_.assign(static_cast<size_t>(spf) * bps, 0);
   for (u32 s = 0; s < spf; ++s) read_(fat_off_ + static_cast<u64>(s) * bps, bps, fat_.data() + s * bps);
   fat_dirty_.assign(spf, false);
+  free_count_ = 0;
+  for (u32 c = 2; c < clusters_ + 2; ++c) free_count_ += fat_get(c) == 0;
+  next_free_ = 2;
   return true;
+}
+
+bool FatVolume::format(const WriteFn& write, const FormatSpec& s, std::string* err) {
+  auto fail = [&](const char* m) { if (err) *err = m; return false; };
+  const bool fat32 = s.fat_bits == 32;
+  if (s.fat_bits != 16 && !fat32) return fail("format: FAT16 or FAT32 only");
+  const u32 spc = s.sectors_per_cluster;
+  if (spc == 0 || spc > 128 || (spc & (spc - 1))) return fail("format: bad cluster size");
+  if (s.sectors > 0xFFFFFFFFull || s.sectors < 64) return fail("format: bad volume size");
+  const u32 total = static_cast<u32>(s.sectors);
+  const u32 rsv = fat32 ? 32 : 1, nfats = 2, root_entries = fat32 ? 0 : 512;
+  const u32 root_sectors = root_entries * 32 / 512;
+  // Enough FAT for every cluster the volume could hold without its FATs: a
+  // slight overestimate, as formatters make.
+  const u64 clusters_max = (total - rsv - root_sectors) / spc;
+  const u32 spf = static_cast<u32>(((clusters_max + 2) * (fat32 ? 4 : 2) + 511) / 512);
+  const u64 data = rsv + static_cast<u64>(nfats) * spf + root_sectors;
+  if (total <= data + spc) return fail("format: volume smaller than its own metadata");
+  const u64 clusters = (total - data) / spc;
+  if (!fat32 && (clusters < 4085 || clusters >= 65525)) return fail("format: the cluster count does not suit FAT16");
+  if (fat32 && clusters < 65525) return fail("format: the cluster count does not suit FAT32");
+
+  u8 b[512] = {};
+  b[0] = 0xEB; b[1] = fat32 ? 0x58 : 0x3C; b[2] = 0x90;
+  std::memset(b + 3, ' ', 8);
+  std::memcpy(b + 3, s.oem, std::min<size_t>(8, std::strlen(s.oem)));
+  wr16(b + 0x0B, 512); b[0x0D] = static_cast<u8>(spc); wr16(b + 0x0E, static_cast<u16>(rsv)); b[0x10] = static_cast<u8>(nfats);
+  wr16(b + 0x11, static_cast<u16>(root_entries));
+  if (!fat32 && total < 0x10000) wr16(b + 0x13, static_cast<u16>(total)); else wr32(b + 0x20, total);
+  b[0x15] = 0xF8;
+  if (!fat32) wr16(b + 0x16, static_cast<u16>(spf));
+  wr16(b + 0x18, 63); wr16(b + 0x1A, 255); wr32(b + 0x1C, s.hidden);
+  if (fat32) { wr32(b + 0x24, spf); wr32(b + 0x2C, 2); wr16(b + 0x30, 1); wr16(b + 0x32, 6); }
+  u8* ext = b + (fat32 ? 0x40 : 0x24);
+  ext[0] = 0x80; ext[2] = 0x29; wr32(ext + 3, s.serial);
+  std::memset(ext + 7, ' ', 11);
+  std::memcpy(ext + 7, s.label, std::min<size_t>(11, std::strlen(s.label)));
+  std::memcpy(ext + 18, fat32 ? "FAT32   " : "FAT16   ", 8);
+  b[0x1FE] = 0x55; b[0x1FF] = 0xAA;
+
+  const std::vector<u8> zero(512, 0);
+  auto zero_range = [&](u64 first, u64 count) {
+    if (s.zeroed) return;
+    for (u64 k = 0; k < count; ++k) write((first + k) * 512, 512, zero.data());
+  };
+  zero_range(1, rsv - 1);
+  write(0, 512, b);
+  if (fat32) {
+    u8 fsi[512] = {};
+    wr32(fsi, 0x41615252); wr32(fsi + 0x1E4, 0x61417272);
+    wr32(fsi + 0x1E8, 0xFFFFFFFF); wr32(fsi + 0x1EC, 0xFFFFFFFF);   // free count and next free: unknown
+    fsi[0x1FE] = 0x55; fsi[0x1FF] = 0xAA;
+    write(1 * 512, 512, fsi);
+    write(6 * 512, 512, b);
+    write(7 * 512, 512, fsi);
+  }
+  for (u32 f = 0; f < nfats; ++f) {
+    const u64 fat = rsv + static_cast<u64>(f) * spf;
+    zero_range(fat + 1, spf - 1);
+    u8 first[512] = {};
+    if (fat32) { wr32(first, 0x0FFFFFF8); wr32(first + 4, 0x0FFFFFFF); wr32(first + 8, 0x0FFFFFFF); }   // cluster 2: the root
+    else       { wr16(first, 0xFFF8); wr16(first + 2, 0xFFFF); }
+    write(fat * 512, 512, first);
+  }
+  if (fat32) zero_range(data, spc);
+  else       zero_range(rsv + static_cast<u64>(nfats) * spf, root_sectors);
+  return true;
+}
+
+FatVolume::Entry FatVolume::root() const {
+  Entry r;
+  r.attr = 0x10;
+  r.cluster = root_cluster_;
+  return r;
 }
 
 u32 FatVolume::fat_get(u32 c) const {
@@ -76,22 +221,36 @@ u32 FatVolume::fat_get(u32 c) const {
     const u32 v = fat_[o] | (fat_[o + 1] << 8);
     return (c & 1) ? v >> 4 : v & 0xFFF;
   }
-  const size_t o = static_cast<size_t>(c) * 2;
-  return o + 1 < fat_.size() ? rd16(&fat_[o]) : 0xFFFF;
+  if (fat_bits_ == 16) {
+    const size_t o = static_cast<size_t>(c) * 2;
+    return o + 1 < fat_.size() ? rd16(&fat_[o]) : 0xFFFF;
+  }
+  const size_t o = static_cast<size_t>(c) * 4;
+  return o + 3 < fat_.size() ? rd32(&fat_[o]) & 0x0FFFFFFF : 0x0FFFFFFF;
 }
 
 void FatVolume::fat_set(u32 c, u32 v) {
-  size_t o;
+  const size_t width = fat_bits_ == 12 ? 2 : fat_bits_ == 16 ? 2 : 4;
+  const size_t o = fat_bits_ == 12 ? c + c / 2 : static_cast<size_t>(c) * (fat_bits_ / 8);
+  if (o + width > fat_.size()) return;
+  if (c >= 2 && c < clusters_ + 2) {
+    const bool was_free = fat_get(c) == 0;
+    if (was_free && v != 0) --free_count_;
+    if (!was_free && v == 0) ++free_count_;
+    // next_free_ stays at or below the lowest free cluster, so an allocation
+    // that starts there finds what a scan from cluster 2 would.
+    if (v == 0 && c < next_free_) next_free_ = c;
+  }
   if (fat_bits_ == 12) {
-    o = c + c / 2;
     if (c & 1) { fat_[o] = static_cast<u8>((fat_[o] & 0x0F) | ((v << 4) & 0xF0)); fat_[o + 1] = static_cast<u8>(v >> 4); }
     else       { fat_[o] = static_cast<u8>(v); fat_[o + 1] = static_cast<u8>((fat_[o + 1] & 0xF0) | ((v >> 8) & 0x0F)); }
-  } else {
-    o = static_cast<size_t>(c) * 2;
+  } else if (fat_bits_ == 16) {
     wr16(&fat_[o], static_cast<u16>(v));
+  } else {
+    wr32(&fat_[o], (rd32(&fat_[o]) & 0xF0000000) | (v & 0x0FFFFFFF));
   }
   fat_dirty_[o / bps_] = true;
-  fat_dirty_[(o + 1) / bps_] = true;
+  fat_dirty_[(o + width - 1) / bps_] = true;
 }
 
 void FatVolume::fat_flush() {
@@ -103,15 +262,9 @@ void FatVolume::fat_flush() {
   }
 }
 
-u32 FatVolume::free_clusters() const {
-  u32 n = 0;
-  for (u32 c = 2; c < clusters_ + 2; ++c) n += fat_get(c) == 0;
-  return n;
-}
-
 std::vector<u32> FatVolume::chain(u32 first) const {
   std::vector<u32> out;
-  const u32 eoc = fat_bits_ == 12 ? 0xFF8 : 0xFFF8;
+  const u32 eoc = eoc_min();
   for (u32 c = first; c >= 2 && c < clusters_ + 2 && out.size() <= clusters_; c = fat_get(c)) {
     out.push_back(c);
     if (fat_get(c) >= eoc) break;
@@ -122,12 +275,15 @@ std::vector<u32> FatVolume::chain(u32 first) const {
 bool FatVolume::alloc_chain(u32 count, u32& first) {
   first = 0;
   if (count == 0) return true;
+  if (free_count_ < count) return false;
   std::vector<u32> got;
-  for (u32 c = 2; c < clusters_ + 2 && got.size() < count; ++c)
+  got.reserve(count);
+  u32 c = std::max<u32>(next_free_, 2);
+  for (; c < clusters_ + 2 && got.size() < count; ++c)
     if (fat_get(c) == 0) got.push_back(c);
   if (got.size() < count) return false;
-  const u32 eoc = fat_bits_ == 12 ? 0xFFF : 0xFFFF;
-  for (size_t i = 0; i < got.size(); ++i) fat_set(got[i], i + 1 < got.size() ? got[i + 1] : eoc);
+  for (size_t i = 0; i < got.size(); ++i) fat_set(got[i], i + 1 < got.size() ? got[i + 1] : eoc_mark());
+  next_free_ = std::max(next_free_, c);   // every cluster below c is now in use
   first = got[0];
   return true;
 }
@@ -136,15 +292,25 @@ void FatVolume::free_chain(u32 first) {
   for (u32 c : chain(first)) fat_set(c, 0);
 }
 
+u32 FatVolume::entry_cluster(const u8* e) const {
+  return rd16(e + 26) | (fat_bits_ == 32 ? static_cast<u32>(rd16(e + 20)) << 16 : 0);
+}
+
+void FatVolume::set_entry_cluster(u8* e, u32 c) const {
+  wr16(e + 26, static_cast<u16>(c));
+  if (fat_bits_ == 32) wr16(e + 20, static_cast<u16>(c >> 16));
+}
+
 std::vector<u8> FatVolume::dir_bytes(const Entry& dir) const {
   std::vector<u8> out;
-  if (dir.cluster == 0) {
+  const u32 first = dir.cluster ? dir.cluster : root_cluster_;
+  if (first == 0) {
     out.resize((root_entries_ * 32 + bps_ - 1) / bps_ * bps_);
     for (size_t s = 0; s < out.size(); s += bps_) read_(root_off_ + s, bps_, out.data() + s);
     return out;
   }
   const u32 cs = cluster_bytes();
-  for (u32 c : chain(dir.cluster)) {
+  for (u32 c : chain(first)) {
     const size_t at = out.size();
     out.resize(at + cs);
     for (u32 s = 0; s < cs; s += bps_) read_(cluster_offset(c) + s, bps_, out.data() + at + s);
@@ -154,8 +320,9 @@ std::vector<u8> FatVolume::dir_bytes(const Entry& dir) const {
 
 std::vector<FatVolume::Entry> FatVolume::list(const Entry& dir) const {
   std::vector<Entry> out;
+  const u32 first = dir.cluster ? dir.cluster : root_cluster_;
   const std::vector<u8> d = dir_bytes(dir);
-  const std::vector<u32> cl = dir.cluster ? chain(dir.cluster) : std::vector<u32>{};
+  const std::vector<u32> cl = first ? chain(first) : std::vector<u32>{};
   const u32 cs = cluster_bytes();
   std::u16string lfn;
   u8 lfn_sum = 0;
@@ -181,7 +348,7 @@ std::vector<FatVolume::Entry> FatVolume::list(const Entry& dir) const {
     if (!lfn.empty()) {
       u8 sum = 0;
       for (int k = 0; k < 11; ++k) sum = static_cast<u8>(((sum & 1) << 7) + (sum >> 1) + e[k]);
-      if (sum == lfn_sum) for (char16_t ch : lfn) en.long_name.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+      if (sum == lfn_sum) en.long_name = utf16_to_8(lfn);
       lfn.clear();
     }
     std::string base(reinterpret_cast<const char*>(e), 8), ext(reinterpret_cast<const char*>(e + 8), 3);
@@ -189,18 +356,27 @@ std::vector<FatVolume::Entry> FatVolume::list(const Entry& dir) const {
     base.erase(base.find_last_not_of(' ') + 1);
     ext.erase(ext.find_last_not_of(' ') + 1);
     en.name = ext.empty() ? base : base + "." + ext;
+    // Windows and Linux store a lower-case 8.3 name as upper case plus two
+    // flags in the reserved byte, not as a long name.
+    if (en.long_name.empty() && (e[12] & 0x18)) {
+      std::string b2 = base, e2 = ext;
+      if (e[12] & 0x08) for (char& ch : b2) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+      if (e[12] & 0x10) for (char& ch : e2) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+      en.long_name = e2.empty() ? b2 : b2 + "." + e2;
+    }
     en.attr = e[11];
-    en.cluster = rd16(e + 26);
+    en.cluster = entry_cluster(e);
     en.size = rd32(e + 28);
-    en.dirent = dir.cluster == 0 ? root_off_ + i : cluster_offset(cl[i / cs]) + i % cs;
+    en.mtime = rd16(e + 22);
+    en.mdate = rd16(e + 24);
+    en.dirent = first == 0 ? root_off_ + i : cluster_offset(cl[i / cs]) + i % cs;
     out.push_back(std::move(en));
   }
   return out;
 }
 
 bool FatVolume::lookup(const std::string& path, Entry& out) const {
-  Entry cur;
-  cur.attr = 0x10;
+  Entry cur = root();
   for (const std::string& p : parts_of(path)) {
     if (!cur.dir()) return false;
     const std::string want = upper(p);
@@ -232,9 +408,7 @@ bool FatVolume::read(const Entry& file, std::vector<u8>& out) const {
 
 void FatVolume::walk(const std::function<void(const std::string&, const Entry&)>& fn) const {
   std::vector<std::pair<std::string, Entry>> stack;
-  Entry root;
-  root.attr = 0x10;
-  stack.emplace_back("", root);
+  stack.emplace_back("", root());
   while (!stack.empty()) {
     auto [base, dir] = stack.back();
     stack.pop_back();
@@ -286,23 +460,24 @@ void FatVolume::write_entry(u64 dirent, const u8 raw[32]) {
 }
 
 bool FatVolume::add_entry(const Entry& parent, const u8* raw, u32 count, u64& dirent_out) {
+  const u32 first = parent.cluster ? parent.cluster : root_cluster_;
   const std::vector<u8> d = dir_bytes(parent);
-  const std::vector<u32> cl = parent.cluster ? chain(parent.cluster) : std::vector<u32>{};
+  const std::vector<u32> cl = first ? chain(first) : std::vector<u32>{};
   const u32 cs = cluster_bytes();
-  const size_t limit = parent.cluster ? d.size() : static_cast<size_t>(root_entries_) * 32;
-  auto at = [&](size_t i) { return parent.cluster ? cluster_offset(cl[i / cs]) + i % cs : root_off_ + i; };
+  const size_t limit = first ? d.size() : static_cast<size_t>(root_entries_) * 32;
+  auto at = [&](size_t i) { return first ? cluster_offset(cl[i / cs]) + i % cs : root_off_ + i; };
   // The first run of `count` free slots. Everything from the first 0x00 entry
   // on is free, so a run may start there and continue into a new cluster.
   size_t run = 0;
   for (size_t i = 0; i + 32 <= limit; i += 32) {
     if (d[i] != 0x00 && d[i] != 0xE5) { run = 0; continue; }
     if (++run < count) continue;
-    const size_t first = i + 32 - count * 32;
-    for (u32 k = 0; k < count; ++k) write_entry(at(first + k * 32), raw + k * 32);
+    const size_t start = i + 32 - count * 32;
+    for (u32 k = 0; k < count; ++k) write_entry(at(start + k * 32), raw + k * 32);
     dirent_out = at(i);
     return true;
   }
-  if (!parent.cluster || cl.empty()) return false;   // the root directory is full
+  if (!first || cl.empty()) return false;   // the fixed root directory is full
   // Grow the directory by a zeroed cluster and put the entries at its start
   // (a run cut by the cluster end is abandoned: those slots stay free).
   if (count * 32 > cs) return false;
@@ -316,31 +491,49 @@ bool FatVolume::add_entry(const Entry& parent, const u8* raw, u32 count, u64& di
   return true;
 }
 
-bool FatVolume::make_entries(const Entry& parent, const std::string& name, std::vector<u8>& raws) const {
+bool FatVolume::make_entries(const Entry& parent, const std::string& name, std::vector<u8>& raws, std::string* why) const {
+  std::unordered_set<std::string> taken;
+  for (const Entry& e : list(parent)) taken.insert(e.name);
+  return make_entries_in(taken, name, raws, why);
+}
+
+bool FatVolume::make_entries_in(const std::unordered_set<std::string>& taken, const std::string& name, std::vector<u8>& raws, std::string* why) const {
+  auto fail = [&](const char* m) { if (why) *why = m; return false; };
+  if (name == "." || name == "..") return fail("a reserved name");
   u8 short_name[11];
-  if (to_83(name, short_name)) { raws.assign(short_name, short_name + 11); raws.resize(32, 0); return true; }
-  // NAME~N.EXT from the long name's letters, N the first not in use.
-  std::string base, ext;
-  const size_t dot = name.find_last_of('.');
-  for (char c : name.substr(0, dot)) if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') base.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-  if (dot != std::string::npos) for (char c : name.substr(dot + 1)) if (std::isalnum(static_cast<unsigned char>(c)) && ext.size() < 3) ext.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-  if (base.empty()) base = "FILE";
-  const std::vector<Entry> existing = list(parent);
-  bool found = false;
-  for (int n = 1; n <= 9 && !found; ++n) {
-    std::string sn = base.substr(0, 6) + "~" + std::to_string(n);
-    const std::string full = ext.empty() ? sn : sn + "." + ext;
-    if (std::none_of(existing.begin(), existing.end(), [&](const Entry& e) { return e.name == full; })) {
+  const bool is_83 = to_83(name, short_name);
+  const bool has_lower = std::any_of(name.begin(), name.end(), [](char c) { return c >= 'a' && c <= 'z'; });
+  if (is_83 && !(preserve_case_ && has_lower)) { raws.assign(short_name, short_name + 11); raws.resize(32, 0); return true; }
+
+  std::u16string wide;
+  if (!utf8_to_16(name, wide)) return fail("the name is not UTF-8");
+  if (wide.size() > 255) return fail("the name is longer than 255 characters");
+  for (char16_t ch : wide)
+    if (ch < 0x20 || (ch < 0x80 && std::strchr("\"*/:<>?\\|", static_cast<char>(ch)))) return fail("the name has a character FAT does not allow");
+  if (name.back() == '.' || name.back() == ' ') return fail("the name ends in a dot or a space");
+
+  if (!is_83) {
+    // NAME~N.EXT from the long name's letters, N the first not in use.
+    std::string base, ext;
+    const size_t dot = name.find_last_of('.');
+    for (char c : name.substr(0, dot)) if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') base.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    if (dot != std::string::npos) for (char c : name.substr(dot + 1)) if (std::isalnum(static_cast<unsigned char>(c)) && ext.size() < 3) ext.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    if (base.empty()) base = "FILE";
+    bool found = false;
+    for (u32 n = 1; n <= 999999 && !found; ++n) {
+      const std::string tail = "~" + std::to_string(n);
+      const std::string sn = base.substr(0, 8 - tail.size()) + tail;
+      if (taken.count(ext.empty() ? sn : sn + "." + ext)) continue;
       std::memset(short_name, ' ', 11);
       std::memcpy(short_name, sn.data(), sn.size());
       std::memcpy(short_name + 8, ext.data(), ext.size());
       found = true;
     }
+    if (!found) return fail("no free short name");
   }
-  if (!found) return false;
   u8 sum = 0;
   for (int k = 0; k < 11; ++k) sum = static_cast<u8>(((sum & 1) << 7) + (sum >> 1) + short_name[k]);
-  const u32 pieces = static_cast<u32>((name.size() + 12) / 13);
+  const u32 pieces = static_cast<u32>((wide.size() + 12) / 13);
   raws.assign((pieces + 1) * 32, 0);
   for (u32 p = 0; p < pieces; ++p) {
     u8* e = &raws[(pieces - 1 - p) * 32];            // stored last piece first
@@ -350,7 +543,7 @@ bool FatVolume::make_entries(const Entry& parent, const std::string& name, std::
     int slot = 0;
     for (int k : {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30}) {
       const size_t ci = p * 13 + slot++;
-      const u16 ch = ci < name.size() ? static_cast<u8>(name[ci]) : ci == name.size() ? 0x0000 : 0xFFFF;
+      const u16 ch = ci < wide.size() ? static_cast<u16>(wide[ci]) : ci == wide.size() ? 0x0000 : 0xFFFF;
       wr16(e + k, ch);
     }
   }
@@ -358,93 +551,194 @@ bool FatVolume::make_entries(const Entry& parent, const std::string& name, std::
   return true;
 }
 
-bool FatVolume::write(const std::string& path, const u8* data, u32 len, std::string* err) {
+bool FatVolume::put(const std::string& path, const u8* data, u32 len, bool with_data, Entry* out, std::string* err, const Stamp* stamp) {
   auto fail = [&](const std::string& m) { if (err) *err = path + ": " + m; return false; };
   Entry parent;
   std::string name;
   if (!split(path, parent, name, err)) return false;
-  std::vector<u8> raws;
-  if (!make_entries(parent, name, raws)) return fail("no free short name");
-
   Entry existing;
   const bool exists = lookup(path, existing);
   if (exists && existing.dir()) return fail("is a directory");
+  std::vector<u8> raws;
+  std::string why;
+  if (!exists && !make_entries(parent, name, raws, &why)) return fail(why);
+
   const u32 cs = cluster_bytes();
-  const u32 need = (len + cs - 1) / cs;
+  const u32 need = static_cast<u32>((static_cast<u64>(len) + cs - 1) / cs);
   const u32 have = exists ? static_cast<u32>(chain(existing.cluster).size()) : 0;
-  if (need > have && free_clusters() < need - have) return fail("not enough free space");
+  if (need > have && free_count_ < need - have) return fail("not enough free space");
 
   u32 first = exists ? existing.cluster : 0;
   if (need != have) {
     if (exists && existing.cluster) free_chain(existing.cluster);
     if (!alloc_chain(need, first)) return fail("allocation failed");
   }
-  std::vector<u8> buf(bps_);
-  const std::vector<u32> cl = chain(first);
-  for (u32 k = 0; k < need; ++k)
-    for (u32 s = 0; s < cs; s += bps_) {
-      const u64 at = static_cast<u64>(k) * cs + s;
-      std::memset(buf.data(), 0, bps_);
-      if (at < len) std::memcpy(buf.data(), data + at, static_cast<size_t>(std::min<u64>(bps_, len - at)));
-      write_(cluster_offset(cl[k]) + s, bps_, buf.data());
-    }
+  if (with_data) {
+    std::vector<u8> buf(bps_);
+    const std::vector<u32> cl = chain(first);
+    for (u32 k = 0; k < need; ++k)
+      for (u32 s = 0; s < cs; s += bps_) {
+        const u64 at = static_cast<u64>(k) * cs + s;
+        std::memset(buf.data(), 0, bps_);
+        if (at < len) std::memcpy(buf.data(), data + at, static_cast<size_t>(std::min<u64>(bps_, len - at)));
+        write_(cluster_offset(cl[k]) + s, bps_, buf.data());
+      }
+  }
   fat_flush();
 
+  const u16 date = stamp ? stamp->date : kFatDate, time = stamp ? stamp->time : 0;
   if (exists) {
     u8 b[512];
     const u64 sec = existing.dirent / bps_ * bps_;
     read_(sec, bps_, b);
     u8* e = b + (existing.dirent - sec);
-    wr16(e + 26, static_cast<u16>(first));
+    set_entry_cluster(e, first);
     wr32(e + 28, len);
+    if (stamp) { wr16(e + 22, time); wr16(e + 24, date); }
     write_(sec, bps_, b);
   } else {
     u8* raw = &raws[raws.size() - 32];
     raw[11] = 0x20;   // archive
-    wr16(raw + 16, kFatDate);   // created
-    wr16(raw + 18, kFatDate);   // accessed
-    wr16(raw + 24, kFatDate);   // modified
-    wr16(raw + 26, static_cast<u16>(first));
+    wr16(raw + 14, time); wr16(raw + 16, date);   // created
+    wr16(raw + 18, date);                         // accessed
+    wr16(raw + 22, time); wr16(raw + 24, date);   // modified
+    set_entry_cluster(raw, first);
     wr32(raw + 28, len);
     u64 dirent;
     if (!add_entry(parent, raws.data(), static_cast<u32>(raws.size() / 32), dirent)) { free_chain(first); fat_flush(); return fail("directory is full"); }
     fat_flush();
   }
+  if (out && !lookup(path, *out)) return fail("the new entry cannot be found");
   return true;
 }
 
-bool FatVolume::mkdir(const std::string& path, std::string* err) {
+bool FatVolume::write(const std::string& path, const u8* data, u32 len, std::string* err, const Stamp* stamp) {
+  return put(path, data, len, true, nullptr, err, stamp);
+}
+
+bool FatVolume::create(const std::string& path, u32 len, Entry* out, std::string* err, const Stamp* stamp) {
+  return put(path, nullptr, len, false, out, err, stamp);
+}
+
+bool FatVolume::mkdir(const std::string& path, std::string* err, const Stamp* stamp) {
   auto fail = [&](const std::string& m) { if (err) *err = path + ": " + m; return false; };
   Entry e;
   if (lookup(path, e)) return e.dir() ? true : fail("exists as a file");
   Entry parent;
   std::string name;
   if (!split(path, parent, name, err)) return false;
-  u8 raw[32] = {};
-  if (!to_83(name, raw)) return fail("not an 8.3 name");
+  std::vector<u8> raws;
+  std::string why;
+  if (!make_entries(parent, name, raws, &why)) return fail(why);
   u32 c;
   if (!alloc_chain(1, c)) return fail("not enough free space");
 
-  // The new directory's cluster: "." and "..", the rest zero.
-  std::vector<u8> sec(bps_, 0);
-  auto dot = [&](u8* p, const char* n, u32 cluster) {
+  write_dir_cluster(c, parent.dirent == 0 ? 0 : parent.cluster, stamp);
+  u8* raw = &raws[raws.size() - 32];
+  const u16 date = stamp ? stamp->date : kFatDate, time = stamp ? stamp->time : 0;
+  raw[11] = 0x10;
+  wr16(raw + 14, time); wr16(raw + 16, date); wr16(raw + 18, date); wr16(raw + 22, time); wr16(raw + 24, date);
+  set_entry_cluster(raw, c);
+  u64 dirent;
+  if (!add_entry(parent, raws.data(), static_cast<u32>(raws.size() / 32), dirent)) { free_chain(c); fat_flush(); return fail("directory is full"); }
+  fat_flush();
+  return true;
+}
+
+// A new directory's cluster: "." and "..", the rest zero. ".." names the root
+// as cluster 0, FAT32 included.
+void FatVolume::write_dir_cluster(u32 cluster, u32 parent_cluster, const Stamp* stamp) {
+  const u16 date = stamp ? stamp->date : kFatDate, time = stamp ? stamp->time : 0;
+  auto dot = [&](u8* p, const char* n, u32 c) {
     std::memset(p, ' ', 11);
     std::memcpy(p, n, std::strlen(n));
     p[11] = 0x10;
-    wr16(p + 16, kFatDate); wr16(p + 18, kFatDate); wr16(p + 24, kFatDate);
-    wr16(p + 26, static_cast<u16>(cluster));
+    wr16(p + 14, time); wr16(p + 16, date); wr16(p + 18, date); wr16(p + 22, time); wr16(p + 24, date);
+    set_entry_cluster(p, c);
   };
-  for (u32 s = 0; s < cluster_bytes(); s += bps_) {
-    std::memset(sec.data(), 0, bps_);
-    if (s == 0) { dot(sec.data(), ".", c); dot(sec.data() + 32, "..", parent.cluster); }
-    write_(cluster_offset(c) + s, bps_, sec.data());
+  u8 sec[512] = {};   // bps_ is always 512 (open() refuses anything else)
+  dot(sec, ".", cluster);
+  dot(sec + 32, "..", parent_cluster);
+  write_(cluster_offset(cluster), bps_, sec);
+  if (fresh_) return;
+  std::memset(sec, 0, sizeof sec);
+  for (u32 s = bps_; s < cluster_bytes(); s += bps_) write_(cluster_offset(cluster) + s, bps_, sec);
+}
+
+bool FatVolume::populate(const Entry& dir, std::vector<NewEntry>& items, std::string* err) {
+  const u32 first = dir.cluster ? dir.cluster : root_cluster_;
+  const u32 cs = cluster_bytes();
+  std::vector<u8> d = dir_bytes(dir);
+  std::unordered_set<std::string> taken;
+  for (const Entry& e : list(dir)) taken.insert(e.name);
+  size_t used = 0;
+  while (used + 32 <= d.size() && d[used] != 0x00) used += 32;
+
+  // Names, clusters and raw entries first; where they go in the directory after.
+  std::vector<u8> buf;
+  std::vector<std::pair<size_t, size_t>> placed;   // item, offset of its short entry in buf
+  for (size_t k = 0; k < items.size(); ++k) {
+    NewEntry& it = items[k];
+    it.ok = false;
+    std::vector<u8> raws;
+    if (!make_entries_in(taken, it.name, raws, &it.why)) continue;
+    const u32 need = it.dir ? 1 : static_cast<u32>((static_cast<u64>(it.size) + cs - 1) / cs);
+    u32 c = 0;
+    if (need && !alloc_chain(need, c)) { it.why = "not enough free space"; continue; }
+    if (it.dir) write_dir_cluster(c, dir.dirent == 0 ? 0 : dir.cluster, &it.stamp);
+    u8* raw = &raws[raws.size() - 32];
+    raw[11] = it.dir ? 0x10 : 0x20;
+    wr16(raw + 14, it.stamp.time); wr16(raw + 16, it.stamp.date); wr16(raw + 18, it.stamp.date);
+    wr16(raw + 22, it.stamp.time); wr16(raw + 24, it.stamp.date);
+    set_entry_cluster(raw, c);
+    wr32(raw + 28, it.dir ? 0 : it.size);
+    std::string sn(reinterpret_cast<const char*>(raw), 8), ext(reinterpret_cast<const char*>(raw + 8), 3);
+    sn.erase(sn.find_last_not_of(' ') + 1);
+    ext.erase(ext.find_last_not_of(' ') + 1);
+    it.out = Entry{};
+    it.out.name = ext.empty() ? sn : sn + "." + ext;
+    if (raws.size() > 32) it.out.long_name = it.name;
+    it.out.attr = raw[11];
+    it.out.cluster = c;
+    it.out.size = it.dir ? 0 : it.size;
+    it.out.mdate = it.stamp.date;
+    it.out.mtime = it.stamp.time;
+    taken.insert(it.out.name);
+    placed.emplace_back(k, buf.size() + raws.size() - 32);
+    buf.insert(buf.end(), raws.begin(), raws.end());
   }
-  raw[11] = 0x10;
-  wr16(raw + 16, kFatDate); wr16(raw + 18, kFatDate); wr16(raw + 24, kFatDate);
-  wr16(raw + 26, static_cast<u16>(c));
-  u64 dirent;
-  if (!add_entry(parent, raw, 1, dirent)) { free_chain(c); fat_flush(); return fail("directory is full"); }
+
+  auto undo = [&](const char* m) {
+    for (auto [k, at] : placed) if (items[k].out.cluster) free_chain(items[k].out.cluster);
+    fat_flush();
+    if (err) *err = m;
+    return false;
+  };
+  const size_t total = used + buf.size();
+  std::vector<u32> cl;
+  if (first == 0) {
+    if (total > static_cast<size_t>(root_entries_) * 32) return undo("too many entries for the FAT16 root directory");
+  } else {
+    cl = chain(first);
+    const size_t need = (total + cs - 1) / cs;
+    if (need > cl.size()) {
+      u32 more;
+      if (!alloc_chain(static_cast<u32>(need - cl.size()), more)) return undo("not enough free space for the directory");
+      fat_set(cl.back(), more);
+      const std::vector<u32> tail = chain(more);
+      cl.insert(cl.end(), tail.begin(), tail.end());
+    }
+    d.resize(cl.size() * cs, 0);
+  }
+  if (d.size() < total) d.resize(total, 0);
+  std::memcpy(d.data() + used, buf.data(), buf.size());
+  auto at = [&](size_t i) { return first ? cluster_offset(cl[i / cs]) + i % cs : root_off_ + i; };
+  for (size_t sec = used / bps_ * bps_; sec < total; sec += bps_) write_(at(sec), bps_, d.data() + sec);
   fat_flush();
+  for (auto [k, off] : placed) {
+    items[k].out.dirent = at(used + off);
+    items[k].ok = true;
+  }
   return true;
 }
 

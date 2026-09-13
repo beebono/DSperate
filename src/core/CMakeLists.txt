@@ -47,6 +47,7 @@ add_library(dsperate_core STATIC
   io/dsi_nand_persist.cpp
   io/dsi_title_install.cpp
   io/dsi_nand_synth.cpp
+  io/dsi_sd_card.cpp
   io/dsi_font.cpp
   io/dsi_nwifi.cpp
 )

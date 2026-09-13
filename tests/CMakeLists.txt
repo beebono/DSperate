@@ -126,3 +126,7 @@ endif()
 add_executable(test_nand_fs nand_fs_test.cpp)
 target_link_libraries(test_nand_fs PRIVATE dsperate_core)
 add_test(NAME nand_fs COMMAND test_nand_fs)
+
+add_executable(test_sd_card sd_card_test.cpp)
+target_link_libraries(test_sd_card PRIVATE dsperate_core)
+add_test(NAME sd_card COMMAND test_sd_card)

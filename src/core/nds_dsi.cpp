@@ -619,13 +619,18 @@ void NDS::setup_direct_boot_dsi() {
       std::snprintf(title, sizeof title, "nand:/title/%08x/%08x", t.title_id_hi, t.title_id_lo);
       char pub[96];
       std::snprintf(pub, sizeof pub, "%s/data/public.sav", title);
-      struct { u32 hdr; const char* name; const char* path; } entries[] = {
+      struct Mount { u32 hdr; const char* name; const char* path; };
+      std::vector<Mount> entries = {
         {0x00008141, "nand",    "/"},
         {0x0000A142, "nand2",   "/"},
         {0x00041144, "shared1", "nand:/shared1"},
         {0x00063146, "photo",   "nand2:/photo"},
         {0x00060948, "dataPub", pub},
       };
+      // A title with SD card access (header 0x1B4 bit 3) gets the card's root
+      // as well, whether or not a card is in the slot (captured from KNAE's
+      // launch both ways).
+      if (t.access_control & (1u << 3)) entries.push_back({0x00060049, "sdmc", "/"});
       u32 o = tbl;
       for (const auto& e : entries) { w32_7(o, e.hdr); put_str(o + 4, e.name); put_str(o + 20, e.path); o += 0x54; }
       char app[96];

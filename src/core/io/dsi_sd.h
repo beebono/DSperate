@@ -3,8 +3,8 @@
 // A port of melonDS's DSi_SD.cpp: the SDMMC host at 0x04004800-0x040049FF
 // with its command/response registers, the two 16-bit data FIFOs and the
 // 32-bit one they drain into, the IRQ/card-IRQ masks, and an MMC device on
-// port 1 holding the NAND. Port 0 (the SD card slot) is absent and reads as
-// "no card". The same controller, instance 1, is the SDIO host at
+// port 1 holding the NAND. Port 0 is the SD card slot: empty ("no card"), or
+// the card dsi_sd_card.h builds from a host folder. The same controller, instance 1, is the SDIO host at
 // 0x04004A00 with the Atheros Wi-Fi module on its port 0 (melonDS DSi_NWifi).
 //
 // The guest sees *raw* eMMC sectors here. The NAND's AES-CTR lives in
@@ -45,6 +45,16 @@ enum class MmcAcmd : u32 {
 
 constexpr u32 MMC_BLOCK_SIZE = 512;
 
+// What an MMC/SD device reads and writes: the NAND image or the SD card.
+class BlockStorage {
+ public:
+  virtual ~BlockStorage() = default;
+  virtual void read(u64 addr, u32 len, u8* out) = 0;
+  virtual void write(u64 addr, u32 len, const u8* in) = 0;
+  virtual void flush() {}
+  virtual const u8* cid() const = 0;   // the 16-byte card ID the device reports
+};
+
 // A NAND image backed by a real nand.bin. The image carries a 0x40-byte
 // nocash footer holding the eMMC CID and the console ID; without it we cannot
 // key anything, so the open fails loudly.
@@ -55,7 +65,7 @@ constexpr u32 MMC_BLOCK_SIZE = 512;
 // persists is pulled back out of the written sectors as files. `write_through`
 // is for the melonDS comparisons, which diff the written image on disk (run
 // them on a copy).
-class NandImage {
+class NandImage : public BlockStorage {
  public:
   ~NandImage();
   NandImage() = default;
@@ -85,9 +95,10 @@ class NandImage {
   u64 length() const { return length_; }
 
   // Raw sector access, as the guest sees it. `addr` is a byte offset.
-  void read(u64 addr, u32 len, u8* out);
-  void write(u64 addr, u32 len, const u8* in);
-  void flush();
+  void read(u64 addr, u32 len, u8* out) override;
+  void write(u64 addr, u32 len, const u8* in) override;
+  void flush() override;
+  const u8* cid() const override { return cid_; }
   // The same, for the emulator's own filesystem work (NandFs): not counted,
   // not logged, so the guest's access record stays the guest's.
   void peek(u64 addr, u32 len, u8* out);
@@ -130,11 +141,12 @@ class SdDevice {
   bool read_only = false;
 };
 
-// The eMMC device on port 1. melonDS's DSi_MMCStorage, NAND-only: the SD
-// card variants of each command are the branches we never take.
+// A storage device: the eMMC on port 1 or the SD card on port 0. melonDS's
+// DSi_MMCStorage, whose SD card differs in three commands (CMD1, CMD3, ACMD41).
 class MmcStorage : public SdDevice {
  public:
-  MmcStorage(NDS& nds, SdHost& host, NandImage& nand) : nds_(nds), host_(host), nand_(nand) {}
+  MmcStorage(NDS& nds, SdHost& host, BlockStorage& storage, bool sd_card)
+      : nds_(nds), host_(host), storage_(storage), sd_card_(sd_card) {}
 
   void reset() override;
   void send_cmd(MmcCmd cmd, u32 param) override;
@@ -150,7 +162,8 @@ class MmcStorage : public SdDevice {
 
   NDS& nds_;
   SdHost& host_;
-  NandImage& nand_;
+  BlockStorage& storage_;
+  bool sd_card_;
 
   u8  cid_[16] = {};
   u8  csd_[16] = {};
@@ -175,6 +188,10 @@ class SdHost {
   void reset();
   void attach_nand(NandImage* nand);
   bool has_nand() const { return storage_ != nullptr; }
+  // The SD card in the slot (host 0, port 0), or none. `read_only` clears the
+  // writable bit and drops writes.
+  void attach_sd(BlockStorage* card, bool read_only = false);
+  bool has_sd() const { return card_ != nullptr; }
 
   u16  read(u32 addr);
   void write(u32 addr, u16 val);
@@ -208,7 +225,7 @@ class SdHost {
   void update_irq(u32 oldmask);
   void update_card_irq(u16 oldmask);
   SdDevice* device() { return (port_select_ & 1) ? port1() : port0(); }
-  SdDevice* port0();                                                  // SD card slot (host 0, empty) / Wi-Fi (host 1)
+  SdDevice* port0();                                                  // SD card slot (host 0) / Wi-Fi (host 1)
   SdDevice* port1() { return num_ == 0 ? storage_.get() : nullptr; }  // the eMMC on host 0
   u32 irq2_main() const;
   u32 irq2_data1() const;
@@ -229,6 +246,7 @@ class SdHost {
   u32 num_ = 0;
   NandImage* nand_ = nullptr;
   std::unique_ptr<MmcStorage> storage_;
+  std::unique_ptr<MmcStorage> card_;   // the SD card (host 0, port 0)
   std::unique_ptr<NWifi> wifi_;
 
   u16 port_select_ = 0, soft_reset_ = 0, sd_clock_ = 0, sd_option_ = 0;

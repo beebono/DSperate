@@ -109,6 +109,8 @@ const char* kUsage =
     "                  up from [user], and saves go to paths.saves (else beside the game). The DSi system\n"
     "                  font is DSperate's own (Noto Sans, WenQuanYi Micro Hei); --dsi-font F\n"
     "                  (paths.dsi_font) uses a console's /sys/TWLFontTable.dat instead.\n"
+    "                  --dsi-sd DIR (paths.dsi_sd) puts a host folder in the DSi's SD card slot; what the\n"
+    "                  DSi changes on the card is written back to the folder (new, changed and removed files)\n"
     "                  A DSiWare .nds/.dsi/.cia named without --dsi-mode runs this way too, and so does one\n"
     "                  picked from the loader's game list (marked [DSi]); the DSi BIOS pair can be set as\n"
     "                  paths.bios9i/paths.bios7i. When the title leaves (a soft reset), the session ends.\n"
@@ -991,6 +993,7 @@ int main(int argc, char** argv) {
   const char* dsi_title = nullptr; const char* dsi_tmd = nullptr; bool dsi_offline = false, dsi_hide_installed = false, dsi_menu = false;
   bool dsi_hle = false;          // --dsi-mode with a title and no NAND: the launcher hand-off, BIOS pair only
   const char* dsi_font = nullptr;
+  const char* dsi_sd = nullptr;
   u32 dsi_title_lo = 0;   // the title --dsi-mode was given, once it is on the NAND: what the autoload starts
 
   // The game is found before the options are read. A flag whose value is
@@ -1025,6 +1028,7 @@ int main(int argc, char** argv) {
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];
     else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];
     else if (arg("--dsi-font")) dsi_font = argv[++i];
+    else if (arg("--dsi-sd")) dsi_sd = argv[++i];
     else if (flag("--dsi-offline")) dsi_offline = true;
     else if (flag("--dsi-menu")) dsi_menu = true;
     else if (flag("--dsi-hide-installed")) dsi_hide_installed = true;
@@ -1304,10 +1308,25 @@ int main(int argc, char** argv) {
                  nds.firmware_synthetic ? "firmware" : "", global_ini.c_str());
     return 2;
   }
+  // The DSi's SD card: a host folder, built into a card before the reset that
+  // puts it in the slot (io/dsi_sd_card.h). Opened once; a later DSiWare pick
+  // from the game list keeps it.
+  const std::string dsi_sd_dir = dsi_sd ? std::string(dsi_sd) : cfg.str("paths.dsi_sd");
+  auto open_dsi_sd = [&]() -> bool {
+    if (dsi_sd_dir.empty() || nds.dsi_sd.valid()) return true;
+    ds::io::SdCard::Report r;
+    std::string err;
+    if (!nds.dsi_sd.open(dsi_sd_dir, &r, &err)) { std::fprintf(stderr, "dsi sd: %s\n", err.c_str()); return false; }
+    VLOG("dsi sd: %s, %d files and %d folders on a %llu MB FAT%d card\n", dsi_sd_dir.c_str(), r.files, r.dirs,
+         static_cast<unsigned long long>(nds.dsi_sd.length() >> 20), nds.dsi_sd.fat_bits());
+    for (const std::string& n : r.notes) std::fprintf(stderr, "dsi sd: %s\n", n.c_str());
+    return true;
+  };
   if (dsi_hle) {
     std::string err;
     if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", dsi_bios9i.c_str(), dsi_bios7i.c_str()); return 1; }
+    if (!open_dsi_sd()) return 1;
     nds.set_dsi(true);
     nds.dsi_hle_launch = true;   // the NAND and settings are made once the title is in the slot (below)
     std::fprintf(stderr, "console: DSi without a NAND (EXPERIMENTAL: interpreter, no save states)\n");
@@ -1315,6 +1334,7 @@ int main(int argc, char** argv) {
     std::string err;
     if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", dsi_bios9i.c_str(), dsi_bios7i.c_str()); return 1; }
+    if (!open_dsi_sd()) return 1;
     // Opened read-only: the guest's writes (TWLCFG, title saves) are held in
     // memory (NandImage), so the dump is never written and nothing is kept
     // between runs until saves and settings are pulled out as files.
@@ -2097,7 +2117,17 @@ sdl_ready:
     if (r.saves || r.system_files || r.photos) VLOG("dsi: saved %d title saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
   };
-  auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav); flush_dsi(); };
+  // The SD card's changes go back to its folder on the same occasions, and
+  // once its writes have been quiet for two seconds.
+  u64 sd_writes_seen = nds.dsi_sd.writes, sd_quiet_since = 0, sd_synced = nds.dsi_sd.writes;
+  auto flush_sd = [&] {
+    if (save_readonly || !nds.dsi_sd.valid() || nds.dsi_sd.writes == sd_synced) return;
+    sd_synced = nds.dsi_sd.writes;
+    const ds::io::SdCard::Report r = nds.dsi_sd.sync();
+    if (r.files || r.dirs || r.removed) VLOG("dsi sd: %d files written, %d folders made, %d removed in %s\n", r.files, r.dirs, r.removed, nds.dsi_sd.folder().c_str());
+    for (const std::string& n : r.notes) std::fprintf(stderr, "dsi sd: %s\n", n.c_str());
+  };
+  auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav); flush_dsi(); flush_sd(); };
   // The session is ending: leave a state behind. The same two guards the
   // save-state hotkey carries -- a replay must not write, and a recording is
   // the inputs from boot, so a state alongside it would only mislead.
@@ -3248,6 +3278,7 @@ sdl_ready:
         std::fprintf(stderr, "launcher: dsi bios: %s\n", err.empty() ? "not found" : err.c_str());
         return;
       }
+      if (!open_dsi_sd()) return;
       nds.dsi_nand.close();
       nds.dsi_nand_synthetic = false;
       nds.dsi_nand_boot = false;   // picked from the DSi launcher: the made-up NAND is handed over, not booted
@@ -3264,6 +3295,7 @@ sdl_ready:
       // given back. The DSi firmware stays loaded; a DSi runs DS games with
       // it too.
       nds.dsi_nand.close();
+      nds.dsi_sd.close();   // synced by the flush_save() above; a DS has no SD slot
       nds.dsi_nand_synthetic = false;
       nds.dsi_nand_boot = false;
       nds.dsi_boot_blobs.clear();
@@ -4143,6 +4175,10 @@ sdl_ready:
     if (dsi_mode && nds.dsi_nand.writes != nand_exported) {
       if (nds.dsi_nand.writes != nand_writes_seen) { nand_writes_seen = nds.dsi_nand.writes; nand_quiet_since = frames; }
       else if (frames - nand_quiet_since >= 120) flush_dsi();
+    }
+    if (nds.dsi_sd.writes != sd_synced) {
+      if (nds.dsi_sd.writes != sd_writes_seen) { sd_writes_seen = nds.dsi_sd.writes; sd_quiet_since = frames; }
+      else if (frames - sd_quiet_since >= 120) flush_sd();
     }
 
     if ((show_fps || fps_osd) && frames % 60 == 0) {   // DS_FPS=1 and/or the on-screen counter

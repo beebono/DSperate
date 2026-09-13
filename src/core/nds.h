@@ -9,6 +9,7 @@
 #include "core/gpu/gpu3d.h"
 #include "core/spu/spu.h"
 #include "core/io/io.h"
+#include "core/io/dsi_sd_card.h"
 #include "core/dma/dma.h"
 #include "core/dma/ndma.h"
 #include "core/cart/cart.h"
@@ -68,6 +69,10 @@ struct NDS {
   // its save data. Loaded before reset(), like the BIOS pair.
   bool load_dsi_nand(const std::string& path, std::string* err = nullptr, bool write_through = false);   // see NandImage
   io::NandImage dsi_nand;
+  // The SD card in the DSi's slot, built from a host folder (io/dsi_sd_card.h).
+  // Opened before reset(), which puts it on the SD/MMC host's port 0; its
+  // changes go back to the folder through dsi_sd.sync().
+  io::SdCard dsi_sd;
   bool firmware_synthetic = false;   // the firmware was generated, not dumped (set by load_bios)
   // Direct boot is the only boot the substitutes support: FreeBIOS has no
   // boot code, and the generated firmware has no DS menu to boot into.

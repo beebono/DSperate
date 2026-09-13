@@ -1,8 +1,22 @@
 # DSiWare support -- scope and status
 
-Rewritten 2026-09-12 at branch `dsiware` @ `e0b4f79` (docs `f245cf9`). This
-replaces the 2026-09-10 plan, whose central design (direct boot + a
-synthesised NAND, no dump) did not survive; section 3 says what was wrong.
+Rewritten 2026-09-12 at branch `dsiware` @ `e0b4f79` (docs `f245cf9`); status
+brought up to date 2026-09-13 at `d582f79`. This replaces the 2026-09-10 plan,
+whose central design (direct boot + a synthesised NAND, no dump) did not
+survive; section 3 says what was wrong.
+
+**Where we are (2026-09-13).** Both launch routes work on the interpreter:
+the real-NAND boot (DSi Menu, TLNC auto-launch, one injected title, save and
+settings persistence) and the no-NAND launcher hand-off HLE, which starts all
+15 oracle titles on the DSi BIOS pair alone with DSperate's own system font.
+The SDL frontend runs DSiWare named on the command line or picked from the
+loader's list, and the loader cart works on the real DSi Menu. The remaining
+2.0.0 work is the hardware and platform half: microphone, DSi Wi-Fi
+networking, save states with the NAND, and the JIT and idle skip under DSi on
+the device (section 5). The SD card slot landed next (5.4): a host folder as
+the card, synced back. `dsiware` is 68 commits ahead of `main` and
+contains all of it (including the Wi-Fi/slirp work); `main` has nothing
+`dsiware` lacks.
 References: melonDS `dsperate-research/melonDS` @ `d3cd6164` (the exactness
 oracle) and melonDS DS `dsperate-research/melonds-ds-libretro` (how a
 shipping frontend launches DSiWare).
@@ -13,16 +27,17 @@ The target is DSperate **2.0.0**.
 
 | feature | 2.0.0 | notes |
 |---------|-------|-------|
-| DSiWare, launched from a real `nand.bin` | **in** | NAND boot + TLNC auto-launch (section 2.1) |
-| Booting the DSi menu itself | **in** | same NAND boot with no autoload |
-| No-NAND fallback: the launcher hand-off in HLE | **in** | `--dsi-hle-launch` (2.2); needs a synthesised NAND with stub system files; Unlaunch cannot be the fallback |
-| Title install from `.nds`/`.app`/`.cia` | **in** | at most one virtual title per boot, injected into the read-only dump's in-memory session (2.3) |
-| Save export/import (`.pub`/`.prv`/`.bnr`) | **in** | melonDS TitleManager extensions |
-| Microphone (I2S `MICCNT`/`MICDATA`) | **in** | fed by the existing SDL/ALSA capture |
-| DSi Wi-Fi networking | **in** | Atheros module is modelled; attach it to the `wifi-emu` slirp backend |
-| SD card slot (SD host port 0) | **in** | host folder or image |
-| Frontend | **in** | `--dsi-mode` with the usual firmware boot options; ini paths; picker lists DSiWare only in DSi mode; `.cia` input |
-| JIT + idle skip under DSi, on device | **in** | must work; **slower than DS titles is accepted for 2.0.0** |
+| DSiWare, launched from a real `nand.bin` | **in** -- done | NAND boot + TLNC auto-launch (section 2.1) |
+| Booting the DSi menu itself | **in** -- done | same NAND boot with no autoload |
+| No-NAND fallback: the launcher hand-off in HLE | **in** -- done | `--dsi-hle-launch` (2.2): synthesised NAND, generated settings and firmware, own system font; Unlaunch cannot be the fallback |
+| Title install from `.nds`/`.app`/`.cia` | **in** -- done | at most one virtual title per boot, injected into the read-only dump's in-memory session (2.3) |
+| Save export/import (`.pub`/`.prv`/`.bnr`) | **in** -- done | melonDS TitleManager extensions; not yet cross-checked by importing into melonDS |
+| Microphone (I2S `MICCNT`/`MICDATA`) | **in** -- not started | fed by the existing SDL/ALSA capture |
+| DSi Wi-Fi networking | **in** -- not started | Atheros module is modelled (drops frames); attach it to the slirp backend already on `dsiware` |
+| SD card slot (SD host port 0) | **in** -- done | a host folder (`--dsi-sd`, `paths.dsi_sd`), built into a card in memory and synced back (5.4) |
+| Frontend | **in** -- mostly done | CLI, loader list and loader cart on the DSi Menu done; no ini key for the NAND/DSi firmware, no menu row for hiding titles (2.4) |
+| Save states under DSi | **in** -- not started | refused in DSi mode today (2.5) |
+| JIT + idle skip under DSi, on device | **in** -- not started | SDL forces the interpreter and lockstep; **slower than DS titles is accepted for 2.0.0** |
 | DSP HLE (G.711, graphics) | after 2.0.0 | one feature commit, together with camera images passed from the CLI |
 | Camera image source | after 2.0.0 | the cameras exist as hardware; frames are black until then |
 | DSi-enhanced retail carts in DSi mode | after 2.0.0 | they run in DS mode, as today |
@@ -317,20 +332,47 @@ Order:
 
 ### 2.4 Machine selection and frontend
 
-The SDL frontend gets `--dsi-mode`, used with the usual firmware-boot options.
-In DSi mode the picker also lists DSiWare (`unit_code & 2` and title-ID high
-`0x00030004`); outside it, nothing changes. DSi-enhanced carts (title-ID high
-`0x00030000`) stay in DS mode in both. New ini paths: `bios9i`, `bios7i`,
-`dsi_firmware`, `dsi_nand` (ini only, per `settings.h`). Headless today uses
-`--dsi` (required with no ROM, or the machine is a DS and draws nothing).
+As built (`6b5e546`, `cd13967`), which departs from the first plan in two
+ways: DSiWare needs no `--dsi-mode`, and the picker lists it in every mode.
+
+- **DSiWare named on the command line** (`.nds`/`.dsi` recognised by header,
+  `.cia`) runs on the DSi machine. Without `--dsi-nand` it takes the hand-off
+  HLE (2.2). With `--dsi-mode --dsi-nand` it is installed into the NAND
+  session and auto-launched, or `--dsi-menu` boots to the menu with it
+  installed. `--dsi-tmd`, `--dsi-offline` and `--dsi-hide-installed` apply.
+- **The loader's game list** lists `.nds`/`.dsi`/`.cia` DSiWare as
+  `[DSi] name` and launches it with the hand-off, detaching the JIT.
+- **`--dsi-mode --dsi-nand` with no title** boots the DSi Menu with the
+  loader cart in the slot (the whitelist gate in section 5, item 3). A DS game
+  picked there leaves the DSi machine for a DS.
+- DSi-enhanced carts (title-ID high `0x00030000`) stay in DS mode.
+- Ini paths that exist: `paths.bios9i`, `paths.bios7i`, `paths.dsi_font`,
+  `paths.dsi_sd` (`--dsi-sd DIR`).
+  **Not yet:** `dsi_nand` and `dsi_firmware` keys (CLI only), and a menu
+  row for hiding the dump's titles (CLI only).
+- A DSi session forces `emu.jit=false`, lockstep, and idle skip off on the
+  NAND boot. It prints "EXPERIMENTAL: interpreter, no save states".
+- Headless uses `--dsi` (required with no ROM, or the machine is a DS and
+  draws nothing), plus `DS_LAUNCH_AT=<frame>:<path>` to script a picker
+  launch.
 
 ### 2.5 Save states
 
 `FORMAT_VERSION` 5 carries the DSi chunk, the SD/MMC, SDIO, Wi-Fi and camera
-events, the Wi-Fi mailboxes (~44 KB) and two 32 KB camera register files. Not
-covered yet: NAND contents. A state must carry the in-memory written sectors
-(`NandImage::written_sectors`) and refuse to load against a different NAND
-identity (CID + console ID + size), the way `bios_id` is checked.
+events, the Wi-Fi mailboxes (~44 KB) and two 32 KB camera register files, but
+**the SDL frontend refuses save states in DSi mode** ("save states are off in
+DSi mode for now"). Missing before they can be turned on:
+- NAND contents. A state must carry the in-memory written sectors
+  (`NandImage::written_sectors`) and refuse to load against a different NAND
+  identity (CID + console ID + size), the way `bios_id` is checked. A
+  synthesised NAND must be carried whole or rebuilt identically.
+- The HLE-only flags (`dsi_font_hle`, `dsi_loader_watch`, `exit_requested`)
+  and the injected title's identity.
+- The SD card's in-memory sectors, and a policy for a folder that changed
+  since the state was made. `SdHost::sync_state` already carries the card
+  device's registers when a card is in, so a state made with a card does not
+  load without one.
+- A round-trip check on a NAND boot and a hand-off launch.
 
 ## 3. Corrections to the 2026-09-10 plan
 
@@ -359,20 +401,29 @@ identity (CID + console ID + size), the way `bios_id` is checked.
 | Machine: 16 MB RAM, NWRAM/MBK, SCFG (per-width reads), IE2/IF2, NDMA, DSi CP15, BIOS pairs + protection, SNDEXCNT, DSi CODEC/TSC, GPIO, I2C + BPTWL | phase 1 | trace-exact vs melonDS; BPTWL soft reset modelled on melonDS `DSi::SoftReset` (`NDS::dsi_soft_reset`; `DS_DSI_SOFT_RESET_AT=<frame>` forces one in headless): reboots to Health and Safety and the launcher, not compared with melonDS |
 | Scheduler: melonDS 64/8 slice grid, 134/67 MHz ARM9 (`set_clock9_shift`), DMA iterations, pending cycles, soft timers per CPU, 8 us Wi-Fi timer | phase 1, `f8de6bf`, `50d4f87`, `e0b4f79` | exact through the launcher boot |
 | Modcrypt at load; AES engine (CTR/CCM, 4 slots, FIFOs, NDMA 0x2A/0x2B) | phase 2, `io/dsi_aes.*`, `tests/aes_test.cpp` | unit-tested; unused at runtime by oracles |
-| SD/MMC host (port 1 = NAND over `NandImage`; port 0 absent) | `fe13f0a`, `io/dsi_sd.*` | exact; raw sectors; `DS_NAND_LOG` |
+| SD/MMC host (port 1 = NAND over `NandImage`; port 0 = the SD card) | `fe13f0a`, `io/dsi_sd.*` | exact; raw sectors; `DS_NAND_LOG` / `DS_SD_LOG` |
+| SD card from a host folder; FatVolume FAT32, UTF-8 long names, bulk populate | `io/dsi_sd_card.*`, `io/dsi_nand_fs.*`, `tests/sd_card_test.cpp` | System Settings copies DSiWare to it and reads the export back after a sync; Free Blocks match melonDS on the same image |
 | SDIO host + Atheros module (BMI/HTC/WMI, scan returns melonDS's AP) | `e0b4f79`, `io/dsi_nwifi.*` | no network backend |
 | Cameras (2 Aptina sensors on I2C, module at 0x04004200) | `e0b4f79`, `io/dsi_camera.*` | black frames |
 | DSP host interface, no core (`PSTS` 0x0100) | `50d4f87`, `io/dsi_dsp.*` | core enable logged once |
 | NAND boot (boot2 shortcut, reset-state fixes: EXMEMCNT 0x6000, CP15 0x2078, WRAMCNT 3, WRAMCNT write re-applies NWRAM) | `d30ed62`..`e0b4f79` | **no-cart boot reaches the DSi Launcher**; top screen at frame 1200 pixel-identical, slice grid identical to the tap |
-| Launcher hand-off HLE (`--dsi-hle-launch`, `DS_ENTRY_SNAP` capture) | `nds_dsi.cpp` | Shantae and KMGE reach their title screens on the real NAND; no synthesised NAND yet |
+| Virtual NAND: read-only dump + in-memory writes, FAT12/16 + NAND crypto, persistence, one-title install, TLNC auto-launch | `7e1b954`, `io/dsi_nand_fs.*`, `io/dsi_nand_persist.*`, `io/dsi_title_install.*`, `crypto/sha1.*` | KD9E injected and Shantae launch with no input; saves and settings round-trip; dump MD5 unchanged |
+| Launcher hand-off HLE (`--dsi-hle-launch`, `DS_ENTRY_SNAP` capture) | `1bc7eee`, `nds_dsi.cpp` | Shantae 1618/2000 frames identical to the real launch |
+| No-NAND boot: synthesised NAND, DSi firmware with extended user settings, TWLCFG/HWINFO by header region | `5e96574`, `6b5e546`, `io/dsi_nand_synth.*`, `bios/firmware_gen.cpp` | 15/15 oracle titles start on the BIOS pair |
+| DSperate's DSi system font + SWI 22h HLE | `456ed04`, `2a154dd`, `d582f79`, `io/dsi_font/`, `tools/make_dsi_font.py` | titles accept it; control glyphs drawn for DSperate |
+| Soft reset: `NDS::dsi_soft_reset` (NAND), `exit_requested` (synthesised NAND) | `d026ef5`, `6b5e546` | NAND reboot not compared with melonDS |
+| SDL: DSiWare from CLI and loader list, loader cart on the DSi Menu (`dsi_loader_watch`) | `6b5e546`, `cd13967` | picker launches of `.cia`, `.dsi`, DS games checked |
 
-Not built: mic/I2S, SD port 0, TLNC launch on the NAND boot, title installer,
-save export, frontend wiring, DSP core, NWRAM dual-slot writes, the
+Not built: mic/I2S, NWifi network backend, save states under DSi,
+JIT and idle skip under DSi (SDL forces them off), `.app` streaming (the
+title is held in memory), DSP core, NWRAM dual-slot writes, the
 `0x02FE71B0`/SCFG_EXT RAM-size hacks, JIT parity for `code_latch`/
 `irq_skip_once`/`defer_cost` (the JIT falls back to the interpreter for the
-unmapped DSi ARM7 BIOS).
+unmapped DSi ARM7 BIOS), cart-present NAND boot, CN/KR font tables.
 
 ## 5. Remaining work to 2.0.0, in order
+
+Items 1-3 are done and kept as the record. Items 4-9 are open.
 
 1. **Launch an installed title from the NAND boot.** *Menu launch works at
    `e0b4f79`, with no code changes* (2026-09-12). The script: Health and Safety
@@ -422,29 +473,102 @@ unmapped DSi ARM7 BIOS).
    - Open: China/Korea font tables (nine resources); the launcher's title
      list at 0x02FFD800; non-USA titles untested; the JIT and save states
      under DSi.
-4. **SD card slot** (port 0): FAT image or host folder; `FatVolume` already
-   reads and writes the filesystem. The Unlaunch installer is an SD test
-   title.
-5. **Mic / I2S**: `MICCNT`/`MICDATA`, 16-entry FIFO, half-full IRQ,
-   `IRQ2_MicExt`, NDMA 0x2C. Oracle: Instrument Tuner (KTUE) uses the mic,
-   though its DSP half waits for after 2.0.0. Pulled forward only if the SD
-   or Unlaunch work turns out to need it.
-6. **DSi Wi-Fi networking**: route the NWifi module's frames into the
-   `wifi-emu` slirp backend. Same condition as 5.
-7. **Frontend** (2.4) and **save states with NAND** (2.5).
-8. **JIT and idle skip under DSi**: `test_jit` and a launcher boot under qemu
-   for aarch64 and A32; then measure the oracle set on the RG DS. The goal is
-   correct and playable, not DS-level headroom (the 134 MHz ARM9 doubles the
-   guest budget).
+4. **SD card slot** (done, 2026-09-13). USER DECISIONS: a host folder, not
+   an image (`--dsi-sd DIR`, `paths.dsi_sd`); the guest's changes are synced
+   back including deletions; the card size is automatic only.
+   - **The card** (`io/dsi_sd_card.*`) is built in memory at boot: an MBR
+     (partition at sector 8192), FAT16 below 1 GB and FAT32 from 1 GB
+     (melonDS's rule; 4 KB clusters to 2 GB, 32 KB above), sized as
+     melonDS's FATStorage sizes one: content + 128 MB, next power of two,
+     at most 32 GB. Files get cluster chains but no data. A data sector the
+     guest has not written is read from the host file that owns it, so memory
+     holds only the FAT, the directories and what the guest writes. Host
+     timestamps become FAT timestamps. Skipped with a note: names FAT cannot
+     hold, names equal but for case, files of 4 GB or more, directory links.
+   - **Sync** (`SdCard::sync`): new and changed files are written to
+     `<name>.dsperate-sync` and renamed over the host file; files and emptied
+     directories the guest removed are removed. A host file that changed on
+     the host since the card was built (size or mtime) is never overwritten
+     or removed: the card keeps its own copy in memory, with a note. After a
+     sync the card reads its files from the host again. Headless syncs at
+     exit; SDL on the NAND's occasions (quiet writes after 2 s, pause, lid,
+     exit) and never under a replay.
+   - **Guest side**: the card is a second `MmcStorage` on host 0 port 0
+     (`BlockStorage` interface shared with `NandImage`), melonDS's SD
+     variants: CMD1 dropped, the CMD3 R6 answer, ACMD41 keeps bit 30, CID
+     `DSiSDCardCID`, presence bits 0x20/0x80 in register 0x1C.
+   - **FatVolume** grew FAT32 (28-bit entries, cluster-chained root, FSInfo,
+     backup boot sector), UTF-8 long names (and the NT lower-case flags on
+     read), case preservation for the SD card only, timestamps, `create()`
+     without data, `populate()` for a whole directory in one pass (a
+     per-file `create()` re-reads the directory each time), a generic
+     `format()`, and a cached free count with an allocation hint that finds
+     what a scan from cluster 2 would (so NAND installs are unchanged).
+   - **The launcher hand-off** (2.2) gives a title with SD access (header
+     0x1B4 bit 3) a sixth mount entry, `{0x00060049, "sdmc", "/"}`, captured
+     from KNAE's real launch with and without a card: identical either way,
+     and our table now matches it byte for byte.
+   - **What uses the card.** The DSi Menu never selects port 0 during boot
+     (melonDS neither), nor does KNAE's startup. DSi Sound (HNKE) reads it at
+     start (144 blocks) and then stalls, waiting on the DSP (melonDS aborts on
+     it). **System Settings** (HNBE) is the working test: Data Management
+     shows "SD Card: Blocks Free 2,014" exactly as melonDS does on the same
+     image; copying Aura-Aura Climber to the card makes 9 702 block writes
+     and the sync writes `private/ds/title/4B535245.bin` (4 898 908 bytes)
+     and `HNB_.lst` (1 208 bytes, byte-identical to melonDS's). The `.bin`
+     differs from melonDS's in content, as a fresh encryption would, and a
+     second session built from the synced folder lists the title under the
+     SD Card tab with its icon (1 977 blocks free).
+   - Tools: headless `--dsi-autoload-id <16 hex>` (TLNC-launch any installed
+     title, system apps included), `DS_SD_DUMP=<file>` (the built card as an
+     image), `DS_SD_LOG=<file>` (block log). trace_melonds `--sd <image>` and
+     `--autoload <16 hex>`.
+   - Script for the Settings copy (both emulators; `--autoload
+     00030015484E4245`): taps `900:115,55` Data Management,
+     `1500:130,88` the second title, `2100:80,133` Copy, `2900:80,152` Yes;
+     4500 frames.
+   - Open: a read-only option, a card image as an
+     alternative input, photos from DSi Camera (DSP-dependent, untested),
+     homebrew on the card (the Unlaunch installer through the hand-off, title
+     ID 0 and no parameter block, crawls to about 22 frames in 15 minutes
+     with or without a card, on the unmodified d582f79 build too: a hand-off
+     problem, not the card's),
+     and melonDS parity of the Settings run past the Data Management tap (our
+     frames are a few behind after the tap, as at the Health and Safety tap).
+5. **Mic / I2S** (not started; nothing in `src/core` maps it):
+   `MICCNT`/`MICDATA`, 16-entry FIFO, half-full IRQ, `IRQ2_MicExt`, NDMA
+   0x2C, fed from `mic_alsa`/SDL capture. Oracle: Instrument Tuner (KTUE)
+   uses the mic, though its DSP half waits for after 2.0.0.
+6. **DSi Wi-Fi networking** (not started): `io/dsi_nwifi.cpp` consumes TX
+   frames and has no RX source. Route its frames into the slirp driver
+   (`src/net/slirp_driver.*`, already on `dsiware`) the way the DS Wi-Fi AP
+   does.
+7. **Frontend leftovers** (2.4): `dsi_nand`/`dsi_firmware` ini keys, a menu
+   row for hiding installed titles, streaming the `.app` instead of holding
+   it in memory. **Save states under DSi** (2.5): currently refused.
+8. **JIT and idle skip under DSi**: the SDL frontend forces the interpreter
+   and lockstep for every DSi session, and idle skip off on the NAND boot.
+   Steps: `test_jit` and a launcher boot and a hand-off launch under qemu
+   for aarch64 and A32, with frame hashes against the interpreter; then idle
+   skip on the oracle set; then measure it on the RG DS. The goal is correct
+   and playable, not DS-level headroom (the 134 MHz ARM9 doubles the guest
+   budget).
 9. **Open fidelity items**: rendered frames differ from melonDS from about
    frame 25 of the NAND boot even while the CPU grid matches (2D
    render/present, unexamined); the grid splits at the Health and Safety tap
-   (touch sampling timing).
+   (touch sampling timing); FAT mtimes 00:00:00 against melonDS's 04:16:00;
+   the hand-off starts both CPUs together where the real launch starts the
+   ARM7 about a frame later; the launcher title list at 0x02FFD800; `SCFG_MC`
+   stores bit 0 raw; the cart-present NAND boot (last split on SPIDATA at
+   frame 37); non-USA titles untested.
 
 After 2.0.0: DSP HLE (G.711 from KTUE, graphics) plus CLI camera images as
 one feature commit (the HLE core-enable path, the 4096-cycle catch-up event,
 the ucode CRC table over NWRAM bank B); DSi-mode carts (`SetScfgMC` power
-machine); RetroAchievements' DSi console table (78) if wanted.
+machine); RetroAchievements' DSi console table (78) if wanted; SD card
+insertion and removal mid-session (USER, 2026-09-13: after 2.0.0, and it is
+not known that the hardware's software handles it; the card is in for the
+whole session, with no insert/remove IRQ).
 
 ## 6. Oracles and assets
 
@@ -478,7 +602,9 @@ also has `info`, `titles`, `extract`, `bootblobs`.
 ### 7.1 Gates, every commit
 
 - Six DS scenes unmoved (`tools/all_scene_hashes.sh`), `state_roundtrip.sh`,
-  the unit tests (22).
+  the unit tests (23). mlbis's 600-frame hash moved between `6b5e546` and
+  `cd13967` on unmodified HEAD builds too, so re-baseline from a HEAD build
+  before reading an mlbis diff.
 - **DSi card-mode gate**: Shantae, 60 frames, both CPU traces byte-identical
   to melonDS, 400 rendered frames identical:
 
@@ -536,9 +662,12 @@ ping-pong once put the ARM7 55 k cycles behind with both traces identical).
 1. **JIT on device.** Every exactness result is interpreter-only, and the
    device runs the JIT. A DSi title that saturates its 134 MHz ARM9 will not
    run full speed on the A55 without a dedicated campaign.
-2. **Unlaunch is unproven.** Its oracle depends on melonDS accepting it as
-   boot2, which nobody has tried. Without that oracle, or if it needs more
-   than 2.2 lists, the no-NAND fallback may slip.
+2. **The hand-off HLE is tuned to 15 USA titles from one console.** It
+   replaces Unlaunch as the no-NAND fallback and works for all of them, but
+   titles that read `/sys` files we do not synthesise (`cert.sys`), use the
+   launcher title list at 0x02FFD800, or need CN/KR fonts will fail
+   differently. The synthesised NAND reports a title reading `/sys`; watch
+   for that first.
 3. **Installer fidelity.** A wrong FAT or save geometry shows up as "no save
    data" or a reformat. Gate the installer against melonDS's `ImportTitle`
    result, sector for sector.

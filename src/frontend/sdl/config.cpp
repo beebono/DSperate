@@ -178,6 +178,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # dsi_font = /path/to/TWLFontTable.dat  # --dsi-mode without a NAND: a console's DSi system font
                                 # (/sys/TWLFontTable.dat) instead of DSperate's own, which is used
                                 # when this is unset; [user] above is the DSi's settings there too
+# dsi_sd = /path/to/folder        # the DSi's SD card: this folder, as a card the size of its contents
+                                # plus 128 MB (at most 32 GB); what the DSi writes, adds or removes
+                                # on the card is carried back into the folder
 # firmware_override = /path/to/firmware.bin.ovr
                                 # settings changed inside the firmware's own menu (nickname, colour,
                                 # language...) are kept here, never in the dump. Delete it to reset.

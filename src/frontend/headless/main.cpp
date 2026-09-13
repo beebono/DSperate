@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
   bool cpu_oc = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
-  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr; const char* dsi_sd = nullptr; ds::u64 dsi_autoload_id = 0;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
@@ -318,6 +318,7 @@ int main(int argc, char** argv) {
     else if (arg("--dsi-nand-boot")) dsi_nand_boot = true;   // boot the NAND (boot2 -> launcher) instead of direct-booting the ROM
     else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];           // the title's signed DSi TMD for --dsi-install (default: <file>.tmd beside it)
     else if (arg("--dsi-autoload")) dsi_autoload = true;
+    else if (arg("--dsi-autoload-id")) { dsi_autoload_id = std::strtoull(argv[++i], nullptr, 16); dsi_autoload = true; }   // 16 hex digits, e.g. 00030005484E4B45: TLNC-launch any installed title (system apps too)
     else if (arg("--dsi-hle-launch")) dsi_hle = true;         // with --direct: start the DSiWare ROM as the DSi launcher hands a title over, not in card mode
     else if (arg("--dsi-font")) dsi_font = argv[++i];         // with --dsi-hle-launch and no --dsi-nand: the console's /sys/TWLFontTable.dat instead of DSperate's own font
     else if (arg("--user-name")) user.nickname = argv[++i];   // generated firmware / DSi settings: the owner's nickname
@@ -328,6 +329,7 @@ int main(int argc, char** argv) {
     else if (arg("--dsi-persist")) dsi_persist = argv[++i];   // carry DSi saves (<CODE>.pub/.prv/.bnr), the system sidecar (nand.ovr) and photos (photos/) in and out of DIR
     else if (arg("--dsi-nand-write")) dsi_nand_write = true;   // write the guest's NAND writes into the file (for diffing against melonDS; use a copy). Default: held in memory
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];        // a real nand.bin (nocash footer): the eMMC behind the SD/MMC host, and the console ID
+    else if (arg("--dsi-sd")) dsi_sd = argv[++i];            // a host folder as the DSi's SD card; the guest's changes are synced back into it at exit
     else if (flag("--dsi")) dsi_mode = 1;                    // force the DSi machine (default: a DSi-capable header with the DSi BIOS loaded)
     else if (flag("--no-dsi")) dsi_mode = 0;
     else if (arg("--trace")) trace = argv[++i];
@@ -400,6 +402,15 @@ int main(int argc, char** argv) {
     if (!nds.load_dsi_bios(bios9i ? bios9i : "", bios7i ? bios7i : "", &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
     if (dsi_boot && !nds.load_dsi_boot_blobs(dsi_boot, &err)) { std::fprintf(stderr, "dsi boot: %s\n", err.c_str()); return 1; }
     if (dsi_nand && !nds.load_dsi_nand(dsi_nand, &err, dsi_nand_write)) { std::fprintf(stderr, "dsi nand: %s\n", err.c_str()); return 1; }
+    if (dsi_sd) {
+      ds::io::SdCard::Report r;
+      if (!nds.dsi_sd.open(dsi_sd, &r, &err)) { std::fprintf(stderr, "dsi sd: %s\n", err.c_str()); return 1; }
+      std::fprintf(stderr, "dsi sd: %s, %d files and %d folders on a %llu MB FAT%d card\n", dsi_sd, r.files, r.dirs,
+                   static_cast<unsigned long long>(nds.dsi_sd.length() >> 20), nds.dsi_sd.fat_bits());
+      for (const std::string& n : r.notes) std::fprintf(stderr, "dsi sd: %s\n", n.c_str());
+      // DS_SD_DUMP=<file>: the card as built, as an image (melonDS's DSiSDCard for the oracle).
+      if (const char* d = std::getenv("DS_SD_DUMP"); d && !nds.dsi_sd.dump(d)) { std::fprintf(stderr, "dsi sd: cannot write %s\n", d); return 1; }
+    }
     if (dsi_hide_installed && nds.dsi_nand.valid()) {
       const int n = ds::io::nand_hide_installed_dsiware(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr, &err);
       if (n < 0) { std::fprintf(stderr, "dsi: hiding installed titles: %s\n", err.c_str()); return 1; }
@@ -563,9 +574,11 @@ int main(int argc, char** argv) {
   }
   if ((rom && direct) || (nds.dsi && nds.dsi_nand_boot)) nds.setup_direct_boot();   // a NAND boot needs no ROM
   if (dsi_autoload) {
-    if (!(nds.dsi && nds.dsi_nand_boot && dsi_title_lo)) { std::fprintf(stderr, "--dsi-autoload needs a NAND boot and --dsi-install\n"); return 1; }
-    nds.dsi_autoload(dsi_title_lo);
-    std::fprintf(stderr, "dsi: autoload %08x (TLNC)\n", dsi_title_lo);
+    const ds::u32 lo = dsi_autoload_id ? static_cast<ds::u32>(dsi_autoload_id) : dsi_title_lo;
+    const ds::u32 hi = dsi_autoload_id ? static_cast<ds::u32>(dsi_autoload_id >> 32) : 0x00030004;
+    if (!(nds.dsi && nds.dsi_nand_boot && lo)) { std::fprintf(stderr, "--dsi-autoload needs a NAND boot and --dsi-install or --dsi-autoload-id\n"); return 1; }
+    nds.dsi_autoload(lo, hi);
+    std::fprintf(stderr, "dsi: autoload %08x%08x (TLNC)\n", hi, lo);
   }
   // A recording made with a save present only replays if the save is there:
   // the game otherwise stops to create one. Loaded in the same place the SDL
@@ -888,6 +901,13 @@ int main(int argc, char** argv) {
   if (nds.dsi_nand.valid())
     std::fprintf(stderr, "nand: %llu block reads, %llu block writes\n",
                  (unsigned long long)nds.dsi_nand.reads, (unsigned long long)nds.dsi_nand.writes);
+  if (nds.dsi_sd.valid()) {
+    std::fprintf(stderr, "sd: %llu block reads, %llu block writes\n",
+                 (unsigned long long)nds.dsi_sd.reads, (unsigned long long)nds.dsi_sd.writes);
+    const ds::io::SdCard::Report r = nds.dsi_sd.sync();
+    if (r.files || r.dirs || r.removed) std::fprintf(stderr, "dsi sd: synced %d files, %d new folders, %d removed\n", r.files, r.dirs, r.removed);
+    for (const std::string& n : r.notes) std::fprintf(stderr, "dsi sd: %s\n", n.c_str());
+  }
   if (dsi_persist && nds.dsi_nand.valid()) {
     const std::string d = dsi_persist;
     const ds::io::NandPersistReport r = ds::io::nand_export(nds.dsi_nand, nds.bios_native_dsi ? nds.bus.bios7i.get() : nullptr,
