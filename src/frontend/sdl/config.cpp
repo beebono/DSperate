@@ -208,6 +208,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # games = /path/to/games        # the library the loader card lists on a firmware boot (.nds and .zip,
                                 # one level; DSiWare .nds/.dsi/.cia too, marked [DSi]). Unset, the
                                 # picker says so.
+# dsi_shortcuts = /path/to/folder  # where [emu] dsi_nand_shortcuts keeps its .dspr.nds files, e.g. a
+                                # frontend's own DSiWare folder. Unset: games above. The loader card
+                                # lists the shortcuts from here too
 # saves = /path/to/saves        # battery saves. Default: next to the ROM
 # states = /path/to/states      # save states (and the autosave's PNG). Default: next to the ROM
 # screenshots = /path/to/shots  # the screenshot hotkey. Default: the states directory
@@ -329,8 +332,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # SIGTERM, not SIGKILL. Resume with autoload below (or --load-state
                                 # <that path>); the slot never shows in the menu. Skipped during a
                                 # replay or recording
-# dsi_nand_shortcuts = false    # a <title>.dspr.nds file in paths.games for each DSiWare title on
-                                # paths.dsi_nand: opening one starts the title straight from the NAND
+# dsi_nand_shortcuts = false    # a <title>.dspr.nds file in paths.dsi_shortcuts (else paths.games) for
+                                # each DSiWare title on paths.dsi_nand, named in plain ASCII (a FAT
+                                # card may take nothing else): opening one starts the title straight from the NAND
                                 # (its saves and settings), skipping the DSi Menu and its slow load.
                                 # Kept up to date at every start; false removes every .dspr.nds there
 # dsi_hide_installed = false    # --dsi-mode: hide the NAND dump's own DSiWare from the DSi Menu for

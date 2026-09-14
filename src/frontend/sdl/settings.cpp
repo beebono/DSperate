@@ -126,7 +126,7 @@ const Setting kEmuSettings[] = {
   boolean("emu.dsi_hide_installed", "HIDE NAND DSIWARE", "false", FlagRestart, Dep::None,
           "DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED"),
   // Live: switching it writes or clears the .dspr.nds files at once.
-  boolean("emu.dsi_nand_shortcuts", "NAND DSIWARE SHORTCUTS", "false", FlagLive, Dep::GamesPath,
+  boolean("emu.dsi_nand_shortcuts", "NAND DSIWARE SHORTCUTS", "false", FlagLive, Dep::ShortcutsPath,
           "GAME LIST ENTRIES THAT START THE NAND'S DSIWARE WITHOUT THE DSI MENU"),
   // Live, and it was not always: it used to need a restart because the MAC was
   // only randomized into the firmware image for a run that asked for a session,

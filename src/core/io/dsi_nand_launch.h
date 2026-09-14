@@ -53,6 +53,12 @@ struct NandShortcut {
   bool from(const NandImage& nand) const;
 };
 
+// The first line of a banner title (UTF-16LE, 0x80 characters at most) in
+// plain ASCII, as a shortcut's file name takes it: accents dropped, typographic
+// punctuation and fullwidth ASCII folded, anything without an ASCII spelling
+// (TM, (R), the DSi font's button glyphs, kana) left out.
+std::string banner_title_ascii(const u8* utf16le);
+
 // Whether `path` ends in .dspr.nds (any case).
 bool is_shortcut_name(const std::string& path);
 // Reads one; false when the file is not a shortcut.

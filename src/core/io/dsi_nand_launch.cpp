@@ -24,23 +24,54 @@ constexpr size_t kStubBytes = 64;
 std::string hex8(u32 v) { char b[9]; std::snprintf(b, sizeof b, "%08x", v); return b; }
 u32 rd32(const u8* p) { return static_cast<u32>(p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<u32>(p[3]) << 24)); }
 
-void utf8_append(std::string& s, u32 cp) {
-  if (cp < 0x80) s += static_cast<char>(cp);
-  else if (cp < 0x800) { s += static_cast<char>(0xC0 | (cp >> 6)); s += static_cast<char>(0x80 | (cp & 0x3F)); }
-  else { s += static_cast<char>(0xE0 | (cp >> 12)); s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); s += static_cast<char>(0x80 | (cp & 0x3F)); }
+// One banner character as plain ASCII, or "" to drop it. A shortcut's name
+// has to survive a FAT card mounted iocharset=ascii -- ROCKNIX's games card
+// refuses any other byte with EINVAL -- and every frontend's scraper, so the
+// Latin letters lose their accents, typographic punctuation becomes its ASCII
+// form, fullwidth ASCII becomes ASCII, and what has no ASCII spelling (TM, (R),
+// (C), the DSi font's button glyphs in the private use area, kana and hanzi)
+// goes. A title left with nothing falls back to its game code.
+std::string ascii_of(u32 c) {
+  if (c >= 0x20 && c < 0x7F) return std::string(1, static_cast<char>(c));
+  if (c >= 0xFF01 && c <= 0xFF5E) return std::string(1, static_cast<char>(c - 0xFEE0));   // fullwidth ASCII
+  if (c == 0x3000 || c == 0xA0 || (c >= 0x2000 && c <= 0x200A)) return " ";
+  switch (c) {
+  case 0x2018: case 0x2019: case 0x201B: case 0x2032: case 0xB4: return "'";
+  case 0x201C: case 0x201D: case 0x201F: case 0x2033: return "\"";
+  case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2015: case 0x2212: case 0x30FC: return "-";
+  case 0x2026: return "...";
+  case 0xD7: return "x";
+  case 0xB7: case 0x30FB: return " ";
+  case 0xC6: return "AE"; case 0xE6: return "ae"; case 0x152: return "OE"; case 0x153: return "oe";
+  case 0xDF: return "ss"; case 0xD0: return "D"; case 0xF0: return "d"; case 0xDE: return "Th"; case 0xFE: return "th";
+  case 0xD8: return "O"; case 0xF8: return "o";
+  default: break;
+  }
+  // Latin-1 letters with a diacritic, by block.
+  static constexpr const char kLatin1[] =
+      "AAAAAA_CEEEEIIII_NOOOOO_OUUUUY__"   // U+00C0-00DF (the _ are handled above or have no letter)
+      "aaaaaa_ceeeeiiii_nooooo_ouuuuy_y";  // U+00E0-00FF
+  if (c >= 0xC0 && c <= 0xFF && kLatin1[c - 0xC0] != '_') return std::string(1, kLatin1[c - 0xC0]);
+  // Latin Extended-A (U+0100-017F) comes in case pairs; its base letters, in order.
+  static constexpr const char kExtA[] =
+      "AaAaAaCcCcCcCcDdDdEeEeEeEeEeGgGgGgGgHhHhIiIiIiIiIi__JjKkkLlLlLlLlLlNnNnNnnNnOoOoOo__RrRrRrSsSsSsSsTtTtTtUuUuUuUuUuUuWwYyYZzZzZzs";
+  if (c >= 0x100 && c <= 0x17F && kExtA[c - 0x100] != '_') return std::string(1, kExtA[c - 0x100]);
+  return "";
 }
 
-// The first line of one of the banner's UTF-16 titles.
-std::string banner_line(const u8* t) {
+}  // namespace
+
+std::string banner_title_ascii(const u8* t) {
   std::string s;
   for (int i = 0; i < 0x80; ++i) {
     const u32 c = t[i * 2] | (t[i * 2 + 1] << 8);
     if (c == 0 || c == '\n') break;
-    if (c >= 0xD800 && c <= 0xDFFF) continue;   // no surrogates in a DSi banner
-    utf8_append(s, c);
+    s += ascii_of(c);
   }
   return s;
 }
+
+namespace {
 
 // A name a FAT card, ext4 and a frontend's scraper all accept: no path or
 // wildcard characters, no control characters, single spaces, no trailing dot.
@@ -95,9 +126,13 @@ std::vector<NandTitle> nand_dsiware_titles(NandImage& nand, const u8* bios7i) {
       const u32 at = rd32(hdr + 0x68);
       u8 titles[0x200];
       // Titles 0 (Japanese) and 1 (English) of the banner.
+      // A name is only one with a letter or a digit in it: a kana title
+      // folds to its punctuation ("-"), which names nothing.
+      const auto named = [](const std::string& n) { return std::any_of(n.begin(), n.end(), [](unsigned char c) { return std::isalnum(c) != 0; }); };
       if (at && static_cast<u64>(at) + 0x240 + sizeof titles <= app.size && nfs.main().read_part(app, at + 0x240, sizeof titles, titles)) {
-        t.name = file_safe(banner_line(titles + 0x100));
-        if (t.name.empty()) t.name = file_safe(banner_line(titles));
+        t.name = file_safe(banner_title_ascii(titles + 0x100));
+        if (!named(t.name)) t.name = file_safe(banner_title_ascii(titles));
+        if (!named(t.name)) t.name.clear();
       }
     }
     if (t.name.empty()) t.name = t.code;

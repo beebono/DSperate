@@ -567,6 +567,14 @@ bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout
 // "FF3" and "LEGENDOFKAY" against "Art Academy", "Final Fantasy III" and
 // "Legend of Kay". The filename is what the player named the file, and it is
 // the one thing about a library they control.
+// Where NAND title shortcuts go (emu.dsi_nand_shortcuts): paths.dsi_shortcuts,
+// or the games folder when that is unset -- a frontend that keeps DSiWare in a
+// system folder of its own points the first at it.
+std::string shortcuts_dir(const ds::sdl::Config& cfg) {
+  const std::string d = cfg.str("paths.dsi_shortcuts");
+  return d.empty() ? cfg.str("paths.games") : d;
+}
+
 std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
   std::vector<ds::sdl::Menu::GameEntry> games;
   if (dir.empty()) return games;
@@ -597,6 +605,21 @@ std::vector<ds::sdl::Menu::GameEntry> enumerate_games(const std::string& dir) {
   // By name, the label aside, so a DSiWare title sits among the rest.
   auto key = [](const std::string& t) { return t.compare(0, 6, "[DSi] ") == 0 ? t.substr(6) : t; };
   std::sort(games.begin(), games.end(), [&](const ds::sdl::Menu::GameEntry& a, const ds::sdl::Menu::GameEntry& b) {
+    return key(a.title) < key(b.title);
+  });
+  return games;
+}
+
+// The loader card's list: the games folder, and the shortcut folder's titles
+// too when that is somewhere else, so the shortcuts are on the list either way.
+std::vector<ds::sdl::Menu::GameEntry> enumerate_library(const ds::sdl::Config& cfg) {
+  std::vector<ds::sdl::Menu::GameEntry> games = enumerate_games(cfg.str("paths.games"));
+  const std::string sc = cfg.str("paths.dsi_shortcuts");
+  if (sc.empty() || sc == cfg.str("paths.games")) return games;
+  for (ds::sdl::Menu::GameEntry& g : enumerate_games(sc))
+    if (ds::io::is_shortcut_name(g.path)) games.push_back(std::move(g));
+  auto key = [](const std::string& t) { return t.compare(0, 6, "[DSi] ") == 0 ? t.substr(6) : t; };
+  std::stable_sort(games.begin(), games.end(), [&](const ds::sdl::Menu::GameEntry& a, const ds::sdl::Menu::GameEntry& b) {
     return key(a.title) < key(b.title);
   });
   return games;
@@ -2087,14 +2110,16 @@ sdl_ready:
   // The library the loader cart's picker offers. Only read when there is a
   // loader cart to raise it: a normal session never shows the list.
   // NAND DSIWARE SHORTCUTS (emu.dsi_nand_shortcuts): a .dspr.nds file in the
-  // games folder for every DSiWare title on paths.dsi_nand while it is on,
+  // shortcut folder (shortcuts_dir) for every DSiWare title on paths.dsi_nand while it is on,
   // none while it is off (io/dsi_nand_launch.h). Brought up to date at every
   // start, so a title installed or removed since is picked up, and when the
   // row is changed. Reads its own copy of the NAND: the session's is not
   // touched. Returns a one-line summary for the toast.
   auto sync_nand_shortcuts = [&](bool on) -> std::string {
-    const std::string dir = cfg.str("paths.games");
-    if (dir.empty()) return "NO GAMES FOLDER";
+    // A folder that paths.dsi_shortcuts has since moved away from keeps its
+    // shortcuts: only the folder named now is brought up to date or cleared.
+    const std::string dir = shortcuts_dir(cfg);
+    if (dir.empty()) return "NO SHORTCUT FOLDER";
     ds::io::NandImage nand;
     std::vector<ds::u8> b7;
     if (on) {
@@ -2113,7 +2138,7 @@ sdl_ready:
   if (cfg.flag("emu.dsi_nand_shortcuts", false)) sync_nand_shortcuts(true);
   std::string shortcuts_note;   // what the last change of the row did, for a toast
   std::vector<ds::sdl::Menu::GameEntry> games =
-      boot_firmware && nds.cart ? enumerate_games(cfg.str("paths.games")) : std::vector<ds::sdl::Menu::GameEntry>{};
+      boot_firmware && nds.cart ? enumerate_library(cfg) : std::vector<ds::sdl::Menu::GameEntry>{};
   menu.set_games(&games);
   // Armed until a game is launched: after that the cart in the slot is a real
   // one, and its own reads at its own arm9_rom_offset mean nothing.
@@ -2683,8 +2708,8 @@ sdl_ready:
         return cfg.str("net.mode", "off") == "internet" ? "" : "ONLY WITH NETWORK FEATURES ON INTERNET";
       case ds::sdl::Dep::NetSession:
         return (net_live && *net_live) ? "NOT DURING A NETWORK SESSION" : "";
-      case ds::sdl::Dep::GamesPath:
-        return cfg.str("paths.games").empty() ? "NEEDS A GAMES FOLDER (PATHS.GAMES)" : "";
+      case ds::sdl::Dep::ShortcutsPath:
+        return shortcuts_dir(cfg).empty() ? "NEEDS PATHS.DSI_SHORTCUTS OR PATHS.GAMES" : "";
       }
       return "";
     }
@@ -2751,7 +2776,7 @@ sdl_ready:
     if (is("emu.fast_load")) { nds.io.set_cart_bulk(on); return; }
     if (is("emu.dsi_nand_shortcuts")) {
       shortcuts_note = sync_nand_shortcuts(on);   // shown by the frame loop's toast
-      if (boot_firmware && nds.cart) games = enumerate_games(cfg.str("paths.games"));
+      if (boot_firmware && nds.cart) games = enumerate_library(cfg);
       return;
     }
     // NETWORK FEATURES. Live, so a player can put the radio up for a trade

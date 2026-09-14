@@ -477,8 +477,29 @@ static void test_nand_shortcuts() {
   std::filesystem::remove_all(dir);
 }
 
+// Shortcut names in plain ASCII: a FAT card mounted iocharset=ascii (ROCKNIX's
+// games card) refuses every other byte, which is how "Shantae: Risky's
+// Revenge(TM)" failed to be written on the RG DS Plus.
+static void test_shortcut_names() {
+  auto ascii = [](const std::u16string& s) {
+    std::vector<ds::u8> b(0x100, 0);
+    for (size_t i = 0; i < s.size() && i < 0x80; ++i) { b[i * 2] = static_cast<ds::u8>(s[i]); b[i * 2 + 1] = static_cast<ds::u8>(s[i] >> 8); }
+    return ds::io::banner_title_ascii(b.data());
+  };
+  CHECK(ascii(u"Shantae: Risky\u2019s Revenge\u2122") == "Shantae: Risky's Revenge");
+  CHECK(ascii(u"Dark Void\u2122 Zero") == "Dark Void Zero");
+  CHECK(ascii(u"Pok\u00E9mon\u00AE Art Academy\u00A9") == "Pokemon Art Academy");
+  CHECK(ascii(u"Na\u00EFve \u00C6ther \u0141\u00F3d\u017A \u00DFtra\u00DFe") == "Naive AEther Lodz sstrasse");
+  CHECK(ascii(u"\uFF21\uFF22\uFF23\u3000\uFF11\uFF12") == "ABC 12");      // fullwidth ASCII
+  CHECK(ascii(u"A \u2013 B\u2026") == "A - B...");
+  CHECK(ascii(u"\uE000 Start\uE001") == " Start");                            // the DSi font's button glyphs
+  CHECK(ascii(u"\u3074\u3053\u3063\u3068\u30A2\u30ED\u30FC") == "-");      // kana: only the long-vowel mark survives
+  CHECK(ascii(u"Line one\nLine two") == "Line one");                            // the first line only
+}
+
 int main() {
   test_sha1();
+  test_shortcut_names();
   test_nand_shortcuts();
   test_nand_state();
   test_fat12();
