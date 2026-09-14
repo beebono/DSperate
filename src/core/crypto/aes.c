@@ -369,7 +369,7 @@ static void InvShiftRows(state_t* state)
 }
 
 /* Cipher is the main function that encrypts the PlainText. */
-static void Cipher(state_t* state, const uint8_t RoundKey[AES_keyExpSize])
+static void CipherSw(state_t* state, const uint8_t RoundKey[AES_keyExpSize])
 {
   uint8_t round = 0;
 
@@ -393,6 +393,48 @@ static void Cipher(state_t* state, const uint8_t RoundKey[AES_keyExpSize])
   }
   /* Add round key to last round */
   AddRoundKey(Nr, state, RoundKey);
+}
+
+/* DSperate: the forward cipher on the CPU's AES instructions where it has
+ * them (every RK356x core; x86-64 with AES-NI), the table-free C above
+ * elsewhere. Same round keys, same result: the DSi AES engine and the NAND
+ * reader run whole titles through this, a block at a time. */
+#if defined(__aarch64__) && defined(__GNUC__)
+#include <arm_neon.h>
+#include <sys/auxv.h>
+#define HWCAP_AES_BIT (1UL << 3)
+__attribute__((target("+crypto")))
+static void CipherHw(state_t* state, const uint8_t* rk)
+{
+  uint8x16_t s = vld1q_u8((const uint8_t*)state);
+  for (int r = 0; r < Nr - 1; ++r) s = vaesmcq_u8(vaeseq_u8(s, vld1q_u8(rk + r * 16)));
+  s = veorq_u8(vaeseq_u8(s, vld1q_u8(rk + (Nr - 1) * 16)), vld1q_u8(rk + Nr * 16));
+  vst1q_u8((uint8_t*)state, s);
+}
+static int hw_detect(void) { return (getauxval(AT_HWCAP) & HWCAP_AES_BIT) != 0; }
+#elif defined(__x86_64__) && defined(__GNUC__)
+#include <wmmintrin.h>
+__attribute__((target("aes,sse2")))
+static void CipherHw(state_t* state, const uint8_t* rk)
+{
+  __m128i s = _mm_xor_si128(_mm_loadu_si128((const __m128i*)state), _mm_loadu_si128((const __m128i*)rk));
+  for (int r = 1; r < Nr; ++r) s = _mm_aesenc_si128(s, _mm_loadu_si128((const __m128i*)(rk + r * 16)));
+  s = _mm_aesenclast_si128(s, _mm_loadu_si128((const __m128i*)(rk + Nr * 16)));
+  _mm_storeu_si128((__m128i*)state, s);
+}
+static int hw_detect(void) { __builtin_cpu_init(); return __builtin_cpu_supports("aes"); }
+#else
+static void CipherHw(state_t* state, const uint8_t* rk) { CipherSw(state, rk); }
+static int hw_detect(void) { return 0; }
+#endif
+
+static int hw_state = -1;   /* -1 not probed yet */
+void AES_force_software(int soft) { hw_state = soft ? 0 : hw_detect(); }
+
+static inline void Cipher(state_t* state, const uint8_t RoundKey[AES_keyExpSize])
+{
+  if (hw_state < 0) hw_state = hw_detect();
+  if (hw_state) CipherHw(state, RoundKey); else CipherSw(state, RoundKey);
 }
 
 static void InvCipher(state_t* state, const uint8_t RoundKey[AES_keyExpSize])

@@ -45,6 +45,10 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 /* One 16-byte block in place (the CCM MAC step). */
 void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf);
 
+/* DSperate: the cipher uses the CPU's AES instructions when present; a
+ * nonzero `soft` pins the portable C instead (tests compare the two). */
+void AES_force_software(int soft);
+
 #ifdef __cplusplus
 }
 #endif

@@ -35,6 +35,8 @@ public:
   void update_tcm(CpuContext& cpu, bool force = false);
   u32 tcm_prev_itcm_ = 0, tcm_prev_dtcm_base_ = 0, tcm_prev_dtcm_size_ = 0;   // windows mapped by the last update_tcm   // CP15 (ARM9)
   void update_wram();                 // WRAMCNT (DS), or WRAMCNT beneath the NWRAM windows (DSi)
+  static constexpr u32 WRAM_PAGES = 0x01000000 >> PAGE_SHIFT;   // the 0x03000000 region, per CPU
+  std::unique_ptr<u8*[]> wram_hosts_[2] = {std::make_unique<u8*[]>(WRAM_PAGES), std::make_unique<u8*[]>(WRAM_PAGES)};   // lay_wram scratch
   // DSi: rebuild the two CPUs' 0x03000000 windows from MBK1-9 (io.dsi.mbk)
   // over the WRAMCNT split. A slot a window shows that no MBK entry backs
   // reads as 0 and drops writes, as on hardware; the fall-through to the
@@ -144,6 +146,8 @@ private:
   void map_page_aligned(PageTable& pt, u32 guest, u32 size, u8* host, u32 flags, u32 mirror_end);
   // DSi NWRAM slot tables, rebuilt from MBK1-5 by update_nwram: [bank][cpu 0 ARM9 / 1 ARM7 / 2 DSP][slot].
   u8* nwram_map_[3][3][8] = {};
+  void lay_wram(int c, bool nwram);   // wram_hosts_[c] from WRAMCNT, with `nwram` the DSi's NWRAM windows over it
+  void apply_wram(bool nwram);        // lay both CPUs and remap what changed
 public:
   // The non-RAM access path (I/O, VRAM slow blocks, GBA slot). The JIT's
   // slow-store helper enters here for I/O so it gets the GXFIFO fast path.

@@ -39,6 +39,27 @@ static void test_primitives() {
   CHECK_MEM(buf, ctr, 16);
 }
 
+// The CPU-instruction cipher (where the host has one) against the portable C:
+// ECB and a CTR stream over many keys, counters and lengths.
+static void test_hw_matches_software() {
+  u32 x = 0x12345678;
+  auto rnd = [&x] { x ^= x << 13; x ^= x >> 17; x ^= x << 5; return static_cast<u8>(x); };
+  for (int n = 0; n < 200; ++n) {
+    u8 key[16], iv[16], a[64], b[64];
+    for (u8& v : key) v = rnd();
+    for (u8& v : iv) v = n < 8 ? 0xFF : rnd();          // the first few carry through the whole counter
+    for (u8& v : a) v = rnd();
+    std::memcpy(b, a, sizeof a);
+    const size_t len = 1 + n % 64;
+    AES_ctx c1, c2;
+    AES_force_software(0); AES_init_ctx_iv(&c1, key, iv); AES_CTR_xcrypt_buffer(&c1, a, len); AES_ECB_encrypt(&c1, a + 48);
+    AES_force_software(1); AES_init_ctx_iv(&c2, key, iv); AES_CTR_xcrypt_buffer(&c2, b, len); AES_ECB_encrypt(&c2, b + 48);
+    CHECK_MEM(a, b, sizeof a);
+    CHECK_MEM(c1.Iv, c2.Iv, 16);
+  }
+  AES_force_software(0);
+}
+
 static void test_scrambler() {
   // ROL128 by 42 = 5 bytes + 2 bits; a single set bit lands where expected.
   u8 v[16] = {1};
@@ -165,6 +186,10 @@ static void test_engine_keys(NDS& nds) {
 
 int main() {
   test_primitives();
+  AES_force_software(1);
+  test_primitives();
+  AES_force_software(0);
+  test_hw_matches_software();
   test_scrambler();
   NDS nds;
   nds.set_dsi(true);

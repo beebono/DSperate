@@ -221,35 +221,64 @@ void Bus::set_clock9_shift(u32 shift) {
   nds_.sched.set_clock9_shift(shift);
 }
 
-void Bus::update_wram() {
-  PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
-  PageTable& pt7 = nds_.cpu(Cpu::ARM7).page_table;
-  const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
-  // ARM9 side: 03000000-03FFFFFF.
-  pt9.unmap(0x03000000, 0x01000000);
-  // ARM7 side: 03000000-037FFFFF is the shared split; 03800000-03FFFFFF the
-  // private WRAM, re-laid here because a DSi NWRAM window may have covered it.
-  pt7.unmap(0x03000000, 0x01000000);
-  map_page_aligned(pt7, 0x03800000, ARM7_WRAM_SIZE, arm7_wram.get(), RW, 0x04000000);
+// The 0x03000000 region is laid out in `wram_hosts_` (one host pointer per
+// page, nullptr = unmapped) and applied with PageTable::remap, which touches
+// only the entries that change. A rebuild used to unmap and remap both CPUs'
+// whole 16 MB: the DSi Menu hands NWRAM slots between the CPUs a few hundred
+// times a frame while it loads a title, and that alone made a launch several
+// times slower than the guest's own time on a handheld.
+void Bus::lay_wram(int c, bool nwram) {
+  u8** h = wram_hosts_[c].get();
+  std::fill_n(h, WRAM_PAGES, nullptr);
+  const auto fill = [h](u32 guest, u32 size, u8* host, u32 end) {
+    for (u32 a = guest; a < end; a += size)
+      for (u32 o = 0; o < size; o += PAGE_SIZE) h[(a + o - 0x03000000) >> PAGE_SHIFT] = host ? host + o : nullptr;
+  };
   u8* half0 = shared_wram.get();
   u8* half1 = shared_wram.get() + 0x4000;
-  switch (nds_.io.wramcnt & 3) {
-  case 0:   // ARM9: all 32K; ARM7: none (ARM7 WRAM mirrors)
-    map_page_aligned(pt9, 0x03000000, SHARED_WRAM_SIZE, shared_wram.get(), RW, 0x04000000);
-    map_page_aligned(pt7, 0x03000000, ARM7_WRAM_SIZE, arm7_wram.get(), RW, 0x03800000);
-    break;
-  case 1:   // ARM9: second 16K; ARM7: first 16K
-    map_page_aligned(pt9, 0x03000000, 0x4000, half1, RW, 0x04000000);
-    map_page_aligned(pt7, 0x03000000, 0x4000, half0, RW, 0x03800000);
-    break;
-  case 2:   // ARM9: first 16K; ARM7: second 16K
-    map_page_aligned(pt9, 0x03000000, 0x4000, half0, RW, 0x04000000);
-    map_page_aligned(pt7, 0x03000000, 0x4000, half1, RW, 0x03800000);
-    break;
-  default:  // ARM9: none (unmapped -> slow path returns 0); ARM7: all 32K
-    map_page_aligned(pt7, 0x03000000, SHARED_WRAM_SIZE, shared_wram.get(), RW, 0x03800000);
-    break;
+  const u32 cnt = nds_.io.wramcnt & 3;
+  if (c == 0) {
+    // ARM9: all 32K (0), the second 16K (1), the first (2), none (3: slow path returns 0).
+    if (cnt == 0) fill(0x03000000, SHARED_WRAM_SIZE, shared_wram.get(), 0x04000000);
+    else if (cnt != 3) fill(0x03000000, 0x4000, cnt == 1 ? half1 : half0, 0x04000000);
+  } else {
+    // ARM7: 03000000-037FFFFF is the shared split (its own WRAM's mirrors
+    // when it has none of it); 03800000-03FFFFFF the private WRAM, re-laid
+    // every time because a DSi NWRAM window may have covered it.
+    fill(0x03800000, ARM7_WRAM_SIZE, arm7_wram.get(), 0x04000000);
+    if (cnt == 0) fill(0x03000000, ARM7_WRAM_SIZE, arm7_wram.get(), 0x03800000);
+    else if (cnt == 3) fill(0x03000000, SHARED_WRAM_SIZE, shared_wram.get(), 0x03800000);
+    else fill(0x03000000, 0x4000, cnt == 1 ? half0 : half1, 0x03800000);
   }
+  if (!nwram || !nds_.dsi) return;
+  const io::DsiIo& d = nds_.io.dsi;
+  if (!(d.scfg_ext[c] & (1u << 25))) return;
+  for (int bank = 2; bank >= 0; --bank) {          // C first, A last: A has priority
+    const u32 v = d.mbk[c][5 + bank];
+    u32 start, end, mask;
+    if (bank == 0) {
+      start = 0x03000000 + (((v >> 4) & 0xFF) << 16); end = 0x03000000 + (((v >> 20) & 0x1FF) << 16);
+      static const u32 masks[4] = {0, 0, 1, 3}; mask = masks[(v >> 12) & 3];
+    } else {
+      start = 0x03000000 + (((v >> 3) & 0x1FF) << 15); end = 0x03000000 + (((v >> 19) & 0x3FF) << 15);
+      static const u32 masks[4] = {0, 1, 3, 7}; mask = masks[(v >> 12) & 3];
+    }
+    if (end > 0x04000000) end = 0x04000000;      // the window is cut at the end of the region
+    const u32 shift = bank == 0 ? 16 : 15, unit = 1u << shift;
+    for (u32 a = start; a < end; a += unit)        // shown but unbacked: reads 0, writes dropped (slow path)
+      fill(a, unit, nwram_map_[bank][c][(a >> shift) & mask], a + unit);
+  }
+}
+
+void Bus::apply_wram(bool nwram) {
+  for (int c = 0; c < 2; ++c) {
+    lay_wram(c, nwram);
+    nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table.remap(0x03000000, 0x01000000, wram_hosts_[c].get(), PAGE_READABLE | PAGE_WRITABLE);
+  }
+}
+
+void Bus::update_wram() {
+  apply_wram(false);
 }
 
 // The NWRAM slot tables and windows, as melonDS derives them (DSi.cpp
@@ -260,50 +289,28 @@ void Bus::update_wram() {
 // are both written by a store there (melonDS writes every matching part);
 // here the one that reads wins. No title on hand does it.
 void Bus::update_nwram() {
-  update_wram();
   // The watched page (enable_watch) is re-laid with the rest: take it out again after.
   struct Retrap { Bus& b; ~Retrap() { if (!watch_on) return; for (int c = 0; c < 2; ++c) if (watch_host[c]) b.nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table.map_mmio(watch_addr & ~0x7FFu, 0x800); } } retrap{*this};
-  if (!nds_.dsi) return;
-  const io::DsiIo& d = nds_.io.dsi;
-  if (getenv("DS_DEBUG_MBK"))
-    std::fprintf(stderr, "[nwram] rebuild scfg_ext %08x/%08x (bit25 a9=%d a7=%d) t=%llu\n",
-                 d.scfg_ext[0], d.scfg_ext[1], (d.scfg_ext[0] >> 25) & 1, (d.scfg_ext[1] >> 25) & 1,
-                 (unsigned long long)nds_.sched.now());
   std::memset(nwram_map_, 0, sizeof nwram_map_);
-  for (int part = 3; part >= 0; --part) {
-    const u8 v = static_cast<u8>((d.mbk[0][0] >> (part * 8)) & 0xFD);
-    if (v & 0x80) nwram_map_[0][v & 3][(v >> 2) & 3] = nwram[0].get() + (part << 16);
-  }
-  for (int bank = 1; bank <= 2; ++bank)
-    for (int part = 7; part >= 0; --part) {
-      u8 v = static_cast<u8>((d.mbk[0][(bank == 1 ? 1 : 3) + (part >> 2)] >> ((part & 3) * 8)) & 0xFF);
-      if (!(v & 0x80)) continue;
-      if (v & 0x02) v &= 0xFE;
-      nwram_map_[bank][v & 3][(v >> 2) & 7] = nwram[bank].get() + (part << 15);
+  if (nds_.dsi) {
+    const io::DsiIo& d = nds_.io.dsi;
+    if (getenv("DS_DEBUG_MBK"))
+      std::fprintf(stderr, "[nwram] rebuild scfg_ext %08x/%08x (bit25 a9=%d a7=%d) t=%llu\n",
+                   d.scfg_ext[0], d.scfg_ext[1], (d.scfg_ext[0] >> 25) & 1, (d.scfg_ext[1] >> 25) & 1,
+                   (unsigned long long)nds_.sched.now());
+    for (int part = 3; part >= 0; --part) {
+      const u8 v = static_cast<u8>((d.mbk[0][0] >> (part * 8)) & 0xFD);
+      if (v & 0x80) nwram_map_[0][v & 3][(v >> 2) & 3] = nwram[0].get() + (part << 16);
     }
-  const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
-  for (int c = 0; c < 2; ++c) {
-    if (!(d.scfg_ext[c] & (1u << 25))) continue;
-    PageTable& pt = nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table;
-    for (int bank = 2; bank >= 0; --bank) {          // C first, A last: A has priority
-      const u32 v = d.mbk[c][5 + bank];
-      u32 start, end, mask;
-      if (bank == 0) {
-        start = 0x03000000 + (((v >> 4) & 0xFF) << 16); end = 0x03000000 + (((v >> 20) & 0x1FF) << 16);
-        static const u32 masks[4] = {0, 0, 1, 3}; mask = masks[(v >> 12) & 3];
-      } else {
-        start = 0x03000000 + (((v >> 3) & 0x1FF) << 15); end = 0x03000000 + (((v >> 19) & 0x3FF) << 15);
-        static const u32 masks[4] = {0, 1, 3, 7}; mask = masks[(v >> 12) & 3];
+    for (int bank = 1; bank <= 2; ++bank)
+      for (int part = 7; part >= 0; --part) {
+        u8 v = static_cast<u8>((d.mbk[0][(bank == 1 ? 1 : 3) + (part >> 2)] >> ((part & 3) * 8)) & 0xFF);
+        if (!(v & 0x80)) continue;
+        if (v & 0x02) v &= 0xFE;
+        nwram_map_[bank][v & 3][(v >> 2) & 7] = nwram[bank].get() + (part << 15);
       }
-      if (end > 0x04000000) end = 0x04000000;      // the window is cut at the end of the region
-      const u32 shift = bank == 0 ? 16 : 15, unit = 1u << shift;
-      for (u32 a = start; a < end; a += unit) {
-        u8* host = nwram_map_[bank][c][(a >> shift) & mask];
-        if (host) pt.map(a, unit, host, RW);
-        else pt.unmap(a, unit);                    // shown but unbacked: reads 0, writes dropped (slow path)
-      }
-    }
   }
+  apply_wram(true);
 }
 
 void Bus::update_vram() {
