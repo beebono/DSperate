@@ -769,7 +769,7 @@ void Io::cart_write_romctrl(u32 value) {
   const bool release = (value & ~cart.romctrl) & (1u << 29);
   cart.romctrl = (cart.romctrl & 0x00800000) | (value & 0xFF7F7FFF) | (cart.romctrl & (1u << 29));
   if (value & (1u << 29)) cart.romctrl |= 1u << 29;
-  if (release && nds_.cart) nds_.cart->set_reset(false);
+  if (release) update_cart_reset();
   if (!(cart.auxspicnt & 0x8000) || (cart.auxspicnt & 0x2000) || !start) return;
   if (nds_.cart) nds_.cart->command_start(cart.cmd.data());
   u32 size_code = (cart.romctrl >> 24) & 7;
@@ -1813,12 +1813,19 @@ void Io::dsi_write_scfg_mc(u16 value, u16 mask) {
     mc = static_cast<u16>((mc & ~(3u << shift)) | (newpower << shift));
   }
   dsi.scfg_mc = mc;
+  if ((old ^ mc) & 0x000C) update_cart_reset();
 }
 
 void Io::cart_power_event(NDS& nds, u32 slot) {
   const int shift = 2 + 4 * static_cast<int>(slot);
   nds.io.dsi.scfg_mc = static_cast<u16>(nds.io.dsi.scfg_mc & ~(3u << shift));
-  if (slot == 0) nds.io.cart.romctrl &= ~(1u << 29);
+  if (slot == 0) { nds.io.cart.romctrl &= ~(1u << 29); nds.io.update_cart_reset(); }
+}
+
+void Io::update_cart_reset() {
+  if (!nds_.cart) return;
+  const bool powered = !nds_.dsi || ((dsi.scfg_mc >> 2) & 3) == 2;
+  nds_.cart->set_reset(!powered || !(cart.romctrl & (1u << 29)));
 }
 
 // MBK6-8 for one CPU: its window over bank A/B/C.

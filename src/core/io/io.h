@@ -262,6 +262,11 @@ public:
   // an inserted card down before it starts a NAND title and waits for state
   // 0: stored as written, that never came and the launch stayed white.
   void dsi_write_scfg_mc(u16 value, u16 mask);
+  // The card's /RES line (melonDS NDSCartSlot::UpdateCartState): held while
+  // ROMCTRL bit 29 is clear, and on a DSi while slot 1 is not in power
+  // state 2. Asserting it drops the card back to plain commands, which is
+  // what lets the DSi Menu read the card again after a power cycle.
+  void update_cart_reset();
   // SCFG_EXT9 bits 14-15 made the machine's main RAM size (melonDS ApplyNewRAMSize).
   void dsi_apply_ram_size();
   static void cart_power_event(NDS& nds, u32 slot);

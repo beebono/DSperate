@@ -161,7 +161,12 @@ bool NDS::boot_dsi_nand() {
   d.scfg_ext[1] |= 1u << 25;
   // The card slot as it is now: a frontend may put a card in after reset()
   // (the SDL loader cart), which Io::reset would have reported as empty.
+  // Powered off, so the card is back in reset: after a soft reset it would
+  // otherwise still be in KEY2 mode from the last boot, and the DSi Menu's
+  // header read would get nothing it recognises (no card on the menu).
   d.scfg_mc = static_cast<u16>(0x0010 | (cart ? 0 : 1));
+  io.cart.romctrl &= ~(1u << 29);
+  io.update_cart_reset();
   for (int i = 0; i < 3; ++i) std::memset(bus.nwram[i].get(), 0, mem::Bus::NWRAM_BANK_SIZE);
 
   // The boot info block: where boot2 lives and where it goes. Raw NAND bytes --
@@ -329,7 +334,7 @@ void NDS::dsi_soft_reset() {
   d.scfg_clock9 = 0x0187; d.scfg_clock7 = 0x0187;
   bus.set_clock9_shift(2);       // the launcher may have dropped the ARM9 to 67 MHz
   d.scfg_ext[0] = 0x8307F100; d.scfg_ext[1] = 0x93FFFB06;
-  d.scfg_mc = static_cast<u16>(0x0010 | (cart ? 0 : 1));
+  d.scfg_mc = static_cast<u16>(0x0010 | (cart ? 0 : 1));   // boot_dsi_nand put the card back in reset
   d.scfg_rst = 0;
   io.dsp.set_rst_line(false);
   io.dispstat[0] |= 0x40; io.dispstat[1] |= 0x40;   // LCD init flag
