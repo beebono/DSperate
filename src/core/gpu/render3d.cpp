@@ -1664,7 +1664,7 @@ template <int mode, bool textured, bool aa, bool opq>
           u32 t0, t1 = 0;
           uint32x4_t pre[2];
           pre[0] = prefix_exclusive(vandq_u32(mo[0], vdupq_n_u32(1)), &t0);
-          if constexpr (NH == 2) pre[1] = vaddq_u32(prefix_exclusive(vandq_u32(mo[1], vdupq_n_u32(1)), &t1), vdupq_n_u32(t0));
+          if constexpr (decltype(nh_c)::value == 2) pre[1] = vaddq_u32(prefix_exclusive(vandq_u32(mo[1], vdupq_n_u32(1)), &t1), vdupq_n_u32(t0));
           for (u32 k = 0; k < NH; ++k) {
             const uint32x4_t xc = vshrq_n_u32(vmlaq_u32(vdupq_n_u32(static_cast<u32>(xcov)), pre[k], vdupq_n_u32(static_cast<u32>(cov_step))), 5);
             uint32x4_t cov;
