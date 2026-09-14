@@ -186,6 +186,15 @@ struct NDS {
   // Halt(4), which resets at the end of ARM7::Execute.
   bool dsi_soft_reset_pending = false;
   void dsi_soft_reset();
+  // The DSi Menu has handed a title over and jumped to it. The loader stub
+  // (at 023FExxx) writes SCFG_EXT during its IPCSYNC 5/5 handshake with the
+  // ARM7 (dsi_loader_scfg_seen) and ends it with the ARM9's IPCSYNC 0, its
+  // last I/O before the jump. Cleared by reset() and a soft reset, set on a
+  // state load (states are made in titles). The frontend defers cpu_oc's
+  // underclock tier to it: that handshake is a race the underclocked ARM9
+  // loses (both CPUs then wait for good).
+  bool dsi_loader_scfg_seen = false;
+  bool dsi_title_running = false;
   // The guest started a program on the DSP (PCFG bit 0 released after the
   // ucode upload), which DSperate does not emulate: the title will wait for
   // replies that never come, or go without its DSP audio or image work.

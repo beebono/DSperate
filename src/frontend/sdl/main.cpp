@@ -161,7 +161,7 @@ const char* kUsage =
     "  --timing-oc     Timing OC: no GX FIFO, untimed geometry (faster, less accurate; DraStic's model).\n"
     "                  emu.timing_oc in the config\n"
     "  --cpu-oc        CPU OC: recompiled data accesses priced as main RAM, geometry on its own thread\n                  with every polygon priced as drawn (less accurate); emu.cpu_oc = true\n"
-    "  --cpu-uc        CPU OC's underclock: stores and the ARM7 priced at main RAM's bus cost, so the\n                  guest runs slower and the host does less a frame (weakest devices; a game can\n                  miss VBlanks); emu.cpu_oc = underclock\n"
+    "  --cpu-uc        CPU OC's underclock: for the harder to run games and/or the lowest end devices.\n                  The game's CPUs run slower than a console's, so there is less to emulate a frame\n                  (less accurate; a game can miss VBlanks); emu.cpu_oc = underclock\n"
     "  --fast-load     cart DMA reads the card without its clock (may affect accuracy); emu.fast_load\n"
     "  --aa / --no-aa  3D anti-aliasing on (hardware behaviour) or off; video.aa, off by default\n"
     "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
@@ -1823,9 +1823,17 @@ sdl_ready:
   if (!replay || rtc_host) nds.io.start_rtc_clock();
   else VLOG("rtc: frozen for the replay\n");
   if (replay && rtc_host) std::fprintf(stderr, "rtc: --rtc-host over a replay; this run is not reproducible\n");
+  // emu.cpu_oc as set, and as the recompiler runs it. The underclock tier
+  // waits on a DSi NAND boot until the DSi Menu has jumped to the title it
+  // launched (NDS::dsi_title_running): the Menu's hand-off is an IPC race the
+  // underclocked ARM9 loses, and both CPUs then wait for good. Checked once a
+  // frame below, so it comes back off when the title returns to the Menu.
+  int cpu_oc_cfg = cpu_oc_mode(cfg.str("emu.cpu_oc"));
+  int cpu_oc_applied = 0;
+  auto cpu_oc_wanted = [&](int mode) { return (mode == 2 && nds.dsi && nds.dsi_nand_boot && !nds.dsi_title_running) ? 0 : mode; };
 #if DSPERATE_JIT
   if (jit && !ds::jit::attach(nds, true, true)) return 1;
-  if (jit) ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_mode(cfg.str("emu.cpu_oc"))));   // see config.cpp; translate-time pricing, so before the first block
+  if (jit) ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied = cpu_oc_wanted(cpu_oc_cfg)));   // see config.cpp; translate-time pricing, so before the first block
   // The firmware boots under per-instruction budget checks. Block-granularity
   // overshoot has been seen to stop it booting at all on the RG DS -- not
   // every time, which is what a timing race looks like -- and the console is
@@ -2712,8 +2720,10 @@ sdl_ready:
     // only reach code the game had not run yet.
     if (is("emu.cpu_oc")) {
       const int mode = cpu_oc_mode(v);
+      cpu_oc_cfg = mode;
+      cpu_oc_applied = cpu_oc_wanted(mode);
 #if DSPERATE_JIT
-      ::ds::jit::set_cpu_oc(static_cast<::ds::jit::CpuOc>(mode));
+      ::ds::jit::set_cpu_oc(static_cast<::ds::jit::CpuOc>(cpu_oc_applied));
       ::ds::jit::flush_all();
 #endif
       nds.gpu3d.set_geometry_worker(mode != 0 || cfg.flag("emu.timing_oc", false));
@@ -3953,6 +3963,15 @@ sdl_ready:
     // power button would do next. A game reaching here is left running: it is
     // not expected to, and quitting on one stray write would lose more than
     // it saved.
+#if DSPERATE_JIT
+    // The underclock tier, deferred past the DSi Menu's hand-off (cpu_oc_wanted).
+    if (jit && cpu_oc_cfg == 2 && cpu_oc_wanted(cpu_oc_cfg) != cpu_oc_applied) {
+      cpu_oc_applied = cpu_oc_wanted(cpu_oc_cfg);
+      VLOG("cpu_oc: underclock %s\n", cpu_oc_applied ? "on: the DSi Menu has started its title" : "held off: the DSi Menu is running");
+      ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied));
+      ds::jit::flush_all();
+    }
+#endif
     // A DSiWare title leaving (NDS::exit_requested): the session ends with it.
     if (nds.exit_requested) {
       std::fprintf(stderr, "dsi: the title has left (a soft reset); quitting\n");

@@ -97,7 +97,7 @@ const Setting kEmuSettings[] = {
   pick("emu.frameskip_mode", "FRAMESKIP MODE", kSkipMode, 2, "adaptive", FlagLive, Dep::FrameskipMode,
        "ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME"),
   pick("emu.cpu_oc", "CPU OC", kCpuOc, 3, "false", FlagLive | FlagInexact, Dep::NetSession,
-       "FASTER. UNDERCLOCK SLOWS THE GAME TO SAVE THE HOST. OFF IF A GAME MISBEHAVES"),
+       "UNDERCLOCK: FOR THE HARDER TO RUN GAMES AND/OR THE LOWEST END DEVICES. OFF IF A GAME MISBEHAVES"),
   boolean("emu.timing_oc", "TIMING OC", "false", FlagLive | FlagInexact, Dep::NetSession,
           "FASTEST AND LEAST SAFE. GAMES THAT PACE ON THE 3D FIFO WILL BREAK"),
   boolean("emu.fast_load", "FAST LOAD", "false", FlagLive | FlagInexact, Dep::NetSession,

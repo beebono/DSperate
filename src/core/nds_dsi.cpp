@@ -298,6 +298,8 @@ void NDS::dsi_soft_reset() {
   dsi_soft_reset_pending = false;
   dsi_loader_launched = false;
   dsi_dsp_started = false;
+  dsi_loader_scfg_seen = false;
+  dsi_title_running = false;
   if (dsi_nand_synthetic) {
     // Nothing to reset into (see exit_requested). The ARM7 was halted by the
     // request and stays so.

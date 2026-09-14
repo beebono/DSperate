@@ -622,7 +622,10 @@ int main(int argc, char** argv) {
   }
 #if DSPERATE_JIT
   if ((jit9 || jit7) && !ds::jit::attach(nds, jit9, jit7)) return 1;
-  if ((jit9 || jit7) && cpu_oc) ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc));
+  // As the SDL frontend: underclock waits on a DSi NAND boot until the DSi Menu has jumped to its title (NDS::dsi_title_running).
+  const auto cpu_oc_wanted = [&] { return (cpu_oc == 2 && nds.dsi && nds.dsi_nand_boot && !nds.dsi_title_running) ? 0 : cpu_oc; };
+  int cpu_oc_applied = cpu_oc_wanted();
+  if ((jit9 || jit7) && cpu_oc_applied) ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied));
 #else
   (void)jit9; (void)jit7; (void)cpu_oc;
 #endif
@@ -874,6 +877,14 @@ int main(int argc, char** argv) {
     // would do next. A cart session is left alone: a game is not expected to
     // reach here, and quitting a benchmark on one stray write would be worse
     // than running on.
+#if DSPERATE_JIT
+    if ((jit9 || jit7) && cpu_oc == 2 && cpu_oc_wanted() != cpu_oc_applied) {
+      cpu_oc_applied = cpu_oc_wanted();
+      std::fprintf(stderr, "cpu_oc: underclock %s at frame %d\n", cpu_oc_applied ? "on (the DSi Menu started its title)" : "held off (the DSi Menu)", i);
+      ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied));
+      ds::jit::flush_all();
+    }
+#endif
     if (nds.exit_requested) { std::fprintf(stderr, "exit requested at frame %d: ending the run\n", i); break; }
     if (nds.power_off) {
       std::fprintf(stderr, "power off at frame %d%s\n", i, nds.cart ? "" : "; saving settings and rebooting");

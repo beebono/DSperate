@@ -137,6 +137,8 @@ void Io::ipc_sync_write(Cpu cpu, u16 value) {
   // The DSi-loader hack's other half (see the SCFG_EXT write): the ARM7's
   // IPCSYNC 0 applies a RAM size the ARM9 asked for during the handshake.
   if (nds_.dsi && cpu == Cpu::ARM7 && !(value & 0x0F00) && ((dsi.scfg_ext[0] ^ dsi.scfg_ext[1]) & 0xC000u)) dsi_apply_ram_size();
+  // ...and the ARM9's IPCSYNC 0 after the loader's SCFG_EXT write: the jump to the title follows.
+  if (nds_.dsi && cpu == Cpu::ARM9 && !(value & 0x0F00) && nds_.dsi_loader_scfg_seen) { nds_.dsi_loader_scfg_seen = false; nds_.dsi_title_running = true; }
   me.ipc_sync = (me.ipc_sync & 0x000F) | (value & 0x4F00);
   them.ipc_sync = (them.ipc_sync & 0x4F00) | ((value >> 8) & 0xF);
   if ((value & 0x2000) && (them.ipc_sync & 0x4000)) request_irq(other(cpu), IRQ_IPC_SYNC);
@@ -1732,9 +1734,11 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
       // (IPCSYNC 5 both ways), which on hardware bus contention lets finish
       // first; here the size is held until the ARM7 signals it is done
       // (IPCSYNC 0).
+      const bool handshake = (cpu_io[ci(Cpu::ARM9)].ipc_sync & 0x0F0F) == 0x0505;
       if ((old0 ^ dsi.scfg_ext[0]) & 0xC000u) {
-        if ((cpu_io[ci(Cpu::ARM9)].ipc_sync & 0x0F0F) != 0x0505) dsi_apply_ram_size();
+        if (!handshake) dsi_apply_ram_size();
       }
+      if (handshake) nds_.dsi_loader_scfg_seen = true;   // the loader stub: see NDS::dsi_title_running
     } else {
       dsi.scfg_ext[0] = (dsi.scfg_ext[0] & ~0x03000000u) | (value & 0x03000000u);
       dsi.scfg_ext[1] = (dsi.scfg_ext[1] & ~0x93FF0F07u) | (value & 0x93FF0F07u);

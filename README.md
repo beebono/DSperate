@@ -140,7 +140,7 @@ audio dumps, save-state checkpoints and cheats from the command line. It never
 writes a battery save back.
 
 Performance knobs that trade accuracy for speed, off by default: `--cpu-oc`
-(or its underclock tier, `--cpu-uc`, for the weakest devices),
+(or its underclock tier, `--cpu-uc`, for the harder to run games and/or the lowest end devices),
 `--timing-oc`, `--fast-load`. Turn them off first if a game misbehaves.
 
 ## Diagnostics, tests and tools
