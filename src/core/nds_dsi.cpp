@@ -332,6 +332,7 @@ void NDS::dsi_soft_reset() {
   io.dispstat[0] |= 0x40; io.dispstat[1] |= 0x40;   // LCD init flag
   bus.update_nwram();            // SCFG_EXT bit 25 (NWRAM) was just rewritten
   bus.update_vram_timings();
+  bus.update_main_ram();         // 16 MB again: a DS title the menu started ran at 4 MB (melonDS keeps its mask here; the register says 16)
 
 #if DSPERATE_JIT
   if (jit::has_runtime()) jit::flush_all();   // boot2 went over NWRAM and ITCM

@@ -48,6 +48,11 @@ public:
   void set_clock9_shift(u32 shift);
   // DSi: SCFG_EXT bit 13 widens the VRAM bus to 32 bits (melonDS UpdateVRAMTimings).
   void update_vram_timings();
+  // DSi: the main RAM the CPUs address, 4 or 16 MB (the size SCFG_EXT7 bits
+  // 14-15 carry, see Io::dsi_apply_ram_size). The buffer stays 16 MB.
+  u32 main_ram_span() const;
+  // Re-lays both CPUs' main RAM mirrors after the size changed.
+  void update_main_ram();
   void update_vram();                 // VRAMCNT A-I
   Entry lcdc_read_save_[8 * 64] = {};   // set_lcdc_read_trap: 8 mirrors x 128 KB / PAGE_SIZE
   // Lazy 2D (see gpu.h): trap ARM9 stores into the 2D engines' VRAM windows

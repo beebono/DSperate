@@ -134,6 +134,9 @@ void Io::ipc_sync_write(Cpu cpu, u16 value) {
                         (unsigned long long)nds_.sched.now(), (unsigned long long)nds_.frame_count, nds_.gpu.line(), nds_.cpu(cpu).hot.regs[15]);
   CpuIo& me = cpu_io[ci(cpu)];
   CpuIo& them = cpu_io[ci(other(cpu))];
+  // The DSi-loader hack's other half (see the SCFG_EXT write): the ARM7's
+  // IPCSYNC 0 applies a RAM size the ARM9 asked for during the handshake.
+  if (nds_.dsi && cpu == Cpu::ARM7 && !(value & 0x0F00) && ((dsi.scfg_ext[0] ^ dsi.scfg_ext[1]) & 0xC000u)) dsi_apply_ram_size();
   me.ipc_sync = (me.ipc_sync & 0x000F) | (value & 0x4F00);
   them.ipc_sync = (them.ipc_sync & 0x4F00) | ((value >> 8) & 0xF);
   if ((value & 0x2000) && (them.ipc_sync & 0x4000)) request_irq(other(cpu), IRQ_IPC_SYNC);
@@ -1217,7 +1220,10 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   case 0xe1: if (!a9) spi_write_data(static_cast<u8>(value)); return;
   case 0x102: {
     const u16 old = exmemcnt;
-    exmemcnt = a9 ? ((exmemcnt & 0x6000) | (value & 0x88FF)) : ((exmemcnt & 0xFF80) | (value & 0x007F));
+    // The DSi has one more ARM9 bit, 10: which CPU the second card slot
+    // answers (melonDS SetExMemCnt). PictoChat sets it and reads it back.
+    const u16 rw9 = nds_.dsi ? 0x8CFF : 0x88FF;
+    exmemcnt = a9 ? ((exmemcnt & 0x6000) | (value & rw9)) : ((exmemcnt & 0xFF80) | (value & 0x007F));
     if ((old ^ exmemcnt) & 0xFF) nds_.bus.update_gba_slot_timings();
     return;
   }
@@ -1709,9 +1715,17 @@ void Io::dsi_write(Cpu cpu, u32 addr, u32 width, u32 value) {
     if (a9) {
       dsi.scfg_ext[0] = (dsi.scfg_ext[0] & ~0x8007F19Fu) | (value & 0x8007F19Fu);
       dsi.scfg_ext[1] = (dsi.scfg_ext[1] & ~0x00003080u) | (value & 0x00003080u);
-      // The RAM-size bits (14-15) are stored but the machine keeps 16 MB;
-      // melonDS's DSi-loader hack around them is not modelled.
       if ((old0 ^ dsi.scfg_ext[0]) & (1u << 13)) nds_.bus.update_vram_timings();
+      // Bits 14-15: main RAM, 4 MB (0-1) or 16 MB (2-3). The DSi loader
+      // limits a DS title (a card, PictoChat, Download Play) to 4 MB, which
+      // the title then sees mirrored. melonDS's DSi-loader hack: the loader
+      // writes this while the ARM7 is still clearing and moving main RAM
+      // (IPCSYNC 5 both ways), which on hardware bus contention lets finish
+      // first; here the size is held until the ARM7 signals it is done
+      // (IPCSYNC 0).
+      if ((old0 ^ dsi.scfg_ext[0]) & 0xC000u) {
+        if ((cpu_io[ci(Cpu::ARM9)].ipc_sync & 0x0F0F) != 0x0505) dsi_apply_ram_size();
+      }
     } else {
       dsi.scfg_ext[0] = (dsi.scfg_ext[0] & ~0x03000000u) | (value & 0x03000000u);
       dsi.scfg_ext[1] = (dsi.scfg_ext[1] & ~0x93FF0F07u) | (value & 0x93FF0F07u);
@@ -1754,7 +1768,16 @@ void Io::mbk_map_slot(int bank, int slot, u8 value) {
   nds_.bus.update_nwram();
 }
 
-// MBK6-8 for one CPU: its window over bank A/B/C.
+// melonDS DSi::ApplyNewRAMSize: SCFG_EXT9's size becomes the machine's, and
+// the ARM7's SCFG_EXT mirrors it (bits 14-15, read-only there). The mirror is
+// what the bus maps from, so a save state carries the applied size.
+void Io::dsi_apply_ram_size() {
+  const u32 size = (dsi.scfg_ext[0] >> 14) & 3;
+  const bool was16 = ((dsi.scfg_ext[1] >> 14) & 3) >= 2;
+  dsi.scfg_ext[1] = (dsi.scfg_ext[1] & ~0xC000u) | (size << 14);
+  if (was16 != (size >= 2)) nds_.bus.update_main_ram();
+}
+
 void Io::dsi_write_scfg_mc(u16 value, u16 mask) {
   const u16 old = dsi.scfg_mc;
   u16 mc = static_cast<u16>((old & (~mask | 0x0011)) | (value & mask & 0x80CC));
@@ -1785,6 +1808,7 @@ void Io::cart_power_event(NDS& nds, u32 slot) {
   if (slot == 0) nds.io.cart.romctrl &= ~(1u << 29);
 }
 
+// MBK6-8 for one CPU: its window over bank A/B/C.
 void Io::mbk_map_range(Cpu cpu, int bank, u32 value) {
   value &= bank == 0 ? ~0xE00FC00Fu : ~0xE007C007u;
   u32& reg = dsi.mbk[ci(cpu)][5 + bank];

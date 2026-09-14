@@ -5,6 +5,9 @@
 #include "core/state/state.h"
 #include "core/profile.h"
 #include "core/nds.h"
+#if DSPERATE_JIT
+#include "core/cpu/jit/jit.h"
+#endif
 
 #include <cassert>
 #include <cstdio>
@@ -148,10 +151,33 @@ void Bus::map_fixed_regions() {
 
 // Main RAM: the DS's 4 MB mirrored over 02000000-02FFFFFF; the DSi's 16 MB
 // once, and again at 0C000000 (the uncached alias both DSi CPUs decode).
+// A DSi limited to 4 MB (SCFG_EXT) mirrors the first 4 MB over both, as
+// melonDS masks them with MainRAMMask.
 void Bus::map_main_ram(PageTable& pt) {
   const u32 RW = PAGE_READABLE | PAGE_WRITABLE;
-  map_page_aligned(pt, 0x02000000, main_ram_size(), main_ram.get(), RW, 0x03000000);
-  if (nds_.dsi) pt.map(0x0C000000, MAIN_RAM_SIZE_DSI, main_ram.get(), RW);
+  map_page_aligned(pt, 0x02000000, main_ram_span(), main_ram.get(), RW, 0x03000000);
+  if (nds_.dsi) map_page_aligned(pt, 0x0C000000, main_ram_span(), main_ram.get(), RW, 0x0D000000);
+}
+
+u32 Bus::main_ram_span() const {
+  if (!nds_.dsi) return MAIN_RAM_SIZE;
+  return ((nds_.io.dsi.scfg_ext[1] >> 14) & 3) >= 2 ? MAIN_RAM_SIZE_DSI : MAIN_RAM_SIZE;
+}
+
+void Bus::update_main_ram() {
+  // The ARM9's map is rebuilt whole, so the TCM windows over main RAM (a DS
+  // title's DTCM at 027C0000) go back on top.
+  update_tcm(nds_.cpu(Cpu::ARM9), true);
+  PageTable& pt7 = nds_.cpu(Cpu::ARM7).page_table;
+  pt7.unmap(0x02000000, 0x01000000);
+  pt7.unmap(0x0C000000, 0x01000000);
+  map_main_ram(pt7);
+  if (watch_on && watch_host[1]) pt7.map_mmio(watch_addr & ~0x7FFu, 0x800);
+#if DSPERATE_JIT
+  // A block translated at 02400000 or above was built from bytes that
+  // address now shows elsewhere.
+  for (Cpu c : {Cpu::ARM9, Cpu::ARM7}) jit::flush(nds_.cpu(c));
+#endif
 }
 
 // The BIOS pair. DS: 4 KB ARM9 image mirrored over the top 64 KB, 16 KB ARM7
@@ -645,7 +671,7 @@ void Bus::relink() {
   a9.timing7 = a7.timing7 = timing_.cpu7();
   a9.cost7 = a7.cost7 = timing_.cost7();
   cp15_update_pu_map(a9);
-  update_tcm(a9, true);          // also update_bios_map(), update_nwram() and update_vram()
+  update_main_ram();            // update_tcm(a9, true) -- also update_bios_map(), update_nwram(), update_vram() -- and the ARM7's main RAM at the loaded size
   gba_slot_applied_ = -1;        // the loaded EXMEMCNT is not what the tables hold
   update_gba_slot_timings();
   if (nds_.dsi) {

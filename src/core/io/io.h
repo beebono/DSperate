@@ -262,6 +262,8 @@ public:
   // an inserted card down before it starts a NAND title and waits for state
   // 0: stored as written, that never came and the launch stayed white.
   void dsi_write_scfg_mc(u16 value, u16 mask);
+  // SCFG_EXT9 bits 14-15 made the machine's main RAM size (melonDS ApplyNewRAMSize).
+  void dsi_apply_ram_size();
   static void cart_power_event(NDS& nds, u32 slot);
   u32  dsi_mic_read_data();
   void dsi_mic_clock(s16 sample);

@@ -3,6 +3,7 @@
 #include "core/mem/timing.h"
 #include "core/profile.h"
 #include "core/cpu/cpu.h"
+#include "core/nds.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -194,7 +195,15 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
   // a store to a cacheable page that misses goes out through the write
   // buffer at bus speed; only the TCMs are free. DS_STORE_BUS=0 keeps the
   // old pricing (stores as cache hits) for comparison.
-  static const bool store_bus = [] { const char* e = std::getenv("DS_STORE_BUS"); return !e || std::atoi(e) != 0; }();
+  //
+  // DS only by default (USER DECISION 2026-09-14). The DSi prices stores as
+  // cache hits, as melonDS does: DSi PictoChat's ARM9 builds a heap inside
+  // the main RAM its ARM7 is clearing a chunk per frame, and at bus-priced
+  // stores it reaches its first allocation after the clear has wiped the
+  // heap (NULL, then the ITCM is zeroed). Ore ga Omae's race, which bus
+  // pricing fixed, is a DS one. DS_STORE_BUS=0/1 still forces either way.
+  static const int store_bus_env = [] { const char* e = std::getenv("DS_STORE_BUS"); return e ? (std::atoi(e) != 0) : -1; }();
+  const bool store_bus = store_bus_env >= 0 ? store_bus_env != 0 : !(cpu.nds && cpu.nds->dsi);
   const u32 first = start >> 12, last = (end == 0xFFFFFFFF) ? 0x100000 : (end >> 12);
   const u32 sh = clock9_shift;
   u32 x_prev = 0, y_prev = 0; bool changed_prev = false;
