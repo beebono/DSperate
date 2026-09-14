@@ -622,8 +622,14 @@ int main(int argc, char** argv) {
   }
 #if DSPERATE_JIT
   if ((jit9 || jit7) && !ds::jit::attach(nds, jit9, jit7)) return 1;
-  // As the SDL frontend: underclock waits on a DSi NAND boot until the DSi Menu has jumped to its title (NDS::dsi_title_running).
-  const auto cpu_oc_wanted = [&] { return (cpu_oc == 2 && nds.dsi && nds.dsi_nand_boot && !nds.dsi_title_running) ? 0 : cpu_oc; };
+  // As the SDL frontend's cpu_tuning_for: on a DSi NAND boot underclock waits for the DSi Menu to start its
+  // title (NDS::dsi_title_running), and PictoChat (HNE?) and Download Play (HND?) run with neither tier.
+  const auto cpu_oc_wanted = [&]() -> int {
+    if (cpu_oc == 0 || !nds.dsi || !nds.dsi_nand_boot) return cpu_oc;
+    if (!nds.dsi_title_running) return cpu_oc == 2 ? 0 : cpu_oc;
+    const char* c = nds.dsi_title_code;
+    return (c[0] == 'H' && c[1] == 'N' && (c[2] == 'E' || c[2] == 'D')) ? 0 : cpu_oc;
+  };
   int cpu_oc_applied = cpu_oc_wanted();
   if ((jit9 || jit7) && cpu_oc_applied) ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied));
 #else
@@ -878,9 +884,10 @@ int main(int argc, char** argv) {
     // reach here, and quitting a benchmark on one stray write would be worse
     // than running on.
 #if DSPERATE_JIT
-    if ((jit9 || jit7) && cpu_oc == 2 && cpu_oc_wanted() != cpu_oc_applied) {
+    if ((jit9 || jit7) && cpu_oc != 0 && cpu_oc_wanted() != cpu_oc_applied) {
       cpu_oc_applied = cpu_oc_wanted();
-      std::fprintf(stderr, "cpu_oc: underclock %s at frame %d\n", cpu_oc_applied ? "on (the DSi Menu started its title)" : "held off (the DSi Menu)", i);
+      std::fprintf(stderr, "cpu tuning: %s at frame %d (%.4s)\n", cpu_oc_applied == 2 ? "underclock" : cpu_oc_applied ? "overclock" : "off", i,
+                   nds.dsi_title_running ? nds.dsi_title_code : "menu");
       ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied));
       ds::jit::flush_all();
     }

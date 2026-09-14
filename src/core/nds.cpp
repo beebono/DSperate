@@ -72,6 +72,7 @@ void NDS::reset() {
   dsi_loader_launched = false;
   dsi_loader_scfg_seen = false;
   dsi_title_running = false;
+  std::memset(dsi_title_code, 0, sizeof dsi_title_code);
 }
 
 // Normalise the touchscreen calibration in both user-settings blocks so that
@@ -667,6 +668,7 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     r.end();
     dsi_loader_scfg_seen = false;
     dsi_title_running = true;   // not in the state: one is made in a title, not mid-hand-off
+    dsi_note_title();
   }
   if (!r.ok()) { err = r.error(); return false; }
   if (dsi) {

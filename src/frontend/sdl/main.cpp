@@ -376,6 +376,24 @@ int cpu_oc_mode(const std::string& v) {
   return (v == "overclock" || v == "1" || v == "true" || v == "yes" || v == "on") ? 1 : 0;
 }
 
+// The CPU tuning tier to run, given the one set (cpu_oc_mode's 0/1/2). On a
+// DSi NAND boot:
+// - the underclock waits until the DSi Menu has jumped to the title it
+//   launched (NDS::dsi_title_running): the Menu's hand-off is an IPC race
+//   the underclocked ARM9 loses, and both CPUs then wait for good;
+// - PictoChat (HNE?) and DS Download Play (HND?) run with neither tier:
+//   PictoChat's ARM9 builds its heap in the RAM its ARM7 is still clearing
+//   and loses that race under both, and Download Play is local wireless,
+//   which a session runs untuned anyway. A program Download Play boots keeps
+//   its setting (the header snapshot still says HND).
+int cpu_tuning_for(const NDS& nds, int mode) {
+  if (mode == 0 || !nds.dsi || !nds.dsi_nand_boot) return mode;
+  if (!nds.dsi_title_running) return mode == 2 ? 0 : mode;
+  const char* c = nds.dsi_title_code;
+  if (c[0] == 'H' && c[1] == 'N' && (c[2] == 'E' || c[2] == 'D')) return 0;
+  return mode;
+}
+
 // Autoload: the auto slot as the starting point, when emu.autoload asks for
 // it and the file is there. The state is left in place -- a SIGKILL never
 // gets to write one, so the last clean exit's state stays resumable, and a
@@ -1825,14 +1843,12 @@ sdl_ready:
   if (!replay || rtc_host) nds.io.start_rtc_clock();
   else VLOG("rtc: frozen for the replay\n");
   if (replay && rtc_host) std::fprintf(stderr, "rtc: --rtc-host over a replay; this run is not reproducible\n");
-  // emu.cpu_tuning as set, and as the recompiler runs it. The underclock tier
-  // waits on a DSi NAND boot until the DSi Menu has jumped to the title it
-  // launched (NDS::dsi_title_running): the Menu's hand-off is an IPC race the
-  // underclocked ARM9 loses, and both CPUs then wait for good. Checked once a
-  // frame below, so it comes back off when the title returns to the Menu.
+  // emu.cpu_tuning as set, and as the recompiler runs it (cpu_tuning_for).
+  // Checked once a frame below, so it follows the DSi Menu starting a title
+  // and the title returning to the Menu.
   int cpu_oc_cfg = cpu_oc_mode(cfg.str("emu.cpu_tuning"));
   int cpu_oc_applied = 0;
-  auto cpu_oc_wanted = [&](int mode) { return (mode == 2 && nds.dsi && nds.dsi_nand_boot && !nds.dsi_title_running) ? 0 : mode; };
+  auto cpu_oc_wanted = [&](int mode) { return cpu_tuning_for(nds, mode); };
 #if DSPERATE_JIT
   if (jit && !ds::jit::attach(nds, true, true)) return 1;
   if (jit) ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied = cpu_oc_wanted(cpu_oc_cfg)));   // see config.cpp; translate-time pricing, so before the first block
@@ -3966,10 +3982,11 @@ sdl_ready:
     // not expected to, and quitting on one stray write would lose more than
     // it saved.
 #if DSPERATE_JIT
-    // The underclock tier, deferred past the DSi Menu's hand-off (cpu_oc_wanted).
-    if (jit && cpu_oc_cfg == 2 && cpu_oc_wanted(cpu_oc_cfg) != cpu_oc_applied) {
+    // CPU tuning following the DSi Menu and the title it starts (cpu_tuning_for).
+    if (jit && cpu_oc_cfg != 0 && cpu_oc_wanted(cpu_oc_cfg) != cpu_oc_applied) {
       cpu_oc_applied = cpu_oc_wanted(cpu_oc_cfg);
-      VLOG("cpu tuning: underclock %s\n", cpu_oc_applied ? "on: the DSi Menu has started its title" : "held off: the DSi Menu is running");
+      VLOG("cpu tuning: %s (%s)\n", cpu_oc_applied == 2 ? "underclock" : cpu_oc_applied ? "overclock" : "off",
+           !nds.dsi_title_running ? "the DSi Menu" : cpu_oc_applied ? "its title started" : "not for PictoChat or Download Play");
       ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied));
       ds::jit::flush_all();
     }

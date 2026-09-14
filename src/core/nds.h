@@ -195,6 +195,12 @@ struct NDS {
   // loses (both CPUs then wait for good).
   bool dsi_loader_scfg_seen = false;
   bool dsi_title_running = false;
+  // The game code of the title dsi_title_running marks (its header at
+  // 02FFFE0C, as the title's ARM9 reads it), taken when it is set; zeros
+  // before. The frontend keeps CPU tuning away from PictoChat (HNE?) and
+  // DS Download Play (HND?) with it.
+  char dsi_title_code[4] = {};
+  void dsi_note_title();
   // The guest started a program on the DSP (PCFG bit 0 released after the
   // ucode upload), which DSperate does not emulate: the title will wait for
   // replies that never come, or go without its DSP audio or image work.
