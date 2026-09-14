@@ -194,6 +194,13 @@ struct Runtime {
   // (deque: stable addresses). One malloc per block was a measurable slice
   // of an overlay burst's translate stall.
   std::deque<Block> block_pool;
+  // Blocks installed since the last arena reset (translated, pooled or
+  // adopted). What a translation costs outside the arena -- the Block, its
+  // map/LUT/page-list entries -- is only freed by the reset, and a guest that
+  // runs off into zeroed memory translates a new ~4-instruction block at every
+  // address: tiny code, so the arena takes hundreds of MB of metadata to fill.
+  // translate() asks for the reset at MAX_BLOCKS (runtime.cpp) instead.
+  size_t blocks_live = 0;
   // host page -> blocks with code on it. The byte range each block covers
   // on the page is kept in a parallel array (offsets within the page,
   // lo | hi << 16), so a store's range test scans a few cache lines instead

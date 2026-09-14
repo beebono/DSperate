@@ -39,6 +39,12 @@ namespace {
 // 32-bit hosts: the A32 backend reaches the stubs with `b`/`bl`, +-32 MB.
 constexpr size_t ARENA_BYTES = sizeof(void*) >= 8 ? (64u << 20) : (32u << 20);
 constexpr size_t BLOCK_MARGIN = 64u << 10;    // a block may emit up to this much
+// The block-metadata budget: an arena's worth of translations at most this
+// many blocks (3/4 of the arena's size in Block structs: 48 MB of metadata on
+// a 64-bit host, 24 MB on a 32-bit one). The six recorded scenes peak at
+// ~16 K blocks over 1800 frames; a crashed guest sliding through RAM reached
+// 13 M in 200 frames and was OOM-killed on a 1 GB handheld.
+constexpr size_t MAX_BLOCKS = ARENA_BYTES / 4 * 3 / sizeof(Block);
 
 Runtime g_rt;
 } // namespace
@@ -248,6 +254,7 @@ void reset_arena() {
   for (auto& kv : r.code_pages) set_code_tag(kv.first, false);
   r.code_pages.clear();
   r.block_pool.clear();
+  r.blocks_live = 0;
   r.pos = r.stubs_end;
   r.need_reset = false;
   r.stats.flushes++;
@@ -444,6 +451,7 @@ static void install(JitCpu& jc, Block* b) {
   copy_guest_bytes(jc, key_pc(b->key), b->guest_copy, b->guest_copy_len);
   register_block(jc, b);
   jc.all_blocks.push_back(b);
+  r.blocks_live++;
   r.stats.blocks_translated++;
   r.stats.code_bytes += b->size;
   r.stats.hot_bytes += b->hot_size;
@@ -471,7 +479,7 @@ Block* translate(JitCpu& jc, u32 key) {
   Block* b;
   {
     pretx::ArenaLock lk;
-    if (r.pos + BLOCK_MARGIN > r.cap) return nullptr;
+    if (r.pos + BLOCK_MARGIN > r.cap || r.blocks_live >= MAX_BLOCKS) return nullptr;   // full (code or metadata): the caller resets the arena
     b = &r.block_pool.emplace_back(Block{});
     b->key = key;
     b->owner = jc.arm9 ? 0 : 1;
