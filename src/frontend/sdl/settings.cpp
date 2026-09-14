@@ -17,7 +17,7 @@ const Choice kOnOff[]   = {{"false", "OFF"}, {"true", "ON"}};
 const Choice kSkipMode[] = {{"adaptive", "ADAPTIVE"}, {"fixed", "FIXED"}};
 // emu.cpu_oc keeps "true" for the overclock tier, so a file from before the
 // underclock tier means what it did.
-const Choice kCpuOc[] = {{"false", "OFF"}, {"true", "OVERCLOCK"}, {"underclock", "UNDERCLOCK"}};
+const Choice kCpuOc[] = {{"false", "OFF"}, {"underclock", "UNDERCLOCK"}, {"true", "OVERCLOCK"}};
 // The rates a panel comes in, plus the console's own and no limiter at all.
 // "auto" is the only one that plays a game at the speed it was written for;
 // 60 is 0.29 % fast, which is what a player means by "60 fps".
