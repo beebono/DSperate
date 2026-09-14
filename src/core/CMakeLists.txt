@@ -71,7 +71,7 @@ set_source_files_properties(cart/miniz/miniz_tdef.c PROPERTIES
 
 if(DSPERATE_JIT)
   # The runtime is host-agnostic; the backend directory is the host's.
-  target_sources(dsperate_core PRIVATE cpu/jit/runtime.cpp)
+  target_sources(dsperate_core PRIVATE cpu/jit/runtime.cpp cpu/jit/bios_sha1.cpp)
   if(DSPERATE_HOST_AARCH64)
     target_sources(dsperate_core PRIVATE cpu/jit/a64/stubs.cpp cpu/jit/a64/translate.cpp)
   elseif(DSPERATE_HOST_ARM32)

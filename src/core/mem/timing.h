@@ -40,6 +40,11 @@ public:
   // reset() and update_cpu9(); Bus::set_clock9_shift changes it live.
   u32 clock9_shift = 1;
 
+  // Bumped by every change to the ARM9 CPU table (update_cpu9, reset): a
+  // cost derived from it (the BIOS SHA-1 hook's, jit/bios_sha1.cpp) is kept
+  // until this moves.
+  u64 cpu9_version = 0;
+
   // ARM7 precomputed data-cost table. The ARM7 rule --
   // costs add when code and data share a region, overlap into a max when they
   // do not -- has exactly one dynamic input, the data page; `nc`, `cdi`,

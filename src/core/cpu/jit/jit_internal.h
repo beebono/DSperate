@@ -300,6 +300,13 @@ u32  relative_branch_class(u32 word);
 // Helpers called from translated code (through the stubs).
 extern "C" {
 u32         jit_h_fallback(CpuContext* cpu, u32 instr, u32 key);   // returns cpu->jumped
+// The DSi ARM9 BIOS SHA-1 loop (bios_sha1.cpp). The translator asks at a
+// block start; the block then begins with a fallback call carrying
+// BIOS_SHA1_MARKER, which runs iterations natively (returns true, pc set) or
+// declines and lets the translated instructions run.
+constexpr u32 BIOS_SHA1_MARKER = 0xE7F5A1F0;   // an undefined instruction: never a real fallback
+bool bios_sha1_hook_wanted(CpuContext& cpu, u32 pc, bool thumb);
+bool bios_sha1_run(CpuContext& cpu);
 const void* jit_h_lookup(CpuContext* cpu, u32 key);
 const void* jit_h_link(CpuContext* cpu, u32 key, u8* patch_site);
 void        jit_h_trace(CpuContext* cpu, u32 instr, u32 key);

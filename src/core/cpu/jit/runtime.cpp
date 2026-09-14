@@ -749,6 +749,7 @@ void invalidate_cpu(JitCpu& jc) {
 // ---- helpers called from translated code -----------------------------------------------------
 
 extern "C" u32 jit_h_fallback(CpuContext* cpu, u32 instr, u32 key) {
+  if (instr == BIOS_SHA1_MARKER) return bios_sha1_run(*cpu) ? 1 : 0;   // the key is LOOP-4, so a poll that leaves resumes at LOOP
   // Execute one instruction through the interpreter with the interpreter's own
   // cycle accounting. r15 is set from the key (pipeline-adjusted).
   cpu->hot.regs[15] = key_r15(key);
@@ -961,6 +962,7 @@ void report(std::FILE* out) {
   std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, slow accesses %llu, entries %llu, invalidated %llu, revived %llu, flushes %llu\n",
                (unsigned long long)s.blocks_translated, (unsigned long long)s.instrs_translated, (unsigned long long)s.instrs_fallback,
                (unsigned long long)s.slow_accesses, (unsigned long long)s.entries, (unsigned long long)s.blocks_invalidated, (unsigned long long)s.blocks_revived, (unsigned long long)s.flushes);
+  if (s.bios_sha1_blocks) std::fprintf(out, "[jit] DSi BIOS SHA-1 blocks run natively: %llu\n", (unsigned long long)s.bios_sha1_blocks);
   if (pretx::on())
     std::fprintf(out, "[jit] pretx: built %llu adopted %llu dropped %llu skipped %llu\n",
                  (unsigned long long)pretx::st_built, (unsigned long long)pretx::st_adopted,

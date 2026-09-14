@@ -23,6 +23,7 @@ struct Stats {
   u64 hot_bytes = 0;           // of which the hot sections (what runs on the fast paths)
   u64 slow_accesses = 0;       // loads/stores that left the inline page-table path
   u64 blocks_revived = 0;      // killed blocks brought back because the guest bytes matched again
+  u64 bios_sha1_blocks = 0;    // DSi BIOS SHA-1 blocks run natively (bios_sha1.cpp)
 };
 
 // Create the runtime (code arena, stubs) and route the selected CPUs through

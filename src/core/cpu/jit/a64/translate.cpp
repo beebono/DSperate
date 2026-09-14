@@ -1887,6 +1887,13 @@ bool Translator::run() {
     dslot_->n_flags_live = static_cast<u8>(c_fl); dslot_->entry_flags_live = live != 0;
   }
   emit_budget_check(key_);
+  // The DSi BIOS SHA-1 loop head: try the native loop first (bios_sha1.cpp).
+  if (a9_ && bios_sha1_hook_wanted(cpu_, start, thumb_)) {
+    flush_pending();
+    call_stub(jc_.fallback);
+    e().word(BIOS_SHA1_MARKER);
+    e().word(make_key(start - 4, false));
+  }
 
   u32 end_addr = addr;
   for (size_t i = 0; i < instrs_.size(); ++i) {

@@ -58,6 +58,7 @@ void Timing::reset() {
   }
   build_refill9(0, 0x100000);
   build_cost7();
+  ++cpu9_version;
 }
 
 // Mirrors refill_cycles()/fetch_cost9() in cpu_cycles.h: a branch fetch on a
@@ -291,6 +292,7 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
   // page `first`, which just changed).
   if (last > first && changed_prev) build_refill9(last - 1, last);
   if (first) build_refill9(first - 1, first);
+  ++cpu9_version;
   if (notify) notify_cpu9(cpu);
 }
 
