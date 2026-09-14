@@ -515,6 +515,13 @@ private:
   // titles missing VBlank (screen swaps a frame off, IPC/timer hangs on
   // overlay loads). ARM7: its WRAM entry (1), where its code and data live.
   u32 oc_data_cost(bool word, bool seq, bool store) const {
+    if (rt().cpu_oc == CpuOc::Underclock) {
+      // The first cut (see jit::set_cpu_oc): bus-priced main RAM for ARM9
+      // stores and the whole ARM7. From the bus table, not timing9's store
+      // entry, which a DSi prices as a cache hit (Timing::update_cpu9).
+      if (a9_) return store ? cpu_.nds->bus.timing().bus9_data(0x02000000u, word, seq) : cpu_.timing9[0x02000000u >> 12][seq ? 3 : (word ? 2 : 1)];
+      return cpu_.timing7[0x02000000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
+    }
     (void)store;
     if (a9_) return cpu_.timing9[0x02000000u >> 12][seq ? 3 : (word ? 2 : 1)];
     return cpu_.timing7[0x03800000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
@@ -925,7 +932,7 @@ private:
   // budget between the two (the strict-mode check is per instruction).
   void emit_single(Mem m, u32 wdata, u32 dst, bool wb, u32 wb_reg, bool cdi, int const_nd = -1) {
     const bool word = is_word(m);
-    if (rt().cpu_oc && const_nd < 0) const_nd = static_cast<int>(oc_data_cost(word, false, !is_load(m)));
+    if (rt().cpu_oc != CpuOc::Off && const_nd < 0) const_nd = static_cast<int>(oc_data_cost(word, false, !is_load(m)));
     const bool const_cost = const_nd >= 0;
     if (const_cost) add_pending(const_charge(static_cast<u32>(const_nd), cdi));
     flush_pending();
@@ -1038,7 +1045,7 @@ private:
       if (writeback) e().mov(host_reg(rn), SCRATCH7);
     }
     // cost: N + (n - 1) S from the page's entry (--cpu-oc: main RAM's, at translate time)
-    const bool oc = rt().cpu_oc;
+    const bool oc = rt().cpu_oc != CpuOc::Off;
     u32 oc_nd = 0;
     if (oc) oc_nd = oc_data_cost(true, false, !load) + (n - 1) * oc_data_cost(true, true, !load);
     else {
@@ -1817,7 +1824,7 @@ bool Translator::run() {
   if (!a9_) { t7_ = cpu_.timing7[start >> 15]; code_region7_ = start >> 24; }
   // --cpu-oc bakes main RAM's data costs into every access: not a page the
   // dependency set tracks, so such a block dies on any retime.
-  if (rt().cpu_oc) blk_.dep_overflow = true;
+  if (rt().cpu_oc != CpuOc::Off) blk_.dep_overflow = true;
 
   // Decode the straight-line run.
   u32 addr = start;

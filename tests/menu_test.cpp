@@ -948,9 +948,14 @@ void test_setting_steps() {
   // A number says what it counts.
   CHECK(ds::sdl::display_value(ff, "4") == "4X");
   // A boolean wraps, because a two-entry list has to.
+  const ds::sdl::Setting& fl = find("emu.fast_load");
+  CHECK(ds::sdl::step_value(fl, "false", +1, h) == "true");
+  CHECK(ds::sdl::step_value(fl, "true", +1, h) == "false");
+  // CPU OC has three: "true" stays the overclock tier, as older files wrote it.
   const ds::sdl::Setting& oc = find("emu.cpu_oc");
-  CHECK(ds::sdl::step_value(oc, "false", +1, h) == "true");
-  CHECK(ds::sdl::step_value(oc, "true", +1, h) == "false");
+  CHECK(ds::sdl::display_value(oc, "true") == "OVERCLOCK");
+  CHECK(ds::sdl::step_value(oc, "true", +1, h) == "underclock");
+  CHECK(ds::sdl::display_value(oc, "underclock") == "UNDERCLOCK");
   // GAME SPEED is a whole percent in the file, as --speed and the frontend
   // read it. As a 0..1 percent row it showed 100 as 10000% and wrote 1.
   const ds::sdl::Setting& sp = find("emu.speed");

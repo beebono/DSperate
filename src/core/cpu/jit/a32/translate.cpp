@@ -464,6 +464,13 @@ private:
   // (a9_: main RAM's cached LOAD entry for loads and stores alike; ARM7: its
   // WRAM entry). Same rule as the A64 backend; the reasoning is there.
   u32 oc_data_cost(bool word, bool seq, bool store) const {
+    if (rt().cpu_oc == CpuOc::Underclock) {
+      // The first cut (see jit::set_cpu_oc): bus-priced main RAM for ARM9
+      // stores and the whole ARM7. From the bus table, not timing9's store
+      // entry, which a DSi prices as a cache hit (Timing::update_cpu9).
+      if (a9_) return store ? cpu_.nds->bus.timing().bus9_data(0x02000000u, word, seq) : cpu_.timing9[0x02000000u >> 12][seq ? 3 : (word ? 2 : 1)];
+      return cpu_.timing7[0x02000000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
+    }
     (void)store;
     if (a9_) return cpu_.timing9[0x02000000u >> 12][seq ? 3 : (word ? 2 : 1)];
     return cpu_.timing7[0x03800000u >> 15][seq ? (word ? 3 : 1) : (word ? 2 : 0)];
@@ -696,7 +703,7 @@ private:
   // joins the static cycles.
   void emit_single(Mem m, u32 a, u32 data, u32 rd, bool cdi, int const_nd = -1) {
     const bool load = is_load(m), word = is_word(m);
-    if (rt().cpu_oc && const_nd < 0) const_nd = static_cast<int>(oc_data_cost(word, false, !load));
+    if (rt().cpu_oc != CpuOc::Off && const_nd < 0) const_nd = static_cast<int>(oc_data_cost(word, false, !load));
     const bool const_cost = const_nd >= 0;
     if (const_cost) add_pending(const_charge(static_cast<u32>(const_nd), cdi));
     flush_pending();
@@ -831,7 +838,7 @@ private:
       // The interpreter charges the CDI cost after the jump: the stub does
       // it from the new pc/state (numD, data address).
       const u32 c = cache_.temp(), t = cache_.temp();
-      if (rt().cpu_oc) e().mov_imm(c, oc_data_cost(true, false, false) + (n - 1) * oc_data_cost(true, true, false));
+      if (rt().cpu_oc != CpuOc::Off) e().mov_imm(c, oc_data_cost(true, false, false) + (n - 1) * oc_data_cost(true, true, false));
       else {
         emit_data_cost(a, c, t, true, false, false);
         if (n > 1) {
@@ -851,7 +858,7 @@ private:
       cold_end();
       return;
     }
-    if (rt().cpu_oc) {
+    if (rt().cpu_oc != CpuOc::Off) {
       const u32 nd = oc_data_cost(true, false, !load) + (n - 1) * oc_data_cost(true, true, !load);
       add_pending(const_charge(nd, load));
       flush_pending();
@@ -1681,7 +1688,7 @@ bool Translator::run() {
   const u32 start = key_pc(key_);
   if (!a9_) { t7_ = cpu_.timing7[start >> 15]; code_region7_ = start >> 24; }
   blk_.ndep = 0;
-  blk_.dep_overflow = rt().cpu_oc;   // main RAM's costs baked into every access: dies on any retime
+  blk_.dep_overflow = rt().cpu_oc != CpuOc::Off;   // main RAM's costs baked into every access: dies on any retime
 
   // Decode the straight-line run.
   u32 addr = start;

@@ -287,8 +287,12 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # cpu_oc, timing_oc and fast_load trade accuracy for speed. They are off by
 # default and no game needs them; they exist to squeeze a slow device. If a
 # game misbehaves (hangs, desyncs, glitches), turn these off first.
-# cpu_oc = false                # "CPU OC": the recompiler prices every memory access at one
-                                # constant (a cached main-RAM load) instead of by region. Less
+# cpu_oc = false                # "CPU OC": false | true (overclock) | underclock. true: the recompiler
+                                # prices every memory access at one constant (a cached main-RAM
+                                # load) instead of by region. underclock: stores and the whole ARM7
+                                # at main RAM's bus cost instead -- the game runs slower than a
+                                # console and the host does less work a frame (the weakest devices;
+                                # a game waiting on its own clock can miss a VBlank). Less
                                 # accurate than timing_oc: timer-race titles drift. Usually a
                                 # sizable FPS increase. Also moves the 3D geometry engine to its
                                 # own thread with every polygon priced as if drawn (the FIFO, its

@@ -139,7 +139,8 @@ firmware or a ROM with `--direct`, and offers instruction traces, frame and
 audio dumps, save-state checkpoints and cheats from the command line. It never
 writes a battery save back.
 
-Performance knobs that trade accuracy for speed, off by default: `--cpu-oc`,
+Performance knobs that trade accuracy for speed, off by default: `--cpu-oc`
+(or its underclock tier, `--cpu-uc`, for the weakest devices),
 `--timing-oc`, `--fast-load`. Turn them off first if a game misbehaves.
 
 ## Diagnostics, tests and tools

@@ -15,6 +15,9 @@ using T = Setting::Type;
 
 const Choice kOnOff[]   = {{"false", "OFF"}, {"true", "ON"}};
 const Choice kSkipMode[] = {{"adaptive", "ADAPTIVE"}, {"fixed", "FIXED"}};
+// emu.cpu_oc keeps "true" for the overclock tier, so a file from before the
+// underclock tier means what it did.
+const Choice kCpuOc[] = {{"false", "OFF"}, {"true", "OVERCLOCK"}, {"underclock", "UNDERCLOCK"}};
 // The rates a panel comes in, plus the console's own and no limiter at all.
 // "auto" is the only one that plays a game at the speed it was written for;
 // 60 is 0.29 % fast, which is what a player means by "60 fps".
@@ -93,8 +96,8 @@ const Setting kEmuSettings[] = {
          "DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL"),
   pick("emu.frameskip_mode", "FRAMESKIP MODE", kSkipMode, 2, "adaptive", FlagLive, Dep::FrameskipMode,
        "ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME"),
-  boolean("emu.cpu_oc", "CPU OC", "false", FlagLive | FlagInexact, Dep::NetSession,
-          "FASTER. TIMER-RACE GAMES DRIFT. TURN OFF IF A GAME MISBEHAVES"),
+  pick("emu.cpu_oc", "CPU OC", kCpuOc, 3, "false", FlagLive | FlagInexact, Dep::NetSession,
+       "FASTER. UNDERCLOCK SLOWS THE GAME TO SAVE THE HOST. OFF IF A GAME MISBEHAVES"),
   boolean("emu.timing_oc", "TIMING OC", "false", FlagLive | FlagInexact, Dep::NetSession,
           "FASTEST AND LEAST SAFE. GAMES THAT PACE ON THE 3D FIFO WILL BREAK"),
   boolean("emu.fast_load", "FAST LOAD", "false", FlagLive | FlagInexact, Dep::NetSession,

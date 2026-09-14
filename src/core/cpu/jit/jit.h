@@ -56,7 +56,15 @@ void set_trace(bool on);
 // --cpu-oc: price every data access at a translate-time main-RAM constant
 // instead of looking the page's cost up at run time. INEXACT (frame hashes
 // move on every scene); opt-in only. Flushes both CPUs when it changes.
-void set_cpu_oc(bool on);
+//   Overclock:  main RAM's cached load cost for the ARM9 (stores too), its
+//               WRAM cost for the ARM7 -- cheaper than the regions replaced.
+//   Underclock: the first pricing -- ARM9 stores and every ARM7 access at
+//               main RAM's bus cost (8-9 cycles), ARM9 loads as Overclock.
+//               The guest runs slower than hardware and the host does less
+//               work per frame: better on the weakest devices, but a title
+//               that waits on its own clock can miss a VBlank.
+enum class CpuOc : u8 { Off, Overclock, Underclock };
+void set_cpu_oc(CpuOc mode);
 
 // Per-instruction budget checks, the same lockstep with the interpreter that
 // DS_JIT_STRICT asks for. Slower, and exact: the frontend turns it on for a

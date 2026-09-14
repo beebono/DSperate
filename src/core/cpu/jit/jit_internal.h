@@ -233,7 +233,7 @@ struct Runtime {
   // constant (ARM9: main RAM's cached load cost, for stores too; ARM7: its
   // WRAM cost -- see Translator::oc_data_cost), and the whole CD/CDI charge
   // folds into the block's static cycles.
-  bool cpu_oc = false;
+  CpuOc cpu_oc = CpuOc::Off;   // see jit::set_cpu_oc; `rt().cpu_oc != CpuOc::Off` is the tier test
   // DS_JIT_RETIME_ALL: a timing-table rebuild kills every ARM9 block (the old
   // rule) instead of only the blocks that baked a changed byte. A/B knob.
   bool retime_all = false;

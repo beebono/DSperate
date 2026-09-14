@@ -109,6 +109,13 @@ public:
     if (arm9) { const u8* t = &bus9_[(addr >> 14) * 8]; n32 = t[2]; s32 = t[3]; }
     else      { const u8* t = &bus7()[(addr >> 15) * 4]; n32 = t[2]; s32 = t[3]; }
   }
+  // The ARM9's bus price of a data access at `addr` in its own cycles, as
+  // update_cpu9 builds a store entry under DS_STORE_BUS -- whatever the store
+  // rule currently in the table. What the underclock tier of --cpu-oc charges.
+  u32 bus9_data(u32 addr, bool word, bool seq) const {
+    const u8* t = &bus9_[(addr >> 14) * 8];
+    return static_cast<u32>(seq ? t[3] : word ? t[2] : t[0]) << clock9_shift;
+  }
   void dma_cost(bool arm9, u32 addr, bool word, u32& n, u32& s) const {
     if (arm9) { const u8* t = &bus9_[(addr >> 14) * 8]; n = t[word ? 6 : 4]; s = t[word ? 7 : 5]; }
     else      { const u8* t = &bus7()[(addr >> 15) * 4]; n = t[word ? 2 : 0]; s = t[word ? 3 : 1]; }

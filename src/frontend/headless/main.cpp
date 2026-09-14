@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
   bool rtc_host = false;              // --rtc-host: free-running clock seeded from the wall
   const char* fw_override = nullptr;  // --firmware-override: sidecar of changed firmware pages
   bool no_aa = false;
-  bool cpu_oc = false;
+  int cpu_oc = 0;   // jit::CpuOc: 0 off, 1 overclock, 2 underclock
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
   const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr; const char* dsi_sd = nullptr; ds::u64 dsi_autoload_id = 0; const char* dsi_shortcuts = nullptr; bool dsi_shortcuts_on = true;
@@ -356,7 +356,8 @@ int main(int argc, char** argv) {
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
     else if (flag("--timing-oc")) timing_oc = true;                          // no FIFO + untimed geometry (DraStic's model); see Gpu3D::set_timing_oc
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
-    else if (flag("--cpu-oc")) cpu_oc = true;                                // INEXACT: JIT data accesses priced as main RAM at translate time; see jit::set_cpu_oc
+    else if (flag("--cpu-oc")) cpu_oc = 1;                                   // INEXACT: JIT data accesses priced as main RAM at translate time; see jit::set_cpu_oc
+    else if (flag("--cpu-uc")) cpu_oc = 2;                                   // INEXACT: --cpu-oc's underclock tier (stores and the ARM7 at main RAM's bus cost)
     // Split A/B knobs: the bundled flag above is three separate changes.
 
     else if (!std::strcmp(argv[i], "--jit9")) { jit9 = true; jit7 = false; }  // recompile the ARM9 only
@@ -544,7 +545,7 @@ int main(int argc, char** argv) {
   nds.gpu3d.set_timing_oc(timing_oc);
   // Geometry worker + per-frame shape controller, with either inexact tier
   // (no-FIFO, or the FIFO kept with the cull priced by ratio under --cpu-oc).
-  nds.gpu3d.set_geometry_worker(timing_oc || cpu_oc);   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
+  nds.gpu3d.set_geometry_worker(timing_oc || cpu_oc != 0);   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
   nds.gpu3d.renderer().set_aa(!no_aa);
 
   if (rom && cheat_db) {
@@ -621,7 +622,7 @@ int main(int argc, char** argv) {
   }
 #if DSPERATE_JIT
   if ((jit9 || jit7) && !ds::jit::attach(nds, jit9, jit7)) return 1;
-  if ((jit9 || jit7) && cpu_oc) ds::jit::set_cpu_oc(true);
+  if ((jit9 || jit7) && cpu_oc) ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc));
 #else
   (void)jit9; (void)jit7; (void)cpu_oc;
 #endif
