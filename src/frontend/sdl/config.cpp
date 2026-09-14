@@ -57,6 +57,8 @@ bool Config::load(const std::string& path) {
   std::ifstream f(path);
   if (!f) return false;
   std::string line, section;
+  std::string cpu_oc;           // emu.cpu_oc, emu.cpu_tuning's old name, as this file gives it
+  bool cpu_tuning = false;      // ... and whether it names the new one
   while (std::getline(f, line)) {
     line = trim(line);
     if (line.empty() || line[0] == '#' || line[0] == ';') continue;
@@ -66,7 +68,19 @@ bool Config::load(const std::string& path) {
     std::string k = trim(line.substr(0, eq)), v = trim(line.substr(eq + 1));
     // Trailing comments; a bare `#` inside a value is not expected.
     if (const size_t c = v.find_first_of("#;"); c != std::string::npos) v = trim(v.substr(0, c));
-    kv_[section.empty() ? k : section + "." + k] = v;
+    const std::string key = section.empty() ? k : section + "." + k;
+    if (key == "emu.cpu_oc") cpu_oc = v;
+    if (key == "emu.cpu_tuning") cpu_tuning = true;
+    kv_[key] = v;
+  }
+  // emu.cpu_tuning: false | underclock | overclock. A file from before it says
+  // emu.cpu_oc = true/false, which stands in when the file has no cpu_tuning;
+  // "true" (and on/yes/1) is the overclock tier either way.
+  if (!cpu_tuning && !cpu_oc.empty()) kv_["emu.cpu_tuning"] = cpu_oc;
+  if (const auto it = kv_.find("emu.cpu_tuning"); it != kv_.end()) {
+    const std::string& t = it->second;
+    if (t == "1" || t == "true" || t == "yes" || t == "on") it->second = "overclock";
+    else if (t == "0" || t == "no" || t == "off") it->second = "false";
   }
   return true;
 }
@@ -284,10 +298,11 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # jit = true                    # false = interpreter (much slower; for comparison)
 # quantum = 0                   # CPU interleave: 0 = event-bound (fastest) | 128 = melonDS lockstep
 #
-# cpu_oc, timing_oc and fast_load trade accuracy for speed. They are off by
+# cpu_tuning, timing_oc and fast_load trade accuracy for speed. They are off by
 # default and no game needs them; they exist to squeeze a slow device. If a
 # game misbehaves (hangs, desyncs, glitches), turn these off first.
-# cpu_oc = false                # "CPU OC": false | true (overclock) | underclock. true: the recompiler
+# cpu_tuning = false            # "CPU TUNING": false | underclock | overclock (cpu_oc, its old name, and
+                                # true for overclock are still read). overclock: the recompiler
                                 # prices every memory access at one constant (a cached main-RAM
                                 # load) instead of by region. underclock: for the harder to run games
                                 # and/or the lowest end devices -- stores and the whole ARM7 at main

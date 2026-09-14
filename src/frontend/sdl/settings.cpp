@@ -15,9 +15,8 @@ using T = Setting::Type;
 
 const Choice kOnOff[]   = {{"false", "OFF"}, {"true", "ON"}};
 const Choice kSkipMode[] = {{"adaptive", "ADAPTIVE"}, {"fixed", "FIXED"}};
-// emu.cpu_oc keeps "true" for the overclock tier, so a file from before the
-// underclock tier means what it did.
-const Choice kCpuOc[] = {{"false", "OFF"}, {"underclock", "UNDERCLOCK"}, {"true", "OVERCLOCK"}};
+// emu.cpu_tuning. Config::load turns an old emu.cpu_oc and a "true" into these.
+const Choice kCpuOc[] = {{"false", "OFF"}, {"underclock", "UNDERCLOCK"}, {"overclock", "OVERCLOCK"}};
 // The rates a panel comes in, plus the console's own and no limiter at all.
 // "auto" is the only one that plays a game at the speed it was written for;
 // 60 is 0.29 % fast, which is what a player means by "60 fps".
@@ -96,7 +95,7 @@ const Setting kEmuSettings[] = {
          "DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL"),
   pick("emu.frameskip_mode", "FRAMESKIP MODE", kSkipMode, 2, "adaptive", FlagLive, Dep::FrameskipMode,
        "ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME"),
-  pick("emu.cpu_oc", "CPU OC", kCpuOc, 3, "false", FlagLive | FlagInexact, Dep::NetSession,
+  pick("emu.cpu_tuning", "CPU TUNING", kCpuOc, 3, "false", FlagLive | FlagInexact, Dep::NetSession,
        "UNDERCLOCK: FOR THE HARDER TO RUN GAMES AND/OR THE LOWEST END DEVICES. OFF IF A GAME MISBEHAVES"),
   boolean("emu.timing_oc", "TIMING OC", "false", FlagLive | FlagInexact, Dep::NetSession,
           "FASTEST AND LEAST SAFE. GAMES THAT PACE ON THE 3D FIFO WILL BREAK"),

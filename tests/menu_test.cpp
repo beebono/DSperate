@@ -951,13 +951,13 @@ void test_setting_steps() {
   const ds::sdl::Setting& fl = find("emu.fast_load");
   CHECK(ds::sdl::step_value(fl, "false", +1, h) == "true");
   CHECK(ds::sdl::step_value(fl, "true", +1, h) == "false");
-  // CPU OC has three, OFF / UNDERCLOCK / OVERCLOCK: "true" stays the
-  // overclock tier, as older files wrote it.
-  const ds::sdl::Setting& oc = find("emu.cpu_oc");
+  // CPU TUNING has three, OFF / UNDERCLOCK / OVERCLOCK.
+  const ds::sdl::Setting& oc = find("emu.cpu_tuning");
+  CHECK(std::strcmp(oc.label, "CPU TUNING") == 0);
   CHECK(ds::sdl::step_value(oc, "false", +1, h) == "underclock");
   CHECK(ds::sdl::display_value(oc, "underclock") == "UNDERCLOCK");
-  CHECK(ds::sdl::step_value(oc, "underclock", +1, h) == "true");
-  CHECK(ds::sdl::display_value(oc, "true") == "OVERCLOCK");
+  CHECK(ds::sdl::step_value(oc, "underclock", +1, h) == "overclock");
+  CHECK(ds::sdl::display_value(oc, "overclock") == "OVERCLOCK");
   // GAME SPEED is a whole percent in the file, as --speed and the frontend
   // read it. As a 0..1 percent row it showed 100 as 10000% and wrote 1.
   const ds::sdl::Setting& sp = find("emu.speed");
@@ -1077,7 +1077,7 @@ void test_network_features_row() {
     if (t[i].depends == ds::sdl::Dep::NetSession) ++session_gated;
   CHECK(session_gated == 8);
   for (const char* k : {"emu.frameskip", "emu.ff_speed", "emu.ff_skip",
-                        "emu.cpu_oc", "emu.timing_oc", "emu.fast_load",
+                        "emu.cpu_tuning", "emu.timing_oc", "emu.fast_load",
                         "emu.limiter", "emu.speed"}) {
     const ds::sdl::Setting* row = nullptr;
     for (int i = 0; i < ds::sdl::settings_count(t); ++i)
@@ -1091,7 +1091,7 @@ void test_network_features_row() {
     CHECK(!(row->flags & (ds::sdl::FlagRestart | ds::sdl::FlagDeferred)));
   }
   // The three speed knobs are the inexact ones, and still say so.
-  for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"}) {
+  for (const char* k : {"emu.cpu_tuning", "emu.timing_oc", "emu.fast_load"}) {
     const ds::sdl::Setting* row = nullptr;
     for (int i = 0; i < ds::sdl::settings_count(t); ++i)
       if (!std::strcmp(t[i].key, k)) row = &t[i];

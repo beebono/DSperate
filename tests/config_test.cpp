@@ -175,6 +175,42 @@ void test_layering() {
   CHECK(c.num("emu.frameskip", 9) == 0);
 }
 
+// emu.cpu_tuning, and emu.cpu_oc -- its old name -- standing in for it.
+void test_cpu_tuning_alias() {
+  {   // an old file: the key and "true" both carried over
+    write("[emu]\ncpu_oc = true\n");
+    ds::sdl::Config c;
+    CHECK(c.load(kPath));
+    CHECK(c.str("emu.cpu_tuning") == "overclock");
+  }
+  {
+    write("[emu]\ncpu_oc = underclock\n");
+    ds::sdl::Config c;
+    CHECK(c.load(kPath));
+    CHECK(c.str("emu.cpu_tuning") == "underclock");
+  }
+  {   // both in one file (a menu change added the new key): the new one wins
+    write("[emu]\ncpu_oc = true\ncpu_tuning = underclock\n");
+    ds::sdl::Config c;
+    CHECK(c.load(kPath));
+    CHECK(c.str("emu.cpu_tuning") == "underclock");
+  }
+  {   // the new key spelled as a boolean
+    write("[emu]\ncpu_tuning = on\n");
+    ds::sdl::Config c;
+    CHECK(c.load(kPath));
+    CHECK(c.str("emu.cpu_tuning") == "overclock");
+  }
+  {   // a later file's old key still overrides an earlier file's new one
+    ds::sdl::Config c;
+    write("[emu]\ncpu_tuning = overclock\n");
+    CHECK(c.load(kPath));
+    write("[emu]\ncpu_oc = false\n");
+    CHECK(c.load(kPath));
+    CHECK(c.str("emu.cpu_tuning") == "false");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -184,6 +220,7 @@ int main() {
   test_store_adds_keys_and_sections();
   test_round_trip();
   test_layering();
+  test_cpu_tuning_alias();
   std::remove(kPath);
   std::printf("config: ok\n");
   return 0;

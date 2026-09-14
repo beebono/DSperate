@@ -160,8 +160,8 @@ const char* kUsage =
     "  --interp        interpreter instead of the recompiler\n"
     "  --timing-oc     Timing OC: no GX FIFO, untimed geometry (faster, less accurate; DraStic's model).\n"
     "                  emu.timing_oc in the config\n"
-    "  --cpu-oc        CPU OC: recompiled data accesses priced as main RAM, geometry on its own thread\n                  with every polygon priced as drawn (less accurate); emu.cpu_oc = true\n"
-    "  --cpu-uc        CPU OC's underclock: for the harder to run games and/or the lowest end devices.\n                  The game's CPUs run slower than a console's, so there is less to emulate a frame\n                  (less accurate; a game can miss VBlanks); emu.cpu_oc = underclock\n"
+    "  --cpu-oc        CPU tuning, overclock: recompiled data accesses priced as main RAM, geometry on its\n                  own thread with every polygon priced as drawn (less accurate); emu.cpu_tuning = overclock\n"
+    "  --cpu-uc        CPU tuning, underclock: for the harder to run games and/or the lowest end devices.\n                  The game's CPUs run slower than a console's, so there is less to emulate a frame\n                  (less accurate; a game can miss VBlanks); emu.cpu_tuning = underclock\n"
     "  --fast-load     cart DMA reads the card without its clock (may affect accuracy); emu.fast_load\n"
     "  --aa / --no-aa  3D anti-aliasing on (hardware behaviour) or off; video.aa, off by default\n"
     "  --lockstep      128-cycle CPU interleave (melonDS lockstep) instead of event-bound; --quantum N for any value\n"
@@ -367,11 +367,13 @@ std::string auto_state_path(NDS& nds, const std::string& dir) {
   return dir + "/" + code + ".auto.dss";
 }
 
-// emu.cpu_oc: false | true (the overclock tier) | underclock. 0/1/2, the
-// order of jit::CpuOc; anything unreadable is off.
+// emu.cpu_tuning (once emu.cpu_oc; Config::load reads the old key and value):
+// false | underclock | overclock, "true" still meaning overclock. 0/1/2, the
+// order of jit::CpuOc; anything unreadable is off. Also read as "is it on"
+// for the two boolean speed knobs.
 int cpu_oc_mode(const std::string& v) {
   if (v == "underclock") return 2;
-  return (v == "1" || v == "true" || v == "yes" || v == "on") ? 1 : 0;
+  return (v == "overclock" || v == "1" || v == "true" || v == "yes" || v == "on") ? 1 : 0;
 }
 
 // Autoload: the auto slot as the starting point, when emu.autoload asks for
@@ -1110,8 +1112,8 @@ int main(int argc, char** argv) {
     else if (flag("--lockstep")) cli.set("emu.quantum", std::to_string(ds::LOCKSTEP_QUANTUM));
     else if (arg("--quantum")) cli.set("emu.quantum", argv[++i]);
     else if (flag("--timing-oc")) cli.set("emu.timing_oc", "true");
-    else if (flag("--cpu-oc")) cli.set("emu.cpu_oc", "true");
-    else if (flag("--cpu-uc")) cli.set("emu.cpu_oc", "underclock");
+    else if (flag("--cpu-oc")) cli.set("emu.cpu_tuning", "overclock");
+    else if (flag("--cpu-uc")) cli.set("emu.cpu_tuning", "underclock");
     else if (flag("--fast-load")) cli.set("emu.fast_load", "true");
     else if (arg("--frameskip")) cli.set("emu.frameskip", argv[++i]);
     else if (arg("--frameskip-mode")) cli.set("emu.frameskip_mode", argv[++i]);
@@ -1163,7 +1165,7 @@ int main(int argc, char** argv) {
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.latency_frames", "emu.timing_oc", "emu.cpu_oc", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.latency_frames", "emu.timing_oc", "emu.cpu_tuning", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
   // The DSi's own firmware, for a session that is a DSi from the start, unless
@@ -1807,7 +1809,7 @@ sdl_ready:
   nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
   // Geometry worker + per-frame shape controller, with either inexact tier
   // (no-FIFO, or the FIFO kept with the cull priced by ratio under --cpu-oc).
-  nds.gpu3d.set_geometry_worker(cfg.flag("emu.timing_oc", false) || cpu_oc_mode(cfg.str("emu.cpu_oc")) != 0);   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
+  nds.gpu3d.set_geometry_worker(cfg.flag("emu.timing_oc", false) || cpu_oc_mode(cfg.str("emu.cpu_tuning")) != 0);   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
   nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
   nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
   if (!boot_firmware || nds.dsi) nds.setup_direct_boot();   // on a DSi this is the NAND boot (NDS::boot_dsi_nand)
@@ -1823,12 +1825,12 @@ sdl_ready:
   if (!replay || rtc_host) nds.io.start_rtc_clock();
   else VLOG("rtc: frozen for the replay\n");
   if (replay && rtc_host) std::fprintf(stderr, "rtc: --rtc-host over a replay; this run is not reproducible\n");
-  // emu.cpu_oc as set, and as the recompiler runs it. The underclock tier
+  // emu.cpu_tuning as set, and as the recompiler runs it. The underclock tier
   // waits on a DSi NAND boot until the DSi Menu has jumped to the title it
   // launched (NDS::dsi_title_running): the Menu's hand-off is an IPC race the
   // underclocked ARM9 loses, and both CPUs then wait for good. Checked once a
   // frame below, so it comes back off when the title returns to the Menu.
-  int cpu_oc_cfg = cpu_oc_mode(cfg.str("emu.cpu_oc"));
+  int cpu_oc_cfg = cpu_oc_mode(cfg.str("emu.cpu_tuning"));
   int cpu_oc_applied = 0;
   auto cpu_oc_wanted = [&](int mode) { return (mode == 2 && nds.dsi && nds.dsi_nand_boot && !nds.dsi_title_running) ? 0 : mode; };
 #if DSPERATE_JIT
@@ -2718,7 +2720,7 @@ sdl_ready:
     // the namespace in here. The pricing is baked in when a block is
     // translated, so the cache goes with it -- otherwise the change would
     // only reach code the game had not run yet.
-    if (is("emu.cpu_oc")) {
+    if (is("emu.cpu_tuning")) {
       const int mode = cpu_oc_mode(v);
       cpu_oc_cfg = mode;
       cpu_oc_applied = cpu_oc_wanted(mode);
@@ -2729,7 +2731,7 @@ sdl_ready:
       nds.gpu3d.set_geometry_worker(mode != 0 || cfg.flag("emu.timing_oc", false));
       return;
     }
-    if (is("emu.timing_oc")) { nds.gpu3d.set_timing_oc(on); nds.gpu3d.set_geometry_worker(on || cpu_oc_mode(cfg.str("emu.cpu_oc")) != 0); return; }
+    if (is("emu.timing_oc")) { nds.gpu3d.set_timing_oc(on); nds.gpu3d.set_geometry_worker(on || cpu_oc_mode(cfg.str("emu.cpu_tuning")) != 0); return; }
     if (is("emu.fast_load")) { nds.io.set_cart_bulk(on); return; }
     if (is("emu.dsi_nand_shortcuts")) {
       shortcuts_note = sync_nand_shortcuts(on);   // shown by the frame loop's toast
@@ -2855,14 +2857,14 @@ sdl_ready:
   // Set when a guest heard nobody: see begin_guest_scan below.
   bool guest_retry_armed = false, radio_was_on = false, scanning = false;
   bool knobs_held = false;
-  std::string held_cpu_oc = "false", held_timing_oc = "false", held_fast_load = "false";   // the values, as emu.cpu_oc has three
+  std::string held_cpu_oc = "false", held_timing_oc = "false", held_fast_load = "false";   // the values, as emu.cpu_tuning has three
   int held_speed = 100; std::string held_limiter = "60";
   int  held_fs_limit = 0;
   bool held_ff_toggle = false;
   auto take_away_for_session = [&] {
     if (knobs_held) return;
     knobs_held = true;
-    held_cpu_oc = cpu_oc_mode(cfg.str("emu.cpu_oc")) == 2 ? "underclock" : cpu_oc_mode(cfg.str("emu.cpu_oc")) ? "true" : "false";
+    held_cpu_oc = cpu_oc_mode(cfg.str("emu.cpu_tuning")) == 2 ? "underclock" : cpu_oc_mode(cfg.str("emu.cpu_tuning")) ? "overclock" : "false";
     held_timing_oc = cfg.flag("emu.timing_oc", false) ? "true" : "false";
     held_fast_load = cfg.flag("emu.fast_load", false) ? "true" : "false";
     held_fs_limit = fs_limit;
@@ -2887,8 +2889,8 @@ sdl_ready:
       std::fprintf(stderr, "net: fast forward is off for this session\n");
       ff_toggle = false;
     }
-    for (const char* k : {"emu.cpu_oc", "emu.timing_oc", "emu.fast_load"})
-      if (cpu_oc_mode(cfg.str(k)) != 0) {   // "on" for the two booleans, either tier for cpu_oc
+    for (const char* k : {"emu.cpu_tuning", "emu.timing_oc", "emu.fast_load"})
+      if (cpu_oc_mode(cfg.str(k)) != 0) {   // "on" for the two booleans, either tier for cpu_tuning
         std::fprintf(stderr, "net: %s is off for this session -- the network keeps time, so the machine cannot fake it\n", k);
         cfg.set(k, "false");       // in memory, not in the player's file
         host.apply(k, "false");    // and into the running machine
@@ -2906,7 +2908,7 @@ sdl_ready:
       std::fprintf(stderr, "net: the frame limiter is back where it was -- the session is over\n");
     }
     const std::pair<const char*, const std::string*> knobs[] = {
-      {"emu.cpu_oc", &held_cpu_oc}, {"emu.timing_oc", &held_timing_oc}, {"emu.fast_load", &held_fast_load}};
+      {"emu.cpu_tuning", &held_cpu_oc}, {"emu.timing_oc", &held_timing_oc}, {"emu.fast_load", &held_fast_load}};
     for (const auto& [k, held] : knobs)
       if (*held != "false") {
         std::fprintf(stderr, "net: %s is back on -- the session is over\n", k);
@@ -3967,7 +3969,7 @@ sdl_ready:
     // The underclock tier, deferred past the DSi Menu's hand-off (cpu_oc_wanted).
     if (jit && cpu_oc_cfg == 2 && cpu_oc_wanted(cpu_oc_cfg) != cpu_oc_applied) {
       cpu_oc_applied = cpu_oc_wanted(cpu_oc_cfg);
-      VLOG("cpu_oc: underclock %s\n", cpu_oc_applied ? "on: the DSi Menu has started its title" : "held off: the DSi Menu is running");
+      VLOG("cpu tuning: underclock %s\n", cpu_oc_applied ? "on: the DSi Menu has started its title" : "held off: the DSi Menu is running");
       ds::jit::set_cpu_oc(static_cast<ds::jit::CpuOc>(cpu_oc_applied));
       ds::jit::flush_all();
     }
