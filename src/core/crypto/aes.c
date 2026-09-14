@@ -521,6 +521,14 @@ void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length)
   }
 }
 
+void AES_CTR_next_keystream(struct AES_ctx* ctx, uint8_t ks[AES_BLOCKLEN])
+{
+  memcpy(ks, ctx->Iv, AES_BLOCKLEN);
+  Cipher((state_t*)ks, ctx->RoundKey);
+  for (int bi = AES_BLOCKLEN - 1; bi >= 0; --bi)
+    if (++ctx->Iv[bi] != 0) break;
+}
+
 void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf)
 {
   Cipher((state_t*)buf, ctx->RoundKey);

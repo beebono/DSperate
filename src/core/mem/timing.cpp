@@ -206,40 +206,84 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
   const bool store_bus = store_bus_env >= 0 ? store_bus_env != 0 : !(cpu.nds && cpu.nds->dsi);
   const u32 first = start >> 12, last = (end == 0xFFFFFFFF) ? 0x100000 : (end >> 12);
   const u32 sh = clock9_shift;
-  u32 x_prev = 0, y_prev = 0; bool changed_prev = false;
-  for (u32 i = first; i < last; ++i) {
-    const u8 pu = pu_map[i];
-    const u8* b = &bus9_[(i >> 2) * 8];
-    u8* slot = &cpu9_[i * 8];
-    // The slot is composed in a local and stored as one word only when it
-    // changed: a full-range rebuild (reset, PU setup) runs a million times.
-    u64 old_w; std::memcpy(&old_w, slot, 8);
-    const u8 old_code = static_cast<u8>(old_w), old_data = static_cast<u8>(old_w >> 16);
+  // One page's slot. It depends on the 16 KB bus entry, the page's two PU
+  // cacheability bits and whether a TCM covers it.
+  const auto compose = [&](const u8* b, u8 pu, bool tcm_i, bool tcm_d) {
     u8 c[8];
-    const u32 addr = i << 12;
-    const bool itcm = addr < cpu.itcm_size;
-    const bool dtcm = (addr & cpu.dtcm_mask) == cpu.dtcm_base;
-    c[0] = itcm ? 1 : (pu & 0x40) ? 0xFF : static_cast<u8>(b[2] << sh);
-    if (itcm || dtcm) { c[1] = 1; c[2] = 1; c[3] = 1; }
+    c[0] = tcm_i ? 1 : (pu & 0x40) ? 0xFF : static_cast<u8>(b[2] << sh);
+    if (tcm_i || tcm_d) { c[1] = 1; c[2] = 1; c[3] = 1; }
     else if (pu & 0x10) { c[1] = CACHE_DATA; c[2] = CACHE_DATA; c[3] = 1; }
     else { c[1] = static_cast<u8>(b[0] << sh); c[2] = static_cast<u8>(b[2] << sh); c[3] = static_cast<u8>(b[3] << sh); }
     c[4] = c[0];
-    if (!(itcm || dtcm) && (pu & 0x10) && store_bus) { c[5] = static_cast<u8>(b[0] << sh); c[6] = static_cast<u8>(b[2] << sh); c[7] = static_cast<u8>(b[3] << sh); }
+    if (!(tcm_i || tcm_d) && (pu & 0x10) && store_bus) { c[5] = static_cast<u8>(b[0] << sh); c[6] = static_cast<u8>(b[2] << sh); c[7] = static_cast<u8>(b[3] << sh); }
     else { c[5] = c[1]; c[6] = c[2]; c[7] = c[3]; }
-    u64 new_w; std::memcpy(&new_w, c, 8);
-    if (new_w != old_w) std::memcpy(slot, &new_w, 8);
-    // Refill entries, written inline and only where a branch cost moved
-    // (a full-range rebuild leaves most pages alone): page i-1's entry [2]
-    // needs this page's cost, so each page is finished one iteration late.
-    const u32 x = c[0] == 0xFF ? 3u : c[0];
-    const bool changed = c[0] != old_code;
-    if (i > first && (changed || changed_prev)) { u8* r = refill9_rw() + (i - 1) * 4; r[0] = static_cast<u8>(x_prev + y_prev); r[1] = static_cast<u8>(x_prev + x_prev); r[2] = static_cast<u8>(x_prev + x); r[3] = static_cast<u8>(x_prev); }
-    x_prev = x; y_prev = c[0] == 0xFF ? 1u : c[0]; changed_prev = changed;
-    // Only the bytes a translation can have baked count as a retime.
-    const u8 f = static_cast<u8>((c[0] != old_code ? RETIME_CODE : 0) | (c[2] != old_data ? RETIME_DATA : 0));
-    if (f && (retime_flags_[i] & f) != f) {
-      if (!retime_flags_[i]) retime_list_.push_back(i);
-      retime_flags_[i] |= f;
+    u64 w; std::memcpy(&w, c, 8); return w;
+  };
+  const auto bus_word = [&](u32 group) { u64 w; std::memcpy(&w, &bus9_[group * 8], 8); return w; };
+  // The walk is by runs, not pages: a full rebuild (a clock change, the PU
+  // switched on) visits a million pages, 27 ns each on a Cortex-A55 as a
+  // per-page compose, and a title launch does several in one frame. The TCMs
+  // are two page intervals (their sizes are powers of two >= 16 KB, aligned);
+  // between their edges a run of pages with the same PU bits and the same bus
+  // entry has one slot, and where the table already holds it with nothing
+  // pending from the page before, whole 16-page blocks are skipped.
+  const u64 itcm_end = cpu.itcm_size >> 12;
+  const u64 dtcm_lo = cpu.dtcm_mask ? (cpu.dtcm_base >> 12) : 0x100000, dtcm_hi = cpu.dtcm_mask ? ((static_cast<u64>(cpu.dtcm_base) + (~cpu.dtcm_mask + 1ull)) >> 12) : 0x100000;
+  const u8* pu_map_p = pu_map.get();
+  u8* const refill = refill9_rw();
+  u32 x_prev = 0, y_prev = 0; bool changed_prev = false;
+  u32 i = first;
+  while (i < last) {
+    u32 seg_end = last;
+    for (u64 e : {itcm_end, dtcm_lo, dtcm_hi}) if (e > i && e < seg_end) seg_end = static_cast<u32>(e);
+    const bool ti = i < itcm_end, td = i >= dtcm_lo && i < dtcm_hi;
+    while (i < seg_end) {
+      const u8 pu = pu_map_p[i];
+      const u64 bw = bus_word(i >> 2);
+      const u64 W = compose(&bus9_[(i >> 2) * 8], pu, ti, td);
+      const u8 code = static_cast<u8>(W), data = static_cast<u8>(W >> 16);
+      const u32 x = code == 0xFF ? 3u : code, y = code == 0xFF ? 1u : code;
+      const u32 R = static_cast<u8>(x + y) | (static_cast<u32>(static_cast<u8>(x + x)) << 8) | (static_cast<u32>(static_cast<u8>(x + x)) << 16) | (static_cast<u32>(static_cast<u8>(x)) << 24);   // page k's refill entry when page k+1 has the same slot
+      // The run: pages with this PU byte and this bus entry.
+      const u64 pu8 = 0x0101010101010101ull * pu;
+      u32 j = i + 1;
+      while (j < seg_end) {
+        if ((j & 7) == 0 && j + 8 <= seg_end) { u64 v; std::memcpy(&v, pu_map_p + j, 8); if (v == pu8 && bus_word(j >> 2) == bw && bus_word((j >> 2) + 1) == bw) { j += 8; continue; } }
+        if (pu_map_p[j] != pu || ((j & 3) == 0 && bus_word(j >> 2) != bw)) break;
+        ++j;
+      }
+      for (; i < j; ++i) {
+        u8* slot = &cpu9_[i * 8];
+        u64 old_w; std::memcpy(&old_w, slot, 8);
+        if (old_w == W && !changed_prev) {
+          // Nothing moves here; skip whole 16-page blocks that hold the slot.
+          x_prev = x; y_prev = y;
+          while ((i & 15) == 15 && i + 17 <= j) {
+            u64 acc = 0;
+            for (u32 k = 1; k <= 16; ++k) { u64 o; std::memcpy(&o, &cpu9_[(i + k) * 8], 8); acc |= o ^ W; }
+            if (acc) break;
+            i += 16;
+          }
+          continue;
+        }
+        if (old_w != W) std::memcpy(slot, &W, 8);
+        const u8 old_code = static_cast<u8>(old_w), old_data = static_cast<u8>(old_w >> 16);
+        // Refill entries, written only where a branch cost moved: page i-1's
+        // entry [2] needs this page's cost, so each page is finished one
+        // iteration late.
+        const bool changed = code != old_code;
+        if (i > first && (changed || changed_prev)) {
+          if (x_prev == x && y_prev == y) std::memcpy(refill + (i - 1) * 4, &R, 4);
+          else { u8* r = refill + (i - 1) * 4; r[0] = static_cast<u8>(x_prev + y_prev); r[1] = static_cast<u8>(x_prev + x_prev); r[2] = static_cast<u8>(x_prev + x); r[3] = static_cast<u8>(x_prev); }
+        }
+        x_prev = x; y_prev = y; changed_prev = changed;
+        // Only the bytes a translation can have baked count as a retime.
+        const u8 f = static_cast<u8>((changed ? RETIME_CODE : 0) | (data != old_data ? RETIME_DATA : 0));
+        if (f && (retime_flags_[i] & f) != f) {
+          if (!retime_flags_[i]) { if (retime_list_.size() < RETIME_LIST_MAX) retime_list_.push_back(i); else retime_overflow_ = true; }
+          retime_flags_[i] |= f;
+        }
+      }
     }
   }
   // The pages at both edges of the range: the last one (its neighbour is

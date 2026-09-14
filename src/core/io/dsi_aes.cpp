@@ -108,13 +108,13 @@ void DsiAes::process_ccm_encrypt() {
   for (int k = 0; k < 4; ++k) out_.write(get32(&data[k * 4]));
 }
 
+// The block goes in byte-reversed and comes out reversed back, so the
+// keystream is XORed in reversed instead: the same bytes, without the copies.
 void DsiAes::process_ctr() {
-  u8 data[16], rev[16];
-  for (int k = 0; k < 4; ++k) put32(&data[k * 4], in_.read());
-  bswap128(rev, data);
-  AES_CTR_xcrypt_buffer(CTX, rev, 16);
-  bswap128(data, rev);
-  for (int k = 0; k < 4; ++k) out_.write(get32(&data[k * 4]));
+  u8 ks[16], ksr[16];
+  AES_CTR_next_keystream(CTX, ks);
+  bswap128(ksr, ks);
+  for (int k = 0; k < 4; ++k) out_.write(in_.read() ^ get32(&ksr[k * 4]));
 }
 
 void DsiAes::push_output_mac() {

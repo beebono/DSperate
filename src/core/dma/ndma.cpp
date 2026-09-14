@@ -99,8 +99,9 @@ void Ndma::check(Cpu cpu, u32 mode) {
   for (int n = 0; n < 4; ++n) { Channel& c = channel(cpu, n); if (c.start_mode == mode && (c.cnt & 0x80000000)) start(c); }
 }
 void Ndma::stop(Cpu cpu, u32 mode) {
-  for (int n = 0; n < 4; ++n) { Channel& c = channel(cpu, n); if (c.start_mode == mode) c.cnt &= ~0x80000000u; }
-  nds_.dma.update_armed();
+  bool any = false;   // update_armed only caches in_mode answers: nothing to redo unless a channel stopped
+  for (int n = 0; n < 4; ++n) { Channel& c = channel(cpu, n); if (c.start_mode == mode && (c.cnt & 0x80000000u)) { c.cnt &= ~0x80000000u; any = true; } }
+  if (any) nds_.dma.update_armed();
 }
 bool Ndma::in_mode(Cpu cpu, u32 mode) const {
   for (int n = 0; n < 4; ++n) { const Channel& c = channel(cpu, n); if (c.start_mode == mode && (c.cnt & 0x80000000)) return true; }
@@ -133,8 +134,10 @@ u32 Ndma::run_channel(Channel& c, u32 budget) {
   // The ARM7's FIFO ends straight to their devices (Io::ndma_read7): the
   // same calls the bus would make, minus two dispatches a word.
   const bool direct = !a9 && !io::Io::census_on() && !mem::Bus::watch_active();
-  const bool src_fifo = direct && !fill && c.src_inc == 0 && (c.cur_src == 0x0400490C || c.cur_src == 0x0400440C);
-  const bool dst_aes = direct && c.dst_inc == 0 && c.cur_dst == 0x04004408;
+  // SCFG_EXT gates the ports (Io::dsi_io_access) and nothing a transfer
+  // does can change it, so the check is made once here, not per word.
+  const bool src_fifo = direct && !fill && c.src_inc == 0 && (c.cur_src == 0x0400490C || c.cur_src == 0x0400440C) && nds_.io.dsi_io_access(Cpu::ARM7, c.cur_src);
+  const bool dst_aes = direct && c.dst_inc == 0 && c.cur_dst == 0x04004408 && nds_.io.dsi_io_access(Cpu::ARM7, c.cur_dst);
   u32 used = 0;
   while (c.iter_count > 0) {
     if (a9 && nds_.gpu3d.stalled()) break;

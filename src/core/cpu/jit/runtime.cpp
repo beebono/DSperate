@@ -281,7 +281,7 @@ void on_timing_changed(CpuContext& cpu) {
     invalidate_cpu(jc);
   } else {
     pretx::purge();
-    if (!t.retime_pages().empty()) {
+    if (t.retime_pending()) {
       for (Block* b : jc.all_blocks) {
         if (b->dead) continue;
         bool hit = b->dep_overflow;

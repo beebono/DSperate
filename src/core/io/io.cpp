@@ -1528,15 +1528,13 @@ bool Io::dsi_io_access(Cpu cpu, u32 addr) const {
 // NDMA's ARM7 FIFO ends, reached as Io::read / Io::write would reach them
 // through dsi_read / dsi_write, without the dispatch: a NAND title load moves
 // every byte through these a word at a time (SD data FIFO -> AES -> RAM).
-// Callers check census_on() and the bus watch first.
+// Callers check census_on(), the bus watch and dsi_io_access first.
 u32 Io::ndma_read7(u32 addr) {
-  if (addr != 0x040001C0) spi_poll_streak_ = 0;
-  if (!dsi_io_access(Cpu::ARM7, addr)) return 0;
+  spi_poll_streak_ = 0;
   return addr == 0x0400490C ? sd.read_fifo32() : aes.read_output_fifo();
 }
 void Io::ndma_write7_aes(u32 value) {
   spi_poll_streak_ = 0;
-  if (!dsi_io_access(Cpu::ARM7, 0x04004408)) return;
   aes.write_input_fifo(value);
 }
 

@@ -350,8 +350,8 @@ public:
   void dsi_tsc_reset();
   void mbk_map_slot(int bank, int slot, u8 value);      // MBK1-5 byte (also the direct-boot mapping from the header)
   void mbk_map_range(Cpu cpu, int bank, u32 value);     // MBK6-8
-private:
   bool dsi_io_access(Cpu cpu, u32 addr) const;   // CheckIO9Access/CheckIO7Access: a disabled page reads 0, drops writes
+private:
   u8   dsi_tsc_transfer(u8 value);
   NDS& nds_;
   u32  read16(Cpu cpu, u32 addr);

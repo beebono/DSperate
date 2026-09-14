@@ -56,6 +56,12 @@ static void test_hw_matches_software() {
     AES_force_software(1); AES_init_ctx_iv(&c2, key, iv); AES_CTR_xcrypt_buffer(&c2, b, len); AES_ECB_encrypt(&c2, b + 48);
     CHECK_MEM(a, b, sizeof a);
     CHECK_MEM(c1.Iv, c2.Iv, 16);
+    // The keystream call is the xcrypt of a zero block.
+    AES_ctx c3, c4; u8 z[16] = {}, ks[16];
+    AES_init_ctx_iv(&c3, key, iv); AES_init_ctx_iv(&c4, key, iv);
+    AES_CTR_xcrypt_buffer(&c3, z, 16); AES_CTR_next_keystream(&c4, ks);
+    CHECK_MEM(z, ks, 16);
+    CHECK_MEM(c3.Iv, c4.Iv, 16);
   }
   AES_force_software(0);
 }

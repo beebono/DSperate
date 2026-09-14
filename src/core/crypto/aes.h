@@ -42,6 +42,10 @@ void AES_CBC_decrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
  */
 void AES_CTR_xcrypt_buffer(struct AES_ctx* ctx, uint8_t* buf, size_t length);
 
+/* DSperate: the next CTR keystream block (what AES_CTR_xcrypt_buffer XORs
+ * into a 16-byte buffer), with the counter advanced past it. */
+void AES_CTR_next_keystream(struct AES_ctx* ctx, uint8_t ks[AES_BLOCKLEN]);
+
 /* One 16-byte block in place (the CCM MAC step). */
 void AES_ECB_encrypt(const struct AES_ctx* ctx, uint8_t* buf);
 

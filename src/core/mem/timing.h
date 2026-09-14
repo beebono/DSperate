@@ -3,6 +3,7 @@
 #pragma once
 #include "core/types.h"
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -138,12 +139,20 @@ public:
   // several update_cpu9 calls of one notify (cp15_update_pu_map, update_tcm).
   static constexpr u8 RETIME_CODE = 1, RETIME_DATA = 2;
   u8 retime_flag(u32 page) const { return retime_flags_[page]; }
-  const std::vector<u32>& retime_pages() const { return retime_list_; }
-  void retime_clear() { for (u32 p : retime_list_) retime_flags_[p] = 0; retime_list_.clear(); }
+  bool retime_pending() const { return retime_overflow_ || !retime_list_.empty(); }
+  // Past RETIME_LIST_MAX flagged pages (a clock change flags them all) the
+  // list stops growing and the clear wipes the whole flag table instead.
+  void retime_clear() {
+    if (retime_overflow_) std::fill_n(retime_flags_.get(), 0x100000, u8{0});
+    else for (u32 p : retime_list_) retime_flags_[p] = 0;
+    retime_list_.clear(); retime_overflow_ = false;
+  }
 
 private:
   std::unique_ptr<u8[]> retime_flags_;   // 0x100000, RETIME_* bits
-  std::vector<u32> retime_list_;         // pages with a non-zero flag
+  std::vector<u32> retime_list_;         // pages with a non-zero flag (the first RETIME_LIST_MAX)
+  bool retime_overflow_ = false;
+  static constexpr size_t RETIME_LIST_MAX = 1u << 16;
   std::unique_ptr<u8[]> bus9_;     // 0x40000 * 8
   std::unique_ptr<u8[]> regions9_; // 0x40000
   // [0, BUS7_BYTES) the raw ARM7 bus table, then the precomputed cost table.
