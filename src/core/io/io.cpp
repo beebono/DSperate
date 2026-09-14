@@ -289,6 +289,15 @@ u8 Io::spi_transfer(u8 value) {
       // moment the settings are complete on disk. Recorded rather than acted
       // on; the frontend decides what a power-off means (NDS::power_off).
       if (reg == 0 && (value & 0x40)) nds_.power_off = true;
+      // DSi register 10h bit 0: reset. A DS-mode title cannot reach the I2C
+      // reset (BPTWL 11h: SCFG is locked for it), so this is how one goes back
+      // to the DSi Menu -- Download Play's "Return to DSi Menu?", at least.
+      // The same soft reset as the BPTWL request (see bptwl_write). melonDS
+      // masks the index to 3 bits and never sees it (its TODO: DSi registers).
+      if (reg == 0x10 && (value & 0x01) && nds_.dsi) {
+        nds_.dsi_soft_reset_pending = true;
+        nds_.cpu(Cpu::ARM7).halted = true;
+      }
       static const bool log = std::getenv("DS_MIC_LOG") != nullptr;
       if (log && (reg == 2 || reg == 3)) std::fprintf(stderr, "[mic] PMIC reg %u = %02x (frame %llu)\n", reg, value, (unsigned long long)nds_.frame_count);
       p.data = 0;
