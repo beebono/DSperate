@@ -48,6 +48,7 @@ void Bus::reset() {
   std::memset(main_ram.get(), 0, main_ram_size());
   for (auto& b : nwram) std::memset(b.get(), 0, NWRAM_BANK_SIZE);
   std::memset(nwram_map_, 0, sizeof nwram_map_);
+  wram_key_[0] = wram_key_[1] = ~0u;   // the page tables are rebuilt: the next apply lays everything
   timing_.clock9_shift = nds_.dsi ? 2 : 1;   // SCFG_CLK9 bit 0 is set at a DSi reset; timing_.reset() builds with it
   std::memset(shared_wram.get(), 0, SHARED_WRAM_SIZE);
   std::memset(arm7_wram.get(), 0, ARM7_WRAM_SIZE);
@@ -227,12 +228,31 @@ void Bus::set_clock9_shift(u32 shift) {
 // whole 16 MB: the DSi Menu hands NWRAM slots between the CPUs a few hundred
 // times a frame while it loads a title, and that alone made a launch several
 // times slower than the guest's own time on a handheld.
-void Bus::lay_wram(int c, bool nwram) {
+// The windows MBK6-8 give CPU `c` over banks A, B and C (end <= start: none).
+void Bus::nwram_windows(int c, bool nwram, u32 win[3][2]) const {
+  for (int bank = 0; bank < 3; ++bank) win[bank][0] = win[bank][1] = 0;
+  if (!nwram || !nds_.dsi) return;
+  const io::DsiIo& d = nds_.io.dsi;
+  if (!(d.scfg_ext[c] & (1u << 25))) return;
+  for (int bank = 0; bank < 3; ++bank) {
+    const u32 v = d.mbk[c][5 + bank];
+    u32 start, end;
+    if (bank == 0) { start = 0x03000000 + (((v >> 4) & 0xFF) << 16); end = 0x03000000 + (((v >> 20) & 0x1FF) << 16); }
+    else { start = 0x03000000 + (((v >> 3) & 0x1FF) << 15); end = 0x03000000 + (((v >> 19) & 0x3FF) << 15); }
+    win[bank][0] = start; win[bank][1] = std::min(end, 0x04000000u);   // the window is cut at the end of the region
+  }
+}
+
+// Pages [lo, hi) of wram_hosts_[c], from WRAMCNT and the windows `win`.
+void Bus::lay_wram(int c, const u32 win[3][2], u32 lo, u32 hi) {
   u8** h = wram_hosts_[c].get();
-  std::fill_n(h, WRAM_PAGES, nullptr);
-  const auto fill = [h](u32 guest, u32 size, u8* host, u32 end) {
-    for (u32 a = guest; a < end; a += size)
-      for (u32 o = 0; o < size; o += PAGE_SIZE) h[(a + o - 0x03000000) >> PAGE_SHIFT] = host ? host + o : nullptr;
+  std::fill(h + ((lo - 0x03000000) >> PAGE_SHIFT), h + ((hi - 0x03000000) >> PAGE_SHIFT), nullptr);
+  const auto fill = [h, lo, hi](u32 guest, u32 size, u8* host, u32 end) {
+    for (u32 a = guest; a < end; a += size) {
+      if (a + size <= lo || a >= hi) continue;
+      for (u32 o = 0; o < size; o += PAGE_SIZE)
+        if (a + o >= lo && a + o < hi) h[(a + o - 0x03000000) >> PAGE_SHIFT] = host ? host + o : nullptr;
+    }
   };
   u8* half0 = shared_wram.get();
   u8* half1 = shared_wram.get() + 0x4000;
@@ -250,35 +270,48 @@ void Bus::lay_wram(int c, bool nwram) {
     else if (cnt == 3) fill(0x03000000, SHARED_WRAM_SIZE, shared_wram.get(), 0x03800000);
     else fill(0x03000000, 0x4000, cnt == 1 ? half0 : half1, 0x03800000);
   }
-  if (!nwram || !nds_.dsi) return;
+  if (!nds_.dsi) return;
   const io::DsiIo& d = nds_.io.dsi;
-  if (!(d.scfg_ext[c] & (1u << 25))) return;
   for (int bank = 2; bank >= 0; --bank) {          // C first, A last: A has priority
     const u32 v = d.mbk[c][5 + bank];
-    u32 start, end, mask;
-    if (bank == 0) {
-      start = 0x03000000 + (((v >> 4) & 0xFF) << 16); end = 0x03000000 + (((v >> 20) & 0x1FF) << 16);
-      static const u32 masks[4] = {0, 0, 1, 3}; mask = masks[(v >> 12) & 3];
-    } else {
-      start = 0x03000000 + (((v >> 3) & 0x1FF) << 15); end = 0x03000000 + (((v >> 19) & 0x3FF) << 15);
-      static const u32 masks[4] = {0, 1, 3, 7}; mask = masks[(v >> 12) & 3];
-    }
-    if (end > 0x04000000) end = 0x04000000;      // the window is cut at the end of the region
+    const u32 start = win[bank][0], end = win[bank][1];
+    if (start >= end) continue;
+    u32 mask;
+    if (bank == 0) { static const u32 masks[4] = {0, 0, 1, 3}; mask = masks[(v >> 12) & 3]; }
+    else { static const u32 masks[4] = {0, 1, 3, 7}; mask = masks[(v >> 12) & 3]; }
     const u32 shift = bank == 0 ? 16 : 15, unit = 1u << shift;
     for (u32 a = start; a < end; a += unit)        // shown but unbacked: reads 0, writes dropped (slow path)
       fill(a, unit, nwram_map_[bank][c][(a >> shift) & mask], a + unit);
   }
 }
 
-void Bus::apply_wram(bool nwram) {
+// `windows_only`: only MBK1-8 changed since the last apply, so outside the
+// old and the new windows nothing moved -- the DSi Menu's slot hand-offs
+// during a title load repaint ~500 pages instead of 16 K. Everything else
+// (WRAMCNT, SCFG_EXT, a page-table rebuild) lays the whole region.
+void Bus::apply_wram(bool nwram, bool windows_only) {
   for (int c = 0; c < 2; ++c) {
-    lay_wram(c, nwram);
-    nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table.remap(0x03000000, 0x01000000, wram_hosts_[c].get(), PAGE_READABLE | PAGE_WRITABLE);
+    u32 win[3][2];
+    nwram_windows(c, nwram, win);
+    const u32 key = (nds_.io.wramcnt & 3) | (nwram ? 4 : 0) | (nds_.dsi ? 8 : 0) | (nds_.dsi ? (nds_.io.dsi.scfg_ext[c] >> 25 & 1) << 4 : 0);
+    u32 lo = 0x03000000, hi = 0x04000000;
+    if (windows_only && wram_key_[c] == key) {
+      lo = 0x04000000; hi = 0x03000000;
+      for (const auto* w : {win, wram_win_[c]})
+        for (int bank = 0; bank < 3; ++bank)
+          if (w[bank][0] < w[bank][1]) { lo = std::min(lo, w[bank][0]); hi = std::max(hi, w[bank][1]); }
+      if (lo >= hi) continue;
+      lo &= ~(PAGE_SIZE - 1); hi = (hi + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    }
+    lay_wram(c, win, lo, hi);
+    nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table.remap(lo, hi - lo, wram_hosts_[c].get() + ((lo - 0x03000000) >> PAGE_SHIFT), PAGE_READABLE | PAGE_WRITABLE);
+    wram_key_[c] = key;
+    std::memcpy(wram_win_[c], win, sizeof win);
   }
 }
 
 void Bus::update_wram() {
-  apply_wram(false);
+  apply_wram(false, false);
 }
 
 // The NWRAM slot tables and windows, as melonDS derives them (DSi.cpp
@@ -288,7 +321,7 @@ void Bus::update_wram() {
 // One hardware quirk is not modelled: two slots mapped to the same position
 // are both written by a store there (melonDS writes every matching part);
 // here the one that reads wins. No title on hand does it.
-void Bus::update_nwram() {
+void Bus::update_nwram(bool windows_only) {
   // The watched page (enable_watch) is re-laid with the rest: take it out again after.
   struct Retrap { Bus& b; ~Retrap() { if (!watch_on) return; for (int c = 0; c < 2; ++c) if (watch_host[c]) b.nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table.map_mmio(watch_addr & ~0x7FFu, 0x800); } } retrap{*this};
   std::memset(nwram_map_, 0, sizeof nwram_map_);
@@ -310,7 +343,7 @@ void Bus::update_nwram() {
         nwram_map_[bank][v & 3][(v >> 2) & 7] = nwram[bank].get() + (part << 15);
       }
   }
-  apply_wram(true);
+  apply_wram(true, windows_only);
 }
 
 void Bus::update_vram() {
@@ -514,6 +547,8 @@ void Bus::enable_watch(u32 addr) {
     if (watch_host[c]) pt.map_mmio(addr & ~0x7FFu, 0x800);
   }
 }
+
+bool Bus::watch_active() { return watch_on; }
 
 u32 Bus::io_read(Cpu cpu, u32 addr, u32 width) {
   if (watch_on && (addr & ~0x7FFu) == (watch_addr & ~0x7FFu) && watch_host[cpu == Cpu::ARM9 ? 0 : 1]) {

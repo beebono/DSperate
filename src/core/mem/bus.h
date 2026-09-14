@@ -41,7 +41,7 @@ public:
   // over the WRAMCNT split. A slot a window shows that no MBK entry backs
   // reads as 0 and drops writes, as on hardware; the fall-through to the
   // old shared WRAM only happens outside the windows.
-  void update_nwram();
+  void update_nwram(bool windows_only = false);   // windows_only: only MBK1-8 changed (see apply_wram)
   // DSi: the BIOS pair as SCFG_BIOS exposes it (bits 0/8 hide the upper
   // 32 KB halves, bits 1/9 fall back to the DS images).
   void update_bios_map();
@@ -87,6 +87,7 @@ public:
   void update_wifi_timings();        // WIFIWAITCNT / POWCNT2 bit 1 (melonDS NDS::UpdateWifiTimings)
   int gba_slot_applied_ = -1;        // EXMEMCNT timing bits the tables currently hold
   void enable_watch(u32 addr);       // debug: log writes to a main-RAM word (see DS_WATCH, headless)
+  static bool watch_active();       // enable_watch has been called (a bypass around io_read/io_write must yield)
 
   // Slow paths, reached when the page table returns nullptr.
   u8  read8 (Cpu cpu, u32 addr);
@@ -146,8 +147,11 @@ private:
   void map_page_aligned(PageTable& pt, u32 guest, u32 size, u8* host, u32 flags, u32 mirror_end);
   // DSi NWRAM slot tables, rebuilt from MBK1-5 by update_nwram: [bank][cpu 0 ARM9 / 1 ARM7 / 2 DSP][slot].
   u8* nwram_map_[3][3][8] = {};
-  void lay_wram(int c, bool nwram);   // wram_hosts_[c] from WRAMCNT, with `nwram` the DSi's NWRAM windows over it
-  void apply_wram(bool nwram);        // lay both CPUs and remap what changed
+  void nwram_windows(int c, bool nwram, u32 win[3][2]) const;
+  void lay_wram(int c, const u32 win[3][2], u32 lo, u32 hi);   // wram_hosts_[c] over [lo, hi): WRAMCNT, then the windows
+  void apply_wram(bool nwram, bool windows_only);           // lay both CPUs and remap what changed
+  u32 wram_key_[2] = {~0u, ~0u};   // what the last apply laid under the windows (~0: nothing yet)
+  u32 wram_win_[2][3][2] = {};     // and the windows it laid
 public:
   // The non-RAM access path (I/O, VRAM slow blocks, GBA slot). The JIT's
   // slow-store helper enters here for I/O so it gets the GXFIFO fast path.

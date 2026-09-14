@@ -130,13 +130,19 @@ u32 Ndma::run_channel(Channel& c, u32 budget) {
   if (a9) unit <<= shift9_;
   const bool fill = ((c.cnt >> 13) & 3) == 3;
   mem::Bus& bus = nds_.bus;
+  // The ARM7's FIFO ends straight to their devices (Io::ndma_read7): the
+  // same calls the bus would make, minus two dispatches a word.
+  const bool direct = !a9 && !io::Io::census_on() && !mem::Bus::watch_active();
+  const bool src_fifo = direct && !fill && c.src_inc == 0 && (c.cur_src == 0x0400490C || c.cur_src == 0x0400440C);
+  const bool dst_aes = direct && c.dst_inc == 0 && c.cur_dst == 0x04004408;
   u32 used = 0;
   while (c.iter_count > 0) {
     if (a9 && nds_.gpu3d.stalled()) break;
     used += unit;
     nds_.sched.dma_progress(run_base_ + used);
-    if (fill) bus.dma_write32(c.cpu, c.cur_dst, c.fill);
-    else bus.dma_write32(c.cpu, c.cur_dst, bus.dma_read32(c.cpu, c.cur_src));
+    const u32 v = fill ? c.fill : src_fifo ? nds_.io.ndma_read7(c.cur_src) : bus.dma_read32(c.cpu, c.cur_src);
+    if (dst_aes) nds_.io.ndma_write7_aes(v);
+    else bus.dma_write32(c.cpu, c.cur_dst, v);
     c.cur_src += c.src_inc * 4;
     c.cur_dst += c.dst_inc * 4;
     c.iter_count--; c.rem_count--; c.total_rem--;

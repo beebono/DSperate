@@ -1525,6 +1525,21 @@ bool Io::dsi_io_access(Cpu cpu, u32 addr) const {
   }
 }
 
+// NDMA's ARM7 FIFO ends, reached as Io::read / Io::write would reach them
+// through dsi_read / dsi_write, without the dispatch: a NAND title load moves
+// every byte through these a word at a time (SD data FIFO -> AES -> RAM).
+// Callers check census_on() and the bus watch first.
+u32 Io::ndma_read7(u32 addr) {
+  if (addr != 0x040001C0) spi_poll_streak_ = 0;
+  if (!dsi_io_access(Cpu::ARM7, addr)) return 0;
+  return addr == 0x0400490C ? sd.read_fifo32() : aes.read_output_fifo();
+}
+void Io::ndma_write7_aes(u32 value) {
+  spi_poll_streak_ = 0;
+  if (!dsi_io_access(Cpu::ARM7, 0x04004408)) return;
+  aes.write_input_fifo(value);
+}
+
 u32 Io::dsi_read(Cpu cpu, u32 addr, u32 width) {
   if (!dsi_io_access(cpu, addr)) return 0;
   const bool a9 = cpu == Cpu::ARM9;
@@ -1778,7 +1793,7 @@ void Io::mbk_map_slot(int bank, int slot, u8 value) {
   if (((dsi.mbk[0][reg] >> sh) & 0xFF) == value) return;
   dsi.mbk[0][reg] = (dsi.mbk[0][reg] & ~(0xFFu << sh)) | (static_cast<u32>(value) << sh);
   dsi.mbk[1][reg] = dsi.mbk[0][reg];
-  nds_.bus.update_nwram();
+  nds_.bus.update_nwram(true);
 }
 
 // melonDS DSi::ApplyNewRAMSize: SCFG_EXT9's size becomes the machine's, and
@@ -1841,7 +1856,7 @@ void Io::mbk_map_range(Cpu cpu, int bank, u32 value) {
                  "ABC"[bank], cpu == Cpu::ARM9 ? 9 : 7, value, start, end, (value >> 12) & 3,
                  (unsigned long long)nds_.sched.now());
   }
-  nds_.bus.update_nwram();
+  nds_.bus.update_nwram(true);
 }
 
 // The DSi CODEC's SPI protocol (melonDS DSi_TSC::Write): the first byte of a

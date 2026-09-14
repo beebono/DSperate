@@ -188,6 +188,8 @@ public:
   u32  read (Cpu cpu, u32 addr, u32 width);
   void write(Cpu cpu, u32 addr, u32 width, u32 value);
   static bool census_on();   // DS_IO_CENSUS: a bypass around write() must keep counting
+  u32  ndma_read7(u32 addr);         // 0x0400490C (SD data FIFO) or 0x0400440C (AES output FIFO), see io.cpp
+  void ndma_write7_aes(u32 value);  // 0x04004408 (AES input FIFO)
   // The frontend's fast_load: cart DMA without the card's clock (cart_bulk_); DS_CART_BULK in the environment wins.
   void set_cart_bulk(bool on);
 
