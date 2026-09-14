@@ -222,12 +222,13 @@ void Bus::set_clock9_shift(u32 shift) {
   nds_.sched.set_clock9_shift(shift);
 }
 
-// The 0x03000000 region is laid out in `wram_hosts_` (one host pointer per
-// page, nullptr = unmapped) and applied with PageTable::remap, which touches
-// only the entries that change. A rebuild used to unmap and remap both CPUs'
-// whole 16 MB: the DSi Menu hands NWRAM slots between the CPUs a few hundred
-// times a frame while it loads a title, and that alone made a launch several
-// times slower than the guest's own time on a handheld.
+// The 0x03000000 region is laid out in 16 KB cells (wram_cell_host) and
+// applied with PageTable::remap, which touches only the entries that change.
+// A rebuild used to unmap and remap both CPUs' whole 16 MB: the DSi Menu hands
+// NWRAM slots between the CPUs a few hundred times a frame while it loads a
+// title, and that alone made a launch several times slower than the guest's
+// own time on a handheld.
+
 // The windows MBK6-8 give CPU `c` over banks A, B and C (end <= start: none).
 void Bus::nwram_windows(int c, bool nwram, u32 win[3][2]) const {
   for (int bank = 0; bank < 3; ++bank) win[bank][0] = win[bank][1] = 0;
@@ -243,68 +244,70 @@ void Bus::nwram_windows(int c, bool nwram, u32 win[3][2]) const {
   }
 }
 
-// Pages [lo, hi) of wram_hosts_[c], from WRAMCNT and the windows `win`.
-void Bus::lay_wram(int c, const u32 win[3][2], u32 lo, u32 hi) {
-  u8** h = wram_hosts_[c].get();
-  std::fill(h + ((lo - 0x03000000) >> PAGE_SHIFT), h + ((hi - 0x03000000) >> PAGE_SHIFT), nullptr);
-  const auto fill = [h, lo, hi](u32 guest, u32 size, u8* host, u32 end) {
-    for (u32 a = guest; a < end; a += size) {
-      if (a + size <= lo || a >= hi) continue;
-      for (u32 o = 0; o < size; o += PAGE_SIZE)
-        if (a + o >= lo && a + o < hi) h[(a + o - 0x03000000) >> PAGE_SHIFT] = host ? host + o : nullptr;
+// Everything the 0x03000000 region shows is linear within 16 KB cells (the
+// shared WRAM halves, the ARM7 WRAM, the 32 and 64 KB NWRAM slots and the
+// windows' edges all fall on them), so the region is laid out as one host
+// pointer per cell. This is that pointer for CPU `c`'s cell at `a`: WRAMCNT's
+// view, under the windows `win` (A over B over C); nullptr is unmapped.
+u8* Bus::wram_cell_host(int c, const u32 win[3][2], u32 a) const {
+  if (nds_.dsi) {
+    const io::DsiIo& d = nds_.io.dsi;
+    for (int bank = 0; bank < 3; ++bank) {
+      if (a < win[bank][0] || a >= win[bank][1]) continue;
+      const u32 v = d.mbk[c][5 + bank];
+      u32 mask;
+      if (bank == 0) { static const u32 masks[4] = {0, 0, 1, 3}; mask = masks[(v >> 12) & 3]; }
+      else { static const u32 masks[4] = {0, 1, 3, 7}; mask = masks[(v >> 12) & 3]; }
+      const u32 shift = bank == 0 ? 16 : 15;
+      u8* host = nwram_map_[bank][c][(a >> shift) & mask];   // shown but unbacked: reads 0, writes dropped (slow path)
+      return host ? host + (a & ((1u << shift) - 1)) : nullptr;
     }
-  };
-  u8* half0 = shared_wram.get();
-  u8* half1 = shared_wram.get() + 0x4000;
+  }
   const u32 cnt = nds_.io.wramcnt & 3;
+  u8* const half0 = shared_wram.get(), * const half1 = shared_wram.get() + 0x4000;
   if (c == 0) {
     // ARM9: all 32K (0), the second 16K (1), the first (2), none (3: slow path returns 0).
-    if (cnt == 0) fill(0x03000000, SHARED_WRAM_SIZE, shared_wram.get(), 0x04000000);
-    else if (cnt != 3) fill(0x03000000, 0x4000, cnt == 1 ? half1 : half0, 0x04000000);
-  } else {
-    // ARM7: 03000000-037FFFFF is the shared split (its own WRAM's mirrors
-    // when it has none of it); 03800000-03FFFFFF the private WRAM, re-laid
-    // every time because a DSi NWRAM window may have covered it.
-    fill(0x03800000, ARM7_WRAM_SIZE, arm7_wram.get(), 0x04000000);
-    if (cnt == 0) fill(0x03000000, ARM7_WRAM_SIZE, arm7_wram.get(), 0x03800000);
-    else if (cnt == 3) fill(0x03000000, SHARED_WRAM_SIZE, shared_wram.get(), 0x03800000);
-    else fill(0x03000000, 0x4000, cnt == 1 ? half0 : half1, 0x03800000);
+    if (cnt == 0) return shared_wram.get() + (a & 0x7FFF);
+    return cnt == 3 ? nullptr : cnt == 1 ? half1 : half0;
   }
-  if (!nds_.dsi) return;
-  const io::DsiIo& d = nds_.io.dsi;
-  for (int bank = 2; bank >= 0; --bank) {          // C first, A last: A has priority
-    const u32 v = d.mbk[c][5 + bank];
-    const u32 start = win[bank][0], end = win[bank][1];
-    if (start >= end) continue;
-    u32 mask;
-    if (bank == 0) { static const u32 masks[4] = {0, 0, 1, 3}; mask = masks[(v >> 12) & 3]; }
-    else { static const u32 masks[4] = {0, 1, 3, 7}; mask = masks[(v >> 12) & 3]; }
-    const u32 shift = bank == 0 ? 16 : 15, unit = 1u << shift;
-    for (u32 a = start; a < end; a += unit)        // shown but unbacked: reads 0, writes dropped (slow path)
-      fill(a, unit, nwram_map_[bank][c][(a >> shift) & mask], a + unit);
-  }
+  // ARM7: 03000000-037FFFFF is the shared split (its own WRAM's mirrors when
+  // it has none of it); 03800000-03FFFFFF the private WRAM.
+  if (a >= 0x03800000 || cnt == 0) return arm7_wram.get() + (a & 0xFFFF);
+  if (cnt == 3) return shared_wram.get() + (a & 0x7FFF);
+  return cnt == 1 ? half0 : half1;
 }
 
-// `windows_only`: only MBK1-8 changed since the last apply, so outside the
-// old and the new windows nothing moved -- the DSi Menu's slot hand-offs
-// during a title load repaint ~500 pages instead of 16 K. Everything else
-// (WRAMCNT, SCFG_EXT, a page-table rebuild) lays the whole region.
+// `windows_only`: only MBK1-8 changed since the last apply, so nothing moved
+// outside the old and the new windows, and inside them only the cells whose
+// pointer changed are remapped -- the DSi Menu's slot hand-offs during a title
+// load (hundreds a frame) touch a few cells each. Everything else (WRAMCNT,
+// SCFG_EXT, a page-table rebuild) remaps the whole region against the table.
 void Bus::apply_wram(bool nwram, bool windows_only) {
+  constexpr u32 CELL = 0x4000, PAGES = CELL >> PAGE_SHIFT;
   for (int c = 0; c < 2; ++c) {
     u32 win[3][2];
     nwram_windows(c, nwram, win);
     const u32 key = (nds_.io.wramcnt & 3) | (nwram ? 4 : 0) | (nds_.dsi ? 8 : 0) | (nds_.dsi ? (nds_.io.dsi.scfg_ext[c] >> 25 & 1) << 4 : 0);
+    const bool partial = windows_only && wram_key_[c] == key;
     u32 lo = 0x03000000, hi = 0x04000000;
-    if (windows_only && wram_key_[c] == key) {
+    if (partial) {
       lo = 0x04000000; hi = 0x03000000;
       for (const auto* w : {win, wram_win_[c]})
         for (int bank = 0; bank < 3; ++bank)
           if (w[bank][0] < w[bank][1]) { lo = std::min(lo, w[bank][0]); hi = std::max(hi, w[bank][1]); }
-      if (lo >= hi) continue;
-      lo &= ~(PAGE_SIZE - 1); hi = (hi + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+      lo &= ~(CELL - 1); hi = (hi + CELL - 1) & ~(CELL - 1);
     }
-    lay_wram(c, win, lo, hi);
-    nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table.remap(lo, hi - lo, wram_hosts_[c].get() + ((lo - 0x03000000) >> PAGE_SHIFT), PAGE_READABLE | PAGE_WRITABLE);
+    PageTable& pt = nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table;
+    u8** cells = wram_cells_[c];
+    for (u32 a = lo; a < hi; a += CELL) {
+      const u32 k = (a - 0x03000000) / CELL;
+      u8* host = wram_cell_host(c, win, a);
+      if (partial && cells[k] == host) continue;
+      cells[k] = host;
+      u8* pages[PAGES];
+      for (u32 i = 0; i < PAGES; ++i) pages[i] = host ? host + (i << PAGE_SHIFT) : nullptr;
+      pt.remap(a, CELL, pages, PAGE_READABLE | PAGE_WRITABLE);
+    }
     wram_key_[c] = key;
     std::memcpy(wram_win_[c], win, sizeof win);
   }

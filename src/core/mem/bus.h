@@ -35,8 +35,6 @@ public:
   void update_tcm(CpuContext& cpu, bool force = false);
   u32 tcm_prev_itcm_ = 0, tcm_prev_dtcm_base_ = 0, tcm_prev_dtcm_size_ = 0;   // windows mapped by the last update_tcm   // CP15 (ARM9)
   void update_wram();                 // WRAMCNT (DS), or WRAMCNT beneath the NWRAM windows (DSi)
-  static constexpr u32 WRAM_PAGES = 0x01000000 >> PAGE_SHIFT;   // the 0x03000000 region, per CPU
-  std::unique_ptr<u8*[]> wram_hosts_[2] = {std::make_unique<u8*[]>(WRAM_PAGES), std::make_unique<u8*[]>(WRAM_PAGES)};   // lay_wram scratch
   // DSi: rebuild the two CPUs' 0x03000000 windows from MBK1-9 (io.dsi.mbk)
   // over the WRAMCNT split. A slot a window shows that no MBK entry backs
   // reads as 0 and drops writes, as on hardware; the fall-through to the
@@ -148,7 +146,8 @@ private:
   // DSi NWRAM slot tables, rebuilt from MBK1-5 by update_nwram: [bank][cpu 0 ARM9 / 1 ARM7 / 2 DSP][slot].
   u8* nwram_map_[3][3][8] = {};
   void nwram_windows(int c, bool nwram, u32 win[3][2]) const;
-  void lay_wram(int c, const u32 win[3][2], u32 lo, u32 hi);   // wram_hosts_[c] over [lo, hi): WRAMCNT, then the windows
+  u8* wram_cell_host(int c, const u32 win[3][2], u32 a) const;   // the 16 KB cell at `a`: WRAMCNT under the windows
+  u8* wram_cells_[2][0x400] = {};   // what the last apply mapped, per cell (see apply_wram)
   void apply_wram(bool nwram, bool windows_only);           // lay both CPUs and remap what changed
   u32 wram_key_[2] = {~0u, ~0u};   // what the last apply laid under the windows (~0: nothing yet)
   u32 wram_win_[2][3][2] = {};     // and the windows it laid
