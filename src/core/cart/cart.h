@@ -57,7 +57,9 @@ struct TwlHeader {
 };
 static_assert(sizeof(TwlHeader) == 0x378 - 0x180, "TWL header layout");
 
-enum class SaveType : u8 { None, EepromTiny, Eeprom, Flash };
+// Detect: the game code is not in the save list and no save file named the
+// chip, so the chip is still unknown -- see Cart::spi_detect.
+enum class SaveType : u8 { None, EepromTiny, Eeprom, Flash, Detect };
 
 // Retail Slot-1 cartridge: ROM reads through the KEY1/KEY2 command protocol,
 // and the save chip on the AUXSPI bus.
@@ -91,6 +93,21 @@ public:
   void spi_release();
   u8   spi_transfer(u8 v);
   std::vector<u8>& sram() { return sram_; }
+  SaveType save_type() const { return save_type_; }
+  // Whether the save list (save_list.inc) names this game's chip. When it
+  // does not -- a ROM hack that changed its game code, homebrew -- the chip
+  // follows the size of the save file load_save is given, or, with no file,
+  // is detected from the game's first save access. Such a chip is also
+  // lenient where a wrong guess would destroy data: FLASH programs overwrite
+  // rather than AND (an EEPROM game never erases first) and grow to fit an
+  // address past the end.
+  bool save_type_listed() const { return listed_; }
+  // Loads a battery save file's bytes into the chip. A DeSmuME .dsv footer is
+  // dropped first. `fitted` is false when the file is not the chip's size:
+  // the part that fits was loaded, and the next write replaces the file with
+  // one of the chip's size, so the caller should keep the original.
+  struct SaveLoad { bool fitted; u32 chip_bytes; };
+  SaveLoad load_save(const u8* data, size_t n);
   bool sram_dirty() const { return sram_dirty_; }
   // Bumped on every save-chip write; the frontend flushes once it stops moving.
   u32  sram_writes() const { return sram_writes_; }
@@ -149,10 +166,23 @@ private:
   void mark_dirty() { sram_dirty_ = true; ++sram_writes_; }
   u32 spi_pos_ = 0; u8 spi_cmd_ = 0; u32 spi_addr_ = 0; u8 spi_status_ = 0;
   u8 spi_eeprom_tiny(u8 v); u8 spi_eeprom(u8 v); u8 spi_flash(u8 v);
+  u8 spi_chip(u8 v);    // the byte to the chip the save type names
+
+  bool listed_ = true;
+  // SaveType::Detect: the transaction so far (command byte first), capped;
+  // not in the save state, so a state taken mid-transaction drops it.
+  std::vector<u8> detect_buf_;
+  u8 spi_detect(u8 v);
+  void detect_release();
+  void set_chip(SaveType type, u32 bytes);
+  void fit_flash(u32 addr);
 };
 
 // Save type per game code (a small list; default is 64 KB EEPROM).
 SaveType save_type_for(u32 game_code, u32& size);
+// The chip a save file of `bytes` bytes came from, or None for a size no
+// chip has.
+SaveType save_type_for_size(u32 bytes);
 
 // Whether the save-type database (save_list.inc) carries this game code at
 // all. save_type_for() answers for every code, falling back to the commonest

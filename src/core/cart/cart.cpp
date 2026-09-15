@@ -55,6 +55,15 @@ SaveType save_type_for(u32 code, u32& size) {
   return SaveType::Flash;
 }
 
+SaveType save_type_for_size(u32 bytes) {
+  // The same classes as the list's types: 512 B EEPROM takes a one-byte
+  // address, 8 KB to 128 KB EEPROM two or three, 256 KB and up is FLASH.
+  if (bytes == 512) return SaveType::EepromTiny;
+  if (bytes == 8192 || bytes == 65536 || bytes == 131072) return SaveType::Eeprom;
+  if (bytes >= 262144 && bytes <= 67108864 && (bytes & (bytes - 1)) == 0) return SaveType::Flash;
+  return SaveType::None;
+}
+
 Cart::Cart(NDS& nds, std::unique_ptr<RomSource> rom) : nds_(nds), rom_(std::move(rom)) {
   // The card wraps its address at a power of two and reads 0xFF past the
   // image; the source pads that way (rom_source.h), so no copy is made here.
@@ -71,7 +80,9 @@ Cart::Cart(NDS& nds, std::unique_ptr<RomSource> rom) : nds_(nds), rom_(std::move
   u32 sram_size = 0;
   save_type_ = save_type_for(header_.game_code_u32(), sram_size);
   ir_cart_ = (header_.game_code_u32() & 0xFF) == 'I';
-  sram_.assign(sram_size, 0xFF);
+  listed_ = known_game_code(header_.game_code_u32());
+  if (listed_) sram_.assign(sram_size, 0xFF);
+  else save_type_ = SaveType::Detect;   // load_save or the first save access names the chip
 
   // Dumps often carry a decrypted secure area; the cart must hand out the
   // encrypted form, so re-encrypt if the "decrypted" marker is present. The
@@ -247,7 +258,87 @@ u32 Cart::command_receive() {
 static const bool g_auxspi_log = std::getenv("DS_AUXSPI_LOG") != nullptr;
 void Cart::spi_release() {
   if (g_auxspi_log && spi_pos_) std::fprintf(stderr, "[auxspi] cmd %02x addr %06x len %u status %02x%s\n", spi_cmd_, spi_addr_, spi_pos_, spi_status_, ir_cart_ ? " (ir)" : "");
+  if (save_type_ == SaveType::Detect && spi_pos_ > 0) detect_release();
   spi_pos_ = 0; ir_pos_ = 0;
+}
+
+void Cart::set_chip(SaveType type, u32 bytes) {
+  save_type_ = type;
+  sram_.assign(bytes, 0xFF);
+}
+
+Cart::SaveLoad Cart::load_save(const u8* data, size_t n) {
+  // DeSmuME's .dsv is the raw image with a 122-byte footer ending in this cookie.
+  static constexpr char DSV_COOKIE[] = "|-DESMUME SAVE-|";
+  if (n >= 122 && std::memcmp(data + n - 16, DSV_COOKIE, 16) == 0) n -= 122;
+  if (!listed_) {
+    const SaveType t = n <= 67108864 ? save_type_for_size(static_cast<u32>(n)) : SaveType::None;
+    if (t == SaveType::None) return {false, 0};   // no chip is that size: stay detecting
+    set_chip(t, static_cast<u32>(n));
+  }
+  if (save_type_ == SaveType::None) return {true, 0};   // no save chip: nothing will overwrite the file
+  std::memcpy(sram_.data(), data, n < sram_.size() ? n : sram_.size());
+  return {n == sram_.size(), static_cast<u32>(sram_.size())};
+}
+
+// SaveType::Detect. No save file, so the chip is blank: every read answers
+// 0xFF whatever its address, and only the address width is missing. That
+// comes from DeSmuME's rule -- the SDK's first access to the chip moves a
+// single byte, so the transaction's length is command + address + 1 -- with
+// the commands only one chip class has settling the rest. Nothing is decided
+// until the transaction ends; a write that decides is then replayed into the
+// chip, so nothing the game stored is lost.
+u8 Cart::spi_detect(u8 v) {
+  if (detect_buf_.size() < 0x1000) detect_buf_.push_back(v);
+  return spi_cmd_ == 0x05 ? spi_status_ : 0xFF;
+}
+
+void Cart::detect_release() {
+  if (detect_buf_.empty()) return;
+  const u8 cmd = detect_buf_[0];
+  const u32 len = spi_pos_;    // bytes clocked, the command included
+  SaveType t = SaveType::Detect;
+  u32 bytes = 0;
+  switch (cmd) {
+  case 0x02: case 0x03:
+    if (len == 3) { t = SaveType::EepromTiny; bytes = 512; }
+    else if (len == 4) { t = SaveType::Eeprom; bytes = 65536; }
+    else if (len == 5) { t = SaveType::Flash; bytes = 524288; }
+    // A longer first write cannot be split into address and data, and cannot
+    // wait either (the game may read it straight back): the commonest chip.
+    else if (cmd == 0x02 && len > 5) { t = SaveType::Eeprom; bytes = 65536; }
+    break;
+  case 0x0A: case 0x0B:
+    // 512 B EEPROM's upper-half commands, or FLASH page write / fast read
+    // (the latter with a dummy byte after the address).
+    if (len == 5 || (cmd == 0x0B && len == 6)) { t = SaveType::Flash; bytes = 524288; }
+    else if (len == 3 || cmd == 0x0A) { t = SaveType::EepromTiny; bytes = 512; }
+    break;
+  case 0xD8: case 0xDB:   // erases: FLASH only
+    t = SaveType::Flash; bytes = 524288;
+    break;
+  default: break;         // status, write enable, ID: say nothing about the chip
+  }
+  if (t == SaveType::Detect) { detect_buf_.clear(); return; }   // write enable/disable never refill it
+  std::fprintf(stderr, "save: game code not in the save list; detected a %u %s %s from its first access (cmd %02x, %u bytes)\n",
+               bytes >= 1024 ? bytes >> 10 : bytes, bytes >= 1024 ? "KB" : "B", t == SaveType::Flash ? "FLASH" : "EEPROM", cmd, len);
+  const std::vector<u8> tx = std::move(detect_buf_);
+  detect_buf_.clear();
+  set_chip(t, bytes);
+  if (cmd == 0x02 || cmd == 0x0A || cmd == 0xD8 || cmd == 0xDB) {
+    spi_cmd_ = cmd; spi_addr_ = 0;
+    for (u32 i = 1; i < tx.size(); ++i) { spi_pos_ = i; spi_chip(tx[i]); }
+  }
+}
+
+u8 Cart::spi_chip(u8 v) {
+  switch (save_type_) {
+  case SaveType::EepromTiny: return spi_eeprom_tiny(v);
+  case SaveType::Eeprom: return spi_eeprom(v);
+  case SaveType::Flash: return spi_flash(v);
+  case SaveType::Detect: return spi_detect(v);
+  default: return 0xFF;
+  }
 }
 
 u8 Cart::spi_transfer(u8 v) {
@@ -264,13 +355,9 @@ u8 Cart::spi_transfer(u8 v) {
     case 0x06: spi_status_ |= 2;  spi_pos_++; return 0;   // write enable
     default: spi_cmd_ = v; spi_addr_ = 0; break;
     }
+    if (save_type_ == SaveType::Detect) detect_buf_.assign(1, v);
   } else {
-    switch (save_type_) {
-    case SaveType::EepromTiny: ret = spi_eeprom_tiny(v); break;
-    case SaveType::Eeprom: ret = spi_eeprom(v); break;
-    case SaveType::Flash: ret = spi_flash(v); break;
-    default: break;
-    }
+    ret = spi_chip(v);
   }
   spi_pos_++;
   return ret;
@@ -310,32 +397,43 @@ u8 Cart::spi_eeprom(u8 v) {
   }
 }
 
+// An unlisted chip's size is a guess (a detected FLASH starts at 512 KB): an
+// address past the end grows it to the next power of two, up to 8 MB, rather
+// than wrapping onto data the game stored at the bottom.
+void Cart::fit_flash(u32 addr) {
+  if (addr < sram_.size() || addr >= 0x800000) return;
+  u32 bytes = static_cast<u32>(sram_.size());
+  while (bytes <= addr) bytes <<= 1;
+  sram_.resize(bytes, 0xFF);
+}
+
 u8 Cart::spi_flash(u8 v) {
+  const bool addressing = spi_pos_ <= 3 && (spi_cmd_ == 0x02 || spi_cmd_ == 0x03 || spi_cmd_ == 0x0A ||
+                                            spi_cmd_ == 0x0B || spi_cmd_ == 0xD8 || spi_cmd_ == 0xDB);
+  if (addressing) {
+    spi_addr_ = (spi_addr_ << 8) | v;
+    if (spi_pos_ == 3 && !listed_) fit_flash(spi_addr_);
+  }
   const u32 mask = static_cast<u32>(sram_.size() - 1);
   switch (spi_cmd_) {
   case 0x05: return spi_status_;
-  case 0x02:   // page program: can only clear bits (an erased page reads 0xFF)
-    if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] &= v; mark_dirty(); } spi_addr_++; }
+  case 0x02:   // page program: can only clear bits (an erased page reads 0xFF) -- unless unlisted, see save_type_listed
+    if (!addressing) { if (spi_status_ & 2) { u8& b = sram_[spi_addr_ & mask]; b = listed_ ? (b & v) : v; mark_dirty(); } spi_addr_++; }
     return 0;
   case 0x0A:   // page write
-    if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
-    else { if (spi_status_ & 2) { sram_[spi_addr_ & mask] = v; mark_dirty(); } spi_addr_++; }
+    if (!addressing) { if (spi_status_ & 2) { sram_[spi_addr_ & mask] = v; mark_dirty(); } spi_addr_++; }
     return 0;
   case 0x03:
-    if (spi_pos_ <= 3) { spi_addr_ = (spi_addr_ << 8) | v; return 0; }
+    if (addressing) return 0;
     return sram_[(spi_addr_++) & mask];
   case 0x0B:   // fast read (dummy byte)
-    if (spi_pos_ <= 3) { spi_addr_ = (spi_addr_ << 8) | v; return 0; }
-    if (spi_pos_ == 4) return 0;
+    if (addressing || spi_pos_ == 4) return 0;
     return sram_[(spi_addr_++) & mask];
   case 0x9F: return 0xFF;
   case 0xD8:   // sector erase
-    if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
     if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x10000; ++i) sram_[(spi_addr_++) & mask] = 0xFF; mark_dirty(); }
     return 0;
   case 0xDB:   // page erase
-    if (spi_pos_ <= 3) spi_addr_ = (spi_addr_ << 8) | v;
     if (spi_pos_ == 3 && (spi_status_ & 2)) { for (u32 i = 0; i < 0x100; ++i) sram_[(spi_addr_++) & mask] = 0xFF; mark_dirty(); }
     return 0;
   default: return 0xFF;
@@ -348,7 +446,16 @@ template <class S> void Cart::sync_state(S& s) {
   s.fields(in_reset_, cmd_mode_, data_mode_, rom_cmd_, rom_addr_, spi_pos_, spi_cmd_, spi_addr_, spi_status_, ir_cmd_, ir_pos_);
   u32 n = static_cast<u32>(sram_.size());
   s.put(n);
-  if constexpr (S::reading) { if (n != sram_.size()) { s.fail("save chip size differs"); return; } }
+  if constexpr (S::reading) {
+    if (n != sram_.size()) {
+      // An unlisted chip's type is a function of its size, so a state names
+      // it: detected (or grown) since, or not yet detected (0 bytes).
+      const SaveType t = n ? save_type_for_size(n) : SaveType::Detect;
+      if (listed_ || t == SaveType::None) { s.fail("save chip size differs"); return; }
+      set_chip(t, n);
+      detect_buf_.clear();
+    }
+  }
   s.blob(sram_.data(), sram_.size());
   s.end();
   if constexpr (S::reading) {

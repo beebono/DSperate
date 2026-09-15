@@ -19,6 +19,10 @@ add_executable(test_io io_test.cpp)
 target_link_libraries(test_io PRIVATE dsperate_core)
 add_test(NAME io COMMAND test_io)
 
+add_executable(test_cart_save cart_save_test.cpp)
+target_link_libraries(test_cart_save PRIVATE dsperate_core)
+add_test(NAME cart_save COMMAND test_cart_save)
+
 add_executable(test_gpu3d gpu3d_test.cpp)
 target_link_libraries(test_gpu3d PRIVATE dsperate_core)
 add_test(NAME gpu3d COMMAND test_gpu3d)

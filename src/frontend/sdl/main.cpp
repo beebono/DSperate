@@ -263,13 +263,28 @@ std::string save_path(const std::string& rom, const std::string& dir) {
 }
 
 void load_save(NDS& nds, const std::string& path) {
-  if (!nds.cart || nds.cart->sram().empty()) return;
+  if (!nds.cart) return;
   FILE* f = std::fopen(path.c_str(), "rb");
-  if (!f) return;
-  std::vector<u8>& sram = nds.cart->sram();
-  const size_t n = std::fread(sram.data(), 1, sram.size(), f);
+  if (!f) {
+    if (!nds.cart->save_type_listed()) VLOG("save: game code not in the save list; the chip is detected on first use\n");
+    return;
+  }
+  std::vector<u8> data;
+  u8 buf[65536];
+  for (size_t got; (got = std::fread(buf, 1, sizeof buf, f)) > 0;) data.insert(data.end(), buf, buf + got);
   std::fclose(f);
-  VLOG("save: loaded %zu bytes from %s\n", n, path.c_str());
+  const ds::cart::Cart::SaveLoad r = nds.cart->load_save(data.data(), data.size());
+  if (r.fitted) { VLOG("save: loaded %zu bytes from %s\n", data.size(), path.c_str()); return; }
+  // The first write replaces the file with one of the chip's size, which
+  // would cut off (or pad) the player's original: keep it beside the save.
+  const std::string bak = path + ".bak";
+  if (r.chip_bytes) std::fprintf(stderr, "save: %s is %zu bytes but the game's save chip holds %u; the original is kept as %s\n", path.c_str(), data.size(), r.chip_bytes, bak.c_str());
+  else std::fprintf(stderr, "save: %s is %zu bytes, a size no save chip has; ignored, the original is kept as %s\n", path.c_str(), data.size(), bak.c_str());
+  if (FILE* e = std::fopen(bak.c_str(), "rb")) { std::fclose(e); return; }   // an earlier original wins
+  if (FILE* o = std::fopen(bak.c_str(), "wb")) {
+    if (std::fwrite(data.data(), 1, data.size(), o) != data.size()) std::fprintf(stderr, "save: cannot write %s\n", bak.c_str());
+    std::fclose(o);
+  }
 }
 
 void write_save(NDS& nds, const std::string& path) {

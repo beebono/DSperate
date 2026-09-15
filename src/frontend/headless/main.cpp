@@ -609,12 +609,14 @@ int main(int argc, char** argv) {
   // A recording made with a save present only replays if the save is there:
   // the game otherwise stops to create one. Loaded in the same place the SDL
   // frontend loads it, and never written back -- this is a harness.
-  if (save && nds.cart && !nds.cart->sram().empty()) {
+  if (save && nds.cart) {
     if (FILE* f = std::fopen(save, "rb")) {
-      std::vector<ds::u8>& sram = nds.cart->sram();
-      const size_t n = std::fread(sram.data(), 1, sram.size(), f);
+      std::vector<ds::u8> data;
+      ds::u8 buf[65536];
+      for (size_t got; (got = std::fread(buf, 1, sizeof buf, f)) > 0;) data.insert(data.end(), buf, buf + got);
       std::fclose(f);
-      std::fprintf(stderr, "save: loaded %zu bytes from %s\n", n, save);
+      const ds::cart::Cart::SaveLoad r = nds.cart->load_save(data.data(), data.size());
+      std::fprintf(stderr, "save: loaded %zu bytes from %s%s\n", data.size(), save, r.fitted ? "" : " (not the save chip's size)");
     } else {
       std::fprintf(stderr, "save: cannot read %s\n", save);
       return 1;
