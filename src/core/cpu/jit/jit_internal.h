@@ -156,7 +156,13 @@ struct JitCpuHot {
 
 struct JitCpu {
   JitCpuHot hot{};
-  bool  fastmem = false;                     // hot.pt is the host view (mem::GuestView), see Runtime::fm_sites
+  bool  fastmem = false;                     // hot.pt is the host view (mem::GuestView), see Runtime::fm_blocks
+  // 32-bit hosts: hot.pt points here instead of at the view. One entry per
+  // 64 MB guest region: region 0 (0x00000000-0x03FFFFFF, where every direct
+  // access of the measured scenes lands) holds the view base, the others
+  // Runtime::fm_guard minus the region's start, so any address outside
+  // region 0 lands in the guard and faults. host = region[a >> 26] + a.
+  u32   fm_region[64] = {};
   CpuContext* ctx = nullptr;
   NDS*  nds = nullptr;
   bool  arm9 = false;
@@ -226,6 +232,7 @@ struct Runtime {
   }
   // Faults from the handler, drained into fm_slow on the emulation thread (the
   // handler does not allocate).
+  u8* fm_guard = nullptr;                           // 32-bit: a 64 MB PROT_NONE range every non-view region maps into
   u64 fm_ring[512] = {};
   u32 fm_ring_n = 0;
   u64 fm_faults = 0;

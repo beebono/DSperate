@@ -18,11 +18,11 @@
 
 namespace ds::mem {
 
-// On by default where the JIT reads the views (AArch64 with the JIT built in);
-// DS_FASTMEM=0 turns it off, DS_FASTMEM=1 turns it on anywhere else (the
-// views are then built and verifiable, and nothing reads them).
+// On by default where the JIT reads the views (AArch64 and ARMv7 with the JIT
+// built in); DS_FASTMEM=0 turns it off, DS_FASTMEM=1 turns it on anywhere else
+// (the views are then built and verifiable, and nothing reads them).
 bool fastmem_requested() {
-#if defined(__aarch64__) && DSPERATE_JIT
+#if (defined(__aarch64__) || defined(__arm__)) && DSPERATE_JIT
   constexpr bool kDefault = true;
 #else
   constexpr bool kDefault = false;

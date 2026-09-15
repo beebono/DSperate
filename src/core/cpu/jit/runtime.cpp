@@ -919,11 +919,13 @@ static void fm_fault(int sig, siginfo_t* si, void* uctx) {
   }
   bool in_view = false;
   const uintptr_t addr = reinterpret_cast<uintptr_t>(si->si_addr);
-  for (const JitCpu& jc : r.cpus)
-    if (jc.fastmem) {
-      const uintptr_t base = reinterpret_cast<uintptr_t>(jc.hot.pt);
-      if (addr >= base && addr - base < mem::GuestView::RESERVE) in_view = true;
-    }
+  for (int c = 0; c < 2; ++c) {
+    const JitCpu& jc = r.cpus[c];
+    if (!jc.fastmem) continue;
+    const mem::GuestView* v = jc.nds->bus.view(c == 0 ? Cpu::ARM9 : Cpu::ARM7);
+    if (v && v->contains(addr)) in_view = true;
+  }
+  if (r.fm_guard && addr >= reinterpret_cast<uintptr_t>(r.fm_guard) && addr - reinterpret_cast<uintptr_t>(r.fm_guard) < mem::GuestView::RESERVE) in_view = true;
   if (!site || !in_view) {
     const struct sigaction& old = sig == SIGBUS ? g_old_bus : g_old_segv;
     if (old.sa_flags & SA_SIGINFO) { if (old.sa_sigaction) { old.sa_sigaction(sig, si, uctx); return; } }
@@ -1012,9 +1014,22 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     jc.fastmem = false;
     if (const mem::GuestView* v = nds.bus.view(c == 0 ? Cpu::ARM9 : Cpu::ARM7);
         v && backend::fastmem_capable() && !pretx::on() && r.memprobe == 0 && !nds.dsi) {
+#if UINTPTR_MAX > 0xFFFFFFFFu
       jc.fastmem = true;
       jc.hot.pt = reinterpret_cast<mem::Entry*>(v->base());
-      install_fault_handler();
+#else
+      if (!r.fm_guard) {
+        void* g = mmap(nullptr, mem::GuestView::RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (g != MAP_FAILED) r.fm_guard = static_cast<u8*>(g);
+      }
+      if (r.fm_guard) {
+        const u32 guard = static_cast<u32>(reinterpret_cast<uintptr_t>(r.fm_guard));
+        for (u32 k = 0; k < 64; ++k) jc.fm_region[k] = k == 0 ? static_cast<u32>(reinterpret_cast<uintptr_t>(v->base())) : guard - (k << 26);
+        jc.fastmem = true;
+        jc.hot.pt = reinterpret_cast<mem::Entry*>(jc.fm_region);
+      }
+#endif
+      if (jc.fastmem) install_fault_handler();
     }
     jc.hot.timing = c == 0 ? reinterpret_cast<const u8*>(ctx.timing9) : reinterpret_cast<const u8*>(ctx.timing7);
     jc.hot.arena = r.arena;

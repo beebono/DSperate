@@ -378,6 +378,12 @@ private:
   Emitter* cur_;
   RegCache cache_;
   struct Fix { size_t at; bool at_cold; size_t target; bool target_cold; const void* abs; };
+  // Fastmem sites of this block (see Runtime::fm_blocks): hot offsets of the
+  // accesses that may fault, the patch site, the cold resume (cold-relative).
+  struct FmSiteRel { u32 fault; u32 patch; u32 resume_cold; u64 guest; };
+  std::vector<FmSiteRel> fm_sites_;
+  u32 fm_faults_[4] = {};
+  u32 fm_nfaults_ = 0;
   std::vector<Fix> fixes_;
 
   Emitter& e() { return *cur_; }
@@ -417,6 +423,7 @@ private:
       Emitter::patch_rel(at, target);
     }
     assert(hot_.size() >= backend::ENTRY_PATCH && "kill_block patches 12 bytes at the entry");
+    for (const FmSiteRel& s : fm_sites_) rt().fm_new.push_back({s.fault, s.patch, static_cast<u32>(cold_base) + s.resume_cold, s.guest});
     return true;
   }
 
@@ -610,6 +617,56 @@ private:
     e().ldr_reg(en, R_PT, en, LSL, 2);
     e().dp_reg(MOV, false, en, 0, en, LSL, 2);
   }
+  // ---- fastmem (Runtime::fm_blocks; JitCpu::fm_region) ----
+  bool fm_fast() const { return jc_.fastmem && !rt().fm_is_slow(fm_key(a9_, pc_, thumb_)); }
+  // en = the region base for `a` (host = en + a). The table load is the
+  // patch site; returns its hot offset. No flags touched.
+  size_t fm_region(u32 a, u32 en) {
+    e().lsr_imm(en, a, 26);
+    const size_t at = hot_.size();
+    e().ldr_reg(en, R_PT, en, LSL, 2);
+    return at;
+  }
+  void fm_fault_here() { assert(fm_nfaults_ < 4); fm_faults_[fm_nfaults_++] = static_cast<u32>(hot_.size()); }
+  // The page entry of `a` -> en, with no other register and no flags: on a
+  // fastmem CPU r10 holds the region table, so the page table's address is
+  // a translate-time constant and the x4 index is folded in by two
+  // `add lsr #10` (4 * (a >> 11) plus 2 * bit 10) and an alignment mask.
+  void emit_entry_load(u32 a, u32 en) {
+    if (!jc_.fastmem) {
+      e().lsr_imm(en, a, mem::PAGE_SHIFT);
+      e().ldr_reg(en, R_PT, en, LSL, 2);
+      return;
+    }
+    e().mov_ptr(en, cpu_.page_table.raw());
+    e().add_reg(en, en, a, LSR, 10);
+    e().add_reg(en, en, a, LSR, 10);
+    e().and_imm(en, en, ~3u);
+    e().ldr(en, en, 0);
+  }
+  // The cold walk of a fastmem site: en = the biased host base from the
+  // table, then back to the hot instruction after the patch site. Guest
+  // flags are held in host lr across the tests (lr is free between stub
+  // calls). Failures leave with the flags restored and go to `fail_to` (a
+  // cold offset), or fall through right after the walk when it is ~0.
+  void fm_cold_walk(u32 a, u32 en, size_t patch, bool store, size_t fail_to) {
+    assert(in_cold());
+    const u32 resume = static_cast<u32>(cold_.size());
+    if (live_) e().mrs_apsr(R_LR);
+    emit_entry_load(a, en);
+    std::vector<size_t> f;
+    if (store) { e().tst_imm(en, 0xC0000000u); f.push_back(e().b_fwd(NE)); }
+    e().dp_reg(MOV, true, en, 0, en, LSL, 2);
+    f.push_back(e().b_fwd(EQ));
+    if (live_) e().msr_apsr_nzcvq(R_LR);
+    fixes_.push_back({cold_.b_fwd(), true, patch + 4, false, nullptr});
+    for (size_t s : f) cold_.bind(s);
+    if (live_) e().msr_apsr_nzcvq(R_LR);
+    if (fail_to != ~size_t{0}) fixes_.push_back({cold_.b_fwd(), true, fail_to, true, nullptr});
+    for (u32 i = 0; i < fm_nfaults_; ++i) fm_sites_.push_back({fm_faults_[i], static_cast<u32>(patch), resume, fm_key(a9_, pc_, thumb_)});
+    fm_nfaults_ = 0;
+  }
+
   u32 flags_begin() {
     if (!live_) return 0xFF;
     const u32 f = cache_.temp();
@@ -727,35 +784,43 @@ private:
     const int slot7 = const_cost ? -1 : cost7_slot(cdi, word);
     assert(a9_ || const_cost || slot7 >= 0);
     // ---- hot path ----
-    const u32 f = flags_begin();
+    // Fastmem: region base, add, access -- no walk, no flags. An access the
+    // view refuses faults into the cold walk (fm_cold_walk), which resumes
+    // at the `add` with the table's base.
+    const bool fast = fm_fast();
+    const u32 f = fast ? 0xFFu : flags_begin();
     const u32 en = cache_.temp();
-    emit_walk_probe(a, en);
+    if (!fast) emit_walk_probe(a, en);
     const RegCache::State s0 = cache_.save();
     std::vector<size_t> fail;
-    e().lsr_imm(en, a, mem::PAGE_SHIFT);
-    e().ldr_reg(en, R_PT, en, LSL, 2);
-    if (!load) { e().tst_imm(en, 0xC0000000u); fail.push_back(e().b_fwd(NE)); }
-    e().dp_reg(MOV, true, en, 0, en, LSL, 2);          // biased host base; 0 = unmapped
-    fail.push_back(e().b_fwd(EQ));
-    flags_end(f);
+    size_t patch = 0;
+    if (fast) patch = fm_region(a, en);
+    else {
+      emit_entry_load(a, en);
+      if (!load) { e().tst_imm(en, 0xC0000000u); fail.push_back(e().b_fwd(NE)); }
+      e().dp_reg(MOV, true, en, 0, en, LSL, 2);          // biased host base; 0 = unmapped
+      fail.push_back(e().b_fwd(EQ));
+      flags_end(f);
+    }
     e().add_reg(en, en, a);                            // host address (base is 4-aligned)
     u32 d = 0;
     if (load) d = cache_.write(rd, false);
+    auto site = [&] { if (fast) fm_fault_here(); };
     switch (m) {
-    case Mem::Ld32: e().and_imm(en, en, ~3u); e().ldr(d, en, 0); e().lsl_imm(en, a, 3); e().ror_reg(d, d, en); break;
+    case Mem::Ld32: e().and_imm(en, en, ~3u); site(); e().ldr(d, en, 0); e().lsl_imm(en, a, 3); e().ror_reg(d, d, en); break;
     case Mem::Ld16:
-      e().and_imm(en, en, ~1u); e().ldrh(d, en, 0);
+      e().and_imm(en, en, ~1u); site(); e().ldrh(d, en, 0);
       if (!a9_) { e().and_imm(en, a, 1); e().lsl_imm(en, en, 3); e().ror_reg(d, d, en); }
       break;
-    case Mem::Ld8:  e().ldrb(d, en, 0); break;
-    case Mem::Ld8S: e().ldrsb(d, en, 0); break;
+    case Mem::Ld8:  site(); e().ldrb(d, en, 0); break;
+    case Mem::Ld8S: site(); e().ldrsb(d, en, 0); break;
     case Mem::Ld16S:
-      e().and_imm(en, en, ~1u); e().ldrsh(d, en, 0);
+      e().and_imm(en, en, ~1u); site(); e().ldrsh(d, en, 0);
       if (!a9_) { e().and_imm(en, a, 1); e().lsl_imm(en, en, 3); e().asr_reg(d, d, en); }   // odd: the signed high byte
       break;
-    case Mem::St32: e().and_imm(en, en, ~3u); e().str(data, en, 0); break;
-    case Mem::St16: e().and_imm(en, en, ~1u); e().strh(data, en, 0); break;
-    case Mem::St8:  e().strb(data, en, 0); break;
+    case Mem::St32: e().and_imm(en, en, ~3u); site(); e().str(data, en, 0); break;
+    case Mem::St16: e().and_imm(en, en, ~1u); site(); e().strh(data, en, 0); break;
+    case Mem::St8:  site(); e().strb(data, en, 0); break;
     }
     if (!const_cost) {
       const u32 c = cache_.temp();
@@ -766,6 +831,11 @@ private:
     cache_.release(en);
     const size_t join = hot_.size();
     const RegCache::State s1 = cache_.save();
+    if (fast) {   // the walk first; its failures fall through into the helper path below
+      cold_begin({});
+      fm_cold_walk(a, en, patch, !load, ~size_t{0});
+      cur_ = &hot_;
+    }
     // ---- cold path: the helper, then the same tail, then rejoin ----
     cold_begin(fail);
     if (f != 0xFF) e().msr_apsr_nzcvq(f);
@@ -804,15 +874,30 @@ private:
     e().eor_reg(e2, e2, a);
     e().dp_reg(MOV, true, e2, 0, e2, LSR, mem::PAGE_SHIFT);
     fail.push_back(e().b_fwd(NE));
-    e().lsr_imm(en, a, mem::PAGE_SHIFT);
-    e().ldr_reg(en, R_PT, en, LSL, 2);
-    if (!load) { e().tst_imm(en, 0xC0000000u); fail.push_back(e().b_fwd(NE)); }
-    e().dp_reg(MOV, true, en, 0, en, LSL, 2);
-    fail.push_back(e().b_fwd(EQ));
-    flags_end(f);
+    // Fastmem: the region load instead of the walk. Every word is on one 2 KB
+    // page, so one 4 KB view page with one protection; a probe of the first
+    // byte (read, and for a store the same byte written back) faults before
+    // the register cache emits anything, so the fallback's state is s0.
+    const bool fast = fm_fast();
+    size_t patch = 0;
+    if (fast) {
+      flags_end(f);
+      patch = fm_region(a, en);
+    } else {
+      emit_entry_load(a, en);
+      if (!load) { e().tst_imm(en, 0xC0000000u); fail.push_back(e().b_fwd(NE)); }
+      e().dp_reg(MOV, true, en, 0, en, LSL, 2);
+      fail.push_back(e().b_fwd(EQ));
+      flags_end(f);
+    }
     cache_.release(e2);
     e().add_reg(en, en, a);
     e().and_imm(en, en, ~3u);                          // each word access is aligned; the base may not be (Thumb)
+    if (fast) {
+      fm_fault_here();
+      e().ldrb(R_LR, en, 0);
+      if (!load) { fm_fault_here(); e().strb(R_LR, en, 0); }
+    }
     u32 k = 0;
     bool first = true;
     const u32 wv = t_w == 0xFF ? a : t_w;
@@ -871,9 +956,11 @@ private:
       emit_branch_indirect(hpc, interwork_pc, true, c, a);
       cold_begin(fail);
       if (f != 0xFF) e().msr_apsr_nzcvq(f);
+      const size_t fb = cold_.size();                 // walk failures enter here, flags already restored
       cache_.restore(s0);
       emit_fallback(instr, true);
       cold_end();
+      if (fast) { cold_begin({}); fm_cold_walk(a, en, patch, !load, fb); cur_ = &hot_; }
       return;
     }
     if (rt().cpu_oc != CpuOc::Off) {
@@ -900,11 +987,13 @@ private:
     const RegCache::State s1 = cache_.save();
     cold_begin(fail);
     if (f != 0xFF) e().msr_apsr_nzcvq(f);
+    const size_t fb = cold_.size();                   // walk failures enter here, flags already restored
     cache_.restore(s0);
     emit_fallback(instr, false);
     cache_.restore(s1);
     cache_.reload();
     cold_end_jump(join);
+    if (fast) { cold_begin({}); fm_cold_walk(a, en, patch, !load, fb); cur_ = &hot_; }
   }
 
   // Effective address of a single transfer into a fresh temporary. The base

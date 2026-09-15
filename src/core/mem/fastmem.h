@@ -45,7 +45,7 @@
 namespace ds::mem {
 
 // DS_FASTMEM: 1 = views are built (the arena and the table hook), 0 = off;
-// unset = on where the JIT uses them (AArch64), off elsewhere.
+// unset = on where the JIT uses them (AArch64, ARMv7), off elsewhere.
 bool fastmem_requested();
 
 class HostArena {
