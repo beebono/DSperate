@@ -63,7 +63,8 @@ constexpr u32 PAGE_COUNT = 1u << (32 - PAGE_SHIFT); // 2 Mi entries = 16 MiB of 
 // store's guest entry belongs to, and clearing one page's tag drops the tag
 // of bytes another page still covers -- after which stores into that code
 // are never reported (a stale block; seen on Mario & Luigi's overlay loads).
-struct PageBufFree { void operator()(u8* p) const { std::free(p); } };
+// `owned` false: the bytes belong to a HostArena (fastmem.h), which frees them all at once.
+struct PageBufFree { bool owned = true; void operator()(u8* p) const { if (owned) std::free(p); } };
 using PageBuf = std::unique_ptr<u8[], PageBufFree>;
 inline PageBuf alloc_page_buf(size_t bytes) {
   const size_t n = (bytes + PAGE_SIZE - 1) & ~size_t{PAGE_SIZE - 1};
@@ -74,6 +75,7 @@ inline PageBuf alloc_page_buf(size_t bytes) {
 }
 
 using Entry = uintptr_t;
+class GuestView;
 
 constexpr Entry TAG_CODE    = Entry{1} << (sizeof(Entry) * 8 - 1);
 constexpr Entry TAG_SPECIAL = Entry{1} << (sizeof(Entry) * 8 - 2);
@@ -142,12 +144,19 @@ public:
     return base ? reinterpret_cast<u8*>(base + addr) : nullptr;
   }
 
+  // DS_FASTMEM: the host view derived from this table (fastmem.h). Every entry
+  // written from here on is reported to it; nullptr detaches.
+  void attach_view(GuestView* v);
+
   Entry  entry(u32 addr) const { return table_[addr >> PAGE_SHIFT]; }
   Entry* raw()                 { return table_; }
   const Entry* raw() const     { return table_; }
 
 private:
   Entry* table_;   // PAGE_COUNT entries, mmap'd: untouched pages cost no RSS
+  GuestView* view_ = nullptr;
+  void note_view(u32 page);
+  void flush_view();
   // Reverse index for set_code_host: host page number -> the guest pages (low
   // 256 MB) mapping it, maintained by map/unmap. An open-addressing table of
   // host pages whose values head intrusive lists threaded through `next`;

@@ -23,20 +23,67 @@ constexpr u32 Bus::VRAM_BANK_SIZES[9];
 static u32 watch_addr = 0; static bool watch_on = false; static u32 watch_hits = 0;
 static u8* watch_host[2] = {nullptr, nullptr};   // the watched page's host bytes per CPU (any directly mapped page; main RAM by default)
 
+// Every buffer below, each rounded to the arena's 4 KB pages.
+static size_t arena_bytes() {
+  auto r = [](size_t n) { return (n + GuestView::HOST_PAGE - 1) & ~size_t{GuestView::HOST_PAGE - 1}; };
+  return r(Bus::MAIN_RAM_SIZE_DSI) + r(Bus::SHARED_WRAM_SIZE) + r(Bus::ARM7_WRAM_SIZE) + r(Bus::ITCM_SIZE) + r(Bus::DTCM_SIZE) + r(Bus::VRAM_TOTAL) +
+         r(Bus::PALETTE_SIZE) + r(Bus::OAM_SIZE) + r(Bus::BIOS9_SIZE) + r(Bus::BIOS7_SIZE) + 3 * r(Bus::NWRAM_BANK_SIZE) + r(Bus::BIOS9I_SIZE) +
+         r(Bus::BIOS7I_SIZE);
+}
+
+PageBuf Bus::take_buf(size_t bytes) {
+  if (arena_)
+    if (u8* p = arena_->take(bytes)) return PageBuf(p, PageBufFree{false});
+  return alloc_page_buf(bytes);
+}
+
 Bus::Bus(NDS& nds)
-    : main_ram(alloc_page_buf(MAIN_RAM_SIZE_DSI)), shared_wram(alloc_page_buf(SHARED_WRAM_SIZE)),
-      arm7_wram(alloc_page_buf(ARM7_WRAM_SIZE)), itcm(alloc_page_buf(ITCM_SIZE)),
-      dtcm(alloc_page_buf(DTCM_SIZE)), vram(alloc_page_buf(VRAM_TOTAL)), palette(alloc_page_buf(PALETTE_SIZE)),
-      oam(alloc_page_buf(OAM_SIZE)), bios9(alloc_page_buf(BIOS9_SIZE)), bios7(alloc_page_buf(BIOS7_SIZE)),
-      nwram{alloc_page_buf(NWRAM_BANK_SIZE), alloc_page_buf(NWRAM_BANK_SIZE), alloc_page_buf(NWRAM_BANK_SIZE)},
-      bios9i(alloc_page_buf(BIOS9I_SIZE)), bios7i(alloc_page_buf(BIOS7I_SIZE)), nds_(nds) {
+    : arena_(fastmem_requested() ? HostArena::create(arena_bytes()) : nullptr),
+      main_ram(take_buf(MAIN_RAM_SIZE_DSI)), shared_wram(take_buf(SHARED_WRAM_SIZE)),
+      arm7_wram(take_buf(ARM7_WRAM_SIZE)), itcm(take_buf(ITCM_SIZE)),
+      dtcm(take_buf(DTCM_SIZE)), vram(take_buf(VRAM_TOTAL)), palette(take_buf(PALETTE_SIZE)),
+      oam(take_buf(OAM_SIZE)), bios9(take_buf(BIOS9_SIZE)), bios7(take_buf(BIOS7_SIZE)),
+      nwram{take_buf(NWRAM_BANK_SIZE), take_buf(NWRAM_BANK_SIZE), take_buf(NWRAM_BANK_SIZE)},
+      bios9i(take_buf(BIOS9I_SIZE)), bios7i(take_buf(BIOS7I_SIZE)), nds_(nds) {
+  if (fastmem_requested() && !arena_) std::fprintf(stderr, "fastmem: no shared-memory backing (memfd or tmpfs); off\n");
   std::memset(bios9.get(), 0, BIOS9_SIZE);
   std::memset(bios7.get(), 0, BIOS7_SIZE);
 }
 
 u32 Bus::main_ram_size() const { return nds_.dsi ? MAIN_RAM_SIZE_DSI : MAIN_RAM_SIZE; }
 
-Bus::~Bus() = default;
+Bus::~Bus() {
+  // The CPUs (and their page tables) outlive the bus.
+  for (int c = 0; c < 2; ++c)
+    if (views_[c]) nds_.cpu(c == 0 ? Cpu::ARM9 : Cpu::ARM7).page_table.attach_view(nullptr);
+}
+
+void Bus::fastmem_flush() {
+  for (auto& v : views_) if (v && v->pending()) v->flush();
+}
+
+bool Bus::fastmem_verify(u64 frame) {
+  for (int c = 0; c < 2; ++c) {
+    if (!views_[c]) continue;
+    std::string why;
+    if (!views_[c]->verify(&why)) {
+      std::fprintf(stderr, "fastmem verify: frame %llu arm%d: %s\n", static_cast<unsigned long long>(frame), c ? 7 : 9, why.c_str());
+      return false;
+    }
+  }
+  return true;
+}
+
+void Bus::fastmem_report() const {
+  if (!arena_) return;
+  for (int c = 0; c < 2; ++c) {
+    if (!views_[c]) continue;
+    const GuestView::Stats& s = views_[c]->stats();
+    std::fprintf(stderr, "fastmem: arm%d view at %p (%s): %llu flushes, %llu mmap calls, %llu pages laid\n", c ? 7 : 9,
+                 static_cast<void*>(views_[c]->base()), arena_->kind(), static_cast<unsigned long long>(s.flushes),
+                 static_cast<unsigned long long>(s.map_calls), static_cast<unsigned long long>(s.pages_laid));
+  }
+}
 
 u8* Bus::vram_bank(int i) {
   u32 off = 0;
@@ -76,6 +123,15 @@ void Bus::reset() {
   if (nds_.dsi) update_vram_timings();
   gba_slot_applied_ = -1;        // the timing tables were just reset
   update_gba_slot_timings();
+  if (arena_) {
+    for (int c = 0; c < 2; ++c) {
+      if (views_[c]) continue;
+      PageTable& pt = nds_.cpu(c == 0 ? Cpu::ARM9 : Cpu::ARM7).page_table;
+      views_[c] = GuestView::create(*arena_, pt);
+      if (views_[c]) pt.attach_view(views_[c].get());
+      else std::fprintf(stderr, "fastmem: cannot reserve the arm%d view; off for it\n", c ? 7 : 9);
+    }
+  }
 }
 
 void Bus::update_wifi_timings() {
@@ -632,6 +688,7 @@ void Bus::set_vram_trap(bool on, bool lcdc, bool a_only) {
 // vram_write. The saved entry goes back on lift, with whatever code tag the
 // page picked up meanwhile; an entry that gained a base in between (a remap
 // that did not go through the join, which should not happen) is left alone.
+// (Raw entry writes, so views are not told: they never map VRAM, see GuestView::desired.)
 void Bus::set_lcdc_read_trap(int bank, bool on) {
   assert(bank >= 0 && bank < 4);
   static const u32 lcdc_base[4] = {0x00000, 0x20000, 0x40000, 0x60000};

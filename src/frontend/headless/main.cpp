@@ -762,6 +762,8 @@ int main(int argc, char** argv) {
   for (int i = 0; i < frames; ++i) {
     if (pc_profile && i == stats_from) ds::pcsample::set_active(true);
     if (i == stats_from && ds::mem::fmc::on()) ds::mem::fmc::set_counting(true);
+    static const bool fm_verify = std::getenv("DS_FASTMEM_VERIFY") != nullptr;
+    if (fm_verify && nds.bus.arena_ && i > 0 && !nds.bus.fastmem_verify(nds.frame_count)) return 1;
     if (pace) {   // the DS's 59.83 Hz, from the run's start so sleep jitter does not accumulate
       const auto due = pace_start + std::chrono::microseconds(static_cast<long long>(i * 1000000.0 / 59.8261));
       std::this_thread::sleep_until(due);
@@ -964,6 +966,7 @@ int main(int argc, char** argv) {
     }
   }
   if (ds::mem::fmc::on()) ds::mem::fmc::report(frame_ms.size());
+  nds.bus.fastmem_report();
   ds::frame_report(frame_ms);
   ds::prof::frame_breakdown(frame_ms);
   if (nds.dsi_nand.valid())

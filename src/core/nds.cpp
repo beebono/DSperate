@@ -459,6 +459,7 @@ void NDS::run_frame() {
   frame_ready = false;
   sched.run_until_frame();   // one entry into the slice loop per frame, not per event
   ++frame_count;
+  if (bus.arena_) bus.fastmem_flush();
 }
 
 bool NDS::run_frame_slice(u64 cycles) {
@@ -471,6 +472,7 @@ bool NDS::run_frame_slice(u64 cycles) {
   if (!frame_ready) return false;
   frame_in_slices = false;
   ++frame_count;
+  if (bus.arena_) bus.fastmem_flush();
   return true;
 }
 

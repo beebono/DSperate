@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/mem/page_table.h"
 #include "core/mem/fastmem_census.h"
+#include "core/mem/fastmem.h"
 
 
 #include <cassert>
@@ -59,10 +60,12 @@ void PageTable::map(u32 guest, u32 size, u8* host, u32 flags) {
     const Entry e = make_entry(g, host + off, flags);
     if (table_[p] == e) continue;
     if (fmc::on()) fmc::entry_changed(p, table_[p], e);
+    if (view_) note_view(p);
     index_remove(p, table_[p]);
     table_[p] = e;
     index_insert(p, e);
   }
+  flush_view();
 }
 
 void PageTable::remap(u32 guest, u32 size, u8* const* hosts, u32 flags) {
@@ -74,7 +77,7 @@ void PageTable::remap(u32 guest, u32 size, u8* const* hosts, u32 flags) {
     const Entry old = table_[p];
     u8* host = hosts[i];
     if (!host) {
-      if (old) { if (fmc::on()) fmc::entry_changed(p, old, 0); index_remove(p, old); table_[p] = 0; }
+      if (old) { if (fmc::on()) fmc::entry_changed(p, old, 0); if (view_) note_view(p); index_remove(p, old); table_[p] = 0; }
       continue;
     }
     if (old && !(old & TAG_SPECIAL) == writable) {
@@ -85,10 +88,12 @@ void PageTable::remap(u32 guest, u32 size, u8* const* hosts, u32 flags) {
     const Entry e = make_entry(g, host, flags);
     if (old == e) continue;
     if (fmc::on()) fmc::entry_changed(p, old, e);
+    if (view_) note_view(p);
     index_remove(p, old);
     table_[p] = e;
     index_insert(p, e);
   }
+  flush_view();
 }
 
 void PageTable::map_mmio(u32 guest, u32 size) {
@@ -101,9 +106,26 @@ void PageTable::unmap(u32 guest, u32 size) {
     const u32 p = (guest + off) >> PAGE_SHIFT;
     if (!table_[p]) continue;
     if (fmc::on()) fmc::entry_changed(p, table_[p], 0);
+    if (view_) note_view(p);
     index_remove(p, table_[p]);
     table_[p] = 0;
   }
+  flush_view();
+}
+
+void PageTable::attach_view(GuestView* v) {
+  view_ = v;
+  if (v) v->note_all();
+}
+
+void PageTable::note_view(u32 page) { view_->note(page); }
+
+// Translated code may run on the view the moment a mutator returns -- a block
+// just registered (its page now CODE), a VRAMCNT or TCM store from a slow
+// helper -- so no mutator leaves it stale: a store through a page that has
+// just become code would otherwise skip the SMC report.
+void PageTable::flush_view() {
+  if (view_ && view_->pending()) view_->flush();
 }
 
 PageTable::~PageTable() { munmap(table_, TABLE_BYTES); delete index_; }
@@ -141,8 +163,10 @@ void PageTable::set_code_host(const u8* host_page, bool is_code) {
   for (u32 p = ix.head[s]; p != HostIndex::NONE; p = ix.next[p]) {
     Entry e = table_[p];
     if (fmc::on()) fmc::entry_changed(p, e, is_code ? (e | TAG_CODE) : (e & ~TAG_CODE));
+    if (view_) note_view(p);
     table_[p] = is_code ? (e | TAG_CODE) : (e & ~TAG_CODE);
   }
+  flush_view();
 }
 
 void PageTable::set_write_trap(u32 guest, u32 size, bool on) {
@@ -152,8 +176,9 @@ void PageTable::set_write_trap(u32 guest, u32 size, bool on) {
     const Entry e = table_[p];
     if (!(e & BASE_MASK)) continue;
     const Entry want = on ? (e | TAG_SPECIAL) : (e & ~TAG_SPECIAL);
-    if (want != e) { if (fmc::on()) fmc::entry_changed(p, e, want); table_[p] = want; }   // no writeback for a line already right
+    if (want != e) { if (fmc::on()) fmc::entry_changed(p, e, want); if (view_) note_view(p); table_[p] = want; }   // no writeback for a line already right
   }
+  flush_view();
 }
 
 void PageTable::set_write_trap_bits(u32 first_page, u32 count, const u64* bits, bool on) {
@@ -165,9 +190,10 @@ void PageTable::set_write_trap_bits(u32 first_page, u32 count, const u64* bits, 
       const Entry e = table_[p];
       if (!(e & BASE_MASK)) continue;
       const Entry want = on ? (e | TAG_SPECIAL) : (e & ~TAG_SPECIAL);
-      if (want != e) { if (fmc::on()) fmc::entry_changed(p, e, want); table_[p] = want; }
+      if (want != e) { if (fmc::on()) fmc::entry_changed(p, e, want); if (view_) note_view(p); table_[p] = want; }
     }
   }
+  flush_view();
 }
 
 void PageTable::set_code(u32 guest, u32 size, bool is_code) {
@@ -176,7 +202,9 @@ void PageTable::set_code(u32 guest, u32 size, bool is_code) {
   for (u32 p = first; p <= last; ++p) {
     if (is_code) table_[p] |= TAG_CODE;
     else         table_[p] &= ~TAG_CODE;
+    if (view_) note_view(p);
   }
+  flush_view();
 }
 
 } // namespace ds::mem

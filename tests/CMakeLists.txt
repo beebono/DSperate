@@ -27,6 +27,10 @@ add_executable(test_gpu3d gpu3d_test.cpp)
 target_link_libraries(test_gpu3d PRIVATE dsperate_core)
 add_test(NAME gpu3d COMMAND test_gpu3d)
 
+add_executable(test_fastmem fastmem_test.cpp)
+target_link_libraries(test_fastmem PRIVATE dsperate_core)
+add_test(NAME fastmem COMMAND test_fastmem)
+
 add_executable(test_div64 div64_test.cpp)
 target_link_libraries(test_div64 PRIVATE dsperate_core)
 add_test(NAME div64 COMMAND test_div64)

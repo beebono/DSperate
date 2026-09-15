@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "core/mem/page_table.h"
 #include "core/mem/timing.h"
+#include "core/mem/fastmem.h"
 #include "core/gpu/vram_map.h"
 
 #include <memory>
@@ -23,6 +24,16 @@ class Bus {
 public:
   explicit Bus(NDS& nds);
   ~Bus();
+
+  // DS_FASTMEM (fastmem.h): the shared object the buffers below live in, and
+  // one host view per CPU derived from its page table. Declared before the
+  // buffers: they are taken from it. nullptr when off or unavailable.
+  std::unique_ptr<HostArena> arena_;
+  std::unique_ptr<GuestView> views_[2];
+  GuestView* view(Cpu cpu) const { return views_[cpu == Cpu::ARM9 ? 0 : 1].get(); }
+  void fastmem_flush();                  // lay what the tables changed (cheap when nothing did)
+  bool fastmem_verify(u64 frame);        // DS_FASTMEM_VERIFY: views against tables; logs the first mismatch
+  void fastmem_report() const;
 
   void reset();
   // Save states: the physical memories, and the rebuild of every mapping
@@ -130,6 +141,7 @@ public:
 
   const gpu::VramMap& vram_map() const { return vram_map_; }
 
+  PageBuf take_buf(size_t bytes);   // from the arena, else alloc_page_buf
   PageBuf main_ram, shared_wram, arm7_wram, itcm, dtcm, vram, palette, oam, bios9, bios7;   // PAGE_SIZE-aligned, see alloc_page_buf
   PageBuf nwram[3], bios9i, bios7i;   // DSi: NWRAM A/B/C and the 64 KB BIOS pair (zero on a DS)
   u8* vram_bank(int i);
