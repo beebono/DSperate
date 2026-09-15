@@ -386,6 +386,12 @@ private:
   Emitter cold_;
   Emitter* cur_;
   struct Fix { size_t at; bool at_cold; size_t target; bool target_cold; const void* abs; };
+  // Fastmem sites of this block: hot offsets of the accesses that may fault,
+  // the patch site and the cold resume (cold-relative until finish()).
+  struct FmSiteRel { u32 fault; u32 patch; u32 resume_cold; u64 guest; };
+  std::vector<FmSiteRel> fm_sites_;
+  u32 fm_faults_[4] = {};
+  u32 fm_nfaults_ = 0;
   // Per-block lists that kept reallocating from empty on every translation.
   static std::vector<Instr>& scratch_instrs() { static thread_local std::vector<Instr> v; return v; }
   static std::vector<Fix>& scratch_fixes() { static thread_local std::vector<Fix> v; return v; }
@@ -461,6 +467,7 @@ private:
       Emitter::patch_rel(at, target);
     }
     assert(hot_.size() >= 12 && "kill_block patches 12 bytes at the entry");
+    for (const FmSiteRel& s : fm_sites_) rt().fm_new.push_back({s.fault, s.patch, static_cast<u32>(cold_base) + s.resume_cold, s.guest});
     return true;
   }
 
@@ -781,13 +788,56 @@ private:
     e().lsl_imm(SCRATCH3, SCRATCH2, 2, true);
   }
 
+  // The page entry of `waddr` -> x2 (clobbers x3). On a fastmem CPU R_PT
+  // holds the view, so the table comes from the context.
+  void emit_entry_load(u32 waddr) {
+    if (!jc_.fastmem) {
+      e().lsr_imm(SCRATCH2, waddr, mem::PAGE_SHIFT);
+      e().ldr_x_reg(SCRATCH2, R_PT, SCRATCH2, true, true);
+      return;
+    }
+    e().ldr_x(SCRATCH3, R_CTX, OFF_JIT);
+    e().ldr_x(SCRATCH3, SCRATCH3, OFF_JC_TABLE);
+    e().lsr_imm(SCRATCH2, waddr, mem::PAGE_SHIFT);
+    e().ldr_x_reg(SCRATCH2, SCRATCH3, SCRATCH2, true, true);
+  }
+
+  // ---- fastmem (Runtime::fm_sites) ----
+  // Whether this instruction's accesses go through the view: the CPU runs on
+  // fastmem and the guest site has not faulted before.
+  bool fm_fast() const { return jc_.fastmem && !rt().fm_is_slow(fm_key(a9_, pc_, thumb_)); }
+  // The patch site: x3 = the view base. Returns its hot offset.
+  size_t fm_base() { const size_t at = hot_.size(); hot_.mov(SCRATCH3, R_PT, true); return at; }
+  // The next hot instruction is an access that may fault.
+  void fm_fault_here() { fm_faults_[fm_nfaults_++] = static_cast<u32>(hot_.size()); }
+  // The cold walk for the site at `patch`: x3 = the table's host base for
+  // w1 (x2 clobbered), failures to `fail_to` (a cold offset, or ~0: the
+  // walk's own fall-through, bound by the caller), then back to the hot
+  // instruction after the patch site. `pre_resume` re-derives what the hot
+  // code between the patch and the access expects (block transfers: w2).
+  // Records the sites. Leaves the cold section current; returns the cold
+  // offsets of the failure branches still to bind when fail_to is ~0.
+  FailList fm_cold_walk(size_t patch, bool store, size_t fail_to, bool pre_resume_align) {
+    assert(in_cold());
+    const u32 resume = static_cast<u32>(cold_.size());
+    emit_entry_load(SCRATCH1);
+    FailList f;
+    if (store) { e().lsr_imm(SCRATCH3, SCRATCH2, 62, true); f.push_back(e().cbnz_fwd(SCRATCH3)); }
+    e().lsl_imm(SCRATCH3, SCRATCH2, 2, true);
+    f.push_back(e().cbz_fwd(SCRATCH3, true));
+    if (pre_resume_align) e().and_imm(SCRATCH2, SCRATCH1, ~3u);
+    fixes_.push_back({cold_.b_fwd(), true, patch + 4, false, nullptr});
+    for (u32 i = 0; i < fm_nfaults_; ++i) fm_sites_.push_back({fm_faults_[i], static_cast<u32>(patch), resume, fm_key(a9_, pc_, thumb_)});
+    fm_nfaults_ = 0;
+    if (fail_to != ~size_t{0}) { for (size_t s : f) cold_.bind_to(s, fail_to); return {}; }
+    return f;
+  }
+
   // Page-table lookup for `waddr` (hot). On success x3 = pre-biased host
   // base. Failure branches are collected in `fail`. Clobbers x2, x3.
   void emit_page_lookup(u32 waddr, bool store, FailList& fail) {
-    assert(!in_cold());
     emit_walk_probe(waddr);
-    e().lsr_imm(SCRATCH2, waddr, mem::PAGE_SHIFT);
-    e().ldr_x_reg(SCRATCH2, R_PT, SCRATCH2, true, true);
+    emit_entry_load(waddr);
     if (store) {
       e().lsr_imm(SCRATCH3, SCRATCH2, 62, true);
       fail.push_back(e().cbnz_fwd(SCRATCH3));
@@ -953,49 +1003,70 @@ private:
       e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH6);
     };
     FailList fail;
-    emit_walk_probe(SCRATCH1);
-    e().lsr_imm(SCRATCH2, SCRATCH1, mem::PAGE_SHIFT);
-    e().ldr_x_reg(SCRATCH2, R_PT, SCRATCH2, true, true);
+    // Fastmem: no walk in the hot path -- x3 is the view base, and an access
+    // the view refuses faults into the cold walk below (fm_cold_walk).
+    const bool fast = fm_fast();
+    size_t patch = 0;
+    if (!fast) {
+      emit_walk_probe(SCRATCH1);
+      emit_entry_load(SCRATCH1);
+    }
     cost();
     if (word) e().and_imm(SCRATCH4, SCRATCH1, ~3u);
     else if (m == Mem::Ld16 || m == Mem::St16 || (m == Mem::Ld16S && a9_)) e().and_imm(SCRATCH4, SCRATCH1, ~1u);
     if (m == Mem::Ld32 && a9_) e().lsl_imm(SCRATCH5, SCRATCH1, 3);
-    if (!is_load(m)) {
-      e().lsr_imm(SCRATCH3, SCRATCH2, 62, true);
-      fail.push_back(e().cbnz_fwd(SCRATCH3));
+    if (fast) patch = fm_base();
+    else {
+      if (!is_load(m)) {
+        e().lsr_imm(SCRATCH3, SCRATCH2, 62, true);
+        fail.push_back(e().cbnz_fwd(SCRATCH3));
+      }
+      e().lsl_imm(SCRATCH3, SCRATCH2, 2, true);
+      fail.push_back(e().cbz_fwd(SCRATCH3, true));
     }
-    e().lsl_imm(SCRATCH3, SCRATCH2, 2, true);
-    fail.push_back(e().cbz_fwd(SCRATCH3, true));
+    auto site = [&] { if (fast) fm_fault_here(); };
     switch (m) {
     case Mem::Ld32:
+      site();
       e().ldr_w_reg(SCRATCH0, SCRATCH3, SCRATCH4);
       charge();
       if (!a9_) e().lsl_imm(SCRATCH5, SCRATCH1, 3);
       e().rorv(dst, SCRATCH0, SCRATCH5);
       break;
     case Mem::Ld16:
+      site();
       if (a9_) { e().ldrh_reg(dst, SCRATCH3, SCRATCH4); charge(); }
       else { e().ldrh_reg(SCRATCH0, SCRATCH3, SCRATCH4); charge(); e().ubfiz(SCRATCH5, SCRATCH1, 3, 1); e().rorv(dst, SCRATCH0, SCRATCH5); }
       break;
-    case Mem::Ld8:  e().ldrb_reg(dst, SCRATCH3, SCRATCH1); charge(); break;
-    case Mem::Ld8S: e().ldrsb_w_reg(dst, SCRATCH3, SCRATCH1); charge(); break;
+    case Mem::Ld8:  site(); e().ldrb_reg(dst, SCRATCH3, SCRATCH1); charge(); break;
+    case Mem::Ld8S: site(); e().ldrsb_w_reg(dst, SCRATCH3, SCRATCH1); charge(); break;
     case Mem::Ld16S:
-      if (a9_) { e().ldrsh_w_reg(dst, SCRATCH3, SCRATCH4); charge(); }
+      if (a9_) { site(); e().ldrsh_w_reg(dst, SCRATCH3, SCRATCH4); charge(); }
       else {
         size_t odd = e().tbnz_fwd(SCRATCH1, 0);
+        site();
         e().ldrsh_w_reg(dst, SCRATCH3, SCRATCH1);
         size_t j = e().b_fwd();
         e().bind(odd);
+        site();
         e().ldrsb_w_reg(dst, SCRATCH3, SCRATCH1);
         e().bind(j);
         charge();
       }
       break;
-    case Mem::St32: e().str_w_reg(wdata, SCRATCH3, SCRATCH4); charge(); break;
-    case Mem::St16: e().strh_reg(wdata, SCRATCH3, SCRATCH4); charge(); break;
-    case Mem::St8:  e().strb_reg(wdata, SCRATCH3, SCRATCH1); charge(); break;
+    case Mem::St32: site(); e().str_w_reg(wdata, SCRATCH3, SCRATCH4); charge(); break;
+    case Mem::St16: site(); e().strh_reg(wdata, SCRATCH3, SCRATCH4); charge(); break;
+    case Mem::St8:  site(); e().strb_reg(wdata, SCRATCH3, SCRATCH1); charge(); break;
     }
     const size_t join = hot_.size();
+    if (fast) {
+      // The cold walk, then (its failures) the slow path below.
+      cold_begin({});
+      fail = fm_cold_walk(patch, !is_load(m), ~size_t{0}, false);
+      for (size_t f : fail) cold_.bind(f);
+      fail = {};
+      cur_ = &hot_;   // cold_begin below re-enters the cold section right here
+    }
     cold_begin(fail);
     if (!is_load(m) && wdata != SCRATCH2) e().mov(SCRATCH2, wdata);
     call_stub(is_load(m) ? rt().slow_load[size_index(m)] : rt().slow_store[size_index(m)]);
@@ -1019,15 +1090,34 @@ private:
     e().eor_reg(SCRATCH2, SCRATCH2, SCRATCH1);
     e().lsr_imm(SCRATCH2, SCRATCH2, mem::PAGE_SHIFT);
     fail.push_back(e().cbnz_fwd(SCRATCH2));
-    emit_page_lookup(SCRATCH1, !load, fail);
-    e().and_imm(SCRATCH2, SCRATCH1, ~3u);          // each word access is aligned; the base may not be (Thumb)
+    // Fastmem: every word is on one 2 KB page, so on one 4 KB view page with
+    // one protection -- only the first access can fault, before any register
+    // or byte has changed, and the cold walk resumes at the `add` below.
+    const bool fast = fm_fast();
+    size_t patch = 0;
+    if (fast) {
+      e().and_imm(SCRATCH2, SCRATCH1, ~3u);
+      patch = fm_base();
+    } else {
+      emit_page_lookup(SCRATCH1, !load, fail);
+      e().and_imm(SCRATCH2, SCRATCH1, ~3u);          // each word access is aligned; the base may not be (Thumb)
+    }
     e().add_uxtw(SCRATCH3, SCRATCH3, SCRATCH2);
     u32 k = 0;
     bool first = true;
     const bool pc_in_list = (list & 0x8000) != 0;
+    // The block's cold fallback starts at this cold offset once emitted; the
+    // fastmem walk (emitted after it) sends its failures there.
+    auto fm_walk = [&](size_t fallback_at) {
+      if (!fast) return;
+      cold_begin({});
+      fm_cold_walk(patch, !load, fallback_at, true);
+      cur_ = &hot_;
+    };
     if (load) {
       for (u32 i = 0; i < 16; ++i) {
         if (!(list & (1u << i))) continue;
+        if (k == 0 && fast) fm_fault_here();
         e().ldr_w(i == 15 ? SCRATCH0 : host_reg(i), SCRATCH3, 4 * k);
         ++k;
       }
@@ -1039,6 +1129,7 @@ private:
         if (i == 15) { e().mov_imm(SCRATCH0, pc_store_value); src = SCRATCH0; }
         else if (i == rn && !first && writeback) src = SCRATCH7;
         else src = host_reg(i);
+        if (k == 0 && fast) fm_fault_here();
         e().str_w(src, SCRATCH3, 4 * k);
         ++k; first = false;
       }
@@ -1063,8 +1154,10 @@ private:
       if (oc) e().mov_imm(SCRATCH1, oc_nd); else e().mov(SCRATCH1, SCRATCH6);
       emit_branch_indirect(SCRATCH0, interwork_pc, true);
       cold_begin(fail);
+      const size_t fb = cold_.size();
       emit_fallback(instr, true);
       cold_end();
+      fm_walk(fb);
       ended_ = true;
       return;
     }
@@ -1072,8 +1165,10 @@ private:
     else emit_charge_data(SCRATCH6, SCRATCH1, load);
     const size_t join = hot_.size();
     cold_begin(fail);
+    const size_t fb = cold_.size();
     emit_fallback(instr, false);
     cold_end_jump(join);
+    fm_walk(fb);
   }
 
   // Effective address of a single transfer -> w1; the writeback value -> w7

@@ -502,6 +502,8 @@ void write_entry_redirect(u8* entry, u32 key, const u8* dispatch) {
 }
 
 // `bl link` at `site` becomes `b target`.
+bool fastmem_capable() { return true; }
+
 void patch_link(u8* site, const u8* target) {
   const s64 delta = target - site;
   const u32 w = 0x14000000u | (static_cast<u32>(delta >> 2) & 0x03FFFFFFu);

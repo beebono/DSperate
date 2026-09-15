@@ -28,6 +28,10 @@ struct Site {
   u64 slow = 0;         // accesses that would leave the view (before or after the rewrite)
   bool rewritten = false;
   bool mixed = false;   // served directly at least once before its first fault
+  u8 first_why = 0;     // why the first fault left the view, and where it went
+  bool first_store = false;
+  u32 first_addr = 0;
+  u64 slow_after = 0;   // faulting accesses after the rewrite (a site that keeps leaving the view)
 };
 
 struct State {
@@ -88,8 +92,10 @@ void access(CpuContext& cpu, u32 addr, bool store) {
     return;
   }
   ++site.slow;
+  if (site.rewritten) ++site.slow_after;
   if (s.counting) ++s.slow_why[c][why];
   if (!site.rewritten) {
+    site.first_why = static_cast<u8>(why); site.first_addr = addr; site.first_store = store;
     site.rewritten = true;
     site.mixed = site.direct != 0;
     if (s.counting) { ++s.rewrites_counted[c]; if (site.mixed) ++s.rewrites_mixed[c]; }
@@ -149,9 +155,12 @@ void report(u64 frames) {
   u64 lost_total = 0;
   for (auto& l : lost) lost_total += l.first;
   std::fprintf(stderr, "[fastmem] sites with lost direct accesses: %zu, %.0f accesses/frame (whole run incl. warm-up); worst:", lost.size(), lost_total / f);
-  for (size_t i = 0; i < lost.size() && i < 8; ++i)
-    std::fprintf(stderr, " arm%d@%08x %.0f/f", (lost[i].second >> 32) ? 7 : 9, static_cast<u32>(lost[i].second), lost[i].first / f);
   std::fputc('\n', stderr);
+  for (size_t i = 0; i < lost.size() && i < 12; ++i) {
+    const Site& st = s.sites[lost[i].second];
+    std::fprintf(stderr, "[fastmem]   arm%d@%08x lost %.0f/f, still leaving %.0f/f; first fault: %s %08x (%s)\n", (lost[i].second >> 32) ? 7 : 9,
+                 static_cast<u32>(lost[i].second), lost[i].first / f, st.slow_after / f, st.first_store ? "store" : "load", st.first_addr, kWhy[st.first_why]);
+  }
   std::fprintf(stderr, "[fastmem] view churn/frame: remaps %.1f, protection changes %.1f, code tags on %.1f off %.1f; VRAM entry changes (free) %.1f\n",
                s.view_map_changes / f, s.view_prot_changes / f, s.code_tags_on / f, s.code_tags_off / f, s.vram_changes / f);
 }

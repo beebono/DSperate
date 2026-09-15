@@ -3,6 +3,7 @@
 #include "core/mem/fastmem.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,8 +18,16 @@
 
 namespace ds::mem {
 
+// On by default where the JIT reads the views (AArch64 with the JIT built in);
+// DS_FASTMEM=0 turns it off, DS_FASTMEM=1 turns it on anywhere else (the
+// views are then built and verifiable, and nothing reads them).
 bool fastmem_requested() {
-  static const bool on = [] { const char* e = std::getenv("DS_FASTMEM"); return e && std::atoi(e) != 0; }();
+#if defined(__aarch64__) && DSPERATE_JIT
+  constexpr bool kDefault = true;
+#else
+  constexpr bool kDefault = false;
+#endif
+  static const bool on = [] { const char* e = std::getenv("DS_FASTMEM"); return e ? std::atoi(e) != 0 : kDefault; }();
   return on;
 }
 
@@ -101,8 +110,7 @@ std::unique_ptr<GuestView> GuestView::create(const HostArena& arena, const PageT
   v->dirty_.assign(pages, 0);
   v->laid_.assign(pages, Laid{});
   v->pending_.reserve(pages);
-  v->note_all();
-  return v;
+  return v;   // nothing laid: fault() grants pages as they are touched
 }
 
 GuestView::~GuestView() {
@@ -152,35 +160,79 @@ bool GuestView::lay_run(u32 v0, u32 n, const Laid& first) {
   return true;
 }
 
+bool GuestView::protect_run(u32 v0, u32 n, bool writable) {
+  ++stats_.map_calls;
+  stats_.pages_laid += n;
+  if (mprotect(base_ + size_t{v0} * HOST_PAGE, size_t{n} * HOST_PAGE, PROT_READ | (writable ? PROT_WRITE : 0)) != 0) {
+    std::fprintf(stderr, "fastmem: mprotect of view pages %05x+%u failed\n", v0, n);
+    return false;
+  }
+  return true;
+}
+
+// What stays laid of `l` once the table wants `d`: the tighter of the two
+// (the grant side is fault()'s).
+static inline bool same_backing(u32 a_plus1, u32 b_plus1) { return a_plus1 && a_plus1 == b_plus1; }
+
 bool GuestView::flush() {
   if (pending_.empty()) return true;
   ++stats_.flushes;
+  const auto t0 = std::chrono::steady_clock::now();
   std::sort(pending_.begin(), pending_.end());
   bool ok = true;
-  // Runs of consecutive pages that become one mapping: all unmapped, or the
-  // same protection at consecutive offsets.
+  // Two kinds of restriction, each coalesced over consecutive pages: take the
+  // page away (the backing moved or the table stopped serving it), or drop a
+  // read-write page to read-only (same backing: an mprotect).
   size_t i = 0;
   while (i < pending_.size()) {
     const u32 v0 = pending_[i];
     dirty_[v0] = 0;
+    const Laid l0 = laid_[v0];
+    if (!l0.off_plus1) { ++i; continue; }
     const Laid d0 = desired(v0);
-    if (d0 == laid_[v0]) { ++i; continue; }
+    const bool keep0 = same_backing(l0.off_plus1, d0.off_plus1);
+    if (keep0 && (d0.writable || !l0.writable)) { ++i; continue; }   // nothing to take away
     u32 n = 1;
-    laid_[v0] = d0;
+    laid_[v0] = keep0 ? Laid{l0.off_plus1, 0} : Laid{};
     while (i + n < pending_.size() && pending_[i + n] == v0 + n) {
       const u32 v = v0 + n;
-      const Laid d = desired(v);
-      const bool extends = d.writable == d0.writable && (d0.off_plus1 ? d.off_plus1 == d0.off_plus1 + n * HOST_PAGE : d.off_plus1 == 0);
-      if (!extends || d == laid_[v]) break;
+      const Laid l = laid_[v], d = desired(v);
+      if (!l.off_plus1) break;
+      const bool keep = same_backing(l.off_plus1, d.off_plus1);
+      if (keep != keep0 || (keep && (d.writable || !l.writable))) break;
       dirty_[v] = 0;
-      laid_[v] = d;
+      laid_[v] = keep ? Laid{l.off_plus1, 0} : Laid{};
       ++n;
     }
-    ok &= lay_run(v0, n, d0);
+    ok &= keep0 ? protect_run(v0, n, false) : lay_run(v0, n, Laid{});
     i += n;
   }
   pending_.clear();
+  stats_.flush_ns += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   return ok;
+}
+
+bool GuestView::fault(uintptr_t addr) {
+  if (!contains(addr)) return false;
+  const uintptr_t a = addr - reinterpret_cast<uintptr_t>(base_);
+  if (a >= SPAN) return false;
+  const u32 v0 = static_cast<u32>(a / HOST_PAGE);
+  const Laid d0 = desired(v0), l0 = laid_[v0];
+  if (!d0.off_plus1 || (same_backing(l0.off_plus1, d0.off_plus1) && l0.writable >= d0.writable)) return false;   // the table refuses too
+  // Grant a run: the following pages the table serves the same way at
+  // consecutive offsets that are not yet laid so (one mmap for a buffer's
+  // first touch instead of one fault per page).
+  constexpr u32 kRun = 256;
+  u32 n = 1;
+  while (n < kRun && v0 + n < SPAN / HOST_PAGE) {
+    const Laid d = desired(v0 + n), l = laid_[v0 + n];
+    if (d.writable != d0.writable || d.off_plus1 != d0.off_plus1 + n * HOST_PAGE || l == d) break;
+    ++n;
+  }
+  if (!lay_run(v0, n, d0)) return false;
+  for (u32 k = 0; k < n; ++k) laid_[v0 + k] = Laid{d0.off_plus1 + k * HOST_PAGE, d0.writable};
+  ++stats_.grants;
+  return true;
 }
 
 bool GuestView::verify(std::string* why) {
@@ -188,12 +240,12 @@ bool GuestView::verify(std::string* why) {
   char buf[160];
   for (u32 v = 0; v < SPAN / HOST_PAGE; ++v) {
     const Laid d = desired(v), l = laid_[v];
-    if (!(d == l)) {
-      std::snprintf(buf, sizeof buf, "view page %08x laid off %x w%d, table wants off %x w%d", v * HOST_PAGE, l.off_plus1, l.writable, d.off_plus1, d.writable);
+    if (!l.off_plus1) continue;
+    if (l.off_plus1 != d.off_plus1 || (l.writable && !d.writable)) {
+      std::snprintf(buf, sizeof buf, "view page %08x laid off %x w%d, but the table allows only off %x w%d", v * HOST_PAGE, l.off_plus1, l.writable, d.off_plus1, d.writable);
       *why = buf;
       return false;
     }
-    if (!l.off_plus1) continue;
     // Independent of desired(): each half must be what the table itself
     // hands the interpreter, and the bytes through the view must be those.
     for (int h = 0; h < 2; ++h) {
@@ -229,6 +281,8 @@ void GuestView::note_all() {}
 GuestView::Laid GuestView::desired(u32) const { return {}; }
 bool GuestView::lay_run(u32, u32, const Laid&) { return false; }
 bool GuestView::flush() { return true; }
+bool GuestView::fault(uintptr_t) { return false; }
+bool GuestView::protect_run(u32, u32, bool) { return false; }
 bool GuestView::verify(std::string*) { return true; }
 
 #endif

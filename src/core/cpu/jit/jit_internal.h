@@ -8,6 +8,9 @@
 #include "core/cpu/cpu.h"
 
 #include <cstddef>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <deque>
 #include <unordered_map>
 #include <vector>
@@ -26,6 +29,7 @@ constexpr u32 OFF_JIT      = offsetof(CpuContext, jit);
 constexpr u32 OFF_JC_PT    = 0;                    // JitCpuHot::pt
 constexpr u32 OFF_JC_TIM   = sizeof(void*);        // JitCpuHot::timing
 constexpr u32 OFF_JC_ARENA = 2 * sizeof(void*);    // JitCpuHot::arena
+constexpr u32 OFF_JC_TABLE = 3 * sizeof(void*);    // JitCpuHot::table
 inline constexpr u32 off_reg(u32 r) { return OFF_REGS + 4 * r; }
 
 // Alert bits (JitHot::alerts): set by the runtime while translated code is
@@ -141,13 +145,18 @@ static_assert(LUT_BITS <= LUT_BITS_MAX, "the arena only reserves room for LUT_BI
 // Standard-layout head of JitCpu: translated code reaches these through
 // CpuContext::jit with fixed offsets.
 struct JitCpuHot {
-  mem::Entry* pt;      // page-table entries (pointer-sized)
+  // Page-table entries (pointer-sized) -- or, when this CPU runs on fastmem
+  // (JitCpu::fastmem), the host view's base: translated code then indexes
+  // guest addresses straight off R_PT, and walks load `table` instead.
+  mem::Entry* pt;
   const u8* timing;    // timing9 (per 4 KB, 8 bytes per entry) or timing7 (per 32 KB, 4 bytes per entry)
   u8*       arena;     // Runtime::arena: LUT base and block-pointer base (R_ARENA)
+  mem::Entry* table;   // the page table itself, always
 };
 
 struct JitCpu {
   JitCpuHot hot{};
+  bool  fastmem = false;                     // hot.pt is the host view (mem::GuestView), see Runtime::fm_sites
   CpuContext* ctx = nullptr;
   NDS*  nds = nullptr;
   bool  arm9 = false;
@@ -190,6 +199,38 @@ struct Runtime {
   u8* merge_set_c = nullptr;   // w0 = result, w1 = carry: N,Z from it, C from w1, V kept
 
   JitCpu cpus[2];
+
+  // DS_FASTMEM (core/mem/fastmem.h). A translated load or store on a fastmem
+  // CPU reads its host base straight from the view (`mov x3, R_PT`, the patch
+  // site) and accesses through it; an access the view refuses faults. The
+  // fault handler finds the faulting instruction here, turns its patch site
+  // into a branch to the site's cold walk -- today's page-table path -- and
+  // resumes there, so the access completes exactly as it always did and every
+  // later execution takes the walk. The guest instruction is remembered
+  // (fm_slow) so a retranslation emits the walk from the start.
+  // Registered sites, appended as blocks are installed: blocks sit at rising
+  // addresses within one arena lifetime, so the handler binary-searches
+  // fm_blocks by pc and scans that block's few entries in fm_rels. Cleared
+  // with the arena. (A hash map insert per site was a visible share of
+  // translation.)
+  struct FmRel { u32 fault, patch, resume; u64 guest; };
+  struct FmBlock { const u8* entry; u32 size; u32 first; u32 count; };
+  std::vector<FmBlock> fm_blocks;
+  std::vector<FmRel> fm_rels;
+  std::unordered_set<u64> fm_slow;                  // fm_key(cpu, pc, thumb) of every site that faulted
+  u64 fm_slow_bits[1024] = {};                      // hash filter over fm_slow: most accesses never faulted
+  static u32 fm_bit(u64 key) { return static_cast<u32>((key * 0x9E3779B97F4A7C15ull) >> 48); }
+  bool fm_is_slow(u64 key) const {
+    const u32 b = fm_bit(key);
+    return (fm_slow_bits[b >> 6] >> (b & 63) & 1) && fm_slow.count(key);
+  }
+  // Faults from the handler, drained into fm_slow on the emulation thread (the
+  // handler does not allocate).
+  u64 fm_ring[512] = {};
+  u32 fm_ring_n = 0;
+  u64 fm_faults = 0;
+  // Filled by the translator, block-relative: moved to fm_rels when the block is installed.
+  std::vector<FmRel> fm_new;
   // Blocks translated on the emulation thread; same lifetime as the arena
   // (deque: stable addresses). One malloc per block was a measurable slice
   // of an overlay burst's translate stall.
@@ -263,6 +304,7 @@ struct Runtime {
 };
 
 Runtime& rt();
+inline u64 fm_key(bool arm9, u32 pc, bool thumb) { return (u64{arm9 ? 0u : 1u} << 33) | (u64{thumb} << 32) | pc; }
 
 // Runtime services used by the translator.
 void   invalidate_host_page(const u8* host_page);
@@ -290,6 +332,8 @@ bool translate_block(JitCpu& jc, u32 key, u8* buf, size_t cap, Block& b, u32& si
 // Overwrite a killed block's first ENTRY_PATCH bytes with a jump into the
 // dispatcher carrying `key`.
 void write_entry_redirect(u8* entry, u32 key, const u8* dispatch);
+// Whether this backend emits fastmem accesses (Runtime::fm_sites).
+bool fastmem_capable();
 // Turn the `bl link` at `site` into a direct branch to `target`.
 void patch_link(u8* site, const u8* target);
 // 0 when `word` is not a pc-relative branch, else a class id equal for two

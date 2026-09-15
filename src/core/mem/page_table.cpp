@@ -114,8 +114,7 @@ void PageTable::unmap(u32 guest, u32 size) {
 }
 
 void PageTable::attach_view(GuestView* v) {
-  view_ = v;
-  if (v) v->note_all();
+  view_ = v;   // a new view has nothing laid, so nothing to restrict
 }
 
 void PageTable::note_view(u32 page) { view_->note(page); }
@@ -162,9 +161,11 @@ void PageTable::set_code_host(const u8* host_page, bool is_code) {
   if (ix.key[s] != want) return;
   for (u32 p = ix.head[s]; p != HostIndex::NONE; p = ix.next[p]) {
     Entry e = table_[p];
-    if (fmc::on()) fmc::entry_changed(p, e, is_code ? (e | TAG_CODE) : (e & ~TAG_CODE));
-    if (view_) note_view(p);
-    table_[p] = is_code ? (e | TAG_CODE) : (e & ~TAG_CODE);
+    const Entry want = is_code ? (e | TAG_CODE) : (e & ~TAG_CODE);
+    if (want == e) continue;
+    if (fmc::on()) fmc::entry_changed(p, e, want);
+    if (view_ && is_code) note_view(p);   // untagging only loosens: fault() grants it when a store asks
+    table_[p] = want;
   }
   flush_view();
 }

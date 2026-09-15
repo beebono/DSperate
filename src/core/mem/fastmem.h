@@ -20,13 +20,20 @@
 //
 // GuestView: a PROT_NONE reservation per CPU -- the whole 4 GB guest space on
 // a 64-bit host, the low 64 MB (the one region every direct access of the
-// measured scenes falls in) on a 32-bit one. The page table reports each entry
-// it writes; the view marks that 4 KB host page dirty, and flush() lays the
-// dirty pages again from the table in coalesced mmap calls. A 4 KB view page
-// holds two 2 KB guest pages and is mapped only when both halves are backed by
-// the arena contiguously: read-write when both are plain RAM, read-only when
-// both are readable, not at all otherwise. So the view never serves an access
-// the table would not -- it may only refuse ones the table would serve.
+// measured scenes falls in) on a 32-bit one. A 4 KB view page holds two 2 KB
+// guest pages and may be mapped only when both halves are backed by the arena
+// contiguously: read-write when both are plain RAM, read-only when both are
+// readable, not at all otherwise. The invariant is one-sided: the view never
+// serves an access the table would not; it may refuse ones the table would.
+//
+// Laid lazily, like melonDS's map-on-fault. The page table reports each entry
+// it writes and flush() applies only the restrictions (unmap, or drop to
+// read-only) -- those cannot wait, a page that has just become code must
+// refuse stores before translated code runs again. Everything the table allows
+// beyond what is laid is granted by fault(): an access the view refuses asks
+// it first, and only an access the table refuses as well is a real refusal.
+// Nothing is laid until it is touched, and a code page that an SMC cycle
+// untags and tags again costs no system call at all while it stays read-only.
 #pragma once
 #include "core/types.h"
 #include "core/mem/page_table.h"
@@ -37,7 +44,8 @@
 
 namespace ds::mem {
 
-// DS_FASTMEM: 1 = views are built (the arena and the table hook), 0 or unset = off.
+// DS_FASTMEM: 1 = views are built (the arena and the table hook), 0 = off;
+// unset = on where the JIT uses them (AArch64), off elsewhere.
 bool fastmem_requested();
 
 class HostArena {
@@ -87,19 +95,27 @@ public:
     const u32 v = guest_page >> 1;
     // VRAM is never laid (desired() refuses it), and its write traps toggle
     // hundreds of entries a frame: not worth a pending slot each.
-    if (v >= SPAN / HOST_PAGE || (v >> 12) == 0x6 || dirty_[v]) return;
+    // A page with nothing laid has nothing to take away (fault() reads the
+    // table afresh when it grants).
+    if (v >= SPAN / HOST_PAGE || (v >> 12) == 0x6 || dirty_[v] || !laid_[v].off_plus1) return;
     dirty_[v] = 1;
     pending_.push_back(v);
   }
   void note_all();
   bool pending() const { return !pending_.empty(); }
-  // Lay every dirty page again. Returns false (and logs) if a mapping call failed.
+  // Apply the restrictions the dirty pages need. Returns false (and logs) if a mapping call failed.
   bool flush();
-  // DS_FASTMEM_VERIFY: every page's laid state against the table, and the
-  // mapped pages' bytes against the table's own host pointers. Flushes first.
+  // A refused access at host address `addr` (from the fault handler; async-
+  // signal-safe: table reads and mmap only). True when the table allows more
+  // than the view had laid there -- the page (and what follows it that the
+  // table allows too, up to a run) is laid now and the access can be retried.
+  bool fault(uintptr_t addr);
+  bool contains(uintptr_t addr) const { return addr >= reinterpret_cast<uintptr_t>(base_) && addr - reinterpret_cast<uintptr_t>(base_) < RESERVE; }
+  // DS_FASTMEM_VERIFY: nothing laid is more than the table allows, and the
+  // mapped pages' bytes are the table's own. Flushes first.
   bool verify(std::string* why);
 
-  struct Stats { u64 flushes = 0, map_calls = 0, pages_laid = 0; };
+  struct Stats { u64 flushes = 0, map_calls = 0, pages_laid = 0, flush_ns = 0, grants = 0; };
   const Stats& stats() const { return stats_; }
 
 private:
@@ -107,6 +123,7 @@ private:
   struct Laid { u32 off_plus1 = 0; u8 writable = 0; bool operator==(const Laid& o) const { return off_plus1 == o.off_plus1 && writable == o.writable; } };
   Laid desired(u32 v) const;
   bool lay_run(u32 v0, u32 n, const Laid& first);
+  bool protect_run(u32 v0, u32 n, bool writable);
 
   const HostArena& arena_;
   const PageTable& table_;

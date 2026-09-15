@@ -9,6 +9,7 @@
 #include "core/cpu/jit/jit_internal.h"
 #include "core/host_cores.h"
 #include "core/mem/fastmem_census.h"
+#include "core/mem/fastmem.h"
 #include "core/profile.h"
 #include "core/sched/scheduler.h"
 #include "core/cpu/cpu_cycles.h"
@@ -32,6 +33,9 @@
 #include <unistd.h>
 #include <cstdlib>
 #include <sys/mman.h>
+#include <csignal>
+#include <ucontext.h>
+#include <iterator>
 #include <algorithm>
 #include <vector>
 
@@ -256,6 +260,8 @@ void reset_arena() {
   }
   for (auto& kv : r.code_pages) set_code_tag(kv.first, false);
   r.code_pages.clear();
+  r.fm_blocks.clear();   // the code they patch is gone; fm_slow (guest sites) stays
+  r.fm_rels.clear();
   r.block_pool.clear();
   r.blocks_live = 0;
   r.pos = r.stubs_end;
@@ -460,9 +466,22 @@ static void install(JitCpu& jc, Block* b) {
   r.stats.hot_bytes += b->hot_size;
 }
 
+// Faults the handler queued (it cannot allocate): into fm_slow, before a
+// translation consults it.
+static void fm_drain(Runtime& r) {
+  const u32 n = r.fm_ring_n;
+  for (u32 i = 0; i < n && i < std::size(r.fm_ring); ++i) {
+    r.fm_slow.insert(r.fm_ring[i]);
+    const u32 b = Runtime::fm_bit(r.fm_ring[i]);
+    r.fm_slow_bits[b >> 6] |= u64{1} << (b & 63);
+  }
+  r.fm_ring_n = 0;
+}
+
 Block* translate(JitCpu& jc, u32 key) {
   DS_PROF(JIT_TX);   // nested inside the CPU9/CPU7 slice: an "of which" column
   Runtime& r = g_rt;
+  if (r.fm_ring_n) fm_drain(r);
   if (churn::on()) {
     churn::trans++;
     const u64 f = jc.ctx->nds->frame_count;
@@ -488,9 +507,15 @@ Block* translate(JitCpu& jc, u32 key) {
     b->owner = jc.arm9 ? 0 : 1;
     b->pooled = true;
     u32 size = 0;
-    if (!backend::translate_block(jc, key, r.arena + r.pos, BLOCK_MARGIN, *b, size)) { r.block_pool.pop_back(); return nullptr; }
+    r.fm_new.clear();
+    if (!backend::translate_block(jc, key, r.arena + r.pos, BLOCK_MARGIN, *b, size)) { r.block_pool.pop_back(); r.fm_new.clear(); return nullptr; }
     b->entry = r.arena + r.pos;
     b->size = size;
+    if (!r.fm_new.empty()) {
+      r.fm_blocks.push_back({b->entry, b->size, static_cast<u32>(r.fm_rels.size()), static_cast<u32>(r.fm_new.size())});
+      r.fm_rels.insert(r.fm_rels.end(), r.fm_new.begin(), r.fm_new.end());
+      r.fm_new.clear();
+    }
     r.pos += (b->size + 15) & ~size_t{15};
   }
   sync_icache(b->entry, b->size);
@@ -573,7 +598,7 @@ static void worker() {
     b->key = j.key;
     b->owner = jc.arm9 ? 0 : 1;
     u32 size = 0;
-    if (!backend::translate_block(jc, j.key, chunk + used, BLOCK_MARGIN, *b, size) || b->guest_len > avail) {
+    if (!backend::translate_block(jc, j.key, chunk + used, BLOCK_MARGIN, *b, size) || b->guest_len > avail) {   // (pretx is refused on fastmem CPUs)
       in_flight.store(false, std::memory_order_release);
       delete b; ++st_skipped; continue;
     }
@@ -864,6 +889,81 @@ extern "C" void jit_h_st32(CpuContext* cpu, u32 addr, u32 v) {
 
 // ---- public API ---------------------------------------------------------------------------------
 
+// ---- fastmem faults -----------------------------------------------------------------
+// SIGSEGV / SIGBUS from a registered access site (Runtime::fm_sites): patch the
+// site to its cold walk and resume there. Anything else is not ours and gets
+// the previous disposition -- the default one re-faults and dies as before.
+static struct sigaction g_old_segv, g_old_bus;
+
+static void fm_fault(int sig, siginfo_t* si, void* uctx) {
+  Runtime& r = g_rt;
+  uintptr_t pc = 0;
+  ucontext_t* uc = static_cast<ucontext_t*>(uctx);
+#if defined(__aarch64__)
+  pc = static_cast<uintptr_t>(uc->uc_mcontext.pc);
+#elif defined(__arm__)
+  pc = static_cast<uintptr_t>(uc->uc_mcontext.arm_pc);
+#endif
+  const Runtime::FmRel* site = nullptr;
+  const u8* block = nullptr;
+  {
+    auto it = std::upper_bound(r.fm_blocks.begin(), r.fm_blocks.end(), pc,
+                               [](uintptr_t p, const Runtime::FmBlock& b) { return p < reinterpret_cast<uintptr_t>(b.entry); });
+    if (it != r.fm_blocks.begin()) {
+      const Runtime::FmBlock& b = *(it - 1);
+      const uintptr_t off = pc - reinterpret_cast<uintptr_t>(b.entry);
+      if (off < b.size)
+        for (u32 k = 0; k < b.count; ++k)
+          if (r.fm_rels[b.first + k].fault == off) { site = &r.fm_rels[b.first + k]; block = b.entry; break; }
+    }
+  }
+  bool in_view = false;
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(si->si_addr);
+  for (const JitCpu& jc : r.cpus)
+    if (jc.fastmem) {
+      const uintptr_t base = reinterpret_cast<uintptr_t>(jc.hot.pt);
+      if (addr >= base && addr - base < mem::GuestView::RESERVE) in_view = true;
+    }
+  if (!site || !in_view) {
+    const struct sigaction& old = sig == SIGBUS ? g_old_bus : g_old_segv;
+    if (old.sa_flags & SA_SIGINFO) { if (old.sa_sigaction) { old.sa_sigaction(sig, si, uctx); return; } }
+    else if (old.sa_handler != SIG_DFL && old.sa_handler != SIG_IGN) { old.sa_handler(sig); return; }
+    signal(sig, SIG_DFL);   // return re-executes the instruction, which now kills the process as usual
+    return;
+  }
+  // First the view: if the table allows the access and the view had just not
+  // laid the page yet (views are laid on demand), lay it and retry in place.
+  for (int c = 0; c < 2; ++c) {
+    const JitCpu& jc = r.cpus[c];
+    if (!jc.fastmem) continue;
+    mem::GuestView* v = jc.nds->bus.view(c == 0 ? Cpu::ARM9 : Cpu::ARM7);
+    if (v && v->contains(addr) && v->fault(addr)) return;
+  }
+  u8* const patch = const_cast<u8*>(block) + site->patch;
+  const u8* const resume = block + site->resume;
+  backend::patch_link(patch, resume);
+  sync_icache(patch, 4);
+  if (r.fm_ring_n < std::size(r.fm_ring)) r.fm_ring[r.fm_ring_n++] = site->guest;
+  ++r.fm_faults;
+#if defined(__aarch64__)
+  uc->uc_mcontext.pc = reinterpret_cast<u64>(resume);
+#elif defined(__arm__)
+  uc->uc_mcontext.arm_pc = static_cast<unsigned long>(reinterpret_cast<uintptr_t>(resume));
+#endif
+}
+
+static void install_fault_handler() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+  struct sigaction sa {};
+  sa.sa_sigaction = fm_fault;
+  sa.sa_flags = SA_SIGINFO | SA_NODEFER;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, &g_old_segv);
+  sigaction(SIGBUS, &sa, &g_old_bus);
+}
+
 bool attach(NDS& nds, bool arm9, bool arm7) {
   Runtime& r = g_rt;
   if (!r.arena) {
@@ -904,6 +1004,18 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     jc.nds = &nds;
     jc.arm9 = c == 0;
     jc.hot.pt = ctx.page_table.raw();
+    jc.hot.table = ctx.page_table.raw();
+    // Fastmem: the backend emits view accesses, the bus built a view for this
+    // CPU, and nothing that translates off the emulation thread is on. DSi
+    // (the fastmem scope's P4) stays on the table for now: its NWRAM windows
+    // are laid in 16 KB cells the DSi Menu reshuffles hundreds of times a frame.
+    jc.fastmem = false;
+    if (const mem::GuestView* v = nds.bus.view(c == 0 ? Cpu::ARM9 : Cpu::ARM7);
+        v && backend::fastmem_capable() && !pretx::on() && r.memprobe == 0 && !nds.dsi) {
+      jc.fastmem = true;
+      jc.hot.pt = reinterpret_cast<mem::Entry*>(v->base());
+      install_fault_handler();
+    }
     jc.hot.timing = c == 0 ? reinterpret_cast<const u8*>(ctx.timing9) : reinterpret_cast<const u8*>(ctx.timing7);
     jc.hot.arena = r.arena;
     // An overlay-heavy scene translates ~20 k blocks; growing these through a
@@ -966,6 +1078,9 @@ void report(std::FILE* out) {
   std::fprintf(out, "[jit] blocks %llu, inline instrs %llu, fallback executions %llu, slow accesses %llu, entries %llu, invalidated %llu, revived %llu, flushes %llu\n",
                (unsigned long long)s.blocks_translated, (unsigned long long)s.instrs_translated, (unsigned long long)s.instrs_fallback,
                (unsigned long long)s.slow_accesses, (unsigned long long)s.entries, (unsigned long long)s.blocks_invalidated, (unsigned long long)s.blocks_revived, (unsigned long long)s.flushes);
+  if (g_rt.cpus[0].fastmem || g_rt.cpus[1].fastmem)
+    std::fprintf(out, "[jit] fastmem: %llu site faults (rewritten to the walk), %zu guest sites on the walk, %zu registered sites\n",
+                 static_cast<unsigned long long>(g_rt.fm_faults), g_rt.fm_slow.size() + g_rt.fm_ring_n, g_rt.fm_rels.size());
   if (s.bios_sha1_blocks) std::fprintf(out, "[jit] DSi BIOS SHA-1 blocks run natively: %llu\n", (unsigned long long)s.bios_sha1_blocks);
   if (pretx::on())
     std::fprintf(out, "[jit] pretx: built %llu adopted %llu dropped %llu skipped %llu\n",

@@ -491,6 +491,8 @@ void write_entry_redirect(u8* entry, u32 key, const u8* dispatch) {
 }
 
 // `bl link` at `site` becomes `b target` (same encoding, L bit clear).
+bool fastmem_capable() { return false; }   // the ARMv7 region table is the fastmem scope's P3
+
 void patch_link(u8* site, const u8* target) {
   Emitter::patch(site, 0xEA000000u | Emitter::rel24_from(site, target));
 }
