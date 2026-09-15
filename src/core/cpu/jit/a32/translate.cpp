@@ -593,6 +593,23 @@ private:
   // The guest flags around a flag-clobbering test sequence: saved into a
   // temporary when live, restored by `flags_end` (the cold path restores
   // them itself from the same register).
+  // DS_JIT_MEMPROBE: see the field's comment in jit_internal.h. The duplicate
+  // page-table walk of a single load or store, as on A64 (lsr, table load,
+  // base shift, no branches), plus this host's own share of it: the mrs/msr
+  // bracket the walk needs while guest flags are live (the msr writes back
+  // the value just read). Everything lands in `en`, which the real walk
+  // overwrites before anything reads it.
+  bool memprobe_on() const {
+    const int c = rt().memprobe;
+    return c == 1 || (c == 9 && a9_) || (c == 7 && !a9_);
+  }
+  void emit_walk_probe(u32 a, u32 en) {
+    if (!memprobe_on()) return;
+    if (live_) { e().mrs_apsr(en); e().msr_apsr_nzcvq(en); }
+    e().lsr_imm(en, a, mem::PAGE_SHIFT);
+    e().ldr_reg(en, R_PT, en, LSL, 2);
+    e().dp_reg(MOV, false, en, 0, en, LSL, 2);
+  }
   u32 flags_begin() {
     if (!live_) return 0xFF;
     const u32 f = cache_.temp();
@@ -712,6 +729,7 @@ private:
     // ---- hot path ----
     const u32 f = flags_begin();
     const u32 en = cache_.temp();
+    emit_walk_probe(a, en);
     const RegCache::State s0 = cache_.save();
     std::vector<size_t> fail;
     e().lsr_imm(en, a, mem::PAGE_SHIFT);
