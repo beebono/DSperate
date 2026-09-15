@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 add_executable(dsperate-headless main.cpp)
 target_link_libraries(dsperate-headless PRIVATE dsperate_core)
+# The 3D rasteriser alone on save-stated frames, for device timing of kernels.
+add_executable(dsperate-raster-bench ${CMAKE_CURRENT_SOURCE_DIR}/../../../tools/raster_bench.cpp)
+target_link_libraries(dsperate-raster-bench PRIVATE dsperate_core)
 # The LAN transport, so two headless instances (or one and a melonDS) can
 # play local wireless: the test bench for the Wi-Fi block.
 if(DSPERATE_NET)

@@ -230,6 +230,9 @@ private:
   Renderer3D renderer_;
 public:
   Renderer3D& renderer() { return renderer_; }   // tests
+  // The next render_frame rasterises in full, not the identical-frame shortcut
+  // (tools/raster_bench.cpp re-renders one frame to time it).
+  void force_full_raster() { render_identical_ = false; }
 private:
 
   struct Entry { u32 param; u8 cmd; };
