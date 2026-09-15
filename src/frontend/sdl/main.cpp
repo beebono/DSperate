@@ -7,6 +7,7 @@
 // handheld needs (volume, layout, screenshots, save states), and the pause
 // key opens a blitted menu over the held frame (menu.h).
 #include "core/nds.h"
+#include "core/host_cores.h"
 #include "core/cart/zip.h"
 #include "core/cart/zip_cache.h"
 #include "core/profile.h"
@@ -1301,6 +1302,8 @@ int main(int argc, char** argv) {
   // the NDS is constructed: Scheduler's constructor reads DS_IDLE_SKIP once
   // (scheduler.cpp), so setting it afterwards left emu.idle_skip a no-op.
   if (cfg.has("emu.idle_skip") && !std::getenv("DS_IDLE_SKIP")) setenv("DS_IDLE_SKIP", cfg.str("emu.idle_skip").c_str(), 1);
+  if (cfg.num("emu.host_cores", 0) > 0 && !std::getenv("DS_HOST_CORES")) setenv("DS_HOST_CORES", cfg.str("emu.host_cores").c_str(), 1);
+  VLOG("host: %u cores\n", ds::host_cores());
 
   NDS nds;
   ds::bios::UserSettings user;

@@ -11,6 +11,7 @@
 #include <thread>
 #include "core/gpu/kernels.h"
 #include "core/gpu/gpu3d.h"
+#include "core/host_cores.h"
 #include "core/gpu/vram_map.h"
 #include "core/nds.h"
 #include "core/profile.h"
@@ -207,17 +208,18 @@ void Renderer3D::Slope<side>::edge_params(bool aa, s32* length, s32* coverage) c
 // parked on a condition variable in between, never per frame.
 //
 // So Pool(n) is n threads *in addition to* the emulation thread, and
-// DS_R3D_THREADS=N asks for N of them. N of 0 or 1 is a different shape
-// entirely: band_count returns 1, render() takes the `maxb <= 1`
+// DS_R3D_THREADS=N asks for N of them. N of 0 is a different shape
+// entirely: band_count returns 0, render() takes the `maxb == 0`
 // path, and the raster runs inline on the emulation thread with no pool.
+// N of 1 is one worker beside the emulation thread.
 struct Renderer3D::Pool {
-  explicit Pool(u32 n) {
+  explicit Pool(u32 n) : start_(new std::condition_variable[n]) {
     threads_.reserve(n);
     for (u32 i = 0; i < n; ++i) threads_.emplace_back([this, i] { loop(i); });
   }
   ~Pool() {
     { std::lock_guard<std::mutex> lk(m_); stop_ = true; generation_.fetch_add(1, std::memory_order_relaxed); }
-    start_.notify_all();
+    for (u32 i = 0; i < workers(); ++i) start_[i].notify_one();
     for (auto& t : threads_) t.join();
   }
   u32 workers() const { return static_cast<u32>(threads_.size()); }
@@ -230,7 +232,11 @@ struct Renderer3D::Pool {
     u64 gen;
     {
       std::lock_guard<std::mutex> lk(m_);
-      job_ = &fn; jobs_ = jobs; remaining_.store(static_cast<u32>(threads_.size()), std::memory_order_relaxed);
+      // Only the first `jobs` workers are woken and counted: the pool is sized
+      // for the most workers a frame can get, and a frame given fewer (one,
+      // on two cores) must not pay a wake-up per idle thread.
+      if (jobs > workers()) jobs = workers();
+      job_ = &fn; jobs_ = jobs; remaining_.store(jobs, std::memory_order_relaxed);
       done_bits_.store(0, std::memory_order_relaxed);
       nbins_ = bins;
       // Before the generation bump, not after: a worker that wakes on the new
@@ -239,7 +245,7 @@ struct Renderer3D::Pool {
       next_bin_.store(0, std::memory_order_relaxed);
       gen = generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
     }
-    start_.notify_all();
+    for (u32 i = 0; i < jobs; ++i) start_[i].notify_one();
     return gen;
   }
 
@@ -323,16 +329,18 @@ struct Renderer3D::Pool {
 
 private:
   void loop(u32 index) {
+    if (pin_threads()) pin_current_thread(1 + index);
     u64 seen = 0;
     for (;;) {
       std::unique_lock<std::mutex> lk(m_);
-      start_.wait(lk, [this, &seen] { return stop_ || generation_.load(std::memory_order_relaxed) != seen; });
+      // A generation this worker is not part of (index >= jobs) is skipped
+      // without waking; it takes the next one that includes it.
+      start_[index].wait(lk, [this, index, &seen] { return stop_ || (generation_.load(std::memory_order_relaxed) != seen && index < jobs_); });
       if (stop_) return;
       seen = generation_.load(std::memory_order_relaxed);
       const std::function<void(u32)>* fn = job_;
-      const u32 jobs = jobs_;
       lk.unlock();
-      if (fn && index < jobs) (*fn)(index);
+      if (fn) (*fn)(index);
       lk.lock();
       remaining_.fetch_sub(1, std::memory_order_release);
       done_.notify_all();
@@ -346,7 +354,8 @@ public:
   }
   std::vector<std::thread> threads_;
   std::mutex m_;
-  std::condition_variable start_, done_;
+  std::unique_ptr<std::condition_variable[]> start_;   // one per worker: a dispatch wakes only its jobs
+  std::condition_variable done_;
   const std::function<void(u32)>* job_ = nullptr;
   std::atomic<u64> generation_{0};   // bumped under m_; read lock-free by wait_bits
   std::atomic<u64> done_bits_{0};
@@ -2635,7 +2644,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   // The buffer the display is not reading; it becomes the displayed one once
   // the frame is dispatched (its lines are then waited for per band).
   u32* const dst = out_[display_ ^ 1].data();
-  if (maxb <= 1) { pending_bands_ = 0; wait_ns_.store(0, std::memory_order_relaxed); build_edges(); render_band(0, 192, dst); display_ ^= 1; return; }
+  if (maxb == 0) { pending_bands_ = 0; wait_ns_.store(0, std::memory_order_relaxed); build_edges(); render_band(0, 192, dst); display_ ^= 1; return; }
 
   // The pool is always the maximum size and only `nb` of it is given work, so
   // ramping the thread count costs a dispatch flag rather than creating and
@@ -2645,8 +2654,13 @@ void Renderer3D::render(const Gpu3D& gx) {
   }
   for (auto& b : bands_) b->aa_ = aa_;   // the setting can change between frames
   // Never replaced once it is big enough: the compositor thread may be
-  // waiting on it for the previous frame's bands (sync_line).
-  if (!pool_ || pool_->workers() < maxb) pool_ = std::make_unique<Pool>(maxb);
+  // waiting on it for the previous frame's bands (sync_line). So it is made
+  // once, for the most workers any frame gets by default -- three, whatever
+  // the cores now: the online count moves under a running game (see
+  // host_cores) and the lag rule starts some frames at two. Workers a frame
+  // does not use are never woken (Pool::dispatch). Only a forced count past
+  // three can grow it.
+  if (!pool_ || pool_->workers() < maxb) pool_ = std::make_unique<Pool>(maxb > 3 ? maxb : 3);
 
   u32 nb = (adapt_enabled() && !threads_forced()) ? adaptive_workers(maxb) : maxb;
   if (bands_next_ && !threads_forced()) nb = bands_next_ < maxb ? bands_next_ : maxb;
@@ -2682,6 +2696,7 @@ void Renderer3D::render(const Gpu3D& gx) {
     if (w < 8) band_ns_[w] = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   };
   pending_bands_ = nbins_;
+  if (pin_threads() && owner_ != std::this_thread::get_id()) pin_current_thread(0);
   owner_ = std::this_thread::get_id();
   {
     // The next generation's slot: sync_all above guarantees no thief of the
@@ -3066,25 +3081,33 @@ bool Renderer3D::threads_forced() {
   return on;
 }
 
-// How many bands to split the frame into. DS_R3D_THREADS overrides the count
-// (0 or 1 disables banding). Only near-empty frames stay on one thread:
-// polygon *count* says nothing about raster cost (a skybox or a full-screen
-// quad is a full frame of spans), and skipping banding below 24 polygons
-// cost 12 % of the whole win on SM64DS.
+// How many band workers the frame gets; 0 draws it inline on the emulation
+// thread. DS_R3D_THREADS overrides the count. Only near-empty frames stay
+// inline: polygon *count* says nothing about raster cost (a skybox or a
+// full-screen quad is a full frame of spans), and skipping banding below 24
+// polygons cost 12 % of the whole win on SM64DS.
 u32 Renderer3D::band_count(u32 polygons) {
   static const int forced = [] {
     const char* e = std::getenv("DS_R3D_THREADS");
     return e ? std::atoi(e) : -1;
   }();
-  if (forced >= 0) return forced < 1 ? 1u : static_cast<u32>(forced);
-  if (polygons < 2) return 1;
-  // Pinned at three since 2026-08-29 (RG DS knob sweep against the CPU cuts
-  // of 2026-08-28: mlbis -6.8 %, etody -2.6 %, sm64 -1.4 %, meteos/dbori flat;
-  // GSDD +5.8 %, whose main thread is the critical path). Before the pin a
-  // third worker only paid where the emulation thread was blocked on the
-  // raster (etody +4.3 %; sm64, mlbis, dbori lost 3-9 %), hence the 2<->3
-  // controller, which stays behind DS_R3D_ADAPT=1.
-  return 3;
+  if (forced >= 0) return static_cast<u32>(forced);
+  if (polygons < 2) return 0;
+  // Pinned at three since 2026-08-29 on four cores (RG DS knob sweep against
+  // the CPU cuts of 2026-08-28: mlbis -6.8 %, etody -2.6 %, sm64 -1.4 %,
+  // meteos/dbori flat; GSDD +5.8 %, whose main thread is the critical path).
+  // Before the pin a third worker only paid where the emulation thread was
+  // blocked on the raster (etody +4.3 %; sm64, mlbis, dbori lost 3-9 %),
+  // hence the 2<->3 controller, which stays behind DS_R3D_ADAPT=1.
+  //
+  // Fewer cores: one worker per core. Measured on the A30 with two cores
+  // offline (2x A7, shipped config, SCHED_RR, 2026-09-14), two workers match
+  // three on every scene (etody 26 ms, sm64 11.9, nsmb 31.5) while one worker
+  // is 11 ms worse on etody: the raster there needs both cores, and the
+  // emulation thread's steal does not stand in for a worker (neither did the
+  // compositor stealing, or no lag). A single core draws inline.
+  const u32 cores = host_cores();
+  return cores >= 3 ? 3 : cores >= 2 ? 2 : 0;
 }
 
 // Set up a worker to render a band of the frame the coordinator has latched.

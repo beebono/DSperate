@@ -298,6 +298,7 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # realtime = rr                 # rr | fifo | off: real-time scheduling for the emulator's threads
 #                               # (needs root or an rtprio limit)
 # rt_priority = 5
+# host_cores = 0                # cores the emulator's threads size themselves for; 0 = detect
 # jit = true                    # false = interpreter (much slower; for comparison)
 # quantum = 0                   # CPU interleave: 0 = event-bound (fastest) | 128 = melonDS lockstep
 #

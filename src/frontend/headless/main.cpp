@@ -7,6 +7,7 @@
 // and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py
 // and the SPU output (--dump-audio, raw s16 stereo at 32768 Hz).
 #include "core/nds.h"
+#include "core/host_cores.h"
 #include "core/state/state.h"
 #include "core/io/dsi_nand_persist.h"
 #include "core/io/dsi_title_install.h"
@@ -638,6 +639,7 @@ int main(int argc, char** argv) {
   (void)jit9; (void)jit7; (void)cpu_oc;
 #endif
   ds::prof::enabled = std::getenv("DS_PROFILE") != nullptr;
+  std::fprintf(stderr, "host: %u cores\n", ds::host_cores());
   if (const char* w = std::getenv("DS_WATCH")) nds.bus.enable_watch(static_cast<ds::u32>(std::strtoul(w, nullptr, 16)));
   if (trace) {
     ts.out[0] = std::fopen((std::string(trace) + ".arm9.trace").c_str(), "w");

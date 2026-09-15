@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/gpu3d.h"
+#include "core/host_cores.h"
 #include "core/state/state.h"
 #include "core/nds.h"
 #include "core/profile.h"
@@ -1584,11 +1585,15 @@ void Gpu3D::worker_activate(bool on) {
     worker_on_ = true;
     exec_timed_ = false;
     pricer_resync();
-    renderer_.set_bands_next(2);   // the worker takes the third band worker's core
+    // The worker takes the third band worker's core on four. On two cores the
+    // band count stays: two workers beside the geometry worker measured
+    // best there, and the emulation thread's joins are what let the second
+    // band worker onto a core under SCHED_RR (A30, 2026-09-14).
+    renderer_.set_bands_next(host_cores() >= 4 ? 2 : 0);
   } else {
     worker_on_ = false;
     exec_timed_ = !untimed_;
-    renderer_.set_bands_next(3);
+    renderer_.set_bands_next(0);   // band_count's default
   }
 }
 
