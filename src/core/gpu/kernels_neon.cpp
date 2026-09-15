@@ -9,6 +9,7 @@
 // code does it; byte planes (ids, kinds, masks) are handled 16 at a time and
 // widened to u32 lane masks where they gate colour lanes.
 #include "core/gpu/kernels.h"
+#include "core/div64.h"
 
 #if DSPERATE_NEON
 #include <arm_neon.h>
@@ -1051,7 +1052,7 @@ void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac)
       return;
     }
     const u32 A = static_cast<u32>(w0n) << 8;
-    const u32 step = static_cast<u32>((static_cast<u64>(A) << 16) / dscalar);
+    const u32 step = static_cast<u32>(div_u64(static_cast<u64>(A) << 16, dscalar));
     uint32x4_t acc = vmulq_u32(vreinterpretq_u32_s32(vaddq_s32(vdupq_n_s32(xv0), kLane)), vdupq_n_u32(step));
     const uint32x4_t inc = vdupq_n_u32(step * 4);
     for (u32 i = 0; i < n; i += 4) {
@@ -1341,7 +1342,7 @@ struct LinAttr {
 // 64-bit division, and five of them per span was the cost this kernel exists
 // to remove.
 static inline u32 lin_recip(s32 xdiff) {
-  return xdiff >= 2 ? static_cast<u32>(((1ull << 32) + static_cast<u32>(xdiff) - 1) / static_cast<u32>(xdiff)) : 0;
+  return xdiff >= 2 ? recip_ceil32(static_cast<u32>(xdiff)) : 0;
 }
 
 void span_attrs5n_lin(const s32* y0, const s32* y1, s32 xv0, u32 n, s32 xdiff, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
@@ -1400,7 +1401,7 @@ void span_attr_linear(s32 y0, s32 y1, s32 xv0, u32 n, s32 xdiff, s32* out) {
   // d * f / xdiff with the product below 2^32: q = (n * ceil(2^32 / xdiff)) >> 32
   // is exact or one too many; the compare q * xdiff > n fixes it. xdiff == 1
   // (reciprocal would not fit) divides by nothing.
-  const u32 m = xdiff >= 2 ? static_cast<u32>(((1ull << 32) + static_cast<u32>(xdiff) - 1) / static_cast<u32>(xdiff)) : 0;
+  const u32 m = lin_recip(xdiff);
   const uint32x4_t vm = vdupq_n_u32(m), vxd = vreinterpretq_u32_s32(vxdiff);
   for (u32 i = 0; i < n; i += 4) {
     int32x4_t xv = vaddq_s32(vdupq_n_s32(xv0 + static_cast<s32>(i)), kLane);

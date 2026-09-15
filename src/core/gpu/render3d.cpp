@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/render3d.h"
+#include "core/div64.h"
 #include "core/state/state.h"
 
 #include <type_traits>
@@ -44,7 +45,7 @@ template <int dir>
 void Renderer3D::Interp<dir>::setup(s32 x0_, s32 x1_, s32 w0, s32 w1, bool wbuf) {
   x0 = x0_; x1 = x1_; xdiff = x1_ - x0_; wbuffer = wbuf;
   xrecip_z = xdiff != 0 ? (1 << 22) / xdiff : 0;
-  recip = xdiff >= 2 ? static_cast<u32>(((1ull << 32) + static_cast<u32>(xdiff) - 1) / static_cast<u32>(xdiff)) : 0;
+  recip = xdiff >= 2 ? recip_ceil32(static_cast<u32>(xdiff)) : 0;
   const u32 mask = dir ? 0x7E : 0x7F;
   linear = (w0 == w1) && !(w0 & mask) && !(w1 & mask);
   if (dir) { w0n = w0 >> 1; w0d = (w0 + ((w0 & ~w1) & 1)) >> 1; w1d = w1 >> 1; shift = 9; }

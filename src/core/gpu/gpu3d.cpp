@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/gpu3d.h"
+#include "core/div64.h"
 #include "core/host_cores.h"
 #include "core/state/state.h"
 #include "core/nds.h"
@@ -235,7 +236,7 @@ template <int comp, int plane, bool attribs>
 void clip_segment(Vertex& out, const Vertex& vin, const Vertex& vout) {
   const s64 num = vin.pos[3] - static_cast<s64>(plane) * vin.pos[comp];
   const s32 den = static_cast<s32>(num - (vout.pos[3] - static_cast<s64>(plane) * vout.pos[comp]));
-  auto lerp = [&](s32 a, s32 b) -> s32 { return static_cast<s32>(a + ((static_cast<s64>(b) - a) * num) / den); };
+  auto lerp = [&](s32 a, s32 b) -> s32 { return static_cast<s32>(a + div_s64((static_cast<s64>(b) - a) * num, den)); };
   if (comp != 0) out.pos[0] = lerp(vin.pos[0], vout.pos[0]);
   if (comp != 1) out.pos[1] = lerp(vin.pos[1], vout.pos[1]);
   if (comp != 2) out.pos[2] = lerp(vin.pos[2], vout.pos[2]);
@@ -1281,7 +1282,7 @@ void Gpu3D::finish_polygon(Polygon* poly, int nverts) {
     else { w = vt.pos[3] >> (wsize - 16); wshifted = w << (wsize - 16); }
     s32 z;
     if (flush_attr_ & 2) z = wshifted;
-    else if (vt.pos[3]) z = static_cast<s32>(((static_cast<s64>(vt.pos[2]) * 0x4000) / vt.pos[3] + 0x3FFF) * 0x200);
+    else if (vt.pos[3]) z = static_cast<s32>((div_s64(static_cast<s64>(vt.pos[2]) * 0x4000, vt.pos[3]) + 0x3FFF) * 0x200);
     else z = 0x7FFE00;
     if (z < 0) z = 0; else if (z > 0xFFFFFF) z = 0xFFFFFF;
     poly->z[i] = z; poly->w[i] = w;
