@@ -1008,12 +1008,12 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     jc.hot.pt = ctx.page_table.raw();
     jc.hot.table = ctx.page_table.raw();
     // Fastmem: the backend emits view accesses, the bus built a view for this
-    // CPU, and nothing that translates off the emulation thread is on. DSi
-    // (the fastmem scope's P4) stays on the table for now: its NWRAM windows
-    // are laid in 16 KB cells the DSi Menu reshuffles hundreds of times a frame.
+    // CPU, and nothing that translates off the emulation thread is on.
+    // DS_FASTMEM_DSI=0 keeps a DSi session on the table (P4 measurement knob).
     jc.fastmem = false;
+    static const bool dsi_ok = [] { const char* e = std::getenv("DS_FASTMEM_DSI"); return !e || std::atoi(e) != 0; }();
     if (const mem::GuestView* v = nds.bus.view(c == 0 ? Cpu::ARM9 : Cpu::ARM7);
-        v && backend::fastmem_capable() && !pretx::on() && r.memprobe == 0 && !nds.dsi) {
+        v && backend::fastmem_capable() && !pretx::on() && r.memprobe == 0 && (!nds.dsi || dsi_ok)) {
 #if UINTPTR_MAX > 0xFFFFFFFFu
       jc.fastmem = true;
       jc.hot.pt = reinterpret_cast<mem::Entry*>(v->base());

@@ -79,9 +79,10 @@ void Bus::fastmem_report() const {
   for (int c = 0; c < 2; ++c) {
     if (!views_[c]) continue;
     const GuestView::Stats& s = views_[c]->stats();
-    std::fprintf(stderr, "fastmem: arm%d view at %p (%s): %llu flushes, %llu mmap calls, %llu pages laid, %llu grants, %.1f ms flushing\n", c ? 7 : 9,
+    std::fprintf(stderr, "fastmem: arm%d view at %p (%s): %llu flushes, %llu mmap calls, %llu pages laid, %llu grants, %llu volatile refusals, %.1f ms flushing\n", c ? 7 : 9,
                  static_cast<void*>(views_[c]->base()), arena_->kind(), static_cast<unsigned long long>(s.flushes),
-                 static_cast<unsigned long long>(s.map_calls), static_cast<unsigned long long>(s.pages_laid), static_cast<unsigned long long>(s.grants), s.flush_ns / 1e6);
+                 static_cast<unsigned long long>(s.map_calls), static_cast<unsigned long long>(s.pages_laid), static_cast<unsigned long long>(s.grants),
+                 static_cast<unsigned long long>(s.volatile_refusals), s.flush_ns / 1e6);
   }
 }
 

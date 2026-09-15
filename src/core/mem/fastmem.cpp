@@ -109,6 +109,7 @@ std::unique_ptr<GuestView> GuestView::create(const HostArena& arena, const PageT
   const u32 pages = SPAN / HOST_PAGE;
   v->dirty_.assign(pages, 0);
   v->laid_.assign(pages, Laid{});
+  v->moved_.assign(pages, 0);
   v->pending_.reserve(pages);
   return v;   // nothing laid: fault() grants pages as they are touched
 }
@@ -194,6 +195,7 @@ bool GuestView::flush() {
     if (keep0 && (d0.writable || !l0.writable)) { ++i; continue; }   // nothing to take away
     u32 n = 1;
     laid_[v0] = keep0 ? Laid{l0.off_plus1, 0} : Laid{};
+    if (!keep0 && moved_[v0] < 255) ++moved_[v0];
     while (i + n < pending_.size() && pending_[i + n] == v0 + n) {
       const u32 v = v0 + n;
       const Laid l = laid_[v], d = desired(v);
@@ -202,6 +204,7 @@ bool GuestView::flush() {
       if (keep != keep0 || (keep && (d.writable || !l.writable))) break;
       dirty_[v] = 0;
       laid_[v] = keep ? Laid{l.off_plus1, 0} : Laid{};
+      if (!keep && moved_[v] < 255) ++moved_[v];
       ++n;
     }
     ok &= keep0 ? protect_run(v0, n, false) : lay_run(v0, n, Laid{});
@@ -219,6 +222,7 @@ bool GuestView::fault(uintptr_t addr) {
   const u32 v0 = static_cast<u32>(a / HOST_PAGE);
   const Laid d0 = desired(v0), l0 = laid_[v0];
   if (!d0.off_plus1 || (same_backing(l0.off_plus1, d0.off_plus1) && l0.writable >= d0.writable)) return false;   // the table refuses too
+  if (moved_[v0] >= kVolatile) { ++stats_.volatile_refusals; return false; }
   // Grant a run: the following pages the table serves the same way at
   // consecutive offsets that are not yet laid so (one mmap for a buffer's
   // first touch instead of one fault per page).
@@ -226,7 +230,7 @@ bool GuestView::fault(uintptr_t addr) {
   u32 n = 1;
   while (n < kRun && v0 + n < SPAN / HOST_PAGE) {
     const Laid d = desired(v0 + n), l = laid_[v0 + n];
-    if (d.writable != d0.writable || d.off_plus1 != d0.off_plus1 + n * HOST_PAGE || l == d) break;
+    if (d.writable != d0.writable || d.off_plus1 != d0.off_plus1 + n * HOST_PAGE || l == d || moved_[v0 + n] >= kVolatile) break;
     ++n;
   }
   if (!lay_run(v0, n, d0)) return false;

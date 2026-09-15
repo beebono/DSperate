@@ -115,7 +115,7 @@ public:
   // mapped pages' bytes are the table's own. Flushes first.
   bool verify(std::string* why);
 
-  struct Stats { u64 flushes = 0, map_calls = 0, pages_laid = 0, flush_ns = 0, grants = 0; };
+  struct Stats { u64 flushes = 0, map_calls = 0, pages_laid = 0, flush_ns = 0, grants = 0, volatile_refusals = 0; };
   const Stats& stats() const { return stats_; }
 
 private:
@@ -131,6 +131,13 @@ private:
   std::vector<u8> dirty_;
   std::vector<u32> pending_;
   std::vector<Laid> laid_;
+  // Times each page lost its backing while laid (a remap under it). A page
+  // that keeps moving -- the DSi Menu hands NWRAM slots between the CPUs
+  // hundreds of times while it launches a title -- is not granted again past
+  // kVolatile: each round trip is an unmap, a fault and a map, and the
+  // table's walk serves it cheaper.
+  static constexpr u8 kVolatile = 3;
+  std::vector<u8> moved_;
   Stats stats_;
 };
 
