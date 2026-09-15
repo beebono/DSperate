@@ -17,7 +17,8 @@
 // state words 0-2 and 4 in r4-r6 and lr, the last round constant in r7, the
 // message schedule's last sixteen words W79..W64 in the 64 bytes below sp,
 // r1 += 64, r2 -= 64 with its flags -- and charging the cycles the
-// recompiled instructions charge, from the live timing table.
+// recompiled instructions charge, from the live timing table (with CPU tuning
+// applied the way the translator prices data accesses under it).
 //
 // What differs from running the instructions: the loop is only left between
 // iterations (at the budget, or with an IRQ pending), not at the recompiler's
@@ -109,6 +110,18 @@ bool decode_shape(CpuContext& cpu) {
 
 inline u32 max3c(s32 a, s32 b, s32 c) { return static_cast<u32>(std::max(a, std::max(b, c))); }
 
+// A word access's data cost as the translator prices it. Untuned: the
+// accessed page's entry at run time. Under CPU tuning (Translator::
+// oc_data_cost) a translate-time constant: main RAM's load entry, or for
+// underclocked stores main RAM's bus cost. A pc-relative literal always
+// keeps its own page's N32 (arm_ldr_str).
+s32 data_cost(const CpuContext& cpu, u32 addr, bool seq, bool store, bool literal) {
+  const CpuOc oc = rt().cpu_oc;
+  if (literal || oc == CpuOc::Off) return cpu.timing9[addr >> 12][(store ? 4 : 0) + (seq ? 3 : 2)];
+  if (oc == CpuOc::Underclock && store) return static_cast<s32>(cpu.nds->bus.timing().bus9_data(0x02000000u, true, seq));
+  return cpu.timing9[0x02000000u >> 12][seq ? 3 : 2];
+}
+
 // What the recompiled instructions charge, less the R1 loads (those follow r1).
 u32 base_cost(const CpuContext& cpu, u32 sp, u32 r0) {
   u32 total = 0;
@@ -119,13 +132,13 @@ u32 base_cost(const CpuContext& cpu, u32 sp, u32 r0) {
     s32 D = -1;
     switch (op.kind) {
     case Kind::Plain: break;
-    case Kind::Lit:     D = cpu.timing9[static_cast<u32>(op.arg) >> 12][2]; break;
-    case Kind::SpLoad:  D = cpu.timing9[(sp + static_cast<u32>(op.arg)) >> 12][2]; break;
-    case Kind::SpStore: D = cpu.timing9[(sp + static_cast<u32>(op.arg)) >> 12][6]; break;
+    case Kind::Lit:     D = data_cost(cpu, static_cast<u32>(op.arg), false, false, true); break;
+    case Kind::SpLoad:  D = data_cost(cpu, sp + static_cast<u32>(op.arg), false, false, false); break;
+    case Kind::SpStore: D = data_cost(cpu, sp + static_cast<u32>(op.arg), false, true, false); break;
     case Kind::Ldm: case Kind::Stm: {
-      const u32 k = op.kind == Kind::Ldm ? 0 : 4;
-      D = cpu.timing9[r0 >> 12][k + 2];
-      for (u32 i = 1; i < op.count; ++i) D += cpu.timing9[(r0 + 4 * i) >> 12][k + 3];
+      const bool store = op.kind == Kind::Stm;
+      D = data_cost(cpu, r0, false, store, false);
+      for (u32 i = 1; i < op.count; ++i) D += data_cost(cpu, r0 + 4 * i, true, store, false);
       break;
     }
     default: break;
@@ -141,7 +154,7 @@ u32 r1_cost(const CpuContext& cpu, u32 r1) {
     const u32 pc8 = op.pc + 8;
     const u8 cc = cpu.timing9[pc8 >> 12][0];
     const s32 C = cc == 0xFF ? (!(pc8 & 0x1F) ? 3 : 1) : cc;
-    const s32 D = cpu.timing9[(r1 + 4 * static_cast<u32>(op.arg)) >> 12][2];
+    const s32 D = data_cost(cpu, r1 + 4 * static_cast<u32>(op.arg), false, false, false);
     total += max3c(C + D - 6, C, D);
   }
   return total;
@@ -191,9 +204,9 @@ bool compute(CpuContext& cpu, Iter& it) {
   }
 
   // Cycles, as the recompiled loop charges them.
-  static u64 cache_version = ~0ull; static u32 cache_sp = 0, cache_r0 = 0, cache_base = 0;
-  if (cache_version != t.cpu9_version || cache_sp != sp || cache_r0 != r0) {
-    cache_version = t.cpu9_version; cache_sp = sp; cache_r0 = r0;
+  static u64 cache_version = ~0ull; static u32 cache_sp = 0, cache_r0 = 0, cache_base = 0; static CpuOc cache_oc = CpuOc::Off;
+  if (cache_version != t.cpu9_version || cache_sp != sp || cache_r0 != r0 || cache_oc != rt().cpu_oc) {
+    cache_version = t.cpu9_version; cache_sp = sp; cache_r0 = r0; cache_oc = rt().cpu_oc;
     cache_base = base_cost(cpu, sp, r0);
   }
   const u32 r2 = R[2];
@@ -240,7 +253,7 @@ bool compute(CpuContext& cpu, Iter& it) {
 
 bool bios_sha1_run(CpuContext& cpu) {
   Runtime& r = rt();
-  if (r.strict || r.cpu_oc != CpuOc::Off || cpu.thumb() || !g_shape.ok || mem::Bus::watch_active()) return false;
+  if (r.strict || r.fastcost || cpu.thumb() || !g_shape.ok || mem::Bus::watch_active()) return false;
   bool ran = false;
   Iter it;
   while (compute(cpu, it)) {
