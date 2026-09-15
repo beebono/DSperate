@@ -8,6 +8,7 @@
 // and the SPU output (--dump-audio, raw s16 stereo at 32768 Hz).
 #include "core/nds.h"
 #include "core/pc_sampler.h"
+#include "core/mem/fastmem_census.h"
 #include "core/host_cores.h"
 #include "core/state/state.h"
 #include "core/io/dsi_nand_persist.h"
@@ -249,6 +250,7 @@ void entry_snap_cb(ds::CpuContext& cpu, ds::u32, void* user) {
 } // namespace
 
 int main(int argc, char** argv) {
+  ds::mem::fmc::init();   // before any Bus exists: the census counts page-table churn from reset on
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
   const char* hide_screen = nullptr;
@@ -754,10 +756,12 @@ int main(int argc, char** argv) {
   if (lan_host || lan_join || netplay) { std::fprintf(stderr, "lan: built without DSPERATE_NET\n"); return 1; }
   if (internet) { std::fprintf(stderr, "internet: built without DSPERATE_NET\n"); return 1; }
 #endif
+  if (ds::mem::fmc::on()) ds::mem::fmc::set_counting(stats_from == 0);
   if (pc_profile && !ds::pcsample::start()) { std::fprintf(stderr, "--pc-profile: no sampler on this platform\n"); return 1; }
   const auto pace_start = std::chrono::steady_clock::now();
   for (int i = 0; i < frames; ++i) {
     if (pc_profile && i == stats_from) ds::pcsample::set_active(true);
+    if (i == stats_from && ds::mem::fmc::on()) ds::mem::fmc::set_counting(true);
     if (pace) {   // the DS's 59.83 Hz, from the run's start so sleep jitter does not accumulate
       const auto due = pace_start + std::chrono::microseconds(static_cast<long long>(i * 1000000.0 / 59.8261));
       std::this_thread::sleep_until(due);
@@ -959,6 +963,7 @@ int main(int argc, char** argv) {
       for (int d = 0; d < 4; ++d) std::fprintf(stderr, "[state]   dma%d cnt %08x src %08x dst %08x\n", d, nds.io.read(cpu, 0x040000B8 + d * 12, 32), nds.io.read(cpu, 0x040000B0 + d * 12, 32), nds.io.read(cpu, 0x040000B4 + d * 12, 32));
     }
   }
+  if (ds::mem::fmc::on()) ds::mem::fmc::report(frame_ms.size());
   ds::frame_report(frame_ms);
   ds::prof::frame_breakdown(frame_ms);
   if (nds.dsi_nand.valid())

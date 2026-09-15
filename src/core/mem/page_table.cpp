@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/mem/page_table.h"
+#include "core/mem/fastmem_census.h"
 
 
 #include <cassert>
@@ -57,6 +58,7 @@ void PageTable::map(u32 guest, u32 size, u8* host, u32 flags) {
     const u32 p = g >> PAGE_SHIFT;
     const Entry e = make_entry(g, host + off, flags);
     if (table_[p] == e) continue;
+    if (fmc::on()) fmc::entry_changed(p, table_[p], e);
     index_remove(p, table_[p]);
     table_[p] = e;
     index_insert(p, e);
@@ -72,7 +74,7 @@ void PageTable::remap(u32 guest, u32 size, u8* const* hosts, u32 flags) {
     const Entry old = table_[p];
     u8* host = hosts[i];
     if (!host) {
-      if (old) { index_remove(p, old); table_[p] = 0; }
+      if (old) { if (fmc::on()) fmc::entry_changed(p, old, 0); index_remove(p, old); table_[p] = 0; }
       continue;
     }
     if (old && !(old & TAG_SPECIAL) == writable) {
@@ -82,6 +84,7 @@ void PageTable::remap(u32 guest, u32 size, u8* const* hosts, u32 flags) {
     }
     const Entry e = make_entry(g, host, flags);
     if (old == e) continue;
+    if (fmc::on()) fmc::entry_changed(p, old, e);
     index_remove(p, old);
     table_[p] = e;
     index_insert(p, e);
@@ -97,6 +100,7 @@ void PageTable::unmap(u32 guest, u32 size) {
   for (u32 off = 0; off < size; off += PAGE_SIZE) {
     const u32 p = (guest + off) >> PAGE_SHIFT;
     if (!table_[p]) continue;
+    if (fmc::on()) fmc::entry_changed(p, table_[p], 0);
     index_remove(p, table_[p]);
     table_[p] = 0;
   }
@@ -136,6 +140,7 @@ void PageTable::set_code_host(const u8* host_page, bool is_code) {
   if (ix.key[s] != want) return;
   for (u32 p = ix.head[s]; p != HostIndex::NONE; p = ix.next[p]) {
     Entry e = table_[p];
+    if (fmc::on()) fmc::entry_changed(p, e, is_code ? (e | TAG_CODE) : (e & ~TAG_CODE));
     table_[p] = is_code ? (e | TAG_CODE) : (e & ~TAG_CODE);
   }
 }
@@ -147,7 +152,7 @@ void PageTable::set_write_trap(u32 guest, u32 size, bool on) {
     const Entry e = table_[p];
     if (!(e & BASE_MASK)) continue;
     const Entry want = on ? (e | TAG_SPECIAL) : (e & ~TAG_SPECIAL);
-    if (want != e) table_[p] = want;   // no writeback for a line already right
+    if (want != e) { if (fmc::on()) fmc::entry_changed(p, e, want); table_[p] = want; }   // no writeback for a line already right
   }
 }
 
@@ -160,7 +165,7 @@ void PageTable::set_write_trap_bits(u32 first_page, u32 count, const u64* bits, 
       const Entry e = table_[p];
       if (!(e & BASE_MASK)) continue;
       const Entry want = on ? (e | TAG_SPECIAL) : (e & ~TAG_SPECIAL);
-      if (want != e) table_[p] = want;
+      if (want != e) { if (fmc::on()) fmc::entry_changed(p, e, want); table_[p] = want; }
     }
   }
 }

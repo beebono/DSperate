@@ -8,6 +8,7 @@
 // the translator, the killed-block entry redirect and the link patch.
 #include "core/cpu/jit/jit_internal.h"
 #include "core/host_cores.h"
+#include "core/mem/fastmem_census.h"
 #include "core/profile.h"
 #include "core/sched/scheduler.h"
 #include "core/cpu/cpu_cycles.h"
@@ -197,6 +198,7 @@ static void page_span(const Block* b, const u8* page, u32& lo, u32& hi) {
 bool code_query(const u8* host_page) { return g_rt.code_pages.count(host_page) != 0; }
 
 void set_code_tag(const u8* host_page, bool on) {
+  if (mem::fmc::on()) mem::fmc::code_tag(on);
   for (JitCpu& jc : g_rt.cpus)
     if (jc.ctx) jc.ctx->page_table.set_code_host(host_page, on);
 }

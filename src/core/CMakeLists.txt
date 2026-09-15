@@ -10,6 +10,7 @@ add_library(dsperate_core STATIC
   host_cores.cpp
   pc_sampler.cpp
   mem/page_table.cpp
+  mem/fastmem_census.cpp
   mem/bus.cpp
   mem/timing.cpp
   dma/dma.cpp

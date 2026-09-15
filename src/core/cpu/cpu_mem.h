@@ -4,6 +4,7 @@
 #pragma once
 #include "core/cpu/cpu.h"
 #include "core/mem/bus.h"
+#include "core/mem/fastmem_census.h"
 #include "core/nds.h"
 
 #include <cstring>
@@ -34,24 +35,28 @@ inline void data_cost(CpuContext& cpu, u32 addr, int width, bool seq, bool store
 
 inline u8 mem_read8(CpuContext& cpu, u32 addr, bool seq = false) {
   data_cost(cpu, addr, 0, seq, false);
+  if (mem::fmc::on()) mem::fmc::access(cpu, addr, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) return *p;
   return cpu.nds->bus.read8(cpu.which, addr);
 }
 inline u16 mem_read16(CpuContext& cpu, u32 addr, bool seq = false) {
   addr &= ~1u;
   data_cost(cpu, addr, 0, seq, false);
+  if (mem::fmc::on()) mem::fmc::access(cpu, addr, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
   return cpu.nds->bus.read16(cpu.which, addr);
 }
 inline u32 mem_read32(CpuContext& cpu, u32 addr, bool seq = false) {
   addr &= ~3u;
   data_cost(cpu, addr, 1, seq, false);
+  if (mem::fmc::on()) mem::fmc::access(cpu, addr, false);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
   return cpu.nds->bus.read32(cpu.which, addr);
 }
 
 inline void mem_write8(CpuContext& cpu, u32 addr, u8 v, bool seq = false) {
   data_cost(cpu, addr, 0, seq, true);
+  if (mem::fmc::on()) mem::fmc::access(cpu, addr, true);
   bool code = false;
   if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 1); else *p = v; return; }
   cpu.nds->bus.write8(cpu.which, addr, v);
@@ -59,6 +64,7 @@ inline void mem_write8(CpuContext& cpu, u32 addr, u8 v, bool seq = false) {
 inline void mem_write16(CpuContext& cpu, u32 addr, u16 v, bool seq = false) {
   addr &= ~1u;
   data_cost(cpu, addr, 0, seq, true);
+  if (mem::fmc::on()) mem::fmc::access(cpu, addr, true);
   bool code = false;
   if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 2); else std::memcpy(p, &v, 2); return; }
   cpu.nds->bus.write16(cpu.which, addr, v);
@@ -66,6 +72,7 @@ inline void mem_write16(CpuContext& cpu, u32 addr, u16 v, bool seq = false) {
 inline void mem_write32(CpuContext& cpu, u32 addr, u32 v, bool seq = false) {
   addr &= ~3u;
   data_cost(cpu, addr, 1, seq, true);
+  if (mem::fmc::on()) mem::fmc::access(cpu, addr, true);
   bool code = false;
   if (u8* p = cpu.page_table.write_ptr(addr, &code)) { if (code) mem::store_code(p, &v, 4); else std::memcpy(p, &v, 4); return; }
   cpu.nds->bus.write32(cpu.which, addr, v);
@@ -73,10 +80,12 @@ inline void mem_write32(CpuContext& cpu, u32 addr, u32 v, bool seq = false) {
 
 // Instruction fetch (no cost: the prefetch cost is charged by the run loop).
 inline u32 fetch32(CpuContext& cpu, u32 addr) {
+  if (mem::fmc::on()) mem::fmc::fetch(cpu, addr);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u32 v; std::memcpy(&v, p, 4); return v; }
   return cpu.nds->bus.fetch(cpu.which, addr, 32);
 }
 inline u16 fetch16(CpuContext& cpu, u32 addr) {
+  if (mem::fmc::on()) mem::fmc::fetch(cpu, addr);
   if (u8* p = cpu.page_table.read_ptr(addr)) { u16 v; std::memcpy(&v, p, 2); return v; }
   return static_cast<u16>(cpu.nds->bus.fetch(cpu.which, addr, 16));
 }
