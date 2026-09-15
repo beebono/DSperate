@@ -220,30 +220,8 @@ bool NDS::boot_dsi_nand() {
       }
     }
   };
-  if (dsi_boot2_override.empty()) {
-    load_boot2(bp[0], bp[3], bp[2], Cpu::ARM9);
-    load_boot2(bp[4], bp[7], bp[6], Cpu::ARM7);
-  } else {
-    // A boot2 replacement (Unlaunch and friends) ships as a plain DSi
-    // multiboot SRL: unencrypted, no modcrypt, its own ARM9/ARM7 load
-    // addresses in the header. Load those in place of the NAND's boot2 and
-    // enter them the same way -- the entry state below is boot2's, which is
-    // exactly what a replacement is written against.
-    std::vector<u8> img = slurp_file(dsi_boot2_override);
-    if (img.size() < 0x200) { std::fprintf(stderr, "dsi: %s is not an SRL\n", dsi_boot2_override.c_str()); return false; }
-    auto hdr32 = [&](u32 o) { u32 v; std::memcpy(&v, &img[o], 4); return v; };
-    const u32 r9 = hdr32(0x20), e9 = hdr32(0x24), a9 = hdr32(0x28), s9 = hdr32(0x2C);
-    const u32 r7 = hdr32(0x30), e7 = hdr32(0x34), a7 = hdr32(0x38), s7 = hdr32(0x3C);
-    if (static_cast<u64>(r9) + s9 > img.size() || static_cast<u64>(r7) + s7 > img.size()) {
-      std::fprintf(stderr, "dsi: %s: ARM9/ARM7 sections run past the file\n", dsi_boot2_override.c_str());
-      return false;
-    }
-    for (u32 i = 0; i + 3 < s9; i += 4) { u32 v; std::memcpy(&v, &img[r9 + i], 4); bus.dma_write32(Cpu::ARM9, a9 + i, v); }
-    for (u32 i = 0; i + 3 < s7; i += 4) { u32 v; std::memcpy(&v, &img[r7 + i], 4); bus.dma_write32(Cpu::ARM7, a7 + i, v); }
-    bp[2] = e9; bp[6] = e7;
-    bp[3] = s9; bp[7] = s7;
-    std::fprintf(stderr, "dsi: boot2 replaced by %s\n", dsi_boot2_override.c_str());
-  }
+  load_boot2(bp[0], bp[3], bp[2], Cpu::ARM9);
+  load_boot2(bp[4], bp[7], bp[6], Cpu::ARM7);
 
   if (getenv("DS_DEBUG_MBK")) {
     for (u32 a : {0x037B8000u, 0x037C0000u, 0x037D0000u, 0x037D5190u, 0x037D8000u, 0x037DF000u})

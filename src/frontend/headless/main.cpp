@@ -277,7 +277,7 @@ int main(int argc, char** argv) {
   int cpu_oc = 0;   // jit::CpuOc: 0 off, 1 overclock, 2 underclock
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
-  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; const char* dsi_boot2 = nullptr; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr; const char* dsi_sd = nullptr; ds::u64 dsi_autoload_id = 0; const char* dsi_shortcuts = nullptr; bool dsi_shortcuts_on = true;
+  const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr; const char* dsi_sd = nullptr; ds::u64 dsi_autoload_id = 0; const char* dsi_shortcuts = nullptr; bool dsi_shortcuts_on = true;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
   std::vector<std::string> enable_cheats;   // names (or #index) to switch on
@@ -323,7 +323,6 @@ int main(int argc, char** argv) {
     else if (arg("--bios9i")) bios9i = argv[++i];            // the DSi BIOS pair (64 KB each): needed for DSi mode
     else if (arg("--bios7i")) bios7i = argv[++i];
     else if (arg("--dsi-boot")) dsi_boot = argv[++i];        // tools/dsi_nand.py bootblobs output: the console data a DSi title starts with
-    else if (arg("--dsi-boot2")) dsi_boot2 = argv[++i];      // an SRL to run instead of the NAND's boot2 (Unlaunch)
     else if (flag("--dsi-nand-boot")) dsi_nand_boot = true;   // boot the NAND (boot2 -> launcher) instead of direct-booting the ROM
     else if (arg("--dsi-tmd")) dsi_tmd = argv[++i];           // the title's signed DSi TMD for --dsi-install (default: <file>.tmd beside it)
     else if (flag("--dsi-autoload")) dsi_autoload = true;
@@ -523,8 +522,7 @@ int main(int argc, char** argv) {
     if (want && !capable) std::fprintf(stderr, "warning: --dsi with a DS-only header (unit code %02x)\n", nds.cart ? nds.cart->header().unit_code : 0);
     if (want) {
       nds.set_dsi(true);
-      nds.dsi_nand_boot = dsi_nand_boot || dsi_boot2;
-      if (dsi_boot2) nds.dsi_boot2_override = dsi_boot2;
+      nds.dsi_nand_boot = dsi_nand_boot;
       if (dsi_hle && rom && !nds.dsi_nand_boot) {
         std::string why; std::vector<std::string> made;
         if (dsi_font) nds.dsi_font_path = dsi_font;

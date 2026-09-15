@@ -175,7 +175,6 @@ struct NDS {
   // boot from the card. Needs a NAND image; false if there is none.
   bool boot_dsi_nand();
   bool dsi_nand_boot = false;        // set before reset() to take that path
-  std::string dsi_boot2_override;    // an SRL to run instead of the NAND's boot2 (e.g. Unlaunch)
   // The DSi's autoload hand-off (GBATEK "DSi Autoload", melonDS DS
   // SetUpDSiWareDirectBoot): a 0x100-byte "TLNC" block at 0x02000300 naming
   // the title, plus the BPTWL boot flag. Written after a NAND boot is set up,
