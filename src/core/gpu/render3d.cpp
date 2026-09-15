@@ -1580,8 +1580,8 @@ template <int mode, bool textured, bool aa, bool opq>
   // the byte-plane stages take (vld4_u8 over eight records). Lane masks are
   // tested through one 64-bit transfer of the narrowed lanes -- a cross-lane
   // reduction per test is what the in-order core stalls on.
-  auto lanes8 = [](uint32x4_t a, uint32x4_t b) __attribute__((always_inline)) -> u64 {
-    return vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(vcombine_u16(vmovn_u32(a), vmovn_u32(b)))), 0);
+  auto lanes8 = [](uint32x4_t a, uint32x4_t b) __attribute__((always_inline)) {
+    return static_cast<u64>(vget_lane_u64(vreinterpret_u64_u8(vmovn_u16(vcombine_u16(vmovn_u32(a), vmovn_u32(b)))), 0));
   };
   constexpr u64 HALF[2] = {0x00000000FFFFFFFFull, 0xFFFFFFFF00000000ull};
   const bool untextured_passes = !textured && sh.polyalpha > sh.alpha_ref;
