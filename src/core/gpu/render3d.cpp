@@ -329,6 +329,9 @@ struct Renderer3D::Pool {
 
 private:
   void loop(u32 index) {
+    char name[16];
+    std::snprintf(name, sizeof name, "r3d-band%u", index);
+    name_current_thread(name);
     if (pin_threads()) pin_current_thread(1 + index);
     u64 seen = 0;
     for (;;) {

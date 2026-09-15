@@ -10,6 +10,7 @@
 
 #if defined(__linux__)
 #include <sched.h>
+#include <sys/prctl.h>
 #endif
 
 namespace ds {
@@ -111,6 +112,14 @@ void pin_current_thread(u32 k) {
   sched_setaffinity(0, sizeof set, &set);   // a hint: failure leaves the thread where it was
 #else
   (void)k;
+#endif
+}
+
+void name_current_thread(const char* name) {
+#if defined(__linux__)
+  prctl(PR_SET_NAME, name, 0, 0, 0);
+#else
+  (void)name;
 #endif
 }
 

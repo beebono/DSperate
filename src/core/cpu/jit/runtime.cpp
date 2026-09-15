@@ -7,6 +7,7 @@
 // behind the `backend` interface in jit_internal.h (a64/, a32/): the stubs,
 // the translator, the killed-block entry redirect and the link patch.
 #include "core/cpu/jit/jit_internal.h"
+#include "core/host_cores.h"
 #include "core/profile.h"
 #include "core/sched/scheduler.h"
 #include "core/cpu/cpu_cycles.h"
@@ -525,6 +526,7 @@ static void seed(JitCpu& jc, const Block& b) {
 }
 
 static void worker() {
+  name_current_thread("jit-pretx");
   Runtime& r = g_rt;
   // The worker emits into its own arena chunk, reserved in one bump of r.pos,
   // so translate_block runs without mu held: the emulation thread's own

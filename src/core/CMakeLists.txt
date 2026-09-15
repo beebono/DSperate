@@ -8,6 +8,7 @@ add_library(dsperate_core STATIC
   bios/firmware_gen.cpp
   profile.cpp
   host_cores.cpp
+  pc_sampler.cpp
   mem/page_table.cpp
   mem/bus.cpp
   mem/timing.cpp

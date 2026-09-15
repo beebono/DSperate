@@ -1844,6 +1844,7 @@ void Gpu3D::worker_join() {
 }
 
 void Gpu3D::worker_loop() {
+  name_current_thread("gx-worker");
   u32 rd = q_rd_local_;
   for (;;) {
     u32 wr = q_wr_.load(std::memory_order_acquire);

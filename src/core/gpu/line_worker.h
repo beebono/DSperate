@@ -20,6 +20,7 @@
 // handhelds, where the 3D band workers already want three of them.
 #pragma once
 
+#include "core/host_cores.h"
 #include "core/types.h"
 
 #include <atomic>
@@ -123,6 +124,7 @@ private:
   }
 
   void loop() {
+    name_current_thread("line-worker");
     u32 last = 0;
     for (;;) {
       // Spin briefly, then park. 20000 (~the line gap) by default: parking

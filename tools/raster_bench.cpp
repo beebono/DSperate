@@ -19,19 +19,16 @@
 // equal hashes across builds mean equal pictures. DS_R3D_THREADS=0 gives the
 // single-threaded cost of the kernels; unset, the shape the build would use.
 //
-// --profile OUT: a sampling profile of the timed renders, for a device with no
-// perf (the A30's 3.4 kernel has no perf events at all). ITIMER_PROF delivers
-// SIGPROF on CPU time -- at the kernel's tick, 100 Hz there -- and the handler
-// records the interrupted PC. OUT gets the executable's load base and one PC
-// per line; tools/pc_profile.py folds them into functions, inlined ones
-// included, with addr2line on a -g build of the same code. Only the thread
-// running when the tick lands is sampled, so use it with DS_R3D_THREADS=0.
+// --profile OUT: a sampling profile of the timed renders (core/pc_sampler.h),
+// for a device with no perf; tools/pc_profile.py folds it into functions,
+// inlined ones included, with addr2line on a -g build of the same code. Every
+// thread is sampled, so DS_R3D_THREADS=0 keeps the kernels on one thread.
 #include "core/nds.h"
 #include "core/state/state.h"
 #include "core/host_cores.h"
+#include "core/pc_sampler.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -39,67 +36,7 @@
 #include <string>
 #include <vector>
 
-#if defined(__linux__)
-#include <csignal>
-#include <link.h>
-#include <sys/time.h>
-#include <ucontext.h>
-#endif
-
 namespace {
-
-// ---- sampling profiler ----------------------------------------------------------
-constexpr size_t kMaxSamples = 1 << 20;
-uintptr_t g_samples[kMaxSamples];
-std::atomic<size_t> g_nsamples{0};
-std::atomic<bool> g_sampling{false};
-
-#if defined(__linux__)
-void on_sigprof(int, siginfo_t*, void* ctx) {
-  if (!g_sampling.load(std::memory_order_relaxed)) return;
-  const ucontext_t* uc = static_cast<const ucontext_t*>(ctx);
-  uintptr_t pc = 0;
-#if defined(__arm__)
-  pc = uc->uc_mcontext.arm_pc;
-#elif defined(__aarch64__)
-  pc = uc->uc_mcontext.pc;
-#elif defined(__x86_64__)
-  pc = static_cast<uintptr_t>(uc->uc_mcontext.gregs[REG_RIP]);
-#endif
-  const size_t n = g_nsamples.load(std::memory_order_relaxed);
-  if (n < kMaxSamples) { g_samples[n] = pc; g_nsamples.store(n + 1, std::memory_order_relaxed); }
-}
-
-int first_phdr(struct dl_phdr_info* info, size_t, void* out) {
-  *static_cast<uintptr_t*>(out) = info->dlpi_addr;   // the first object is the executable
-  return 1;
-}
-
-void start_profile() {
-  struct sigaction sa {};
-  sa.sa_sigaction = on_sigprof;
-  sa.sa_flags = SA_SIGINFO | SA_RESTART;
-  sigemptyset(&sa.sa_mask);
-  sigaction(SIGPROF, &sa, nullptr);
-  const itimerval tv{{0, 1000}, {0, 1000}};   // asks for 1 kHz; the kernel's tick decides
-  setitimer(ITIMER_PROF, &tv, nullptr);
-}
-
-bool write_profile(const char* path) {
-  const itimerval off{};
-  setitimer(ITIMER_PROF, &off, nullptr);
-  FILE* f = std::fopen(path, "w");
-  if (!f) return false;
-  uintptr_t base = 0;
-  dl_iterate_phdr(first_phdr, &base);
-  std::fprintf(f, "base %#lx\n", static_cast<unsigned long>(base));
-  const size_t n = g_nsamples.load();
-  for (size_t i = 0; i < n; ++i) std::fprintf(f, "%#lx\n", static_cast<unsigned long>(g_samples[i]));
-  std::fclose(f);
-  std::fprintf(stderr, "profile: %zu samples to %s\n", n, path);
-  return true;
-}
-#endif
 
 std::vector<ds::u8> slurp(const char* path) {
   std::vector<ds::u8> v;
@@ -162,11 +99,7 @@ int main(int argc, char** argv) {
 #endif
   );
   bool ok = true;
-#if defined(__linux__)
-  if (profile) start_profile();
-#else
-  if (profile) { std::fprintf(stderr, "--profile needs Linux\n"); return 2; }
-#endif
+  if (profile && !ds::pcsample::start()) { std::fprintf(stderr, "--profile: no sampler on this platform\n"); return 2; }
   for (const char* path : states) {
     ds::NDS nds;
     std::string err;
@@ -183,9 +116,9 @@ int main(int argc, char** argv) {
     ms.reserve(static_cast<size_t>(iters));
     int bad = 0;
     for (int k = 0; k < iters; ++k) {
-      g_sampling.store(profile != nullptr, std::memory_order_relaxed);
+      if (profile) ds::pcsample::set_active(true);
       ms.push_back(render_once(nds));
-      g_sampling.store(false, std::memory_order_relaxed);
+      if (profile) ds::pcsample::set_active(false);
       if (frame_hash(nds) != want) ++bad;
     }
     std::vector<double> sorted = ms;
@@ -197,8 +130,6 @@ int main(int argc, char** argv) {
                 bad ? "  HASH MISMATCH" : "");
     if (bad) { std::fprintf(stderr, "%s: %d of %d renders differed from the first\n", path, bad, iters); ok = false; }
   }
-#if defined(__linux__)
-  if (profile && !write_profile(profile)) { std::fprintf(stderr, "cannot write %s\n", profile); ok = false; }
-#endif
+  if (profile && !ds::pcsample::write(profile)) { std::fprintf(stderr, "cannot write %s\n", profile); ok = false; }
   return ok ? 0 : 1;
 }

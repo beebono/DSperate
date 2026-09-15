@@ -7,6 +7,7 @@
 // and/or dumping raw framebuffers (--dump-frames) for tools/compare_frames.py
 // and the SPU output (--dump-audio, raw s16 stereo at 32768 Hz).
 #include "core/nds.h"
+#include "core/pc_sampler.h"
 #include "core/host_cores.h"
 #include "core/state/state.h"
 #include "core/io/dsi_nand_persist.h"
@@ -254,6 +255,7 @@ int main(int argc, char** argv) {
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
+  const char* pc_profile = nullptr;
   // A whole 1800-frame dump is ~708 MB, so a window can be selected: the
   // frame-budget report below names the frames worth looking at.
   int dump_from = 0, dump_count = 0;
@@ -374,6 +376,7 @@ int main(int argc, char** argv) {
     // measure. Applies to the frame_ms/work_ms series, not to DS_PROFILE
     // counters, which accumulate from frame 0 either way.
     else if (arg("--stats-from")) stats_from = std::atoi(argv[++i]);
+    else if (arg("--pc-profile")) pc_profile = argv[++i];                   // a sampling profile of every thread from --stats-from on (core/pc_sampler.h; tools/pc_profile.py)
     else if (arg("--save-state-at")) { save_state_at = std::atoi(argv[++i]); save_state_path = std::strchr(argv[i], ':'); if (save_state_path) ++save_state_path; }   // N:path -- write after N frames (0 = at once)
     else rom = argv[i];
   }
@@ -751,8 +754,10 @@ int main(int argc, char** argv) {
   if (lan_host || lan_join || netplay) { std::fprintf(stderr, "lan: built without DSPERATE_NET\n"); return 1; }
   if (internet) { std::fprintf(stderr, "internet: built without DSPERATE_NET\n"); return 1; }
 #endif
+  if (pc_profile && !ds::pcsample::start()) { std::fprintf(stderr, "--pc-profile: no sampler on this platform\n"); return 1; }
   const auto pace_start = std::chrono::steady_clock::now();
   for (int i = 0; i < frames; ++i) {
+    if (pc_profile && i == stats_from) ds::pcsample::set_active(true);
     if (pace) {   // the DS's 59.83 Hz, from the run's start so sleep jitter does not accumulate
       const auto due = pace_start + std::chrono::microseconds(static_cast<long long>(i * 1000000.0 / 59.8261));
       std::this_thread::sleep_until(due);
@@ -916,6 +921,7 @@ int main(int argc, char** argv) {
     if (per_frame && trace) { std::fprintf(stderr, "frame %d arm9 %llu arm7 %llu\n", i, ts.executed[0] - last9, ts.executed[1] - last7); last9 = ts.executed[0]; last7 = ts.executed[1]; }
   }
   wd_stop.store(true); if (wd.joinable()) wd.join();
+  if (pc_profile && !ds::pcsample::write(pc_profile)) std::fprintf(stderr, "--pc-profile: cannot write %s\n", pc_profile);
   if (fw_override && nds.firmware_override_dirty()) {
     std::string err;
     if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware override: cannot save: %s\n", err.c_str());

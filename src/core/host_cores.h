@@ -22,4 +22,8 @@ u32 host_cores();
 bool pin_threads();
 void pin_current_thread(u32 k);
 
+// The calling thread's name (15 characters at most on Linux), for profiles
+// and debuggers: the sampling profiler's thread column reads it.
+void name_current_thread(const char* name);
+
 } // namespace ds
