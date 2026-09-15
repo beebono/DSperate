@@ -738,8 +738,13 @@ void Renderer3D::setup_polygon(Edge& e, const Polygon& p) {
 // ramp's step is at most 2^24 / xdiff and xv * step stays below 2^24, so its
 // factors are below 256 too. Otherwise nothing is promised (~0u).
 u32 Renderer3D::fac_bound(s32 xdiff, s32 wl, s32 wr) {
+#if defined(__arm__)
   const u64 wmax = std::max(static_cast<u32>(wl), static_cast<u32>(wr));
   return static_cast<u64>(static_cast<u32>(xdiff)) * wmax < (u64{1} << 24) ? 256u : ~0u;
+#else
+  (void)xdiff; (void)wl; (void)wr;
+  return ~0u;   // only the ARMv7 kernels use a bound
+#endif
 }
 
 bool Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
@@ -759,7 +764,14 @@ bool Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s
   // function of its pixel alone, so the values do not depend on the range.
   // With z constant nothing reads it -- GSDD's title stages 45 k such pixels
   // a frame (census 2026-08-28).
+  // ARMv7 only: on the A55 it measured flat to slower with the other two
+  // A30 changes, and AArch64 keeps the factor over the whole span.
+#if defined(__arm__)
   const bool use_factor = xdiff != 0 && wbuffer && zl != zr;
+#else
+  const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
+  const bool use_factor = xdiff != 0 && (!linear || (wbuffer && zl != zr));
+#endif
   if (use_factor) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac + off);
   // A constant depth needs no reciprocal or per-pixel interpolation.  Flat
   // geometry is common in the DS scenes, and keeping this out of the span
@@ -820,7 +832,11 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   }
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   if (xdiff != 0 && !linear) {
+#if defined(__arm__)
     if (!fac_ready) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac + off);
+#else
+    (void)fac_ready;   // span_stage staged it (ARMv7 alone defers it to here)
+#endif
     // A span whose colour endpoints agree -- most of them, and every span of
     // flat-shaded content -- interpolates nothing across r, g and b: fill the
     // three buffers with the constant and stage only s and t. This is
@@ -1776,7 +1792,7 @@ template <int mode, bool textured, bool aa, bool opq>
 // once per run instead of once per line. The loop also lets the constant
 // polygon and Shade fields (wbuffer, always_fill, ybot, the vertex pointers)
 // stay in registers across the whole run rather than being reloaded per line.
-#if DSPERATE_NEON
+#if DSPERATE_NEON && defined(__arm__)
 // One edge's w and five attributes (r g b s t) at the current scanline, as
 // Interp<1>::interpolate computes each: y0 + ((y1-y0) * f >> 9) rising, else
 // y1 + ((y0-y1) * (512-f) >> 9), y0 when they are equal. Formed in 32-bit
@@ -1785,7 +1801,8 @@ template <int mode, bool textured, bool aa, bool opq>
 // (colours are 9 bits, texture coordinates s16, W normalised to 16). Returns
 // false, writing nothing, for a linear edge or one the guard rejects; the
 // scalar interpolate then runs as before. On the A30 the ten scalar calls per
-// scanline were ~5 % of a heavy frame's raster (2026-09-15).
+// scanline were ~5 % of a heavy frame's raster (2026-09-15). ARMv7 only: on
+// the A55 the scalar calls are cheap and this measured flat to slower.
 [[gnu::always_inline]] inline bool Renderer3D::edge_values_vec(const Interp<1>& in, s32 w0, s32 w1, const Vertex& vc, const Vertex& vn,
                                                                s32* w, s32* a) {
   if (in.xdiff == 0) {
@@ -1821,6 +1838,7 @@ template <int mode, bool textured, bool aa, bool opq>
 }
 #endif
 
+#if DSPERATE_NEON && defined(__arm__)
 void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
   const Polygon& p = *e.poly;
   const Shade& sh = e.sh;
@@ -1841,7 +1859,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
     // Both edges' w and attributes, computed per edge (the swap below only
     // changes which edge's values sit on which end).
     s32 wl, wr, av[2][5];
-#if DSPERATE_NEON
+#if DSPERATE_NEON && defined(__arm__)
     const bool lvec = edge_values_vec(e.left.interp, e.wcl, e.wnl, *e.vcl, *e.vnl, &wl, av[0]);
     const bool rvec = edge_values_vec(e.right.interp, e.wcr, e.wnr, *e.vcr, *e.vnr, &wr, av[1]);
 #else
@@ -1922,6 +1940,106 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
     e.xr = e.right.step();
   }
 }
+#else
+// The AArch64 and portable body, as before the ARMv7 edge path: restructuring it
+// around per-edge arrays measured slower on the A55 (2026-09-15).
+void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
+  const Polygon& p = *e.poly;
+  const Shade& sh = e.sh;
+  const bool always_fill = sh.always_fill;
+  const bool wireframe = sh.wireframe;
+  const bool aa = sh.dispcnt & (1 << 4);   // coverage is only read by the AA resolve
+  const bool flat = p.ytop == p.ybot;
+  const s32 ybot1 = p.ybot - 1;
+  const s32 ytop = p.ytop;
+
+  for (s32 y = y0; y < y1; ++y) {
+    LineSpan& ls = lines_[static_cast<u32>(y - y0)];
+    if (!flat) {
+      if (y >= gx_->vertex(p.vtx[e.next_vl]).sy && e.cur_vl != p.vbot) setup_left_edge(e, y);
+      if (y >= gx_->vertex(p.vtx[e.next_vr]).sy && e.cur_vr != p.vbot) setup_right_edge(e, y);
+    }
+    s32 xstart = e.xl, xend = e.xr;
+    s32 wl = e.left.interp.interpolate(e.wcl, e.wnl);
+    s32 wr = e.right.interp.interpolate(e.wcr, e.wnr);
+    s32 zl = e.left.interp.interpolate_z(e.zcl, e.znl);
+    s32 zr = e.right.interp.interpolate_z(e.zcr, e.znr);
+    // Right vertical edges are pushed one pixel left unless the span is a
+    // single pixel at the screen's left edge.
+    if (e.r_incr0 && (!e.l_incr0 || xstart != xend) && xend != 0) --xend;
+
+    const Vertex *vlcur, *vlnext, *vrcur, *vrnext;
+    const Interp<1>* istart; const Interp<1>* iend;
+    bool l_fill, r_fill; s32 l_len, r_len, l_cov, r_cov;
+    // Everything below that is not a function of y comes out of the Edge; only
+    // the bottom-line test and the edge_params (which walk dx) are per scanline.
+    const bool ybot_line = y == ybot1;
+    const bool bottom_fill = ybot_line && e.next_sx_differ;
+    if (xstart > xend) {
+      // Swapped edges: the hardware walks them backwards, which breaks the
+      // X-major edge lengths (and the AA on them) in a specific way.
+      vlcur = e.vcr; vlnext = e.vnr;
+      vrcur = e.vcl; vrnext = e.vnl;
+      istart = &e.right.interp; iend = &e.left.interp;
+      e.right.edge_params<true>(aa, &l_len, &l_cov);
+      e.left.edge_params<true>(aa, &r_len, &r_cov);
+      std::swap(xstart, xend); std::swap(wl, wr); std::swap(zl, zr);
+      if (always_fill) { l_fill = r_fill = true; }
+      else {
+        l_fill = e.nx_r || (bottom_fill && e.rxm);
+        r_fill = e.px_l || (!e.lneg_xm && e.r_incr0) || (bottom_fill && e.lxm);
+      }
+    } else {
+      vlcur = e.vcl; vlnext = e.vnl;
+      vrcur = e.vcr; vrnext = e.vnr;
+      istart = &e.left.interp; iend = &e.right.interp;
+      e.left.edge_params<false>(aa, &l_len, &l_cov);
+      e.right.edge_params<false>(aa, &r_len, &r_cov);
+      // Fill rules for opaque edges: left edges fill when their slope is <= 1,
+      // right edges when > 1 or vertical; the bottom pixel of a negative
+      // X-major edge fills next to a flat bottom; fully overlapping identical
+      // edges fill. AA, edge marking, blended translucency or wireframe fill all.
+      if (always_fill) { l_fill = r_fill = true; }
+      else {
+        l_fill = e.nx_l || (bottom_fill && e.lxm) ||
+                 (e.same_incr && (xstart + l_len == xend + 1));
+        r_fill = e.px_r || e.r_incr0 || (bottom_fill && e.rxm);
+      }
+    }
+
+    int yedge = 0;
+    if (y == ytop) yedge = 0x4; else if (ybot_line) yedge = 0x8;
+    s32 x = xstart;
+    if (x < 0) x = 0;
+
+    ls.xstart = xstart; ls.xend = xend;
+    ls.wl = wl; ls.wr = wr; ls.zl = zl; ls.zr = zr;
+    ls.l_len = l_len; ls.r_len = r_len; ls.l_cov = l_cov; ls.r_cov = r_cov;
+    ls.xa = x; ls.xb = std::min(xend + 1, 256);
+    ls.yedge = yedge;
+    ls.l_fill = l_fill; ls.r_fill = r_fill;
+    ls.wf_skip = wireframe && !yedge;
+    // Attributes at both ends of the span: r g b s t. Computed for every line
+    // of the run, including the ones the depth pre-pass will go on to kill --
+    // the per-scanline path skipped those, but the interpolants are live in
+    // registers here and depth survival is 61-94 % across the five scenes, so
+    // the branch costs more than the arithmetic it saves.
+    ls.al[0] = istart->interpolate(vlcur->fcol[0], vlnext->fcol[0]);
+    ls.al[1] = istart->interpolate(vlcur->fcol[1], vlnext->fcol[1]);
+    ls.al[2] = istart->interpolate(vlcur->fcol[2], vlnext->fcol[2]);
+    ls.al[3] = istart->interpolate(vlcur->tex[0], vlnext->tex[0]);
+    ls.al[4] = istart->interpolate(vlcur->tex[1], vlnext->tex[1]);
+    ls.ar[0] = iend->interpolate(vrcur->fcol[0], vrnext->fcol[0]);
+    ls.ar[1] = iend->interpolate(vrcur->fcol[1], vrnext->fcol[1]);
+    ls.ar[2] = iend->interpolate(vrcur->fcol[2], vrnext->fcol[2]);
+    ls.ar[3] = iend->interpolate(vrcur->tex[0], vrnext->tex[0]);
+    ls.ar[4] = iend->interpolate(vrcur->tex[1], vrnext->tex[1]);
+
+    e.xl = e.left.step();
+    e.xr = e.right.step();
+  }
+}
+#endif
 
 // Stage one precomputed scanline into the batch. What is left here is exactly
 // the work the framebuffer reaches: the depth pre-pass against live depth_ and
@@ -1955,9 +2073,17 @@ void Renderer3D::stage_line(Edge& e, s32 y, const LineSpan& ls) {
   SpanBuf& sb = spanbuf_;
   const u32 off = batch_px_;
   s32 ca = xa, cb = xa;
+#if defined(__arm__)
   bool fac_ready = false;
+#else
+  constexpr bool fac_ready = true;
+#endif
   if (xb > xa) {
+#if defined(__arm__)
     fac_ready = span_stage(sb, ls.xstart, ls.xend, xa, xb, ls.wl, ls.wr, ls.zl, ls.zr, p.wbuffer, nullptr, nullptr, false, off);
+#else
+    span_stage(sb, ls.xstart, ls.xend, xa, xb, ls.wl, ls.wr, ls.zl, ls.zr, p.wbuffer, nullptr, nullptr, false, off);
+#endif
     if (sh.shadow) {
       // Shadow polygons test against whichever pixel their stencil names; no pre-pass.
       std::memset(sb.pass + off, 1, static_cast<size_t>(xb - xa)); cb = xb;

@@ -373,7 +373,7 @@ private:
   // leave the edge cursors stepped past y1-1 exactly as the per-scanline path
   // left them.
   void precompute_lines(Edge& e, s32 y0, s32 y1);
-#if DSPERATE_NEON
+#if DSPERATE_NEON && defined(__arm__)
   static bool edge_values_vec(const Interp<1>& in, s32 w0, s32 w1, const Vertex& vc, const Vertex& vn, s32* w, s32* a);
 #endif
   // The half of the old render_polygon_line that framebuffer state reaches:
