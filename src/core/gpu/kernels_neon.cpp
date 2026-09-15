@@ -972,6 +972,41 @@ inline int32x4_t mul_hi8_add(int32x4_t base, uint32x4_t d, uint32x4_t f) {   // 
   return vaddq_s32(base, vreinterpretq_s32_u32(vcombine_u32(vmovn_u64(lo), vmovn_u64(hi))));
 }
 const int32x4_t kLane = {0, 1, 2, 3};
+
+// The attribute kernels' multiply, when it fits: base + ((d * f) >> 8) with
+// d * f < 2^32 is the same number whether the product is formed in 64 bits or
+// in 32, and the 32-bit form is one instruction where the 64-bit one is six --
+// on ARMv7 the high half has to be split out and narrowed back by hand, which
+// the A30 profile put at 6 % of a heavy frame's raster (2026-09-15).
+[[gnu::always_inline]] inline int32x4_t mul8_add(int32x4_t base, uint32x4_t d, uint32x4_t f, bool narrow) {
+  if (narrow) return vaddq_s32(base, vreinterpretq_s32_u32(vshrq_n_u32(vmulq_u32(d, f), 8)));
+  return mul_hi8_add(base, d, f);
+}
+
+// The largest factor in fac[0, n) -- only those: the entries past n are the
+// slack the kernels write over and hold whatever an earlier span left. Only
+// run when the caller could not bound the factors: on the A30 the scan cost
+// as much as the narrow multiply saved (2026-09-15).
+inline u32 fac_max(const u32* fac, u32 n) {
+  uint32x4_t acc = vdupq_n_u32(0);
+  u32 i = 0;
+  for (; i + 4 <= n; i += 4) acc = vmaxq_u32(acc, vld1q_u32(fac + i));
+  if (i < n) acc = vmaxq_u32(acc, vandq_u32(vld1q_u32(fac + i), vcltq_u32(vreinterpretq_u32_s32(kLane), vdupq_n_u32(n - i))));
+  return compat::maxv_u32(acc);
+}
+
+// Whether every product the attribute kernels form over this span fits 32
+// bits. A factor above 256 only comes from a perspective numerator that
+// wrapped (garbage W); with all of them at most 256, 256 - f is too, and an
+// endpoint difference below 2^24 keeps d * f below 2^32. Colours (9 bits) and
+// texture coordinates (s16) always pass; the wide path stays for the rest.
+inline bool narrow_ok(u32 fmax, u32 dmax) { return fmax <= 256 && dmax < (1u << 24); }
+// The bound to test: the caller's when it gave one, otherwise the scan -- and
+// no scan at all when no attribute can narrow anyway.
+inline u32 fac_bound_of(const u32* fac, u32 n, u32 fmax, u32 dmax) {
+  if (fmax <= 256 || dmax >= (1u << 24)) return fmax;
+  return fac_max(fac, n);
+}
 }
 
 void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac) {
@@ -1053,37 +1088,51 @@ void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac)
   }
 }
 
-void span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out) {
+void span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out, u32 fmax) {
   if (y0 == y1) { const int32x4_t v = vdupq_n_s32(y0); for (u32 i = 0; i < n; i += 4) vst1q_s32(out + i, v); return; }
   const bool up = y0 < y1;
+  const u32 dd = static_cast<u32>(up ? y1 - y0 : y0 - y1);
+  const bool narrow = narrow_ok(fac_bound_of(fac, n, fmax, dd), dd);
   const int32x4_t base = vdupq_n_s32(up ? y0 : y1);
-  const uint32x4_t d = vdupq_n_u32(static_cast<u32>(up ? y1 - y0 : y0 - y1));
+  const uint32x4_t d = vdupq_n_u32(dd);
   const uint32x4_t k256 = vdupq_n_u32(256);
   for (u32 i = 0; i < n; i += 4) {
     uint32x4_t f = vld1q_u32(fac + i);
     if (!up) f = vsubq_u32(k256, f);
-    vst1q_s32(out + i, mul_hi8_add(base, d, f));
+    vst1q_s32(out + i, mul8_add(base, d, f, narrow));
   }
 }
+
+namespace {
+// Endpoint constants for attributes [k0, k1): the base, |y1 - y0|, direction
+// and flatness, and the largest difference (for narrow_ok).
+struct AttrSet {
+  int32x4_t base[5]; uint32x4_t d[5]; bool up[5], flat[5];
+  u32 dmax = 0;
+  AttrSet(const s32* y0, const s32* y1, int k0, int k1) {
+    for (int k = k0; k < k1; ++k) {
+      flat[k] = y0[k] == y1[k];
+      up[k] = y0[k] < y1[k];
+      base[k] = vdupq_n_s32(flat[k] ? y0[k] : (up[k] ? y0[k] : y1[k]));
+      const u32 dk = static_cast<u32>(up[k] ? y1[k] - y0[k] : y0[k] - y1[k]);
+      d[k] = vdupq_n_u32(dk);
+      if (!flat[k] && dk > dmax) dmax = dk;
+    }
+  }
+};
 
 // The five attributes in one pass over the span: `fac` is loaded once per
 // four pixels instead of once per attribute, and the endpoint constants for
 // all five stay in registers.
-void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const* out) {
+template <bool narrow>
+void span_attrs5_body(const AttrSet& a, const u32* fac, u32 n, s32* const* out) {
   const uint32x4_t k256 = vdupq_n_u32(256);
-  int32x4_t base[5]; uint32x4_t d[5]; bool up[5], flat[5];
-  for (int k = 0; k < 5; ++k) {
-    flat[k] = y0[k] == y1[k];
-    up[k] = y0[k] < y1[k];
-    base[k] = vdupq_n_s32(flat[k] ? y0[k] : (up[k] ? y0[k] : y1[k]));
-    d[k] = vdupq_n_u32(static_cast<u32>(up[k] ? y1[k] - y0[k] : y0[k] - y1[k]));
-  }
   for (u32 i = 0; i < n; i += 4) {
     const uint32x4_t f = vld1q_u32(fac + i);
     const uint32x4_t fi = vsubq_u32(k256, f);
     for (int k = 0; k < 5; ++k) {
-      if (flat[k]) vst1q_s32(out[k] + i, base[k]);
-      else vst1q_s32(out[k] + i, mul_hi8_add(base[k], d[k], up[k] ? f : fi));
+      if (a.flat[k]) vst1q_s32(out[k] + i, a.base[k]);
+      else vst1q_s32(out[k] + i, mul8_add(a.base[k], a.d[k], a.up[k] ? f : fi, narrow));
     }
   }
 }
@@ -1094,39 +1143,26 @@ void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const
 // span buffers are a third of the size.
 // s and t only: three of the five attribute chains, and three of the five
 // stores per eight pixels, go with the colour.
-void span_attrs2n(const s32* y0, const s32* y1, const u32* fac, u32 n, s16* sc, s16* tc) {
+template <bool narrow>
+void span_attrs2n_body(const AttrSet& a, const u32* fac, u32 n, s16* sc, s16* tc) {
   const uint32x4_t k256 = vdupq_n_u32(256);
-  int32x4_t base[2]; uint32x4_t d[2]; bool up[2], flat[2];
-  for (int k = 0; k < 2; ++k) {
-    const s32 a = y0[k + 3], b = y1[k + 3];
-    flat[k] = a == b;
-    up[k] = a < b;
-    base[k] = vdupq_n_s32(flat[k] ? a : (up[k] ? a : b));
-    d[k] = vdupq_n_u32(static_cast<u32>(up[k] ? b - a : a - b));
-  }
   s16* const tout[2] = {sc, tc};
   for (u32 i = 0; i < n; i += 8) {
     const uint32x4_t f0 = vld1q_u32(fac + i), f1 = vld1q_u32(fac + i + 4);
     const uint32x4_t i0 = vsubq_u32(k256, f0), i1 = vsubq_u32(k256, f1);
-    for (int k = 0; k < 2; ++k) {
+    for (int k = 3; k < 5; ++k) {
       int32x4_t v0, v1;
-      if (flat[k]) { v0 = base[k]; v1 = base[k]; }
-      else { v0 = mul_hi8_add(base[k], d[k], up[k] ? f0 : i0); v1 = mul_hi8_add(base[k], d[k], up[k] ? f1 : i1); }
-      vst1q_s16(tout[k] + i, vreinterpretq_s16_u16(vcombine_u16(vmovn_u32(vreinterpretq_u32_s32(v0)),
-                                                                vmovn_u32(vreinterpretq_u32_s32(v1)))));
+      if (a.flat[k]) { v0 = a.base[k]; v1 = a.base[k]; }
+      else { v0 = mul8_add(a.base[k], a.d[k], a.up[k] ? f0 : i0, narrow); v1 = mul8_add(a.base[k], a.d[k], a.up[k] ? f1 : i1, narrow); }
+      vst1q_s16(tout[k - 3] + i, vreinterpretq_s16_u16(vcombine_u16(vmovn_u32(vreinterpretq_u32_s32(v0)),
+                                                                   vmovn_u32(vreinterpretq_u32_s32(v1)))));
     }
   }
 }
 
-void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
+template <bool narrow>
+void span_attrs5n_body(const AttrSet& a, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
   const uint32x4_t k256 = vdupq_n_u32(256);
-  int32x4_t base[5]; uint32x4_t d[5]; bool up[5], flat[5];
-  for (int k = 0; k < 5; ++k) {
-    flat[k] = y0[k] == y1[k];
-    up[k] = y0[k] < y1[k];
-    base[k] = vdupq_n_s32(flat[k] ? y0[k] : (up[k] ? y0[k] : y1[k]));
-    d[k] = vdupq_n_u32(static_cast<u32>(up[k] ? y1[k] - y0[k] : y0[k] - y1[k]));
-  }
   u8* const cout[3] = {vr, vg, vb};
   s16* const tout[2] = {sc, tc};
   for (u32 i = 0; i < n; i += 8) {
@@ -1134,8 +1170,8 @@ void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u
     const uint32x4_t i0 = vsubq_u32(k256, f0), i1 = vsubq_u32(k256, f1);
     for (int k = 0; k < 5; ++k) {
       int32x4_t v0, v1;
-      if (flat[k]) { v0 = base[k]; v1 = base[k]; }
-      else { v0 = mul_hi8_add(base[k], d[k], up[k] ? f0 : i0); v1 = mul_hi8_add(base[k], d[k], up[k] ? f1 : i1); }
+      if (a.flat[k]) { v0 = a.base[k]; v1 = a.base[k]; }
+      else { v0 = mul8_add(a.base[k], a.d[k], a.up[k] ? f0 : i0, narrow); v1 = mul8_add(a.base[k], a.d[k], a.up[k] ? f1 : i1, narrow); }
       if (k < 3) {   // (v >> 3) & 0xFF: the two narrowing moves mask it
         const uint16x8_t w = vcombine_u16(vmovn_u32(vshrq_n_u32(vreinterpretq_u32_s32(v0), 3)),
                                           vmovn_u32(vshrq_n_u32(vreinterpretq_u32_s32(v1), 3)));
@@ -1146,6 +1182,25 @@ void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u
       }
     }
   }
+}
+} // namespace
+
+void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const* out, u32 fmax) {
+  const AttrSet a(y0, y1, 0, 5);
+  if (a.dmax == 0 || narrow_ok(fac_bound_of(fac, n, fmax, a.dmax), a.dmax)) span_attrs5_body<true>(a, fac, n, out);
+  else span_attrs5_body<false>(a, fac, n, out);
+}
+
+void span_attrs2n(const s32* y0, const s32* y1, const u32* fac, u32 n, s16* sc, s16* tc, u32 fmax) {
+  const AttrSet a(y0, y1, 3, 5);
+  if (a.dmax == 0 || narrow_ok(fac_bound_of(fac, n, fmax, a.dmax), a.dmax)) span_attrs2n_body<true>(a, fac, n, sc, tc);
+  else span_attrs2n_body<false>(a, fac, n, sc, tc);
+}
+
+void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc, u32 fmax) {
+  const AttrSet a(y0, y1, 0, 5);
+  if (a.dmax == 0 || narrow_ok(fac_bound_of(fac, n, fmax, a.dmax), a.dmax)) span_attrs5n_body<true>(a, fac, n, vr, vg, vb, sc, tc);
+  else span_attrs5n_body<false>(a, fac, n, vr, vg, vb, sc, tc);
 }
 
 // Linear interpolation of one attribute over four pixels, the vector form of

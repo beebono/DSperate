@@ -6,6 +6,7 @@
 // without NEON only the reference runs (as a smoke test).
 #include "core/gpu/kernels.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -424,7 +425,14 @@ static void test_span() {
     else if (kind == 1) { y0 = static_cast<s16>(rng()); y1 = static_cast<s16>(rng()); }                               // texture coordinate
     else { y0 = static_cast<s32>(rng() & 0xFFFFFF); y1 = static_cast<s32>(rng() & 0xFFFFFF); }                       // depth
     if (!(rng() & 7)) y1 = y0;
-    kern::ref::span_attr_persp(y0, y1, fa, n, oa); N::span_attr_persp(y0, y1, fa, n, ob);
+    // Colour and texture-coordinate magnitudes, as the renderer's endpoints are.
+    s32 ys5bound0[5], ys5bound1[5];
+    for (int k = 0; k < 5; ++k) {
+      ys5bound0[k] = k < 3 ? static_cast<s32>(rng() & 0x1FF) : static_cast<s16>(rng());
+      ys5bound1[k] = k < 3 ? static_cast<s32>(rng() & 0x1FF) : static_cast<s16>(rng());
+      if (!(rng() & 5)) ys5bound1[k] = ys5bound0[k];
+    }
+    kern::ref::span_attr_persp(y0, y1, fa, n, oa, ~0u); N::span_attr_persp(y0, y1, fa, n, ob, ~0u);
     CHECK_SAME("span_attr_persp", oa, ob, n * 4);
     {
       // The five-attribute pass: mixed flat / rising / falling endpoints.
@@ -436,13 +444,13 @@ static void test_span() {
         if (!(rng() & 3)) { const s32 t = ys0[k]; ys0[k] = ys1[k]; ys1[k] = t; }
         pa[k] = a5[k]; pb[k] = b5[k];
       }
-      kern::ref::span_attrs5(ys0, ys1, fa, n, pa); N::span_attrs5(ys0, ys1, fa, n, pb);
+      kern::ref::span_attrs5(ys0, ys1, fa, n, pa, ~0u); N::span_attrs5(ys0, ys1, fa, n, pb, ~0u);
       for (int k = 0; k < 5; ++k) CHECK_SAME("span_attrs5", a5[k], b5[k], n * 4);
       // The narrowing twin: colour to 6 bits, texture coordinates to s16.
       alignas(16) static u8 ra8[264], ga8[264], ba8[264], rb8[264], gb8[264], bb8[264];
       alignas(16) static s16 sa16[264], ta16[264], sb16[264], tb16[264];
-      kern::ref::span_attrs5n(ys0, ys1, fa, n, ra8, ga8, ba8, sa16, ta16);
-      N::span_attrs5n(ys0, ys1, fa, n, rb8, gb8, bb8, sb16, tb16);
+      kern::ref::span_attrs5n(ys0, ys1, fa, n, ra8, ga8, ba8, sa16, ta16, ~0u);
+      N::span_attrs5n(ys0, ys1, fa, n, rb8, gb8, bb8, sb16, tb16, ~0u);
       CHECK_SAME("span_attrs5n r", ra8, rb8, n);
       CHECK_SAME("span_attrs5n g", ga8, gb8, n);
       CHECK_SAME("span_attrs5n b", ba8, bb8, n);
@@ -450,13 +458,33 @@ static void test_span() {
       CHECK_SAME("span_attrs5n t", ta16, tb16, n * 2);
       // The s/t-only twin, and its agreement with the five-attribute kernel
       // on the two attributes they share.
-      kern::ref::span_attrs2n(ys0, ys1, fa, n, sa16, ta16);
-      N::span_attrs2n(ys0, ys1, fa, n, sb16, tb16);
+      kern::ref::span_attrs2n(ys0, ys1, fa, n, sa16, ta16, ~0u);
+      N::span_attrs2n(ys0, ys1, fa, n, sb16, tb16, ~0u);
       CHECK_SAME("span_attrs2n s", sa16, sb16, n * 2);
       CHECK_SAME("span_attrs2n t", ta16, tb16, n * 2);
-      kern::ref::span_attrs5n(ys0, ys1, fa, n, ra8, ga8, ba8, sb16, tb16);
+      kern::ref::span_attrs5n(ys0, ys1, fa, n, ra8, ga8, ba8, sb16, tb16, ~0u);
       CHECK_SAME("span_attrs2n vs 5n s", sa16, sb16, n * 2);
       CHECK_SAME("span_attrs2n vs 5n t", ta16, tb16, n * 2);
+    }
+    {
+      // The renderer's promise (Renderer3D::fac_bound): with xdiff * max(W) < 2^24 every factor span_factor
+      // gives for xv < xdiff is at most 256, and the kernels may take 256 as the bound instead of scanning.
+      const u32 wm = std::max(static_cast<u32>(w0), static_cast<u32>(w1));
+      if (static_cast<u64>(static_cast<u32>(xdiff)) * wm < (u64{1} << 24)) {
+        for (u32 i = 0; i < n; ++i)
+          if (fa[i] > 256) { std::fprintf(stderr, "FAIL %s: fac_bound promise broken, fac %u (iteration %u)\n", __func__, fa[i], it); ++failures; break; }
+        alignas(16) static u8 r1[264], g1[264], b1[264], r2[264], g2[264], b2[264];
+        alignas(16) static s16 s1[264], t1[264], s2[264], t2[264];
+        kern::ref::span_attrs5n(ys5bound0, ys5bound1, fa, n, r1, g1, b1, s1, t1, ~0u);
+        N::span_attrs5n(ys5bound0, ys5bound1, fa, n, r2, g2, b2, s2, t2, 256);
+        CHECK_SAME("span_attrs5n bounded r", r1, r2, n); CHECK_SAME("span_attrs5n bounded g", g1, g2, n);
+        CHECK_SAME("span_attrs5n bounded b", b1, b2, n); CHECK_SAME("span_attrs5n bounded s", s1, s2, n * 2);
+        CHECK_SAME("span_attrs5n bounded t", t1, t2, n * 2);
+        kern::ref::span_attrs2n(ys5bound0, ys5bound1, fa, n, s1, t1, ~0u); N::span_attrs2n(ys5bound0, ys5bound1, fa, n, s2, t2, 256);
+        CHECK_SAME("span_attrs2n bounded s", s1, s2, n * 2); CHECK_SAME("span_attrs2n bounded t", t1, t2, n * 2);
+        kern::ref::span_attr_persp(y0, y1, fa, n, oa, ~0u); N::span_attr_persp(y0, y1, fa, n, ob, 256);
+        CHECK_SAME("span_attr_persp bounded", oa, ob, n * 4);
+      }
     }
     if (kind != 2) {   // linear attributes: |y1 - y0| * xdiff < 2^32
       kern::ref::span_attr_linear(y0, y1, xv0, n, xdiff, oa); N::span_attr_linear(y0, y1, xv0, n, xdiff, ob);

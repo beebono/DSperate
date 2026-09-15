@@ -439,28 +439,28 @@ void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac)
   }
 }
 
-void span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out) {
+void span_attr_persp(s32 y0, s32 y1, const u32* fac, u32 n, s32* out, u32) {
   if (y0 == y1) { for (u32 i = 0; i < n; ++i) out[i] = y0; return; }
   if (y0 < y1) { const s64 d = y1 - y0; for (u32 i = 0; i < n; ++i) out[i] = y0 + static_cast<s32>((d * fac[i]) >> 8); return; }
   const s64 d = y0 - y1;
   for (u32 i = 0; i < n; ++i) out[i] = y1 + static_cast<s32>((d * (256 - fac[i])) >> 8);
 }
 
-void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const* out) {
-  for (int k = 0; k < 5; ++k) span_attr_persp(y0[k], y1[k], fac, n, out[k]);
+void span_attrs5(const s32* y0, const s32* y1, const u32* fac, u32 n, s32* const* out, u32 fmax) {
+  for (int k = 0; k < 5; ++k) span_attr_persp(y0[k], y1[k], fac, n, out[k], fmax);
 }
 
-void span_attrs2n(const s32* y0, const s32* y1, const u32* fac, u32 n, s16* sc, s16* tc) {
+void span_attrs2n(const s32* y0, const s32* y1, const u32* fac, u32 n, s16* sc, s16* tc, u32 fmax) {
   s32 tmp[2][272];
-  span_attr_persp(y0[3], y1[3], fac, n, tmp[0]);
-  span_attr_persp(y0[4], y1[4], fac, n, tmp[1]);
+  span_attr_persp(y0[3], y1[3], fac, n, tmp[0], fmax);
+  span_attr_persp(y0[4], y1[4], fac, n, tmp[1], fmax);
   for (u32 i = 0; i < n; ++i) { sc[i] = static_cast<s16>(tmp[0][i]); tc[i] = static_cast<s16>(tmp[1][i]); }
 }
 
-void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc) {
+void span_attrs5n(const s32* y0, const s32* y1, const u32* fac, u32 n, u8* vr, u8* vg, u8* vb, s16* sc, s16* tc, u32 fmax) {
   s32 tmp[5][272];
   s32* out[5] = {tmp[0], tmp[1], tmp[2], tmp[3], tmp[4]};
-  span_attrs5(y0, y1, fac, n, out);
+  span_attrs5(y0, y1, fac, n, out, fmax);
   for (u32 i = 0; i < n; ++i) {
     vr[i] = static_cast<u8>((static_cast<u32>(tmp[0][i]) >> 3) & 0xFF);
     vg[i] = static_cast<u8>((static_cast<u32>(tmp[1][i]) >> 3) & 0xFF);

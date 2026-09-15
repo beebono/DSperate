@@ -730,7 +730,19 @@ void Renderer3D::setup_polygon(Edge& e, const Polygon& p) {
 // attributes for screen pixels [xa, xb) of the span [xstart, xend], through
 // the kernels (kern::active). This is Interp<0> (setup, set_x, interpolate,
 // interpolate_z) evaluated for the whole span at once.
-void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
+// An upper bound on every factor span_factor(xv, xdiff, wl, wl, wr) yields for
+// 0 <= xv < xdiff, for the attribute kernels' choice of multiply (kernels.h).
+// With xdiff * max(wl, wr) < 2^24 nothing wraps: the numerator 256 * xv * wl
+// and the denominator xv * wl + (xdiff - xv) * wr stay exact and the first is
+// at most 256 times the second, so the quotient is at most 256; the W-constant
+// ramp's step is at most 2^24 / xdiff and xv * step stays below 2^24, so its
+// factors are below 256 too. Otherwise nothing is promised (~0u).
+u32 Renderer3D::fac_bound(s32 xdiff, s32 wl, s32 wr) {
+  const u64 wmax = std::max(static_cast<u32>(wl), static_cast<u32>(wr));
+  return static_cast<u64>(static_cast<u32>(xdiff)) * wmax < (u64{1} << 24) ? 256u : ~0u;
+}
+
+bool Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
                             const s32* al, const s32* ar, bool with_attrs, u32 off) const {
   // x0 is the screen x that maps to buffer index 0, so a span staged at batch
   // offset `off` sets it back by that much and every stage indexes correctly.
@@ -738,20 +750,25 @@ void Renderer3D::span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s
   const u32 n = static_cast<u32>(xb - xa);
   const s32 xdiff = (xend + 1) - xstart;
   const s32 xv0 = xa - xstart;
-  const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   // The factor feeds span_attr_persp (w-buffer depth) and the perspective
-  // attribute kernels. A linear span only needs it for a varying w-buffer
-  // depth; with z constant as well nothing reads it -- GSDD's title stages
-  // 45 k such pixels a frame (census 2026-08-28).
-  const bool use_factor = xdiff != 0 && (!linear || (wbuffer && zl != zr));
+  // attribute kernels. Only the depth needs it across the whole span: the
+  // attributes are staged over the pixels the depth pre-pass leaves alive, so
+  // for a z-buffered span span_attrs computes it there itself, and an occluded
+  // span never computes it at all. On the A30 the factor and the attribute
+  // pass were ~7 % of a heavy frame's raster (2026-09-15). A factor is a
+  // function of its pixel alone, so the values do not depend on the range.
+  // With z constant nothing reads it -- GSDD's title stages 45 k such pixels
+  // a frame (census 2026-08-28).
+  const bool use_factor = xdiff != 0 && wbuffer && zl != zr;
   if (use_factor) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac + off);
   // A constant depth needs no reciprocal or per-pixel interpolation.  Flat
   // geometry is common in the DS scenes, and keeping this out of the span
   // kernel also makes the depth pre-pass a straight fill.
   if (xdiff == 0 || zl == zr) kern::active::span_z_const(zl, n, sb.z + off);
-  else if (wbuffer) kern::active::span_attr_persp(zl, zr, sb.fac + off, n, sb.z + off);
+  else if (wbuffer) kern::active::span_attr_persp(zl, zr, sb.fac + off, n, sb.z + off, fac_bound(xdiff, wl, wr));
   else kern::active::span_z_linear(zl, zr, xv0, n, xdiff, (1 << 22) / xdiff, sb.z + off);
-  if (with_attrs) span_attrs(sb, xstart, xend, xa, xb, wl, wr, al, ar, false, false);
+  if (with_attrs) span_attrs(sb, xstart, xend, xa, xb, wl, wr, al, ar, false, false, use_factor);
+  return use_factor;
 }
 
 // Constant-attribute fills for span_attrs. These used to be three libc memset
@@ -786,7 +803,7 @@ namespace {
 
 // The five attributes for screen pixels [ca, cb) of the span (a sub-range of
 // the staged span, normally the depth pre-pass's candidate range).
-void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar, bool attrs_constant, bool rgb_constant) const {
+void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar, bool attrs_constant, bool rgb_constant, bool fac_ready) const {
   const u32 off = static_cast<u32>(ca - sb.x0), n = static_cast<u32>(cb - ca);
   const s32 xdiff = (xend + 1) - xstart;
   const s32 xv0 = ca - xstart;
@@ -803,6 +820,7 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
   }
   const bool linear = (wl == wr) && !(wl & 0x7F) && !(wr & 0x7F);
   if (xdiff != 0 && !linear) {
+    if (!fac_ready) kern::active::span_factor(xv0, n, xdiff, wl, wl, wr, sb.fac + off);
     // A span whose colour endpoints agree -- most of them, and every span of
     // flat-shaded content -- interpolates nothing across r, g and b: fill the
     // three buffers with the constant and stage only s and t. This is
@@ -813,12 +831,12 @@ void Renderer3D::span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s
       // The kernels write whole vectors past n; match that, the buffers carry
       // the slack for it.
       fill_rgb_const(sb.vr + off, sb.vg + off, sb.vb + off, n, al);
-      kern::active::span_attrs2n(al, ar, sb.fac + off, n, sb.sc + off, sb.tc + off);
+      kern::active::span_attrs2n(al, ar, sb.fac + off, n, sb.sc + off, sb.tc + off, fac_bound(xdiff, wl, wr));
       return;
     }
     prof::add(prof::C_SPAN_LERP_RGB, 1);
     // One pass for all five, narrowed as it is stored.
-    kern::active::span_attrs5n(al, ar, sb.fac + off, n, sb.vr + off, sb.vg + off, sb.vb + off, sb.sc + off, sb.tc + off);
+    kern::active::span_attrs5n(al, ar, sb.fac + off, n, sb.vr + off, sb.vg + off, sb.vb + off, sb.sc + off, sb.tc + off, fac_bound(xdiff, wl, wr));
     return;
   }
   if (xdiff == 0) {
@@ -1758,6 +1776,51 @@ template <int mode, bool textured, bool aa, bool opq>
 // once per run instead of once per line. The loop also lets the constant
 // polygon and Shade fields (wbuffer, always_fill, ybot, the vertex pointers)
 // stay in registers across the whole run rather than being reloaded per line.
+#if DSPERATE_NEON
+// One edge's w and five attributes (r g b s t) at the current scanline, as
+// Interp<1>::interpolate computes each: y0 + ((y1-y0) * f >> 9) rising, else
+// y1 + ((y0-y1) * (512-f) >> 9), y0 when they are equal. Formed in 32-bit
+// lanes, which is exact when every product fits -- f <= 512 and differences
+// below 2^23 -- and that holds for every perspective edge a game draws
+// (colours are 9 bits, texture coordinates s16, W normalised to 16). Returns
+// false, writing nothing, for a linear edge or one the guard rejects; the
+// scalar interpolate then runs as before. On the A30 the ten scalar calls per
+// scanline were ~5 % of a heavy frame's raster (2026-09-15).
+[[gnu::always_inline]] inline bool Renderer3D::edge_values_vec(const Interp<1>& in, s32 w0, s32 w1, const Vertex& vc, const Vertex& vn,
+                                                               s32* w, s32* a) {
+  if (in.xdiff == 0) {
+    *w = w0;
+    for (int k = 0; k < 3; ++k) a[k] = vc.fcol[k];
+    a[3] = vc.tex[0]; a[4] = vc.tex[1];
+    return true;
+  }
+  if (in.linear || in.yfactor > 512) return false;
+  const s32 c0[4] = {w0, vc.fcol[0], vc.fcol[1], vc.fcol[2]};
+  const s32 c1[4] = {w1, vn.fcol[0], vn.fcol[1], vn.fcol[2]};
+  const int32x4_t lo = vld1q_s32(c0), hi = vld1q_s32(c1);
+  // Four s16 from tex[] (the last two are the next field, discarded).
+  const int32x2_t tlo = vget_low_s32(vmovl_s16(vld1_s16(vc.tex)));
+  const int32x2_t thi = vget_low_s32(vmovl_s16(vld1_s16(vn.tex)));
+  const uint32x4_t d = vreinterpretq_u32_s32(vabdq_s32(hi, lo));
+  const uint32x2_t td = vreinterpret_u32_s32(vabd_s32(thi, tlo));
+  // |d| < 2^23 on all six: the lane difference of two s32 is exact as a u32.
+  const uint32x4_t lim = vdupq_n_u32(1u << 23);
+  if (compat::maxv_u32(vcgeq_u32(d, lim)) | vget_lane_u32(vpmax_u32(vcge_u32(td, vget_low_u32(lim)), vcge_u32(td, vget_low_u32(lim))), 0)) return false;
+  const uint32x4_t fu = vdupq_n_u32(in.yfactor), fd = vdupq_n_u32(512 - in.yfactor);
+  const uint32x4_t rising = vcltq_s32(lo, hi);
+  const uint32x4_t q = vshrq_n_u32(vmulq_u32(d, vbslq_u32(rising, fu, fd)), 9);
+  const int32x4_t r = vaddq_s32(vminq_s32(lo, hi), vreinterpretq_s32_u32(q));
+  const uint32x2_t trising = vclt_s32(tlo, thi);
+  const uint32x2_t tq = vshr_n_u32(vmul_u32(td, vbsl_u32(trising, vget_low_u32(fu), vget_low_u32(fd))), 9);
+  const int32x2_t tr = vadd_s32(vmin_s32(tlo, thi), vreinterpret_s32_u32(tq));
+  s32 out4[4];
+  vst1q_s32(out4, r);
+  *w = out4[0]; a[0] = out4[1]; a[1] = out4[2]; a[2] = out4[3];
+  a[3] = vget_lane_s32(tr, 0); a[4] = vget_lane_s32(tr, 1);
+  return true;
+}
+#endif
+
 void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
   const Polygon& p = *e.poly;
   const Shade& sh = e.sh;
@@ -1775,16 +1838,34 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
       if (y >= gx_->vertex(p.vtx[e.next_vr]).sy && e.cur_vr != p.vbot) setup_right_edge(e, y);
     }
     s32 xstart = e.xl, xend = e.xr;
-    s32 wl = e.left.interp.interpolate(e.wcl, e.wnl);
-    s32 wr = e.right.interp.interpolate(e.wcr, e.wnr);
+    // Both edges' w and attributes, computed per edge (the swap below only
+    // changes which edge's values sit on which end).
+    s32 wl, wr, av[2][5];
+#if DSPERATE_NEON
+    const bool lvec = edge_values_vec(e.left.interp, e.wcl, e.wnl, *e.vcl, *e.vnl, &wl, av[0]);
+    const bool rvec = edge_values_vec(e.right.interp, e.wcr, e.wnr, *e.vcr, *e.vnr, &wr, av[1]);
+#else
+    constexpr bool lvec = false, rvec = false;
+#endif
+    if (!lvec) {
+      wl = e.left.interp.interpolate(e.wcl, e.wnl);
+      const Interp<1>& in = e.left.interp; const Vertex& vc = *e.vcl; const Vertex& vn = *e.vnl;
+      for (int k = 0; k < 3; ++k) av[0][k] = in.interpolate(vc.fcol[k], vn.fcol[k]);
+      av[0][3] = in.interpolate(vc.tex[0], vn.tex[0]); av[0][4] = in.interpolate(vc.tex[1], vn.tex[1]);
+    }
+    if (!rvec) {
+      wr = e.right.interp.interpolate(e.wcr, e.wnr);
+      const Interp<1>& in = e.right.interp; const Vertex& vc = *e.vcr; const Vertex& vn = *e.vnr;
+      for (int k = 0; k < 3; ++k) av[1][k] = in.interpolate(vc.fcol[k], vn.fcol[k]);
+      av[1][3] = in.interpolate(vc.tex[0], vn.tex[0]); av[1][4] = in.interpolate(vc.tex[1], vn.tex[1]);
+    }
     s32 zl = e.left.interp.interpolate_z(e.zcl, e.znl);
     s32 zr = e.right.interp.interpolate_z(e.zcr, e.znr);
     // Right vertical edges are pushed one pixel left unless the span is a
     // single pixel at the screen's left edge.
     if (e.r_incr0 && (!e.l_incr0 || xstart != xend) && xend != 0) --xend;
 
-    const Vertex *vlcur, *vlnext, *vrcur, *vrnext;
-    const Interp<1>* istart; const Interp<1>* iend;
+    int astart = 0;   // which edge's attributes are the span's left end
     bool l_fill, r_fill; s32 l_len, r_len, l_cov, r_cov;
     // Everything below that is not a function of y comes out of the Edge; only
     // the bottom-line test and the edge_params (which walk dx) are per scanline.
@@ -1793,9 +1874,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
     if (xstart > xend) {
       // Swapped edges: the hardware walks them backwards, which breaks the
       // X-major edge lengths (and the AA on them) in a specific way.
-      vlcur = e.vcr; vlnext = e.vnr;
-      vrcur = e.vcl; vrnext = e.vnl;
-      istart = &e.right.interp; iend = &e.left.interp;
+      astart = 1;
       e.right.edge_params<true>(aa, &l_len, &l_cov);
       e.left.edge_params<true>(aa, &r_len, &r_cov);
       std::swap(xstart, xend); std::swap(wl, wr); std::swap(zl, zr);
@@ -1805,9 +1884,6 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
         r_fill = e.px_l || (!e.lneg_xm && e.r_incr0) || (bottom_fill && e.lxm);
       }
     } else {
-      vlcur = e.vcl; vlnext = e.vnl;
-      vrcur = e.vcr; vrnext = e.vnr;
-      istart = &e.left.interp; iend = &e.right.interp;
       e.left.edge_params<false>(aa, &l_len, &l_cov);
       e.right.edge_params<false>(aa, &r_len, &r_cov);
       // Fill rules for opaque edges: left edges fill when their slope is <= 1,
@@ -1839,16 +1915,8 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
     // the per-scanline path skipped those, but the interpolants are live in
     // registers here and depth survival is 61-94 % across the five scenes, so
     // the branch costs more than the arithmetic it saves.
-    ls.al[0] = istart->interpolate(vlcur->fcol[0], vlnext->fcol[0]);
-    ls.al[1] = istart->interpolate(vlcur->fcol[1], vlnext->fcol[1]);
-    ls.al[2] = istart->interpolate(vlcur->fcol[2], vlnext->fcol[2]);
-    ls.al[3] = istart->interpolate(vlcur->tex[0], vlnext->tex[0]);
-    ls.al[4] = istart->interpolate(vlcur->tex[1], vlnext->tex[1]);
-    ls.ar[0] = iend->interpolate(vrcur->fcol[0], vrnext->fcol[0]);
-    ls.ar[1] = iend->interpolate(vrcur->fcol[1], vrnext->fcol[1]);
-    ls.ar[2] = iend->interpolate(vrcur->fcol[2], vrnext->fcol[2]);
-    ls.ar[3] = iend->interpolate(vrcur->tex[0], vrnext->tex[0]);
-    ls.ar[4] = iend->interpolate(vrcur->tex[1], vrnext->tex[1]);
+    std::memcpy(ls.al, av[astart], sizeof ls.al);
+    std::memcpy(ls.ar, av[1 - astart], sizeof ls.ar);
 
     e.xl = e.left.step();
     e.xr = e.right.step();
@@ -1887,8 +1955,9 @@ void Renderer3D::stage_line(Edge& e, s32 y, const LineSpan& ls) {
   SpanBuf& sb = spanbuf_;
   const u32 off = batch_px_;
   s32 ca = xa, cb = xa;
+  bool fac_ready = false;
   if (xb > xa) {
-    span_stage(sb, ls.xstart, ls.xend, xa, xb, ls.wl, ls.wr, ls.zl, ls.zr, p.wbuffer, nullptr, nullptr, false, off);
+    fac_ready = span_stage(sb, ls.xstart, ls.xend, xa, xb, ls.wl, ls.wr, ls.zl, ls.zr, p.wbuffer, nullptr, nullptr, false, off);
     if (sh.shadow) {
       // Shadow polygons test against whichever pixel their stencil names; no pre-pass.
       std::memset(sb.pass + off, 1, static_cast<size_t>(xb - xa)); cb = xb;
@@ -1907,7 +1976,7 @@ void Renderer3D::stage_line(Edge& e, s32 y, const LineSpan& ls) {
                           : sh.blendmode == 2 ? prof::C_RES_TOON_SPANS : prof::C_RES_VEC_SPANS;
     prof::add(c, 1); prof::add(static_cast<prof::Counter>(c + 1), static_cast<u64>(cb - ca));
   }
-  span_attrs(sb, ls.xstart, ls.xend, ca, cb, ls.wl, ls.wr, ls.al, ls.ar, sh.attrs_constant, sh.rgb_constant);
+  span_attrs(sb, ls.xstart, ls.xend, ca, cb, ls.wl, ls.wr, ls.al, ls.ar, sh.attrs_constant, sh.rgb_constant, fac_ready);
 
   SpanJob& j = jobs_[njobs_++];
   j.y = y; j.ca = ca; j.cb = cb; j.off = off + static_cast<u32>(ca - xa);

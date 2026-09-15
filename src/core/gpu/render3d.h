@@ -373,6 +373,9 @@ private:
   // leave the edge cursors stepped past y1-1 exactly as the per-scanline path
   // left them.
   void precompute_lines(Edge& e, s32 y0, s32 y1);
+#if DSPERATE_NEON
+  static bool edge_values_vec(const Interp<1>& in, s32 w0, s32 w1, const Vertex& vc, const Vertex& vn, s32* w, s32* a);
+#endif
   // The half of the old render_polygon_line that framebuffer state reaches:
   // the depth pre-pass, the attribute staging and the batch job.
   void stage_line(Edge& e, s32 y, const LineSpan& ls);
@@ -406,9 +409,12 @@ private:
   template <bool textured> void span_shade(const Shade& sh, SpanBuf& sb, s32 ca, s32 cb) const;
   static const void* select_gather4(const Shade& sh);
 #endif
-  void span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
+  static u32 fac_bound(s32 xdiff, s32 wl, s32 wr);
+  // Returns whether the perspective factor was staged for the whole span
+  // (only a w-buffered depth needs it there); span_attrs takes that as fac_ready.
+  bool span_stage(SpanBuf& sb, s32 xstart, s32 xend, s32 xa, s32 xb, s32 wl, s32 wr, s32 zl, s32 zr, bool wbuffer,
                   const s32* al, const s32* ar, bool with_attrs, u32 off) const;
-  void span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar, bool attrs_constant, bool rgb_constant) const;
+  void span_attrs(SpanBuf& sb, s32 xstart, s32 xend, s32 ca, s32 cb, s32 wl, s32 wr, const s32* al, const s32* ar, bool attrs_constant, bool rgb_constant, bool fac_ready) const;
   void setup_left_edge(Edge& e, s32 y) const;
   void setup_right_edge(Edge& e, s32 y) const;
   void setup_polygon(Edge& e, const Polygon& p);
