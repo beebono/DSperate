@@ -271,6 +271,7 @@ int main(int argc, char** argv) {
 #endif
   TraceState ts;
   bool timing_oc = false;
+  bool gx_worker = false;   // --gx-worker: the geometry worker with the FIFO kept (the race-preserving tier, without --cpu-oc)
   bool rtc_host = false;              // --rtc-host: free-running clock seeded from the wall
   const char* fw_override = nullptr;  // --firmware-override: sidecar of changed firmware pages
   bool no_aa = false;
@@ -359,6 +360,7 @@ int main(int argc, char** argv) {
     else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
     else if (flag("--timing-oc")) timing_oc = true;                          // no FIFO + untimed geometry (DraStic's model); see Gpu3D::set_timing_oc
+    else if (flag("--gx-worker")) gx_worker = true;                          // INEXACT (slightly): the geometry worker alone, FIFO and stall timing kept, cull priced by the previous frame's ratio
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
     else if (flag("--cpu-oc")) cpu_oc = 1;                                   // INEXACT: JIT data accesses priced as main RAM at translate time; see jit::set_cpu_oc
     else if (flag("--cpu-uc")) cpu_oc = 2;                                   // INEXACT: --cpu-oc's underclock tier (stores and the ARM7 at main RAM's bus cost)
@@ -549,7 +551,7 @@ int main(int argc, char** argv) {
   nds.gpu3d.set_timing_oc(timing_oc);
   // Geometry worker + per-frame shape controller, with either inexact tier
   // (no-FIFO, or the FIFO kept with the cull priced by ratio under --cpu-oc).
-  nds.gpu3d.set_geometry_worker(timing_oc || cpu_oc != 0);   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
+  nds.gpu3d.set_geometry_worker(timing_oc || gx_worker || cpu_oc != 0);   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
   nds.gpu3d.renderer().set_aa(!no_aa);
 
   if (rom && cheat_db) {

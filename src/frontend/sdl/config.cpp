@@ -337,6 +337,11 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # own thread with every polygon priced as if drawn (the FIFO, its
                                 # level and the stall are kept; the engine only drains a little
                                 # slower than hardware).
+# gx_worker = false             # The geometry engine on its own thread, with the GX FIFO, its level,
+                                # the stall and the swap timing KEPT: the half-way house between exact
+                                # and timing_oc. Only the cost of a culled polygon is estimated (from
+                                # the previous frame's cull ratio), so games pacing on the FIFO keep
+                                # their ordering. Most of timing_oc's speed on 3D-heavy games.
 # timing_oc = false             # "Timing OC": drop the GX FIFO and geometry timing (DraStic's model),
                                 # and run the geometry engine on its own thread.
                                 # A few percent faster on 3D-heavy games; USE WITH CAUTION! games that
