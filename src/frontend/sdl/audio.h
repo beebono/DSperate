@@ -11,9 +11,14 @@ namespace ds::sdl {
 
 // Audio output.
 //
-// The device is opened at its own rate and the SPU's 32768 Hz stream is
-// resampled here on the way in (linear, two taps: a 32.768 -> 48 kHz step on
-// a DS mix is well inside what the DAC's own filtering hides). Resampling in
+// The device is opened at its own rate and the SPU's stream is resampled
+// here on the way in (linear, two taps: a 32.7 -> 48 kHz step on a DS mix is
+// well inside what the DAC's own filtering hides). That input rate is
+// 32728.5 Hz, not the 32768 the DS rate is named after, and it is read live
+// from the SPU because a DSi title can move it to 47605.1: the ratio is the
+// one thing here that has to be exact, and a nominal rate 1207 ppm off left
+// the rate control correcting our own constant for whole runs. See
+// Spu::output_rate_hz() and docs/frame-pacing-scoping.md. Resampling in
 // the sound daemon instead measured ~1 ms a frame on the RG DS (PipeWire's
 // clock is locked to 48 kHz there) -- `native_rate` false restores that, the
 // device then being asked for 32768 Hz. Samples are queued rather than pulled
@@ -75,6 +80,35 @@ public:
   // queue). For the statistics line -- a number that sits at one end of its
   // range means the drift is larger than the controller can answer.
   double rate_trim_ppm() const { return trim_ * 1e6; }
+  // What the device actually gave us, which is not always what was asked
+  // for: a daemon-backed device picks its own period. The queue target has
+  // to clear this -- the device drains in whole chunks of it, so a target
+  // under one chunk is a depth the controller can never hold.
+  u32    device_samples() const { return dev_samples_; }
+  double device_buffer_frames() const;   // that chunk, in frames of audio
+  double input_rate() const { return in_rate_; }   // the SPU's, live (DSi: 47605.1)
+
+  // Output statistics since the last reset. The controller's own inputs,
+  // gathered where they are already measured rather than by asking SDL
+  // again from the frame loop.
+  //
+  // `dry` is the underrun signal: the queue was empty when the frame looked
+  // at it, so the device has played everything it had and anything it plays
+  // before the next push is silence. There is no callback to catch a real
+  // underrun in -- a queued device just goes quiet -- so this is the closest
+  // thing to one, and it is what an automatic buffer size has to grow on.
+  struct Stats {
+    u64    frames = 0;        // frames the queue was measured on
+    u64    dry = 0;           // ... and found empty
+    u64    under_half = 0;    // ... and found under half a frame
+    u64    under_one = 0;
+    u64    dropped = 0;       // frames sent to drain() instead of the device
+    double min_depth = 1e9;   // shallowest measurement, in frames
+    double max_depth = 0.0;
+  };
+  const Stats& stats() const { return stats_; }
+  void reset_stats() { stats_ = Stats{}; }
+
   void set_volume(int percent);   // 0..100
   int  volume() const { return volume_; }
   void set_muted(bool m) { muted_ = m; }
@@ -109,6 +143,8 @@ private:
   SDL_AudioDeviceID dev_ = 0, cap_ = 0;
   std::vector<s16> mic_;
   u32 frame_bytes_ = 0;
+  u32 dev_samples_ = 0;     // got.samples: the device's own period
+  Stats stats_;
   u32 rate_ = spu::Spu::SAMPLE_RATE;     // the device's rate
   // Resampler state: the previous input frame and the output phase within
   // the current input step, 16.16.
@@ -120,7 +156,10 @@ private:
   double speed_ = 1.0;   // wall-clock rate against the console's own
   double depth_ = -1.0;  // smoothed queue depth in frames; < 0 until the first measurement
   double trim_ = 0.0;    // the controller's correction, as a fraction of the nominal rate
-  u32  in_rate_ = spu::Spu::SAMPLE_RATE;   // the SPU's output rate, which a DSi title can change
+  // The SPU's real output rate, which a DSi title can change. Not an integer:
+  // it is 32728.5 Hz on a DS, and rounding it to 32728 would leave 15 ppm of
+  // the 1207 this is here to stop paying.
+  double in_rate_ = 0.0;   // 0 until the first push reads it
   int  volume_ = 100;
   bool muted_ = false;
 };

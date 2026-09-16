@@ -2037,7 +2037,6 @@ sdl_ready:
     pacer.reset();
   };
   apply_limiter();
-  double aq_min = 1e9; unsigned aq_under1 = 0, aq_under_half = 0;   // audio-queue depth after a frame (lan stats)
   const double ticks_per_ns = static_cast<double>(SDL_GetPerformanceFrequency()) / 1e9;
 
   const bool show_fps = std::getenv("DS_FPS") != nullptr;
@@ -4345,20 +4344,26 @@ sdl_ready:
       const double cap = frame_budget_ms * (fs_limit + 1);
       if (fs_debt_ms > cap) fs_debt_ms = cap;   // a long stall must not buy a run of skips
     }
-    // DS_AUDIO_QUEUE=<path>: queue depth in frames and the controller's trim
-    // in ppm, once a frame -- the acceptance measurement for the rate control
+    // DS_AUDIO_QUEUE=<path>: one line a frame --
+    //
+    //   depth   queue depth in frames of audio
+    //   ppm     what the rate control is doing to the sample rate
+    //   target  the depth it is steering towards
+    //   dry     running count of frames that found the queue empty
+    //   in_rate the SPU's output rate, which a DSi title can change
+    //
+    // The first two are the acceptance measurement for the rate control
     // (docs/frame-pacing-scoping.md): a steady depth and a trim that is not
-    // sitting on its clamp.
+    // sitting on its clamp. The rest are what an automatic buffer size has to
+    // decide on, logged from the run that would have driven it.
     if (audio.active()) {
       static FILE* aq = [] { const char* p = std::getenv("DS_AUDIO_QUEUE"); return p ? std::fopen(p, "w") : nullptr; }();
-      if (aq) std::fprintf(aq, "%.3f %.0f\n", audio.queued_frames(), audio.rate_trim_ppm());
+      if (aq) std::fprintf(aq, "%.3f %.0f %d %llu %.1f\n", audio.queued_frames(), audio.rate_trim_ppm(), audio.latency_frames(),
+                           static_cast<unsigned long long>(audio.stats().dry), audio.input_rate());
     }
     ds::prof::frame_mark();   // marks the emu slice: the present is not in a stage, it lands in "untimed" of work_ms
 
     const Uint64 t3 = SDL_GetPerformanceCounter();
-#if DSPERATE_NET
-    if (lan && audio.active()) { const double q = audio.queued_frames(); if (q < aq_min) aq_min = q; if (q < 1.0) ++aq_under1; if (q < 0.5) ++aq_under_half; }
-#endif
     // One clock, one number. base_scale is what the limiter and emu.speed
     // came to; fast forward, while it is held, asks for a floor under that
     // rather than a multiple of it -- ff_speed is a multiple of *real time*,
@@ -4402,10 +4407,14 @@ sdl_ready:
       fps_value = fps >= 999.0 ? 999 : static_cast<int>(fps + 0.5);
       if (show_fps) {
         const double wall_ms = static_cast<double>(now - fps_mark) * to_ms;   // per frame, same unit as the rest
-        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, wait %.1f ms, pace %.1f ms (spin %.0f us), other %.1f ms, audio queued %.1f frames (%+.0f ppm)\n",
+        // The SPU rate is live rather than a constant: a DSi title moves it to
+        // 47605 Hz through SNDEXCNT, and the resampler ratio follows it, so a
+        // statistics line that named 32768 would be naming the wrong input.
+        std::fprintf(stderr, "%.1f fps (%.0f%%), emu %.1f ms, present %.1f ms, wait %.1f ms, pace %.1f ms (spin %.0f us), other %.1f ms, audio queued %.1f frames (%+.0f ppm, %.1f -> %u Hz)\n",
                      fps, 100.0 * fps / (ds::ARM9_CLOCK_HZ / double(ds::CYCLES_PER_FRAME)),
                      emu_ticks * to_ms, draw_ticks * to_ms, wait_ticks * to_ms, fps_pace_ticks * to_ms, pacer.spin_us(),
-                     wall_ms - (emu_ticks + draw_ticks + wait_ticks + fps_pace_ticks) * to_ms, audio.queued_frames(), audio.rate_trim_ppm());
+                     wall_ms - (emu_ticks + draw_ticks + wait_ticks + fps_pace_ticks) * to_ms, audio.queued_frames(), audio.rate_trim_ppm(),
+                     audio.input_rate(), audio.rate());
         if (fs_limit > 0) std::fprintf(stderr, "  frameskip: %llu frames skipped (%s, limit %d)\n",
                                        static_cast<unsigned long long>(fs_skipped), fs_adaptive ? "adaptive" : "fixed", fs_limit);
       }
@@ -4437,11 +4446,20 @@ sdl_ready:
 #if DSPERATE_NET
   if (lan) {
     VLOG("lan: reply/host waits %u, total %.1f ms, max %.1f ms, timeouts %u\n", lan->wait_count(), lan->wait_total_ms(), lan->wait_max_ms(), lan->wait_timeouts());
-    // The audio queue is the clock on a device: how close it came to running
-    // dry is the stutter a session caused (frame times include the sleeps).
-    VLOG("lan: audio queue after a frame: min %.2f frames, under 1 frame %u times, under 0.5 %u times\n", aq_min, aq_under1, aq_under_half);
   }
 #endif
+  // How the output buffer held up over the run. `dry` is the one that matters:
+  // the queue was empty when a frame looked at it, so the device played
+  // silence until the next push -- the gap a player hears, and the event an
+  // automatic buffer size grows on. A run with drops but no dry frames was
+  // fast-forwarding or had lost its device, which is not the same fault.
+  if (const ds::sdl::Audio::Stats& as = audio.stats(); as.frames) {
+    VLOG("audio: queue depth %.2f..%.2f frames over %llu, dry %llu, under 1 frame %llu, under 0.5 %llu, dropped %llu; device buffer %u samples (%.2f frames), ring overruns %llu\n",
+         as.min_depth, as.max_depth, static_cast<unsigned long long>(as.frames), static_cast<unsigned long long>(as.dry),
+         static_cast<unsigned long long>(as.under_one), static_cast<unsigned long long>(as.under_half),
+         static_cast<unsigned long long>(as.dropped), audio.device_samples(), audio.device_buffer_frames(),
+         static_cast<unsigned long long>(nds.spu.ring_overruns()));
+  }
   if (std::getenv("DS_FRAME_STATS") || ds::prof::enabled) {
     // Emulation work only -- see frame_report.h. The two excluded costs are
     // named on their own line so a headless/SDL disagreement can be attributed.

@@ -346,7 +346,7 @@ void Spu::write_sndexcnt(u16 value, u16 mask) {
     mix_period_ = (value & 0x2000) ? MIX_PERIOD_47K : MIX_PERIOD;
     timer_step_ = mix_period_ / 4;
     // The next sample keeps its nominal slot; only the spacing after it changes.
-    if (dbg_) std::fprintf(stderr, "[spu] SNDEXCNT: output %u Hz\n", output_rate());
+    if (dbg_) std::fprintf(stderr, "[spu] SNDEXCNT: output %.1f Hz\n", output_rate_hz());
   }
   catch_up();
   cur = value & 0xE00F;   // bits 15, 14 and 0-3 are applied per sample in mix()
@@ -355,7 +355,7 @@ void Spu::write_sndexcnt(u16 value, u16 mask) {
 void Spu::push(s16 l, s16 r) {
   ring_[wr_ * 2] = l; ring_[wr_ * 2 + 1] = r;
   wr_ = (wr_ + 1) & (RING_FRAMES - 1);
-  if (wr_ == rd_) rd_ = (rd_ + 1) & (RING_FRAMES - 1);   // overwrite the oldest
+  if (wr_ == rd_) { rd_ = (rd_ + 1) & (RING_FRAMES - 1); ++overruns_; }   // overwrite the oldest
 }
 
 size_t Spu::take(s16* dst, size_t max_frames) {

@@ -121,10 +121,10 @@ The three-minute run is the one that matters: depth flat at 3.4 from 30 s
 onward, trim stable near -1200 ppm and nowhere near its clamp. That is
 convergence, not drift.
 
-Two things to know. The measured host mismatch is ~1200 ppm, not the ~100 ppm
-this document assumed, so the proportional-only steady-state offset is ~0.4
-frames rather than 0.05 -- 7 ms of latency above the target, harmless, and
-the price of having no integral term to wind up. And the adaptive spin margin
+Two things to know. **The ~1200 ppm this phase measured was ours, not the
+host's** -- see "The rate that was not a rate" below; it was found and fixed
+in the buffer-sizing work, and the steady-state offset it was paying for is
+gone with it. And the adaptive spin margin
 grows at 2x speed (477 us on an 8.3 ms frame, against ~200 us at 1x), because
 it is chasing the same absolute wakeup tail across a shorter period.
 
@@ -170,6 +170,49 @@ Also in phase 2:
   a wrong `frame_bytes_` just shifts the target depth harmlessly; under DRC it
   biases the controller. Worth fixing in the same pass -- read `output_rate()`
   and derive `frame_bytes_` from `frame_ns`, not from 60.
+
+  That was half of it. `output_rate()` was itself returning a nominal
+  constant -- see below.
+
+### The rate that was not a rate -- **FIXED (2026-09-15)**
+
+Phase 2 recorded a ~1200 ppm host mismatch, noted that it was ten times what
+this document had assumed, and priced the 0.4-frame steady-state offset it
+caused as the cost of a proportional-only controller. **It was not the host.**
+
+The SPU emits one sample every `mix_period_` ARM9 cycles, so its real output
+rate is `67027964 / 2048 = 32728.5 Hz`. `Spu::SAMPLE_RATE` is 32768 -- the
+nominal "32.768 kHz" the rate is *named* after, and 1207 ppm away from the
+one the mixer produces. `output_rate()` derived the DSi's high-rate mode
+correctly (`67027964 / 1408 = 47605.1`) and returned the nominal constant for
+every other case, so the resampler's nominal ratio was wrong by 1207 ppm on
+every DS title. The rate control then spent every run holding the queue
+against it, which is exactly what a steady -1200 ppm trim is: a controller
+correcting its own input.
+
+Fixed by deriving the rate from the clock (`Spu::output_rate_hz()`, a double
+-- rounding to 32728 would leave 15 ppm of the 1207) and reading it in
+`Audio::push`. Measured on the host, Shantae, 3600 frames, against the same
+scene that produced the phase 2 table:
+
+| | before | after |
+|---|---|---|
+| resampler input rate | 32768 | 32728.5 |
+| steady-state trim | -1200 ppm, all run | **-13 ppm** |
+| steady depth against target | -0.6 frames | ~0.00 |
+| dry frames | 11 / 900 | 2 / 3600 |
+
+The residual ~10 ppm is the host's crystal, which is the order this document
+expected in the first place. Every ppm figure in the phase 2 and phase 3
+tables above was measured under the bug and should be re-read with that in
+mind; the depths are still right, and the conclusions -- that the controller
+converges and does not clamp -- hold, with more margin than they claimed.
+
+Two consequences beyond the arithmetic. The 0.4-frame offset was ~7 ms of
+latency the buffer could not account for, which matters directly to sizing it
+(`docs/audio-buffer-scoping.md`). And the 1207 ppm was eating a quarter of
+the +/-0.5 % trim authority before the controller did anything useful with
+it.
 
 ### Phase 3 -- the controls -- **DONE (2026-09-12, unmerged on `wifi-emu`)**
 

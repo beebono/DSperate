@@ -36,13 +36,22 @@ bool Audio::open(bool native_rate) {
   dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
   if (!dev_) { std::fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError()); return false; }
   rate_ = got.freq > 0 ? static_cast<u32>(got.freq) : spu::Spu::SAMPLE_RATE;
+  dev_samples_ = got.samples;
   // A DS frame, not 1/60 s: the console runs at 59.8261 Hz, and this number
   // is what a frame of queue depth means to the controller.
   frame_bytes_ = static_cast<u32>(static_cast<u64>(rate_) * 4 * CYCLES_PER_FRAME / ARM9_CLOCK_HZ);
   prev_l_ = prev_r_ = 0; phase_ = 0;
+  stats_ = Stats{};
   SDL_PauseAudioDevice(dev_, 0);
-  std::fprintf(stderr, "audio: %s driver, %d Hz, %d channels, %u-sample buffer%s\n", SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?",
-               got.freq, got.channels, got.samples, rate_ != spu::Spu::SAMPLE_RATE ? " (resampled from 32768 Hz here)" : "");
+  // The buffer is reported in frames of audio as well as samples: it is the
+  // floor under any queue target, and "2048 samples" does not say that "2.55
+  // DS frames" does. The input rate is not named here -- everything goes
+  // through the resampler now, and a DSi title can move the SPU to 47605 Hz
+  // mid-session, so the rate the sound is coming *from* is a live number and
+  // belongs in the statistics line rather than in a message printed once.
+  std::fprintf(stderr, "audio: %s driver, %d Hz, %d channels, %u-sample buffer (%.2f frames)\n",
+               SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?",
+               got.freq, got.channels, got.samples, device_buffer_frames());
   return true;
 }
 
@@ -84,22 +93,34 @@ const std::vector<s16>& Audio::capture() {
 void Audio::push(NDS& nds, bool drop) {
   // The SPU's rate is not a constant: a DSi title can select 47.6 kHz
   // through SNDEXCNT mid-session. Re-reading it here costs nothing and
-  // keeps the resampler honest when it changes.
-  in_rate_ = nds.spu.output_rate();
+  // keeps the resampler honest when it changes. The exact rate, not the
+  // nominal 32768 -- see Spu::output_rate_hz().
+  in_rate_ = nds.spu.output_rate_hz();
 
   // Measure before queueing, so the depth is what the device has left to
   // play rather than what it has plus this frame.
   if (dev_) {
-    const double now = static_cast<double>(SDL_GetQueuedAudioSize(dev_)) / frame_bytes_;
+    const u32 queued = SDL_GetQueuedAudioSize(dev_);
+    const double now = static_cast<double>(queued) / frame_bytes_;
     depth_ = depth_ < 0 ? now : depth_ + (now - depth_) * DRC_SMOOTH;
     if (now > target_frames_ + MAX_FRAMES) over_ = true;
     else if (now <= target_frames_) over_ = false;
+    ++stats_.frames;
+    if (queued == 0) ++stats_.dry;
+    if (now < 0.5) ++stats_.under_half;
+    if (now < 1.0) ++stats_.under_one;
+    if (now < stats_.min_depth) stats_.min_depth = now;
+    if (now > stats_.max_depth) stats_.max_depth = now;
   }
 
   // Fast forward outruns the speakers whatever the rate is, and a queue that
   // is not being consumed cannot be steered: both drop whole frames. Neither
   // teaches the controller anything, so its state is left where it is.
-  if (over_ || (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * target_frames_))) { nds.spu.drain(); return; }
+  if (over_ || (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * target_frames_))) {
+    ++stats_.dropped;
+    nds.spu.drain();
+    return;
+  }
 
   // Steer the queue back to the target. Positive trim plays out faster than
   // nominal, which drains a deep queue; negative fills a shallow one.
@@ -119,7 +140,7 @@ void Audio::push(NDS& nds, bool drop) {
     // The step is input frames per output frame, 16.16 -- a larger step
     // emits fewer output frames from the same input, which is what draining
     // a deep queue means.
-    const double ratio = static_cast<double>(in_rate_) / rate_ * speed_ * (1.0 + trim_);
+    const double ratio = in_rate_ / rate_ * speed_ * (1.0 + trim_);
     const u32 step = static_cast<u32>(ratio * 65536.0 + 0.5);
     out_.resize((static_cast<size_t>(n / ratio) + 2) * 2);
     size_t m = 0;
@@ -170,6 +191,10 @@ void Audio::pause(bool p) {
 
 double Audio::queued_frames() const {
   return dev_ ? static_cast<double>(SDL_GetQueuedAudioSize(dev_)) / frame_bytes_ : 0.0;
+}
+
+double Audio::device_buffer_frames() const {
+  return frame_bytes_ ? static_cast<double>(dev_samples_) * 4 / frame_bytes_ : 0.0;
 }
 
 } // namespace ds::sdl

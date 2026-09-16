@@ -44,7 +44,21 @@ public:
   // 13 selects 47.6 kHz output (only while disabled), bits 0-3 the NITRO/DSP
   // mix ratio. The DSi ignores SOUNDBIAS. melonDS DSi_I2S::WriteSndExCnt.
   void write_sndexcnt(u16 value, u16 mask);
-  u32  output_rate() const { return mix_period_ == MIX_PERIOD_47K ? 47605 : SAMPLE_RATE; }
+  // What the mixer actually produces, from the clock and the mix period
+  // rather than from the nominal name of the rate. The SPU emits one sample
+  // every mix_period_ ARM9 cycles, so the DS runs at 67027964 / 2048 =
+  // 32728.5 Hz -- *not* the 32768 its "32.768 kHz" name suggests, which is
+  // 1207 ppm away. The DSi's high-rate mode is 67027964 / 1408 = 47605.1.
+  //
+  // The difference is small and it is not nothing: it is a fixed ratio error
+  // on everything the frontend resamples, and before this was derived the
+  // rate control sat at -1200 ppm for entire runs holding the queue against
+  // it -- correcting our own constant while it was documented as the host's
+  // crystal (docs/frame-pacing-scoping.md). Anything converting the stream
+  // wants the exact one; SAMPLE_RATE is a name, good for asking a device for
+  // a rate it will recognise and for sizing a mic buffer, not for a ratio.
+  double output_rate_hz() const { return static_cast<double>(ARM9_CLOCK_HZ) / mix_period_; }
+  u32  output_rate() const { return static_cast<u32>(output_rate_hz() + 0.5); }
   void set_apply_bias(bool on) { apply_bias_ = on; }
   void catch_up();
 
@@ -53,7 +67,14 @@ public:
   size_t available() const { return (wr_ - rd_) & (RING_FRAMES - 1); }
   size_t take(s16* dst, size_t max_frames);
   void   drain() { rd_ = wr_; }
+  // Frames the ring dropped because nobody took them for half a second: a
+  // frontend that stopped draining, or a fast forward outrunning the ring.
+  // Not saved in a state and not read by the core -- a statistic only.
+  u64    ring_overruns() const { return overruns_; }
 
+  // The nominal name of the DS rate, not the rate: the mixer produces
+  // 32728.5 Hz (output_rate_hz()). Use this to ask a device for a rate it
+  // will recognise, or to size a buffer; never as the input of a conversion.
   static constexpr u32 SAMPLE_RATE = 32768;
   static constexpr u32 MIX_PERIOD  = 2048;      // ARM9 cycles per output sample
   static constexpr u32 MIX_PERIOD_47K = 1408;   // the DSi's 47605 Hz (melonDS: 704 ARM7 cycles)
@@ -126,6 +147,7 @@ private:
   static constexpr size_t RING_FRAMES = 16384;   // half a second
   std::array<s16, RING_FRAMES * 2> ring_{};
   size_t rd_ = 0, wr_ = 0;
+  u64    overruns_ = 0;                  // frames the ring overwrote unheard
 };
 
 } // namespace ds::spu
