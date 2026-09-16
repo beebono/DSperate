@@ -39,6 +39,7 @@
 #include "lid.h"
 #include "loader_cart.h"
 #include "menu.h"
+#include "cpu_gov.h"
 #include "pacer.h"
 
 #include <dirent.h>
@@ -181,6 +182,13 @@ const char* kUsage =
     "  --limiter HZ    the rate the emulator is held to: auto (the console's 59.8261 Hz), 30, 60\n"
     "                  (default), 120, 144, 240, or off. emu.limiter\n"
     "  --speed N       run at N percent of that rate (25..400); emu.speed\n"
+    "  --pacing M      how the wait for the next frame is spent: auto (default) | sleep | busy.\n"
+    "                  A frequency governor that decides by polling how busy the last few\n"
+    "                  milliseconds looked reads that sleep as an idle machine and clocks down\n"
+    "                  under the emulator (ondemand on ROCKNIX: 4-6x the missed frames and ~20x\n"
+    "                  the audio gaps). busy holds the core to the deadline instead, at the price\n"
+    "                  of a core that never idles; auto does that only where such a governor is in\n"
+    "                  charge. Nothing here changes a system setting. emu.pacing\n"
     "  --frames N      quit after N frames (for repeatable measurements)\n"
     "  --stats-from N  leave the first N frames out of the frame statistics (DS_FRAME_STATS)\n"
     "  --record F      write the played inputs to F (one record per frame)\n"
@@ -1107,6 +1115,7 @@ int main(int argc, char** argv) {
     else if (arg("--write-config")) { ds::sdl::Config::write_default(argv[++i], true); return 0; }
     else if (arg("--scale")) cli.set("video.scale", argv[++i]);
     else if (flag("--dual-window")) cli.set("video.dual_window", "true");
+    else if (arg("--pacing")) cli.set("emu.pacing", argv[++i]);
     else if (arg("--layout")) cli.set("video.layout", argv[++i]);
     else if (arg("--screen")) cli.set("video.screen", argv[++i]);
     else if (arg("--pip-alpha")) cli.set("video.pip_alpha", argv[++i]);
@@ -1226,7 +1235,7 @@ int main(int argc, char** argv) {
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.buffer_size", "audio.latency_frames", "emu.timing_oc", "emu.cpu_tuning", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.timing_oc", "emu.cpu_tuning", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
   // The DSi's own firmware, for a session that is a DSi from the start, unless
@@ -2000,6 +2009,30 @@ sdl_ready:
   // Wall-clock pacing when there is no audio queue to pace against.
   const double frame_ns = 1e9 * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ;
   ds::sdl::Pacer pacer(frame_ns);
+  // emu.pacing -- how the wait to the next deadline is spent.
+  //
+  // "sleep" is the obvious answer and the right one on any machine whose
+  // clock does not depend on what the last few milliseconds looked like. On
+  // one whose does, sleeping is what makes the emulator slow: a polling
+  // governor reads the sleep as idle and clocks down under us (cpu_gov.h has
+  // the measurements). "busy" holds the core to the deadline instead, which
+  // costs a core's idle power and buys back the dives without touching a
+  // single system-wide setting -- nothing here writes to sysfs, it only
+  // reads which governor is in charge.
+  //
+  // "auto", the default, is "busy" exactly when a polling governor is in
+  // charge, and a plain sleep otherwise.
+  {
+    const std::string pacing = cfg.str("emu.pacing", "auto");
+    std::string gov;
+    const bool polls = ds::sdl::host_governor_polls(&gov);
+    const bool busy = pacing == "busy" || (pacing != "sleep" && pacing != "off" && polls);
+    pacer.set_busy_wait(busy);
+    if (busy) VLOG("pacing: busy-wait to the deadline (governor %s%s)\n",
+                   polls ? gov.c_str() : ds::sdl::cpu_governor().c_str(),
+                   pacing == "busy" ? ", asked for" : ": it decides by polling load");
+    else VLOG("pacing: sleep to the deadline (governor %s)\n", ds::sdl::cpu_governor().c_str());
+  }
   // The limiter: what rate the emulator is held to, and how fast the game
   // runs against it.
   //

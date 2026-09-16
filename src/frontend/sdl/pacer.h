@@ -8,6 +8,8 @@
 #if defined(__linux__)
 #include <cerrno>
 #include <ctime>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/prctl.h>
 #endif
 
@@ -48,6 +50,16 @@ public:
 
   void set_period_ns(double ns) { period_ = ns * ticks_per_ns(); }
   double period_ns() const { return period_ / ticks_per_ns(); }
+
+  // Hold the core through the wait instead of sleeping it (emu.pacing =
+  // busy). The frame rate is identical either way -- this only changes what
+  // the machine looks like it is doing between frames, which is the whole
+  // of what a polling frequency governor decides on. See cpu_gov.h for why
+  // that is worth a core's idle time: on `ondemand` the sleep reads as idle
+  // and the clock steps down under the emulator, and there is no way for an
+  // unprivileged process to say "I am busy, I am just not busy *now*".
+  void set_busy_wait(bool on) { busy_ = on; }
+  bool busy_wait() const { return busy_; }
 
   // Start again from now: the deadline is one period away. For every place
   // where wall time and emulated time have just been cut apart -- unpause,
@@ -105,7 +117,33 @@ private:
     return v;
   }
 
+  // The whole wait, spun. The spin must not run at the emulator's real-time
+  // priority: the kernel caps an RT thread's share of a CPU
+  // (sched_rt_runtime_us, 95 % of every second on ROCKNIX) and would throttle
+  // the emulation along with the spin, and while it held the core nothing at
+  // ordinary priority -- the sound daemon, the compositor -- would run there
+  // at all. So the wait is taken as an ordinary thread and the real-time
+  // policy is put back for the frame.
+  void busy_until(Uint64 deadline, Uint64 now) {
+#if defined(__linux__)
+    int policy = 0;
+    sched_param sp{};
+    bool rt = pthread_getschedparam(pthread_self(), &policy, &sp) == 0 && (policy == SCHED_RR || policy == SCHED_FIFO);
+    if (rt) {
+      sched_param normal{};
+      if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &normal) != 0) rt = false;
+    }
+#endif
+    while (SDL_GetPerformanceCounter() < deadline) {}
+#if defined(__linux__)
+    if (rt) pthread_setschedparam(pthread_self(), policy, &sp);
+#endif
+    spin_ticks_ += static_cast<double>(deadline - now);
+    ++spin_n_;
+  }
+
   void sleep_until(Uint64 deadline, Uint64 now) {
+    if (busy_) { busy_until(deadline, now); return; }
     const double margin = margin_ticks_;
     const double left = static_cast<double>(deadline - now);
     if (left > margin) {
@@ -140,6 +178,7 @@ private:
     while (SDL_GetPerformanceCounter() < deadline) {}
   }
 
+  bool busy_ = false;        // spin the wait instead of sleeping it
   double period_ = 0;        // in performance-counter ticks
   Uint64 next_ = 0;
   double margin_ticks_ = 0;  // learned; starts at zero and grows into the first few frames

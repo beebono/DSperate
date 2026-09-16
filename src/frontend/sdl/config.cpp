@@ -303,6 +303,13 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # realtime = rr                 # rr | fifo | off: real-time scheduling for the emulator's threads
 #                               # (needs root or an rtprio limit)
 # rt_priority = 5
+# pacing = auto                 # auto | sleep | busy: how the wait for the next frame is spent.
+                                # A governor that sets the CPU clock from how busy the last few
+                                # milliseconds looked (ondemand, conservative, powersave) reads
+                                # that sleep as an idle machine and clocks down under the
+                                # emulator; busy holds the core to the deadline instead, which
+                                # costs a core's idle power. auto = busy only where such a
+                                # governor is in charge. No system setting is changed either way
 # host_cores = 0                # cores the emulator's threads size themselves for; 0 = detect
 # jit = true                    # false = interpreter (much slower; for comparison)
 # quantum = 0                   # CPU interleave: 0 = event-bound (fastest) | 128 = melonDS lockstep
