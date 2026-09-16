@@ -150,6 +150,17 @@ public:
   void set_geometry_worker(bool on);
   bool geometry_worker() const { return worker_on_; }
 
+  // How fast the modelled engine drains its FIFO, in percent of hardware
+  // (emu.gx_drain / --gx-drain). 100 is the exact model. Above it, elapsed
+  // time is credited against the command costs faster, so the FIFO level
+  // falls sooner and a stalled ARM9 is released sooner -- but every
+  // mechanism a game paces on (the level, the stall, the busy bits, the swap
+  // wait) still happens, in the same order, only shorter. That is the
+  // difference from timing_oc, which removes them. Deterministic: the
+  // fractional cycle is carried. No effect with timing_oc (nothing is timed).
+  void set_drain_speed(u32 percent) { drain_pct_ = percent < 100 ? 100 : (percent > 1000 ? 1000 : percent); drain_frac_ = 0; }
+  u32 drain_speed() const { return drain_pct_; }
+
   // POWCNT1 bit 3 (geometry) and bit 2 (rendering).
   void set_powcnt(u16 value);
 
@@ -272,6 +283,8 @@ private:
 
   // Timing.
   u64 timestamp_ = 0;          // system cycles
+  u32 drain_pct_ = 100;        // set_drain_speed
+  u64 drain_frac_ = 0;         // the credited cycle's fraction, carried (hundredths)
   s32 cycle_count_ = 0;
   s32 vertex_pipeline_ = 0, normal_pipeline_ = 0, polygon_pipeline_ = 0;
   s32 vertex_slot_counter_ = 0;

@@ -342,6 +342,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # and timing_oc. Only the cost of a culled polygon is estimated (from
                                 # the previous frame's cull ratio), so games pacing on the FIFO keep
                                 # their ordering. Most of timing_oc's speed on 3D-heavy games.
+# gx_drain = 100                # How fast the modelled GX FIFO drains, in percent of hardware (100 is
+                                # exact, up to 1000). Stalls, the FIFO level and the swap wait still
+                                # happen in the same order, only shorter, so games that pace on them
+                                # keep working; fewer stalled ARM9 cycles on 3D-heavy scenes.
 # timing_oc = false             # "Timing OC": drop the GX FIFO and geometry timing (DraStic's model),
                                 # and run the geometry engine on its own thread.
                                 # A few percent faster on 3D-heavy games; USE WITH CAUTION! games that

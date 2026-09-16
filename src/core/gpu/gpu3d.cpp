@@ -464,7 +464,12 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
   const bool timed = shape_log_ && worker_started_ && !worker_on_;
   const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   const u64 now = arm9_time >> 1;
-  cycle_count_ -= static_cast<s32>(now - timestamp_);
+  u64 elapsed = now - timestamp_;
+  if (drain_pct_ != 100) {   // set_drain_speed: the engine drains faster than hardware
+    const u64 x = elapsed * drain_pct_ + drain_frac_;
+    elapsed = x / 100; drain_frac_ = x % 100;
+  }
+  cycle_count_ -= static_cast<s32>(elapsed);
   timestamp_ = now;
   if (cycle_count_ <= 0 && pipe_n_) {
     if (prof::enabled) prof::add(prof::C_GX_RUN_SLOW_EXEC, 1);
