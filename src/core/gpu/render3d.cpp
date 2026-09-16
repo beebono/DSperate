@@ -2762,6 +2762,13 @@ void Renderer3D::render(const Gpu3D& gx) {
   // this object's state, and the identical-frame path below mutates the cache
   // even when it renders nothing.
   sync_all();
+  // Everything from here to the band dispatch -- the identical-frame check,
+  // the texture cache validation and the resolve -- is R3D_PREP; the band
+  // workers account for themselves.
+  const auto t_prep0 = prof::enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  struct PrepEnd { std::chrono::steady_clock::time_point t0; bool* done; ~PrepEnd() { if (prof::enabled && !*done) { prof::add_ns(prof::R3D_PREP, static_cast<u64>((std::chrono::steady_clock::now() - t0).count())); *done = true; } } };
+  bool prep_done = false;
+  PrepEnd prep_end{t_prep0, &prep_done};
   gx_ = &gx;
   // The slowest band of the frame just synced, kept for two frames (the
   // band-count choice below). The slots are read again by the profile after
@@ -2823,6 +2830,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   }
   texels_in_ = &poly_texels_;
 
+  if (prof::enabled && !prep_done) { prof::add_ns(prof::R3D_PREP, static_cast<u64>((std::chrono::steady_clock::now() - t_prep0).count())); prep_done = true; }
   u32 maxb = band_count(live);
   // A hot compositor thread (Gpu lag mode) takes the fourth core of the
   // handhelds: three band workers beside it measured +9 % on Golden Sun's

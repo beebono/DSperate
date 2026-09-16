@@ -350,7 +350,10 @@ void Scheduler::fire_due() {
         armed_ &= ~bit;
         firing_at_ = at_[i];
         if (debug_slices_) std::fprintf(stderr, "[fire] t %llu event %u at %llu\n", (unsigned long long)now_, i, (unsigned long long)at_[i]);
-        fn_[i](nds_, param_[i]);   // may schedule: next_ is kept current by schedule()
+        // The two scanline handlers account for themselves (Gpu::on_hblank,
+        // on_scanline_start); everything else is "events".
+        if (i == static_cast<u32>(EventId::HBlank) || i == static_cast<u32>(EventId::VBlank_Scanline)) fn_[i](nds_, param_[i]);
+        else { prof::Scope ev(prof::EVENTS); fn_[i](nds_, param_[i]); }   // may schedule: next_ is kept current by schedule()
         m = armed_ & ~((bit << 1) - 1);
       } else {
         if (soft_mask_ & bit) { if (at_[i] < next_soft(i)) next_soft(i) = at_[i]; }     // soft events never bound a slice
@@ -442,6 +445,7 @@ SliceNext Scheduler::slice_next() {
 
 begin:
   {
+    prof::Scope sched_scope(prof::SCHED);
     if ((sl_.until_frame && nds_.frame_ready) || now_ >= sl_.until) { sl_.phase = SL_BEGIN; return {nullptr, nullptr}; }
     u64 deadline = next_;
     if (deadline > sl_.until) deadline = sl_.until;
@@ -548,6 +552,7 @@ slice_end:
     running_ = nullptr;
     now_ += static_cast<u64>(sl_.ran9);
     if (debug_slices_) std::fprintf(stderr, "[slice] now %llu ran9 %lld a9pc %08x b7 %d a7left %d a7pc %08x\n", (unsigned long long)now_, (long long)sl_.ran9, a9.hot.regs[15], sl_.budget7, a7.hot.cycle_budget, a7.hot.regs[15]);
+    { prof::Scope sched_scope(prof::SCHED); }   // the walk itself is inside fire_due's per-handler accounting
     fire_due();
     goto begin;
   }

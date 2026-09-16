@@ -327,6 +327,7 @@ void Gpu::fall_back_per_line(u32 mask) {
 // ---- timing -----------------------------------------------------------------
 
 void Gpu::on_hblank() {
+  prof::Scope hook(prof::GPU_LINE);
   nds_.io.set_hblank(true);
   const bool frame_reset = line_ == 262;
   if (line_ < SCREEN_H) {
@@ -344,7 +345,12 @@ void Gpu::on_hblank() {
       l[e] = batch ? SCREEN_H - 1 : line_;
       if (!batch && render_next_[e] < line_) f[e] = render_next_[e];          // catch up anything skipped
     }
+    // The draws account for themselves; take them out of this hook's time.
+    // (Adding the negated interval to the unsigned accumulator subtracts it
+    // modulo 2^64; the enclosing scope keeps the per-frame sum positive.)
+    const auto t_draw0 = prof::enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     render_ranges(f[0], l[0], f[1], l[1]);
+    if (prof::enabled) prof::add_ns(prof::GPU_LINE, static_cast<u64>(-(std::chrono::steady_clock::now() - t_draw0).count()));
     // End of a burst window: the lines after this one batch again, trapped.
     for (int e = 0; e < 2; ++e)
       if (burst_[e] && --burst_left_[e] == 0 && line_ < SCREEN_H - 1) {
@@ -368,7 +374,10 @@ void Gpu::on_hblank() {
       // previous 3D picture, which is the only inexactness frameskip adds
       // beyond the skipped frames themselves.
       skip_next_ = skip_req_ && skippable();
+      // The render accounts for itself (R3D_PREP / GPU_UPLOAD / band dispatch).
+      const auto t_r0 = prof::enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if (!skip_next_) nds_.gpu3d.render_frame(); else nds_.gpu3d.note_raster_skipped();
+      if (prof::enabled) prof::add_ns(prof::GPU_LINE, static_cast<u64>(-(std::chrono::steady_clock::now() - t_r0).count()));
       if (probe_enabled_) async_probe_start();
     } else if (line_ == 262) {
       engine[0].latch(Engine2D::L_SPRITES, 0, false); engine[1].latch(Engine2D::L_SPRITES, 0, false);
@@ -436,6 +445,7 @@ void Gpu::async_probe_check(bool at_line0) {
 }
 
 void Gpu::on_scanline_start() {
+  prof::Scope hook(prof::GPU_LINE);
   nds_.io.set_hblank(false);
   line_ = static_cast<u16>((line_ + 1) % SCANLINES_PER_FRAME);
   hblank_done_ = false;
@@ -447,9 +457,9 @@ void Gpu::on_scanline_start() {
     // The frame's display lines must all be drawn before the frontend reads
     // them (run_frame returns here) and before begin_frame reads the
     // engines' render side.
-    join_worker();
+    { prof::Scope j(prof::JOIN0); join_worker(); }
     if (probe_enabled_) async_probe_check(true);
-    begin_frame();
+    { prof::Scope b(prof::BEGIN_FRAME); begin_frame(); }
     nds_.frame_ready = true;
   } else if (line_ == 192) {
     if (probe_enabled_) async_probe_check(false);
@@ -458,7 +468,7 @@ void Gpu::on_scanline_start() {
     nds_.dma.stop(Cpu::ARM9, dma::MODE9_DISPLAY_FIFO);
     nds_.dma.check(Cpu::ARM9, dma::MODE9_VBLANK);
     nds_.dma.check(Cpu::ARM7, dma::MODE7_VBLANK);
-    nds_.gpu3d.vblank();
+    { prof::Scope v(prof::GX_VBLANK); nds_.gpu3d.vblank(); }
     if (capture_on_) { capcnt_ &= ~(1u << 31); capture_on_ = false; }
   } else if (line_ == 262) nds_.io.set_vblank(false);
   if (line_ >= 2 && line_ < 194) nds_.dma.check(Cpu::ARM9, dma::MODE9_DISPLAY_START);
@@ -717,10 +727,13 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
 // HBlank latches, the line, its output, the next line's sprites.
 void Gpu::step_engine(int e, u32 line) {
   Engine2D& en = engine[e];
-  en.replay_to(line * 2);
-  en.update_windows(line);
-  en.replay_to(line * 2 + 1);
-  en.pre_draw(line, false);
+  {
+    prof::Scope jn(prof::JOURNAL);
+    en.replay_to(line * 2);
+    en.update_windows(line);
+    en.replay_to(line * 2 + 1);
+    en.pre_draw(line, false);
+  }
   const unsigned abl = ablate();
   // Engine B on a screen the frontend hides (set_screen_visible) draws
   // nothing; the line it comes back on re-renders its own sprites, which the
@@ -730,7 +743,7 @@ void Gpu::step_engine(int e, u32 line) {
   // Reading the 3D line joins the raster bands, so a skipped frame (whose
   // raster never ran) must not ask for it; capture, which also reads it, is
   // never on for a skipped frame.
-  if (e == 0 && (draw || capture_render_)) { line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); }
+  if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); }
   if (draw) { en.render_line(line); output_engine(e, line); }
   // A skipped frame has nothing to capture: its destination bank keeps the
   // picture it last captured, and display_phase_period() is what stops an
@@ -741,7 +754,7 @@ void Gpu::step_engine(int e, u32 line) {
     prof::Scope sc(prof::OBJ_DRAW, e == 0);
     en.render_sprites(line + 1);
   }
-  en.post_draw(false);
+  { prof::Scope jn(prof::JOURNAL); en.post_draw(false); }
 }
 
 // The output stage for one engine's line: display mode, master brightness,

@@ -21,6 +21,8 @@ const char* const names[COUNT] = {
   "3d clear", "3d spans", "3d final pass", "3d band wait", "spu",
   "jit translate",
   "gx worker join",
+  "sched slice loop", "events (timers, dma, fifo)", "gpu line hooks", "line-0 worker join", "begin_frame", "gx vblank (sort, join)",
+  "2d journal/latches", "3d line wait", "3d prep (texcache)", "gpu upload",
 };
 
 const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d resolved pixels",

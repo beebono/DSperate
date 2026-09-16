@@ -20,6 +20,19 @@ enum Stage : u32 {
   JIT_TX,
   // The emulation thread waiting for the geometry worker (Gpu3D::worker_join).
   GX_JOIN,
+  // The "untimed" bucket, resolved (2026-09-16): leaf scopes placed so that
+  // none contains another scope and none sits inside one, so they add
+  // against wall time like the stages above.
+  SCHED,        // the slice loop's own bookkeeping: deadline, idle test, budgets
+  EVENTS,       // event handlers other than the two scanline ones: timers, DMA starts, the display FIFO
+  GPU_LINE,     // the scanline-start and HBlank handlers, minus the pieces below and minus the 2D draws
+  JOIN0,        // waiting for the 2D worker at line 0
+  BEGIN_FRAME,  // Gpu::begin_frame
+  GX_VBLANK,    // Gpu3D::vblank: the swap, the polygon sort, the geometry worker join
+  JOURNAL,      // step_engine's journal replay, window and draw latches
+  R3D_LINE,     // asking the 3D raster for a line (a band or fence wait when it is one)
+  R3D_PREP,     // Renderer3D::render up to the raster seam: texture cache validation and resolve
+  GPU_UPLOAD,   // the GPU raster's upload and submit
   COUNT
 };
 extern bool enabled;
