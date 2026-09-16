@@ -384,7 +384,14 @@ private:
   std::chrono::steady_clock::time_point frame_t0_{};
   bool frame_t0_valid_ = false;
   u32 frame_idx_ = 0;
-  u64 gx_inline_ns_ = 0;               // inline execution time this interval (shape A)
+  // Inline execution time this interval (shape A). DIAGNOSTIC ONLY: the arm
+  // choice in shape_step is made on `wall`, and this number reaches nothing
+  // but the DS_GX_SHAPE_LOG line -- so it is accumulated only when that log is
+  // on. It cost two steady_clock reads per run_to_slow call otherwise, which
+  // is ~1,300 a frame on a 3D-heavy title (run_to_slow drains in ~667 chunks),
+  // and the A30's kernel has no vDSO, so each one of those is a syscall.
+  bool shape_log_ = false;             // DS_GX_SHAPE_LOG: read once, see the constructor
+  u64 gx_inline_ns_ = 0;
   u64 external_ns_ = 0;                // frontend time outside emulation this interval (note_external_ns)
   void shape_step();
   void worker_loop();

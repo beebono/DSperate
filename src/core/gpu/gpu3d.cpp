@@ -336,7 +336,13 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
 
 Gpu3D::~Gpu3D() { if (worker_on_) worker_join(); worker_stop(); renderer_.sync_all(); }
 
-Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) { reset(); }
+Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) {
+  // Once, here rather than as a function-local static in the hot path: a
+  // local static costs an acquire load per use (the same reason
+  // Scheduler's constructor reads its knobs).
+  shape_log_ = std::getenv("DS_GX_SHAPE_LOG") != nullptr;
+  reset();
+}
 
 void Gpu3D::reset_render_state() {
   render_count_.fill(0);
@@ -448,9 +454,14 @@ void Gpu3D::finish_work(s32 cycles) {
 
 void Gpu3D::run_to_slow(u64 arm9_time) {
   prof::add(prof::C_GX_RUN_SLOW, 1);
-  // The inline execution time is the shape controller's input; the clock is
-  // read only while the controller is live (~40 ns a call otherwise).
-  const bool timed = worker_started_ && !worker_on_;
+  // The inline execution time is a DS_GX_SHAPE_LOG diagnostic and nothing
+  // else -- shape_step chooses its arm on `wall`. Two clock reads per call is
+  // too much to pay for a log line on a geometry firehose: Golden Sun's title
+  // makes 591 calls a frame, and on the A30 (no vDSO) a read is a syscall at
+  // ~370 ns, so ~440 us a frame. Ordinary scenes make 1-29 calls a frame, so
+  // this is worth ~2 % there and nothing anywhere else -- see
+  // docs/smoothness-scoping.md P8a for the measured table.
+  const bool timed = shape_log_ && worker_started_ && !worker_on_;
   const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   const u64 now = arm9_time >> 1;
   cycle_count_ -= static_cast<s32>(now - timestamp_);
@@ -545,7 +556,7 @@ void Gpu3D::promote_stalled() {
 
 void Gpu3D::drain_all() {
   if (!geometry_on_) return;
-  const bool timed = worker_started_;
+  const bool timed = shape_log_ && worker_started_;   // diagnostic only; see run_to_slow
   const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   const u64 now = nds_.sched.now();
   // run_to_slow drains while its cycle deficit is non-positive; give it one
@@ -1608,7 +1619,7 @@ void Gpu3D::worker_activate(bool on) {
 // the even and the odd interval, the pair's summed wall time is remembered,
 // the shortest arm is run and the others are probed again now and then.
 void Gpu3D::shape_step() {
-  static const bool log = std::getenv("DS_GX_SHAPE_LOG") != nullptr;
+  const bool log = shape_log_;
   const auto now = std::chrono::steady_clock::now();
   const u64 waits = nds_.gpu.take_join_wait_ns() + renderer_.take_owner_wait_ns() + join_wait_ns_.exchange(0, std::memory_order_relaxed);
   const u64 gx_worker = take_worker_busy_ns();
