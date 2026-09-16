@@ -105,7 +105,9 @@ the resampler -- the old equal-rates bypass would have been a path with no
 control on it -- and `frame_bytes_` comes from `CYCLES_PER_FRAME /
 ARM9_CLOCK_HZ` with the SPU's live `output_rate()`, so the 47605 Hz DSi mode
 and the 59.8261 Hz frame rate are both accounted for. `audio.latency_frames`
-(default 3) is wired. Frame dropping survives only for what the controller
+(default 3) is wired -- renamed to `audio.buffer_size` and given in
+milliseconds since (2026-09-15, the buffer-sizing work); the old key is still
+read. Frame dropping survives only for what the controller
 cannot answer for: fast forward, and a queue past `MAX_FRAMES` (8) that is
 not being consumed at all.
 
@@ -264,6 +266,11 @@ device, where the margins are thinner.
 
 `audio.latency_frames` is ini-only: the menu has Emu, Video, Layout and User
 pages and no audio page, and adding one for a single row is not worth it.
+
+**Superseded (2026-09-15).** The key is `audio.buffer_size`, in milliseconds,
+and it gets an AUDIO BUFFER row on the Emu page rather than a page of its
+own -- which is the cheap half of the answer the reasoning above was missing.
+See `docs/audio-buffer-scoping.md`.
 
 ### The original plan for this phase
 

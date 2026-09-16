@@ -249,7 +249,7 @@ measured decision, ranked by likely payoff:
 | 4.18 | Vertex transform as a batched kernel after replay | 04 §6 | no | vertices transformed as commands execute; a NEON form of the per-vertex transform measured worse than the scalar `smull`/`smaddl` chain (110 → 118 insn), so batching is the only route and it needs the replay model |
 | 4.19 | `GXSTAT` (and FIFO IRQ/DMA) computed by replaying the log on demand | 04 §6 | same | register reads call `run_to` first; `swap_pending()` feeds idle skip — see Dragon Ball GXSTAT poll note |
 | 4.20 | 3D render kicked at line 215, joined at VBlank | 04 §6 | same | `render_frame` at VCount 215, joined by `sync_line` as display reads each band |
-| 4.21 | Audio buffer occupancy as primary frame limiter | 04 §7 | same | `Audio::pace()` sleeps above the target queue depth; wall clock only with `--no-audio` |
+| 4.21 | Audio buffer occupancy as primary frame limiter | 04 §7 | no | it was, through `Audio::pace()`, until the frame limiter took over (`pacer.h`, docs/frame-pacing-scoping.md). The queue is a latency buffer now and follows the clock rather than being it: dynamic rate control steers the resampler to hold it at `audio.buffer_size` |
 | 4.22 | Frame skip drops rendering only (CPU/geometry/SPU still exact) | 04 §7 | no | no frame skip at all |
 | 4.23 | All thread hand-offs via mutex + condvar, no spinning | 04 §8 | equiv | LineWorker spins then parks; 3D workers mutex+condvar — see qemu LineWorker hang note |
 
@@ -272,7 +272,7 @@ measured decision, ranked by likely payoff:
 | 5.13 | Lock-free 64 K-sample ring with 16-bit indices to the audio thread | 05 §6 | same | 16 K-frame ring, `take()` from the frontend |
 | 5.14 | Capture units emulated for timing/control only (data is silence) | 05 §6 | no — by choice | capture implemented for the mixer-output mode; add/channel modes warn — accuracy trade — decide, don't copy |
 | 5.15 | Channels 0–3 keep a side sample for SOUNDCNT output select | 05 §6 | same | channel 1/3 bypass in `mix()` |
-| 5.16 | `audio_sync` blocks at VBlank above ¾ buffer occupancy | 05 §7 | same | `Audio::pace()` |
+| 5.16 | `audio_sync` blocks at VBlank above ¾ buffer occupancy | 05 §7 | no | nothing blocks on the queue; see 4.21 |
 
 ## Cross-cutting
 

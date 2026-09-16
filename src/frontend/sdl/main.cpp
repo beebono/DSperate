@@ -156,6 +156,9 @@ const char* kUsage =
     "                  and fb0 answers). video.fbdev\n"
     "  --no-audio      run without sound\n"
     "  --volume N      0..100\n"
+    "  --audio-buffer MS  how much sound is held ahead, in milliseconds (default 50);\n"
+    "                  audio.buffer_size. Lower is less delay and less slack before a\n"
+    "                  late frame is heard as a gap\n"
     "  --no-mic        do not open the microphone (M still fakes one)\n"
     "  --no-vsync      present without waiting for the display refresh\n"
     "  --interp        interpreter instead of the recompiler\n"
@@ -1161,6 +1164,7 @@ int main(int argc, char** argv) {
     else if (flag("--no-fbdev")) cli.set("video.fbdev", "false");
     else if (flag("--no-audio")) cli.set("audio.enabled", "false");
     else if (arg("--volume")) cli.set("audio.volume", argv[++i]);
+    else if (arg("--audio-buffer")) cli.set("audio.buffer_size", argv[++i]);
     else if (arg("--speed")) cli.set("emu.speed", argv[++i]);
     else if (arg("--limiter")) cli.set("emu.limiter", argv[++i]);
     else if (flag("--no-mic")) cli.set("audio.mic", "false");
@@ -1222,7 +1226,7 @@ int main(int argc, char** argv) {
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.latency_frames", "emu.timing_oc", "emu.cpu_tuning", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "audio.buffer_size", "audio.latency_frames", "emu.timing_oc", "emu.cpu_tuning", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
   // The DSi's own firmware, for a session that is a DSi from the start, unless
@@ -1648,7 +1652,16 @@ sdl_ready:
   ds::sdl::Audio audio;
   if (audio_on) audio.open(cfg.flag("audio.native_rate", true));
   audio.set_volume(cfg.num("audio.volume", 100));
-  audio.set_latency_frames(cfg.num("audio.latency_frames", 3));
+  // [audio] buffer_size is milliseconds. It replaced latency_frames, which
+  // counted whole DS frames; that key is still read when buffer_size is unset,
+  // so an ini or a per-game file written before the rename keeps its setting
+  // rather than silently reverting to the default.
+  auto audio_buffer_ms = [](const ds::sdl::Config& c) {
+    if (const std::string v = c.str("audio.buffer_size"); !v.empty()) return std::atof(v.c_str());
+    if (const int frames = c.num("audio.latency_frames", 0); frames > 0) return frames * ds::sdl::Audio::FRAME_MS;
+    return ds::sdl::Audio::DEFAULT_MS;
+  };
+  audio.set_buffer_ms(audio_buffer_ms(cfg));
   // Not during a replay: the log carries the mic, and an open capture device
   // would only add work to a measurement.
   ds::sdl::MicAlsa mic_alsa;
@@ -2816,7 +2829,8 @@ sdl_ready:
     if (is("net.mode")) { if (set_net_mode) set_net_mode(v); return; }
     if (is("emu.speed")) { speed_pct = std::atoi(v.c_str()); apply_limiter(); return; }
     if (is("emu.limiter")) { limiter_mode = v; apply_limiter(); return; }
-    if (is("audio.latency_frames")) { audio.set_latency_frames(std::atoi(v.c_str())); return; }
+    if (is("audio.buffer_size")) { audio.set_buffer_ms(std::atof(v.c_str())); return; }
+    if (is("audio.latency_frames")) { audio.set_buffer_ms(std::atoi(v.c_str()) * ds::sdl::Audio::FRAME_MS); return; }
     if (is("emu.ff_speed")) { ff_speed = std::atoi(v.c_str()); return; }
     if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
     if (is("emu.autosave")) { autosave = on; return; }
@@ -4358,7 +4372,7 @@ sdl_ready:
     // decide on, logged from the run that would have driven it.
     if (audio.active()) {
       static FILE* aq = [] { const char* p = std::getenv("DS_AUDIO_QUEUE"); return p ? std::fopen(p, "w") : nullptr; }();
-      if (aq) std::fprintf(aq, "%.3f %.0f %d %llu %.1f\n", audio.queued_frames(), audio.rate_trim_ppm(), audio.latency_frames(),
+      if (aq) std::fprintf(aq, "%.3f %.0f %.2f %llu %.1f\n", audio.queued_frames(), audio.rate_trim_ppm(), audio.target_frames(),
                            static_cast<unsigned long long>(audio.stats().dry), audio.input_rate());
     }
     ds::prof::frame_mark();   // marks the emu slice: the present is not in a stage, it lands in "untimed" of work_ms

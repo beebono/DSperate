@@ -70,11 +70,28 @@ public:
   // Fast forward is not this. It drops whole frames instead, because 2x of
   // pitched-up audio is not what anyone wants out of a fast forward.
   void set_speed(double factor);
-  // The depth the controller holds the queue at, in frames of audio: the
-  // output latency, and the slack a late frame has before the queue runs
-  // dry. [audio] latency_frames.
-  void set_latency_frames(int frames);
-  int  latency_frames() const { return target_frames_; }
+  // A DS frame of audio, in milliseconds. The console's 59.8261 Hz, not
+  // 1/60: this is the unit the queue depth is measured in.
+  static constexpr double FRAME_MS = 1e3 * CYCLES_PER_FRAME / ARM9_CLOCK_HZ;
+  // What [audio] latency_frames = 3 came to, and still the default.
+  static constexpr double DEFAULT_MS = 3 * FRAME_MS;
+  // The bounds the file accepts, which are wider than the ones a menu row
+  // offers. The floor is not arbitrary: the device drains in whole periods
+  // of its own, so a target under one of them is a depth nothing can hold.
+  static constexpr double MIN_MS = 10.0, MAX_MS = 400.0;
+
+  // The depth the controller holds the queue at, as milliseconds of audio:
+  // the output latency, and the slack a late frame has before the queue runs
+  // dry. [audio] buffer_size.
+  //
+  // Milliseconds rather than frames because the other half of the latency --
+  // the device's own period, 42.7 ms at the 2048 samples we ask for -- is a
+  // count of samples, and the two only become comparable in time. Whole
+  // frames could not express a target between 33 and 50 ms at all, which is
+  // most of the interesting range once the device buffer is sized too.
+  void set_buffer_ms(double ms);
+  double buffer_ms() const { return target_frames_ * FRAME_MS; }
+  double target_frames() const { return target_frames_; }
   // What the controller is doing to the sample rate right now, in parts per
   // million (positive: playing out faster than nominal to shed a deep
   // queue). For the statistics line -- a number that sits at one end of its
@@ -126,7 +143,6 @@ public:
   double queued_frames() const;   // how much audio is buffered, in frames
 
 private:
-  static constexpr int TARGET_FRAMES = 3;    // ~50 ms of slack
   // Past this the queue is not drifting, it is not being consumed at all (a
   // dead daemon, a device the session lost): the controller cannot fix that
   // and would wind itself to its limit trying, so whole frames go instead.
@@ -152,7 +168,9 @@ private:
   u32 phase_ = 0;
   std::vector<s16> out_;
   bool over_ = false;    // the queue is not being consumed; dropping until it is back at the target
-  int  target_frames_ = TARGET_FRAMES;
+  // Fractional: the target is set in milliseconds, which does not land on
+  // whole frames, and the controller's error term wants the difference.
+  double target_frames_ = DEFAULT_MS / FRAME_MS;
   double speed_ = 1.0;   // wall-clock rate against the console's own
   double depth_ = -1.0;  // smoothed queue depth in frames; < 0 until the first measurement
   double trim_ = 0.0;    // the controller's correction, as a fraction of the nominal rate

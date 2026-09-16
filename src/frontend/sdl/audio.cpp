@@ -2,6 +2,7 @@
 #include "audio.h"
 #include "core/nds.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -116,7 +117,7 @@ void Audio::push(NDS& nds, bool drop) {
   // Fast forward outruns the speakers whatever the rate is, and a queue that
   // is not being consumed cannot be steered: both drop whole frames. Neither
   // teaches the controller anything, so its state is left where it is.
-  if (over_ || (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * target_frames_))) {
+  if (over_ || (drop && (!dev_ || SDL_GetQueuedAudioSize(dev_) > frame_bytes_ * target_frames_))) {   // target_frames_ is fractional; the comparison promotes
     ++stats_.dropped;
     nds.spu.drain();
     return;
@@ -172,8 +173,9 @@ void Audio::set_speed(double factor) {
   speed_ = factor > 0.05 ? (factor < 20.0 ? factor : 20.0) : 0.05;
 }
 
-void Audio::set_latency_frames(int frames) {
-  target_frames_ = frames < 1 ? 1 : (frames > 8 ? 8 : frames);
+void Audio::set_buffer_ms(double ms) {
+  if (!(ms > 0.0)) ms = DEFAULT_MS;      // unset, unparseable, or a NaN out of atof
+  target_frames_ = std::clamp(ms, MIN_MS, MAX_MS) / FRAME_MS;
   depth_ = -1.0;      // the target moved: measure again rather than chase the old error
   trim_ = 0.0;
 }
