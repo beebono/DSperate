@@ -54,10 +54,13 @@ using EventFn = void (*)(NDS& nds, u32 param);
 // What the native slice loop runs next: the context to enter and the native
 // entry (returned in x0/x1); ctx == nullptr ends the run.
 struct SliceNext { CpuContext* ctx; const void* native; };
+// Event names, for the per-event census (DS_PROFILE).
+const char* event_name(u32 id);
 
 class Scheduler {
 public:
   explicit Scheduler(NDS& nds);
+  ~Scheduler();   // prints the per-event census when DS_PROFILE is on
 
   void reset();
 
@@ -243,6 +246,7 @@ private:
   std::array<EventFn, EVENT_COUNT> fn_{};
   std::array<u32, EVENT_COUNT>     param_{};
   u32 armed_ = 0;                 // bit i = events_[i] is armed
+  u64 ev_ns_[EVENT_COUNT] = {}, ev_n_[EVENT_COUNT] = {};   // DS_PROFILE: host time and count per event id
   u32 next_id_ = EVENT_COUNT;     // which event `next_` belongs to (EVENT_COUNT: none)
   NDS& nds_;
   u64  now_;

@@ -21,6 +21,25 @@
 
 namespace ds {
 
+const char* event_name(u32 id) {
+  static const char* const names[static_cast<u32>(EventId::Count)] = {
+    "hblank", "scanline", "timer0", "timer1", "timer2", "timer3", "timer7_0", "timer7_1", "timer7_2", "timer7_3",
+    "dma", "spu", "spi", "rtc", "cart", "gx3d", "display fifo", "div", "sqrt", "lcd irq", "wifi",
+  };
+  return id < static_cast<u32>(EventId::Count) && names[id] ? names[id] : "?";
+}
+
+Scheduler::~Scheduler() {
+  if (!prof::enabled) return;
+  u64 total = 0;
+  for (u32 i = 0; i < EVENT_COUNT; ++i) total += ev_n_[i];
+  if (!total) return;
+  std::fprintf(stderr, "[events] handler time by event (the EVENTS stage split):\n");
+  for (u32 i = 0; i < EVENT_COUNT; ++i)
+    if (ev_n_[i]) std::fprintf(stderr, "[events]   %-14s %10llu fired  %9.3f ms total  %6.0f ns each\n", event_name(i),
+                                static_cast<unsigned long long>(ev_n_[i]), static_cast<double>(ev_ns_[i]) / 1e6, static_cast<double>(ev_ns_[i]) / static_cast<double>(ev_n_[i]));
+}
+
 Scheduler::Scheduler(NDS& nds) : nds_(nds), now_(0) {
   // Read once: a function-local static costs an acquire load per use.
   if (const char* q = std::getenv("DS_QUANTUM")) { set_quantum(std::atoll(q)); quantum_forced_ = true; }
@@ -350,10 +369,19 @@ void Scheduler::fire_due() {
         armed_ &= ~bit;
         firing_at_ = at_[i];
         if (debug_slices_) std::fprintf(stderr, "[fire] t %llu event %u at %llu\n", (unsigned long long)now_, i, (unsigned long long)at_[i]);
-        // The two scanline handlers account for themselves (Gpu::on_hblank,
-        // on_scanline_start); everything else is "events".
-        if (i == static_cast<u32>(EventId::HBlank) || i == static_cast<u32>(EventId::VBlank_Scanline)) fn_[i](nds_, param_[i]);
-        else { prof::Scope ev(prof::EVENTS); fn_[i](nds_, param_[i]); }   // may schedule: next_ is kept current by schedule()
+        // The two scanline handlers and the SPU account for themselves (the
+        // SPU is one event per sample, ~540 a frame, with its own stage).
+        if (i == static_cast<u32>(EventId::HBlank) || i == static_cast<u32>(EventId::VBlank_Scanline) || i == static_cast<u32>(EventId::Spu)) fn_[i](nds_, param_[i]);
+        else if (!prof::enabled) fn_[i](nds_, param_[i]);   // may schedule: next_ is kept current by schedule()
+        else {
+          // Per event id as well as in the EVENTS stage, so the stage can be
+          // split by what fired (printed by the destructor).
+          const auto t0 = std::chrono::steady_clock::now();
+          fn_[i](nds_, param_[i]);
+          const u64 el = static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
+          prof::add_ns(prof::EVENTS, el);
+          ev_ns_[i] += el; ++ev_n_[i];
+        }
         m = armed_ & ~((bit << 1) - 1);
       } else {
         if (soft_mask_ & bit) { if (at_[i] < next_soft(i)) next_soft(i) = at_[i]; }     // soft events never bound a slice
