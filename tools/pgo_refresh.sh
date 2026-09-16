@@ -2,7 +2,8 @@
 # Regenerate the committed PGO profile (pgo/<arch>/), or check whether it has
 # drifted from the tree it will be applied to.
 #
-#   DS_ROMS=<rom dir> DS_BIOS=<bios dir> tools/pgo_refresh.sh [--check] [build-dir] [extra cmake args]
+#   DS_ROMS=<rom dir> DS_BIOS=<bios dir> [DS_DSI=<dsi-binary dir>] \
+#     tools/pgo_refresh.sh [--check] [--no-dsi] [build-dir] [extra cmake args]
 #
 # --check  compares the profile's MANIFEST against this tree: the compiler and
 #          the compile flags (a mismatch voids the whole profile -- CI fails the
@@ -10,16 +11,36 @@
 #          made (each edited function silently loses its profile). Exit 1 if
 #          the compiler/flags differ, 2 if only sources moved, 0 if current.
 # default  an instrumented aarch64 cross build, trained under qemu on the
-#          recorded scenes and the two save-state scenes, writes the .gcda
-#          files into pgo/aarch64/ and a MANIFEST; then a "use" build from
-#          the committed profile in a *different* directory, reporting how many
-#          functions failed to find their profile (should be none straight
-#          after a refresh). ~15 minutes on a desktop. Commit pgo/ afterwards.
+#          recorded scenes, the two save-state scenes, one cart boot from
+#          frame 0 and (where the dumps are there) two DSiWare titles, writes
+#          the .gcda files into pgo/aarch64/ and a MANIFEST; then a "use" build
+#          from the committed profile in a *different* directory, reporting how
+#          many functions failed to find their profile (should be none straight
+#          after a refresh). ~20 minutes on a desktop. Commit pgo/ afterwards.
+# --no-dsi trains the DS scenes only, for a profile to ship without the DSi
+#          dumps to hand. The DSi scenes are also skipped on their own when
+#          DS_DSI (default: the dsi-binary directory beside this checkout) has
+#          no BIOS pair in it. MANIFEST records which scenes actually ran.
+#
+# Two of the scenes are here for paths the replays cannot reach: `nsmb` boots
+# the cart from frame 0, which is the only training for the boot path and for
+# the cold translation burst that follows it, and runs long enough to reach the
+# attract-mode demo (the hardest sustained scene in the suite -- ~19-21 ms a
+# frame on an RK3566, see docs/cpu-governor-scoping.md); the DSiWare pair
+# trains the DSi memory map, NWRAM, NDMA and the launcher hand-off, none of
+# which a DS scene executes at all.
 #
 # The training needs the real BIOS and firmware: without them the JIT
 # translates one-instruction blocks and the profile describes another program.
 set -eu
-CHECK=0; if [ "${1:-}" = "--check" ]; then CHECK=1; shift; fi
+CHECK=0; DSI=1
+while :; do
+  case "${1:-}" in
+    --check)  CHECK=1; shift ;;
+    --no-dsi) DSI=0; shift ;;
+    *) break ;;
+  esac
+done
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${1:-$HERE/build/pgo-gen}; shift || true
 ARCH=aarch64
@@ -49,6 +70,15 @@ if [ $CHECK = 1 ]; then
 fi
 
 : "${DS_ROMS:?set DS_ROMS}"; : "${DS_BIOS:?set DS_BIOS}"
+# The DSi scenes are opt-out and self-disabling: a checkout without the dumps
+# still produces a valid DS-only profile rather than failing halfway through.
+DS_DSI=${DS_DSI:-$HERE/../dsi-binary}
+DSI_OK=0; DSI_WHY=""
+if [ $DSI = 0 ]; then DSI_WHY="--no-dsi"
+elif [ ! -f "$DS_DSI/bios/biosdsi9.bin" ] || [ ! -f "$DS_DSI/bios/biosdsi7.bin" ]; then DSI_WHY="no DSi BIOS pair in $DS_DSI/bios"
+elif [ ! -f "$DS_DSI/bios/dsifirmware.bin" ]; then DSI_WHY="no DSi firmware in $DS_DSI/bios"
+else DSI_OK=1
+fi
 echo "== instrumented build -> $PROFILE"
 mkdir -p "$PROFILE"
 find "$PROFILE" -name '*.gcda' -delete
@@ -66,6 +96,28 @@ train dbori  --replay "$HERE/scenes/dbori.dsin" --frames 600 "$DS_ROMS/Dragon Ba
 train meteos --save "$HERE/scenes/meteos.sav" --replay "$HERE/scenes/meteos.dsin" --frames 600 "$DS_ROMS/Meteos.nds" &
 train gsdd   --load-state "$HERE/scenes/gsdd-phase2.dss" --frames 400 "$DS_ROMS/Golden Sun - Dark Dawn.nds" &
 train st     --load-state "$HERE/scenes/st-intro.dss" --frames 600 "$DS_ROMS/Legend of Zelda, The - Spirit Tracks.nds" &
+# From frame 0: the boot path, the cold translation burst, and then the
+# attract-mode demo, which starts around frame 1200 -- hence the frame count,
+# and hence this being the longest run of the batch.
+train nsmb   --frames 1500 "$DS_ROMS/New Super Mario Bros..nds" &
+SCENES="mlbis sm64 etody dbori meteos gsdd st nsmb"
+if [ $DSI_OK = 1 ]; then
+  # BIOS-only DSiWare: the launcher's hand-off is emulated over a synthetic
+  # NAND, so this needs the four BIOS dumps and the DSi firmware but no NAND
+  # image. --dsi-persist keeps the titles' saves out of the asset directory
+  # and --dsi-offline makes sure a training run never reaches the network.
+  DC=(--direct --quantum 0 --bios9 "$DS_BIOS/bios9.bin" --bios7 "$DS_BIOS/bios7.bin"
+      --bios9i "$DS_DSI/bios/biosdsi9.bin" --bios7i "$DS_DSI/bios/biosdsi7.bin"
+      --firmware "$DS_DSI/bios/dsifirmware.bin"
+      --dsi --dsi-hle-launch --dsi-offline --dsi-persist "$BUILD/dsi-saves")
+  mkdir -p "$BUILD/dsi-saves"
+  train_dsi() { echo "  train: $1"; shift; $Q "$G" "${DC[@]}" "$@" > /dev/null 2>&1 || echo "  (run failed: $*)"; }
+  train_dsi dsi-shantae --frames 600 "$DS_DSI/games/Shantae - Risky's Revenge.nds" &
+  train_dsi dsi-pvz     --frames 600 "$DS_DSI/games/Plants vs Zombies.nds" &
+  SCENES="$SCENES dsi-shantae dsi-pvz"
+else
+  echo "  (DSi scenes skipped: $DSI_WHY)"
+fi
 wait
 n=$(find "$PROFILE" -name '*.gcda' | wc -l)
 echo "  profiles: $n"
@@ -75,7 +127,7 @@ echo "  profiles: $n"
   echo "compiler $(aarch64-linux-gnu-g++ -dumpfullversion) ($(aarch64-linux-gnu-g++ -dumpmachine))"
   echo "commit $(git -C "$HERE" rev-parse HEAD)"
   echo "date $(date -u +%Y-%m-%dT%H:%MZ)"
-  echo "scenes mlbis sm64 etody dbori meteos gsdd st"
+  echo "scenes $SCENES"
 } > "$PROFILE/MANIFEST"
 
 echo "== verifying: optimised build from the committed profile (separate build dir)"
@@ -83,12 +135,17 @@ VBUILD="$BUILD-use"
 cmake -S "$HERE" -B "$VBUILD" "${CONF[@]}" -DDSPERATE_PGO=use -DDSPERATE_PGO_STRICT=ON > /dev/null
 ninja -C "$VBUILD" > "$VBUILD/pgo-warnings.log" 2>&1 || { tail -20 "$VBUILD/pgo-warnings.log"; exit 1; }
 # -Wmissing-profile is per object (no .gcda at all), -Wcoverage-mismatch per
-# function (the profile is there but the function changed). The SDL frontend's
-# objects never run in the training, so their missing profiles are expected.
-core_missing=$(grep -c "data file not found" <(grep -v "src/frontend/sdl/" "$VBUILD/pgo-warnings.log") || true)
-sdl_missing=$(grep "src/frontend/sdl/" "$VBUILD/pgo-warnings.log" | grep -c "data file not found" || true)
+# function (the profile is there but the function changed). Whole groups are
+# expected to have no profile, because a headless training run never executes
+# them at all: the SDL frontend, the achievement code, the standalone tools,
+# and the two fallbacks (miniz's inflate, the reference kernels). What matters
+# is whether anything *outside* those groups went untrained -- that is a scene
+# that stopped running, and it used to hide behind a count.
+UNTRAINED='src/frontend/sdl/|rcheevos|cheevos|tools#|miniz|kernels_ref'
+missing=$(grep -c "data file not found" "$VBUILD/pgo-warnings.log" || true)
+unexpected=$(grep "data file not found" "$VBUILD/pgo-warnings.log" | grep -cE -v "$UNTRAINED" || true)
 mismatch=$(grep -c "control flow of function" "$VBUILD/pgo-warnings.log" || true)   # "source locations ... changed" is benign: the counts still apply
-echo "  objects without a profile: core/headless $core_missing (miniz and kernels_ref never run: 3 expected), sdl frontend $sdl_missing (untrained, expected)"
-[ "$core_missing" -le 3 ] || grep -v "src/frontend/sdl/" "$VBUILD/pgo-warnings.log" | grep "data file not found" | sed -E 's/.*dir#(.*)\.gcda.*/    \1/'
+echo "  objects without a profile: $missing, of which $unexpected outside the never-trained groups (should be 0)"
+[ "$unexpected" = 0 ] || grep "data file not found" "$VBUILD/pgo-warnings.log" | grep -E -v "$UNTRAINED" | sed -E 's/.*dir#(.*)\.gcda.*/    \1/'
 echo "  functions whose profile no longer matches: $mismatch (should be 0 straight after a refresh)"
 echo "done: $PROFILE ($n files); binaries in $VBUILD"
