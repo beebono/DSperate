@@ -2035,6 +2035,36 @@ sdl_ready:
                    pacing == "busy" ? ", asked for" : ": it decides by polling load");
     else VLOG("pacing: sleep to the deadline (governor %s)\n", ds::sdl::cpu_governor().c_str());
   }
+  // emu.rt_relief -- stay under the kernel's real-time bandwidth cap.
+  //
+  // Only worth anything to a thread that actually runs real-time (emu.realtime)
+  // and only where the cap is on, which is every stock distro:
+  // sched_rt_runtime_us/sched_rt_period_us, 950000 of 1000000 us on ROCKNIX.
+  // The pacer's comment has the reasoning and the numbers; the short version is
+  // that the kernel takes its 5 % in one ~50 ms lump, and a scene with no slack
+  // wears it as a hitch every second or so. Default on, off for an A/B.
+  if (cfg.flag("emu.rt_relief", true)) {
+    const auto sysctl_num = [](const char* path) -> double {
+      std::FILE* f = std::fopen(path, "r");
+      if (!f) return 0.0;
+      double v = 0.0;
+      if (std::fscanf(f, "%lf", &v) != 1) v = 0.0;
+      std::fclose(f);
+      return v;
+    };
+    const double runtime_us = sysctl_num("/proc/sys/kernel/sched_rt_runtime_us");
+    const double period_us = sysctl_num("/proc/sys/kernel/sched_rt_period_us");
+    int policy = 0; sched_param sp{};
+    const bool rt = pthread_getschedparam(pthread_self(), &policy, &sp) == 0 && (policy == SCHED_RR || policy == SCHED_FIFO);
+    if (!rt) VLOG("rt relief: not needed, this thread is not real-time\n");
+    else if (runtime_us < 0 || period_us <= 0) VLOG("rt relief: not needed, the real-time class is uncapped\n");
+    else if (runtime_us >= period_us) VLOG("rt relief: not needed, the cap is not a cap (%.0f of %.0f us)\n", runtime_us, period_us);
+    else {
+      pacer.set_rt_relief(runtime_us / period_us, period_us * 1000.0);
+      VLOG("rt relief: the real-time class is capped at %.1f %% of every %.0f ms; giving the rest back a frame at a time\n",
+           100.0 * runtime_us / period_us, period_us / 1000.0);
+    }
+  }
   // The limiter: what rate the emulator is held to, and how fast the game
   // runs against it.
   //
@@ -4521,6 +4551,15 @@ sdl_ready:
          static_cast<unsigned long long>(as.under_one), static_cast<unsigned long long>(as.under_half),
          static_cast<unsigned long long>(as.dropped), audio.device_samples(), audio.device_buffer_frames(),
          static_cast<unsigned long long>(nds.spu.ring_overruns()));
+  }
+  // What staying under the real-time cap cost, if it was on: the frames it had
+  // to act on out of the run, and the mean nap on those frames. A run that
+  // never saturated a core reports nothing to do.
+  if (pacer.rt_relief()) {
+    unsigned relief_frames = 0;
+    const double relief_us = pacer.relief_us(&relief_frames);
+    VLOG("rt relief: %u of %llu frames gave time back, %.0f us each on those\n",
+         relief_frames, static_cast<unsigned long long>(frames), relief_us);
   }
   if (std::getenv("DS_FRAME_STATS") || ds::prof::enabled) {
     // Emulation work only -- see frame_report.h. The two excluded costs are

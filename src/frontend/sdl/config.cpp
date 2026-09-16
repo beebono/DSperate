@@ -303,6 +303,12 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # realtime = rr                 # rr | fifo | off: real-time scheduling for the emulator's threads
 #                               # (needs root or an rtprio limit)
 # rt_priority = 5
+# rt_relief = true              # with realtime on: the kernel caps the real-time class at
+                                # sched_rt_runtime_us of every sched_rt_period_us (95 % of a second
+                                # on a stock distro) and enforces it in one lump, stopping the
+                                # thread dead for up to 50 ms. A scene with no slack to sleep in
+                                # wears that as a hitch about every second. This gives the same 5 %
+                                # back ~0.8 ms at a time instead. false = let the kernel take it
 # pacing = auto                 # auto | sleep | busy: how the wait for the next frame is spent.
                                 # A governor that sets the CPU clock from how busy the last few
                                 # milliseconds looked (ondemand, conservative, powersave) reads

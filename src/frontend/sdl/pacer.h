@@ -61,6 +61,46 @@ public:
   void set_busy_wait(bool on) { busy_ = on; }
   bool busy_wait() const { return busy_; }
 
+  // Stay under the kernel's real-time bandwidth cap by choosing when to give
+  // the surplus up, instead of having it taken.
+  //
+  // sched_rt_runtime_us/sched_rt_period_us cap the real-time class at 95 % of
+  // every second on a stock distro, and with NO_RT_RUNTIME_SHARE (ROCKNIX's
+  // setting) each CPU is capped on its own, so one saturated thread is enough
+  // to trigger it. The kernel enforces it in a single lump: when the budget
+  // runs out the thread is stopped dead for the rest of the period, up to
+  // 50 ms. That is invisible on a scene with slack -- the limiter's sleep
+  // keeps us well under -- and brutal on one without, where the limiter never
+  // sleeps and the thread really is 100 % real-time: NSMB's attract mode took
+  // 45-60 ms hitches about every 1.7 s, three lost frames and a gap in the
+  // sound each time.
+  //
+  // The 5 % is going either way. This gives it back ~0.8 ms at a time, at the
+  // frame boundary, and only while the accounting says we are actually near
+  // the cap -- so a scene that is merely occasionally late pays nothing.
+  // `cap` is runtime/period; `period_ns` the kernel's RT period.
+  void set_rt_relief(double cap, double period_ns) {
+    if (!(cap > 0.0 && cap < 1.0) || !(period_ns > 0.0)) return;
+    // A little under the kernel's own figure: being throttled costs 50 ms and
+    // being early costs microseconds, so the margin is not symmetric.
+    allowed_ = cap - 0.01;
+    rt_period_ = period_ns * ticks_per_ns();
+    relief_ = allowed_ > 0.0;
+    window_ = SDL_GetPerformanceCounter();
+    rt_busy_ = 0.0;
+    frame_start_ = window_;
+  }
+  bool rt_relief() const { return relief_; }
+
+  // What the relief has cost, in microseconds a frame since the last call,
+  // and how many frames it had to act on. For the statistics line.
+  double relief_us(unsigned* frames = nullptr) {
+    const double v = relief_n_ ? relief_ticks_ / ticks_per_ns() / 1e3 / relief_n_ : 0.0;
+    if (frames) *frames = relief_n_;
+    relief_ticks_ = 0; relief_n_ = 0;
+    return v;
+  }
+
   // Start again from now: the deadline is one period away. For every place
   // where wall time and emulated time have just been cut apart -- unpause,
   // a state load, a speed change -- so the gap is not repaid as a burst.
@@ -74,14 +114,18 @@ public:
   // faster or slower than the period: 2.0 is double speed, 0.5 half.
   void wait(double scale = 1.0) {
     next_ += static_cast<Uint64>(scale > 0.0 ? period_ / scale : period_);
-    const Uint64 now = SDL_GetPerformanceCounter();
+    Uint64 now = SDL_GetPerformanceCounter();
+    if (relief_) now = relieve(now);
     if (now >= next_) {
       // Behind. Carry at most one frame of debt (see above).
       const Uint64 budget = static_cast<Uint64>(period_);
       if (now - next_ > budget) next_ = now - budget;
-      return;
+    } else {
+      sleep_until(next_, now);
     }
-    sleep_until(next_, now);
+    // The frame's real-time run starts when this returns, not before: the
+    // wait itself -- slept or spun at ordinary priority -- is not charged.
+    if (relief_) frame_start_ = SDL_GetPerformanceCounter();
   }
 
   // What the spin is costing, in microseconds a frame, averaged since the
@@ -142,6 +186,34 @@ private:
     ++spin_n_;
   }
 
+  // Charge the frame that just ran, then sleep off whatever puts us over the
+  // cap for the window so far. A sleep consumes no real-time budget, so this
+  // needs no change of scheduling policy -- only not running.
+  Uint64 relieve(Uint64 now) {
+    rt_busy_ += static_cast<double>(now - frame_start_);
+    const double elapsed = static_cast<double>(now - window_);
+    if (elapsed >= rt_period_) {          // a new accounting window
+      window_ = now; rt_busy_ = 0.0;
+      return now;
+    }
+    const double over = rt_busy_ - allowed_ * elapsed;
+    if (over <= 0.0) return now;
+    // Never hand over more than a quarter of a frame in one go: the point is
+    // to spread the cost, and a long nap here would be the very hitch this
+    // exists to remove.
+    const double cap_ticks = period_ * 0.25;
+    const double nap = over < cap_ticks ? over : cap_ticks;
+#if defined(__linux__)
+    const double nap_ns = nap / ticks_per_ns();   // at most a quarter frame, so well under a second
+    timespec ts{0, static_cast<long>(nap_ns)};
+    while (clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, &ts) == EINTR) {}
+#endif
+    const Uint64 woke = SDL_GetPerformanceCounter();
+    relief_ticks_ += static_cast<double>(woke - now);
+    ++relief_n_;
+    return woke;
+  }
+
   void sleep_until(Uint64 deadline, Uint64 now) {
     if (busy_) { busy_until(deadline, now); return; }
     const double margin = margin_ticks_;
@@ -179,6 +251,14 @@ private:
   }
 
   bool busy_ = false;        // spin the wait instead of sleeping it
+  bool relief_ = false;      // keep this thread under the kernel's RT bandwidth cap
+  double allowed_ = 0.0;     // fraction of wall time we may spend running at RT
+  double rt_period_ = 0.0;   // the kernel's RT accounting period, in ticks
+  Uint64 window_ = 0;        // start of the current accounting window
+  double rt_busy_ = 0.0;     // ticks run at RT priority in this window
+  Uint64 frame_start_ = 0;   // when this frame's real-time run began
+  double relief_ticks_ = 0;  // what the relief has cost since the last relief_us()
+  unsigned relief_n_ = 0;
   double period_ = 0;        // in performance-counter ticks
   Uint64 next_ = 0;
   double margin_ticks_ = 0;  // learned; starts at zero and grows into the first few frames
