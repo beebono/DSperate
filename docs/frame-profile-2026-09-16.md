@@ -68,3 +68,62 @@ never rescheduled. Symptom: a loaded state that is silent and ~1.5 ms a frame
 "smoother" than the same frames from power-on. Fixed (the chunk's size names
 the count); `DS_DEBUG_STATE=1` dumps the armed events and the ARM7 timers
 after a load.
+
+## The accuracy tiers, and which gains are real (later the same day)
+
+Every tier measured on the RG DS Plus, SDL frontend, `--dual-window`, clean
+runs, software raster, both orders; emulation frame median (p90). The swap
+column is the game's own 3D frame count over the run (`gx swap_buffers (new
+list)` under `DS_PROFILE`), because **a tier can lower the frame time by
+making the game draw fewer frames**, and the frame time alone cannot tell
+that apart from a real saving.
+
+| scene | exact | `--gx-worker` | `--cpu-oc` | `--cpu-uc` | `--timing-oc` |
+| --- | --- | --- | --- | --- | --- |
+| NSMB (2400 fr) | 18.7 (21.0) | 17.3 (19.0) | 16.4 (18.1) | 13.3 (17.3) | 15.6 (18.3) |
+| ... swaps | 2260 | 2260 | 2295 | **1700** | 2260 |
+| Golden Sun (400) | 17.2 (18.7) | 16.7 (18.6) | 17.2 (18.7) | 14.1 (16.0) | 14.4 (16.0) |
+| ... swaps | 335 | 335 | 353 | **223** | 335 |
+| Spirit Tracks (600) | 21.0 (23.0) | 19.8 (21.5) | 17.9 (19.8) | 15.3 (16.5) | 16.8 (18.4) |
+| ... swaps | 600 | 600 | 600 | **400** | 600 |
+| Etrian Odyssey | 9.1 (9.9) | 9.1 (10.0) | 8.7 (9.6) | 8.7 (9.7) | 8.6 (9.8) |
+
+* **`--cpu-uc` (underclock) is not a smoothness gain.** It lets the guest
+  CPUs get less done per emulated cycle, so games miss their own frame
+  deadline on roughly every other frame and drop to an alternating 60/30 Hz
+  cadence: NSMB -25 % of its frames, Golden Sun -33 %, Spirit Tracks -33 %.
+  The emulator's frame time falls because there is less 3D to do. On Dragon
+  Ball Origins' intro (which sets its rate by whether it finished before
+  VBlank) it is visibly jumpy: 854 60 Hz gaps under exact vs 272 under the
+  underclock. It is a last resort for a device that cannot reach 60 at all.
+* **`--gx-worker` and `--cpu-oc` keep every frame** (`--cpu-oc`'s few extra
+  swaps are the game running slightly ahead). Their gains are real but small.
+* **`--timing-oc` keeps every frame on these three**, and is the largest real
+  gain -- but breaks Dragon Ball Origins' intro, which paces on the FIFO
+  stall that it removes. `--gx-worker` and `--cpu-uc` keep that stall and
+  Dragon Ball's ordering.
+
+### Also measured and rejected
+
+* **Faster modelled FIFO drain** (`--gx-drain`, reverted): at most 0.4 ms;
+  the guest's stall time is not where timing-oc's gain is.
+* **Deferring the worker hand-off** (reverted): slower on NSMB and Spirit
+  Tracks. The worker already runs on 89-97 % of frames under its controller.
+* **Wider idle-loop skipping** (`DS_IDLE_SKIP=all`): skips almost nothing
+  extra on these scenes. Spirit Tracks and NSMB have a genuine RAM-flag wait
+  (a 3-instruction loop in ITCM) the analyser accepts, but the whole-machine
+  rule vetoes it -- the ARM7 is busy, or a GXFIFO DMA is running.
+* **What timing-oc actually removes** that the worker keeps: pricing each GX
+  command on the emulation thread to keep the FIFO level exact (the "gx
+  geometry" row, 1.4 ms on NSMB and 2.5 on Golden Sun with the worker vs 0.2
+  under timing-oc), and GXFIFO DMA transfers fragmented by the level (1.29 M
+  dispatch entries vs 0.96 M on Golden Sun).
+
+### Two measurement traps
+
+* The headless harness boots differently from the SDL frontend: Dragon Ball
+  Origins runs its intro at 30 Hz headless (705 swaps) and at 60 Hz in SDL
+  (1060) under the same exact model. A game's frame-rate behaviour must be
+  checked in the frontend it will be played in.
+* Worker mode as shipped (the per-frame shape controller) does not reproduce
+  run to run; exactness checks in that path need `DS_GX_THREAD=2`.
