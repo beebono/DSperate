@@ -18,8 +18,9 @@ const Choice kSkipMode[] = {{"adaptive", "ADAPTIVE"}, {"fixed", "FIXED"}};
 // emu.cpu_tuning. Config::load turns an old emu.cpu_oc and a "true" into these.
 const Choice kCpuOc[] = {{"false", "OFF"}, {"underclock", "UNDERCLOCK"}, {"overclock", "OVERCLOCK"}};
 // The rates a panel comes in, plus the console's own and no limiter at all.
-// "auto" is the only one that plays a game at the speed it was written for;
-// 60 is 0.29 % fast, which is what a player means by "60 fps".
+// "auto" is the default and the only one that plays a game at the speed it was
+// written for; 60 is 0.29 % fast, which is what a player means by "60 fps"
+// and what lines up with a 60 Hz panel.
 const Choice kLimiter[] = {{"auto", "CONSOLE (59.8)"}, {"30", "30"}, {"60", "60"}, {"120", "120"},
                            {"144", "144"}, {"240", "240"}, {"off", "UNLIMITED"}};
 const Choice kIntScale[] = {{"off", "OFF"}, {"under", "UNDER"}, {"over", "OVER"}};
@@ -101,7 +102,7 @@ const Setting kEmuSettings[] = {
           "FASTEST AND LEAST SAFE. GAMES THAT PACE ON THE 3D FIFO WILL BREAK"),
   boolean("emu.fast_load", "FAST LOAD", "false", FlagLive | FlagInexact, Dep::NetSession,
           "SHORTER LOADING SCREENS. GAMES THAT RACE THE CARD CAN MISBEHAVE"),
-  pick("emu.limiter", "FRAME LIMITER", kLimiter, 7, "60", FlagLive, Dep::NetSession,
+  pick("emu.limiter", "FRAME LIMITER", kLimiter, 7, "auto", FlagLive, Dep::NetSession,
        "THE RATE THE GAME IS HELD TO. CONSOLE IS THE ONE THE GAME WAS WRITTEN FOR"),
   // A whole percent in the file ("100"), as --speed and the frontend read it --
   // not a percent row, which keeps a 0..1 fraction: that showed the default as

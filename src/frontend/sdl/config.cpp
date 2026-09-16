@@ -364,8 +364,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # launcher's game switcher). Taken from the emulator's own frame, so
                                 # it works on panels a screen grabber cannot read
 # fast_forward = false          # start fast-forwarding (the hotkeys toggle it)
-# limiter = 60                  # the rate the emulator is held to: auto (the console's own
-                                # 59.8261 Hz -- the only exact one), 30, 60, 120, 144, 240, or off
+# limiter = auto                # the rate the emulator is held to: auto (the console's own
+                                # 59.8261 Hz -- the default, and the only exact one), 30, 60 (0.29 %
+                                # fast, in step with a 60 Hz panel), 120, 144, 240, or off
                                 # (no limiter: still presents and still plays sound)
 # speed = 100                   # percent of that rate the game runs at (25..400)
 # ff_speed = 0                  # fast forward runs at least this many times real time (a floor,

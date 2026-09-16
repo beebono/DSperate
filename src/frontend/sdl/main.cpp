@@ -179,8 +179,10 @@ const char* kUsage =
     "                  captures every frame -- Pokemon B/W, Golden Sun -- then skips nothing,\n"
     "                  so frameskip does nothing at all on it. On by default (the captured\n"
     "                  VRAM holds the last drawn frame); emu.frameskip_capture\n"
-    "  --limiter HZ    the rate the emulator is held to: auto (the console's 59.8261 Hz), 30, 60\n"
-    "                  (default), 120, 144, 240, or off. emu.limiter\n"
+    "  --limiter HZ    the rate the emulator is held to: auto (the console's own 59.8261 Hz, the\n"
+    "                  default and the speed a game was written for), 30, 60 (what a player means\n"
+    "                  by 60 fps: 0.29 % fast, and in step with a 60 Hz panel), 120, 144, 240, or\n"
+    "                  off. emu.limiter\n"
     "  --speed N       run at N percent of that rate (25..400); emu.speed\n"
     "  --pacing M      how the wait for the next frame is spent: auto (default) | sleep | busy.\n"
     "                  A frequency governor that decides by polling how busy the last few\n"
@@ -2036,13 +2038,16 @@ sdl_ready:
   // The limiter: what rate the emulator is held to, and how fast the game
   // runs against it.
   //
-  // "auto" is the console's own 59.8261 Hz, which is the only value that
-  // plays a game at the speed it was written for. The rest are the rates a
-  // panel comes in: 60 is the default because it is what a player expects a
-  // frame limiter to say and what nearly every display runs at, at the price
-  // of 0.29 % fast -- a third of a second an hour, and a pitch shift of five
-  // cents that the rate control absorbs without complaint. 30 halves the
-  // speed; 120 and up run the game fast, the same axis fast forward uses.
+  // "auto" is the console's own 59.8261 Hz and is the default: it is the only
+  // value that plays a game at the speed it was written for, and the speed
+  // everything else here is built around -- the SPU's own rate, the audio
+  // rate control's trim, the length of a replay. The rest are the rates a
+  // panel comes in. 60 is what a player means by "60 fps" and costs 0.29 %
+  // fast -- a third of a second an hour, and a pitch shift of five cents
+  // that the rate control absorbs without complaint; what it buys on a 60 Hz
+  // panel is lining up with the refresh, where the console's own rate slips
+  // a frame against it about every six seconds. 30 halves the speed; 120 and
+  // up run the game fast, the same axis fast forward uses.
   // "off" does not pace at all: unlike fast forward it still presents every
   // frame and still plays sound, so it is a limiter switched off rather than
   // a mode.
@@ -2050,7 +2055,7 @@ sdl_ready:
   // emu.speed multiplies whatever that comes to, so 60 at 50 % and 30 at
   // 100 % are the same clock reached two ways.
   int speed_pct = cfg.num("emu.speed", 100);
-  std::string limiter_mode = cfg.str("emu.limiter", "60");
+  std::string limiter_mode = cfg.str("emu.limiter", "auto");
   bool limiter_off = false;
   // Everything that sets the machine's pace ends up here, as one number: how
   // many times the console's own rate it is running at. The pacer's period
@@ -2980,7 +2985,7 @@ sdl_ready:
   bool guest_retry_armed = false, radio_was_on = false, scanning = false;
   bool knobs_held = false;
   std::string held_cpu_oc = "false", held_timing_oc = "false", held_fast_load = "false";   // the values, as emu.cpu_tuning has three
-  int held_speed = 100; std::string held_limiter = "60";
+  int held_speed = 100; std::string held_limiter = "auto";
   int  held_fs_limit = 0;
   bool held_ff_toggle = false;
   auto take_away_for_session = [&] {
