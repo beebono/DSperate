@@ -156,7 +156,7 @@ const char* kUsage =
     "                  and fb0 answers). video.fbdev\n"
     "  --no-audio      run without sound\n"
     "  --volume N      0..100\n"
-    "  --audio-buffer MS  how much sound is held ahead, in milliseconds (default 50);\n"
+    "  --audio-buffer X  how much sound is held ahead: auto (the default) or milliseconds;\n"
     "                  audio.buffer_size. Lower is less delay and less slack before a\n"
     "                  late frame is heard as a gap\n"
     "  --no-mic        do not open the microphone (M still fakes one)\n"
@@ -1656,12 +1656,16 @@ sdl_ready:
   // counted whole DS frames; that key is still read when buffer_size is unset,
   // so an ini or a per-game file written before the rename keeps its setting
   // rather than silently reverting to the default.
-  auto audio_buffer_ms = [](const ds::sdl::Config& c) {
-    if (const std::string v = c.str("audio.buffer_size"); !v.empty()) return std::atof(v.c_str());
-    if (const int frames = c.num("audio.latency_frames", 0); frames > 0) return frames * ds::sdl::Audio::FRAME_MS;
-    return ds::sdl::Audio::DEFAULT_MS;
+  // "auto" (the default) lets it move the target itself, within the one
+  // regime where depth is the answer -- see Audio::set_buffer_auto.
+  auto apply_audio_buffer = [&audio](const std::string& v) {
+    if (v.empty() || v == "auto") { audio.set_buffer_auto(); return; }
+    audio.set_buffer_ms(std::atof(v.c_str()));
   };
-  audio.set_buffer_ms(audio_buffer_ms(cfg));
+  if (const std::string v = cfg.str("audio.buffer_size"); !v.empty()) apply_audio_buffer(v);
+  else if (const int frames = cfg.num("audio.latency_frames", 0); frames > 0)
+    audio.set_buffer_ms(frames * ds::sdl::Audio::FRAME_MS);
+  else audio.set_buffer_auto();
   // Not during a replay: the log carries the mic, and an open capture device
   // would only add work to a measurement.
   ds::sdl::MicAlsa mic_alsa;
@@ -2829,7 +2833,7 @@ sdl_ready:
     if (is("net.mode")) { if (set_net_mode) set_net_mode(v); return; }
     if (is("emu.speed")) { speed_pct = std::atoi(v.c_str()); apply_limiter(); return; }
     if (is("emu.limiter")) { limiter_mode = v; apply_limiter(); return; }
-    if (is("audio.buffer_size")) { audio.set_buffer_ms(std::atof(v.c_str())); return; }
+    if (is("audio.buffer_size")) { apply_audio_buffer(v); return; }
     if (is("audio.latency_frames")) { audio.set_buffer_ms(std::atoi(v.c_str()) * ds::sdl::Audio::FRAME_MS); return; }
     if (is("emu.ff_speed")) { ff_speed = std::atoi(v.c_str()); return; }
     if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
@@ -4358,6 +4362,12 @@ sdl_ready:
       const double cap = frame_budget_ms * (fs_limit + 1);
       if (fs_debt_ms > cap) fs_debt_ms = cap;   // a long stall must not buy a run of skips
     }
+    // The automatic buffer size needs to know whether the machine is keeping
+    // up, because depth answers a hitch and never a deficit -- growing into
+    // one only pins the rate control at its clamp. Fast forward is behind by
+    // design and says nothing about the machine, so it does not get a vote.
+    if (audio.active() && !(fast && ff_speed <= 0))
+      audio.auto_tick(static_cast<double>(t2 - t0) * ticks_to_ms <= frame_budget_ms);
     // DS_AUDIO_QUEUE=<path>: one line a frame --
     //
     //   depth   queue depth in frames of audio

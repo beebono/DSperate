@@ -118,6 +118,14 @@ const Setting kEmuSettings[] = {
          "AT LEAST THIS MANY TIMES REAL TIME WHILE FAST FORWARD IS HELD", "0", "UNLIMITED", "X"),
   number("emu.ff_skip", "FAST FORWARD SKIP", 0, 9, 1, "3", FlagLive, Dep::NetSession,
          "WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE"),
+  // The one audio row, and it lives here rather than on an audio page of its
+  // own: a page for a single row is not worth the depth it adds. AUTO holds
+  // the default and raises it only when the machine is keeping up and still
+  // ran the queue dry -- a deeper buffer answers a hitch, never a machine
+  // that cannot keep up at all. docs/audio-buffer-scoping.md.
+  number("audio.buffer_size", "AUDIO BUFFER", 20, 200, 10, "auto", FlagLive, Dep::None,
+         "SOUND HELD AHEAD. LOWER IS LESS DELAY, LESS SLACK BEFORE A LATE FRAME IS HEARD",
+         "auto", "AUTO", " MS"),
   boolean("emu.autosave", "AUTOSAVE ON QUIT", "false", FlagLive, Dep::None,
           "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"),
   boolean("emu.autoload", "AUTOLOAD ON START", "false", FlagRestart, Dep::None,

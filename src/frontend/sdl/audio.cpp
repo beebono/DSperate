@@ -11,6 +11,7 @@
 namespace ds::sdl {
 
 bool Audio::open(bool native_rate) {
+  dbg_auto_ = std::getenv("DS_AUDIO_AUTO") != nullptr;   // log every buffer-size decision
   SDL_AudioSpec want{}, got{};
   want.freq = static_cast<int>(spu::Spu::SAMPLE_RATE);
   if (native_rate) {
@@ -173,11 +174,71 @@ void Audio::set_speed(double factor) {
   speed_ = factor > 0.05 ? (factor < 20.0 ? factor : 20.0) : 0.05;
 }
 
-void Audio::set_buffer_ms(double ms) {
-  if (!(ms > 0.0)) ms = DEFAULT_MS;      // unset, unparseable, or a NaN out of atof
+void Audio::apply_target_ms(double ms) {
   target_frames_ = std::clamp(ms, MIN_MS, MAX_MS) / FRAME_MS;
   depth_ = -1.0;      // the target moved: measure again rather than chase the old error
   trim_ = 0.0;
+}
+
+void Audio::set_buffer_ms(double ms) {
+  if (!(ms > 0.0)) ms = DEFAULT_MS;      // unset, unparseable, or a NaN out of atof
+  auto_ = false;
+  apply_target_ms(ms);
+}
+
+void Audio::set_buffer_auto() {
+  auto_ = true;
+  auto_frames_ = auto_on_time_ = auto_calm_ = 0;
+  auto_settle_ = AUTO_SETTLE;
+  auto_dry_mark_ = stats_.dry;
+  apply_target_ms(DEFAULT_MS);
+}
+
+void Audio::queue_silence(double ms) {
+  if (!dev_ || ms <= 0.0) return;
+  const size_t frames = static_cast<size_t>(ms / 1000.0 * rate_);
+  if (!frames) return;
+  const std::vector<s16> zero(frames * 2, 0);
+  SDL_QueueAudio(dev_, zero.data(), static_cast<u32>(frames * 4));
+}
+
+void Audio::auto_tick(bool on_time) {
+  if (!auto_ || !dev_) return;
+  // After a step -- and after startup, where the queue fills from empty and
+  // would otherwise read as a run of underruns and grow the target on a
+  // fault that is over before anything could answer it.
+  if (auto_settle_ > 0) { --auto_settle_; auto_dry_mark_ = stats_.dry; return; }
+
+  ++auto_frames_;
+  if (on_time) ++auto_on_time_;
+  if (auto_frames_ < AUTO_WINDOW) return;
+
+  const u64 dry = stats_.dry - auto_dry_mark_;
+  const bool keeping_up = auto_on_time_ * 100 >= auto_frames_ * AUTO_ON_TIME_PCT;
+  const double now = buffer_ms();
+
+  if (dbg_auto_)
+    std::fprintf(stderr, "[audio] auto: %.0f ms, %llu dry, %d/%d frames on time -> %s\n", now,
+                 static_cast<unsigned long long>(dry), auto_on_time_, auto_frames_,
+                 !keeping_up ? "behind, leaving it" : dry ? "grow" : "clean");
+  if (!keeping_up) {
+    // Behind on its own account. Depth cannot answer that, so leave it.
+    auto_calm_ = 0;
+  } else if (dry) {
+    if (now < AUTO_MAX_MS) {
+      const double want = std::min(now + AUTO_STEP_MS, AUTO_MAX_MS);
+      queue_silence(want - now);
+      apply_target_ms(want);
+      auto_settle_ = AUTO_SETTLE;
+    }
+    auto_calm_ = 0;
+  } else if (++auto_calm_ >= AUTO_CALM_WINDOWS) {
+    // Clean for long enough to believe it: give the latency back.
+    if (now > AUTO_MIN_MS) { apply_target_ms(now - AUTO_STEP_MS); auto_settle_ = AUTO_SETTLE; }
+    auto_calm_ = 0;
+  }
+  auto_frames_ = auto_on_time_ = 0;
+  auto_dry_mark_ = stats_.dry;
 }
 
 void Audio::set_volume(int percent) {

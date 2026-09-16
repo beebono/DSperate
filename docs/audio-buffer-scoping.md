@@ -74,55 +74,92 @@ on the host: default lands on exactly 3.00 frames, 30 -> 1.79, 120 -> 7.18, 5
 clamps to the 10 ms floor, `latency_frames = 6` -> 100.3 ms, and
 `buffer_size` wins when both are set.
 
-## Phase 2 -- the device buffer follows the same number
+## What the measurements changed
 
-`want.samples` from `buffer_size` rather than hard-coded: roughly a third of
-the total, rounded to a power of two in 256..4096, with the queue target
-taking the rest and clamped to clear it.
+Phases 2 and 3 were scoped on the assumption that a deeper buffer reduces
+popping. **It does not, except in one narrow case**, and that reshaped both.
 
-The thing to be careful of is that **SDL may not honour it.** On a
-daemon-backed device the period is the daemon's, and `PIPEWIRE_LATENCY`
-changed nothing when the native-PipeWire experiment tried it (see the
-audio-path notes). So read `got.samples`, never assume `want.samples`, and
-clamp the queue target against what came back. If the device refuses to move,
-phase 2 degrades to reporting the floor honestly -- still worth having, but
-the latency floor will not move on that device.
+Controlled A/Bs, identical workload each time (RG DS Plus, performance
+governor, wayland display path), dry frames per 1800:
 
-A device reopen is needed to change it, so the menu row applies this half in
-`SettingsHost::commit()` -- the deferral point that already exists so that
-stepping a row does not reopen the display on every press.
+| title | 50 ms | 100 ms | 150 ms | 200 ms |
+|-------|-------|--------|--------|--------|
+| sm64 replay | 302 | 345 | 342 | 266 |
+| Spirit Tracks (no input, deterministic) | 191 | 167 | 205 | 186 |
 
-## Phase 3 -- `auto`, and the menu row
+No trend in either. A buffer absorbs jitter around a *sustainable average*;
+it cannot absorb a deficit. At 93 % of real time the queue drains at 7 % of
+real time whatever its depth, and refilling needs to run *above* real time --
+which **the frame limiter forbids**. At the limiter production equals
+consumption exactly, so the only thing that can add depth is the rate
+control's 0.5 % of trim, 0.083 ms a frame. That is why a 200 ms target never
+got past 124 ms of real depth, and why raising a target the machine cannot
+fill pins the trim at its clamp and detunes the output half a percent flat
+(~8 cents) for as long as it lasts.
 
-`audio.buffer_size = auto`, and an **AUDIO BUFFER** row on the Emu page:
-`number("audio.buffer_size", "AUDIO BUFFER", 20, 200, 10, "auto", FlagLive,
-Dep::None, ..., "auto", "AUTO", " MS")`. The table already has what this
-needs -- `Setting::sentinel_value` is documented as taking `"auto"`, and
-`number()` carries a display suffix, the same shape `FAST FORWARD SPEED`
-uses for its `UNLIMITED`.
+So the triage inverts what this document assumed:
 
-20 ms floor because that is about where a device can still be held: even at
-512 samples the queue needs ~1.5 periods above it. 200 ms ceiling because
-past there the drop latch is what you would feel, not the buffer. `Dep::None`
--- unlike `emu.limiter` and `emu.speed` this does not set the emulator's
-pace, so netplay has no stake in it. Step 10 for round numbers, still six
-times finer than the whole frames it replaces.
+- **high `dry` = the machine is not keeping up.** The fix is frameskip, CPU
+  tuning or the governor. Not buffer size.
+- **buffer depth answers isolated hitches** on a machine that otherwise holds
+  100 %. sm64 with the governor fixed: `dry 1/1800`.
 
-The controller is a slow outer loop above the rate control, not a
-replacement for it:
+Two traps voided a day of measurement before this was clear, both on the RG
+DS Plus: the `ondemand` governor (mean emu 13.26 ms against 7.34 on
+`performance`, and dry 174-272 against 1), and SDL falling back to
+`software renderer, offscreen driver` over ssh, which costs 3.8-5.5 ms of
+present and manufactures the very deficit being measured. Grep the `video:`
+line and check the governor before believing anything from that device.
 
-- grow fast: +8 ms on a dry frame, or on the trim sitting at `DRC_CLAMP` for
-  several seconds;
-- shrink slowly: -8 ms after ~30 s in which the measured minimum stayed a
-  comfortable margin clear;
-- wide hysteresis, and inert under fast forward and the `over_` latch;
-- **seed at launch**, per the phase 0 finding, so startup fill is not read as
-  an underrun;
-- `set_buffer_ms` resets `depth_` and `trim_`, so every step costs a
-  re-converge transient. That is the argument for shrinking rarely.
+## Phase 2 -- the device buffer -- **DROPPED**
 
-`auto` moves the queue target only. The device buffer is sized once at open,
-conservatively, because changing it means reopening the device.
+Sizing `want.samples` from the same number was scoped to lower the latency
+floor and to give a weak device a larger device period. The measurements
+above remove the reason for both: depth is not what is failing, and the
+period is not where the gaps come from. `got.samples` is reported at open
+(2.55 frames on every device tested) and clamps nothing else. Revisit only
+with evidence of a fault *downstream* of the queue -- popping with `dry` at
+zero, which nothing has shown yet.
+
+## Phase 3 -- `auto`, and the menu row -- **DONE (2026-09-15)**
+
+`audio.buffer_size = auto` is the default, and an **AUDIO BUFFER** row sits on
+the Emu page (20..200 ms, step 10, `auto` sentinel, `FlagLive`, `Dep::None`).
+
+The controller is a slow outer loop above the rate control, and the gate is
+the part that matters:
+
+- a decision every 300 frames (~5 s);
+- **grow only when the machine is keeping up** -- 90 % of frames inside their
+  budget -- and it still ran dry. 90 rather than 100 because adaptive
+  frameskip and a vsync beat each put the odd frame over, and those are
+  exactly the hitches depth is for;
+- when it is behind, *leave the target alone*. Growing into a deficit is the
+  failure mode this whole phase exists to avoid;
+- +8 ms a step to 150 ms, -8 ms after six clean windows (~30 s) to a 30 ms
+  floor;
+- **inject the step as silence** rather than waiting for the trim to fill it.
+  The limiter leaves no headroom, so without this a step takes ~20 s to
+  materialise with the trim on its clamp throughout. The silence is paid at a
+  moment the queue has just run dry, so it lands in a gap that already
+  existed;
+- 60 frames of settling after every step and at startup, because the queue
+  fills from empty at launch and that would otherwise read as a run of
+  underruns -- 8 of the first 11 dry frames in a 900-frame run were exactly
+  that.
+
+`DS_AUDIO_AUTO=1` logs every decision. Verified on the RG DS Plus in both
+regimes:
+
+    deficit (Spirit Tracks)   50 ms, 1 dry, 282/300 on time -> grow
+                              58 ms, 44 dry, 148/300 on time -> behind, leaving it
+                              58 ms, 68 dry, 145/300 on time -> behind, leaving it
+    healthy (sm64 replay)     50 ms, 1 dry, 298/300 on time -> grow
+                              58 ms, 0 dry, 300/300 on time -> clean
+
+The deficit case is the one to read: 68 underruns in a window and it still
+refuses to grow, because growing would not have helped and would have
+detuned the sound to prove it.
 
 ## Acceptance
 

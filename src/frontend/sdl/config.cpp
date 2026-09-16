@@ -281,10 +281,13 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # SDL's choice; SDL_AUDIODRIVER overrides
 # native_rate = true            # open the device at its own rate and resample here (false: 32768 Hz,
                                 # the sound daemon resamples)
-# buffer_size = 50             # how much sound is held ahead, in milliseconds; lower is less delay
-                                # and less slack before a late frame is heard as a gap. Replaces
-                                # latency_frames, which counted whole DS frames (~16.7 ms each) and is
-                                # still read when this is unset
+# buffer_size = auto           # how much sound is held ahead: auto, or milliseconds (20..200).
+                                # Lower is less delay and less slack before a late frame is heard as
+                                # a gap. auto starts at 50 ms and raises it only when the machine is
+                                # keeping up and still ran the queue dry -- depth answers an
+                                # occasional hitch, never a machine that cannot keep up, where the
+                                # fix is frameskip or cpu_tuning. Replaces latency_frames, which
+                                # counted whole DS frames (~16.7 ms each) and is still read here
 # mic = true                    # open the microphone
 # mic_dev = plughw:0,0          # ALSA capture device
 # mic_gain = 0.25

@@ -92,6 +92,30 @@ public:
   void set_buffer_ms(double ms);
   double buffer_ms() const { return target_frames_ * FRAME_MS; }
   double target_frames() const { return target_frames_; }
+
+  // [audio] buffer_size = auto. Starts at the default and moves the target
+  // itself -- but only within the one regime where depth is the answer.
+  //
+  // A buffer absorbs jitter around a sustainable average; it cannot absorb a
+  // deficit. A machine running at 93 % of real time drains the queue at 7 %
+  // of real time whatever its depth, and refilling needs to run *above* real
+  // time, which the frame limiter forbids -- at the limiter production
+  // equals consumption exactly, and the only thing that can add depth is the
+  // rate control's 0.5 % of trim. Measured: identical-workload runs at 50,
+  // 100, 150 and 200 ms differ in underruns by nothing at all on a title
+  // that is over budget, and a 200 ms target never got past 124 ms of real
+  // depth. Growing into a deficit only pins the trim at its clamp, which
+  // detunes the output half a percent flat for as long as it lasts.
+  //
+  // So auto grows only when the machine is keeping up and still ran dry --
+  // the isolated hitch, which is the case depth does answer. When it is
+  // behind it leaves the target alone: that is a frameskip or a CPU tuning
+  // problem and a deeper queue would be a worse-sounding lie.
+  // docs/audio-buffer-scoping.md.
+  void set_buffer_auto();
+  bool buffer_auto() const { return auto_; }
+  // Once a frame, with whether the frame met its budget.
+  void auto_tick(bool on_time);
   // What the controller is doing to the sample rate right now, in parts per
   // million (positive: playing out faster than nominal to shed a deep
   // queue). For the statistics line -- a number that sits at one end of its
@@ -168,9 +192,31 @@ private:
   u32 phase_ = 0;
   std::vector<s16> out_;
   bool over_ = false;    // the queue is not being consumed; dropping until it is back at the target
+  void apply_target_ms(double ms);
+  // Hands the device depth it could not otherwise reach. Raising the target
+  // is not enough on its own: the limiter leaves no headroom to fill it, so
+  // without this the queue creeps up at 0.083 ms a frame and spends ~20 s
+  // with the trim on its clamp. The step is paid at a moment the queue has
+  // just run dry, so the silence lands in a gap that already existed.
+  void queue_silence(double ms);
+
+  static constexpr double AUTO_STEP_MS = 8.0;
+  static constexpr double AUTO_MIN_MS = 30.0, AUTO_MAX_MS = 150.0;
+  static constexpr int AUTO_WINDOW = 300;       // frames per decision, ~5 s
+  static constexpr int AUTO_CALM_WINDOWS = 6;   // ~30 s clean before giving latency back
+  static constexpr int AUTO_SETTLE = 60;        // frames ignored after a step, and at startup
+  // 90 % of frames on time is "keeping up". Not 100 %: adaptive frameskip
+  // and a vsync beat both put the odd frame over budget on a machine that is
+  // otherwise fine, and those are exactly the hitches depth is for.
+  static constexpr int AUTO_ON_TIME_PCT = 90;
+
   // Fractional: the target is set in milliseconds, which does not land on
   // whole frames, and the controller's error term wants the difference.
   double target_frames_ = DEFAULT_MS / FRAME_MS;
+  bool auto_ = false;
+  bool dbg_auto_ = false;   // DS_AUDIO_AUTO: log every decision
+  int auto_frames_ = 0, auto_on_time_ = 0, auto_calm_ = 0, auto_settle_ = AUTO_SETTLE;
+  u64 auto_dry_mark_ = 0;   // stats_.dry when this window opened
   double speed_ = 1.0;   // wall-clock rate against the console's own
   double depth_ = -1.0;  // smoothed queue depth in frames; < 0 until the first measurement
   double trim_ = 0.0;    // the controller's correction, as a fraction of the nominal rate
