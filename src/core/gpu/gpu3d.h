@@ -160,7 +160,7 @@ public:
       timestamp_ = arm9_time >> 1;
       // The worker's feed point: what the slice parsed becomes visible to it
       // here, once per slice rather than per word.
-      if (worker_on_ && q_pending_) q_feed();
+      if (worker_on_ && q_pending_) q_publish();
       return;
     }
     run_to_slow(arm9_time);
@@ -349,13 +349,6 @@ private:
     shadow_exec(e.cmd, e.param);
   }
   void q_publish();
-  // A feed point that may defer: publish only once q_min_batch_ entries have
-  // accumulated (DS_GX_PUBLISH_MIN; 0 = every feed point, as before). Joins
-  // and a full queue always publish, and anything that reads the worker's
-  // results joins first, so deferring moves only WHEN the worker runs.
-  void q_feed() { if (q_wr_local_ - q_published_ >= q_min_batch_) q_publish(); }
-  u32 q_published_ = 0;                // q_wr_local_ at the last publish
-  u32 q_min_batch_ = 0;
   void q_wait_room();
   void worker_join();                   // everything queued has executed
   void worker_activate(bool on);        // route commands to the worker (true) or execute inline (false); queue must be empty
