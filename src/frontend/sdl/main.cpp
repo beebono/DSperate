@@ -1184,8 +1184,7 @@ int main(int argc, char** argv) {
     else if (flag("--lockstep")) cli.set("emu.quantum", std::to_string(ds::LOCKSTEP_QUANTUM));
     else if (arg("--quantum")) cli.set("emu.quantum", argv[++i]);
     else if (flag("--timing-oc")) cli.set("emu.timing_oc", "true");
-    else if (flag("--gx-worker")) cli.set("emu.gx_worker", "true");
-    else if (arg("--gx-drain")) cli.set("emu.gx_drain", argv[++i]);   // percent of hardware the modelled GX FIFO drains at (100 = exact); stalls and ordering kept   // the geometry worker alone: FIFO, stall and swap timing kept, commands executed off-thread with the cull priced by the previous frame's ratio
+    else if (flag("--gx-worker")) cli.set("emu.gx_worker", "true");   // the geometry worker alone: FIFO, stall and swap timing kept, commands executed off-thread with the cull priced by the previous frame's ratio
     else if (flag("--cpu-oc")) cli.set("emu.cpu_tuning", "overclock");
     else if (flag("--cpu-uc")) cli.set("emu.cpu_tuning", "underclock");
     else if (flag("--fast-load")) cli.set("emu.fast_load", "true");
@@ -1239,7 +1238,7 @@ int main(int argc, char** argv) {
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.disp", "video.fbdev", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.timing_oc", "emu.gx_worker", "emu.gx_drain", "emu.cpu_tuning", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.quantum", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.timing_oc", "emu.gx_worker", "emu.cpu_tuning", "emu.fast_load", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
   // The DSi's own firmware, for a session that is a DSi from the start, unless
@@ -1911,8 +1910,7 @@ sdl_ready:
   nds.gpu3d.set_timing_oc(cfg.flag("emu.timing_oc", false));
   // Geometry worker + per-frame shape controller, with either inexact tier
   // (no-FIFO, or the FIFO kept with the cull priced by ratio under --cpu-oc).
-  nds.gpu3d.set_geometry_worker(cfg.flag("emu.timing_oc", false) || cfg.flag("emu.gx_worker", false) || cpu_oc_mode(cfg.str("emu.cpu_tuning")) != 0);
-  nds.gpu3d.set_drain_speed(static_cast<u32>(std::max(100, cfg.num("emu.gx_drain", 100))));   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
+  nds.gpu3d.set_geometry_worker(cfg.flag("emu.timing_oc", false) || cfg.flag("emu.gx_worker", false) || cpu_oc_mode(cfg.str("emu.cpu_tuning")) != 0);   // DS_GX_THREAD: 0 never, 1 per-frame shape controller, 2 always
   nds.io.set_cart_bulk(cfg.flag("emu.fast_load", false));   // may introduce accuracy issues, see config.cpp
   nds.gpu3d.renderer().set_aa(cfg.flag("video.aa", false));   // opt-in: see config.cpp
   if (!boot_firmware || nds.dsi) nds.setup_direct_boot();   // on a DSi this is the NAND boot (NDS::boot_dsi_nand)
