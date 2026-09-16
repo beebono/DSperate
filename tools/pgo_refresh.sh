@@ -3,7 +3,7 @@
 # drifted from the tree it will be applied to.
 #
 #   DS_ROMS=<rom dir> DS_BIOS=<bios dir> [DS_DSI=<dsi-binary dir>] \
-#     tools/pgo_refresh.sh [--check] [--no-dsi] [build-dir] [extra cmake args]
+#     tools/pgo_refresh.sh [--check] [--no-dsi] [--arm32] [build-dir] [extra cmake args]
 #
 # --check  compares the profile's MANIFEST against this tree: the compiler and
 #          the compile flags (a mismatch voids the whole profile -- CI fails the
@@ -21,6 +21,16 @@
 #          dumps to hand. The DSi scenes are also skipped on their own when
 #          DS_DSI (default: the dsi-binary directory beside this checkout) has
 #          no BIOS pair in it. MANIFEST records which scenes actually ran.
+# --arm32  builds the ARM32 (armv7l) profile into pgo/armv7l instead, with the
+#          vendored A30 toolchain and qemu-arm. It has to be that toolchain and
+#          not the dev box's arm-linux-gnueabihf: a .gcda file is tied to the
+#          compiler's minor version, and the A30 toolchain (GCC 13.2) is what
+#          builds the ARM32 release, so a profile from any other compiler would
+#          be refused by the fingerprint check at configure time. Each
+#          architecture keeps its own profile directory, MANIFEST and scratch
+#          build dir, so the two never collide. DS_A30_TOOLCHAIN overrides
+#          where that toolchain lives (default: toolchains/a30 beside this
+#          checkout).
 #
 # Two of the scenes are here for paths the replays cannot reach: `nsmb` boots
 # the cart from frame 0, which is the only training for the boot path and for
@@ -33,20 +43,39 @@
 # The training needs the real BIOS and firmware: without them the JIT
 # translates one-instruction blocks and the profile describes another program.
 set -eu
-CHECK=0; DSI=1
+CHECK=0; DSI=1; ARCH=aarch64
 while :; do
   case "${1:-}" in
     --check)  CHECK=1; shift ;;
     --no-dsi) DSI=0; shift ;;
+    --arm32)  ARCH=armv7l; shift ;;
+    --arch)   ARCH=$2; shift 2 ;;
     *) break ;;
   esac
 done
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-BUILD=${1:-$HERE/build/pgo-gen}; shift || true
-ARCH=aarch64
+BUILD=${1:-$HERE/build/pgo-gen-$ARCH}; shift || true
+# Per architecture: the toolchain that builds its release binaries, the qemu to
+# train under, and the compiler whose version goes in the MANIFEST. CMakeLists
+# derives the profile directory from CMAKE_SYSTEM_PROCESSOR, so the names here
+# are the ones it will look under.
+case $ARCH in
+  aarch64)
+    TOOLCHAIN="$HERE/cmake/aarch64-linux-gnu.cmake"
+    Q="qemu-aarch64-static -L /usr/aarch64-linux-gnu"
+    PGO_CXX=aarch64-linux-gnu-g++
+    ;;
+  armv7l)
+    A30=${DS_A30_TOOLCHAIN:-$HERE/../toolchains/a30}
+    TOOLCHAIN="$A30/tc-a30.cmake"
+    PGO_CXX="$A30/a30/bin/arm-a30-linux-gnueabihf-g++"
+    Q="qemu-arm-static -L $A30/a30/arm-a30-linux-gnueabihf/sysroot"
+    [ -x "$PGO_CXX" ] || { echo "no ARM32 toolchain at $A30 (set DS_A30_TOOLCHAIN); see toolchains/a30"; exit 1; }
+    ;;
+  *) echo "unknown --arch $ARCH (aarch64 | armv7l)"; exit 1 ;;
+esac
 PROFILE="$HERE/pgo/$ARCH"
-Q="qemu-aarch64-static -L /usr/aarch64-linux-gnu"
-CONF=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$HERE/cmake/$ARCH-linux-gnu.cmake" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_TESTS=OFF "$@")
+CONF=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_TESTS=OFF "$@")
 
 fingerprint() {   # of a configured build dir
   cat "$1/pgo-fingerprint"
@@ -60,10 +89,15 @@ if [ $CHECK = 1 ]; then
   commit=$(sed -n 's/^commit //p' "$PROFILE/MANIFEST")
   echo "profile: $(sed -n 's/^date //p' "$PROFILE/MANIFEST"), commit $commit, $(sed -n 's/^compiler //p' "$PROFILE/MANIFEST")"
   if [ "$now" != "$was" ]; then echo "DRIFT: compiler or flags differ (profile $was, tree $now) -- the profile is void"; exit 1; fi
-  changed=$(git -C "$HERE" diff --name-only "$commit" -- src | wc -l)
+  # The SDL frontend is never trained (a headless run does not execute one line
+  # of it), so changing it cannot cost a profile: leaving it in made every
+  # frontend commit report drift for ever, which is how a real warning gets
+  # ignored. TRAINED is what the training actually runs.
+  TRAINED=(-- src ':(exclude)src/frontend/sdl')
+  changed=$(git -C "$HERE" diff --name-only "$commit" "${TRAINED[@]}" | wc -l)
   if [ "$changed" -gt 0 ]; then
-    echo "source drift: $changed files under src/ changed since the profile ($(git -C "$HERE" diff --shortstat "$commit" -- src | sed 's/^ //'))"
-    git -C "$HERE" diff --name-only "$commit" -- src | sed 's/^/  /'
+    echo "source drift: $changed trained files changed since the profile ($(git -C "$HERE" diff --shortstat "$commit" "${TRAINED[@]}" | sed 's/^ //'))"
+    git -C "$HERE" diff --name-only "$commit" "${TRAINED[@]}" | sed 's/^/  /'
     exit 2
   fi
   echo "current"; exit 0
@@ -79,7 +113,7 @@ elif [ ! -f "$DS_DSI/bios/biosdsi9.bin" ] || [ ! -f "$DS_DSI/bios/biosdsi7.bin" 
 elif [ ! -f "$DS_DSI/bios/dsifirmware.bin" ]; then DSI_WHY="no DSi firmware in $DS_DSI/bios"
 else DSI_OK=1
 fi
-echo "== instrumented build -> $PROFILE"
+echo "== instrumented build for $ARCH -> $PROFILE"
 mkdir -p "$PROFILE"
 find "$PROFILE" -name '*.gcda' -delete
 rm -rf "$BUILD" "$BUILD-use"   # scratch directories: a stale cache (flags) would fingerprint the profile wrongly
@@ -124,7 +158,7 @@ echo "  profiles: $n"
 [ "$n" -gt 0 ] || { echo "no profile written"; exit 1; }
 {
   echo "fingerprint $(fingerprint "$BUILD")"
-  echo "compiler $(aarch64-linux-gnu-g++ -dumpfullversion) ($(aarch64-linux-gnu-g++ -dumpmachine))"
+  echo "compiler $("$PGO_CXX" -dumpfullversion) ($("$PGO_CXX" -dumpmachine))"
   echo "commit $(git -C "$HERE" rev-parse HEAD)"
   echo "date $(date -u +%Y-%m-%dT%H:%MZ)"
   echo "scenes $SCENES"
