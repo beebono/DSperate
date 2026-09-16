@@ -1379,6 +1379,19 @@ int main(int argc, char** argv) {
                  nds.firmware_synthetic ? "firmware" : "", global_ini.c_str());
     return 2;
   }
+  // A DSi session needs all four dumps, not just the DSi pair. FreeBIOS is a
+  // direct-boot stand-in for the DS ARM9/ARM7 BIOS and has neither the
+  // Blowfish key table the cart's secure area is decrypted with nor the SWI
+  // behaviour the launcher hand-off runs through -- a DSiWare title started
+  // on it printed "secure area decryption failed" and then wedged a few
+  // frames in, which is a worse answer than refusing. The DSi pair is gated
+  // separately and earlier, before anything is loaded.
+  if (dsi_mode && !nds.bios_native) {
+    std::fprintf(stderr, "a DSi session needs the DS BIOS dumps as well as the DSi pair: %s (--bios9/--bios7 or [paths] in %s).\n"
+                 "The built-in FreeBIOS cannot boot one.\n",
+                 bios9.empty() ? "no dumps given" : "dumps not found", global_ini.c_str());
+    return 2;
+  }
   // The DSi's SD card: a host folder, built into a card before the reset that
   // puts it in the slot (io/dsi_sd_card.h). Opened once; a later DSiWare pick
   // from the game list keeps it.
@@ -3418,6 +3431,14 @@ sdl_ready:
     bool left_dsi = false;                      // a DS pick leaving the DSi machine
     if (pick_dsi && !have_dsi_bios()) {
       std::fprintf(stderr, "launcher: %s is DSiWare and needs the DSi BIOS pair (paths.bios9i/paths.bios7i in %s)\n", pick.c_str(), global_ini.c_str());
+      return;
+    }
+    // All four dumps, for the reason the startup gate gives: a DS session on
+    // FreeBIOS can reach this picker, and a DSiWare title started from it
+    // would wedge rather than run.
+    if (pick_dsi && !nds.bios_native) {
+      std::fprintf(stderr, "launcher: %s is DSiWare and needs the DS BIOS dumps too (paths.bios9/paths.bios7 in %s); the built-in FreeBIOS cannot boot a DSi\n",
+                   pick.c_str(), global_ini.c_str());
       return;
     }
     flush_save();
