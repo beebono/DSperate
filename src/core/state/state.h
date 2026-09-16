@@ -32,6 +32,7 @@ public:
   void begin(const char tag[4]) { blob(tag, 4); len_at_ = buf_.size(); u32 z = 0; blob(&z, 4); }
   void end() { const u32 n = static_cast<u32>(buf_.size() - len_at_ - 4); std::memcpy(&buf_[len_at_], &n, 4); }
   bool more() const { return true; }
+  size_t remaining() const { return 0; }   // mirrors Reader::remaining for sync_state templates
 
   template <class T> void put(const T& v) {
     if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) blob(&v, sizeof v);
@@ -79,6 +80,10 @@ public:
   }
   void end() { if (ok_) p_ = chunk_end_; }
   bool more() const { return ok_ && p_ < chunk_end_; }
+  // Bytes the current chunk still holds: for a layout whose element count
+  // the file does not carry (the version-2 scheduler events), the size is
+  // what says how many were written.
+  size_t remaining() const { return ok_ ? static_cast<size_t>(chunk_end_ - p_) : 0; }
 
   template <class T> void put(T& v) {   // named like the writer's so sync_state reads the same
     if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) { if (more()) blob(&v, sizeof v); }

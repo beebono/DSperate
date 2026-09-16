@@ -663,20 +663,44 @@ template <class S> void Scheduler::sync_state(S& s) {
   // grid events, the SD/MMC and SDIO transfers, the Wi-Fi module's timer, the
   // camera's two and the card slots' power-off timers); a version-2 file
   // carries the DS's 21.
-  constexpr u32 V2_EVENTS = 21;
   static_assert(EVENT_COUNT == 29, "EVENT_COUNT changed: add a save-state version");
   s.fields(now_, arm7_debt_, armed_);
   if (s.version >= 3) s.fields(at_, param_);
   else {
-    for (u32 i = 0; i < V2_EVENTS; ++i) s.fields(at_[i]);
-    for (u32 i = 0; i < V2_EVENTS; ++i) s.fields(param_[i]);
+    // A version-2 file carries the DS's events -- but that was 20 of them
+    // until Wifi was added (2026-09-07) and 21 after, both written as
+    // version 2. Reading 21 from a 20-event file shifts every param_ by two
+    // entries: the ARM7's Timer1 event then fires as Timer3 once and never
+    // reschedules itself, the sound driver loses its tick, and the state
+    // runs silent and 1.5 ms a frame lighter than it should (the st-intro
+    // and gsdd-phase2 scenes, found 2026-09-16). The chunk's size says which
+    // it was: what follows the two arrays is the idle ring, its position, and
+    // an arm9_carry_ that was itself appended, so the size is one of four
+    // values and each names its count.
+    u32 n = 21;
+    if constexpr (S::reading) {
+      const size_t tail = sizeof(idle_pc_ring_) + sizeof(idle_pc_pos_);
+      const size_t rem = s.remaining();
+      for (u32 cand : {21u, 20u}) {
+        const size_t arrays = cand * (sizeof(at_[0]) + sizeof(param_[0]));
+        if (rem == arrays + tail || rem == arrays + tail + sizeof(arm9_carry_)) { n = cand; break; }
+      }
+    }
+    for (u32 i = 0; i < n; ++i) s.fields(at_[i]);
+    for (u32 i = 0; i < n; ++i) s.fields(param_[i]);
   }
   // The idle-skip pre-filter: whether a slice is skipped depends on the
   // recent slice-start PCs, so the ring is part of the timing.
   s.fields(idle_pc_ring_, idle_pc_pos_);
   s.fields(arm9_carry_);   // appended: DS states leave it 0
   s.end();
-  if constexpr (S::reading) { fn_.fill(nullptr); in_dma_ = false; running_ = nullptr; }
+  if constexpr (S::reading) {
+    fn_.fill(nullptr); in_dma_ = false; running_ = nullptr;
+    static const bool dbg = std::getenv("DS_DEBUG_STATE") != nullptr;   // the armed events as loaded, against now_
+    if (dbg) for (u32 i = 0; i < EVENT_COUNT; ++i)
+      if (armed_ & (1u << i)) std::fprintf(stderr, "[state] event %-13s at %llu (now %llu, in %lld) param %u\n", event_name(i),
+                                           (unsigned long long)at_[i], (unsigned long long)now_, (long long)(at_[i] - now_), param_[i]);
+  }
 }
 template void Scheduler::sync_state<state::Writer>(state::Writer&);
 template void Scheduler::sync_state<state::Reader>(state::Reader&);

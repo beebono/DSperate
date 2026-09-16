@@ -225,6 +225,11 @@ void Io::timer_overflow(Cpu cpu, int idx) {
   Timer& t = cpu_io[ci(cpu)].timers[idx];
   t.counter = t.reload;
   t.start_time = nds_.sched.event_time();   // the overflow's nominal time, not the (late) slice end
+  static const bool dbg = std::getenv("DS_DEBUG_STATE") != nullptr;
+  static int dbg_left = 12;
+  if (dbg && dbg_left > 0 && cpu == Cpu::ARM7) { --dbg_left;
+    std::fprintf(stderr, "[state] arm7 timer%d overflow at %llu (now %llu) control %04x reload %04x\n", idx,
+                 (unsigned long long)t.start_time, (unsigned long long)nds_.sched.now(), t.control, t.reload); }
   if (t.control & 0x40) request_irq(cpu, IRQ_TIMER0 + idx);
   if (idx < 3) {
     Timer& n = cpu_io[ci(cpu)].timers[idx + 1];
@@ -1896,6 +1901,15 @@ template <class S> void Io::sync_state(S& s) {
   for (CpuIo& c : cpu_io) {
     s.fields(c.ime, c.ie, c.if_, c.ipc_sync, c.ipc_fifo_cnt, c.fifo_out.data, c.fifo_out.head, c.fifo_out.count, c.fifo_out.last, c.postflg, c.dma_fill);
     for (Timer& t : c.timers) s.fields(t.reload, t.control, t.counter, t.start_time);
+    // DS_DEBUG_STATE=1: the timers as loaded, against the scheduler clock --
+    // a timer whose start_time is far from now_ never comes due again.
+    if constexpr (S::reading) {
+      static const bool dbg = std::getenv("DS_DEBUG_STATE") != nullptr;
+      if (dbg) for (int i = 0; i < 4; ++i) { const Timer& t = c.timers[i];
+        std::fprintf(stderr, "[state] arm%d timer%d reload %04x control %04x counter %04x start_time %llu (sched now %llu, delta %lld)\n",
+                     (&c == &cpu_io[0]) ? 9 : 7, i, t.reload, t.control, t.counter, (unsigned long long)t.start_time,
+                     (unsigned long long)nds_.sched.now(), (long long)(nds_.sched.now() - t.start_time)); }
+    }
   }
   s.fields(spi_fw.hold, spi_fw.cmd, spi_fw.pos, spi_fw.addr, spi_fw.status, spi_fw.data);
   s.fields(spi_tsc.hold, spi_tsc.pos, spi_tsc.cmd, spi_tsc.sample, spi_tsc.data, spi_tsc.x, spi_tsc.y);
