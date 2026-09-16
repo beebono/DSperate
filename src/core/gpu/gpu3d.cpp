@@ -519,7 +519,7 @@ void Gpu3D::run_to_slow(u64 arm9_time) {
     else drain([this](const Entry& e) { exec_single(e.cmd, e.param); });
     ring_rd_ = rd; pipe_n_ = pipe; fifo_n_ = fifo; drain_settle_ = settle;
   }
-  if (worker_on_) { if (q_pending_) q_publish(); }
+  if (worker_on_) { if (q_pending_) q_feed(); }
   else if (timed) gx_inline_ns_ += static_cast<u64>((std::chrono::steady_clock::now() - t0).count());
   if (cycle_count_ <= 0 && pipe_n_ == 0) {
     if (gxstat_ & (1u << 27)) finish_work(-cycle_count_); else cycle_count_ = 0;
@@ -666,7 +666,7 @@ void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
       gxfifo_word(v, p, [this](const Entry& e) { q_push(e); });
     }
     parse_ = p;
-    if (q_pending_) q_publish();
+    if (q_pending_) q_feed();
     return;
   }
   u32 wr = ring_wr_, pushed = 0, pushpop = 0, tests = 0;
@@ -1571,6 +1571,8 @@ void Gpu3D::set_geometry_worker(bool on) {
   if (on == worker_started_) return;
   if (on) {
     static const int mode = [] { const char* e = std::getenv("DS_GX_THREAD"); return e ? std::atoi(e) : 1; }();
+    static const u32 min_batch = [] { const char* e = std::getenv("DS_GX_PUBLISH_MIN"); return e ? static_cast<u32>(std::atoi(e)) : 0u; }();
+    q_min_batch_ = min_batch;
     shape_mode_ = mode;
     if (shape_mode_ == 0) return;
     q_wr_local_ = q_rd_local_ = q_rd_seen_ = 0; q_pending_ = false;
@@ -1809,6 +1811,7 @@ void Gpu3D::worker_stop() {
 // lock after raising the flag, so one of the two always sees the other.
 void Gpu3D::q_publish() {
   q_pending_ = false;
+  q_published_ = q_wr_local_;
   q_wr_.store(q_wr_local_, std::memory_order_seq_cst);
   std::atomic_thread_fence(std::memory_order_seq_cst);
   if (worker_asleep_.load(std::memory_order_seq_cst)) {
