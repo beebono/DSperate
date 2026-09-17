@@ -108,7 +108,18 @@ endif()
 # and half as many over-budget frames on both save-state scenes; bit-exact.
 set(DSPERATE_PGO "OFF" CACHE STRING "Profile-guided optimisation: OFF | generate | use")
 set_property(CACHE DSPERATE_PGO PROPERTY STRINGS OFF generate use)
-set(DSPERATE_PGO_DIR "${CMAKE_SOURCE_DIR}/pgo/${CMAKE_SYSTEM_PROCESSOR}" CACHE PATH "Where the PGO profile (.gcda files and MANIFEST) lives")
+# Where the profile lives. Both the .gcda format and the fingerprint below are
+# tied to the compiler version, so the tree can carry more than one profile per
+# architecture: pgo/<arch>-gcc<version>/ is preferred when it exists and
+# pgo/<arch>/ is the fallback the canonical build uses. That is what lets a
+# downstream distro on another GCC still build with PGO instead of silently
+# dropping to an unprofiled build -- dArkOS packages DSperate with GCC 12.4
+# while CI builds with 13.3. An explicit -DDSPERATE_PGO_DIR still wins.
+set(_ds_pgo_default "${CMAKE_SOURCE_DIR}/pgo/${CMAKE_SYSTEM_PROCESSOR}")
+if(EXISTS "${_ds_pgo_default}-gcc${CMAKE_CXX_COMPILER_VERSION}/MANIFEST")
+  set(_ds_pgo_default "${_ds_pgo_default}-gcc${CMAKE_CXX_COMPILER_VERSION}")
+endif()
+set(DSPERATE_PGO_DIR "${_ds_pgo_default}" CACHE PATH "Where the PGO profile (.gcda files and MANIFEST) lives")
 option(DSPERATE_PGO_STRICT "PGO use: warn about every function without a matching profile" OFF)
 # What the profile is valid for. The flags below are the ones that reach the
 # compiler for every object; anything added per target would have to join.

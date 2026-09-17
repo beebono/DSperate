@@ -3,7 +3,7 @@
 # drifted from the tree it will be applied to.
 #
 #   DS_ROMS=<rom dir> DS_BIOS=<bios dir> [DS_DSI=<dsi-binary dir>] \
-#     tools/pgo_refresh.sh [--check] [--no-dsi] [--arm32] [build-dir] [extra cmake args]
+#     tools/pgo_refresh.sh [--check] [--no-dsi] [--arm32] [--gcc N] [build-dir] [extra cmake args]
 #
 # --check  compares the profile's MANIFEST against this tree: the compiler and
 #          the compile flags (a mismatch voids the whole profile -- CI fails the
@@ -21,6 +21,15 @@
 #          dumps to hand. The DSi scenes are also skipped on their own when
 #          DS_DSI (default: the dsi-binary directory beside this checkout) has
 #          no BIOS pair in it. MANIFEST records which scenes actually ran.
+# --gcc N  builds a *secondary* aarch64 profile with that GCC major version
+#          (aarch64-linux-gnu-g++-N, installed alongside the default one) into
+#          pgo/aarch64-gcc<full version>/, which CMakeLists prefers whenever a
+#          build uses that compiler. It exists so a downstream distro on
+#          another GCC gets PGO instead of silently falling back to an
+#          unprofiled build: the fingerprint pins the exact compiler version,
+#          and dArkOS (the supported Debian-based RK3326 distro) packages
+#          DSperate with GCC 12.4 while CI builds with 13.3. Refresh it in the
+#          same pass as the default profile, or it decays on its own.
 # --arm32  builds the ARM32 (armv7l) profile into pgo/armv7l instead, with the
 #          vendored A30 toolchain and qemu-arm. It has to be that toolchain and
 #          not the dev box's arm-linux-gnueabihf: a .gcda file is tied to the
@@ -43,18 +52,19 @@
 # The training needs the real BIOS and firmware: without them the JIT
 # translates one-instruction blocks and the profile describes another program.
 set -eu
-CHECK=0; DSI=1; ARCH=aarch64
+CHECK=0; DSI=1; ARCH=aarch64; GCC=''
 while :; do
   case "${1:-}" in
     --check)  CHECK=1; shift ;;
     --no-dsi) DSI=0; shift ;;
     --arm32)  ARCH=armv7l; shift ;;
+    --gcc)    GCC=$2; shift 2 ;;
     --arch)   ARCH=$2; shift 2 ;;
     *) break ;;
   esac
 done
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-BUILD=${1:-$HERE/build/pgo-gen-$ARCH}; shift || true
+BUILD=${1:-$HERE/build/pgo-gen-$ARCH${GCC:+-gcc$GCC}}; shift || true
 # Per architecture: the toolchain that builds its release binaries, the qemu to
 # train under, and the compiler whose version goes in the MANIFEST. CMakeLists
 # derives the profile directory from CMAKE_SYSTEM_PROCESSOR, so the names here
@@ -63,7 +73,9 @@ case $ARCH in
   aarch64)
     TOOLCHAIN="$HERE/cmake/aarch64-linux-gnu.cmake"
     Q="qemu-aarch64-static -L /usr/aarch64-linux-gnu"
-    PGO_CXX=aarch64-linux-gnu-g++
+    PGO_CXX=aarch64-linux-gnu-g++${GCC:+-$GCC}
+    [ -z "$GCC" ] || command -v "$PGO_CXX" > /dev/null || {
+      echo "no $PGO_CXX (apt install g++-$GCC-aarch64-linux-gnu)"; exit 1; }
     ;;
   armv7l)
     A30=${DS_A30_TOOLCHAIN:-$HERE/../toolchains/a30}
@@ -74,8 +86,13 @@ case $ARCH in
     ;;
   *) echo "unknown --arch $ARCH (aarch64 | armv7l)"; exit 1 ;;
 esac
+# A secondary profile goes in pgo/<arch>-gcc<full version>, which is the
+# directory CMakeLists prefers when a build uses that compiler; the default
+# profile keeps the plain pgo/<arch>.
 PROFILE="$HERE/pgo/$ARCH"
-CONF=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_TESTS=OFF "$@")
+[ -z "$GCC" ] || PROFILE="$PROFILE-gcc$("$PGO_CXX" -dumpfullversion)"
+CONF=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_TESTS=OFF
+      -DDSPERATE_PGO_DIR="$PROFILE" ${GCC:+-DDS_CROSS_GCC=$GCC} "$@")
 
 fingerprint() {   # of a configured build dir
   cat "$1/pgo-fingerprint"
