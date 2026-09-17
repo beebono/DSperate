@@ -392,7 +392,7 @@ void Gpu3D::reset() {
   vertex_num_ = vertex_in_poly_ = consecutive_polys_ = 0;
   last_strip_poly_ = nullptr; num_opaque_ = 0;
   bank_ = 0; render_bank_ = 1; raster_bank_ = 1; pending_bank_ = 1; num_vertices_ = num_polygons_ = 0;
-  flush_request_ = flush_attr_ = 0; render_identical_ = false; swapped_ = false; list_same_ = false;
+  flush_request_ = flush_attr_ = 0; render_identical_ = false; swapped_ = false; swap_wait_ = false; swap_busy_until_ = 0; list_same_ = false;
   renderer_.reset();
 }
 
@@ -885,6 +885,7 @@ void Gpu3D::exec_single(u8 cmd, u32 param) {
       // list in the freed bank.
       if (rendering_on_) finalise_list();
       swapped_ = true;
+      swap_wait_ = true;
       { std::lock_guard<std::mutex> lk(bank_mu_); render_bank_ = bank_; bank_ = next_write_bank(); }
       num_vertices_ = num_polygons_ = num_opaque_ = 0;
       flush_request_ = 0;
@@ -1515,6 +1516,7 @@ void Gpu3D::vblank() {
     flush_request_ = 0;
   }
   swapped_ = false;
+  if (swap_wait_) { swap_busy_until_ = nds_.sched.now() + 650; swap_wait_ = false; }
   // The list VCount 215 renders is fixed here. The worker is idle after the
   // join and nothing feeds it inside this call, so no lock is needed; it is
   // taken anyway so that every write to a bank role is under it.
@@ -1926,7 +1928,7 @@ u32 Gpu3D::read(u32 addr, u32 width) {
     if (worker_on_ && sh_.box_pending) { worker_join(); sh_.box_pending = false; }
     const u32 sp = worker_on_ ? sh_.err | ((sh_.pos_sp & 0x1F) << 8) | ((sh_.proj_sp & 1) << 13)
                               : stack_err_ | ((pos_sp_ & 0x1F) << 8) | ((proj_sp_ & 1) << 13);
-    const u32 v = gxstat_ | box_result_ | sp | (level << 16) | (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
+    const u32 v = gxstat_ | (swap_wait_ || nds_.sched.now() < swap_busy_until_ ? (1u << 27) : 0) | box_result_ | sp | (level << 16) | (level < 128 ? (1u << 25) : 0) | (level == 0 ? (1u << 26) : 0);
     return width == 32 ? v : width == 16 ? (v >> ((addr & 2) * 8)) & 0xFFFF : (v >> ((addr & 3) * 8)) & 0xFF;
   }
   if (width == 8) { const u32 v = read(addr & ~3u, 32); return (v >> ((addr & 3) * 8)) & 0xFF; }

@@ -176,7 +176,7 @@ public:
   bool idle() const { return !geometry_on_ || flush_request_ || (pipe_n_ == 0 && !(gxstat_ & (1u << 27))); }
   // A swap has been issued and waits for VBlank: the engine accepts nothing
   // and changes nothing until then, so a loop polling GXSTAT can be skipped.
-  bool swap_pending() const { return flush_request_ != 0; }
+  bool swap_pending() const { return flush_request_ != 0 || swap_wait_; }
 
   // Display timing hooks.
   void vblank();            // VCount 192: latch registers, sort, swap buffers
@@ -249,6 +249,14 @@ private:
   bool stalled_ = false;
   bool no_fifo_ = false;         // see set_timing_oc
   bool swapped_ = false;         // no-FIFO: a SWAP_BUFFERS finalised a list since the last VBlank
+  // no-FIFO: a SWAP_BUFFERS was issued since the last VBlank. On hardware the
+  // engine parks until VBlank, and GXSTAT bit 27 reads busy all that time; the
+  // untimed model has already executed the swap, so the bit is reported from
+  // this. Set where the command is issued on the emulation thread. The
+  // exact engine is still busy for the swap's 325 cycles after the flip, so
+  // VBlank turns the flag into a time (ARM9 cycles) the bit reads busy until.
+  bool swap_wait_ = false;
+  u64 swap_busy_until_ = 0;
   bool list_same_ = false;       // finalise_list: the finished list equals the previous one
   bool untimed_ = false;
   bool pipe_empty() const { return pipe_n_ == 0; }
@@ -588,6 +596,7 @@ inline void Gpu3D::fifo_write(const Entry& e) {
 
 inline void Gpu3D::shadow_exec(u8 cmd, u32 param) {
   if (cmd == 0x70) { sh_.box_pending = true; return; }
+  if (cmd == 0x50) { swap_wait_ = no_fifo_; return; }
   if (static_cast<u8>(cmd - 0x10) > 4) return;
   switch (cmd) {
   case 0x10: sh_.mode = param & 3; break;
