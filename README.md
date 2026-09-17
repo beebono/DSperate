@@ -15,6 +15,12 @@ documented by studying its freely-distributable debug-symbol build (approved
 for distribution by its developer, Exophase) and measuring it on real
 hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques).
 
+## Previews
+
+<img src="dsperate-menu.png">
+
+<img src="dsperate-pip.png" width=49.99999%><img src="dsperate-pip2.png" width=49.99999%>
+
 ## Features
 
 ### Core
