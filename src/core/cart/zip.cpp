@@ -31,11 +31,21 @@ u16 rd16(const u8* p) { return static_cast<u16>(p[0] | (p[1] << 8)); }
 u32 rd32(const u8* p) { return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) |
                                (static_cast<u32>(p[2]) << 16) | (static_cast<u32>(p[3]) << 24); }
 
-bool ends_with_nds(const char* name, size_t len) {
-  if (len < 4) return false;
+// What an entry's extension says it is. Launchers hand over .ZIP and mixed
+// case inside it too, so the compare is case-insensitive.
+enum class Kind { Other, Rom, Cia };
+
+Kind entry_kind(const char* name, size_t len) {
+  if (len < 4) return Kind::Other;
   const char* e = name + len - 4;
+  if (e[0] != '.') return Kind::Other;
   auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c; };
-  return e[0] == '.' && lower(e[1]) == 'n' && lower(e[2]) == 'd' && lower(e[3]) == 's';
+  const char a = lower(e[1]), b = lower(e[2]), c = lower(e[3]);
+  if (a == 'n' && b == 'd' && c == 's') return Kind::Rom;   // a DS ROM
+  if (a == 'd' && b == 's' && c == 'i') return Kind::Rom;   // a DSiWare SRL
+  if (a == 's' && b == 'r' && c == 'l') return Kind::Rom;   // the same, as dumpers name it
+  if (a == 'c' && b == 'i' && c == 'a') return Kind::Cia;   // an SRL in a CIA container
+  return Kind::Other;
 }
 
 // One entry worth considering.
@@ -46,6 +56,7 @@ struct Entry {
   u64      csize = 0, usize = 0;
   size_t   local_off = 0;
   size_t   order = 0;         // position in the central directory, the tie-break
+  bool     cia = false;
 };
 
 // Inflates raw DEFLATE from `src`, handing the output to `sink` in order,
@@ -121,7 +132,7 @@ bool is_zip(const u8* data, size_t size) {
   return size >= 4 && rd32(data) == SIG_LOCAL;
 }
 
-bool find_nds(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
+bool find_rom(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
   err.clear();
   // The end-of-central-directory record is last, but a trailing comment of up
   // to 64 KB may follow it, so it is found by scanning back over that window.
@@ -142,7 +153,7 @@ bool find_nds(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
   std::vector<Entry> cands;
   size_t p = cd_off;
   const size_t cd_end = cd_off + cd_size;
-  size_t nds_seen = 0, skipped_zip64 = 0, skipped_crypt = 0, skipped_method = 0, skipped_huge = 0;
+  size_t rom_seen = 0, skipped_zip64 = 0, skipped_crypt = 0, skipped_method = 0, skipped_huge = 0;
   for (u32 i = 0; i < count && p + 46 <= cd_end; ++i) {
     const u8* h = zip + p;
     if (rd32(h) != SIG_CENTRAL) { err = "corrupt zip (bad central directory entry)"; return false; }
@@ -156,10 +167,11 @@ bool find_nds(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
     if (next > cd_end) { err = "corrupt zip (central directory entry overruns)"; return false; }
     p = next;
 
-    if (!ends_with_nds(reinterpret_cast<const char*>(zip + name_off), name_len)) continue;
-    ++nds_seen;
-    // Reasons an .nds entry cannot be used. Counted rather than fatal: a zip
-    // may hold one usable ROM beside something we cannot read.
+    const Kind kind = entry_kind(reinterpret_cast<const char*>(zip + name_off), name_len);
+    if (kind == Kind::Other) continue;
+    ++rom_seen;
+    // Reasons an entry cannot be used. Counted rather than fatal: a zip may
+    // hold one usable ROM beside something we cannot read.
     if (flags & 1) { ++skipped_crypt; continue; }
     if (csize == 0xFFFFFFFFu || usize == 0xFFFFFFFFu || local_off == 0xFFFFFFFFu) { ++skipped_zip64; continue; }
     if (method != METHOD_STORE && method != METHOD_DEFLATE) { ++skipped_method; continue; }
@@ -170,26 +182,33 @@ bool find_nds(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
     e.name_off = name_off; e.name_len = name_len;
     e.method = method; e.crc = crc; e.csize = csize; e.usize = usize;
     e.local_off = local_off; e.order = cands.size();
+    e.cia = kind == Kind::Cia;
     cands.push_back(e);
   }
 
   if (cands.empty()) {
-    if (!nds_seen) err = "no .nds file in the archive";
-    else if (skipped_crypt) err = "the .nds file in the archive is encrypted";
+    if (!rom_seen) err = "no .nds, .dsi, .srl or .cia file in the archive";
+    else if (skipped_crypt) err = "the ROM in the archive is encrypted";
     else if (skipped_zip64) err = "the archive is zip64, which is not supported";
-    else if (skipped_method) err = "the .nds file uses an unsupported compression method";
-    else if (skipped_huge) err = "the .nds file in the archive is larger than any DS card";
-    else err = "the .nds file in the archive is too small to be a ROM";
+    else if (skipped_method) err = "the ROM uses an unsupported compression method";
+    else if (skipped_huge) err = "the ROM in the archive is larger than any DS card";
+    else err = "the file in the archive is too small to be a ROM";
     return false;
   }
 
   // Pick. One candidate needs no header peek at all -- the common case, and
   // the expensive one to get wrong, since peeking inflates from the start of
   // the stream.
-  size_t best = 0;
-  if (cands.size() > 1) {
+  // A bare image is always preferred over a CIA, which has to be unwrapped
+  // before anything can even read its header. Only when there is no bare
+  // entry at all does the archive's first CIA win.
+  std::vector<size_t> bare;
+  for (size_t i = 0; i < cands.size(); ++i) if (!cands[i].cia) bare.push_back(i);
+
+  size_t best = bare.empty() ? 0 : bare[0];
+  if (bare.size() > 1) {
     int best_known = -1, best_rev = -1;
-    for (size_t i = 0; i < cands.size(); ++i) {
+    for (size_t i : bare) {
       size_t off = 0;
       if (!data_offset(zip, size, cands[i], off)) continue;
       u8 head[sizeof(Header)];
@@ -204,7 +223,7 @@ bool find_nds(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
         best_known = known; best_rev = rev; best = i;
       }
     }
-    if (best_known < 0) { err = "no readable .nds file in the archive"; return false; }
+    if (best_known < 0) { err = "no readable ROM in the archive"; return false; }
   }
 
   const Entry& e = cands[best];
@@ -212,7 +231,7 @@ bool find_nds(const u8* zip, size_t size, ZipEntry& entry, std::string& err) {
   if (!data_offset(zip, size, e, off)) { err = "corrupt zip (entry data out of range)"; return false; }
   if (e.method == METHOD_STORE && e.csize != e.usize) { err = "corrupt zip (stored entry sizes disagree)"; return false; }
   entry.name.assign(reinterpret_cast<const char*>(zip + e.name_off), e.name_len);
-  entry.method = e.method; entry.data_off = off;
+  entry.method = e.method; entry.data_off = off; entry.cia = e.cia;
   entry.csize = e.csize; entry.usize = e.usize; entry.crc32 = e.crc;
   return true;
 }
@@ -260,15 +279,33 @@ bool inflate_entry(const u8* zip, size_t size, const ZipEntry& entry, ZipSink si
   }
   if (!sink_ok) { err = "could not write the extracted ROM"; return false; }
   if (done != total) { err = "corrupt zip (the compressed stream ended early)"; return false; }
-  if (crc != entry.crc32) { err = "corrupt zip (the .nds file's CRC does not match)"; return false; }
+  if (crc != entry.crc32) { err = "corrupt zip (the extracted file's CRC does not match)"; return false; }
   if (progress) progress(progress_user, done, total);
   return true;
 }
 
-bool extract_nds(const u8* zip, size_t size, std::vector<u8>& out, std::string& err,
-                 std::string* chosen) {
+size_t peek_entry(const u8* zip, size_t size, const ZipEntry& entry, u8* out, size_t n) {
+  if (entry.data_off > size || entry.csize > size - entry.data_off) return 0;
+  const size_t want = n < entry.usize ? n : static_cast<size_t>(entry.usize);
+  if (!want) return 0;
+  const u8* src = zip + entry.data_off;
+  if (entry.stored()) { std::memcpy(out, src, want); return want; }
+  size_t got = 0;
+  return inflate_raw(src, static_cast<size_t>(entry.csize), want,
+                     [&](const u8* p, size_t m) { std::memcpy(out + got, p, m); got += m; return true; });
+}
+
+std::string cia_refusal(const std::string& name) {
+  return "the archive holds " + name + ", a DSiWare CIA; it runs in DSi mode, which needs the DSi BIOS dumps";
+}
+
+bool extract_rom(const u8* zip, size_t size, std::vector<u8>& out, std::string& err,
+                 std::string* chosen, bool allow_cia, bool* was_cia) {
   ZipEntry e;
-  if (!find_nds(zip, size, e, err)) return false;
+  if (was_cia) *was_cia = false;
+  if (!find_rom(zip, size, e, err)) return false;
+  if (e.cia && !allow_cia) { err = cia_refusal(e.name); return false; }
+  if (was_cia) *was_cia = e.cia;
   out.clear();
   out.reserve(static_cast<size_t>(e.usize));
   auto sink = [](void* user, const u8* p, size_t n) {

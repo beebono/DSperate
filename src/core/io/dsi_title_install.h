@@ -33,7 +33,7 @@ bool hide_dsiware_title(FatVolume& vol, const std::string& id, std::string* err)
 // Returns how many; call before nand_install_title and nand_import.
 int nand_hide_installed_dsiware(NandImage& nand, const u8* bios7i, std::string* err);
 
-// A DSiWare SRL from a .nds/.app/.srl, or the one content of a CIA whose content
+// A DSiWare SRL from a .nds/.app/.srl, a zip holding one of those, or the one content of a CIA whose content
 // is not title-key encrypted (an encrypted one is refused: decrypting it needs
 // a console key DSperate does not carry). False, with the reason, for anything
 // that is not DSiWare (unit code bit 1 and title ID high 00030004).
@@ -64,8 +64,14 @@ bool nand_has_title(NandImage& nand, const u8* bios7i, u32 title_lo);
 // Whether a file on disk holds DSiWare, cheaply enough to ask of every file in
 // a game list: an .nds/.dsi/.srl by its header (a DSi unit code and title ID
 // high 00030004), a .cia by its extension alone (read_dsiware checks it
-// properly when it is opened).
+// properly when it is opened), and a .zip by the entry it holds.
 bool file_is_dsiware(const std::string& path);
+// The .zip case on its own: the archive's chosen entry (cart/zip.h), judged
+// the same way. Nothing is inflated but the entry's header.
+bool zip_is_dsiware(const std::string& path);
+// Whether a .zip's chosen entry is a .cia -- the container read_dsiware has to
+// unwrap, rather than an image the cart could map directly.
+bool zip_holds_cia(const std::string& path);
 // The content ID an installed title's .app is named by (its CONTENT/xxxxxxxx.APP),
 // which the launcher hands the title as the path to its own image.
 bool nand_title_content_id(NandImage& nand, const u8* bios7i, u32 title_lo, u32& content_id);

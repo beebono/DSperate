@@ -325,7 +325,7 @@ bool NDS::load_rom(const std::string& path) {
     if (zipped) {
       std::vector<u8> rom;
       std::string err, chosen;
-      if (!cart::extract_nds(image.data(), image.size(), rom, err, &chosen)) {
+      if (!cart::extract_rom(image.data(), image.size(), rom, err, &chosen)) {
         std::fprintf(stderr, "rom: %s: %s\n", path.c_str(), err.c_str());
         return false;
       }

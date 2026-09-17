@@ -127,7 +127,13 @@ struct Zip {
   }
 
   bool extract(std::vector<u8>& out, std::string& err, std::string* chosen = nullptr) const {
-    return cart::extract_nds(buf.data(), buf.size(), out, err, chosen);
+    return cart::extract_rom(buf.data(), buf.size(), out, err, chosen);
+  }
+  // The DSi path's form: a CIA is an image too, once the caller has said it
+  // knows what to do with the container.
+  bool extract_cia(std::vector<u8>& out, std::string& err, std::string* chosen = nullptr,
+                   bool* was_cia = nullptr) const {
+    return cart::extract_rom(buf.data(), buf.size(), out, err, chosen, true, was_cia);
   }
 };
 
@@ -178,6 +184,69 @@ void test_entry_matching() {
   std::vector<u8> out; std::string err, chosen;
   CHECK(z.extract(out, err, &chosen));
   CHECK(chosen == "GAME.NDS");
+}
+
+// Which extensions are taken to hold an image, and the CIA rules: a bare
+// entry always wins, and a container is only handed over to a caller that
+// asked for one.
+void test_entry_kinds() {
+  for (const char* name : {"game.nds", "game.dsi", "game.srl", "GAME.SRL"}) {
+    Zip z;
+    z.add("readme.txt", std::vector<u8>(100, 'x'), 0);
+    z.add(name, make_rom(kKnownCode, 0), 0);
+    z.finish();
+    std::vector<u8> out; std::string err, chosen;
+    CHECK(z.extract(out, err, &chosen));
+    CHECK(chosen == name);
+  }
+  {   // a .cia is found, but only extract_cia may have it
+    Zip z;
+    z.add("title.cia", make_rom(kKnownCode, 0), 0);
+    z.finish();
+    std::vector<u8> out; std::string err, chosen;
+    CHECK(!z.extract(out, err, &chosen));
+    CHECK(err.find("title.cia") != std::string::npos && err.find("DSi mode") != std::string::npos);
+    bool was_cia = false;
+    err.clear();
+    CHECK(z.extract_cia(out, err, &chosen, &was_cia));
+    CHECK(err.empty() && chosen == "title.cia" && was_cia);
+  }
+  {   // a bare image beats a container, whatever the archive order
+    Zip z;
+    z.add("title.cia", make_rom(kUnknownCode, 9), 0);
+    z.add("title.nds", make_rom(kUnknownCode, 0), 0);
+    z.finish();
+    std::vector<u8> out; std::string err, chosen;
+    bool was_cia = true;
+    CHECK(z.extract_cia(out, err, &chosen, &was_cia));
+    CHECK(chosen == "title.nds" && !was_cia);
+  }
+  {   // nothing usable names all four extensions, so the reason is actionable
+    Zip z; z.add("cover.png", std::vector<u8>(100, 'p'), 0); z.finish();
+    std::vector<u8> out; std::string err;
+    CHECK(!z.extract_cia(out, err));
+    CHECK(err.find(".cia") != std::string::npos);
+  }
+}
+
+// peek_entry: a header without inflating the rest, stored and deflated alike.
+void test_peek() {
+  for (u16 method : {u16(0), u16(8)}) {
+    Zip z;
+    z.add("game.nds", make_rom(kKnownCode, 7, 0x4000), method);
+    z.finish();
+    cart::ZipEntry e; std::string err;
+    CHECK(cart::find_rom(z.buf.data(), z.buf.size(), e, err));
+    u8 head[0x160] = {};
+    CHECK(cart::peek_entry(z.buf.data(), z.buf.size(), e, head, sizeof head) == sizeof head);
+    CHECK(std::memcmp(head, "TESTROM", 7) == 0);
+    CHECK(head[30] == 7);                       // the revision, not filler
+    // Short of the whole entry, and never more than the entry holds.
+    u8 big[8] = {};
+    cart::ZipEntry tiny = e;
+    tiny.usize = 4;
+    CHECK(cart::peek_entry(z.buf.data(), z.buf.size(), tiny, big, sizeof big) == 4);
+  }
 }
 
 // The selection rule: database membership first, then the highest revision,
@@ -248,7 +317,7 @@ void test_failures() {
   };
   {   // no ROM in the archive
     Zip z; z.add("notes.txt", std::vector<u8>(50, 'q'), 0); z.finish();
-    fails(z, "no .nds file");
+    fails(z, "no .nds, .dsi, .srl or .cia file");
   }
   {   // an encrypted entry is refused, not silently decompressed as garbage
     Zip z; z.add("game.nds", make_rom(kKnownCode, 0), 0, 1); z.finish();
@@ -310,7 +379,7 @@ void test_out_of_range() {
                      (u32(bad[eocd + 18]) << 16) | (u32(bad[eocd + 19]) << 24);
   for (int i = 0; i < 4; ++i) bad[cd_off + 42 + size_t(i)] = 0xFF;
   std::vector<u8> out; std::string err;
-  CHECK(!cart::extract_nds(bad.data(), bad.size(), out, err));
+  CHECK(!cart::extract_rom(bad.data(), bad.size(), out, err));
   CHECK(!err.empty());
 
   // A local header that is present and well-signed, but whose extra-field
@@ -319,7 +388,7 @@ void test_out_of_range() {
   bad = z.buf;
   bad[26 + 2] = 0xFF; bad[26 + 3] = 0xFF;   // local header extra_len = 65535
   out.clear(); err.clear();
-  CHECK(!cart::extract_nds(bad.data(), bad.size(), out, err));
+  CHECK(!cart::extract_rom(bad.data(), bad.size(), out, err));
   CHECK(!err.empty());
 
   // And one whose compressed size claims more bytes than remain after it.
@@ -330,7 +399,7 @@ void test_out_of_range() {
                   (u32(bad[eocd2 + 18]) << 16) | (u32(bad[eocd2 + 19]) << 24);
   for (int i = 0; i < 4; ++i) bad[cd2 + 20 + size_t(i)] = 0xFE;   // central csize, not zip64
   out.clear(); err.clear();
-  CHECK(!cart::extract_nds(bad.data(), bad.size(), out, err));
+  CHECK(!cart::extract_rom(bad.data(), bad.size(), out, err));
   CHECK(!err.empty());
 }
 
@@ -520,6 +589,8 @@ int main() {
   test_roundtrip();
   test_deflate_window();
   test_entry_matching();
+  test_entry_kinds();
+  test_peek();
   test_selection();
   test_failures();
   test_out_of_range();

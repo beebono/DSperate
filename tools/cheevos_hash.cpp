@@ -63,7 +63,7 @@ std::unique_ptr<ds::cart::RomSource> open_rom(const std::string& path, std::stri
 
   std::vector<ds::u8> bytes;
   std::string chosen;
-  if (!ds::cart::extract_nds(zip.data(), zip.size(), bytes, err, &chosen)) return nullptr;
+  if (!ds::cart::extract_rom(zip.data(), zip.size(), bytes, err, &chosen)) return nullptr;
   if (!chosen.empty()) std::fprintf(stderr, "%s: using %s\n", path.c_str(), chosen.c_str());
   return ds::cart::RomSource::from_memory(std::move(bytes));
 }

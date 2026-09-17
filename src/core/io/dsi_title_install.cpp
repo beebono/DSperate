@@ -3,6 +3,8 @@
 #include "core/io/dsi_title_install.h"
 #include "core/io/dsi_nand_fs.h"
 #include "core/io/dsi_sd.h"
+#include "core/cart/rom_source.h"
+#include "core/cart/zip.h"
 #include "core/crypto/sha1.h"
 
 #include <algorithm>
@@ -50,6 +52,19 @@ bool read_dsiware(const std::string& path, std::vector<u8>& srl, std::string* er
   if (!f) { if (err) *err = path + ": cannot open"; return false; }
   std::vector<u8> b(std::istreambuf_iterator<char>(f), {});
   std::string why;
+
+  // A zipped title: the archive holds the .cia (or the bare SRL) and the rest
+  // of this reads the entry's bytes, so a zipped and a loose copy of the same
+  // title behave identically from here on.
+  if (cart::is_zip(b.data(), b.size())) {
+    std::vector<u8> inner;
+    std::string zerr, chosen;
+    if (!cart::extract_rom(b.data(), b.size(), inner, zerr, &chosen, /*allow_cia=*/true)) {
+      if (err) *err = path + ": " + zerr;
+      return false;
+    }
+    b = std::move(inner);
+  }
 
   // A CIA: header, certificates, ticket, TMD, then the content, each padded to
   // 64 bytes. A DSiWare CIA's only content is the SRL itself.
@@ -348,11 +363,40 @@ bool file_is_dsiware(const std::string& path) {
   std::string ext = path.substr(dot + 1);
   for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   if (ext == "cia") return true;
+  if (ext == "zip") return zip_is_dsiware(path);
   if (ext != "nds" && ext != "dsi" && ext != "srl") return false;
   std::ifstream f(path, std::ios::binary);
   std::vector<u8> head(0x1000);
   if (!f.read(reinterpret_cast<char*>(head.data()), static_cast<std::streamsize>(head.size()))) return false;
   return is_dsiware(head, nullptr);
+}
+
+// The archive is mapped rather than read, and nothing is inflated but the
+// entry's header: both of these are asked of every archive in a game list.
+namespace {
+std::unique_ptr<cart::RomSource> zip_entry_of(const std::string& path, cart::ZipEntry& e) {
+  std::string err;
+  std::unique_ptr<cart::RomSource> src = cart::RomSource::map_file(path, err);
+  if (!src || !cart::find_rom(src->page(0), src->size(), e, err)) return nullptr;
+  return src;
+}
+}  // namespace
+
+bool zip_is_dsiware(const std::string& path) {
+  cart::ZipEntry e;
+  std::unique_ptr<cart::RomSource> src = zip_entry_of(path, e);
+  if (!src) return false;
+  // A .cia is DSiWare by its name alone, as a loose one is; a bare entry is
+  // peeked for its DSi unit code and title ID.
+  if (e.cia) return true;
+  std::vector<u8> head(0x1000);
+  if (cart::peek_entry(src->page(0), src->size(), e, head.data(), head.size()) != head.size()) return false;
+  return is_dsiware(head, nullptr);
+}
+
+bool zip_holds_cia(const std::string& path) {
+  cart::ZipEntry e;
+  return zip_entry_of(path, e) != nullptr && e.cia;
 }
 
 bool nand_title_content_id(NandImage& nand, const u8* bios7i, u32 title_lo, u32& content_id) {

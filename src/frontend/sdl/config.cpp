@@ -186,9 +186,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # bios7 = /path/to/bios7.bin    # games, with a note at start; it cannot boot the DS menu and
                                 # its timing is not hardware accurate
 # firmware = /path/to/firmware.bin  # unset or missing, a generated firmware carrying [user] above
-# bios9i = /path/to/biosdsi9.bin  # the DSi BIOS pair: DSiWare (a .nds/.dsi/.cia marked [DSi] in the
-# bios7i = /path/to/biosdsi7.bin  # game list, or named on the command line) runs on the DSi machine
-                                # and needs both; without them it is refused
+# bios9i = /path/to/biosdsi9.bin  # the DSi BIOS pair: DSiWare (a .nds/.dsi/.srl/.cia, loose or zipped,
+# bios7i = /path/to/biosdsi7.bin  # marked [DSi] in the game list or named on the command line) runs on
+                                # the DSi machine and needs both; without them it is refused
 # dsi_nand = /path/to/nand.bin  # --dsi-mode's NAND (a dump with its nocash footer) when --dsi-nand
                                 # is not given. Only --dsi-mode uses it: DSiWare named on the command
                                 # line or picked from the game list still runs without the NAND
@@ -206,8 +206,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # language...) are kept here, never in the dump. Delete it to reset.
                                 # Default: <firmware>.ovr
 # games = /path/to/games        # the library the loader card lists on a firmware boot (.nds and .zip,
-                                # one level; DSiWare .nds/.dsi/.cia too, marked [DSi]). Unset, the
-                                # picker says so.
+                                # one level; DSiWare .nds/.dsi/.srl/.cia too, zipped or not, marked
+                                # [DSi]). Unset, the picker says so.
 # dsi_shortcuts = /path/to/folder  # where [emu] dsi_nand_shortcuts keeps its .dspr.nds files, e.g. a
                                 # frontend's own DSiWare folder. Unset: games above. The loader card
                                 # lists the shortcuts from here too

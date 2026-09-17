@@ -249,6 +249,15 @@ std::string rom_ext(const std::string& rom) {
   return ext;
 }
 
+// A CIA, loose or as the entry a zip holds: the container read_dsiware
+// unwraps to the SRL the DSi slot takes. Everything else the cart reads
+// itself, zipped or not.
+bool is_cia_container(const std::string& rom) {
+  const std::string ext = rom_ext(rom);
+  if (ext == ".cia") return true;
+  return ext == ".zip" && ds::io::zip_holds_cia(rom);
+}
+
 // The four-letter game code from a plain .nds header (offset 0x0C), for the
 // per-game config file. Read straight off the file because the config layering
 // has to happen before the cart is loaded -- the display, audio and input are
@@ -1867,12 +1876,7 @@ sdl_ready:
   // The ROM goes in after the display is open, so a zipped game's first
   // launch -- which unpacks it to the card, seconds to a minute -- can show
   // the notice instead of a black panel.
-  const bool rom_is_cia = [&] {
-    if (rom_path.size() < 4) return false;
-    std::string ext = rom_path.substr(rom_path.size() - 4);
-    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return ext == ".cia";
-  }();
+  const bool rom_is_cia = is_cia_container(rom_path);
   // A shortcut's title comes out of the NAND loaded above.
   auto load_shortcut_title = [&](const std::string& path) -> bool {
     ds::io::NandShortcut sc;
@@ -3646,7 +3650,7 @@ sdl_ready:
     bool loaded;
     if (pick_shortcut) {
       loaded = load_shortcut_title(pick);
-    } else if (pick_dsi && pick.size() > 4 && (pick.compare(pick.size() - 4, 4, ".cia") == 0 || pick.compare(pick.size() - 4, 4, ".CIA") == 0)) {
+    } else if (pick_dsi && is_cia_container(pick)) {
       std::vector<ds::u8> srl;
       std::string err;
       loaded = ds::io::read_dsiware(pick, srl, &err) && nds.load_rom_image(std::move(srl));

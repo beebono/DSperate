@@ -197,7 +197,11 @@ std::unique_ptr<RomSource> open_zip(const std::string& path, ZipOpen& how, std::
   const u8* zip = archive->page(0);
   const size_t size = archive->size();
   ZipEntry e;
-  if (!find_nds(zip, size, e, err)) return nullptr;
+  if (!find_rom(zip, size, e, err)) return nullptr;
+  // The cart maps what comes out of here, so a container is no use: a CIA
+  // has to be unwrapped to its SRL first (io/dsi_title_install.h), which the
+  // DSi path does before the cart is ever asked for one.
+  if (e.cia) { err = cia_refusal(e.name); return nullptr; }
   how.chosen = e.name;
 
   if (e.stored()) {
