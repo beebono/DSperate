@@ -61,7 +61,7 @@
 # The training needs the real BIOS and firmware: without them the JIT
 # translates one-instruction blocks and the profile describes another program.
 set -eu
-CHECK=0; DSI=1; ARCH=aarch64; GCC=''; NATIVE=0
+CHECK=0; DSI=1; ARCH=aarch64; GCC=''; NATIVE=''
 while :; do
   case "${1:-}" in
     --check)  CHECK=1; shift ;;
@@ -81,7 +81,7 @@ BUILD=${1:-$HERE/build/pgo-gen-$ARCH${NATIVE:+-native}${GCC:+-gcc$GCC}}; shift |
 # are the ones it will look under.
 case $ARCH in
   aarch64)
-    if [ $NATIVE = 1 ]; then
+    if [ "$NATIVE" = 1 ]; then
       [ "$(uname -m)" = aarch64 ] || { echo "--native needs an aarch64 host (this is $(uname -m))"; exit 1; }
       TOOLCHAIN=""; Q=""
       PGO_CXX=g++${GCC:+-$GCC}
