@@ -444,6 +444,13 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # laid out as the DS has them (up X, down B, left Y, right A).
                                 # The pen's stick (stylus_axis) keeps the pen in both cases.
 # stick_deadzone = 12000
+# axis_leftx = leftx            # Axis remapping, for a pad whose mapping reports a stick rotated,
+# axis_lefty = lefty            # mirrored or on the wrong axis: each axis names the physical one
+# axis_rightx = rightx          # that feeds it, with a leading - to invert it, or none. E.g. a left
+# axis_righty = righty          # stick turned a quarter: axis_leftx = lefty, axis_lefty = -leftx.
+# axis_lefttrigger = lefttrigger    # Everything else here (bindings, stick_dpad, the pen) sees the
+# axis_righttrigger = righttrigger  # remapped axes. The Controls page sets a row by pushing the stick
+                                    # right (X) or down (Y), or pressing the trigger.
 # stylus_axis = right           # right | left | none: the stick that moves the pen over the
                                 # bottom screen (left takes the stick away from the d-pad)
 # stylus_dpad = none            # a button; while held the d-pad moves the pen (e.g. leftshoulder)

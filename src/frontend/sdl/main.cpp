@@ -1022,10 +1022,30 @@ constexpr Extra kExtras[] = {
   {nullptr,            "pad.stylus_dpad",     "STYLUS DPAD"},
   {nullptr,            "pad.stick_dpad",      "STICK DPAD"},
   {nullptr,            "pad.stick_face",      "STICK ABXY"},
+  // Axis remapping: each row is set by pushing the control the way that axis
+  // reads positive -- a stick right for X, down for Y, a trigger pressed --
+  // and stores the physical axis that went, inverted if it went negative.
+  {nullptr,            "pad.axis_leftx",      "L STICK RIGHT"},
+  {nullptr,            "pad.axis_lefty",      "L STICK DOWN"},
+  {nullptr,            "pad.axis_rightx",     "R STICK RIGHT"},
+  {nullptr,            "pad.axis_righty",     "R STICK DOWN"},
+  {nullptr,            "pad.axis_lefttrigger", "L2 AXIS"},
+  {nullptr,            "pad.axis_righttrigger", "R2 AXIS"},
 };
 // The rows that hold a stick rather than a control: a captured axis is
 // stored as the stick it belongs to, and the value reads as one.
 bool extra_is_stick(const char* key) { return std::strcmp(key, "pad.stylus_axis") == 0 || std::strcmp(key, "pad.stick_dpad") == 0 || std::strcmp(key, "pad.stick_face") == 0; }
+bool extra_is_axis_remap(const char* key) { return std::strncmp(key, "pad.axis_", 9) == 0; }
+// "-righty" as the page reads it: which physical control, and whether it runs backwards.
+std::string axis_remap_label(const std::string& v0) {
+  if (v0 == "none") return "NONE";
+  const bool inv = !v0.empty() && v0[0] == '-';
+  const std::string v = !v0.empty() && (v0[0] == '-' || v0[0] == '+') ? v0.substr(1) : v0;
+  std::string n = v == "leftx" ? "L STICK X" : v == "lefty" ? "L STICK Y" : v == "rightx" ? "R STICK X" : v == "righty" ? "R STICK Y"
+                : v == "lefttrigger" ? "L2" : v == "righttrigger" ? "R2" : v;
+  for (char& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  return inv ? n + " INV" : n;
+}
 bool extra_in_column(const Extra& e, bool pad) { return pad || e.key_keys; }
 int extra_count(bool pad) {
   int n = 0;
@@ -1049,6 +1069,13 @@ const char* extra_default(const char* key, bool pad, const ds::sdl::Config& cfg)
   if (std::strcmp(key, "pad.stylus_dpad") == 0)   return ds::sdl::Input::stylus_dpad_default();
   if (std::strcmp(key, "pad.stick_face") == 0)    return ds::sdl::Input::stick_face_default();
   if (std::strcmp(key, "pad.stick_dpad") == 0)    return ds::sdl::Input::stick_dpad_default();
+  if (extra_is_axis_remap(key))
+    for (int i = 0; i < ds::sdl::Input::axis_remap_count(); ++i)
+      if (ds::sdl::Input::axis_remap_key(i) == key) {
+        static std::string defaults[SDL_CONTROLLER_AXIS_MAX];   // stable storage for the returned pointer
+        defaults[i] = ds::sdl::Input::axis_remap_default(i);
+        return defaults[i].c_str();
+      }
   return ds::sdl::Input::mod_default(pad);
 }
 
@@ -2571,6 +2598,7 @@ sdl_ready:
       const std::string v = cfg.str(key, extra_default(key, pad, cfg));
       // A stick, not an axis: that row names the stick the pen follows, or
       // the one that works the face buttons.
+      if (extra_is_axis_remap(key)) return axis_remap_label(v);
       if (extra_is_stick(key))   // true/false: stick_dpad's old spellings (Input::parse_stick)
         return v == "left" || v == "true" || v == "1" ? "LEFT STICK" : v == "right" ? "RIGHT STICK" : "NONE";
       return pad ? ds::sdl::Input::pad_label(v) : upper(v);
@@ -2625,6 +2653,15 @@ sdl_ready:
       // these store which one rather than the axis the player happened to
       // push. Anything that is not a stick says nothing about that and is
       // left alone -- the row keeps what it had.
+      // An axis row stores the physical axis that moved, before the remap it
+      // is setting -- the captured name is the remapped one. A button says
+      // nothing about an axis, and the row keeps what it had.
+      if (extra_is_axis_remap(key.c_str()) && value != "none") {
+        std::string raw = input.captured_raw_axis();
+        if (raw.empty()) return;
+        if (raw[0] == '+') raw = raw.substr(1);
+        value = raw;
+      }
       if (extra_is_stick(key.c_str()) && value != "none") {
         const char* stick = ds::sdl::Input::stylus_axis_of(value);
         if (!stick) return;

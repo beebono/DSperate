@@ -58,6 +58,7 @@ struct InputTestAccess {
     return in.pad_down(b, down);
   }
   static void axis(Input& in, SDL_GameControllerAxis a, Sint16 v) { in.axis(a, v); }
+  static void physical_axis(Input& in, SDL_GameControllerAxis a, Sint16 v) { in.physical_axis(a, v); }
   static bool pen_down(const Input& in) { return in.stylus_down_ != 0; }
   static bool key_free(const Input& in, SDL_Keycode k) { return in.key_control_free(k); }
   static u32 fb_pressed(const Input& in) { return in.menu_fb_pressed_; }
@@ -387,6 +388,37 @@ void test_stick_dpad_names_a_stick() {
     T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000); CHECK((in.frame().buttons & kDpad) == 0); }
 }
 
+// pad.axis_<name>: a pad whose left stick SDL reports rotated (X on lefty,
+// Y on leftx backwards) is put right by naming the physical axis per
+// remapped one; everything downstream sees the corrected stick.
+void test_axis_remap() {
+  constexpr u32 kUp = 1u << B::BTN_UP, kDown = 1u << B::BTN_DOWN, kLeft = 1u << B::BTN_LEFT, kRight = 1u << B::BTN_RIGHT;
+  constexpr u32 kDpad = kUp | kDown | kLeft | kRight;
+  { Rig r; Input& in = r.go();                                              // identity by default
+    T::physical_axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000); CHECK((in.frame().buttons & kDpad) == kRight); }
+  { Rig r; r.set("pad.axis_leftx", "lefty").set("pad.axis_lefty", "-leftx"); Input& in = r.go();
+    T::physical_axis(in, SDL_CONTROLLER_AXIS_LEFTY, 30000);  CHECK((in.frame().buttons & kDpad) == kRight);
+    T::physical_axis(in, SDL_CONTROLLER_AXIS_LEFTY, 0);
+    T::physical_axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000);  CHECK((in.frame().buttons & kDpad) == kUp);    // inverted
+    T::physical_axis(in, SDL_CONTROLLER_AXIS_LEFTX, -32768); CHECK((in.frame().buttons & kDpad) == kDown);  // no overflow
+  }
+  { Rig r; r.set("pad.axis_leftx", "none"); Input& in = r.go();
+    T::physical_axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000); CHECK((in.frame().buttons & kDpad) == 0); }
+  { Rig r; r.set("pad.axis_leftx", "sideways"); Input& in = r.go();          // unparseable: stays identity
+    T::physical_axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000); CHECK((in.frame().buttons & kDpad) == kRight); }
+  {
+    // A capture names the remapped axis for a binding and keeps the physical
+    // one for an axis row.
+    Rig r; r.set("pad.axis_righttrigger", "-righty").set("pad.axis_righty", "none"); Input& in = r.go();
+    in.begin_capture(true);
+    T::capture_axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000);
+    CHECK(in.captured_raw_axis() == "-righty");
+    CHECK(in.take_capture() == "+righttrigger");
+  }
+  CHECK(Input::axis_remap_key(SDL_CONTROLLER_AXIS_LEFTY) == "pad.axis_lefty");
+  CHECK(Input::axis_remap_default(SDL_CONTROLLER_AXIS_RIGHTX) == "rightx");
+}
+
 } // namespace
 } // namespace ds::sdl
 
@@ -407,6 +439,7 @@ int main() {
   ds::sdl::test_stylus_tap_alt_binding();
   ds::sdl::test_stick_face_buttons();
   ds::sdl::test_stick_dpad_names_a_stick();
+  ds::sdl::test_axis_remap();
   std::printf("input tests passed\n");
   return 0;
 }

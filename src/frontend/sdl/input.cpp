@@ -144,7 +144,28 @@ Input::Bind Input::parse_pad(const std::string& s0) {
   return b;
 }
 
+std::string Input::axis_remap_key(int i) {
+  return std::string("pad.axis_") + SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(i));
+}
+std::string Input::axis_remap_default(int i) {
+  return SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(i));
+}
+
 void Input::configure(const Config& cfg) {
+  for (int i = 0; i < SDL_CONTROLLER_AXIS_MAX; ++i) {
+    const std::string v0 = cfg.str(axis_remap_key(i), axis_remap_default(i));
+    std::string v = v0;
+    axis_inv_[i] = false; axis_src_[i] = i;
+    if (v == "none") { axis_src_[i] = -1; continue; }
+    if (!v.empty() && (v[0] == '+' || v[0] == '-')) { axis_inv_[i] = v[0] == '-'; v = v.substr(1); }
+    const SDL_GameControllerAxis a = SDL_GameControllerGetAxisFromString(v.c_str());
+    if (a == SDL_CONTROLLER_AXIS_INVALID) {
+      std::fprintf(stderr, "config: %s = \"%s\" is not [-]<axis> or none; keeping %s\n", axis_remap_key(i).c_str(), v0.c_str(), axis_remap_default(i).c_str());
+      axis_inv_[i] = false;
+      continue;
+    }
+    axis_src_[i] = a;
+  }
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i) {
     key_map_[i] = parse_key(cfg.str(std::string("keys.") + kButtonNames[i], kKeyDefaults[i]));
     pad_map_[i] = parse_pad(cfg.str(std::string("pad.") + kButtonNames[i], kPadDefaults[i]));
@@ -474,6 +495,23 @@ void Input::axis(Uint8 which, Sint16 value) {
   }
 }
 
+// A physical axis may feed any number of remapped ones (normally exactly its
+// own). Inverting -32768 would overflow, so the negation is clamped.
+void Input::physical_axis(Uint8 which, Sint16 value) {
+  for (int l = 0; l < SDL_CONTROLLER_AXIS_MAX; ++l)
+    if (axis_src_[l] == which)
+      axis(static_cast<Uint8>(l), axis_inv_[l] ? static_cast<Sint16>(std::min(32767, -static_cast<int>(value))) : value);
+}
+
+int Input::logical_of(int physical, Sint16& value) const {
+  for (int l = 0; l < SDL_CONTROLLER_AXIS_MAX; ++l)
+    if (axis_src_[l] == physical) {
+      if (axis_inv_[l]) value = static_cast<Sint16>(std::min(32767, -static_cast<int>(value)));
+      return l;
+    }
+  return -1;
+}
+
 void Input::stick_as_buttons(u32& held, Sint16 value, B neg, B pos) {
   held &= ~((1u << neg) | (1u << pos));
   if (value < -deadzone_) held |= 1u << neg;
@@ -564,6 +602,7 @@ void Input::begin_capture(bool pad) {
   capturing_ = true;
   capture_pad_ = pad;
   captured_.clear();
+  captured_raw_axis_.clear();
   capture_swallow_ = false;
   capture_mod_ = false;
 }
@@ -649,12 +688,20 @@ bool Input::capture_event(const SDL_Event& e) {
     return true;
   }
   if (e.type == SDL_CONTROLLERAXISMOTION) {
-    const int axis = e.caxis.axis;
-    if (!axis_moved(axis, e.caxis.value)) return true;
+    const int raw = e.caxis.axis;
+    if (!axis_moved(raw, e.caxis.value)) return true;
+    const char* rn = SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(raw));
+    if (!rn) return true;
+    captured_raw_axis_ = (e.caxis.value < 0 ? "-" : "+") + std::string(rn);
+    // A binding names the axis as play sees it, after the remap: the control
+    // the player pushed is whichever remapped axis it feeds. One that feeds
+    // none is named as it is, and will not fire until something maps it.
+    Sint16 v = e.caxis.value;
+    const int l = logical_of(raw, v);
+    const char* n = l >= 0 ? SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(l)) : rn;
     // "mod++righttrigger" is a real spelling and a shipped default, so the
     // modifier prefixes an axis as readily as a button.
-    if (const char* n = SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(axis)))
-      captured_ = std::string(capture_mod_ ? "mod+" : "") + (e.caxis.value < 0 ? "-" : "+") + n;
+    captured_ = std::string(capture_mod_ ? "mod+" : "") + ((l >= 0 ? v : e.caxis.value) < 0 ? "-" : "+") + n;
     return true;
   }
   // Everything else (mouse, touch, window) still goes through: closing the
@@ -784,7 +831,7 @@ void Input::handle(const SDL_Event& e, Display& display, Display* second) {
     break;
   }
   case SDL_CONTROLLERAXISMOTION:
-    if (e.caxis.axis < SDL_CONTROLLER_AXIS_MAX) axis(e.caxis.axis, e.caxis.value);
+    if (e.caxis.axis < SDL_CONTROLLER_AXIS_MAX) physical_axis(e.caxis.axis, e.caxis.value);
     break;
 
   case SDL_CONTROLLERDEVICEADDED:

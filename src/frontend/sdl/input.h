@@ -131,6 +131,19 @@ public:
   // A captured stick axis as the stick it belongs to ("left"/"right"), or
   // nullptr when what was captured is not a stick at all.
   static const char* stylus_axis_of(const std::string& captured);
+  // Axis remapping (pad.axis_<name>): each of SDL's six controller axes is
+  // fed by one physical axis, optionally inverted, for pads whose mapping
+  // reports a stick rotated, mirrored or on the wrong axis. `i` indexes
+  // SDL_GameControllerAxis. The value is "[-]<sdl axis>" or "none"; the
+  // default is the axis itself. Everything downstream -- bindings, the
+  // stick-as-buttons rows, the pen -- sees the remapped axes.
+  static int axis_remap_count() { return SDL_CONTROLLER_AXIS_MAX; }
+  static std::string axis_remap_key(int i);
+  static std::string axis_remap_default(int i);
+  // The last axis a capture took, as the physical control pushed ("-righty"),
+  // before the remap: what an axis_<name> row stores. Empty when the capture
+  // was not an axis.
+  const std::string& captured_raw_axis() const { return captured_raw_axis_; }
   static int action_count();
   static const char* key_hot_default(int i);
   static const char* pad_hot_default(int i);
@@ -172,6 +185,8 @@ private:
   bool key_down(SDL_Keycode k, bool down);
   bool pad_down(const Bind& b, bool down);   // a button or axis edge; true if consumed
   void axis(Uint8 which, Sint16 value);
+  void physical_axis(Uint8 which, Sint16 value);   // a raw SDL axis event, through the remap to axis()
+  int  logical_of(int physical, Sint16& value) const;   // the first remapped axis a physical one feeds, value signed for it; -1 if none
   // A stick as four DS buttons (the left stick as the d-pad, or either as
   // X/B/Y/A): held while past the deadzone, with edges for the pause menu.
   void stick_as_buttons(u32& held, Sint16 value, io::Io::Button neg, io::Io::Button pos);
@@ -217,6 +232,8 @@ private:
   bool key_mod_down_ = false, pad_mod_down_ = false, pad_mod_used_ = false;
   int  pad_mod_button_ = -1;   // the DS button the pad modifier would otherwise be
   bool axis_state_[SDL_CONTROLLER_AXIS_MAX][2] = {};   // per axis: - and + past the threshold
+  int  axis_src_[SDL_CONTROLLER_AXIS_MAX] = {0, 1, 2, 3, 4, 5};   // pad.axis_<name>: the physical axis feeding it, -1 none
+  bool axis_inv_[SDL_CONTROLLER_AXIS_MAX] = {};
   enum class StylusAxis : u8 { None, Right, Left };
   // A stick's name as the config spells it: none | left | right. The old
   // stick_dpad = true/false still parse as left/none.
@@ -239,6 +256,7 @@ private:
   std::vector<Action> actions_;
   bool capturing_ = false, capture_pad_ = false;
   std::string captured_;
+  std::string captured_raw_axis_;
   // Swallows the release of whatever was captured, so letting go of the key
   // does not immediately register as the next thing the page asked for.
   bool capture_swallow_ = false;
