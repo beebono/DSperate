@@ -3,7 +3,8 @@
 # drifted from the tree it will be applied to.
 #
 #   DS_ROMS=<rom dir> DS_BIOS=<bios dir> [DS_DSI=<dsi-binary dir>] \
-#     tools/pgo_refresh.sh [--check] [--no-dsi] [--arm32] [--gcc N] [build-dir] [extra cmake args]
+#     tools/pgo_refresh.sh [--check] [--no-dsi] [--arm32] [--gcc N] [--native]
+#                          [build-dir] [extra cmake args]
 #
 # --check  compares the profile's MANIFEST against this tree: the compiler and
 #          the compile flags (a mismatch voids the whole profile -- CI fails the
@@ -30,6 +31,14 @@
 #          and dArkOS (the supported Debian-based RK3326 distro) packages
 #          DSperate with GCC 12.4 while CI builds with 13.3. Refresh it in the
 #          same pass as the default profile, or it decays on its own.
+# --native builds for the machine it is running on instead of cross-building:
+#          no toolchain file and no qemu, so the training runs at native speed.
+#          Meant for running this script *inside* an aarch64 container, which
+#          is how the portable tarball's profile is made -- the low glibc floor
+#          that spruceOS and the A30 need comes from an old sysroot, and an old
+#          sysroot means an old compiler, which means its own profile. Combine
+#          with --gcc N to pick that container's compiler and key the profile
+#          by it (see tools/pgo_refresh_container.sh, which wraps this).
 # --arm32  builds the ARM32 (armv7l) profile into pgo/armv7l instead, with the
 #          vendored A30 toolchain and qemu-arm. It has to be that toolchain and
 #          not the dev box's arm-linux-gnueabihf: a .gcda file is tied to the
@@ -52,30 +61,38 @@
 # The training needs the real BIOS and firmware: without them the JIT
 # translates one-instruction blocks and the profile describes another program.
 set -eu
-CHECK=0; DSI=1; ARCH=aarch64; GCC=''
+CHECK=0; DSI=1; ARCH=aarch64; GCC=''; NATIVE=0
 while :; do
   case "${1:-}" in
     --check)  CHECK=1; shift ;;
     --no-dsi) DSI=0; shift ;;
     --arm32)  ARCH=armv7l; shift ;;
     --gcc)    GCC=$2; shift 2 ;;
+    --native) NATIVE=1; shift ;;
     --arch)   ARCH=$2; shift 2 ;;
     *) break ;;
   esac
 done
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-BUILD=${1:-$HERE/build/pgo-gen-$ARCH${GCC:+-gcc$GCC}}; shift || true
+BUILD=${1:-$HERE/build/pgo-gen-$ARCH${NATIVE:+-native}${GCC:+-gcc$GCC}}; shift || true
 # Per architecture: the toolchain that builds its release binaries, the qemu to
 # train under, and the compiler whose version goes in the MANIFEST. CMakeLists
 # derives the profile directory from CMAKE_SYSTEM_PROCESSOR, so the names here
 # are the ones it will look under.
 case $ARCH in
   aarch64)
-    TOOLCHAIN="$HERE/cmake/aarch64-linux-gnu.cmake"
-    Q="qemu-aarch64-static -L /usr/aarch64-linux-gnu"
-    PGO_CXX=aarch64-linux-gnu-g++${GCC:+-$GCC}
-    [ -z "$GCC" ] || command -v "$PGO_CXX" > /dev/null || {
-      echo "no $PGO_CXX (apt install g++-$GCC-aarch64-linux-gnu)"; exit 1; }
+    if [ $NATIVE = 1 ]; then
+      [ "$(uname -m)" = aarch64 ] || { echo "--native needs an aarch64 host (this is $(uname -m))"; exit 1; }
+      TOOLCHAIN=""; Q=""
+      PGO_CXX=g++${GCC:+-$GCC}
+      command -v "$PGO_CXX" > /dev/null || { echo "no $PGO_CXX on this machine"; exit 1; }
+    else
+      TOOLCHAIN="$HERE/cmake/aarch64-linux-gnu.cmake"
+      Q="qemu-aarch64-static -L /usr/aarch64-linux-gnu"
+      PGO_CXX=aarch64-linux-gnu-g++${GCC:+-$GCC}
+      [ -z "$GCC" ] || command -v "$PGO_CXX" > /dev/null || {
+        echo "no $PGO_CXX (apt install g++-$GCC-aarch64-linux-gnu)"; exit 1; }
+    fi
     ;;
   armv7l)
     A30=${DS_A30_TOOLCHAIN:-$HERE/../toolchains/a30}
@@ -91,8 +108,13 @@ esac
 # profile keeps the plain pgo/<arch>.
 PROFILE="$HERE/pgo/$ARCH"
 [ -z "$GCC" ] || PROFILE="$PROFILE-gcc$("$PGO_CXX" -dumpfullversion)"
-CONF=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_TESTS=OFF
-      -DDSPERATE_PGO_DIR="$PROFILE" ${GCC:+-DDS_CROSS_GCC=$GCC} "$@")
+CONF=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_TESTS=OFF -DDSPERATE_PGO_DIR="$PROFILE")
+if [ -n "$TOOLCHAIN" ]; then
+  CONF+=(-DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" ${GCC:+-DDS_CROSS_GCC=$GCC})
+else
+  CONF+=(-DCMAKE_CXX_COMPILER="$PGO_CXX" ${GCC:+-DCMAKE_C_COMPILER=gcc-$GCC})
+fi
+CONF+=("$@")
 
 fingerprint() {   # of a configured build dir
   cat "$1/pgo-fingerprint"
@@ -176,7 +198,8 @@ echo "  profiles: $n"
 {
   echo "fingerprint $(fingerprint "$BUILD")"
   echo "compiler $("$PGO_CXX" -dumpfullversion) ($("$PGO_CXX" -dumpmachine))"
-  echo "commit $(git -C "$HERE" rev-parse HEAD)"
+  # DS_PGO_COMMIT lets a container without git record the right commit.
+  echo "commit ${DS_PGO_COMMIT:-$(git -C "$HERE" rev-parse HEAD)}"
   echo "date $(date -u +%Y-%m-%dT%H:%MZ)"
   echo "scenes $SCENES"
 } > "$PROFILE/MANIFEST"
