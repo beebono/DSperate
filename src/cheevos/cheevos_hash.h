@@ -22,11 +22,14 @@ namespace ds::cheevos {
 
 // The RetroAchievements hash for a DS ROM: 32 lowercase hex characters in
 // `out`, or false with a reason in `err`. `name` appears only in messages.
+// `dsi` names the console to rcheevos (RC_CONSOLE_NINTENDO_DSI for a title
+// running on the DSi machine). Both consoles hash the same bytes the same way
+// (rc_hash_nintendo_ds), so it changes what the log says, not the hash.
 //
 // Safe to call on any thread, and it does no IO of its own beyond touching
 // `src` -- for a mapped source that means demand-paging a few hundred KB (the
 // header, the two binaries, the icon block), not the whole image.
 bool rom_hash(const cart::RomSource& src, const std::string& name,
-              std::string& out, std::string& err);
+              std::string& out, std::string& err, bool dsi = false);
 
 } // namespace ds::cheevos

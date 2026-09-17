@@ -274,8 +274,32 @@ void the_user_agent_is_well_formed() {
 
 } // namespace
 
+// On the DSi machine the map is rcheevos' DSi one: the hole is real RAM, so the
+// whole 16 MB reads through at the same addresses, and data TCM follows it.
+void the_dsi_map_backs_all_of_main_ram() {
+  NDS nds;
+  nds.dsi = true;
+  cheevos::Memory mem;
+  std::string err;
+  CHECK(mem.attach(nds, err));
+  CHECK(err.empty());
+  constexpr u32 DSI_LEN = mem::Bus::MAIN_RAM_SIZE_DSI;
+  nds.bus.main_ram.get()[RA_HOLE] = 0x5C;              // above the DS's 4 MB
+  nds.bus.main_ram.get()[DSI_LEN - 1] = 0x6D;
+  nds.bus.dtcm.get()[0] = 0x7E;
+  u8 b = 0;
+  CHECK(mem.read(RA_HOLE, &b, 1) == 1 && b == 0x5C);
+  CHECK(mem.read(DSI_LEN - 1, &b, 1) == 1 && b == 0x6D);
+  CHECK(mem.read(RA_DTCM, &b, 1) == 1 && b == 0x7E);
+  CHECK(mem.supported(RA_MAIN, DSI_LEN));
+  CHECK(mem.max_address() == RA_DTCM + DTCM_LEN - 1);
+  u8 past[2] = {0xAA, 0xAA};
+  CHECK(mem.read(RA_DTCM + DTCM_LEN, past, 2) == 0 && past[0] == 0);
+}
+
 int main() {
   the_map_is_the_one_we_expect();
+  the_dsi_map_backs_all_of_main_ram();
   main_ram_and_dtcm_read_through();
   the_dsi_hole_reads_zero_and_is_unbacked();
   a_read_across_the_boundary_is_partial();

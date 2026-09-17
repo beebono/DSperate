@@ -8,7 +8,9 @@
 // The point is comparison against RetroAchievements' own database -- the hash
 // is only correct if their server recognises it, and nothing short of looking
 // it up proves that. Handles .zip the same way the emulator does, so the
-// zipped and unzipped copies of one game can be checked against each other.
+// zipped and unzipped copies of one game can be checked against each other,
+// and DSiWare (.cia, or an SRL recognised as DSiWare) as the SRL the emulator
+// runs, hashed as the DSi console.
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -17,6 +19,7 @@
 #include "cheevos/cheevos_hash.h"
 #include "core/cart/rom_source.h"
 #include "core/cart/zip.h"
+#include "core/io/dsi_title_install.h"
 
 namespace {
 
@@ -32,6 +35,11 @@ bool ends_with(const std::string& s, const char* suffix) {
 }
 
 std::unique_ptr<ds::cart::RomSource> open_rom(const std::string& path, std::string& err) {
+  if (ds::io::file_is_dsiware(path)) {
+    std::vector<ds::u8> srl;
+    if (!ds::io::read_dsiware(path, srl, &err)) return nullptr;
+    return ds::cart::RomSource::from_memory(std::move(srl));
+  }
   if (!ends_with(path, ".zip")) return ds::cart::RomSource::map_file(path, err);
 
   // zip.h works on a buffer, so the archive is slurped. That is the one thing
@@ -79,7 +87,7 @@ int main(int argc, char** argv) {
       continue;
     }
     std::string hash;
-    if (!ds::cheevos::rom_hash(*src, path, hash, err)) {
+    if (!ds::cheevos::rom_hash(*src, path, hash, err, ds::io::file_is_dsiware(path))) {
       std::fprintf(stderr, "%s: %s\n", path.c_str(), err.c_str());
       ++bad;
       continue;

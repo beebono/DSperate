@@ -24,31 +24,43 @@ bool Memory::attach(NDS& nds, std::string& err) {
   for (Region& r : regions_) r = Region{};
   max_address_ = 0;
 
-  const rc_memory_regions_t* map = rc_console_memory_regions(RC_CONSOLE_NINTENDO_DS);
-  if (!map) { err = "rcheevos has no memory map for the DS"; return false; }
+  // The DSi's map is the DS's with the hole filled: the same addresses, 16 MB
+  // of main RAM where the DS has 4 MB and padding, then data TCM. A title on
+  // the DSi machine is read through it, so a condition on DSi RAM sees the
+  // bytes it was written against; a DS game keeps the DS map and its hole.
+  const bool dsi = nds.dsi;
+  const rc_memory_regions_t* map = rc_console_memory_regions(dsi ? RC_CONSOLE_NINTENDO_DSI : RC_CONSOLE_NINTENDO_DS);
+  const char* console = dsi ? "DSi" : "DS";
+  if (!map) { err = std::string("rcheevos has no memory map for the ") + console; return false; }
 
-  // The map this code was written against: main RAM, the DSi-only hole, data
-  // TCM. Anything else and we would be mapping the wrong bytes to the addresses
-  // achievements are written against, so refuse rather than guess.
-  if (map->num_regions != 3) {
-    err = "rcheevos' DS map has " + std::to_string(map->num_regions) +
-          " regions, not the 3 this was written against";
-    return false;
-  }
-
-  mem::Bus& bus = nds.bus;
+  // The map this code was written against -- DS: main RAM, the DSi-only hole,
+  // data TCM; DSi: main RAM, data TCM. Anything else and we would be mapping
+  // the wrong bytes to the addresses achievements are written against, so
+  // refuse rather than guess.
   struct Expect { u32 size; u8* host; const char* what; };
-  const Expect expect[3] = {
+  mem::Bus& bus = nds.bus;
+  const Expect expect_ds[3] = {
     {mem::Bus::MAIN_RAM_SIZE, bus.main_ram.get(), "main RAM"},
     {0xC00000,                nullptr,            "the DSi-only hole"},
     {mem::Bus::DTCM_SIZE,     bus.dtcm.get(),     "data TCM"},
   };
+  const Expect expect_dsi[2] = {
+    {mem::Bus::MAIN_RAM_SIZE_DSI, bus.main_ram.get(), "main RAM"},
+    {mem::Bus::DTCM_SIZE,         bus.dtcm.get(),     "data TCM"},
+  };
+  const Expect* expect = dsi ? expect_dsi : expect_ds;
+  const u32 count = dsi ? 2 : 3;
+  if (map->num_regions != count) {
+    err = std::string("rcheevos' ") + console + " map has " + std::to_string(map->num_regions) +
+          " regions, not the " + std::to_string(count) + " this was written against";
+    return false;
+  }
 
-  for (u32 i = 0; i < 3; ++i) {
+  for (u32 i = 0; i < count; ++i) {
     const rc_memory_region_t& rr = map->region[i];
     const u32 size = rr.end_address - rr.start_address + 1;
     if (size != expect[i].size) {
-      err = std::string("rcheevos' DS region ") + std::to_string(i) + " (" + expect[i].what +
+      err = std::string("rcheevos' ") + console + " region " + std::to_string(i) + " (" + expect[i].what +
             ") is " + std::to_string(size) + " bytes, not " + std::to_string(expect[i].size);
       return false;
     }

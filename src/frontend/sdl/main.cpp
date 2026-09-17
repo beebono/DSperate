@@ -1103,6 +1103,7 @@ int main(int argc, char** argv) {
   const char* dsi_font = nullptr;
   const char* dsi_sd = nullptr;
   u32 dsi_title_lo = 0;   // the title --dsi-mode was given, once it is on the NAND: what the autoload starts
+  std::string dsi_title_cheevos_hash;   // its RetroAchievements identity: it runs from the NAND, with no cart to hash later
 
   // The game is found before the options are read. A flag whose value is
   // optional (--chunky [M]) takes the next word unless it is another option,
@@ -1484,6 +1485,16 @@ int main(int argc, char** argv) {
     if (dsi_title) {
       std::vector<ds::u8> srl, embedded;
       if (!ds::io::read_dsiware(dsi_title, srl, &err, &embedded)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); return 2; }
+#if DSPERATE_CHEEVOS
+      // Only for the autoload: with --dsi-menu the player picks what runs, and
+      // this title may never start.
+      if (cfg.flag("cheevos.enabled", false) && !dsi_menu) {
+        const auto src = ds::cart::RomSource::from_memory(srl);
+        std::string herr;
+        if (!src || !ds::cheevos::rom_hash(*src, dsi_title, dsi_title_cheevos_hash, herr, true))
+          std::fprintf(stderr, "cheevos: cannot identify %s: %s\n", dsi_title, herr.c_str());
+      }
+#endif
       const u32 lo = static_cast<u32>(srl[0x230] | (srl[0x231] << 8) | (srl[0x232] << 16) | (srl[0x233] << 24));
       if (ds::io::nand_has_title(nds.dsi_nand, nds.bus.bios7i.get(), lo)) {
         std::fprintf(stderr, "dsi: %.4s: already installed on the NAND\n", reinterpret_cast<const char*>(&srl[0x0C]));
@@ -3266,8 +3277,20 @@ sdl_ready:
   if (internet) std::fprintf(stderr, "internet: built without DSPERATE_NET\n");
 #endif
 #if DSPERATE_CHEEVOS
-  std::string cheevos_hash;      // this ROM's identity, once; empty if it could not be hashed
+  std::string cheevos_hash;      // the running game's identity; empty if it could not be hashed
   bool cheevos_set_asked = false;
+  // What the game in the machine is, to RetroAchievements: the cart's hash,
+  // or for a DSiWare title run from the NAND the one taken when it was read.
+  // The loader cart is not a game and gets none, so nothing is asked for
+  // until the picker has started one (launch_game calls this again).
+  auto cheevos_identify = [&](const std::string& name) {
+    cheevos_hash.clear();
+    cheevos_set_asked = false;
+    std::string err;
+    if (!nds.cart) { cheevos_hash = dsi_title_cheevos_hash; return; }
+    if (!ds::cheevos::rom_hash(nds.cart->source(), name, cheevos_hash, err, nds.dsi))
+      std::fprintf(stderr, "cheevos: cannot identify this ROM: %s\n", err.c_str());
+  };
 
   auto cheevos_show = [&] {
     for (const ds::cheevos::Message& m : cheevos.take_messages()) {
@@ -3528,8 +3551,7 @@ sdl_ready:
       // Hashing the cart's own source is safe *because* read_unpatched reads
       // past the secure-area rewrite Cart has already done by this point --
       // see docs/retroachievements-scoping.md.
-      if (nds.cart && !ds::cheevos::rom_hash(nds.cart->source(), session.rom_path, cheevos_hash, err))
-        std::fprintf(stderr, "cheevos: cannot identify this ROM: %s\n", err.c_str());
+      if (!launcher) cheevos_identify(session.rom_path);
     }
     cheevos_show();
   }
@@ -3656,6 +3678,11 @@ sdl_ready:
     // line, not for whatever the player picks here.
     launcher = false;
     session.open(nds, cfg, pick, nullptr);
+#if DSPERATE_CHEEVOS
+    // The picked game is a different identity from the loader: drop any set
+    // for what was running and ask again once identified (cheevos_catch_up).
+    if (cheevos_on) { cheevos.unload_game(); cheevos_identify(pick); }
+#endif
     menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
     session.load_enabled(nds);
     load_save(nds, session.sav);

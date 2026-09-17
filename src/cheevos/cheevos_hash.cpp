@@ -66,7 +66,7 @@ void rs_error(const char* message, const rc_hash_iterator_t*) { std::fprintf(std
 } // namespace
 
 bool rom_hash(const cart::RomSource& src, const std::string& name,
-              std::string& out, std::string& err) {
+              std::string& out, std::string& err, bool dsi) {
   out.clear();
   err.clear();
   if (src.size() < 0x200) { err = "too small to be a DS ROM"; return false; }
@@ -89,7 +89,7 @@ bool rom_hash(const cart::RomSource& src, const std::string& name,
   t_src = &src;
   // The console is passed explicitly rather than left to the iterator: one
   // function for DS and DSi, and we are never guessing from a file name.
-  const int ok = rc_hash_generate(hash, RC_CONSOLE_NINTENDO_DS, &it);
+  const int ok = rc_hash_generate(hash, dsi ? RC_CONSOLE_NINTENDO_DSI : RC_CONSOLE_NINTENDO_DS, &it);
   t_src = nullptr;
   rc_hash_destroy_iterator(&it);
 

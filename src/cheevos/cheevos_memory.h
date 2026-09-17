@@ -6,8 +6,9 @@
 // Achievement authors write conditions against a flat address space that is
 // not the DS's: rcheevos publishes it per console (rc_consoles.h), and for the
 // DS it is three regions -- 4 MB of main RAM, a 12 MB hole that exists only so
-// the DS and DSi maps line up, then the ARM9's data TCM. This translates that
-// space to ours.
+// the DS and DSi maps line up, then the ARM9's data TCM. The DSi's is the same
+// addresses with the hole as real RAM (16 MB, then data TCM), and a title on
+// the DSi machine is read through that one. This translates that space to ours.
 //
 // Two properties matter more than speed here, though it is also fast (a bounds
 // check and a memcpy from a host pointer -- no page tables, no Bus::io_read, so
