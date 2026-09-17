@@ -71,6 +71,21 @@ jobs:
              LICENSE README.md dist/$d-static/
           tar -C dist -czf $d-static.tar.gz $d-static
           ls -l *.tar.gz
+      # The runtime floor is a property nothing in the build declares: it moves
+      # when one call reaches a newer symbol, silently, and the report comes
+      # back weeks later as "it doesn't start on my handheld". 2.38/3.4.30 is
+      # what this runner produces today and what dArkOS (GCC 12.4, so libstdc++
+      # 3.4.30) can load; raising either drops devices, so make that a decision
+      # rather than a side effect.
+      - name: ABI floor
+        run: |
+          tools/abi_floor.sh dist/$d/dsperate 2.38 3.4.30
+          tools/abi_floor.sh dist/$d/dsperate-headless 2.38 3.4.30
+          # The -static pair carries libstdc++ inside, so it must import none.
+          tools/abi_floor.sh dist/$d-static/dsperate 2.38 none
+          tools/abi_floor.sh dist/$d-static/dsperate-headless 2.38 none
+        env:
+          d: dsperate-${{ github.ref_name }}-linux-aarch64
       - uses: actions/upload-artifact@v4
         with:
           name: dsperate-linux-aarch64
@@ -122,6 +137,64 @@ jobs:
         with:
           name: dsperate-linux-armhf
           path: dsperate-*-linux-armhf*.tar.gz
+
+  # The portable aarch64 tarball: same source, built against an old sysroot so
+  # it loads on handhelds whose glibc is far older than any runner's. spruceOS
+  # measures a 2.28 arm64 ceiling and the A30-class sysroot is 2.23, while this
+  # runner's own glibc is 2.39 -- and no hosted runner goes low enough (20.04
+  # is retired; 22.04 is 2.35). An old *container* on a current arm64 runner
+  # does, natively, with no qemu.
+  #
+  # The image must carry GCC 10.5, ninja, CMake >= 3.28 and the SDL 2.30.9 that
+  # toolchains/rg35xxsp/build-sdl.sh builds, at /work/prefix -- sdl2.pc records
+  # that absolute path, so the prefix is not relocatable. Build it once from
+  # toolchains/rg35xxsp/Dockerfile, push it to GHCR by digest, and set the
+  # repository variable DSPERATE_FOCAL_IMAGE to it. Pinning by digest matters:
+  # focal is EOL, and its packages will eventually move to old-releases, which
+  # would break an image rebuilt in-workflow for reasons unrelated to any
+  # commit. Until that variable is set this job skips rather than fails, which
+  # is also why `release` does not list it in `needs`: a skipped job would skip
+  # the release with it. Once the image is published, add aarch64-portable to
+  # release's `needs` and its tarball to the arrival check below.
+  aarch64-portable:
+    if: vars.DSPERATE_FOCAL_IMAGE != ''
+    runs-on: ubuntu-24.04-arm
+    container: ${{ vars.DSPERATE_FOCAL_IMAGE }}
+    steps:
+      - uses: actions/checkout@v4
+      # GCC 10.5 selects pgo/aarch64-gcc10.5.0/ on its own: the profile
+      # directory is keyed by compiler version, and the fingerprint would
+      # refuse a profile made by any other one.
+      - name: Build
+        run: |
+          cmake -S . -B build/portable -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_TESTS=OFF \
+            -DDSPERATE_PGO=use -DDSPERATE_PGO_STRICT=ON \
+            -DCMAKE_PREFIX_PATH=/work/prefix \
+            -DCMAKE_CXX_FLAGS=-pthread \
+            "-DCMAKE_EXE_LINKER_FLAGS=-pthread -L/work/prefix/lib -static-libstdc++ -static-libgcc"
+          cmake --build build/portable 2>&1 | grep -v "source locations for function" | tee build.log
+          echo "PGO: $(grep -c 'control flow of function' build.log || true) functions changed since the profile ($(sed -n 's/^commit //p' pgo/aarch64-gcc10.5.0/MANIFEST | cut -c1-9)); $(grep -c 'data file not found' build.log || true) objects without one"
+      - name: Package
+        run: |
+          d=dsperate-${GITHUB_REF_NAME}-linux-aarch64-portable
+          mkdir -p dist/$d
+          cp build/portable/src/frontend/sdl/dsperate build/portable/src/frontend/headless/dsperate-headless dist/$d/
+          strip dist/$d/dsperate dist/$d/dsperate-headless
+          cp LICENSE README.md dist/$d/
+          tar -C dist -czf $d.tar.gz $d
+          ls -l *.tar.gz
+      # 2.18 with libstdc++ inside is the whole point of this job; if it ever
+      # stops holding, the tarball is just the standard one with extra steps.
+      - name: ABI floor
+        run: |
+          d=dsperate-${GITHUB_REF_NAME}-linux-aarch64-portable
+          tools/abi_floor.sh dist/$d/dsperate 2.18 none
+          tools/abi_floor.sh dist/$d/dsperate-headless 2.18 none
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsperate-linux-aarch64-portable
+          path: dsperate-*-linux-aarch64-portable.tar.gz
 
   # Tag v* to publish. The notes are a stand-in (name, tag, changelog link)
   # meant to be edited on GitHub afterwards.
