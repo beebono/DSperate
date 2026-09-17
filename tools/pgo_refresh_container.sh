@@ -21,6 +21,16 @@ IMAGE=${DS_PGO_IMAGE:-dsperate-u20:arm64}
 DS_DSI=${DS_DSI:-$HERE/../dsi-binary}
 # The image has no git, so the commit the profile is made at comes in by hand;
 # without it the MANIFEST would record nothing and --check could never work.
+# focal ships SDL 2.0.10, which is too old to compile our frontend (no
+# SDL_SYSWM_KMSDRM, no windowID on touch events). toolchains/rg35xxsp/prefix
+# holds the SDL 2.30.9 build_sdl.sh makes, which is also the version the
+# devices actually run; without it the training succeeds and the verify build
+# fails on the SDL frontend alone. It has to be mounted at /work/prefix: its
+# CMake/pkg-config files record the absolute path it was built at, which is
+# where toolchains/rg35xxsp/build-sdl.sh puts it inside this same image.
+SDL_PREFIX=${DS_SDL_PREFIX:-$HERE/../toolchains/rg35xxsp/prefix}
+[ -d "$SDL_PREFIX/include/SDL2" ] || {
+  echo "no SDL2 at $SDL_PREFIX (run toolchains/rg35xxsp/build-sdl.sh, or set DS_SDL_PREFIX)" >&2; exit 1; }
 COMMIT=$(git -C "$HERE" rev-parse HEAD)
 [ -z "$(git -C "$HERE" status --porcelain)" ] || {
   echo "working tree is dirty -- commit first, or the profile records a commit it was not built from" >&2; exit 1; }
@@ -29,6 +39,7 @@ exec docker run --rm --platform linux/arm64 \
   -v "$HERE:/src" \
   -v "$DS_ROMS:/roms:ro" \
   -v "$DS_BIOS:/bios:ro" \
+  -v "$SDL_PREFIX:/work/prefix:ro" \
   ${DS_DSI:+-v "$DS_DSI:/dsi:ro"} \
   -e DS_ROMS=/roms -e DS_BIOS=/bios -e DS_DSI=/dsi \
   -e DS_PGO_COMMIT="$COMMIT" \
@@ -37,6 +48,7 @@ exec docker run --rm --platform linux/arm64 \
   bash -euc '
     # -pthread is explicit: glibc 2.31 does not pull it in for std::thread.
     exec /src/tools/pgo_refresh.sh --native --gcc 10 /src/build/pgo-gen-focal \
+      -DCMAKE_PREFIX_PATH=/work/prefix \
       -DCMAKE_CXX_FLAGS=-pthread \
-      "-DCMAKE_EXE_LINKER_FLAGS=-pthread -static-libstdc++ -static-libgcc" '"$*"'
+      "-DCMAKE_EXE_LINKER_FLAGS=-pthread -L/work/prefix/lib -static-libstdc++ -static-libgcc" '"$*"'
   '
