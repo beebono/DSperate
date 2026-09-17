@@ -87,6 +87,8 @@ const char* kUsage =
     "usage: dsperate [rom.nds|rom.zip] [--bios9 F --bios7 F --firmware F] [options]\n"
     "  With no ROM (or a file named BootMenu.nds) the console boots its own\n"
     "  firmware: the DS menu, with the clock set from this machine and PictoChat.\n"
+    "  A file named BootMenuDSi.nds is --dsi-mode: the DSi Menu off the NAND.\n"
+    "  Neither file has to exist -- the name is the whole instruction.\n"
     "  Without dumps a built-in replacement BIOS and a generated firmware run games\n"
     "  (direct boot only; the DS menu and exact timing need the real files).\n"
     "  --config F      settings file (default ~/.config/dsperate/dsperate.ini; every\n"
@@ -1237,6 +1239,17 @@ int main(int argc, char** argv) {
     else if (argv[i][0] == '-' && argv[i][1] == '-') { std::fprintf(stderr, "unknown option %s\n", argv[i]); std::fputs(kUsage, stderr); return 2; }
     else rom = argv[i];
   }
+  // A file called BootMenuDSi.nds is --dsi-mode, the way BootMenu.nds is a
+  // firmware boot: a frontend that can only hand over a game can point at one,
+  // and neither file has to exist. It is the flag and not a game, so the ROM
+  // is dropped here -- what follows is the cartless DSi boot --dsi-mode runs,
+  // down to the settings file it keeps (BootMenu.nds, shared with the flag).
+  const char* dsi_mode_by = "--dsi-mode";
+  if (rom && rom_stem(base_name(rom)) == "BootMenuDSi") {
+    dsi_mode = true;
+    dsi_mode_by = "BootMenuDSi.nds";
+    rom = nullptr;
+  }
   // DSiWare named without --dsi-mode runs the DSi machine too: as a DS it
   // would not start at all.
   const bool dsi_mode_asked = dsi_mode;   // --dsi-mode itself, not a DSiWare title implying it
@@ -1263,7 +1276,7 @@ int main(int argc, char** argv) {
     // a NAND boot has not been checked against melonDS), so the rest of the
     // startup runs as the cartless firmware boot it is.
     dsi_hle = !dsi_nand && rom;
-    if (!dsi_nand && !rom) { std::fprintf(stderr, "--dsi-mode needs --dsi-nand (or paths.dsi_nand in %s) or a DSiWare title\n", global_ini.c_str()); return 2; }
+    if (!dsi_nand && !rom) { std::fprintf(stderr, "%s needs --dsi-nand (or paths.dsi_nand in %s) or a DSiWare title\n", dsi_mode_by, global_ini.c_str()); return 2; }
     if (dsi_hle && dsi_menu) { std::fprintf(stderr, "--dsi-menu needs --dsi-nand: without one there is no DSi Menu to boot\n"); return 2; }
     // Without a NAND the title goes in the slot and is handed over from there
     // (NDS::prepare_dsi_hle), so the ROM path stays as for any game.
@@ -1290,7 +1303,7 @@ int main(int argc, char** argv) {
   auto have_dsi_bios = [&] { return !dsi_bios9i.empty() && !dsi_bios7i.empty() && std::filesystem::exists(dsi_bios9i) && std::filesystem::exists(dsi_bios7i); };
   if (dsi_mode && !have_dsi_bios()) {
     std::fprintf(stderr, "%s needs the DSi BIOS pair: --bios9i/--bios7i, or paths.bios9i/paths.bios7i in %s\n",
-                 dsi_hle ? (std::string(rom) + " is DSiWare and").c_str() : "--dsi-mode", global_ini.c_str());
+                 dsi_hle ? (std::string(rom) + " is DSiWare and").c_str() : dsi_mode_by, global_ini.c_str());
     return 2;
   }
 

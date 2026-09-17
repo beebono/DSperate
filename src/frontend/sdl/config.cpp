@@ -190,8 +190,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # bios7i = /path/to/biosdsi7.bin  # marked [DSi] in the game list or named on the command line) runs on
                                 # the DSi machine and needs both; without them it is refused
 # dsi_nand = /path/to/nand.bin  # --dsi-mode's NAND (a dump with its nocash footer) when --dsi-nand
-                                # is not given. Only --dsi-mode uses it: DSiWare named on the command
-                                # line or picked from the game list still runs without the NAND
+                                # is not given. Only --dsi-mode uses it (or a game named
+                                # BootMenuDSi.nds, which is the same thing without a command line):
+                                # DSiWare named on the command line or picked from the game list
+                                # still runs without the NAND
 # dsi_firmware = /path/to/dsifirmware.bin  # the DSi's firmware, used instead of firmware above
                                 # whenever the machine is a DSi (--dsi-mode, DSiWare) and --firmware
                                 # is not given; unset or missing, firmware above as before
@@ -223,7 +225,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 
 [loader]
 # The card the DS menu shows on a firmware boot, and the DSi Menu under
-# --dsi-mode. Launching it raises the game list. Built in; a BootMenu.nds next
+# --dsi-mode (or a game named BootMenuDSi.nds, the flag without a command
+# line). Launching it raises the game list. Built in; a BootMenu.nds next
 # to this file replaces it (tools/mkcart.py makes one with your own icon). The
 # DSi Menu refuses the card once its launch fade is over ("An error has
 # occurred"), which the list covers.
