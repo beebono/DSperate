@@ -3,8 +3,9 @@
 AI DISCLAIMER: Agentic coding is used here. A lot. I am not smart enough to keep track
 of all of this with the wet electric meat lump that sits inside my skull.
 
-A Nintendo DS emulator that reimplements DraStic's JIT and NEON rendering
-techniques, with modern niceties from melonDS such as per-screen windows.
+A Nintendo DS and DSi emulator that reimplements DraStic's JIT and NEON rendering
+techniques, with modern niceties from melonDS such as per-screen windows and
+local wireless.
 Built for and measured on ARM handhelds (the Anbernic RG DS, an RK3566 with
 four A55 cores); commercial games boot and play. Everything is verified against
 melonDS with frame dumps and instruction traces.
@@ -29,8 +30,10 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   measurement) or event-bound as DraStic does it (the default for play, a few
   percent faster).
 - **Full system.** DMA with burst timing, timers, IPC, SPI (touchscreen,
-  firmware flash, power management, microphone), RTC, divider/sqrt, and
-  register-level Wi-Fi (no frames: PictoChat and Download Play do not work).
+  firmware flash, power management, microphone), RTC, divider/sqrt, and Wi-Fi
+  with real frames (see *Local wireless and internet* below).
+- **Fastmem.** The recompilers reach guest RAM through host-mapped views on
+  AArch64 and ARMv7, DS and DSi alike.
 - **Retail cartridges.** KEY1/KEY2 protocol, direct boot, per-title save-chip
   database (EEPROM and FLASH variants), and IR-cart pass-through for the
   Pokémon titles that need it. The GBA slot is empty.
@@ -45,18 +48,48 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   shadows, fog, edge marking, anti-aliasing) that matches melonDS pixel for
   pixel. Runs asynchronously on three worker threads with a decoded-texture
   cache and a skip for resubmitted frames.
-- **Sound.** All sixteen SPU channels (PCM8/16, ADPCM, PSG, noise), capture
-  units, 32768 Hz output; the frontend paces the emulator from the audio queue.
+- **Sound.** All sixteen SPU channels (PCM8/16, ADPCM, PSG, noise) and capture
+  units, mixed at the console's real 32728.5 Hz. The frontend paces from its own
+  frame limiter at the console's rate, not from the audio queue, and keeps the
+  host's CPU governor and real-time throttling from stealing frames.
 - **No dumps required.** Without BIOS/firmware files, a built-in FreeBIOS and a
   generated firmware run games by direct boot. Real dumps (`bios9.bin`,
   `bios7.bin`, `firmware.bin`, never provided here) unlock the firmware menu and
   exact timing.
+
+### Nintendo DSi (experimental)
+
+- **DSiWare without a NAND.** A `.nds` or `.cia` DSiWare title runs with only the
+  BIOS dumps (all four: DS and DSi): DSperate synthesises the console, its
+  settings, the NAND and a system font of its own, and hands the title over the
+  way the DSi Menu would.
+- **A real NAND.** With `--dsi-mode` and your own `nand.bin`, the console boots
+  to the DSi Menu. The NAND is read-only; writes live in memory and persist
+  beside it. A named title is installed into the session, and installed titles
+  can be started directly through NAND title shortcuts.
+- **DSi hardware.** SD card slot backed by a host folder (synced back, deletions
+  included), microphone, DSi Wi-Fi, PictoChat, and Download Play from the Menu.
+- **Save states, the recompiler, idle skip and fastmem** all work in DSi sessions.
+- **Not yet:** the DSP (titles that start it warn, and camera or DSP audio apps
+  will not work) and DSi-enhanced carts in DSi mode (they run as DS games).
+
+### Local wireless and internet
+
+- **Local wireless over the LAN**, speaking melonDS's protocol so either end can
+  be melonDS: `--lan-host`, `--lan-join`, or `--netplay` to join whoever is on
+  the LAN or host otherwise. Multiplayer and Download Play work, across devices.
+- **Internet** through the emulated access point over a user-mode TCP/IP stack
+  (vendored libslirp; no privileges). Wiimmfi connects.
+- **NETWORK FEATURES** in the pause menu turns a session on or off mid-run. While
+  one is live, the speed knobs, fast forward, frameskip and save states are off,
+  so both consoles stay on the same clock.
 
 ### Playing
 
 - **Save states.** Ten slots plus a hidden auto slot that can be written on
   quit and resumed on the next launch. Exact round trip, includes the screen
   layout and achievement progress, refuses to load across a different BIOS.
+  DSi states carry the NAND and SD card changes too.
 - **Battery saves** written shortly after the game stops writing and again on
   pause, lid close and exit (SIGTERM included).
 - **Pause menu** drawn over the game and driven with the DS buttons: save/load,
@@ -67,7 +100,8 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
 - **RetroAchievements** (Casual mode only, no Hardcore) via rcheevos: sign in
   with a username or a token the CFW already holds, unlock toasts, an
   achievements list and account page in the pause menu, encore mode, and an
-  optional screenshot on unlock. Uses the system's libcurl at runtime.
+  optional screenshot on unlock. DS games and DSiWare, however they are
+  started. Uses the system's libcurl at runtime.
 - **Firmware boot.** With no ROM the console boots its own DS menu with the
   clock set from the host. Settings changed inside it are kept in a sidecar
   file so the dump is never written to. A built-in loader cart in the slot
@@ -81,8 +115,9 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   held-key fake mic; a real hinge switch, host suspend, or a hotkey drives the
   lid.
 - **Controls.** Keyboard and controller remapping, controller hotkeys as
-  `mod+button` chords, a stick-driven stylus crosshair, and touch or mouse on
-  the bottom screen.
+  `mod+button` chords, a stick as the d-pad or face buttons, a stick-driven
+  stylus crosshair, per-axis analog remapping for pads whose sticks SDL reports
+  rotated or mirrored, and touch or mouse on the bottom screen.
 - **Config.** An INI in `~/.config/dsperate/` with every key commented, per-game
   override files by ROM name or game code, and ready-made profiles in
   [configs/](configs/) (melonDS-like, DraStic-like, Knulli "Advanced DraStic").
@@ -120,12 +155,13 @@ renderer.
 
 CMake switches: `DSPERATE_JIT`, `DSPERATE_NEON`, `DSPERATE_TESTS`,
 `DSPERATE_HEADLESS`, `DSPERATE_SDL`, `DSPERATE_WAYLAND`, `DSPERATE_CHEEVOS`,
-`DSPERATE_HARDEN`, and `DSPERATE_PGO=generate|use` (a profile for AArch64 is
-committed under [pgo/](pgo/)).
+`DSPERATE_HARDEN`, and `DSPERATE_PGO=generate|use` (profiles for AArch64 and
+ARMv7 are committed under [pgo/](pgo/)).
 
 ## Running
 
-    dsperate [game.nds|game.zip] [--bios9 F --bios7 F --firmware F] [options]
+    dsperate [game.nds|game.zip|title.cia] [--bios9 F --bios7 F --firmware F] [options]
+    dsperate --dsi-mode --bios9i F --bios7i F [--dsi-nand nand.bin] [title] [options]
 
 `dsperate --help` lists every option; each has a key in the settings file and
 the command line overrides it. Default keys: arrows and `X`/`Z`/`S`/`A`/`Q`/`W`
