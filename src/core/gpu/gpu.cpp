@@ -13,6 +13,10 @@
 #include <cstring>
 #include <cstdlib>
 
+// pow() for the gamma LUT below comes from pow_compat.c, which pins its glibc
+// symbol version so the aarch64 binary keeps a low runtime floor; see there.
+extern "C" double ds_pow_compat(double x, double y);
+
 namespace ds::gpu {
 
 // Render ablation (DS_ABLATE, bit mask) -- a measurement instrument, not a
@@ -840,12 +844,12 @@ struct GammaLut {
   GammaLut() {
     for (u32 i = 0; i < 256; ++i) {
       const double c = i / 255.0;
-      const double l = c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+      const double l = c <= 0.04045 ? c / 12.92 : ds_pow_compat((c + 0.055) / 1.055, 2.4);
       to_lin[i] = static_cast<u16>(std::lround(l * 4095.0));
     }
     for (u32 i = 0; i < 4096; ++i) {
       const double l = i / 4095.0;
-      const double c = l <= 0.0031308 ? l * 12.92 : 1.055 * std::pow(l, 1.0 / 2.4) - 0.055;
+      const double c = l <= 0.0031308 ? l * 12.92 : 1.055 * ds_pow_compat(l, 1.0 / 2.4) - 0.055;
       from_lin[i] = static_cast<u8>(std::lround(c * 255.0));
     }
   }

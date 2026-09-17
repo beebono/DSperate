@@ -33,6 +33,7 @@ add_library(dsperate_core STATIC
   cpu/interp/interp_arm.cpp
   cpu/interp/interp_thumb.cpp
   gpu/gpu.cpp
+  gpu/pow_compat.c
   gpu/engine2d.cpp
   gpu/vram_map.cpp
   gpu/gpu3d.cpp
@@ -57,6 +58,11 @@ add_library(dsperate_core STATIC
   io/dsi_nwifi.cpp
 )
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# The .symver in pow_compat.c only reaches the binary if this TU is kept out
+# of LTO; see the file's comment.
+set_source_files_properties(gpu/pow_compat.c PROPERTIES
+  COMPILE_OPTIONS "-fno-lto")
 
 # The vendored miniz DEFLATE cores (cart/miniz/README.md): inflate for the
 # ZIP reader (the archive parsing in cart/zip.cpp is ours) and deflate for the
