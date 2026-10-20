@@ -163,9 +163,13 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   the DS-resolution frames are scaled and laid out into the scanout buffer by
   the Rockchip RGA (the RK3566's 2D accelerator, through V4L2) where the
   device has one, else by a Vulkan compute pass. The RGA leaves the GPU to the
-  3D layer alone; its filter is bilinear, it draws the LCD grid and a fading
-  PiP inset, and the menu greys out what it cannot do (nearest, seams, chunky
-  cells). Rotated panels and everything else fall back to the scanline scaler.
+  3D layer alone. With bilinear off, views are resized by nearest neighbour
+  on the CPU and copied by RGA at 1:1, keeping them crisp at any scale,
+  including fractional scales and small insets. Optional integer scaling
+  still adds borders or crops when requested. Bilinear on keeps RGA's smooth
+  scaling. It draws the LCD grid and a fading PiP inset; blended seams and
+  chunky cells remain unavailable.
+  Rotated panels and everything else fall back to the scanline scaler.
 - **Dual-window mode** for dual-panel handhelds: one fullscreen window per
   display, one DS screen each.
 - **On-screen overlays:** FPS counter, state slot number, screenshot flash,

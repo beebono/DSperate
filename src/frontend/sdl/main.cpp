@@ -2073,6 +2073,10 @@ sdl_ready:
     want.want_sink = vs.want_sink;
     want.upper_display = vs.upper_display;
     want.lower_display = vs.lower_display;
+    // Filtering and layout changes must keep the selected presenter, including
+    // an automatically selected RGA, rather than VideoSetup's default of off.
+    want.gpu_present = vs.gpu_present;
+    want.gpu_mode = vs.gpu_mode;
     want.layout = display.current_layout();
     if (dual_window) want.layout.primary = vs.layout.primary;   // the windows' own layouts don't track it
     const VideoSetup before = vs;
@@ -2409,12 +2413,13 @@ sdl_ready:
       const bool dominant = mode == Disp::Mode::DominantV || mode == Disp::Mode::DominantH;
       switch (s.depends) {
       case ds::sdl::Dep::None: return "";
+      case ds::sdl::Dep::IntegerScale:
+        return display.gpu_present() ? "" : "NOT AVAILABLE WITH THE CURRENT DISPLAY MODE";
       case ds::sdl::Dep::FrameskipMode:
         // Frameskip is forced to 0 for a session, so its mode is moot too.
         if (net_live && *net_live) return "NOT DURING A NETWORK SESSION";
         return cfg.num("emu.frameskip", 0) > 0 ? "" : "ONLY WITH FRAMESKIP ON";
       case ds::sdl::Dep::PanelEffects:
-        if (display.rga_present()) return "THE RGA ALWAYS SCALES BILINEAR";
         return panel_effects() ? "" : "THIS SCREEN SCALES IN HARDWARE";
       case ds::sdl::Dep::GridSeam:
         if (display.rga_present()) return std::strcmp(s.key, "video.seam") == 0 ? "THE RGA DRAWS THE DARK GRID ONLY" : "";

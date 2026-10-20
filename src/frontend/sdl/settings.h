@@ -26,6 +26,7 @@ enum Flag : u8 {
 enum class Dep : u8 {
   None,
   FrameskipMode,      // emu.frameskip > 0: adaptive-or-fixed means nothing at 0
+  IntegerScale,       // an offloaded presenter is actually running
   PanelEffects,       // the tier has panel pixels at all (not the display engine)
   GridSeam,           // PanelEffects, and video.linear off, which overrides them
   Chunky,             // video.linear off (chunky survives at DS resolution)

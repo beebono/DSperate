@@ -19,6 +19,10 @@ add_executable(test_layout layout_test.cpp)
 target_link_libraries(test_layout PRIVATE dsperate_frontend_video)
 add_test(NAME layout COMMAND test_layout)
 
+add_executable(test_nearest_scale nearest_scale_test.cpp)
+target_link_libraries(test_nearest_scale PRIVATE dsperate_frontend_video)
+add_test(NAME nearest_scale COMMAND test_nearest_scale)
+
 add_executable(test_select select_test.cpp)
 target_link_libraries(test_select PRIVATE dsperate_frontend_video)
 add_test(NAME select COMMAND test_select)

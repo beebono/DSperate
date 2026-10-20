@@ -28,11 +28,12 @@ public:
     u8 inset_alpha = 255;
     frontend::Rect drawn;        // where the frontend drew on overlay() this frame
     u32 grid = 256;              // LCD grid brightness on a seam, 0..256 (256 = off)
+    bool linear = false;         // RGA: false resizes by nearest neighbour before a 1:1 blit
   };
 
   const std::string& name() const { return name_; }   // for the log: what presents, on which device
   // Which hardware presents: the menu greys out what a presenter cannot do
-  // (the RGA scales bilinear only, and draws no grid, seams or chunky cells).
+  // (RGA draws the dark grid, but not blended seams or chunky cells).
   enum class Kind : u8 { Vulkan, Rga };
   virtual Kind kind() const = 0;
 

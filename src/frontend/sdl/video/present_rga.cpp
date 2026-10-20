@@ -4,17 +4,17 @@
 // RGA present stage: the Rockchip 2D accelerator (a V4L2 mem2mem device,
 // /dev/videoN "rockchip-rga") scales the core's 256x192 frames into the
 // scanout sink's own dma-buf, one job per shown view, with crop on the
-// output queue and compose on the capture queue for the layout. Neither the
-// CPU nor the GPU touches a panel-sized pixel: the CPU copies the two 1x
-// frames into small CMA source buffers (192 KB each), the RGA does the rest
-// in ~1 ms a view, and the present thread waits on it with poll().
+// output queue and compose on the capture queue for the layout. The GPU
+// is not involved. With nearest requested, the CPU expands
+// nearest-neighbour pixels into one reusable source and RGA blits them 1:1.
+// With bilinear requested, RGA scales a 1x source.
 //
 // What the RGA cannot do is done by the CPU on the finished buffer, over
 // the pixels concerned only: the frontend's overlay (OSD, pause menu) over
 // the rectangle it drew; a fading PiP inset, which the RGA scales into a
 // scratch buffer and the CPU blends in; the LCD grid's seam columns and
 // rows (the same placement as the scanline scaler's). The filter is the
-// RGA's bilinear; nearest, seams and chunky cells do not exist on this
+// RGA's bilinear when scaling; seams and chunky cells do not exist on this
 // route (the menu greys them out). Rotation: the presenter refuses to open
 // and the scanline scaler handles rotated panels.
 #include "frontend/sdl/video/presenter.h"
@@ -48,13 +48,16 @@
 #endif
 #endif
 
+#if DS_RGA_V4L2
+#include "frontend/sdl/video/rga_source.h"
+#endif
+
 namespace ds::sdl {
 
 #if DS_RGA_V4L2
 namespace {
 
-constexpr int kSlots = 2;               // frames in flight: the one being composed and the one the RGA reads
-constexpr u32 kFrameBytes = ds::SCREEN_W * ds::SCREEN_H * 4;
+constexpr int kSlots = 2;               // frontend overlay slots
 
 int xioctl(int fd, unsigned long req, void* arg) { int r; do r = ioctl(fd, req, arg); while (r < 0 && errno == EINTR); return r; }
 
@@ -92,7 +95,6 @@ public:
   ~RgaPresenter() override {
     sink_.set_gpu_writes(false);
     if (fd_ >= 0) { stream(false); close(fd_); }
-    for (Src& s : src_) for (int k = 0; k < frontend::SCREENS; ++k) { if (s.px[k]) munmap(s.px[k], kFrameBytes); if (s.fd[k] >= 0) close(s.fd[k]); }
     if (scratch_px_) munmap(scratch_px_, scratch_bytes_);
     if (scratch_fd_ >= 0) close(scratch_fd_);
   }
@@ -117,13 +119,6 @@ public:
     // DS_RGA_DUMP=N:FILE: the finished panel buffer of the N-th presented frame, raw XRGB rows, and the views (diagnostic).
     static const char* dump = std::getenv("DS_RGA_DUMP");
     static const u64 dump_at = dump && std::strchr(dump, ':') ? std::strtoull(dump, nullptr, 10) : 300;
-    const Src& s = src_[frame_ % kSlots];
-    // The 1x frames into the RGA's source buffers (CPU write, cache cleaned for the device).
-    for (int k = 0; k < frontend::SCREENS; ++k) {
-      dmaheap::sync_begin_write(s.fd[k]);
-      std::memcpy(s.px[k], fb[k], kFrameBytes);
-      dmaheap::sync_end_write(s.fd[k]);
-    }
     // Letterbox: black once per buffer per layout (a layout change re-blacks every buffer on its next use).
     u64 sig = static_cast<u64>(nviews);
     for (int i = 0; i < nviews && i < frontend::SCREENS; ++i) { const View& v = views[i]; sig = sig * 1000003u + static_cast<u64>(v.shown ? 1 : 0) * 7 + static_cast<u64>(v.rect.x) * 31 + static_cast<u64>(v.rect.y) * 131 + static_cast<u64>(v.rect.w) * 1031 + static_cast<u64>(v.rect.h) * 8191 + static_cast<u64>(v.screen); }
@@ -140,7 +135,12 @@ public:
       if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
       // Clip the view to the buffer (the layout can hang over on an odd window).
       frontend::Rect r = v.rect;
-      int sx = 0, sy = 0, sw = static_cast<int>(ds::SCREEN_W), sh = static_cast<int>(ds::SCREEN_H);
+      const u32 source_w = p.linear ? SCREEN_W : static_cast<u32>(r.w);
+      const u32 source_h = p.linear ? SCREEN_H : static_cast<u32>(r.h);
+      std::string why;
+      if (!setup_source(source_w, source_h, &why)) { std::fprintf(stderr, "rga present: %s\n", why.c_str()); lost_ = true; sink_.end_frame(); return false; }
+      source_.write(fb[v.screen]);
+      int sx = 0, sy = 0, sw = static_cast<int>(source_w), sh = static_cast<int>(source_h);
       if (r.x < 0) { sx = -r.x * sw / r.w; sw -= sx; r.w += r.x; r.x = 0; }
       if (r.y < 0) { sy = -r.y * sh / r.h; sh -= sy; r.h += r.y; r.y = 0; }
       if (r.x + r.w > static_cast<int>(plane.width)) { const int over = r.x + r.w - static_cast<int>(plane.width); sw -= over * sw / r.w; r.w -= over; }
@@ -149,8 +149,8 @@ public:
       const bool fade = v.blends && p.inset_alpha < 255;
       if (fade && !scratch_ready(plane)) { std::fprintf(stderr, "rga present: no scratch buffer for the fading inset (%s); drawn opaque\n", std::strerror(errno)); }
       const bool via_scratch = fade && scratch_fd_ >= 0;
-      if (dump && frame_ == dump_at) std::fprintf(stderr, "rga present: view %d screen %d rect %d,%d %dx%d shown %d blends %d alpha %u fade %d scratch %d\n", i, v.screen, v.rect.x, v.rect.y, v.rect.w, v.rect.h, v.shown, v.blends, p.inset_alpha, fade, via_scratch);
-      if (!job(s.fd[v.screen], sx, sy, sw, sh, via_scratch ? scratch_fd_ : plane.fd, r)) { lost_ = true; sink_.end_frame(); return false; }
+      if (dump && frame_ == dump_at) std::fprintf(stderr, "rga present: view %d screen %d rect %d,%d %dx%d shown %d blends %d alpha %u fade %d scratch %d source %ux%u\n", i, v.screen, v.rect.x, v.rect.y, v.rect.w, v.rect.h, v.shown, v.blends, p.inset_alpha, fade, via_scratch, source_w, source_h);
+      if (!job(source_.fd(), sx, sy, sw, sh, via_scratch ? scratch_fd_ : plane.fd, r)) { lost_ = true; sink_.end_frame(); return false; }
       if (via_scratch) {
         // The inset over what is there, at its alpha (a fade timer on the PiP).
         dmaheap::sync_begin_write(plane.fd);
@@ -217,8 +217,6 @@ public:
 
 private:
   explicit RgaPresenter(ScanoutOut& sink) : sink_(sink) {}
-
-  struct Src { int fd[frontend::SCREENS] = {-1, -1}; u32* px[frontend::SCREENS] = {}; };
 
   // A panel-sized buffer the RGA scales a fading inset into (allocated on first need).
   bool scratch_ready(const ScanoutOut::DmabufPlane& plane) {
@@ -296,18 +294,8 @@ private:
   bool init(std::string* why) {
     fd_ = open_rga(why);
     if (fd_ < 0) return false;
-    // Source: 256x192 XRGB8888. V4L2 names it by byte order (B G R X): XR24 is
-    // what the driver lists; the probe confirmed the channels land right.
-    if (!set_format(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, ds::SCREEN_W, ds::SCREEN_H, why)) return false;
-    if (!reqbufs(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 1)) { if (why) *why = "RGA refuses dma-buf output buffers"; return false; }
-    if (!stream_one(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true)) { if (why) *why = "RGA output stream on failed"; return false; }
+    if (!setup_source(SCREEN_W, SCREEN_H, why)) return false;
     if (!setup_capture(why)) return false;
-    for (Src& s : src_) for (int k = 0; k < frontend::SCREENS; ++k) {
-      s.fd[k] = dmaheap::alloc(kFrameBytes, [](int) { return true; }, "rga");
-      if (s.fd[k] < 0) { if (why) *why = "no dma-buf for the RGA source"; return false; }
-      s.px[k] = static_cast<u32*>(mmap(nullptr, kFrameBytes, PROT_READ | PROT_WRITE, MAP_SHARED, s.fd[k], 0));
-      if (s.px[k] == MAP_FAILED) { s.px[k] = nullptr; if (why) *why = "cannot map the RGA source buffer"; return false; }
-    }
     cleared_.assign(static_cast<size_t>(std::max(0, sink_.bufs())), false);
     sink_.set_gpu_writes(true);   // the device writes the sink's buffers; the CPU syncs its own touches
     name_ = std::string("RGA present (rockchip-rga, ") + (std::strcmp(SDL_GetCurrentVideoDriver(), "KMSDRM") == 0 ? "kms" : "dmabuf") + " scanout)";
@@ -321,13 +309,33 @@ private:
       if (why) *why = std::string("RGA refuses the ") + std::to_string(w) + "x" + std::to_string(h) + " frame format: " + std::strerror(errno);
       return false;
     }
-    if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) src_bytes_ = f.fmt.pix_mp.plane_fmt[0].sizeimage;
+    if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) { src_bytes_ = f.fmt.pix_mp.plane_fmt[0].sizeimage; src_stride_ = f.fmt.pix_mp.plane_fmt[0].bytesperline; }
     else { dst_bytes_ = f.fmt.pix_mp.plane_fmt[0].sizeimage; dst_stride_ = f.fmt.pix_mp.plane_fmt[0].bytesperline; }
     return true;
   }
   bool reqbufs(u32 type, u32 n) {
     v4l2_requestbuffers rb{}; rb.type = static_cast<v4l2_buf_type>(type); rb.memory = V4L2_MEMORY_DMABUF; rb.count = n;
     return xioctl(fd_, VIDIOC_REQBUFS, &rb) == 0 && rb.count >= n;
+  }
+  bool setup_source(u32 width, u32 height, std::string* why) {
+    if (width == source_w_ && height == source_h_) return true;
+    source_w_ = source_h_ = 0;   // partial setup must not leave the old format marked ready
+    // Drop the driver's reference before resizing the source's CMA buffer.
+    stream_one(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, false);
+    reqbufs(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0);
+    // The storage stride satisfies V4L2 alignment, but the crop stays at
+    // the exact view size, including odd widths: RGA still copies at 1:1.
+    const u32 storage_w = std::max(32u, (width + 15) & ~15u);
+    const u32 storage_h = std::max(32u, (height + 15) & ~15u);
+    if (!set_format(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, storage_w, storage_h, why)) return false;
+    if (!source_.resize(width, height, src_stride_, src_bytes_, why)) return false;
+    if (!reqbufs(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 1) || !stream_one(V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true)) {
+      if (why) *why = "RGA source stream setup failed";
+      return false;
+    }
+    source_w_ = width; source_h_ = height;
+    if (std::getenv("DS_VERBOSE")) std::fprintf(stderr, "rga present: source %ux%u (1:1 for a matching view)\n", width, height);
+    return true;
   }
   // The capture side follows the sink's buffer: a format change is refused
   // while the queue holds buffers, so it is torn down and set up again.
@@ -376,8 +384,8 @@ private:
   bool fail(const char* what) { std::fprintf(stderr, "rga present: %s failed: %s\n", what, std::strerror(errno)); return false; }
   ScanoutOut& sink_;
   int fd_ = -1;
-  u32 src_bytes_ = 0, dst_bytes_ = 0, dst_stride_ = 0;
-  Src src_[kSlots];
+  u32 src_bytes_ = 0, src_stride_ = 0, source_w_ = 0, source_h_ = 0, dst_bytes_ = 0, dst_stride_ = 0;
+  RgaSource source_;
   int scratch_fd_ = -1; u32* scratch_px_ = nullptr; size_t scratch_bytes_ = 0;
   std::vector<u8> grid_col_, grid_row_;
   std::vector<u16> grid_fac_;

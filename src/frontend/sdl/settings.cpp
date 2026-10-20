@@ -107,10 +107,10 @@ const Setting kEmuSettings[] = {
 };
 
 const Setting kVideoSettings[] = {
-  pick("video.integer_scale", "INTEGER SCALE", kIntScale, 3, "off", FlagDeferred, Dep::None,
+  pick("video.integer_scale", "INTEGER SCALE", kIntScale, 3, "off", FlagDeferred, Dep::IntegerScale,
        "WHOLE PANEL PIXELS PER DS PIXEL. UNDER LETTERBOXES, OVER CROPS"),
   boolean("video.linear", "BILINEAR", "false", FlagDeferred, Dep::PanelEffects,
-          "SMOOTH SCALING. OVERRIDES THE GRID, SEAMS AND CHUNKY"),
+          "ON: SMOOTH EDGES. OFF: SHARP PIXELS. OVERRIDES THE GRID, SEAMS AND CHUNKY"),
   percent("video.lcd_grid", "LCD GRID", 0, 100, 10, "0", FlagDeferred, Dep::GridSeam,
           "A DARK SEAM AROUND EVERY DS PIXEL, LIKE THE ORIGINAL SCREEN"),
   pick("video.seam", "SEAM", kSeam, 3, "dark", FlagDeferred, Dep::GridSeam,
