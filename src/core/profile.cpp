@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <numeric>
 #include <vector>
 
 #include "core/cpu/idle_loop.h"
@@ -42,15 +43,18 @@ const char* const names[COUNT] = {
 };
 
 // Stable machine keys for DS_PROFILE_LINE; unlike `names`, must not change on rename.
-const char* const stage_keys[COUNT] = {
+const char* const stage_keys[] = {
   "cpu9", "cpu7", "dma", "gx_geom",
   "bg_draw", "obj_draw", "window", "select", "effects", "output", "capture",
   "r3d_clear", "r3d_spans", "r3d_final", "r3d_wait", "spu",
-  "jit_tx",
+  "jit_tx", "jit_tx_gen", "jit_tx_install", "jit_tx_icache",
+  "jit_tx_decode", "jit_tx_live", "jit_tx_emit", "jit_tx_finish",
   "w2d_join",
   "sched", "events", "gpu_line", "join0", "begin_frame", "gx_vblank",
   "journal", "r3d_line", "r3d_prep", "r3d_steal",
 };
+static_assert(sizeof(stage_keys) / sizeof(*stage_keys) == COUNT,
+              "stage_keys must have exactly one entry per Stage");
 
 const char* const count_names[] = {"3d polygon lines", "3d span pixels", "3d resolved pixels",
   "3d texel gathers (cached/direct)", "3d texel gathers (compressed)", "3d texel gathers (via views)",
@@ -281,7 +285,10 @@ void frame_breakdown(const std::vector<double>& frame_ms) {
     const size_t i = order[n - 1 - k];
     double timed = 0;
     std::vector<u32> top(COUNT);
-    for (u32 s = 0; s < COUNT; ++s) { top[s] = s; timed += frame_series[i].ns[s] / 1e6; }
+    for (u32 s = 0; s < COUNT; ++s) {
+      top[s] = s;
+      if (!of_which(static_cast<Stage>(s))) timed += frame_series[i].ns[s] / 1e6;
+    }
     std::sort(top.begin(), top.end(), [&](u32 a, u32 b) { return frame_series[i].ns[a] > frame_series[i].ns[b]; });
     std::fprintf(stderr, "[frames]   #%-5zu %7.3f ms:", i, frame_ms[i]);
     for (size_t s = 0; s < 3 && frame_series[i].ns[top[s]]; ++s)
@@ -317,7 +324,8 @@ void frame_breakdown(const std::vector<double>& frame_ms) {
   if (close_out) std::fprintf(out, "%s", "");
   std::fprintf(out, "{\"label\":\"%s\",\"frames\":%zu", label ? label : "", n);
   std::fprintf(out, ",\"ms\":{\"mean\":%.4f,\"median\":%.4f,\"p90\":%.4f,\"p95\":%.4f,\"p99\":%.4f,\"max\":%.4f}",
-               m.ms, pct(0.50), pct(0.90), pct(0.95), pct(0.99), frame_ms[order[n - 1]]);
+               std::accumulate(frame_ms.begin(), frame_ms.end(), 0.0) / n,
+               pct(0.50), pct(0.90), pct(0.95), pct(0.99), frame_ms[order[n - 1]]);
   std::fprintf(out, ",\"typ\":{");
   bool first = true;
   for (u32 i = 0; i < COUNT; ++i) {

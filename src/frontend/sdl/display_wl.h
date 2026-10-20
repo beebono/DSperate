@@ -33,7 +33,7 @@ namespace ds::sdl {
 
 class DmabufOut : public ScanoutOut {
 public:
-  static constexpr int BUFS = 5;           // nbufs_ is the count in use; 5 needed under GPU present
+  static constexpr int BUFS = 5;           // extra run-ahead for GPU present where the buffers fit
   static constexpr int DEFAULT_BUFS = 4;   // two frames of run-ahead
 
   // False if any precondition is missing; caller falls back to another path.
@@ -50,8 +50,8 @@ public:
   int width() const override { return w_; }
   int height() const override { return h_; }
   int bufs() const override { return nbufs_; }
-  // Before open(): how many buffers to rotate, up to BUFS.
-  void set_bufs(int n) { nbufs_ = n < 2 ? 2 : n > BUFS ? BUFS : n; }
+  // Before open(): desired count, up to BUFS; open() also limits the ring's memory.
+  void set_bufs(int n) { wanted_bufs_ = n < 2 ? 2 : n > BUFS ? BUFS : n; }
   int current() const override { return cur_; }
 
   // Pixels of a free buffer (blocks on the compositor if all pending: vsync).
@@ -80,6 +80,7 @@ private:
   struct wl_event_queue* q_ = nullptr;
   Buf bufs_[BUFS];
   int nbufs_ = DEFAULT_BUFS;
+  int wanted_bufs_ = DEFAULT_BUFS;
   bool gpu_writes_ = false;
   int cur_ = -1;
   int w_ = 0, h_ = 0;

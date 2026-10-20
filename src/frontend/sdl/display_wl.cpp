@@ -11,6 +11,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -199,6 +200,7 @@ void DmabufOut::drop_buf(Buf& b) {
 }
 
 bool DmabufOut::open(SDL_Window* win, int w, int h, int output_index) {
+  if (w <= 0 || h <= 0) return false;
   if (!wldyn::load()) { std::fprintf(stderr, "dmabuf: no libwayland (%s)\n", wldyn::error()); return false; }
 
   SDL_SysWMinfo wm;
@@ -232,8 +234,24 @@ bool DmabufOut::open(SDL_Window* win, int w, int h, int output_index) {
   (void)output_index;
 #endif
 
-  for (int i = 0; i < nbufs_; ++i)
-    if (!alloc_buf(bufs_[i])) { close(); return false; }
+  // The two 1024x768 panels share a 32 MiB CMA pool on the RG DS Plus.
+  // Five buffers per window alone consume 30 MiB, before the compositor
+  // and the RGA's sources. Keep run-ahead where it fits, but bound the
+  // allocation per window when a fullscreen configure enlarges it.
+  constexpr size_t ring_budget = 10u << 20;
+  const size_t bytes = static_cast<size_t>(w_) * h_ * 4;
+  nbufs_ = std::min(wanted_bufs_, static_cast<int>(std::max<size_t>(2, ring_budget / bytes)));
+  for (int i = 0; i < nbufs_; ++i) {
+    if (alloc_buf(bufs_[i])) continue;
+    drop_buf(bufs_[i]);
+    // Double buffering is sufficient for Wayland release-based reuse.
+    // Retain a smaller usable ring rather than dropping hardware scaling.
+    if (i >= 2) { nbufs_ = i; break; }
+    close(); return false;
+  }
+  if (std::getenv("DS_VERBOSE"))
+    std::fprintf(stderr, "dmabuf: %dx%d, %d buffers (%.1f MiB)\n", w_, h_, nbufs_,
+                 static_cast<double>(bytes * nbufs_) / (1u << 20));
   wl_display_roundtrip_queue(dpy_, q_);   // surface any create_immed error now, not mid-game
 
   // Fullscreen+opaque are two of the three scanout conditions (third is the
