@@ -1479,6 +1479,11 @@ static int run(int argc, char** argv) {
   const std::string audio_driver = cfg.str("audio.driver", "pipewire");
   const bool driver_forced = std::getenv("SDL_AUDIODRIVER") != nullptr;
   if ((init & SDL_INIT_AUDIO) && !driver_forced && !audio_driver.empty()) setenv("SDL_AUDIODRIVER", audio_driver.c_str(), 1);
+  // SDL3's atomic KMSDRM path (SDL2 programs run on it through sdl2-compat)
+  // has no plane for a second panel: with a window on each it crashed in the
+  // swap, mid-game or on the way out. The legacy path drives both. Unless the
+  // environment says otherwise; SDL2 itself has no atomic path and ignores it.
+  if (vs.dual_window) setenv("SDL_KMSDRM_ATOMIC", "0", 0);
 #ifdef SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS
   // Pad a/b/x/y are positions (south/east/west/north) everywhere: bindings
   // and the menu's pips assume it. SDL2 otherwise uses labels on Nintendo pads.
