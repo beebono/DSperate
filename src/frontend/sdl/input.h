@@ -45,7 +45,10 @@ public:
   // State for the coming frame. A press+release both arrived since the last
   // frame still counts as held this frame; the release lands on the next one.
   input::Frame frame() {
-    const input::Frame f{static_cast<u16>(buttons_ | pressed_ | stick_ | face_stick_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_), touching_ || touched_ || stylus_down_ != 0};
+    held_back_ &= buttons_ | stick_ | face_stick_;
+    touch_held_back_ = touch_held_back_ && (touching_ || stylus_down_ != 0);
+    const input::Frame f{static_cast<u16>((buttons_ | pressed_ | stick_ | face_stick_) & ~held_back_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_),
+                         !touch_held_back_ && (touching_ || touched_ || stylus_down_ != 0)};
     pressed_ = 0; stick_pressed_ = 0; touched_ = false;
     menu_fb_pressed_ = 0;   // menu fallback presses die with their frame
     return f;
@@ -65,7 +68,14 @@ public:
   u32 menu_held() const { return buttons_ | stick_ | menu_fb_held_; }
   // While the menu is open only Pause and Quit hotkeys fire, so a hotkey that
   // shares a control with a DS button can't hide that button from the menu.
-  void set_menu_open(bool on) { menu_open_ = on; if (!on) menu_faces_ = 0; }
+  // Closing it, what is still held -- the button that chose Resume, the
+  // finger on it -- stays from the game until let go: a B held on into Golden
+  // Sun's name entry deleted the name and backed out of the screen.
+  void set_menu_open(bool on) {
+    if (menu_open_ && !on) { held_back_ = buttons_ | stick_ | face_stick_; touch_held_back_ = touching_ || stylus_down_ != 0; }
+    menu_open_ = on;
+    if (!on) menu_faces_ = 0;
+  }
   // Pad face buttons pressed while the menu is open, by SDL position and
   // regardless of bindings: bit n = SDL_CONTROLLER_BUTTON n (south, east,
   // west, north). Controls-page actions that must not move when rebound.
@@ -155,7 +165,7 @@ private:
   static Bind parse_pad(const std::string& s);
 
   void set(io::Io::Button b, bool down) {
-    if (down) { buttons_ |= 1u << b; pressed_ |= 1u << b; } else buttons_ &= ~(1u << b);
+    if (down) { buttons_ |= 1u << b; pressed_ |= 1u << b; } else { buttons_ &= ~(1u << b); held_back_ &= ~(1u << b); }
   }
   void touch_at(int wx, int wy, Display& display);
   Panel touch_panel(SDL_TouchID id);   // DS_DUAL_SCREENS route for a device, cached on first sight
@@ -237,6 +247,8 @@ private:
   std::vector<Action> actions_;
   bool capturing_ = false, capture_pad_ = false;
   bool menu_open_ = false;
+  u32  held_back_ = 0;              // held as the menu closed: kept from the game until released
+  bool touch_held_back_ = false;    // the same for a touch
   u32  menu_faces_ = 0;
   // pad.face_fix: SDL face button -> the positional one the kernel says it is
   // (identity unless the mapping has a/b or x/y swapped); see pad_faces.h.
