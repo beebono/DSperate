@@ -224,6 +224,31 @@ static void test_exceptions_and_modes() {
   std::puts("exceptions/modes: ok");
 }
 
+// PLD, a cache hint in the unconditional space, is a no-op: the next
+// instruction runs, nothing traps. Zoo Keeper preloads in its title screen;
+// taken as undefined, it ended in the BIOS's undefined-instruction loop.
+static void test_pld() {
+  for (const Cpu which : {Cpu::ARM9, Cpu::ARM7}) {
+    Harness h(which);
+    const u32 base = which == Cpu::ARM9 ? 0x02000000 : 0x03800000;
+    h.load(base, {
+      0xF5D0F000,   // pld [r0]
+      0xF7D1F002,   // pld [r1, r2]
+      0xF550F004,   // pld [r0, #-4]
+      0xE2800001,   // add r0, r0, #1
+    });
+    h.start_arm(base);
+    h.r(0) = 0x02000100; h.r(1) = 0x02000200; h.r(2) = 8;
+    h.step(4);
+    CHECK(h.r(0) == 0x02000101);
+    CHECK((h.cpsr() & 0x1F) == 0x1F);   // still SYS: no undefined-instruction trap
+    CHECK(h.r(15) == base + 4 * 4 + 8);
+  }
+  CHECK(arm::is_pld(0xF5D0F000) && arm::is_pld(0xF7D1F002) && arm::is_pld(0xF550F004));
+  CHECK(!arm::is_pld(0xE5D0F000) && !arm::is_pld(0xF5F0F000) && !arm::is_pld(0xFA000000));   // LDRB, W set, BLX
+  std::puts("pld: ok");
+}
+
 int main() {
   test_decode();
   test_arm_alu();
@@ -231,5 +256,6 @@ int main() {
   test_ldm_stm();
   test_thumb();
   test_exceptions_and_modes();
+  test_pld();
   return 0;
 }

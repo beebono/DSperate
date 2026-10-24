@@ -74,7 +74,7 @@ bool exc_return_reg(u32 instr) {
 
 bool arm_needs_fallback(u32 instr, bool a9) {
   const u32 cond = instr >> 28;
-  if (cond == 0xF) return !(((instr >> 25) & 7) == 5 && a9) && ((instr >> 24) & 0xF7) != 0x55;   // BLX imm (ARM9) and PLD inline
+  if (cond == 0xF) return !(((instr >> 25) & 7) == 5 && a9) && !arm::is_pld(instr);   // BLX imm (ARM9) and PLD inline
   const AOp op = arm::decode_arm(instr);
   const u32 rd = (instr >> 12) & 0xF, rn = (instr >> 16) & 0xF;
   switch (op) {
@@ -1637,7 +1637,7 @@ void Translator::translate_arm(u32 instr) {
       emit_branch_static((pc_ + 8 + static_cast<u32>(off)) & ~1u, true, true);
       return;
     }
-    if (((instr >> 24) & 0xF7) == 0x55) { add_pending(numC(pc_)); return; }   // PLD
+    if (arm::is_pld(instr)) { add_pending(numC(pc_)); return; }   // PLD
     emit_fallback(instr, true);
     return;
   }

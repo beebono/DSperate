@@ -62,6 +62,10 @@ enum class TOp : u8 {
   Bkpt,
 };
 
+// PLD (v5TE: 1111 01I1 U101 nnnn ...), a cache hint the DS's CPUs do nothing
+// with. It lives in the unconditional space, so it is matched on the whole
+// word: the top byte is 0xF5 or 0xF7, never 0x55.
+constexpr inline bool is_pld(u32 instr) { return (instr & 0xFD700000u) == 0xF5500000u; }
 constexpr inline u32 arm_index(u32 instr) { return ((instr >> 16) & 0xFF0) | ((instr >> 4) & 0xF); }
 constexpr inline u32 thumb_index(u16 instr) { return instr >> 6; }
 
