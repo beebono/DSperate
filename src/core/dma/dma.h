@@ -94,6 +94,7 @@ private:
   void start(Channel& c);
   u32  run_channel(Channel& c, u32 budget);
   u32  run_channel_impl(Channel& c, u32 budget);
+  template <u32 UNIT> bool direct_run(Channel& c, bool a9, u32& used, u32 budget, u32& no_run_below);
   u32  unit_cycles(Channel& c, bool burst_start, bool word);
   struct RunCost; RunCost run_cost(Channel& c, bool word);
 };

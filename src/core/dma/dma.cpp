@@ -244,6 +244,78 @@ u32 Dma::run_channel(Channel& c, u32 budget) {
   return used;
 }
 
+// A run of units (UNIT bytes: 4 words, 2 halfwords) between two
+// direct-mapped pages: one page-table walk per end per run instead of two per
+// unit; a code-tagged or trapped destination stays per unit. True when it
+// moved something (the caller loops again), false for the per-unit path.
+template <u32 UNIT>
+bool Dma::direct_run(Channel& c, bool a9, u32& used, u32 budget, u32& no_run_below) {
+  mem::Bus& bus = nds_.bus;
+  if (c.src_inc != 1 || c.dst_inc != 1 || c.cur_dst < no_run_below) return false;
+  const bool tcm = a9 && (bus.dma_tcm(c.cur_src) || bus.dma_tcm(c.cur_dst));   // per unit, through the DMA's view
+  const u8* ps = tcm ? nullptr : nds_.cpu(c.cpu).page_table.read_ptr(c.cur_src);
+  bool code = false;
+  u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
+  // Lazy-2D write trap: take it once for the run rather than per unit.
+  // A page still trapped afterwards falls to the per-unit path.
+  if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
+    prof::add(prof::C_DMA_VRAM_TRAP, 1); if (prof::heavy) prof::add(dma_zone(c.cur_dst, true), 1);
+    nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
+    pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
+    // A lag-mode trap stays armed once satisfied: write the run through it.
+    if (!pd && nds_.gpu.vram_trap_settled()) pd = nds_.cpu(c.cpu).page_table.trapped_write_ptr(c.cur_dst, &code);
+  }
+  if (pd && !code) {
+    u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) / UNIT;
+    const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) / UNIT;
+    if (room_d < room) room = room_d;
+    RunCost rc = run_cost(c, UNIT == 4);
+    prof::add(prof::C_DMA_RUN_SEGS, 1);
+    const u32 zdst = c.cur_dst; const u32 z0 = c.iter_count;
+    // Whole run in one copy while the budget can't cut it short; unit
+    // costs are cyclic so the cut test is closed-form (binary search).
+    if (const u32 n = room < c.iter_count ? room : c.iter_count;
+        n >= kBulkMin && rc.closed_form()) {
+      const u32 dbl = a9 ? shift9_ : 0;   // 2 on a DSi at 134 MHz, not the DS's 1
+      u32 lo, tmp;
+      // Test full-budget first so the common case costs one bulk() call.
+      if (used + (rc.bulk(c.burst_pos, n - 1, tmp) << dbl) < budget) {
+        lo = n;
+      } else {
+        lo = 1;
+        u32 hi = n;
+        while (lo < hi) {
+          const u32 mid = lo + (hi - lo + 1) / 2;
+          if (used + (rc.bulk(c.burst_pos, mid - 1, tmp) << dbl) < budget) lo = mid; else hi = mid - 1;
+        }
+      }
+      if (lo >= 2) {
+        u32 pos_end;
+        used += rc.bulk(c.burst_pos, lo - 1, pos_end) << dbl;
+        c.burst_pos = pos_end;
+        std::memcpy(pd, ps, static_cast<size_t>(lo) * UNIT);
+        c.cur_src += UNIT * lo; c.cur_dst += UNIT * lo;
+        c.iter_count -= lo; c.rem_count -= lo;
+        prof::add(UNIT == 4 ? prof::C_DMA_RUN_W : prof::C_DMA_RUN_H, lo);
+        if (prof::heavy) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
+        return true;
+      }
+    }
+    for (;;) {
+      std::memcpy(pd, ps, UNIT);
+      prof::add(UNIT == 4 ? prof::C_DMA_RUN_W : prof::C_DMA_RUN_H, 1);
+      c.cur_src += UNIT; c.cur_dst += UNIT; c.iter_count--; c.rem_count--;
+      if (--room == 0 || c.iter_count == 0 || used >= budget) break;
+      u32 cost = rc.next(c); if (a9) cost <<= shift9_; used += cost;
+      ps += UNIT; pd += UNIT;
+    }
+    if (prof::heavy) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
+    return true;
+  }
+  no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
+  return false;
+}
+
 u32 Dma::run_channel_impl(Channel& c, u32 budget) {
   const bool a9 = c.cpu == Cpu::ARM9;
   const bool word = c.cnt & (1u << 26);
@@ -312,136 +384,12 @@ u32 Dma::run_channel_impl(Channel& c, u32 budget) {
       nds_.gpu3d.gxfifo_dma_write(bus.dmac_read32(c.cpu, c.cur_src));
     }
     else if (word) {
-      // Run of words between two direct-mapped pages: one page-table walk per
-      // end per run instead of two per word; a code-tagged or trapped
-      // destination stays per word.
-      if (c.src_inc == 1 && c.dst_inc == 1 && c.cur_dst >= no_run_below) {
-        const bool tcm = a9 && (bus.dma_tcm(c.cur_src) || bus.dma_tcm(c.cur_dst));   // per unit, through the DMA's view
-        const u8* ps = tcm ? nullptr : nds_.cpu(c.cpu).page_table.read_ptr(c.cur_src);
-        bool code = false;
-        u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
-        // Lazy-2D write trap: take it once for the run rather than per word.
-        // A page still trapped afterwards falls to the per-word path.
-        if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
-          prof::add(prof::C_DMA_VRAM_TRAP, 1); if (prof::heavy) prof::add(dma_zone(c.cur_dst, true), 1);
-          nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
-          pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
-          // A lag-mode trap stays armed once satisfied: write the run through it.
-          if (!pd && nds_.gpu.vram_trap_settled()) pd = nds_.cpu(c.cpu).page_table.trapped_write_ptr(c.cur_dst, &code);
-        }
-        if (pd && !code) {
-          u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 2;
-          const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) >> 2;
-          if (room_d < room) room = room_d;
-          RunCost rc = run_cost(c, true);
-          prof::add(prof::C_DMA_RUN_SEGS, 1);
-          const u32 zdst = c.cur_dst; const u32 z0 = c.iter_count;
-          // Whole run in one copy while the budget can't cut it short; unit
-          // costs are cyclic so the cut test is closed-form (binary search).
-          if (const u32 n = room < c.iter_count ? room : c.iter_count;
-              n >= kBulkMin && rc.closed_form()) {
-            const u32 dbl = a9 ? shift9_ : 0;
-            u32 lo, tmp;
-            // Test full-budget first so the common case costs one bulk() call.
-            if (used + (rc.bulk(c.burst_pos, n - 1, tmp) << dbl) < budget) {
-              lo = n;
-            } else {
-              lo = 1;
-              u32 hi = n;
-              while (lo < hi) {
-                const u32 mid = lo + (hi - lo + 1) / 2;
-                if (used + (rc.bulk(c.burst_pos, mid - 1, tmp) << dbl) < budget) lo = mid; else hi = mid - 1;
-              }
-            }
-            if (lo >= 2) {
-              u32 pos_end;
-              used += rc.bulk(c.burst_pos, lo - 1, pos_end) << dbl;
-              c.burst_pos = pos_end;
-              std::memcpy(pd, ps, static_cast<size_t>(lo) * 4);
-              c.cur_src += 4 * lo; c.cur_dst += 4 * lo;
-              c.iter_count -= lo; c.rem_count -= lo;
-              prof::add(prof::C_DMA_RUN_W, lo);
-              if (prof::heavy) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
-              continue;
-            }
-          }
-          for (;;) {
-            std::memcpy(pd, ps, 4);
-            prof::add(prof::C_DMA_RUN_W, 1);
-            c.cur_src += 4; c.cur_dst += 4; c.iter_count--; c.rem_count--;
-            if (--room == 0 || c.iter_count == 0 || used >= budget) break;
-            cost = rc.next(c); if (a9) cost <<= shift9_; used += cost;
-            ps += 4; pd += 4;
-          }
-          if (prof::heavy) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
-          continue;
-        }
-        no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
-      }
+      if (direct_run<4>(c, a9, used, budget, no_run_below)) continue;
       prof::add(prof::C_DMA_SLOW_W, 1); if (prof::heavy) prof::add(dma_zone(c.cur_dst, false), 1);
       bus.dmac_write32(c.cpu, c.cur_dst, bus.dmac_read32(c.cpu, c.cur_src));
     }
     else {
-      // Halfword run between two direct-mapped pages: same pattern as the word run above.
-      if (c.src_inc == 1 && c.dst_inc == 1 && c.cur_dst >= no_run_below) {
-        const bool tcm = a9 && (bus.dma_tcm(c.cur_src) || bus.dma_tcm(c.cur_dst));   // per unit, through the DMA's view
-        const u8* ps = tcm ? nullptr : nds_.cpu(c.cpu).page_table.read_ptr(c.cur_src);
-        bool code = false;
-        u8* pd = ps ? nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code) : nullptr;
-        if (ps && !pd && a9 && (c.cur_dst >> 24) == 0x06) {
-          prof::add(prof::C_DMA_VRAM_TRAP, 1); if (prof::heavy) prof::add(dma_zone(c.cur_dst, true), 1);
-          nds_.gpu.vram_store_trap(Cpu::ARM9, c.cur_dst);
-          pd = nds_.cpu(c.cpu).page_table.write_ptr(c.cur_dst, &code);
-          // A lag-mode trap stays armed once satisfied: write the run through it.
-          if (!pd && nds_.gpu.vram_trap_settled()) pd = nds_.cpu(c.cpu).page_table.trapped_write_ptr(c.cur_dst, &code);
-        }
-        if (pd && !code) {
-          u32 room = (mem::PAGE_SIZE - (c.cur_src & (mem::PAGE_SIZE - 1))) >> 1;
-          const u32 room_d = (mem::PAGE_SIZE - (c.cur_dst & (mem::PAGE_SIZE - 1))) >> 1;
-          if (room_d < room) room = room_d;
-          RunCost rc = run_cost(c, false);
-          prof::add(prof::C_DMA_RUN_SEGS, 1);
-          const u32 zdst = c.cur_dst; const u32 z0 = c.iter_count;
-          // Same closed-form bulk copy as the word-run path above.
-          if (const u32 n = room < c.iter_count ? room : c.iter_count;
-              n >= kBulkMin && rc.closed_form()) {
-            const u32 dbl = a9 ? shift9_ : 0;   // 2 on a DSi at 134 MHz, not the DS's 1
-            u32 lo, tmp;
-            if (used + (rc.bulk(c.burst_pos, n - 1, tmp) << dbl) < budget) {
-              lo = n;
-            } else {
-              lo = 1;
-              u32 hi = n;
-              while (lo < hi) {
-                const u32 mid = lo + (hi - lo + 1) / 2;
-                if (used + (rc.bulk(c.burst_pos, mid - 1, tmp) << dbl) < budget) lo = mid; else hi = mid - 1;
-              }
-            }
-            if (lo >= 2) {
-              u32 pos_end;
-              used += rc.bulk(c.burst_pos, lo - 1, pos_end) << dbl;
-              c.burst_pos = pos_end;
-              std::memcpy(pd, ps, static_cast<size_t>(lo) * 2);
-              c.cur_src += 2 * lo; c.cur_dst += 2 * lo;
-              c.iter_count -= lo; c.rem_count -= lo;
-              prof::add(prof::C_DMA_RUN_H, lo);
-              if (prof::heavy) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
-              continue;
-            }
-          }
-          for (;;) {
-            std::memcpy(pd, ps, 2);
-            prof::add(prof::C_DMA_RUN_H, 1);
-            c.cur_src += 2; c.cur_dst += 2; c.iter_count--; c.rem_count--;
-            if (--room == 0 || c.iter_count == 0 || used >= budget) break;
-            cost = rc.next(c); if (a9) cost <<= shift9_; used += cost;
-            ps += 2; pd += 2;
-          }
-          if (prof::heavy) prof::add(dma_zone(zdst, false), z0 - c.iter_count);
-          continue;
-        }
-        no_run_below = (c.cur_dst | (mem::PAGE_SIZE - 1)) + 1;
-      }
+      if (direct_run<2>(c, a9, used, budget, no_run_below)) continue;
       prof::add(prof::C_DMA_SLOW_H, 1); if (prof::heavy) prof::add(dma_zone(c.cur_dst, false), 1);
       bus.dmac_write16(c.cpu, c.cur_dst, bus.dmac_read16(c.cpu, c.cur_src));
     }
