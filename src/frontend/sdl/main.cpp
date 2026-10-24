@@ -2989,9 +2989,15 @@ sdl_ready:
       host.reopen_wanted = true;
   };
   menu.set_settings_host(&host);
+  // Paused, nothing is paced: the emulation thread is an ordinary task
+  // (rt_budget.h) until it resumes. The menu's pages are drawn at the
+  // panel's resolution, and a run of them outlasts RLIMIT_RTTIME as a
+  // real-time thread.
+  std::optional<ds::sdl::OffRealtime> paused_off_rt;
   auto set_paused = [&](bool p) {
     if (p == paused) return;
     paused = p;
+    if (p) paused_off_rt.emplace(); else paused_off_rt.reset();
     audio.pause(p);
     display.set_page(p);
     if (p) flush_save(); else { pacer.reset(); fs_debt_ms = 0; }
