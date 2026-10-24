@@ -4076,6 +4076,15 @@ sdl_ready:
 // RESET from a game the list started goes back via re-exec: launch_game is
 // a one-way trip (a DSiWare pick swaps BIOS pair, firmware, NAND, machine).
 int main(int argc, char** argv) {
+#if defined(__linux__)
+  // A crash's core without the guest memory's shared mappings (bit 1 of the
+  // default 0x33): fastmem lays guest pages into its views as MAP_SHARED
+  // mappings of one memfd, some mirrored thousands of times, and each mapping
+  // went into the core again -- systemd-coredump took 92 s over one on the
+  // RG DS+, the game frozen on screen meanwhile. The heap and the stacks a
+  // backtrace needs stay in.
+  if (FILE* f = std::fopen("/proc/self/coredump_filter", "w")) { std::fputs("0x31", f); std::fclose(f); }
+#endif
   const int rc = run(argc, argv);
   if (g_restart && rc == 0) {
     execv("/proc/self/exe", argv);
