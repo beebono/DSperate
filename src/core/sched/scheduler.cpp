@@ -436,6 +436,7 @@ void Scheduler::count_slice(bool skipped, s64 slice) const {
 // handler may reschedule an event already overshot (timer period shorter
 // than a slice), which one pass would leave armed in the past.
 void Scheduler::fire_due() {
+  if (nds_.io.ipc9_pending_n) nds_.io.ipc_deliver();   // the ARM9's held IPC FIFO words, the ARM7 having caught up
   while (now_ >= next_) {
     next_ = std::numeric_limits<u64>::max();
     next_id_ = EVENT_COUNT;
