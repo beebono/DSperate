@@ -305,7 +305,7 @@ private:
   // Controls page: column (keyboard/pad), position, scroll. `bind_row_`
   // indexes the host's binding list.
   bool bind_pad_ = false;
-  int  bind_row_ = 0;
+  int  bind_row_ = 0, bind_count_ = 0;
   bool reset_armed_ = false;   // first press of DEFAULTS; the second resets the column
   u32  faces_ = 0;
   mutable int bind_top_ = 0;

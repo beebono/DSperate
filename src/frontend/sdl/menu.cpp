@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <iterator>
@@ -1017,6 +1018,7 @@ Menu::Result Menu::handle_options(u32 presses) {
     // Open on the pad column when one is plugged in; keyboard otherwise.
     bind_pad_ = host_->has_pad();
     bind_row_ = 0;
+    bind_count_ = host_->binding_count(bind_pad_);
     bind_top_ = 0;
     reset_armed_ = false;
     return Result::None;
@@ -1159,7 +1161,10 @@ void Menu::draw_settings(const Canvas& d) const {
 
 // Controls page: two columns of bindings (keyboard, pad); shoulders switch.
 void Menu::move_bind_row(int delta) {
-  const int n = host_->binding_count(bind_pad_);
+  const int bindings = host_->binding_count(bind_pad_);
+  if (bindings < bind_count_ && bind_row_ >= bindings) bind_row_ = std::max(0, bindings - 1);
+  bind_count_ = bindings;
+  const int n = bindings + 1;
   if (n <= 0) return;
   const int at = bind_row_ + delta;
   bind_row_ = at < 0 ? 0 : at >= n ? n - 1 : at;
@@ -1191,8 +1196,10 @@ Menu::Result Menu::handle_controls(u32 presses) {
   // so rebinding DS Y/X on this page can't move them. Keyboard has no
   // positions: DS Y/X as bound.
   const bool pad = host_->has_pad();
-  const bool clear = pad ? (faces_ >> 2) & 1 : hit(B::BTN_Y);
-  const bool reset = pad ? (faces_ >> 3) & 1 : hit(B::BTN_X);
+  const int bindings = host_->binding_count(bind_pad_);
+  const bool speed_row = bind_row_ == bindings;
+  const bool clear = !speed_row && (pad ? (faces_ >> 2) & 1 : hit(B::BTN_Y));
+  const bool reset = !speed_row && (pad ? (faces_ >> 3) & 1 : hit(B::BTN_X));
   // DEFAULTS wipes the whole column, so it takes a second press; any other
   // press backs out and does only that.
   if (reset_armed_ && (presses || faces_)) {
@@ -1207,11 +1214,25 @@ Menu::Result Menu::handle_controls(u32 presses) {
   if (hit(B::BTN_L) || hit(B::BTN_R)) {
     bind_pad_ = !bind_pad_;
     bind_row_ = 0;
+    bind_count_ = host_->binding_count(bind_pad_);
     bind_top_ = 0;
   }
   // A alone opens a capture: START may be the control being bound, so it
   // cannot also be the opener.
-  if (hit(B::BTN_A)) host_->begin_capture(bind_pad_);
+  if (speed_row) {
+    if (hit(B::BTN_LEFT) || hit(B::BTN_RIGHT)) {
+      const std::string current = host_->get("pad.stylus_speed");
+      const double value = current.empty() ? 4.0 : std::strtod(current.c_str(), nullptr);
+      const double next = std::clamp(value + (hit(B::BTN_RIGHT) ? 0.5 : -0.5), 0.5, 16.0);
+      if (next != value) {
+        char text[16];
+        std::snprintf(text, sizeof text, "%.1f", next);
+        host_->set("pad.stylus_speed", text);
+      }
+    }
+  } else if (hit(B::BTN_A)) {
+    host_->begin_capture(bind_pad_);
+  }
   // CLEAR: no key press means "no key".
   if (clear) {
     const SettingsHost::Binding b = host_->binding(bind_pad_, bind_row_);
@@ -1229,7 +1250,8 @@ void Menu::draw_controls(const Canvas& d) const {
   const Metrics& m = f.m;
   visible_ = f.visible;
 
-  const int n = host_->binding_count(bind_pad_);
+  const int bindings = host_->binding_count(bind_pad_);
+  const int n = bindings + 1;
   // Drawing is const, so this clamp is local; handle_controls() moves the cursor back.
   const int sel = std::min(bind_row_, std::max(0, n - 1));
   // Three rows at the foot: legend over two lines (doesn't fit one), plus a clash line.
@@ -1245,14 +1267,19 @@ void Menu::draw_controls(const Canvas& d) const {
   const bool listening = host_->capturing();
   const int value_w = f.avail / 2;
   for (int i = 0; i < visible && top + i < n; ++i) {
-    const SettingsHost::Binding b = host_->binding(bind_pad_, top + i);
+    const int row = top + i;
     const int ry = f.py0 + m.list_rows_y + i * m.list_row_h;
-    const bool is_sel = top + i == sel;
+    const bool is_sel = row == sel;
     if (is_sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
-    draw_text(d, f.text_x, ry, m.list_s, kInk, fit(b.label, m.list_s, f.avail - value_w).c_str());
-    // The row being rebound says so where its value was.
-    const std::string v = is_sel && listening ? "PRESS ANY..." : (b.value.empty() || b.value == "none" ? "--" : b.value);
-    const u32 ink = is_sel && listening ? kEdgeText : (v == "--" ? kDim : kInk);
+    const bool speed_row = row == bindings;
+    const SettingsHost::Binding b = speed_row ? SettingsHost::Binding{} : host_->binding(bind_pad_, row);
+    const std::string label = speed_row ? "STYLUS SPEED" : b.label;
+    const std::string raw = speed_row ? host_->get("pad.stylus_speed") : b.value;
+    const std::string v = speed_row ? (raw.empty() ? "4.0 PX/F" : raw + " PX/F")
+                       : is_sel && listening ? "PRESS ANY..."
+                       : (raw.empty() || raw == "none" ? "--" : raw);
+    const u32 ink = is_sel && listening && !speed_row ? kEdgeText : (v == "--" ? kDim : kInk);
+    draw_text(d, f.text_x, ry, m.list_s, kInk, fit(label, m.list_s, f.avail - value_w).c_str());
     draw_text(d, f.text_x + f.avail - std::min(value_w, text_width(m.list_s, v.c_str())),
               ry, m.list_s, ink, fit(v, m.list_s, value_w).c_str());
   }
@@ -1263,10 +1290,12 @@ void Menu::draw_controls(const Canvas& d) const {
   // Footer names DS buttons by position pip, since the pad in hand may print
   // different letters on the same four buttons.
   const bool pad = host_->has_pad();
-  const char* help1 = listening ? "PRESS THE CONTROL TO BIND,"
+  const char* help1 = sel == bindings ? "LEFT/RIGHT CHANGE SPEED"
+                    : listening ? "PRESS THE CONTROL TO BIND,"
                     : reset_armed_ ? (pad ? "\x04 AGAIN: RESET ALL" : "X AGAIN: RESET ALL")
                     : pad ? "\x02 BIND   \x03 CLEAR   \x04 DEFAULTS" : "A BIND   Y CLEAR   X DEFAULTS";
-  const char* help2 = listening ? "OR ESCAPE TO CANCEL"
+  const char* help2 = sel == bindings ? "UP/DOWN SELECT  L/R COLUMN"
+                    : listening ? "OR ESCAPE TO CANCEL"
                     : host_->has_pad() ? "L/R KEYBOARD OR PAD" : "L/R SWAP COLUMN";
   draw_text(d, f.text_x, foot_y + 2 * m.list_s, m.list_s, reset_armed_ && !listening ? kDanger : kDim, fit(help1, m.list_s, f.avail).c_str());
   draw_text(d, f.text_x, foot_y + 2 * m.list_s + m.list_row_h, m.list_s, kDim, fit(help2, m.list_s, f.avail).c_str());

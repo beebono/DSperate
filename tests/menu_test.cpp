@@ -1290,6 +1290,24 @@ void test_controls_binding() {
   CHECK(h.writes.back() == "reset");
 }
 
+void test_controls_stylus_speed() {
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));     // CONTROLS
+  m.input(press(B::BTN_A));
+  for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));     // STYLUS SPEED
+  m.input(press(B::BTN_LEFT));
+  CHECK(h.kv["pad.stylus_speed"] == "3.5");
+  CHECK(h.writes.back() == "pad.stylus_speed");
+  m.input(press(B::BTN_RIGHT));
+  CHECK(h.kv["pad.stylus_speed"] == "4.0");
+  CHECK(!h.capturing());
+}
+
 // With a pad, CLEAR and DEFAULTS are the west and north buttons by position:
 // rebinding DS Y/X can't move them, so a DS X press does nothing here.
 void test_controls_clear_and_reset_are_positional_on_a_pad() {
@@ -1595,6 +1613,7 @@ int main() {
   test_disabled_row_does_not_step();
   test_commit_on_closing();
   test_controls_binding();
+  test_controls_stylus_speed();
   test_controls_clear_and_reset_are_positional_on_a_pad();
   test_controls_list_can_shrink();
   test_controls_repaints_when_a_capture_is_cancelled();
