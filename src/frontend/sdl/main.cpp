@@ -2579,6 +2579,7 @@ sdl_ready:
   host.apply = [&](const char* key, const std::string& v) {
     const auto is = [&](const char* k) { return std::strcmp(key, k) == 0; };
     const bool on = v == "1" || v == "true" || v == "yes" || v == "on";
+    if (is("pad.stylus_speed")) { host.reconfigure_input(); return; }
     if (is("emu.frameskip")) { if (!net_live) fs_limit = std::atoi(v.c_str()); return; }
     if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }
     if (is("emu.dsi_nand_shortcuts")) {
