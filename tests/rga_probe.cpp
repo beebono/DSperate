@@ -23,6 +23,7 @@
 #include <linux/videodev2.h>
 #include <poll.h>
 #include <sys/ioctl.h>
+#include "frontend/sdl/dmaheap.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <vector>
@@ -32,20 +33,11 @@
 #if defined(V4L2_PIX_FMT_XBGR32) && defined(V4L2_CAP_VIDEO_M2M_MPLANE)   // (V4L2_MEMORY_DMABUF is an enumerator, of the same vintage)
 
 namespace {
-struct dma_heap_allocation_data { uint64_t len; uint32_t fd; uint32_t fd_flags; uint64_t heap_flags; };
-#define DMA_HEAP_IOCTL_ALLOC _IOWR('H', 0x0, struct dma_heap_allocation_data)
-
 int heap_alloc(size_t len) {
-  const char* heaps[] = {"/dev/dma_heap/linux,cma", "/dev/dma_heap/system", nullptr};
-  for (int i = 0; heaps[i]; ++i) {
-    int h = open(heaps[i], O_RDWR | O_CLOEXEC);
-    if (h < 0) continue;
-    dma_heap_allocation_data a{}; a.len = len; a.fd_flags = O_RDWR | O_CLOEXEC;
-    int r = ioctl(h, DMA_HEAP_IOCTL_ALLOC, &a);
-    close(h);
-    if (r == 0) { std::printf("dma-buf %zu bytes from %s\n", len, heaps[i]); return static_cast<int>(a.fd); }
-  }
-  return -1;
+  // The frontend's allocator (DS_DMA_HEAP picks the source).
+  const int fd = ds::sdl::dmaheap::alloc(len, [](int) { return true; }, "rga_probe");
+  if (fd >= 0) std::printf("dma-buf %zu bytes from %s\n", len, ds::sdl::dmaheap::chosen());
+  return fd;
 }
 
 int xioctl(int fd, unsigned long req, void* arg) { int r; do r = ioctl(fd, req, arg); while (r < 0 && errno == EINTR); return r; }

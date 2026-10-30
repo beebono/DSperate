@@ -3,7 +3,7 @@
 //
 // Interface the scanline path presents through when not writing into SDL's
 // window surface (DmabufOut/display_wl.h, DrmOut/display_drm.h): both hand
-// out a CMA dma-heap buffer per frame and present it without a copy.
+// out a dma-heap buffer per frame and present it without a copy.
 // begin_frame() blocks (buffer release / previous flip); end_frame() does not
 // -- so display pacing is felt before emulation, where the loop has slack.
 #pragma once

@@ -9,6 +9,7 @@
 // Blends may differ by one step (fixed-function vs float mix); the rest must
 // match exactly. Device-only (Vulkan + /dev/dma_heap), not a test.
 #include "frontend/sdl/gpu_present.h"
+#include "frontend/sdl/dmaheap.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,7 +20,6 @@
 
 #include <fcntl.h>
 #include <linux/dma-buf.h>
-#include <linux/dma-heap.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -38,14 +38,7 @@ public:
   HeapOut(int w, int h) : w_(w), h_(h) {
     for (Buf& b : buf_) {
       b.len = static_cast<size_t>(w) * h * 4;
-      for (const char* heap : {"/dev/dma_heap/linux,cma", "/dev/dma_heap/system"}) {
-        const int fd = open(heap, O_RDWR | O_CLOEXEC);
-        if (fd < 0) continue;
-        dma_heap_allocation_data d{}; d.len = b.len; d.fd_flags = O_RDWR | O_CLOEXEC;
-        const int r = ioctl(fd, DMA_HEAP_IOCTL_ALLOC, &d);
-        ::close(fd);
-        if (r == 0) { b.fd = static_cast<int>(d.fd); break; }
-      }
+      b.fd = dmaheap::alloc(b.len, [](int) { return true; }, "gpu_present_probe");   // DS_DMA_HEAP picks the source
       if (b.fd < 0) continue;
       void* p = mmap(nullptr, b.len, PROT_READ | PROT_WRITE, MAP_SHARED, b.fd, 0);
       b.px = p == MAP_FAILED ? nullptr : static_cast<u32*>(p);

@@ -6,7 +6,7 @@
 // scanout sink's own dma-buf, one job per shown view, with crop on the
 // output queue and compose on the capture queue for the layout. Neither the
 // CPU nor the GPU touches a panel-sized pixel: the CPU copies the two 1x
-// frames into small CMA source buffers (192 KB each), the RGA does the rest
+// frames into small dma-buf source buffers (192 KB each), the RGA does the rest
 // in ~1 ms a view, and the present thread waits on it with poll().
 //
 // The driver's scaler filters (bilinear; there is no filter control), so

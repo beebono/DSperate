@@ -9,6 +9,7 @@
 // (timestamps) and the submit-to-fence time of each path, and checks every
 // pixel against nearest. Device-only, not a test.
 #include "core/gpu/vk/vk_internal.h"
+#include "frontend/sdl/dmaheap.h"
 
 #include <algorithm>
 #include <chrono>
@@ -20,7 +21,6 @@
 
 #include <fcntl.h>
 #include <linux/dma-buf.h>
-#include <linux/dma-heap.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -61,16 +61,11 @@ u32 find_mem(u32 bits, VkMemoryPropertyFlags want) {
 
 struct DmaBuf {
   int fd = -1; u32* px = nullptr; size_t len = 0;
+  // The frontend's allocator: DS_DMA_HEAP picks the source (a heap name,
+  // `udmabuf`, `drm`), else its own order (contiguous heaps first).
   bool alloc(size_t bytes) {
     len = bytes;
-    for (const char* heap : {"/dev/dma_heap/linux,cma", "/dev/dma_heap/system"}) {
-      const int h = open(heap, O_RDWR | O_CLOEXEC);
-      if (h < 0) continue;
-      dma_heap_allocation_data d{}; d.len = bytes; d.fd_flags = O_RDWR | O_CLOEXEC;
-      const int r = ioctl(h, DMA_HEAP_IOCTL_ALLOC, &d);
-      close(h);
-      if (r == 0) { fd = static_cast<int>(d.fd); break; }
-    }
+    fd = sdl::dmaheap::alloc(bytes, [](int) { return true; }, "vk_present_probe");
     if (fd < 0) return false;
     void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (p == MAP_FAILED) return false;
@@ -199,6 +194,7 @@ int main(int argc, char** argv) {
     const char* w = "";
     if (!import(dbuf[i], W, H, usage, imp[i], &w)) { std::printf("import with TRANSFER_DST|COLOR_ATTACHMENT failed: %s\n", w); return 1; }
   }
+  std::printf("dma-bufs from %s\n", sdl::dmaheap::chosen());
 
   // Source: the two screens, as present.comp reads them (SSBO) and as the
   // blit reads them (a 256x384 OPTIMAL image the frame is copied into).

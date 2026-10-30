@@ -234,7 +234,7 @@ bool Display::open_kms(int rot) {
   return true;
 }
 
-// The scanline path's pixels in a CMA dma-buf instead of the shm surface.
+// The scanline path's pixels in a dma-buf instead of the shm surface.
 // Needs the window surface first (the size it's configured at), and falls
 // back to it if the dma-buf is lost later.
 bool Display::open_dmabuf(int rot) {

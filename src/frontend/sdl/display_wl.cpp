@@ -25,7 +25,7 @@ namespace {
 
 constexpr u32 FMT_XRGB8888 = 0x34325258;   // 'XR24'; core writes 0xAARRGGBB, opaque
 
-// LINEAR: plain row-major (what the CMA heap gives us). INVALID: "derive
+// LINEAR: plain row-major (what the dma-heaps give us). INVALID: "derive
 // layout from the dmabuf". A compositor may accept one and not the other.
 constexpr u64 MOD_LINEAR  = 0;
 constexpr u64 MOD_INVALID = 0x00ffffffffffffffULL;

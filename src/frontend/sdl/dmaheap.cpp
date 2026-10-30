@@ -14,6 +14,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 namespace ds::sdl::dmaheap {
@@ -107,6 +108,7 @@ struct Source {
   bool swept = false;             // blind id-bit candidate: quiet on failure
   enum Drm { None, Msm, Dumb };   // GEM buffers exported by PRIME, for kernels with no heap
   Drm drm = None;
+  bool udma = false;              // /dev/udmabuf over a sealed memfd
 };
 
 std::string g_chosen;
@@ -206,29 +208,130 @@ int alloc_drm_dumb(const std::string& path, size_t len) {
   return fd;
 }
 
+// From <linux/udmabuf.h>. Plain page-cache pages of a memfd, pinned and
+// exported as a dma-buf: no contiguous pool at all, so it needs an IOMMU (or
+// the device's own MMU) in front of every consumer. The memfd is closed
+// once wrapped; the dma-buf holds the pages. Pages are cached, like the
+// heaps', and the sync ioctl works on them.
+struct udmabuf_create {
+  uint32_t memfd;
+  uint32_t flags;
+  uint64_t offset;
+  uint64_t size;
+};
+#define UDMABUF_CREATE _IOW('u', 0x42, struct udmabuf_create)
+constexpr uint32_t kUdmabufCloexec = 0x01;
+
+int alloc_udmabuf(size_t len) {
+  const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  len = (len + page - 1) & ~(page - 1);
+  const int dev = ::open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
+  if (dev < 0) return -1;
+  const int mfd = memfd_create("dsperate-scanout", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  int fd = -1, err = 0;
+  if (mfd >= 0) {
+    if (ftruncate(mfd, static_cast<off_t>(len)) == 0 && fcntl(mfd, F_ADD_SEALS, F_SEAL_SHRINK) == 0) {
+      udmabuf_create c = {};
+      c.memfd = static_cast<uint32_t>(mfd);
+      c.flags = kUdmabufCloexec;
+      c.size = len;
+      const int r = ioctl(dev, UDMABUF_CREATE, &c);
+      if (r >= 0) fd = r; else err = errno;
+    } else {
+      err = errno;
+    }
+    ::close(mfd);
+  } else {
+    err = errno;
+  }
+  ::close(dev);
+  errno = err;
+  return fd;
+}
+
 int alloc_from(const Source& s, size_t len) {
+  if (s.udma) return alloc_udmabuf(len);
   if (s.drm) return (s.drm == Source::Msm ? alloc_drm_msm : alloc_drm_dumb)(s.path.substr(s.path.find(':') + 1), len);
   return s.ion_mask ? alloc_ion(s, len) : alloc_dmaheap(s.path, len);
 }
 
-// Rank a dma-heap by name: contiguous memory preferred, uncached over cached.
-int heap_rank(const std::string& n) {
-  const bool uncached = n.find("uncached") != std::string::npos;
-  if (n == "linux,cma") return 0;                                  // mainline
-  if (n.find("cma") != std::string::npos || n.find("contig") != std::string::npos) return uncached ? 1 : 2;
-  if (n.find("reserved") != std::string::npos || n.find("carveout") != std::string::npos) return 3;
-  if (n.find("system") != std::string::npos) return uncached ? 4 : 5;   // contiguous only behind an IOMMU
-  return 6;
+// Whether the display controller can scan a buffer of plain system pages:
+// a dma-buf of `len` from the system heap imported on each KMS node and
+// offered as a framebuffer (ADDFB2 needs no DRM master, so this runs beside
+// the compositor). A driver with no IOMMU in front of the display refuses
+// the scattered pages right there. Decided once, from the first request's
+// size, so the pages are too many to be one chunk by luck.
+//
+// Where it holds, the system heap goes first: on the RG DS Plus (RK3566,
+// 1 GiB, a 32 MiB CMA pool) the five 1024x768 buffers of the second window
+// do not fit in CMA beside the first window's, the fallover to the system
+// heap mid-start cost a 1.3 s present stall, and the system heap's buffers
+// measured the same on the GPU present, the RGA and the CPU (tests/
+// dmabuf_probe.cpp, vk_present_probe, rga_probe). ROCKNIX is also moving
+// its 1 GiB devices off CMA. Without an IOMMU, contiguous memory stays first.
+bool display_scans_system_pages(size_t len) {
+  static int cached = -1;
+  if (cached >= 0) return cached == 1;
+  cached = 0;
+  const int fd = alloc_dmaheap("/dev/dma_heap/system", len);
+  if (fd < 0) return false;
+  DIR* d = opendir("/dev/dri");
+  if (!d) { ::close(fd); return false; }
+  std::vector<std::string> cards;
+  while (dirent* e = readdir(d)) if (!std::strncmp(e->d_name, "card", 4)) cards.emplace_back(e->d_name);
+  closedir(d);
+  std::sort(cards.begin(), cards.end());
+  for (const auto& c : cards) {
+    const int drm = ::open(("/dev/dri/" + c).c_str(), O_RDWR | O_CLOEXEC);
+    if (drm < 0) continue;
+    drmu::prime_handle ph = {};
+    ph.fd = fd;
+    if (ioctl(drm, drmu::IOCTL_PRIME_FD_TO_HANDLE, &ph) == 0) {
+      drmu::mode_fb_cmd2 f = {};
+      f.width = 1024;
+      f.height = static_cast<uint32_t>(len / 4096);
+      f.pixel_format = 0x34325258u;   // XR24
+      f.handles[0] = ph.handle;
+      f.pitches[0] = 4096;
+      if (ioctl(drm, drmu::IOCTL_MODE_ADDFB2, &f) == 0) {
+        unsigned int id = f.fb_id;
+        ioctl(drm, drmu::IOCTL_MODE_RMFB, &id);
+        cached = 1;
+      }
+      drmu::gem_close gc = {};
+      gc.handle = ph.handle;
+      ioctl(drm, drmu::IOCTL_GEM_CLOSE, &gc);
+    }
+    ::close(drm);
+    if (cached) break;
+  }
+  ::close(fd);
+  if (std::getenv("DS_DMA_HEAP_VERBOSE"))
+    std::fprintf(stderr, "dmaheap: the display %s scan system pages\n", cached ? "can" : "cannot");
+  return cached == 1;
 }
 
-void dma_heaps(std::vector<Source>& out) {
+// Rank a dma-heap by name: system pages first where the display can scan
+// them (see above), else contiguous memory; uncached over cached.
+int heap_rank(const std::string& n, bool system_first) {
+  const bool uncached = n.find("uncached") != std::string::npos;
+  if (n.find("system") != std::string::npos) return system_first ? (uncached ? 0 : 1) : (uncached ? 5 : 6);
+  if (n == "linux,cma") return 2;                                  // mainline
+  if (n.find("cma") != std::string::npos || n.find("contig") != std::string::npos) return uncached ? 3 : 4;
+  if (n.find("reserved") != std::string::npos || n.find("carveout") != std::string::npos) return 4;
+  return 7;
+}
+
+void dma_heaps(std::vector<Source>& out, size_t len) {
   DIR* d = opendir("/dev/dma_heap");
   if (!d) return;
   std::vector<std::string> names;
   while (dirent* e = readdir(d)) if (e->d_name[0] != '.') names.emplace_back(e->d_name);
   closedir(d);
+  const bool system_first = std::any_of(names.begin(), names.end(), [](const std::string& n) { return n.find("system") != std::string::npos; }) &&
+                            display_scans_system_pages(len);
   std::stable_sort(names.begin(), names.end(),
-                   [](const std::string& a, const std::string& b) { return heap_rank(a) < heap_rank(b); });
+                   [&](const std::string& a, const std::string& b) { return heap_rank(a, system_first) < heap_rank(b, system_first); });
   for (const auto& n : names) out.push_back({"/dev/dma_heap/" + n});
 }
 
@@ -287,6 +390,14 @@ bool drm_driver_is_msm(const std::string& node) {
   return !std::strncmp(base ? base + 1 : link, "msm", 3);
 }
 
+void udmabuf_source(std::vector<Source>& out) {
+  if (::access("/dev/udmabuf", F_OK) != 0) return;
+  Source s;
+  s.path = "udmabuf";
+  s.udma = true;
+  out.push_back(s);
+}
+
 void drm_sources(std::vector<Source>& out) {
   DIR* d = opendir("/dev/dri");
   if (!d) return;
@@ -303,11 +414,12 @@ void drm_sources(std::vector<Source>& out) {
   for (const auto& n : cards) out.push_back({"drm-dumb:/dev/dri/" + n, 0, false, Source::Dumb});
 }
 
-std::vector<Source> candidates() {
+std::vector<Source> candidates(size_t len) {
   std::vector<Source> v;
   if (const char* e = std::getenv("DS_DMA_HEAP"); e && *e) {
     if (!std::strcmp(e, "ion")) { ion_heaps(v); return v; }
     if (!std::strcmp(e, "drm")) { drm_sources(v); return v; }
+    if (!std::strcmp(e, "udmabuf")) { udmabuf_source(v); return v; }
     if (!std::strncmp(e, "ion:", 4)) {
       const uint32_t m = static_cast<uint32_t>(std::strtoul(e + 4, nullptr, 0));
       v.push_back({std::string("ion:") + (e + 4), m, false});
@@ -316,7 +428,8 @@ std::vector<Source> candidates() {
     v.push_back({e[0] == '/' ? std::string(e) : "/dev/dma_heap/" + std::string(e)});
     return v;
   }
-  dma_heaps(v);
+  dma_heaps(v, len);
+  udmabuf_source(v);   // after the heaps: nothing contiguous about it
   ion_heaps(v);
   drm_sources(v);   // last: only where the kernel offers no heap that works
   return v;
@@ -346,9 +459,9 @@ int alloc(size_t len, const std::function<bool(int fd)>& usable, const char* tag
     exhausted = g_chosen;
   }
 
-  const std::vector<Source> cands = candidates();
+  const std::vector<Source> cands = candidates(len);
   if (cands.empty()) {
-    std::fprintf(stderr, "%s: no dmabuf allocator (no /dev/dma_heap/*, no /dev/ion, no /dev/dri/*)\n", tag);
+    std::fprintf(stderr, "%s: no dmabuf allocator (no /dev/dma_heap/*, no /dev/udmabuf, no /dev/ion, no /dev/dri/*)\n", tag);
     return -1;
   }
   for (const Source& s : cands) {

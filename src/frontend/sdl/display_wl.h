@@ -2,7 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // Dmabuf presentation onto SDL's own Wayland window: frames render straight
-// into CMA dma-heap buffers submitted via zwp_linux_dmabuf_v1, avoiding the
+// into dma-heap buffers submitted via zwp_linux_dmabuf_v1, avoiding the
 // shm copy and texture upload of SDL's window surface path. The compositor
 // samples zero-copy, or (fullscreen/opaque/untransformed) scans out directly.
 //
