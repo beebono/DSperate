@@ -1221,6 +1221,13 @@ static int run(int argc, char** argv) {
     }
     ds::latch_worker_sched();   // what the video workers run at, whichever thread starts them
   }
+  // Latched, the main thread drops back to an ordinary task for the rest of start-up
+  // (rt_budget.h): from here to the first frame it never sleeps, and under the 200 ms
+  // RLIMIT_RTTIME a PipeWire client passes on to the processes it starts (DSlot's shelf is
+  // one), the kernel killed it with a bare SIGKILL between the settings and SDL_Init on a
+  // slow clock. The workers take the latched policy themselves; the guard is lifted, with a
+  // nap, where emulation begins.
+  std::optional<ds::sdl::OffRealtime> startup_off_rt(std::in_place);
   // CPU timing model (core/cpu/timing_mode.h), fixed before anything runs or
   // the recompiler emits its stubs. DS_TIMING wins.
   if (cfg.has("emu.timing") && !std::getenv("DS_TIMING")) ds::g_fast_timing = cfg.str("emu.timing") != "exact";
@@ -1755,9 +1762,8 @@ sdl_ready:
     if (!nds.load_dsi_nand_title(sc.title_lo, &err)) { std::fprintf(stderr, "dsi: %s: %s\n", path.c_str(), err.c_str()); return false; }
     return true;
   };
-  // From the ROM to the starting state: one-shot work, off the real-time
-  // class (rt_budget.h). Inflating a big zipped ROM alone can outlast RLIMIT_RTTIME.
-  std::optional<ds::sdl::OffRealtime> startup_off_rt(std::in_place);
+  // From the ROM to the starting state: still off the real-time class (startup_off_rt
+  // above). Inflating a big zipped ROM alone can outlast RLIMIT_RTTIME.
   if (!bios_error.empty()) {
     start_failed(rom_path, bios_error.find("firmware") != std::string::npos ? "FIRMWARE IS BAD" : "DS BIOS IS BAD");
     return quit_early(1);
