@@ -223,6 +223,13 @@ struct udmabuf_create {
 constexpr uint32_t kUdmabufCloexec = 0x01;
 
 int alloc_udmabuf(size_t len) {
+#if !defined(MFD_CLOEXEC) || !defined(F_ADD_SEALS)
+  // An old sysroot (the A30's glibc 2.23, Linux 3.4 headers) has no memfd
+  // or file sealing, and its kernels no udmabuf: never available there.
+  (void)len;
+  errno = ENOSYS;
+  return -1;
+#else
   const size_t page = static_cast<size_t>(sysconf(_SC_PAGESIZE));
   len = (len + page - 1) & ~(page - 1);
   const int dev = ::open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
@@ -247,6 +254,7 @@ int alloc_udmabuf(size_t len) {
   ::close(dev);
   errno = err;
   return fd;
+#endif
 }
 
 int alloc_from(const Source& s, size_t len) {
