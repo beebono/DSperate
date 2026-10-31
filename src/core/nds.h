@@ -207,8 +207,9 @@ struct NDS {
   dma::Ndma  ndma;                 // DSi only; idle on a DS
   std::unique_ptr<cart::Cart> cart;
 
-  // Action Replay codes, run from the ARM7's VBlank IRQ when enabled. Not
-  // part of a save state: which cheats are on is the frontend's business.
+  // Action Replay codes, run from the ARM7's VBlank IRQ when enabled. Which
+  // cheats are on is the frontend's business and not part of a save state;
+  // the write journal is, because the RAM it describes is.
   cheat::Engine cheats;
 
   // An analog-controls patch (a stripped shocoman CPAD cheat) is active for

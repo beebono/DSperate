@@ -5,6 +5,7 @@
 // the loop, and the ways a malformed code has to fail rather than run away.
 #include "core/nds.h"
 #include "core/cheat/ar_engine.h"
+#include "core/state/state.h"
 #include "check.h"
 
 #include <initializer_list>
@@ -493,6 +494,181 @@ void test_hook_needs_ie_and_if() {
 const u32 kMetroidLocal[] = {0x62001000u,0xE92D007Fu,0xD0000000u,0x00000000u,0x62001000u,0xE92D007Fu,0xE2001000u,0x00000400u,0xE92D007Fu,0xE1A06004u,0xE28E1B05u,0xE59110D8u,0xE5911000u,0xE1510005u,0x18BD007Fu,0x11A01F81u,0x112FFF1Eu,0xE59F53C0u,0xE1D540B0u,0xE3540000u,0x08BD007Fu,0x01A01F81u,0x012FFF1Eu,0xE1A05804u,0xE1A04C04u,0xE1A04C44u,0xE1A05C45u,0xE2655000u,0xE59F3028u,0xE0000493u,0xE0010593u,0xE1A00640u,0xE1A01641u,0xE1C602BAu,0xE1C612BCu,0xE3A01001u,0xE5C61034u,0xE8BD007Fu,0xE28EE008u,0xE12FFF1Eu,0x000004F1u,0x00000000u,0x00000000u,0xE1A08000u,0xE1D10EB4u,0xE92D40FFu,0xE28E1EDEu,0xE5912000u,0xE5922000u,0xE3520000u,0x1A000043u,0xE5911004u,0xE5911000u,0xE151000Au,0x1A00003Fu,0xE59F7328u,0xE1D740FAu,0xE597500Cu,0xE1A06845u,0xE1A05805u,0xE1A05845u,0xE1D870B4u,0xE1D800B6u,0xE3170040u,0x13100001u,0x114F46B8u,0x114F56BAu,0x114F66BCu,0xE3170020u,0x13100001u,0xE5DF20F9u,0x12822001u,0x12022001u,0x15CF20EDu,0xE5DF20E8u,0xE3170080u,0x13100001u,0x11E02002u,0x15CF20D8u,0xE3520000u,0x03A04000u,0x03A06000u,0x0A00000Fu,0xE15F0BF0u,0xE0444000u,0xE1B044C4u,0xB2844001u,0xE15F0BFEu,0xE0455000u,0xE1B054C5u,0xB2855001u,0xE2655000u,0xE15F0DF0u,0xE0466000u,0xE1B064C6u,0xB2866001u,0xE5DF2091u,0xE3520001u,0x01A06005u,0xEB000015u,0xE0844001u,0xE0866000u,0xE59F3080u,0xE0040493u,0xE1B04644u,0xB2844001u,0xE1D802BAu,0xE1D812BCu,0xE0800006u,0xE0811004u,0xE1C802BAu,0xE1C812BCu,0xE3560000u,0x03540000u,0x0A000003u,0xE1D810B0u,0xE3510000u,0x03A01A01u,0x01C810B0u,0xE8BD40FFu,0xE28EE008u,0xE12FFF1Eu,0xE59F221Cu,0xE1D200F6u,0xE1D210F8u,0xE2611000u,0xE59F301Cu,0xE0000093u,0xE0010193u,0xE1B00640u,0xB2800001u,0xE1B01641u,0xB2811001u,0xE12FFF1Eu,0x00000000u,0x00000400u,0x00001F16u,0x02036B20u,0xE92D003Eu,0xE59F51D8u,0xE1D540B0u,0xE3540000u,0x0A000026u,0xE3500000u,0x028E2E5Du,0x128E2E1Eu,0xE5921000u,0xE5911000u,0xE3510000u,0x1A00001Fu,0xE5921004u,0xE5911000u,0xE151000Au,0x1A00001Bu,0xE3500000u,0x1A000012u,0xE59A04C4u,0xE3800A02u,0xE58A04C4u,0xE1A05804u,0xE1A04C04u,0xE1A04C44u,0xE1A05C45u,0xE59F3174u,0xE0000493u,0xE0010593u,0xE1A00640u,0xE1A01641u,0xE58F115Cu,0xE3500000u,0xB2600000u,0xB28EEE21u,0xA28EE07Cu,0xE8BD003Eu,0xE12FFF1Eu,0xE59F0140u,0xE3500000u,0xB2600000u,0xB28EEF77u,0xA28EE070u,0xE8BD003Eu,0xE12FFF1Eu,0xE8BD003Eu,0xE3500000u,0x059A136Cu,0x159A1370u,0xE59D0000u,0xE12FFF1Eu,0xE1A00E80u,0xE92D401Fu,0xE3A00B01u,0xEB00003Bu,0xE8BD401Fu,0x128EE038u,0xE12FFF1Eu,0xE3C12401u,0xE92D401Fu,0xE3A00002u,0xE3A01FE7u,0xE18A00B1u,0xE3A00040u,0xEB000031u,0x13A00000u,0x1B000028u,0xE3A00080u,0xEB00002Du,0x13A00002u,0x1B000024u,0xE3A00010u,0xEB000029u,0x0A000002u,0xE3E00000u,0xEB00000Cu,0xEB00001Eu,0xE3A00020u,0xEB000023u,0x0A000002u,0xE3A00001u,0xEB000006u,0xEB000018u,0xE3A00004u,0xEB00001Du,0x13A00000u,0x151F1160u,0x112FFF31u,0xE8BD801Fu,0xE92D401Eu,0xE1A03000u,0xE59F0078u,0xE7DA0000u,0xE59F1074u,0xE7DA1001u,0xE3A04000u,0xE3540008u,0x0A000008u,0xE2844001u,0xE0800003u,0xE2000007u,0xE3500000u,0x13500002u,0x0AFFFFF7u,0xE1A02031u,0xE3120001u,0x0AFFFFF4u,0xE8BD801Eu,0xE92D400Fu,0xE3A02000u,0xE1A01000u,0xE1A0000Au,0xE59F302Cu,0xE12FFF33u,0xE8BD800Fu,0xE92D4002u,0xE59F1020u,0xE19A10B1u,0xE1110000u,0xE8BD8002u,0x00000000u,0x00004492u,0x027FFDF0u,0x000004CEu,0x000004D2u,0x0200C5FCu,0x00000468u,0xD2000000u,0x00000000u,0x52021DE4u,0xE1A01F81u,0x02021DE4u,0xEBFF7C85u,0x02022078u,0xE3A00000u,0x02022014u,0xE3A00000u,0x02021F50u,0xE3A00000u,0x02021FB4u,0xE3A00000u,0xD2000000u,0x00000000u,0x52024B24u,0xE59D0000u,0x02024B20u,0xE3A00000u,0x02024B24u,0xEBFF71B7u,0x02024F10u,0xE3A00001u,0x02024F14u,0xEBFF70BBu,0x02024B28u,0xE3A00000u,0x02024CBCu,0xE3A00000u,0x02024F18u,0xE3A00000u,0x02025084u,0xE3A00000u,0xD2000000u,0x00000000u,0x52024314u,0xE1D10EB4u,0x02024314u,0xEBFF735Cu,0xD2000000u,0x00000000u,0x52026C34u,0xE3C12401u,0x02026C34u,0xEBFF69ACu,0x02026C64u,0xEBFF6999u,0xD2000000u,0x00000000u};
 const u32 kMetroidUpstream[] = {0x62001000u,0xE92D007Fu,0xD0000000u,0x00000000u,0x62001000u,0xE92D007Fu,0xE2001000u,0x00000300u,0xE92D007Fu,0xE1A06004u,0xE28E1B05u,0xE59110D8u,0xE5911000u,0xE1510005u,0x18BD007Fu,0x11A01F81u,0x112FFF1Eu,0xE59F52D0u,0xE1D540B0u,0xE3540000u,0x08BD007Fu,0x01A01F81u,0x012FFF1Eu,0xE1A05804u,0xE1A04C04u,0xE1A04C44u,0xE1A05C45u,0xE2655000u,0xE59F3028u,0xE0000493u,0xE0010593u,0xE1A00640u,0xE1A01641u,0xE1C602BAu,0xE1C612BCu,0xE3A01001u,0xE5C61034u,0xE8BD007Fu,0xE28EE008u,0xE12FFF1Eu,0x000004F1u,0x00000000u,0x00000000u,0xE1A08000u,0xE1D10EB4u,0xE92D40FFu,0xE28E1EDEu,0xE5912000u,0xE5922000u,0xE3520000u,0x1A00004Cu,0xE5911004u,0xE5911000u,0xE151000Au,0x1A000048u,0xE59F7238u,0xE1D740FAu,0xE597500Cu,0xE1A06845u,0xE1A05805u,0xE1A05845u,0xE5D77004u,0xE5DF113Cu,0xE5CF7138u,0xE0211007u,0xE0077001u,0xE3170002u,0x13A00000u,0x159F1130u,0x112FFF31u,0xE1D870B4u,0xE5DF0118u,0xE3170040u,0x13100004u,0x114F48BCu,0x114F58BEu,0x114F69B0u,0xE3170020u,0x13100004u,0xE5DF20FAu,0x12822001u,0x12022001u,0x15CF20EEu,0xE5DF20E9u,0xE3170080u,0x13100004u,0x11E02002u,0x15CF20D9u,0xE3520000u,0x03A04000u,0x03A06000u,0x0A00000Fu,0xE15F0DF4u,0xE0444000u,0xE1B044C4u,0xB2844001u,0xE15F0EF2u,0xE0455000u,0xE1B054C5u,0xB2855001u,0xE2655000u,0xE15F0FF4u,0xE0466000u,0xE1B064C6u,0xB2866001u,0xE5DF2092u,0xE3520001u,0x01A06005u,0xEB000015u,0xE0844001u,0xE0866000u,0xE59F3080u,0xE0040493u,0xE1B04644u,0xB2844001u,0xE1D802BAu,0xE1D812BCu,0xE0800006u,0xE0811004u,0xE1C802BAu,0xE1C812BCu,0xE3560000u,0x03540000u,0x0A000003u,0xE1D810B0u,0xE3510000u,0x03A01A01u,0x01C810B0u,0xE8BD40FFu,0xE28EE008u,0xE12FFF1Eu,0xE59F2108u,0xE1D200F6u,0xE1D210F8u,0xE2611000u,0xE59F301Cu,0xE0000093u,0xE0010193u,0xE1B00640u,0xB2800001u,0xE1B01641u,0xB2811001u,0xE12FFF1Eu,0x00000000u,0x00000400u,0x00001F16u,0x02036B20u,0xE92D003Eu,0xE59F50C4u,0xE1D540B0u,0xE3540000u,0x0A000026u,0xE3500000u,0x028E2E5Du,0x128E2E1Eu,0xE5921000u,0xE5911000u,0xE3510000u,0x1A00001Fu,0xE5921004u,0xE5911000u,0xE151000Au,0x1A00001Bu,0xE3500000u,0x1A000012u,0xE59A04C4u,0xE3800A02u,0xE58A04C4u,0xE1A05804u,0xE1A04C04u,0xE1A04C44u,0xE1A05C45u,0xE59F3060u,0xE0000493u,0xE0010593u,0xE1A00640u,0xE1A01641u,0xE58F1048u,0xE3500000u,0xB2600000u,0xB28EEE21u,0xA28EE07Cu,0xE8BD003Eu,0xE12FFF1Eu,0xE59F002Cu,0xE3500000u,0xB2600000u,0xB28EEF77u,0xA28EE070u,0xE8BD003Eu,0xE12FFF1Eu,0xE8BD003Eu,0xE3500000u,0x059A136Cu,0x159A1370u,0xE59D0000u,0xE12FFF1Eu,0x00000000u,0x00004492u,0x027FFDF0u,0xD2000000u,0x00000000u,0x52021DE4u,0xE1A01F81u,0x02021DE4u,0xEBFF7C85u,0xD2000000u,0x00000000u,0x52024B24u,0xE59D0000u,0x02024B20u,0xE3A00000u,0x02024B24u,0xEBFF71C0u,0x02024F10u,0xE3A00001u,0x02024F14u,0xEBFF70C4u,0xD2000000u,0x00000000u,0x52024314u,0xE1D10EB4u,0x02024314u,0xEBFF735Cu,0xD2000000u,0x00000000u};
 
+// What the patched instructions hold on the cartridge's code, as each code's
+// guards expect them.
+void seed_metroid(NDS& nds) {
+  w32(nds, 0x02021DE4, 0xE1A01F81);
+  w32(nds, 0x02024B24, 0xE59D0000);
+  w32(nds, 0x02024314, 0xE1D10EB4);
+  w32(nds, 0x02026C34, 0xE3C12401);
+  w32(nds, 0x02026C64, 0xE1A00E80);
+  w32(nds, 0x02024B28, 0x11111111);   // stands for the digital walk test the local scheme removes
+}
+
+void add_metroid(NDS& nds) {
+  cheat::Code local, upstream;
+  local.name = "local";
+  local.analog = true;
+  local.words.assign(std::begin(kMetroidLocal), std::end(kMetroidLocal));
+  upstream.name = "upstream";
+  upstream.analog = true;
+  upstream.words.assign(std::begin(kMetroidUpstream), std::end(kMetroidUpstream));
+  nds.cheats.codes.push_back(local);
+  nds.cheats.codes.push_back(upstream);
+}
+
+// The journal chunk alone, through the same Writer and Reader a state uses,
+// with guest RAM left as it was: exactly what a state brings back.
+void state_round_trip(NDS& nds) {
+  state::Writer w;
+  nds.cheats.save_journal(w);
+  state::Reader r(w.data().data(), w.data().size());
+  nds.cheats.forget_writes();
+  if (r.peek("CHJR")) nds.cheats.load_journal(r);
+  CHECK(r.ok());
+}
+
+// Autosave and autoload are on in every pak profile, so a state normally
+// brings RAM with the last session's hook already in it.
+void test_state_carries_hooks() {
+  { // The hook's cheat is off when the state comes back: it uninstalls.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    seed_metroid(nds);
+    add_metroid(nds);
+    nds.cheats.codes[0].enabled = true;
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x02024B28) == 0xE3A00000);
+    state_round_trip(nds);
+    nds.cheats.codes[0].enabled = false;
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x02024B28) == 0x11111111);
+    CHECK(r32(nds, 0x02026C34) == 0xE3C12401);
+    CHECK(r32(nds, 0x02026C64) == 0xE1A00E80);
+    CHECK(r32(nds, 0x02001000) == 0);
+  }
+  { // Switching scheme across a state: the new hook replaces the old one
+    // whole, so no branch lands inside a body of the other shape.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    seed_metroid(nds);
+    add_metroid(nds);
+    nds.cheats.codes[1].enabled = true;
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x020012EC) == 0xE59D0000);      // upstream: inside its walk hook
+    state_round_trip(nds);
+    nds.cheats.codes[1].enabled = false;
+    nds.cheats.codes[0].enabled = true;
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x02026C64) == 0xEBFF6999);
+    CHECK(r32(nds, 0x020012EC) == 0xE3C12401);      // local: its entry, the replaced instruction
+    CHECK(r32(nds, 0x020012D0) == 0xE1A00E80);
+  }
+  { // Still enabled: stays installed, and disabling later still reverts it.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    seed_metroid(nds);
+    add_metroid(nds);
+    nds.cheats.codes[1].enabled = true;
+    nds.cheats.run(nds);
+    state_round_trip(nds);
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x02024B24) != 0xE59D0000);
+    nds.cheats.codes[1].enabled = false;
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x02024B24) == 0xE59D0000);
+    CHECK(r32(nds, 0x02001000) == 0);
+  }
+  { // A code no longer in the list: its bytes still go back.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    seed_metroid(nds);
+    add_metroid(nds);
+    nds.cheats.codes[0].enabled = true;
+    nds.cheats.run(nds);
+    state_round_trip(nds);
+    nds.cheats.codes[0].name = "renamed";
+    nds.cheats.codes[0].enabled = false;
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x02024B28) == 0x11111111);
+    CHECK(r32(nds, 0x02001000) == 0);
+  }
+  { // Through a whole state, in the order the SDL frontend writes one: the
+    // machine's chunks, the journal if any, then the frontend's own.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    std::vector<u8> rom(0x4000);
+    CHECK(nds.load_rom_image(std::move(rom)));      // a state needs a cartridge
+    nds.reset();
+    nds.run_frame();                                // and a frame boundary
+    seed_metroid(nds);
+    add_metroid(nds);
+    const auto frontend_chunks = [](state::Writer& w) {
+      w.begin("VIEW"); w.put(u32{7}); w.end();
+      w.begin("CHVO"); w.put(u32{9}); w.end();
+    };
+    std::string err;
+
+    // No cheat has written, or a state from before the journal: no chunk,
+    // and it must load, with the frontend's chunks still there to read.
+    state::Writer bare;
+    CHECK(nds.save_state(bare, err));
+    frontend_chunks(bare);
+    state::Reader plain(bare.data().data(), bare.data().size());
+    CHECK(nds.load_state(plain, err));
+    CHECK(plain.ok());
+    CHECK(plain.peek("VIEW"));
+
+    nds.cheats.codes[0].enabled = true;
+    nds.cheats.run(nds);
+    state::Writer full;
+    CHECK(nds.save_state(full, err));
+    frontend_chunks(full);
+    CHECK(full.data().size() > bare.data().size());
+
+    state::Reader with(full.data().data(), full.data().size());
+    CHECK(nds.load_state(with, err));
+    CHECK(with.peek("VIEW"));
+    CHECK(with.begin("VIEW"));
+    with.end();
+    CHECK(with.begin("CHVO"));
+    with.end();
+    nds.cheats.codes[0].enabled = false;
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x02024B28) == 0x11111111);
+    CHECK(r32(nds, 0x02001000) == 0);
+  }
+  { // Its code list gone: the hook still comes out, and the VBlank hook runs.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    seed_metroid(nds);
+    add_metroid(nds);
+    nds.cheats.codes[0].enabled = true;
+    nds.cheats.run(nds);
+    state_round_trip(nds);
+    nds.cheats.codes.clear();
+    CHECK(!nds.cheats.idle());
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x02024B28) == 0x11111111);
+    CHECK(r32(nds, 0x02001000) == 0);
+    CHECK(nds.cheats.idle());
+  }
+  { // A revised code under the same name does not inherit the old hook.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    seed_metroid(nds);
+    add_metroid(nds);
+    nds.cheats.codes[1].enabled = true;
+    nds.cheats.run(nds);
+    state_round_trip(nds);
+    nds.cheats.codes[0].name = nds.cheats.codes[1].name;   // the local body, under upstream's name
+    nds.cheats.codes[0].enabled = true;
+    nds.cheats.codes[1].enabled = false;
+    nds.cheats.run(nds);
+    CHECK(r32(nds, 0x020012EC) == 0xE3C12401);      // the new body, whole
+  }
+}
+
 // The stick layout read from a hook, on the real thing: Metroid's two schemes
 // are extended and SM64DS is packed (test_analog_hook_sm64ds), and only a bulk
 // write is code.
@@ -531,6 +707,143 @@ void test_analog_request() {
   CHECK(r.schemes == 2 && r.nub);
 }
 
+// Only analog codes are journaled. Anything else writes game data, which the
+// game goes on changing: disabling a code just stops it writing.
+void test_disable_leaves_other_codes_alone() {
+  auto p = std::make_unique<NDS>();
+  NDS& nds = *p;
+  w32(nds, RAM + 0x300, 100);
+  cheat::Engine e;
+  cheat::Code c; c.name = "max money"; c.enabled = true;
+  c.words = {at(0x00, 0x2000300), 9999};
+  e.codes.push_back(c);
+  e.run(nds);
+  CHECK(r32(nds, RAM + 0x300) == 9999);
+  e.codes[0].enabled = false;
+  e.run(nds);
+  CHECK(r32(nds, RAM + 0x300) == 9999);
+  state::Writer w;
+  e.save_journal(w);
+  CHECK(w.data().empty());
+}
+
+// A byte that no longer holds what the code wrote has been replaced since, by
+// an overlay say, so its original belongs to what has gone.
+void test_revert_leaves_changed_bytes() {
+  auto p = std::make_unique<NDS>();
+  NDS& nds = *p;
+  w32(nds, RAM + 0x400, 0x11111111);
+  w32(nds, RAM + 0x404, 0x22222222);
+  cheat::Engine e;
+  cheat::Code c; c.name = "hook"; c.enabled = true; c.analog = true;
+  c.words = {at(0x00, 0x2000400), 0xEA000000, at(0x00, 0x2000404), 0xEA000001};
+  e.codes.push_back(c);
+  e.run(nds);
+  w32(nds, RAM + 0x400, 0x33333333);                // the overlay
+  e.codes[0].enabled = false;
+  e.run(nds);
+  CHECK(r32(nds, RAM + 0x400) == 0x33333333);
+  CHECK(r32(nds, RAM + 0x404) == 0x22222222);
+
+  // And the same across a state: what the code wrote travels too.
+  e.codes[0].enabled = true;
+  w32(nds, RAM + 0x400, 0x11111111);
+  e.run(nds);
+  state::Writer w;
+  e.save_journal(w);
+  state::Reader r(w.data().data(), w.data().size());
+  e.forget_writes();
+  e.load_journal(r);
+  CHECK(r.ok());
+  w32(nds, RAM + 0x400, 0x33333333);
+  e.codes[0].enabled = false;
+  e.run(nds);
+  CHECK(r32(nds, RAM + 0x400) == 0x33333333);
+  CHECK(r32(nds, RAM + 0x404) == 0x22222222);
+}
+
+// The bus aligns a write down; the journal must keep those bytes, not the
+// ones the address names.
+void test_journal_follows_alignment() {
+  auto p = std::make_unique<NDS>();
+  NDS& nds = *p;
+  w32(nds, RAM + 0x100, 0x11223344);
+  w32(nds, RAM + 0x104, 0x55667788);
+  cheat::Engine e;
+  cheat::Code c; c.name = "misaligned"; c.enabled = true; c.analog = true;
+  c.words = {at(0x00, 0x2000102), 0xCAFEBABE};
+  e.codes.push_back(c);
+  e.run(nds);
+  CHECK(r32(nds, RAM + 0x100) == 0xCAFEBABE);
+  w32(nds, RAM + 0x104, 0x99AABBCC);                // the game's, never the code's
+  e.codes[0].enabled = false;
+  e.run(nds);
+  CHECK(r32(nds, RAM + 0x100) == 0x11223344);
+  CHECK(r32(nds, RAM + 0x104) == 0x99AABBCC);
+}
+
+void test_disable_reverts_writes() {
+  { // Plain writes, all three widths.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    w32(nds, RAM + 0x300, 0x11223344);
+    cheat::Engine e;
+    cheat::Code c; c.name = "w"; c.enabled = true; c.analog = true;
+    c.words = {at(0x00, 0x2000300), 0xCAFEBABE,
+               at(0x10, 0x2000310), 0x1234,
+               at(0x20, 0x2000320), 0x56};
+    e.codes.push_back(c);
+    e.run(nds);
+    CHECK(r32(nds, RAM + 0x300) == 0xCAFEBABE);
+    e.codes[0].enabled = false;
+    e.run(nds);
+    CHECK(r32(nds, RAM + 0x300) == 0x11223344);
+    CHECK(r16(nds, RAM + 0x310) == 0);
+    CHECK(r8(nds, RAM + 0x320) == 0);
+  }
+  { // A guarded hook install (the CPAD shape): branch + E-block body.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    w32(nds, RAM + 0x400, 0xE5901000);              // the instruction the hook replaces
+    cheat::Engine e;
+    cheat::Code c; c.name = "hook"; c.enabled = true; c.analog = true;
+    c.words = {at(0x60, 0x2001000), 0xE92D007F,     // install unless already installed
+               at(0xE0, 0x2001000), 8, 0xE92D007F, 0xE12FFF1E,
+               at(0x00, 0x2000400), 0xEA000000,     // branch into the hook
+               0xD2000000, 0};
+    e.codes.push_back(c);
+    e.run(nds);
+    CHECK(r32(nds, RAM + 0x1000) == 0xE92D007F);
+    CHECK(r32(nds, RAM + 0x400) == 0xEA000000);
+    e.run(nds);                                   // guard holds: no rewrite
+    e.codes[0].enabled = false;
+    e.run(nds);
+    CHECK(r32(nds, RAM + 0x400) == 0xE5901000);   // original instruction back
+    CHECK(r32(nds, RAM + 0x1000) == 0);           // hook body gone
+    e.codes[0].enabled = true;
+    e.run(nds);
+    CHECK(r32(nds, RAM + 0x1000) == 0xE92D007F);  // and it installs again
+    CHECK(r32(nds, RAM + 0x400) == 0xEA000000);
+  }
+  { // Overlap: disabling one writer must not clobber the other's byte.
+    auto p = std::make_unique<NDS>();
+    NDS& nds = *p;
+    cheat::Engine e;
+    cheat::Code a; a.name = "a"; a.enabled = true; a.analog = true; a.words = {at(0x00, 0x2000500), 1};
+    cheat::Code b; b.name = "b"; b.enabled = true; b.analog = true; b.words = {at(0x00, 0x2000500), 2};
+    e.codes.push_back(a);
+    e.codes.push_back(b);
+    e.run(nds);
+    CHECK(r32(nds, RAM + 0x500) == 2);
+    e.codes[0].enabled = false;
+    e.run(nds);
+    CHECK(r32(nds, RAM + 0x500) == 2);            // b still owns it
+    e.codes[1].enabled = false;
+    e.run(nds);
+    CHECK(r32(nds, RAM + 0x500) == 0);            // last writer out: original back
+  }
+}
+
 } // namespace
 
 int main() {
@@ -555,8 +868,13 @@ int main() {
   test_hook_ignores_other_irqs();
   test_hook_needs_ie_and_if();
   test_analog_hook_sm64ds();
+  test_disable_reverts_writes();
   test_layout_detection();
   test_analog_request();
+  test_disable_leaves_other_codes_alone();
+  test_journal_follows_alignment();
+  test_revert_leaves_changed_bytes();
+  test_state_carries_hooks();
   std::printf("cheat: ok\n");
   return 0;
 }

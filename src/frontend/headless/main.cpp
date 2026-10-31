@@ -549,6 +549,7 @@ int main(int argc, char** argv) {
         return 0;
       }
       nds.cheats.codes = std::move(found.codes);
+      nds.cheats.forget_writes();
       // "#N" is the listing's index -- needed since names can repeat within a game.
       for (const std::string& want : enable_cheats) {
         bool hit = false;

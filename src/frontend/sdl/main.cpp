@@ -637,6 +637,7 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   // usrcheat.dat from paths.cheats, beside the ROM, or the config dir.
   cheats = ds::cheat::GameCheats{};
   nds.cheats.codes.clear();
+  nds.cheats.forget_writes();
   cheats_on_path.clear();
   // Header from the loaded cart, not the file at rom_path: a zipped game's
   // file starts with the archive header, so every lookup would miss.
