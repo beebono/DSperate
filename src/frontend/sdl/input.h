@@ -27,6 +27,7 @@ const char* action_name(Action a);
 class Input {
 public:
   void configure(const Config& cfg);
+  static bool analog_wanted(const Config& cfg);   // pad.analog names a stick mode
 
   // DS_DUAL_SCREENS: "upper=<display>[:<touch>...],lower=...,none=<touch>..."
   // gives each physical panel its SDL display and touch devices (a touch is a
@@ -47,8 +48,9 @@ public:
   input::Frame frame() {
     held_back_ &= buttons_ | stick_ | face_stick_;
     touch_held_back_ = touch_held_back_ && (touching_ || stylus_down_ != 0);
-    const input::Frame f{static_cast<u16>((buttons_ | pressed_ | stick_ | face_stick_) & ~held_back_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_),
+    input::Frame f{static_cast<u16>((buttons_ | pressed_ | stick_ | face_stick_) & ~held_back_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_),
                          !touch_held_back_ && (touching_ || touched_ || stylus_down_ != 0)};
+    fill_analog(f);
     pressed_ = 0; stick_pressed_ = 0; touched_ = false;
     menu_fb_pressed_ = 0;   // menu fallback presses die with their frame
     return f;
@@ -224,6 +226,19 @@ private:
   bool axis_state_[SDL_CONTROLLER_AXIS_MAX][2] = {};   // per axis: - and + past the threshold
   int  axis_src_[SDL_CONTROLLER_AXIS_MAX] = {0, 1, 2, 3, 4, 5};   // pad.axis_<name>: the physical axis feeding it, -1 none
   bool axis_inv_[SDL_CONTROLLER_AXIS_MAX] = {};
+  // Analog patch channel (pad.analog): which stick(s) feed the CPAD patch.
+  // Dual: left stick is the Circle Pad, right stick is the C-Stick/nub.
+  enum class AnalogMode : u8 { Off, Left, Right, Dual };
+  static AnalogMode analog_mode_of(const std::string& s);   // anything else is Off
+  int  trigger_threshold() const { return std::max(deadzone_, 24576); }
+  AnalogMode analog_mode_ = AnalogMode::Off;
+  int  analog_deadzone_ = 6000;   // radial, in SDL units; below stick_deadzone on purpose
+  bool analog_invert_y_ = false;
+  int  analog_sens_left_ = 100, analog_sens_right_ = 100;   // percent
+  Sint16 raw_lx_ = 0, raw_ly_ = 0, raw_rx_ = 0, raw_ry_ = 0;   // post-remap stick values
+  Sint16 raw_lt_ = 0, raw_rt_ = 0;                             // post-remap trigger values
+  void fill_analog(input::Frame& f) const;
+
   enum class StylusAxis : u8 { None, Right, Left };
   // Config spelling: none | left | right. Old stick_dpad = true/false still
   // parse as left/none.

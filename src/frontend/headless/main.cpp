@@ -562,6 +562,11 @@ int main(int argc, char** argv) {
       }
       size_t on = 0;
       for (const ds::cheat::Code& c : nds.cheats.codes) if (c.enabled) ++on;
+      // A replay carries stick data for an analog code's hook.
+      const ds::cheat::AnalogRequest analog = ds::cheat::analog_request(nds.cheats.codes);
+      nds.analog_patch = analog.schemes > 0;
+      nds.analog_full = analog.nub;
+      if (analog.extended) nds.analog_layout = ds::NDS::AnalogLayout::Extended;
       std::fprintf(stderr, "cheats: %zu enabled\n", on);
     }
   }

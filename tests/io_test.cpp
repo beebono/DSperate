@@ -245,6 +245,74 @@ static void test_input_log() {
   std::remove(path);
 }
 
+// The analog patch channel: with NDS::analog_patch set, apply() leaves the
+// frame's sticks and ZL/ZR at 0x027FFDF0 in the layout the ARM9 hook reads;
+// without it, guest RAM is untouched. The nub is written unrotated (the
+// relay's 45-degree rotation compensates the New 3DS C-Stick's diagonal
+// sensor mounting, which host sticks do not have).
+static void test_analog_apply() {
+  constexpr u32 kOut = 0x027FFDF0;
+  { // No patch: nothing is written, however the sticks are pushed.
+    NDS nds;
+    input::Frame f;
+    f.cpad_x = 32767; f.cpad_y = 32767; f.zl = true;
+    input::apply(nds, f);
+    CHECK_EQ(r32(nds, kOut), 0u);
+    CHECK_EQ(r32(nds, kOut + 4), 0u);
+  }
+  NDS nds;
+  nds.analog_patch = true;
+  input::Frame f;
+  f.cpad_x = 32767;    // +127
+  f.cpad_y = -32768;   // -128
+  f.cstick_x = 32767;  // nub +X only: written through as (+127, 0)
+  f.cstick_y = 0;
+  f.zl = true;
+  f.zr = false;
+  // The plain CPAD variant leaves the nub/ZL/ZR word zero, as its 3DS
+  // patch does: the same ARM9 hook would otherwise turn the camera.
+  input::apply(nds, f);
+  CHECK_EQ(r32(nds, kOut), 0x807Fu);        // CPadY<<8 | CPadX
+  CHECK_EQ(r32(nds, kOut + 4), 0u);
+  // The nub variant makes the second word live.
+  nds.analog_full = true;
+  input::apply(nds, f);
+  CHECK_EQ(r32(nds, kOut), 0x807Fu);
+  const u32 nub = r32(nds, kOut + 4);
+  CHECK_EQ(nub & 0xFF, 4u);                 // ZL set (bit 2), ZR clear (bit 1)
+  CHECK_EQ((nub >> 8) & 0xFF, 127u);        // no 45-degree rotation on host sticks:
+  CHECK_EQ((nub >> 16) & 0xFF, 0u);         // a pure right push stays pure right
+  // The extended (Metroid) layout: ZL/ZR byte at +4, nub as s16 at
+  // +6/+8, gyro words zero at +10. (Regression: this code's hook read
+  // the packed layout's Y byte as its X and a never-written +8 as Y,
+  // so the camera turned one way and never pitched.)
+  nds.analog_layout = NDS::AnalogLayout::Extended;
+  input::apply(nds, f);
+  CHECK_EQ(r32(nds, kOut), 0x807Fu);
+  CHECK_EQ(r32(nds, kOut + 4), 0x007F0004u); // ZL byte at +4, (s16)nub_x low byte at +6
+  CHECK_EQ(r16(nds, kOut + 6), 127);         // (s16)nub_x, unrotated
+  CHECK_EQ(r16(nds, kOut + 8), 0);           // (s16)nub_y
+  CHECK_EQ(r32(nds, kOut + 12), 0u);         // gyro words stay zero
+  // Centred sticks and released triggers clear the words again.
+  nds.analog_layout = NDS::AnalogLayout::Packed;
+  input::apply(nds, input::Frame{});
+  CHECK_EQ(r32(nds, kOut), 0u);
+  CHECK_EQ(r32(nds, kOut + 4), 0u);
+  // The log round-trips the analog fields (DSIN v3).
+  const char* path = "/tmp/dsperate_input_log_test.bin";
+  {
+    input::Log w;
+    CHECK_EQ(w.open_write(path), true);
+    w.write(f);
+  }
+  input::Log r;
+  CHECK_EQ(r.open_read(path), true);
+  input::Frame got;
+  CHECK_EQ(r.read(got), true);
+  CHECK_EQ(got == f, true);
+  std::remove(path);
+}
+
 // ---- RTC free-running clock ------------------------------------------------
 // The clock only runs when a frontend asks for it; what is tested here is the
 // carry, because a game may have written its own date into the chip and
@@ -559,6 +627,7 @@ int main() {
   test_input();
   test_mic_and_lid();
   test_input_log();
+  test_analog_apply();
   test_rtc_clock();
   test_firmware_override();
   test_generated_firmware();

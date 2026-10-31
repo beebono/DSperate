@@ -344,7 +344,52 @@ void test_zipped_lookup() {
 
 } // namespace
 
+// The analog database joins a game's own cheats, for this exact ROM only.
+void test_merge_analog() {
+  cheat::GameCheats main;
+  main.groups.resize(1);
+  main.codes.resize(3);
+  main.codes[0].name = "Moon Jump"; main.codes[0].words = {0, 0};
+  main.codes[1].name = "CPAD";      main.codes[1].words = {0, 0};   // an old copy of the same patch
+  main.codes[1].analog = true;
+  main.codes[2].name = "CPAD note";                                 // no words: a note, kept
+
+  cheat::GameCheats analog;
+  analog.checksum = 0x1234;
+  analog.groups.resize(1);
+  analog.groups[0].exclusive = true;
+  analog.codes.resize(2);
+  analog.codes[0].name = "CPAD"; analog.codes[0].words = {1, 1}; analog.codes[0].group = 0;
+  analog.codes[0].analog = true;
+  analog.codes[1].name = "Helper"; analog.codes[1].words = {2, 2};  // in the file, but no hook
+
+  CHECK(!cheat::merge_analog(main, analog, 0x9999));                // another revision: hooks would miss
+  CHECK(main.codes.size() == 3);
+
+  CHECK(cheat::merge_analog(main, analog, 0x1234));
+  CHECK(main.codes.size() == 4);
+  CHECK(!main.codes[3].analog);
+  CHECK(main.codes[0].name == "Moon Jump" && !main.codes[0].analog);
+  CHECK(main.codes[1].is_note());
+  CHECK(main.codes[2].analog && main.codes[2].words[0] == 1);
+  CHECK(main.groups.size() == 2 && main.groups[1].exclusive);
+  CHECK(main.codes[2].group == 1);                                  // renumbered past the game's own
+}
+
+void test_enforce_exclusive() {
+  std::vector<cheat::Group> groups(2);
+  groups[0].exclusive = true;
+  std::vector<cheat::Code> codes(4);
+  for (cheat::Code& c : codes) c.enabled = true;
+  codes[0].group = codes[1].group = 0;
+  codes[2].group = 1;                               // not exclusive: left alone
+  cheat::enforce_exclusive(codes, groups);
+  CHECK(codes[0].enabled && !codes[1].enabled && codes[2].enabled && codes[3].enabled);
+}
+
 int main() {
+  test_merge_analog();
+  test_enforce_exclusive();
   test_header();
   test_basic_entry();
   test_categories();

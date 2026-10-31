@@ -19,10 +19,28 @@ struct Code {
   std::string description;   // often empty
   int group = -1;            // index into GameCheats::groups, -1 for none
   bool enabled = false;
+  bool analog = false;       // a CPAD analog controls patch
   std::vector<u32> words;    // an even number; an odd tail is ignored
 
   bool is_note() const { return words.empty(); }
+  // The variant that adds the second stick and ZL/ZR (see NDS::analog_full).
+  bool analog_nub() const { return analog && name.find("Nub") != std::string::npos; }
 };
+
+// Whether an analog code's hook expects the extended layout at 0x027FFDF0
+// (see NDS::AnalogLayout): such a hook takes the nub as signed halfwords at
+// +6/+8, and a packed one takes the word at +4. Read from the ARM in its bulk
+// writes; a pattern, so pad.analog_layout can still overrule it.
+bool reads_extended_analog(const Code& c);
+
+// What the enabled codes ask of the analog channel.
+struct AnalogRequest {
+  int schemes = 0;           // enabled analog codes; more than one will fight
+  bool nub = false;          // one is the second-stick variant
+  bool extended = false;     // one reads the extended layout
+  const char* name = nullptr;
+};
+AnalogRequest analog_request(const std::vector<Code>& codes);
 
 enum class Stop : u8 {
   Ok,

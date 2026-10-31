@@ -119,6 +119,33 @@ bool load_for_header(const std::string& db_path, const u8 header[512], GameCheat
   return db.best_entry(game_code, header_checksum(header), out, err);
 }
 
+void enforce_exclusive(std::vector<Code>& codes, const std::vector<Group>& groups) {
+  for (size_t g = 0; g < groups.size(); ++g) {
+    if (!groups[g].exclusive) continue;
+    bool seen = false;
+    for (Code& c : codes) {
+      if (c.group != static_cast<int>(g) || !c.enabled) continue;
+      if (seen) c.enabled = false;
+      seen = true;
+    }
+  }
+}
+
+bool merge_analog(GameCheats& into, GameCheats analog, u32 checksum) {
+  if (analog.checksum != checksum) return false;
+  std::vector<Code> kept;
+  for (Code& c : into.codes)
+    if (!c.analog) kept.push_back(std::move(c));
+  into.codes = std::move(kept);
+  const int offset = static_cast<int>(into.groups.size());
+  for (Group& g : analog.groups) into.groups.push_back(std::move(g));
+  for (Code& c : analog.codes) {
+    if (c.group >= 0) c.group += offset;
+    into.codes.push_back(std::move(c));
+  }
+  return true;
+}
+
 bool Database::has(u32 game_code) const {
   for (const Entry& e : index_) if (e.game_code == game_code) return true;
   return false;
@@ -203,20 +230,12 @@ bool Database::parse_entry(const Entry& e, GameCheats& out, std::string& err) co
     c.group = group_left > 0 ? group : -1;
     c.words.reserve(words);
     for (u32 w = 0; w < words; ++w) c.words.push_back(r.u32le());
+    c.analog = !c.is_note() && c.name.rfind("CPAD", 0) == 0;
     out.codes.push_back(std::move(c));
     if (group_left > 0 && --group_left == 0) group = -1;
   }
 
-  // An exclusive category may arrive with several codes marked enabled; first wins.
-  for (size_t g = 0; g < out.groups.size(); ++g) {
-    if (!out.groups[g].exclusive) continue;
-    bool seen = false;
-    for (Code& c : out.codes) {
-      if (c.group != static_cast<int>(g) || !c.enabled) continue;
-      if (seen) c.enabled = false;
-      seen = true;
-    }
-  }
+  enforce_exclusive(out.codes, out.groups);
   return true;
 }
 

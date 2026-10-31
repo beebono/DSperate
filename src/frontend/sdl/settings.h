@@ -107,6 +107,7 @@ constexpr const char* kLayoutCyclePrefix = "video.layout_cycle.";
 
 // The pages. Each is terminated by a row with a null key.
 extern const Setting kEmuSettings[];
+extern const Setting kAnalogSettings[];
 extern const Setting kVideoSettings[];
 extern const Setting kLayoutSettings[];
 extern const Setting kUserSettings[];

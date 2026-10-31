@@ -1044,6 +1044,79 @@ void test_layout_page_rows() {
   CHECK(ds::sdl::step_value(box, "true", +1, free) == "false");
 }
 
+// The analog rows are a page of their own, after CONTROLS, and DS OPTIONS
+// follows it.
+void test_analog_page() {
+  const auto has = [](const ds::sdl::Setting* t, const char* key) {
+    for (int i = 0; t[i].key; ++i) if (!std::strcmp(t[i].key, key)) return true;
+    return false;
+  };
+  for (const char* k : {"pad.analog", "pad.analog_deadzone", "pad.analog_sensitivity_left",
+                        "pad.analog_sensitivity_right", "pad.analog_invert_y", "pad.analog_layout"}) {
+    CHECK(has(ds::sdl::kAnalogSettings, k));
+    CHECK(!has(ds::sdl::kEmuSettings, k));
+  }
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Analog
+  m.input(press(B::BTN_A));                                    // steps its first row
+  CHECK(!h.writes.empty() && h.writes.back() == "pad.analog");
+  m.input(press(B::BTN_B));
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // DS Options
+  int row = 0;
+  while (ds::sdl::kUserSettings[row].type == ds::sdl::Setting::Type::Text) ++row;
+  for (int i = 0; i < row; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+  CHECK(h.writes.back() == ds::sdl::kUserSettings[row].key);
+}
+
+// Analog codes live behind a link at the top of the Analog page: the Cheats
+// page lists the others, and goes when there are no others.
+void test_analog_cheats_link() {
+  std::vector<ds::cheat::Group> groups;
+  std::vector<ds::cheat::Code> codes(2);
+  codes[0].name = "Moon Jump"; codes[0].words = {0, 0};
+  codes[1].name = "CPAD"; codes[1].words = {0, 0}; codes[1].analog = true;
+  FakeHost h;
+  Menu m;
+  m.set_settings_host(&h);
+  m.set_cheats(&codes, &groups);
+  m.set_open(true);
+  for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Cheats
+  m.input(press(B::BTN_A));
+  CHECK(codes[0].enabled && !codes[1].enabled);
+  m.input(press(B::BTN_B));
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Options
+  for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));                                    // Analog
+  m.input(press(B::BTN_A));                                    // the link
+  CHECK(h.writes.empty());
+  m.input(press(B::BTN_A));
+  CHECK(codes[1].enabled && m.cheats_dirty());
+  m.input(press(B::BTN_B));                                    // back on the Analog page
+  m.input(press(B::BTN_DOWN));
+  m.input(press(B::BTN_A));
+  CHECK(!h.writes.empty() && h.writes.back() == "pad.analog");
+
+  codes.erase(codes.begin());                                  // only an analog code left
+  Menu n;
+  n.set_settings_host(&h);
+  n.set_cheats(&codes, &groups);
+  n.set_open(true);
+  for (int i = 0; i < 3; ++i) n.input(press(B::BTN_DOWN));
+  n.input(press(B::BTN_A));                                    // no Cheats row: Options
+  n.input(press(B::BTN_A));                                    // Emulation, not a toggle
+  CHECK(codes[0].enabled);
+}
+
 // Local wireless is one row on the Emulation page rather than a page of its
 // own: five values, and restart-only because the console's MAC is randomized before it boots.
 // INTERNET joined it later, which is what makes the two exclusive --
@@ -1159,8 +1232,8 @@ void test_out_of_range_value_is_kept() {
 // or the first press on that row would jump somewhere unrelated.
 void test_defaults_are_reachable() {
   FakeHost h;
-  for (const ds::sdl::Setting* t : {ds::sdl::kEmuSettings, ds::sdl::kVideoSettings,
-                                    ds::sdl::kLayoutSettings, ds::sdl::kUserSettings}) {
+  for (const ds::sdl::Setting* t : {ds::sdl::kEmuSettings, ds::sdl::kVideoSettings, ds::sdl::kLayoutSettings,
+                                    ds::sdl::kUserSettings, ds::sdl::kAnalogSettings}) {
     for (int i = 0; i < ds::sdl::settings_count(t); ++i) {
       const ds::sdl::Setting& s = t[i];
       const std::string def = ds::sdl::default_value(s);
@@ -1420,7 +1493,7 @@ void test_text_editor() {
   m.set_open(true);
   for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
   m.input(press(B::BTN_A));                                    // Options
-  for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));     // DS OPTIONS
+  for (int i = 0; i < 5; ++i) m.input(press(B::BTN_DOWN));     // DS OPTIONS
   m.input(press(B::BTN_A));
   m.input(press(B::BTN_A));                                    // the nickname editor
   CHECK(h.writes.empty());                                     // opening writes nothing
@@ -1453,7 +1526,7 @@ void test_ds_options_with_a_firmware_dump() {
     m.set_open(true);
     for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
     m.input(press(B::BTN_A));
-    for (int i = 0; i < 4; ++i) m.input(press(B::BTN_DOWN));
+    for (int i = 0; i < 5; ++i) m.input(press(B::BTN_DOWN));
     m.input(press(B::BTN_A));                                  // DS OPTIONS
     m.input(press(B::BTN_DOWN));
     m.input(press(B::BTN_DOWN));                               // FAVOURITE COLOUR, a stepped row
@@ -1473,7 +1546,7 @@ void test_save_target_switch() {
   m.set_open(true);
   for (int i = 0; i < 3; ++i) m.input(press(B::BTN_DOWN));
   m.input(press(B::BTN_A));                                    // Options
-  for (int i = 0; i < 5; ++i) m.input(press(B::BTN_DOWN));     // the save row
+  for (int i = 0; i < 6; ++i) m.input(press(B::BTN_DOWN));     // the save row
   CHECK(!h.save_per_game());
   m.input(press(B::BTN_RIGHT));
   CHECK(h.save_per_game());
@@ -1488,7 +1561,7 @@ void test_save_target_switch() {
   m2.set_open(true);
   for (int i = 0; i < 3; ++i) m2.input(press(B::BTN_DOWN));
   m2.input(press(B::BTN_A));
-  for (int i = 0; i < 5; ++i) m2.input(press(B::BTN_DOWN));
+  for (int i = 0; i < 6; ++i) m2.input(press(B::BTN_DOWN));
   m2.input(press(B::BTN_A));
   CHECK(!h2.save_per_game());
 }
@@ -1538,7 +1611,7 @@ void test_canvas_sizes() {
     m.draw(d); guards_intact();
     for (int i = 0; i < 3; ++i) { m.input(press(B::BTN_DOWN)); m.draw(d); guards_intact(); }
     m.input(press(B::BTN_A));  m.draw(d); guards_intact();     // Options
-    for (int page = 0; page < 5; ++page) {
+    for (int page = 0; page < 6; ++page) {
       Menu p;
       p.set_settings_host(&host);
       p.set_cheats(&codes, &groups);
@@ -1606,6 +1679,8 @@ int main() {
   test_setting_steps();
   test_percent_round_trip();
   test_layout_page_rows();
+  test_analog_page();
+  test_analog_cheats_link();
   test_network_features_row();
   test_out_of_range_value_is_kept();
   test_defaults_are_reachable();

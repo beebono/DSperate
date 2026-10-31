@@ -3,6 +3,7 @@
 #include "core/cheat/ar_engine.h"
 #include "core/nds.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace ds::cheat {
@@ -13,6 +14,35 @@ constexpr Cpu kCpu = Cpu::ARM7;   // the real cartridge runs off the ARM7's VBla
 u32 ror32(u32 v, u32 n) { n &= 31; return n ? ((v >> n) | (v << (32 - n))) : v; }
 
 } // namespace
+
+bool reads_extended_analog(const Code& c) {
+  const std::vector<u32>& w = c.words;
+  for (size_t pc = 0; pc + 1 < w.size();) {
+    const u32 a = w[pc], b = w[pc + 1];
+    pc += 2;
+    if ((a >> 28) != 0xE) continue;
+    const size_t end = std::min<u64>(pc + (static_cast<u64>(b) + 7) / 8 * 2, w.size());
+    for (; pc < end; ++pc) {
+      // ldrsh rd, [rn, #imm]
+      if ((w[pc] & 0x0FF000F0) != 0x01D000F0) continue;
+      const u32 imm = ((w[pc] >> 4) & 0xF0) | (w[pc] & 0xF);
+      if (imm == 6 || imm == 8) return true;
+    }
+  }
+  return false;
+}
+
+AnalogRequest analog_request(const std::vector<Code>& codes) {
+  AnalogRequest r;
+  for (const Code& c : codes) {
+    if (!c.enabled || !c.analog) continue;
+    ++r.schemes;
+    r.nub = r.nub || c.analog_nub();
+    r.extended = r.extended || reads_extended_analog(c);
+    r.name = c.name.c_str();
+  }
+  return r;
+}
 
 const char* stop_name(Stop s) {
   switch (s) {

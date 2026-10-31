@@ -211,6 +211,26 @@ struct NDS {
   // part of a save state: which cheats are on is the frontend's business.
   cheat::Engine cheats;
 
+  // An analog-controls patch (a stripped shocoman CPAD cheat) is active for
+  // this game: input::apply() then writes the frame's stick/ZL/ZR state to
+  // guest shared RAM at 0x027FFDF0 every frame, where the patch's ARM9 hook
+  // reads it. Set by the frontend; not part of a save state (the words are
+  // rewritten every frame, like buttons and touch).
+  bool analog_patch = false;
+  // Which relay layout the game's hook expects at 0x027FFDF0. Packed is
+  // the generic shocoman relay (SM64DS); Extended is Metroid's custom
+  // relay (ZL/ZR byte at +4, nub as s16 at +6/+8, gyro words at +10).
+  // Most games use Packed. The frontend reads it from the enabled code
+  // (cheat::reads_extended_analog) unless pad.analog_layout says otherwise.
+  enum class AnalogLayout : u8 { Packed, Extended };
+  AnalogLayout analog_layout = AnalogLayout::Packed;
+  // The enabled CPAD code is the "with Nub stick, ZL and ZR" variant: the
+  // second word (nub + ZL/ZR) is live. Without it that word stays zero,
+  // exactly as the plain 3DS patch leaves it -- the ARM9 hook is the same
+  // in both variants and would otherwise turn the camera on data the
+  // player never asked it to have.
+  bool analog_full = false;
+
   u64  frame_count = 0;
   bool frame_ready = false;
   bool frame_in_slices = false;   // run_frame_slice has begun a frame not yet complete
