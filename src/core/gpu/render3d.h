@@ -316,6 +316,11 @@ private:
   void setup_left_edge(Edge& e, s32 y) const;
   void setup_right_edge(Edge& e, s32 y) const;
   void setup_polygon(Edge& e, const Polygon& p);
+  void init_edges(Edge& e, const Polygon& p);   // setup_polygon without the shade: the edge cursors at ytop
+  // The lean GPU raster's span table rows for one polygon (vk_layout.h, DS_SPAN_WORDS each) for
+  // scanlines [max(ytop, 0), min(ybot, 191)]: the per-line endpoints precompute_lines derives.
+  // Returns the rows written, 0 if `cap` rows would not hold them.
+  u32  gpu_span_rows(const Polygon& p, u32* out, u32 cap);
   void rewind_edge(Edge& e);
   void refresh_edge_state(Edge& e) const;   // called from both edge setups and once per polygon for the flat case
   void setup_shade(Shade& sh, const Polygon& p);

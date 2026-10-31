@@ -69,7 +69,7 @@ struct GpuPoly {
   uint   tex_w, tex_h;  // decoded texture dimensions, texels
   uint   flags;         // DS_PF_*
   DS_INT ytop, ybot;    // screen scanline range, inclusive
-  uint   span_base;     // first row of this polygon in the span table (set by Lean::submit), DS_SPAN_NONE for none
+  uint   span_base;     // first row of this polygon in the span table (gpu_span_rows), DS_SPAN_NONE for none
   uint   vbot;          // slot of the bottom vertex (unused by the lean path)
   DS_INT xmin, xmax;    // screen x bounds, for the binning pass
   uint   row_base;      // lean path: the polygon's s range, min | max << 16, each + 32768 (the fragment stage's clamp)
@@ -99,14 +99,18 @@ struct GpuRow {
 // not truncated, if it wants more. Worst case 2048*192 falls back to the CPU.
 #define DS_MAX_SPAN_ROWS 49152
 
-// The span table for the fragment stage's row mapping (lean.frag), built
-// by Lean::submit over the whole-pixel vertices: per row of a polygon's
-// [max(ytop, 0), min(ybot, 191)], from GpuPoly::span_base, the row's left
-// edge x and the DS's step (xr - xl) / (ceil(xr) - floor(xl)), as floats.
-// One load per pixel where a loop over the edges cost the GPU half again
-// as much. DS_SPAN_NONE marks a polygon without rows (a frame over
-// DS_MAX_SPAN_ROWS maps nothing).
-#define DS_SPAN_WORDS 2
+// The lean path's span table: the CPU raster's own per-row span endpoints
+// (Renderer3D::gpu_span_rows walks the polygon's edges with its Slope and
+// Interp code), so the fragment stage can interpolate colour and texcoords
+// along the row exactly as the hardware does and the GPU raster's texels
+// match the CPU raster's. Per row of a polygon's [max(ytop, 0),
+// min(ybot, 191)], from GpuPoly::span_base, DS_SPAN_WORDS words:
+//   0 xstart  1 xend (inclusive, the right-edge push applied)  2 wl  3 wr
+//   4 left r | g << 10 | b << 20 (9-bit)   5 left s | t << 16 (12.4, s16)
+//   6 right rgb                            7 right st
+// DS_SPAN_NONE marks a polygon without rows (a frame over DS_MAX_SPAN_ROWS,
+// or a recorded dump): the stage falls back to the hardware's interpolation.
+#define DS_SPAN_WORDS 8
 #define DS_SPAN_NONE 0xFFFFFFFFu
 #define DS_SPAN_TABLE_WORDS (DS_SPAN_WORDS * DS_MAX_SPAN_ROWS)
 

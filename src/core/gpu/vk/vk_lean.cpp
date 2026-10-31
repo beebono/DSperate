@@ -13,6 +13,7 @@ bool Lean::msaa() const { return false; }
 GpuPoly* Lean::poly_buffer() { return nullptr; }
 GpuVert* Lean::vert_buffer() { return nullptr; }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = 0; return nullptr; }
+u32* Lean::span_buffer() { return nullptr; }
 GpuPost* Lean::post_buffer() { return nullptr; }
 bool Lean::submit(u32, u32, u32, const GpuFrame&) { return false; }
 void Lean::wait() {}
@@ -31,7 +32,6 @@ Lean::Stats Lean::stats(bool) { return {}; }
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -74,8 +74,7 @@ struct Lean::Impl {
   std::vector<GpuVert> host_verts;
   GpuPost host_post{};
   Buffer polys[kSlots], verts[kSlots], post[kSlots], texels, out[kSlots], spans[kSlots];
-  std::vector<u32> host_spans;   // the span table, built per submit (vk_layout.h)
-  std::vector<float> row_xl, row_xr;   // scratch: a polygon's rows
+  std::vector<u32> host_spans;   // the span table staging (vk_layout.h), filled by the caller
   u32 tex_flushed = 0;   // arena words already flushed to the GPU
   VkBufferView texel_view = VK_NULL_HANDLE;
   struct Img { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
@@ -140,6 +139,7 @@ GpuPoly* Lean::poly_buffer() { return d_->host_polys.data(); }
 GpuVert* Lean::vert_buffer() { return d_->host_verts.data(); }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = kTexelWords; return static_cast<u32*>(d_->texels.ptr); }
 GpuPost* Lean::post_buffer() { return &d_->host_post; }
+u32* Lean::span_buffer() { return d_->host_spans.data(); }
 const u32* Lean::output() { return newest_ready(false); }
 bool Lean::has_frame() const { return d_->gen != 0; }
 u64 Lean::gpu_ns() const { return d_->last_gpu_ns; }
@@ -428,6 +428,10 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   d.dev->flush(d.verts[slot], 0, sizeof(GpuVert) * nvert);
   std::memcpy(d.post[slot].ptr, &d.host_post, sizeof(GpuPost));
   d.dev->flush(d.post[slot], 0, sizeof(GpuPost));
+  {
+    const u32 nrows = std::min<u32>(fin.nrows, DS_MAX_SPAN_ROWS);
+    if (nrows) { std::memcpy(d.spans[slot].ptr, d.host_spans.data(), sizeof(u32) * DS_SPAN_WORDS * nrows); d.dev->flush(d.spans[slot], 0, sizeof(u32) * DS_SPAN_WORDS * nrows); }
+  }
 
   GpuFrame f = fin;
   const bool wbuf = (f.flags & DS_FF_WBUFFER) != 0;
@@ -441,43 +445,6 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     for (u32 v = 0; v < p.nverts; ++v) { const GpuVert& q = gv[p.first_vert + v]; s0 = std::min(s0, q.s); s1 = std::max(s1, q.s); t0 = std::min(t0, q.t); t1 = std::max(t1, q.t); }
     auto pk = [](s32 lo, s32 hi) { return static_cast<u32>(std::clamp(lo + 32768, 0, 65535)) | (static_cast<u32>(std::clamp(hi + 32768, 0, 65535)) << 16); };
     p.row_base = pk(s0, s1); p.pad_ = pk(t0, t1);
-  }
-
-  // The span table (vk_layout.h): each polygon's rows over its whole-pixel
-  // edges, xl and the DS's step per row; the polygon's base goes into its
-  // record (gpw: the host copy, reordered into the slot below). A frame with
-  // more rows than the table holds maps none.
-  {
-    u32* const rows = d.host_spans.data();
-    u32 nrows = 0;
-    for (u32 k = 0; k < npoly; ++k) {
-      const GpuPoly& p = gp[k];
-      const s32 ry0 = std::max(p.ytop, 0), ry1 = std::min(p.ybot, 191);
-      const u32 h = ry1 >= ry0 ? static_cast<u32>(ry1 - ry0) + 1 : 0;
-      if (!h || nrows + h > DS_MAX_SPAN_ROWS) { gpw[k].span_base = DS_SPAN_NONE; continue; }
-      d.row_xl.assign(h, 1e9f); d.row_xr.assign(h, -1e9f);
-      for (u32 v = 0; v < p.nverts; ++v) {
-        const GpuVert& a = gv[p.first_vert + v];
-        const GpuVert& b = gv[p.first_vert + (v + 1 == p.nverts ? 0 : v + 1)];
-        if (a.sy == b.sy) continue;
-        const float slope = static_cast<float>(b.sx - a.sx) / static_cast<float>(b.sy - a.sy);
-        const s32 ylo = std::max(std::min(a.sy, b.sy), ry0), yhi = std::min(std::max(a.sy, b.sy) - 1, ry1);   // the edge covers [min, max)
-        for (s32 y = ylo; y <= yhi; ++y) {
-          const float x = static_cast<float>(a.sx) + static_cast<float>(y - a.sy) * slope;
-          float& xl = d.row_xl[static_cast<u32>(y - ry0)]; float& xr = d.row_xr[static_cast<u32>(y - ry0)];
-          xl = std::min(xl, x); xr = std::max(xr, x);
-        }
-      }
-      u32* o = rows + DS_SPAN_WORDS * nrows;
-      for (u32 r = 0; r < h; ++r, o += DS_SPAN_WORDS) {
-        float xl = d.row_xl[r], xr = d.row_xr[r], step = 1.f;
-        if (xr < xl) { xl = 0.f; }   // no edge on this row: no shift
-        else { const float s0 = std::floor(xl), s1 = std::max(s0 + 1.f, std::ceil(xr)); step = (xr - xl) / (s1 - s0); }
-        std::memcpy(&o[0], &xl, sizeof xl); std::memcpy(&o[1], &step, sizeof step);
-      }
-      gpw[k].span_base = nrows; nrows += h;
-    }
-    if (nrows) { std::memcpy(d.spans[slot].ptr, rows, sizeof(u32) * DS_SPAN_WORDS * nrows); d.dev->flush(d.spans[slot], 0, sizeof(u32) * DS_SPAN_WORDS * nrows); }
   }
 
   // The frame's id codes (see the stencil layout).
