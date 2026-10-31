@@ -69,10 +69,11 @@ struct GpuPoly {
   uint   tex_w, tex_h;  // decoded texture dimensions, texels
   uint   flags;         // DS_PF_*
   DS_INT ytop, ybot;    // screen scanline range, inclusive
-  uint   vtop, vbot;    // slots of the top and bottom vertices: where the edge chains start and end
+  uint   span_base;     // first row of this polygon in the span table (set by Lean::submit), DS_SPAN_NONE for none
+  uint   vbot;          // slot of the bottom vertex (unused by the lean path)
   DS_INT xmin, xmax;    // screen x bounds, for the binning pass
-  uint   row_base;      // this polygon's first row in the span table
-  uint   pad_;
+  uint   row_base;      // lean path: the polygon's s range, min | max << 16, each + 32768 (the fragment stage's clamp)
+  uint   pad_;          // lean path: the t range, likewise
 };
 
 // One scanline of one polygon (the Y stage's output), computed once per
@@ -97,6 +98,17 @@ struct GpuRow {
 // Span table rows a frame needs (sum of polygons' clamped heights); refused,
 // not truncated, if it wants more. Worst case 2048*192 falls back to the CPU.
 #define DS_MAX_SPAN_ROWS 49152
+
+// The span table for the fragment stage's row mapping (lean.frag), built
+// by Lean::submit over the whole-pixel vertices: per row of a polygon's
+// [max(ytop, 0), min(ybot, 191)], from GpuPoly::span_base, the row's left
+// edge x and the DS's step (xr - xl) / (ceil(xr) - floor(xl)), as floats.
+// One load per pixel where a loop over the edges cost the GPU half again
+// as much. DS_SPAN_NONE marks a polygon without rows (a frame over
+// DS_MAX_SPAN_ROWS maps nothing).
+#define DS_SPAN_WORDS 2
+#define DS_SPAN_NONE 0xFFFFFFFFu
+#define DS_SPAN_TABLE_WORDS (DS_SPAN_WORDS * DS_MAX_SPAN_ROWS)
 
 // Per-frame constants; pushed, not a buffer (changes every frame, small).
 struct GpuFrame {

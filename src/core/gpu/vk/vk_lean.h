@@ -15,7 +15,11 @@
 // id), per-pixel shading with fog in the fragment stage, a custom resolve
 // into the 3D layer record, one submit and one fence per frame. No DS
 // edge-row emulation, no per-sample shading, no attribute planes: what the
-// old triangle path paid for (see gpu-raster-todo.md, G0).
+// old triangle path paid for (see gpu-raster-todo.md, G0). What it keeps
+// of the DS's attribute mapping is cheap: attributes interpolate over the
+// whole-pixel vertex positions (lean.vert) and each row reads them from
+// its whole-pixel span start (a per-row table built here, lean.frag), so
+// sprites stay texel-exact and textured ground matches the CPU raster.
 namespace ds::gpu::vk {
 
 class Lean {

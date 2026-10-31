@@ -2644,7 +2644,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
     if (first_ordered == ~0u && (alpha_all_fail || p.translucent || p.shadow_mask || p.shadow)) { first_ordered = static_cast<u32>(gp.size()); opaque_rows = nrows; }
     GpuPoly o{};
     o.first_vert = static_cast<u32>(gv.size()); o.nverts = p.nverts; o.attr = p.attr; o.texparam = p.texparam;
-    o.ytop = p.ytop; o.ybot = p.ybot; o.vtop = p.vtop; o.vbot = p.vbot;
+    o.ytop = p.ytop; o.ybot = p.ybot; o.span_base = DS_SPAN_NONE; o.vbot = p.vbot;
     o.flags = (p.translucent ? DS_PF_TRANSLUCENT : 0u) | (p.wbuffer ? DS_PF_WBUFFER : 0u) | (p.facing ? DS_PF_FRONTFACING : 0u) |
               (p.shadow_mask ? DS_PF_SHADOW_MASK : 0u) | (p.shadow ? DS_PF_SHADOW : 0u);
     std::vector<u32> run(DS_SHRUN_LINES, 0);
@@ -3039,7 +3039,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     GpuPoly& o = gp[np];
     o = GpuPoly{};
     o.first_vert = nv; o.nverts = p.nverts; o.attr = p.attr; o.texparam = p.texparam;
-    o.ytop = p.ytop; o.ybot = p.ybot; o.vtop = p.vtop; o.vbot = p.vbot;
+    o.ytop = p.ytop; o.ybot = p.ybot; o.span_base = DS_SPAN_NONE; o.vbot = p.vbot;
     o.flags = (p.translucent ? DS_PF_TRANSLUCENT : 0u) | (p.wbuffer ? DS_PF_WBUFFER : 0u) | (p.facing ? DS_PF_FRONTFACING : 0u) |
               (p.shadow_mask ? DS_PF_SHADOW_MASK : 0u) | (p.shadow ? DS_PF_SHADOW : 0u);
     s32 xmin = 0x7FFFFFFF, xmax = -0x7FFFFFFF;
@@ -3082,6 +3082,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   f.npoly = np; f.scale = 1; f.dispcnt = dispcnt_; f.alpha_ref = rs_->alpha_ref;
   f.first_ordered = first_ordered; f.opaque_rows = opaque_rows; f.nrows = nrows;
   for (u32 i = 0; i < npoly; ++i) if (!polys[i]->degenerate) { if (polys[i]->wbuffer) f.flags |= DS_FF_WBUFFER; break; }
+  if (lean_->msaa()) f.flags2 |= DS_FF2_MSAA;   // vertices on pixel corners (lean.vert)
   {
     const u16 c = static_cast<u16>(rs_->clear_attr1);
     auto ch = [](u16 v, u32 shift) { u32 x = (shift == 0 ? (v << 1) : (v >> shift)) & 0x3E; return x ? x + 1 : x; };

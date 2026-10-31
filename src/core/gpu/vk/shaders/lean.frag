@@ -8,6 +8,7 @@
 #define DS_GLSL 1
 #include "vk_layout.h"
 layout(std430, binding = 0) readonly buffer Polys  { GpuPoly polys[]; };
+layout(std430, binding = 4) readonly buffer Spans  { uint spans[]; };   // the span table (vk_layout.h)
 #define DS_TEXEL_BUFFER 1
 layout(binding = 2) uniform usamplerBuffer texels_tb;
 layout(std430, binding = 3) readonly buffer Post   { GpuPost ps; };
@@ -35,14 +36,31 @@ layout(early_fragment_tests) in;
 vec2 st_bounds_lo(GpuPoly p) { return vec2(float(int(p.row_base & 0xFFFFu) - 32768), float(int(p.pad_ & 0xFFFFu) - 32768)); }
 vec2 st_bounds_hi(GpuPoly p) { return vec2(float(int(p.row_base >> 16) - 32768), float(int(p.pad_ >> 16) - 32768)); }
 
+// The DS fills a row from the left edge's whole pixel to the right edge's,
+// and runs the attributes from the left edge's value to the right edge's
+// over exactly those pixels: pixel x reads the polygon's plane not at x but
+// at xl + (x - floor(xl)) * (xr - xl) / (ceil(xr) - floor(xl)), the edges
+// at this row taken over the whole-pixel vertices the hardware has. A
+// vertical edge gives no shift (sprites stay texel-exact); a slanted one
+// shifts the reading up to a pixel, differently each row, and without it
+// textured ground flipped texels against the CPU raster all over. The
+// row's xl and step come from the span table, built at submit.
+// Approximate for the hardware's X-major edge runs; those rows are few.
+float span_shift(GpuPoly p) {
+  if (p.span_base == DS_SPAN_NONE) return 0.0;
+  int y = int(gl_FragCoord.y), ry0 = max(p.ytop, 0), ry1 = min(p.ybot, 191);
+  if (y < ry0 || y > ry1) return 0.0;   // a fragment past the whole-pixel extent
+  uint i = uint(DS_SPAN_WORDS) * (p.span_base + uint(y - ry0));
+  float xl = uintBitsToFloat(spans[i]), step = uintBitsToFloat(spans[i + 1u]);
+  float x = floor(gl_FragCoord.x);
+  return xl + (x - floor(xl)) * step - x;
+}
+
 void main() {
   GpuPoly p = polys[v_poly];
-  vec3 rgb = clamp(interpolateAtOffset(v_rgb, vec2(-0.5)), vec3(0.0), vec3(511.0));
-#ifdef DS_CENTROID
-  vec2 st = clamp(interpolateAtCentroid(v_st), st_bounds_lo(p), st_bounds_hi(p));
-#else
-  vec2 st = clamp(interpolateAtOffset(v_st, vec2(-0.5)), st_bounds_lo(p), st_bounds_hi(p));
-#endif
+  float xs = span_shift(p);   // where along the row the DS reads this pixel's attributes
+  vec3 rgb = clamp(interpolateAtOffset(v_rgb, vec2(-0.5)) + dFdxFine(v_rgb) * xs, vec3(0.0), vec3(511.0));
+  vec2 st = clamp(interpolateAtOffset(v_st, vec2(-0.5)) + dFdxFine(v_st) * xs, st_bounds_lo(p), st_bounds_hi(p));
   uint blendmode = (p.attr >> 4) & 3u;
   uint polyalpha = (p.attr >> 16) & 0x1Fu;
   bool textured = (p.flags & DS_PF_TEXTURED) != 0u;

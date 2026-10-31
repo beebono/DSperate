@@ -31,6 +31,7 @@ Lean::Stats Lean::stats(bool) { return {}; }
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -72,7 +73,9 @@ struct Lean::Impl {
   std::vector<GpuPoly> host_polys;
   std::vector<GpuVert> host_verts;
   GpuPost host_post{};
-  Buffer polys[kSlots], verts[kSlots], post[kSlots], texels, out[kSlots];
+  Buffer polys[kSlots], verts[kSlots], post[kSlots], texels, out[kSlots], spans[kSlots];
+  std::vector<u32> host_spans;   // the span table, built per submit (vk_layout.h)
+  std::vector<float> row_xl, row_xr;   // scratch: a polygon's rows
   u32 tex_flushed = 0;   // arena words already flushed to the GPU
   VkBufferView texel_view = VK_NULL_HANDLE;
   struct Img { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
@@ -127,7 +130,7 @@ struct Lean::Impl {
     for (VkShaderModule* m : {&mod_vert, &mod_frag, &mod_frag_early, &mod_frag_opq, &mod_frag_trans, &mod_res, &mod_fs}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
     if (texel_view) a.vkDestroyBufferView(vk->dev, texel_view, nullptr);
     if (texels) dev->free(texels);
-    for (u32 i = 0; i < kSlots; ++i) for (Buffer* b : {&polys[i], &verts[i], &post[i], &out[i]}) if (*b) dev->free(*b);
+    for (u32 i = 0; i < kSlots; ++i) for (Buffer* b : {&polys[i], &verts[i], &post[i], &out[i], &spans[i]}) if (*b) dev->free(*b);
   }
 };
 
@@ -161,6 +164,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
   // Buffers.
   d.host_polys.resize(DS_MAX_POLYS);
   d.host_verts.resize(DS_MAX_VERTS);
+  d.host_spans.resize(DS_SPAN_TABLE_WORDS);
   d.texels = dev.alloc(sizeof(u32) * kTexelWords, Access::CpuWrite);
   if (!d.texels) return fail("buffer allocation");
   for (u32 i = 0; i < Impl::kSlots; ++i) {
@@ -168,7 +172,8 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     d.verts[i] = dev.alloc(sizeof(GpuVert) * DS_MAX_VERTS, Access::CpuWrite);
     d.post[i] = dev.alloc(sizeof(GpuPost), Access::CpuWrite);
     d.out[i] = dev.alloc(sizeof(u32) * W * H, Access::CpuRead);
-    if (!d.polys[i] || !d.verts[i] || !d.post[i] || !d.out[i]) return fail("buffer allocation");
+    d.spans[i] = dev.alloc(sizeof(u32) * DS_SPAN_TABLE_WORDS, Access::CpuWrite);
+    if (!d.polys[i] || !d.verts[i] || !d.post[i] || !d.out[i] || !d.spans[i]) return fail("buffer allocation");
   }
   {
     VkBufferViewCreateInfo bv{}; bv.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO; bv.buffer = vk_buf(d.texels); bv.format = VK_FORMAT_R32_UINT; bv.offset = 0; bv.range = VK_WHOLE_SIZE;
@@ -184,11 +189,11 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     return fail("lean shaders rejected by the driver");
   d.nostencil = std::getenv("DS_LEAN_NOSTENCIL") && std::atoi(std::getenv("DS_LEAN_NOSTENCIL")) != 0;
 
-  // Descriptors: set 0 = polys, verts, texels (texel buffer), post; set 1 = the MS colour as input attachment.
+  // Descriptors: set 0 = polys, verts, texels (texel buffer), post, spans; set 1 = the MS colour as input attachment.
   {
-    VkDescriptorSetLayoutBinding b[4]{};
-    for (u32 i = 0; i < 4; ++i) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; b[i].descriptorType = i == 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; }
-    VkDescriptorSetLayoutCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci.bindingCount = 4; ci.pBindings = b;
+    VkDescriptorSetLayoutBinding b[5]{};
+    for (u32 i = 0; i < 5; ++i) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; b[i].descriptorType = i == 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; }
+    VkDescriptorSetLayoutCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci.bindingCount = 5; ci.pBindings = b;
     if (a.vkCreateDescriptorSetLayout(vk->dev, &ci, nullptr, &d.dsl) != VK_SUCCESS) return fail("descriptor layout");
     VkDescriptorSetLayoutBinding ib[3]{};
     for (u32 i = 0; i < 3; ++i) { ib[i].binding = i; ib[i].descriptorCount = 1; ib[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; ib[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; }
@@ -198,7 +203,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pcr.size = sizeof(GpuFrame);
     VkPipelineLayoutCreateInfo pli{}; pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pli.setLayoutCount = 2; pli.pSetLayouts = sets; pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pcr;
     if (a.vkCreatePipelineLayout(vk->dev, &pli, nullptr, &d.layout) != VK_SUCCESS) return fail("pipeline layout");
-    VkDescriptorPoolSize psz[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * Impl::kSlots}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 3}};
+    VkDescriptorPoolSize psz[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * Impl::kSlots}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 3}};
     VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = Impl::kSlots + 1; dpi.poolSizeCount = 3; dpi.pPoolSizes = psz;
     if (a.vkCreateDescriptorPool(vk->dev, &dpi, nullptr, &d.pool) != VK_SUCCESS) return fail("descriptor pool");
     VkDescriptorSetLayout layouts[Impl::kSlots + 1];
@@ -210,16 +215,16 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     for (u32 i = 0; i < Impl::kSlots; ++i) d.set[i] = got[i];
     d.set_in = got[Impl::kSlots];
     for (u32 sl = 0; sl < Impl::kSlots; ++sl) {
-      VkDescriptorBufferInfo bi[4]{};
-      const Buffer* src[4] = {&d.polys[sl], &d.verts[sl], &d.texels, &d.post[sl]};
-      VkWriteDescriptorSet w[4]{};
-      for (u32 i = 0; i < 4; ++i) {
+      VkDescriptorBufferInfo bi[5]{};
+      const Buffer* src[5] = {&d.polys[sl], &d.verts[sl], &d.texels, &d.post[sl], &d.spans[sl]};
+      VkWriteDescriptorSet w[5]{};
+      for (u32 i = 0; i < 5; ++i) {
         bi[i].buffer = vk_buf(*src[i]); bi[i].range = VK_WHOLE_SIZE;
         w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = d.set[sl]; w[i].dstBinding = i; w[i].descriptorCount = 1;
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
       }
       w[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER; w[2].pBufferInfo = nullptr; w[2].pTexelBufferView = &d.texel_view;
-      a.vkUpdateDescriptorSets(vk->dev, 4, w, 0, nullptr);
+      a.vkUpdateDescriptorSets(vk->dev, 5, w, 0, nullptr);
     }
   }
 
@@ -436,6 +441,43 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     for (u32 v = 0; v < p.nverts; ++v) { const GpuVert& q = gv[p.first_vert + v]; s0 = std::min(s0, q.s); s1 = std::max(s1, q.s); t0 = std::min(t0, q.t); t1 = std::max(t1, q.t); }
     auto pk = [](s32 lo, s32 hi) { return static_cast<u32>(std::clamp(lo + 32768, 0, 65535)) | (static_cast<u32>(std::clamp(hi + 32768, 0, 65535)) << 16); };
     p.row_base = pk(s0, s1); p.pad_ = pk(t0, t1);
+  }
+
+  // The span table (vk_layout.h): each polygon's rows over its whole-pixel
+  // edges, xl and the DS's step per row; the polygon's base goes into its
+  // record (gpw: the host copy, reordered into the slot below). A frame with
+  // more rows than the table holds maps none.
+  {
+    u32* const rows = d.host_spans.data();
+    u32 nrows = 0;
+    for (u32 k = 0; k < npoly; ++k) {
+      const GpuPoly& p = gp[k];
+      const s32 ry0 = std::max(p.ytop, 0), ry1 = std::min(p.ybot, 191);
+      const u32 h = ry1 >= ry0 ? static_cast<u32>(ry1 - ry0) + 1 : 0;
+      if (!h || nrows + h > DS_MAX_SPAN_ROWS) { gpw[k].span_base = DS_SPAN_NONE; continue; }
+      d.row_xl.assign(h, 1e9f); d.row_xr.assign(h, -1e9f);
+      for (u32 v = 0; v < p.nverts; ++v) {
+        const GpuVert& a = gv[p.first_vert + v];
+        const GpuVert& b = gv[p.first_vert + (v + 1 == p.nverts ? 0 : v + 1)];
+        if (a.sy == b.sy) continue;
+        const float slope = static_cast<float>(b.sx - a.sx) / static_cast<float>(b.sy - a.sy);
+        const s32 ylo = std::max(std::min(a.sy, b.sy), ry0), yhi = std::min(std::max(a.sy, b.sy) - 1, ry1);   // the edge covers [min, max)
+        for (s32 y = ylo; y <= yhi; ++y) {
+          const float x = static_cast<float>(a.sx) + static_cast<float>(y - a.sy) * slope;
+          float& xl = d.row_xl[static_cast<u32>(y - ry0)]; float& xr = d.row_xr[static_cast<u32>(y - ry0)];
+          xl = std::min(xl, x); xr = std::max(xr, x);
+        }
+      }
+      u32* o = rows + DS_SPAN_WORDS * nrows;
+      for (u32 r = 0; r < h; ++r, o += DS_SPAN_WORDS) {
+        float xl = d.row_xl[r], xr = d.row_xr[r], step = 1.f;
+        if (xr < xl) { xl = 0.f; }   // no edge on this row: no shift
+        else { const float s0 = std::floor(xl), s1 = std::max(s0 + 1.f, std::ceil(xr)); step = (xr - xl) / (s1 - s0); }
+        std::memcpy(&o[0], &xl, sizeof xl); std::memcpy(&o[1], &step, sizeof step);
+      }
+      gpw[k].span_base = nrows; nrows += h;
+    }
+    if (nrows) { std::memcpy(d.spans[slot].ptr, rows, sizeof(u32) * DS_SPAN_WORDS * nrows); d.dev->flush(d.spans[slot], 0, sizeof(u32) * DS_SPAN_WORDS * nrows); }
   }
 
   // The frame's id codes (see the stencil layout).
