@@ -1008,7 +1008,7 @@ constexpr Extra kExtras[] = {
   {nullptr,            "pad.stylus_button",   "STYLUS TAP"},
   {nullptr,            "pad.stylus_button.alt", "STYLUS TAP (2)"},
   {nullptr,            "pad.stylus_axis",     "STYLUS STICK"},
-  {nullptr,            "pad.stylus_dpad",     "STYLUS DPAD"},
+  {nullptr,            "pad.stylus_hold",     "STYLUS HOLD"},
   {nullptr,            "pad.stick_dpad",      "STICK DPAD"},
   {nullptr,            "pad.stick_face",      "STICK ABXY"},
   // Axis remap: push the control the positive direction reads (stick
@@ -1051,7 +1051,12 @@ const char* extra_default(const char* key, bool pad, const ds::sdl::Config& cfg)
   if (std::strcmp(key, "pad.stylus_button") == 0) return ds::sdl::Input::stylus_button_default();
   if (std::strcmp(key, "pad.stylus_button.alt") == 0) return "none";   // second binding has no default
   if (std::strcmp(key, "pad.stylus_axis") == 0)   return ds::sdl::Input::stylus_axis_default(cfg);
-  if (std::strcmp(key, "pad.stylus_dpad") == 0)   return ds::sdl::Input::stylus_dpad_default();
+  if (std::strcmp(key, "pad.stylus_hold") == 0) {
+    // pad.stylus_dpad is the old name, and still configures it while unset.
+    static std::string old;
+    old = cfg.str("pad.stylus_dpad", ds::sdl::Input::stylus_hold_default());
+    return old.c_str();
+  }
   if (std::strcmp(key, "pad.stick_face") == 0)    return ds::sdl::Input::stick_face_default();
   if (std::strcmp(key, "pad.stick_dpad") == 0)    return ds::sdl::Input::stick_dpad_default();
   if (extra_is_axis_remap(key))
@@ -2425,7 +2430,7 @@ sdl_ready:
       }
       // A modifier can't be built on itself, nor can the pen's tap.
       if ((key == "hotkeys.modifier" || key == "padhotkeys.modifier" ||
-           key == "pad.stylus_button" || key == "pad.stylus_button.alt" || key == "pad.stylus_dpad") &&
+           key == "pad.stylus_button" || key == "pad.stylus_button.alt" || key == "pad.stylus_hold") &&
           value.compare(0, 4, "mod+") == 0)
         value = value.substr(4);
       cfg.set(key, value);

@@ -348,8 +348,11 @@ the patch:
 
 - `stylus_axis`, `stick_dpad` and `stick_face` let go of those sticks, and
   directions they were holding are released.
-- **Holding the pad modifier lends the pen its stick back.** Meanwhile the
-  patch sees that stick as centred, so the two never both follow it.
+- **Holding `pad.stylus_hold` lends the pen its stick back.** This is the button
+  that already gave the pen the d-pad (it was called `stylus_dpad`, which still
+  reads). Meanwhile the patch sees that stick as centred, so the two never both
+  follow it. While `stylus_hold` is unbound, the pad modifier does the same, so
+  the pen is never stranded; a bound `stylus_hold` keeps Guide for hotkeys.
 - When the patch stops, the sticks return to their bindings on their next
   event.
 - `test_analog_patch_claims_sticks` in `tests/input_test.cpp` pins each of

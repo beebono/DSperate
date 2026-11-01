@@ -461,8 +461,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # the triggers act as ZL/ZR past 3/4 travel. auto: dual on a
                                 # pad with a right stick, else left. While the patch runs its
                                 # sticks are its own: the pen (stylus_axis), stick_dpad and
-                                # stick_face let go of them; hold the pad modifier to move the
-                                # pen with its stick.
+                                # stick_face let go of them; hold stylus_hold (or, unbound,
+                                # the pad modifier) to move the pen with its stick.
 # analog_deadzone = 6000        # radial deadzone for those sticks, SDL units
 # analog_sensitivity_left = 100  # percent, 10-300: under 100 lowers the top speed, over 100
 # analog_sensitivity_right = 100 # reaches full speed with less travel
@@ -481,7 +481,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                     # right (X) or down (Y), or pressing the trigger.
 # stylus_axis = right           # right | left | none: the stick that moves the pen over the
                                 # bottom screen (left takes the stick away from the d-pad)
-# stylus_dpad = none            # a button; while held the d-pad, and the stick_dpad stick, move the pen (e.g. leftshoulder)
+# stylus_hold = none            # a button; while held the d-pad, and the stick_dpad stick, move the pen (e.g. leftstick),
+                                # and so does the pen's own stick while an analog patch has it (pad.analog).
+                                # Unbound, the pad modifier lends a patch's stick to the pen. Was stylus_dpad
 # stylus_button = rightstick    # touches at the pen's position; mod+<it> is free for a hotkey
 # stylus_button.alt = none      # a second tap control, like a hotkey's .alt (e.g. +righttrigger)
 # stylus_speed = 4.0            # pen pixels per frame at full tilt

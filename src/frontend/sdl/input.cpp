@@ -41,7 +41,7 @@ const char* const kModDefaultKey = "none";       // hotkeys.modifier
 const char* const kModDefaultPad = "guide";      // padhotkeys.modifier: the pad's mode/home button
 const char* const kStylusButtonDefault = "rightstick";
 const char* const kStylusAxisDefault = "right";
-const char* const kStylusDpadDefault = "none";
+const char* const kStylusHoldDefault = "none";
 const char* const kStickFaceDefault = "none";
 const char* const kStickDpadDefault = "left";
 
@@ -250,7 +250,8 @@ void Input::configure(const Config& cfg) {
     else if (ax == "none") stylus_axis_ = StylusAxis::None;
     else { std::fprintf(stderr, "config: stylus_axis \"%s\" is not right | left | none\n", ax.c_str()); stylus_axis_ = StylusAxis::Right; }
   }
-  stylus_chord_ = parse_pad(cfg.str("pad.stylus_dpad", kStylusDpadDefault));
+  // stylus_hold; pad.stylus_dpad is its old name, from when it only took the d-pad.
+  stylus_chord_ = parse_pad(cfg.str("pad.stylus_hold", cfg.str("pad.stylus_dpad", kStylusHoldDefault)));
   {
     // stick_dpad: left (default)|right|none, also works d-pad. stick_face:
     // none (default)|left|right, directions X(up)/B(down)/Y(left)/A(right).
@@ -351,7 +352,7 @@ void Input::warn_collisions() const {
       if (stylus_visible_binding() && same(stylus_button_[sl], pad_map_[i]))
         std::fprintf(stderr, "config: pad.stylus_button%s = %s shadows pad.%s; the game will never see it\n", hot_suffix(sl), pad_name(stylus_button_[sl]).c_str(), kButtonNames[i]);
     if (same(stylus_chord_, pad_map_[i]))
-      std::fprintf(stderr, "config: pad.stylus_dpad = %s shadows pad.%s; the game will never see it\n", pad_name(stylus_chord_).c_str(), kButtonNames[i]);
+      std::fprintf(stderr, "config: pad.stylus_hold = %s shadows pad.%s; the game will never see it\n", pad_name(stylus_chord_).c_str(), kButtonNames[i]);
   }
   for (int k = 0; k < na * HOT_SLOTS; ++k) {
     const int a = k / HOT_SLOTS, sl = k % HOT_SLOTS;
@@ -367,14 +368,14 @@ void Input::warn_collisions() const {
         if (stylus_visible_binding() && same(h, stylus_button_[tb]))
           std::fprintf(stderr, "config: padhotkeys.%s%s = %s is pad.stylus_button%s; bind it as mod+%s or it will never fire\n", kActionNames[a], hot_suffix(sl), pad_name(h).c_str(), hot_suffix(tb), pad_name(h).c_str());
       if (same(h, stylus_chord_))
-        std::fprintf(stderr, "config: padhotkeys.%s%s = %s is pad.stylus_dpad; bind it as mod+%s or it will never fire\n", kActionNames[a], hot_suffix(sl), pad_name(h).c_str(), pad_name(h).c_str());
+        std::fprintf(stderr, "config: padhotkeys.%s%s = %s is pad.stylus_hold; bind it as mod+%s or it will never fire\n", kActionNames[a], hot_suffix(sl), pad_name(h).c_str(), pad_name(h).c_str());
     }
     if (same(h, pad_mod_) && h.with < 0)
       std::fprintf(stderr, "config: padhotkeys.%s%s = %s is the modifier; it will never fire\n", kActionNames[a], hot_suffix(sl), pad_name(h).c_str());
   }
   for (int sl = 0; sl < HOT_SLOTS; ++sl)
     if (stylus_visible_binding() && same(stylus_button_[sl], stylus_chord_))
-      std::fprintf(stderr, "config: pad.stylus_button%s and pad.stylus_dpad are both %s; the chord will never engage\n", hot_suffix(sl), pad_name(stylus_button_[sl]).c_str());
+      std::fprintf(stderr, "config: pad.stylus_button%s and pad.stylus_hold are both %s; the hold will never engage\n", hot_suffix(sl), pad_name(stylus_button_[sl]).c_str());
   if (stylus_visible_binding() && exact(stylus_button_[0], stylus_button_[1]))
     std::fprintf(stderr, "config: pad.stylus_button.alt = %s is already pad.stylus_button\n", pad_name(stylus_button_[1]).c_str());
 }
@@ -657,9 +658,9 @@ static void scale_stick(Sint16 x, Sint16 y, int deadzone, int sensitivity, bool 
 void Input::fill_analog(input::Frame& f) const {
   const AnalogMode mode = analog_mode();
   if (mode == AnalogMode::Off) return;
-  // Under the modifier the pen has its stick back (update_stylus), and the
+  // Under stylus_hold the pen has its stick back (update_stylus), and the
   // patch sees that stick centred rather than both following it.
-  const auto pen_on = [&](StylusAxis s) { return analog_patch_ && pad_mod_down_ && stylus_axis_ == s; };
+  const auto pen_on = [&](StylusAxis s) { return analog_patch_ && pen_borrows_stick() && stylus_axis_ == s; };
   if ((mode == AnalogMode::Left || mode == AnalogMode::Dual) && !pen_on(StylusAxis::Left))
     scale_stick(raw_lx_, raw_ly_, analog_deadzone_, analog_sens_left_, analog_invert_y_, f.cpad_x, f.cpad_y);
   if (mode == AnalogMode::Right && !pen_on(StylusAxis::Right))
@@ -741,6 +742,9 @@ void Input::stick_as_buttons(u32& held, Sint16 value, B neg, B pos) {
   stick_prev_ = stick_;
 }
 
+// stylus_hold, or the modifier where stylus_hold is unbound.
+bool Input::pen_borrows_stick() const { return stylus_chord_.kind != Bind::None ? stylus_chord_down_ : pad_mod_down_; }
+
 bool Input::stylus_visible_binding() const { return stylus_axis_ != StylusAxis::None || stylus_chord_.kind != Bind::None; }
 
 void Input::update_stylus() {
@@ -749,8 +753,8 @@ void Input::update_stylus() {
   const double ddx = ((stylus_dpad_ >> B::BTN_RIGHT) & 1) - static_cast<double>((stylus_dpad_ >> B::BTN_LEFT) & 1);
   const double ddy = ((stylus_dpad_ >> B::BTN_DOWN) & 1) - static_cast<double>((stylus_dpad_ >> B::BTN_UP) & 1);
   const double sdx = stylus_chord_down_ ? axis(dstick_x_) : 0.0, sdy = stylus_chord_down_ ? axis(dstick_y_) : 0.0;
-  // An analog patch has the pen's stick unless the modifier is held.
-  const bool pen_stick = !analog_claims(stylus_axis_) || pad_mod_down_;
+  // An analog patch has the pen's stick unless stylus_hold is held.
+  const bool pen_stick = !analog_claims(stylus_axis_) || pen_borrows_stick();
   const double px = pen_stick ? axis(stylus_x_) : 0.0, py = pen_stick ? axis(stylus_y_) : 0.0;
   const double dx = (px + ddx + sdx) * stylus_speed_, dy = (py + ddy + sdy) * stylus_speed_;
   if (dx != 0 || dy != 0 || stylus_down_) stylus_idle_ = 0; else if (stylus_idle_ < (1 << 30)) ++stylus_idle_;
@@ -786,7 +790,7 @@ std::string Input::pad_label(const std::string& s0) {
 
 const char* Input::mod_default(bool pad) { return pad ? kModDefaultPad : kModDefaultKey; }
 const char* Input::stylus_button_default() { return kStylusButtonDefault; }
-const char* Input::stylus_dpad_default() { return kStylusDpadDefault; }
+const char* Input::stylus_hold_default() { return kStylusHoldDefault; }
 const char* Input::stick_face_default() { return kStickFaceDefault; }
 const char* Input::stick_dpad_default() { return kStickDpadDefault; }
 bool Input::parse_stick(const std::string& s, StylusAxis& out) {

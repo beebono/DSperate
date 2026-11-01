@@ -390,7 +390,7 @@ void test_extra_defaults_match_configure() {
   CHECK(std::string(Input::mod_default(true)) == "guide");
   CHECK(std::string(Input::mod_default(false)) == "none");
   CHECK(std::string(Input::stylus_button_default()) == "rightstick");
-  CHECK(std::string(Input::stylus_dpad_default()) == "none");
+  CHECK(std::string(Input::stylus_hold_default()) == "none");
   { Config c; CHECK(std::string(Input::stylus_axis_default(c)) == "right"); }
   // "pad.stylus_stick = false" is the old spelling of "none" and still counts.
   { Config c; c.set("pad.stylus_stick", "false");
@@ -510,12 +510,12 @@ void test_stick_dpad_names_a_stick() {
     T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000); CHECK((in.frame().buttons & kDpad) == 0); }
 }
 
-// Under the pad.stylus_dpad chord the d-pad stick is the pen's, as the d-pad
+// Under the pad.stylus_hold chord the d-pad stick is the pen's, as the d-pad
 // is: the game lets go of it for as long as the chord is held, and a stick
 // still tilted on release is the d-pad again without having to move.
 void test_stick_dpad_moves_the_pen_under_the_chord() {
   constexpr u32 kRight = 1u << B::BTN_RIGHT, kDpad = kRight | (1u << B::BTN_LEFT) | (1u << B::BTN_UP) | (1u << B::BTN_DOWN);
-  Rig r; r.set("pad.stylus_dpad", "leftshoulder"); Input& in = r.go();
+  Rig r; r.set("pad.stylus_hold", "leftshoulder"); Input& in = r.go();
   T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000);
   CHECK((in.frame().buttons & kDpad) == kRight);
   const int x0 = in.stylus_x();
@@ -681,6 +681,30 @@ void test_analog_patch_claims_sticks() {
     in.set_analog_patch(true);
     const int x0 = in.stylus_x();
     T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 30000);
+    in.update_stylus();
+    CHECK(in.stylus_x() > x0); }
+  { // A bound stylus_hold lends the pen its stick, and the modifier no longer does.
+    Rig r; r.set("pad.stylus_hold", "leftstick"); Input& in = r.go();
+    in.set_analog_patch(true);
+    const int x0 = in.stylus_x();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 30000);
+    T::hold_mod(in, true);
+    in.update_stylus();
+    CHECK(in.stylus_x() == x0 && in.frame().cstick_x > 0);
+    T::hold_mod(in, false);
+    CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_LEFTSTICK, true));
+    in.update_stylus();
+    CHECK(in.stylus_x() > x0 && in.frame().cstick_x == 0);
+    CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_LEFTSTICK, false));
+    const int x1 = in.stylus_x();
+    in.update_stylus();
+    CHECK(in.stylus_x() == x1 && in.frame().cstick_x > 0); }
+  { // The old name still binds it.
+    Rig r; r.set("pad.stylus_dpad", "leftstick"); Input& in = r.go();
+    in.set_analog_patch(true);
+    const int x0 = in.stylus_x();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 30000);
+    CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_LEFTSTICK, true));
     in.update_stylus();
     CHECK(in.stylus_x() > x0); }
   { // Off: nothing is claimed even with a patch on.

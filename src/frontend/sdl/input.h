@@ -31,7 +31,7 @@ public:
   // Whether a CPAD patch is reading the sticks (NDS::analog_patch). While it
   // is, the sticks pad.analog feeds belong to the patch: the pen, stick_dpad
   // and stick_face let go of them, and the pen takes its stick back while the
-  // pad modifier is held.
+  // pad.stylus_hold button is held (the pad modifier, while that is unbound).
   void set_analog_patch(bool on);
 
   // DS_DUAL_SCREENS: "upper=<display>[:<touch>...],lower=...,none=<touch>..."
@@ -98,7 +98,7 @@ public:
   void fake_mic_frame(std::vector<s16>& out);
 
   // Pad-driven pen: moved by a stick's deflection (pad.stylus_axis) and by
-  // the d-pad while the pad.stylus_dpad chord is held.
+  // the d-pad while pad.stylus_hold is held.
   void update_stylus();
   bool stylus_visible_binding() const;   // some pad control drives the pen
   bool stylus_visible() const { return (stylus_axis_ != StylusAxis::None || stylus_chord_.kind != Bind::None) && pad_ != nullptr && stylus_idle_ < stylus_hide_; }   // hidden after stylus_hide idle frames
@@ -133,7 +133,7 @@ public:
   // modifier, and the pen's tap button and stick.
   static const char* mod_default(bool pad);
   static const char* stylus_button_default();
-  static const char* stylus_dpad_default();
+  static const char* stylus_hold_default();
   static const char* stick_face_default();
   static const char* stick_dpad_default();
   static const char* stylus_axis_default(const Config& cfg);
@@ -258,7 +258,8 @@ private:
   StylusAxis stick_face_ = StylusAxis::None;   // pad.stick_face: a stick that also works X/B/Y/A (up/down/left/right)
   Bind stylus_button_[HOT_SLOTS];   // pressing either touches at the pen's position (pad.stylus_button, .alt)
   u8   stylus_down_ = 0;            // which of them is held, a bit per slot
-  Bind stylus_chord_;          // while held, the d-pad moves the pen instead of the game
+  Bind stylus_chord_;          // pad.stylus_hold: while held, the d-pad (and a patch's pen stick) move the pen instead of the game
+  bool pen_borrows_stick() const;   // stylus_hold held, or the modifier when it is unbound
   bool stylus_chord_down_ = false;
   u32  stylus_dpad_ = 0;       // d-pad directions held under the chord (bit per DS button)
   u32  held_ = 0;              // SDL pad buttons currently down (bit per button)
