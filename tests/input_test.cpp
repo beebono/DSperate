@@ -564,9 +564,9 @@ void test_axis_remap() {
 }
 
 // pad.analog: sticks reach the frame as proportional values for a CPAD
-// patch, with a radial deadzone; off by default, the fields stay zero.
+// patch, with a radial deadzone; off, the fields stay zero.
 void test_analog_sticks() {
-  { Rig r; Input& in = r.go();                                   // off by default
+  { Rig r; r.set("pad.analog", "off"); Input& in = r.go();
     T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
     const input::Frame f = in.frame();
     CHECK(f.cpad_x == 0 && f.cpad_y == 0 && !f.zl && !f.zr); }
@@ -631,6 +631,63 @@ void test_analog_sticks() {
   { Rig r; r.set("pad.analog", "sideways"); Input& in = r.go();  // unparseable: off
     T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
     CHECK(in.frame().cpad_x == 0); }
+  { Rig r; Input& in = r.go();                                   // auto by default: two sticks here
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -32768);
+    T::axis(in, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 32767);
+    const input::Frame f = in.frame();
+    CHECK(f.cpad_x == 32767 && f.cstick_y == 32767 && f.zl); }
+}
+
+// While a patch runs, its sticks are its own: the pen, stick_dpad and
+// stick_face let go of them, and the modifier lends the pen its stick back.
+void test_analog_patch_claims_sticks() {
+  constexpr u32 kRight = 1u << B::BTN_RIGHT, kDpad = kRight | (1u << B::BTN_LEFT) | (1u << B::BTN_UP) | (1u << B::BTN_DOWN);
+  { // No patch: the defaults as ever, the left stick on the d-pad, the right on the pen.
+    Rig r; Input& in = r.go();
+    const int x0 = in.stylus_x();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000);
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 30000);
+    in.update_stylus();
+    CHECK((in.frame().buttons & kDpad) == kRight);
+    CHECK(in.stylus_x() > x0); }
+  { Rig r; Input& in = r.go();
+    in.set_analog_patch(true);
+    const int x0 = in.stylus_x();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000);
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 30000);
+    in.update_stylus();
+    input::Frame f = in.frame();
+    CHECK((f.buttons & kDpad) == 0);                             // the stick steers, not the d-pad
+    CHECK(in.stylus_x() == x0);                                  // nor the pen
+    CHECK(f.cpad_x > 0 && f.cstick_x > 0);
+    T::hold_mod(in, true);                                       // the pen borrows its stick
+    in.update_stylus();
+    f = in.frame();
+    CHECK(in.stylus_x() > x0);
+    CHECK(f.cstick_x == 0 && f.cpad_x > 0);                      // and the patch sees it centred
+    T::hold_mod(in, false);
+    in.set_analog_patch(false);                                  // the d-pad comes back on the next event
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30001);
+    CHECK((in.frame().buttons & kDpad) == kRight); }
+  { // A direction held when the patch starts does not stay held.
+    Rig r; Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000);
+    CHECK((in.frame().buttons & kDpad) == kRight);
+    in.set_analog_patch(true);
+    CHECK((in.frame().buttons & kDpad) == 0); }
+  { // One stick for the patch: the other keeps its job.
+    Rig r; r.set("pad.analog", "left"); Input& in = r.go();
+    in.set_analog_patch(true);
+    const int x0 = in.stylus_x();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 30000);
+    in.update_stylus();
+    CHECK(in.stylus_x() > x0); }
+  { // Off: nothing is claimed even with a patch on.
+    Rig r; r.set("pad.analog", "off"); Input& in = r.go();
+    in.set_analog_patch(true);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 30000);
+    CHECK((in.frame().buttons & kDpad) == kRight); }
 }
 
 } // namespace
@@ -661,6 +718,7 @@ int main() {
   ds::sdl::test_stick_dpad_moves_the_pen_under_the_chord();
   ds::sdl::test_axis_remap();
   ds::sdl::test_analog_sticks();
+  ds::sdl::test_analog_patch_claims_sticks();
   std::printf("input tests passed\n");
   return 0;
 }

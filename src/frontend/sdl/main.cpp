@@ -721,7 +721,7 @@ void Session::refresh_analog(NDS& nds, const ds::sdl::Config& cfg) const {
   const bool wanted = ds::sdl::Input::analog_wanted(cfg);
   const ds::cheat::AnalogRequest req = ds::cheat::analog_request(nds.cheats.codes);
   if (req.schemes && !wanted)
-    std::fprintf(stderr, "analog: \"%s\" is enabled but pad.analog is off: the sticks will not reach it\n", req.name);
+    std::fprintf(stderr, "analog: \"%s\" is enabled but pad.analog = off: the sticks will not reach it\n", req.name);
   // Two schemes for one game install hooks over the same addresses; running
   // both at once corrupts controls. Exclusive cheat groups keep the bundled
   // schemes from ever being on together.
@@ -3537,6 +3537,7 @@ sdl_ready:
     // the game is handed a frame with nothing pressed.
     const bool menu_over_live = menu.open();
     if (menu_over_live) { pump_menu(); menu_dirty = menu_dirty || menu.dirty(); }
+    input.set_analog_patch(nds.analog_patch);
     input.update_stylus();
     ds::input::Frame in = input.frame();
     if (menu_over_live) {

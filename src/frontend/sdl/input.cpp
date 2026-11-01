@@ -146,10 +146,33 @@ std::string Input::axis_remap_default(int i) {
 }
 
 Input::AnalogMode Input::analog_mode_of(const std::string& s) {
-  return s == "left" ? AnalogMode::Left : s == "right" ? AnalogMode::Right : s == "dual" ? AnalogMode::Dual : AnalogMode::Off;
+  return s == "auto" ? AnalogMode::Auto : s == "left" ? AnalogMode::Left : s == "right" ? AnalogMode::Right
+       : s == "dual" ? AnalogMode::Dual : AnalogMode::Off;
 }
 
-bool Input::analog_wanted(const Config& cfg) { return analog_mode_of(cfg.str("pad.analog", "off")) != AnalogMode::Off; }
+bool Input::analog_wanted(const Config& cfg) { return analog_mode_of(cfg.str("pad.analog", "auto")) != AnalogMode::Off; }
+
+// A pad with no right stick (or none open yet) still has a left one.
+Input::AnalogMode Input::analog_mode() const {
+  if (analog_mode_ != AnalogMode::Auto) return analog_mode_;
+  return pad_ && !SDL_GameControllerHasAxis(pad_, SDL_CONTROLLER_AXIS_RIGHTX) ? AnalogMode::Left : AnalogMode::Dual;
+}
+
+bool Input::analog_claims(StylusAxis s) const {
+  if (!analog_patch_ || s == StylusAxis::None) return false;
+  const AnalogMode m = analog_mode();
+  if (m == AnalogMode::Dual) return true;
+  return s == (m == AnalogMode::Left ? StylusAxis::Left : m == AnalogMode::Right ? StylusAxis::Right : StylusAxis::None);
+}
+
+void Input::set_analog_patch(bool on) {
+  if (on == analog_patch_) return;
+  analog_patch_ = on;
+  // Directions the claimed sticks were holding would otherwise stay held:
+  // SDL reports only changes. Released sticks come back on their next event.
+  if (analog_claims(stick_dpad_)) { stick_ = 0; stick_prev_ = 0; dstick_x_ = dstick_y_ = 0; }
+  if (analog_claims(stick_face_)) face_stick_ = 0;
+}
 
 void Input::configure(const Config& cfg) {
   for (int i = 0; i < SDL_CONTROLLER_AXIS_MAX; ++i) {
@@ -243,23 +266,16 @@ void Input::configure(const Config& cfg) {
   }
   deadzone_ = cfg.num("pad.stick_deadzone", 12000);
   {
-    // analog: off (default) | left | right | dual -- sticks for a CPAD patch.
-    const std::string an = cfg.str("pad.analog", "off");
+    // analog: auto (default) | off | left | right | dual -- sticks for a CPAD
+    // patch. A stick it shares with the pen or stick_dpad/stick_face is the
+    // patch's while one runs (set_analog_patch), so no warning is needed.
+    const std::string an = cfg.str("pad.analog", "auto");
     analog_mode_ = analog_mode_of(an);
     if (analog_mode_ == AnalogMode::Off && an != "off")
-      std::fprintf(stderr, "config: pad.analog \"%s\" is not off | left | right | dual\n", an.c_str());
+      std::fprintf(stderr, "config: pad.analog \"%s\" is not auto | off | left | right | dual\n", an.c_str());
     const std::string layout = cfg.str("pad.analog_layout", "auto");
     if (layout != "auto" && layout != "packed" && layout != "extended")
       std::fprintf(stderr, "config: pad.analog_layout \"%s\" is not auto | packed | extended\n", layout.c_str());
-    if (analog_mode_ != AnalogMode::Off) {
-      const bool uses_left = analog_mode_ == AnalogMode::Left || analog_mode_ == AnalogMode::Dual;
-      const bool uses_right = analog_mode_ == AnalogMode::Right || analog_mode_ == AnalogMode::Dual;
-      if ((uses_left && stylus_axis_ == StylusAxis::Left) || (uses_right && stylus_axis_ == StylusAxis::Right))
-        std::fprintf(stderr, "config: pad.analog and pad.stylus_axis share a stick; both will read it (set stylus_axis = none for a CPAD game)\n");
-      if ((uses_left && (stick_dpad_ == StylusAxis::Left || stick_face_ == StylusAxis::Left)) ||
-          (uses_right && (stick_dpad_ == StylusAxis::Right || stick_face_ == StylusAxis::Right)))
-        std::fprintf(stderr, "config: pad.analog shares a stick with pad.stick_dpad or pad.stick_face; it will press those too (set them to none for a CPAD game)\n");
-    }
   }
   analog_deadzone_ = cfg.num("pad.analog_deadzone", 6000);
   if (analog_deadzone_ < 0) analog_deadzone_ = 0;
@@ -639,17 +655,21 @@ static void scale_stick(Sint16 x, Sint16 y, int deadzone, int sensitivity, bool 
 }
 
 void Input::fill_analog(input::Frame& f) const {
-  if (analog_mode_ == AnalogMode::Off) return;
-  if (analog_mode_ == AnalogMode::Left || analog_mode_ == AnalogMode::Dual)
+  const AnalogMode mode = analog_mode();
+  if (mode == AnalogMode::Off) return;
+  // Under the modifier the pen has its stick back (update_stylus), and the
+  // patch sees that stick centred rather than both following it.
+  const auto pen_on = [&](StylusAxis s) { return analog_patch_ && pad_mod_down_ && stylus_axis_ == s; };
+  if ((mode == AnalogMode::Left || mode == AnalogMode::Dual) && !pen_on(StylusAxis::Left))
     scale_stick(raw_lx_, raw_ly_, analog_deadzone_, analog_sens_left_, analog_invert_y_, f.cpad_x, f.cpad_y);
-  if (analog_mode_ == AnalogMode::Right)
+  if (mode == AnalogMode::Right && !pen_on(StylusAxis::Right))
     scale_stick(raw_rx_, raw_ry_, analog_deadzone_, analog_sens_right_, analog_invert_y_, f.cpad_x, f.cpad_y);
-  if (analog_mode_ == AnalogMode::Dual)
+  if (mode == AnalogMode::Dual && !pen_on(StylusAxis::Right))
     scale_stick(raw_rx_, raw_ry_, analog_deadzone_, analog_sens_right_, analog_invert_y_, f.cstick_x, f.cstick_y);
   // Triggers: the same past-3/4-travel rule axis() uses for trigger bindings.
   // A button-mapped trigger (H700) synthesises 0/32767, so this covers both.
   // Two sticks only, as the setting says, and never under a hotkey chord.
-  if (analog_mode_ != AnalogMode::Dual || pad_mod_down_) return;
+  if (mode != AnalogMode::Dual || pad_mod_down_) return;
   f.zl = raw_lt_ > trigger_threshold();
   f.zr = raw_rt_ > trigger_threshold();
 }
@@ -681,9 +701,10 @@ void Input::axis(Uint8 which, Sint16 value) {
   const bool left_x = which == SDL_CONTROLLER_AXIS_LEFTX, left_y = which == SDL_CONTROLLER_AXIS_LEFTY;
   const bool right_x = which == SDL_CONTROLLER_AXIS_RIGHTX, right_y = which == SDL_CONTROLLER_AXIS_RIGHTY;
   const bool x_axis = left_x || right_x;
-  // Is this axis on the named stick, and is that stick not the pen's?
+  // Is this axis on the named stick, and is that stick neither the pen's nor
+  // an analog patch's?
   const auto on_stick = [&](StylusAxis s) {
-    return s != stylus_axis_ && (s == StylusAxis::Left ? (left_x || left_y) : s == StylusAxis::Right ? (right_x || right_y) : false);
+    return s != stylus_axis_ && !analog_claims(s) && (s == StylusAxis::Left ? (left_x || left_y) : s == StylusAxis::Right ? (right_x || right_y) : false);
   };
   if (on_stick(stick_dpad_)) { if (x_axis) dstick_x_ = value; else dstick_y_ = value; }
   if (on_stick(stick_dpad_) && !stylus_chord_down_) stick_as_buttons(stick_, value, x_axis ? B::BTN_LEFT : B::BTN_UP, x_axis ? B::BTN_RIGHT : B::BTN_DOWN);
@@ -728,7 +749,10 @@ void Input::update_stylus() {
   const double ddx = ((stylus_dpad_ >> B::BTN_RIGHT) & 1) - static_cast<double>((stylus_dpad_ >> B::BTN_LEFT) & 1);
   const double ddy = ((stylus_dpad_ >> B::BTN_DOWN) & 1) - static_cast<double>((stylus_dpad_ >> B::BTN_UP) & 1);
   const double sdx = stylus_chord_down_ ? axis(dstick_x_) : 0.0, sdy = stylus_chord_down_ ? axis(dstick_y_) : 0.0;
-  const double dx = (axis(stylus_x_) + ddx + sdx) * stylus_speed_, dy = (axis(stylus_y_) + ddy + sdy) * stylus_speed_;
+  // An analog patch has the pen's stick unless the modifier is held.
+  const bool pen_stick = !analog_claims(stylus_axis_) || pad_mod_down_;
+  const double px = pen_stick ? axis(stylus_x_) : 0.0, py = pen_stick ? axis(stylus_y_) : 0.0;
+  const double dx = (px + ddx + sdx) * stylus_speed_, dy = (py + ddy + sdy) * stylus_speed_;
   if (dx != 0 || dy != 0 || stylus_down_) stylus_idle_ = 0; else if (stylus_idle_ < (1 << 30)) ++stylus_idle_;
   stylus_fx_ += dx;
   stylus_fy_ += dy;

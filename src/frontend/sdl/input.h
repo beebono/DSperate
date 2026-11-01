@@ -28,6 +28,11 @@ class Input {
 public:
   void configure(const Config& cfg);
   static bool analog_wanted(const Config& cfg);   // pad.analog names a stick mode
+  // Whether a CPAD patch is reading the sticks (NDS::analog_patch). While it
+  // is, the sticks pad.analog feeds belong to the patch: the pen, stick_dpad
+  // and stick_face let go of them, and the pen takes its stick back while the
+  // pad modifier is held.
+  void set_analog_patch(bool on);
 
   // DS_DUAL_SCREENS: "upper=<display>[:<touch>...],lower=...,none=<touch>..."
   // gives each physical panel its SDL display and touch devices (a touch is a
@@ -228,10 +233,13 @@ private:
   bool axis_inv_[SDL_CONTROLLER_AXIS_MAX] = {};
   // Analog patch channel (pad.analog): which stick(s) feed the CPAD patch.
   // Dual: left stick is the Circle Pad, right stick is the C-Stick/nub.
-  enum class AnalogMode : u8 { Off, Left, Right, Dual };
+  // Auto: Dual on a pad with a right stick, else Left.
+  enum class AnalogMode : u8 { Off, Left, Right, Dual, Auto };
   static AnalogMode analog_mode_of(const std::string& s);   // anything else is Off
+  AnalogMode analog_mode() const;   // Auto resolved against the open pad
   int  trigger_threshold() const { return std::max(deadzone_, 24576); }
-  AnalogMode analog_mode_ = AnalogMode::Off;
+  AnalogMode analog_mode_ = AnalogMode::Auto;
+  bool analog_patch_ = false;     // set_analog_patch
   int  analog_deadzone_ = 6000;   // radial, in SDL units; below stick_deadzone on purpose
   bool analog_invert_y_ = false;
   int  analog_sens_left_ = 100, analog_sens_right_ = 100;   // percent
@@ -240,6 +248,8 @@ private:
   void fill_analog(input::Frame& f) const;
 
   enum class StylusAxis : u8 { None, Right, Left };
+  // The patch has this stick (set_analog_patch); the modifier does not change it.
+  bool analog_claims(StylusAxis s) const;
   // Config spelling: none | left | right. Old stick_dpad = true/false still
   // parse as left/none.
   static bool parse_stick(const std::string& s, StylusAxis& out);

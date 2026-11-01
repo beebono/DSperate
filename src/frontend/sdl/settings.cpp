@@ -42,7 +42,7 @@ const Choice kWifiDns[]  = {{"wiimmfi", "WIIMMFI"}, {"host", "HOST"}};
 const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
                             {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
 const Choice kCheck[]    = {{"false", "[ ]"}, {"true", "[X]"}};
-const Choice kAnalog[]   = {{"off", "OFF"}, {"left", "LEFT STICK"}, {"right", "RIGHT STICK"}, {"dual", "TWO STICKS"}};
+const Choice kAnalog[]   = {{"auto", "AUTO"}, {"off", "OFF"}, {"left", "LEFT STICK"}, {"right", "RIGHT STICK"}, {"dual", "TWO STICKS"}};
 const Choice kAnalogLayout[] = {{"auto", "AUTO"}, {"packed", "PACKED"}, {"extended", "EXTENDED"}};
 const Choice kLayout[]   = {{"vertical", "VERTICAL"}, {"horizontal", "HORIZONTAL"}, {"single", "SINGLE"},
                             {"pip", "PIP"}, {"dominant_v", "DOMINANT V"}, {"dominant_h", "DOMINANT H"}};
@@ -109,8 +109,8 @@ const Setting kEmuSettings[] = {
 };
 
 const Setting kAnalogSettings[] = {
-  pick("pad.analog", "ANALOG PATCH", kAnalog, 4, "off", FlagLive, Dep::None,
-       "NEEDS A CPAD CHEAT ON. TWO STICKS ADDS THE RIGHT STICK AND L2/R2"),
+  pick("pad.analog", "ANALOG PATCH", kAnalog, 5, "auto", FlagLive, Dep::None,
+       "NEEDS A CPAD CHEAT ON. AUTO USES TWO STICKS (RIGHT STICK, L2/R2) IF THE PAD HAS THEM"),
   number("pad.analog_deadzone", "ANALOG DEADZONE", 0, 30000, 500, "6000", FlagLive, Dep::None,
          "HOW FAR A STICK MUST MOVE BEFORE AN ANALOG PATCH SEES IT"),
   number("pad.analog_sensitivity_left", "LEFT SENSITIVITY", 10, 300, 10, "100", FlagLive, Dep::None,
