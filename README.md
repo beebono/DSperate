@@ -111,6 +111,10 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   controls, DS settings), achievements, resume and quit.
 - **Action Replay cheats** from a `usrcheat.dat` database, matched by game
   code and header checksum, toggled per game from the pause menu.
+- **Analog controls** for about 70 games through shocoman's Circle Pad
+  patches, built in: enable the game's `CPAD` code under Options > Analog and
+  the sticks steer (and, with two, the camera and ZL/ZR). See
+  [docs/techniques/07](docs/techniques/07-3ds-circle-pad-cheats.md).
 - **RetroAchievements** (Casual mode only, no Hardcore) via rcheevos: sign in
   with a username or a token the CFW already holds, unlock toasts, an
   achievements list and account page in the pause menu, encore mode, and an
@@ -226,4 +230,6 @@ replay, and `mkcart.py` for building a custom loader cart.
 
 GPLv3 — see [LICENSE](LICENSE). melonDS (GPLv3) is used as reference and, with
 attribution, as a code source. FreeBIOS is under its own licence in
-[src/core/bios/LICENSE.freebios](src/core/bios/LICENSE.freebios).
+[src/core/bios/LICENSE.freebios](src/core/bios/LICENSE.freebios). The built-in analog
+controls codes are shocoman's and not under the GPL; their provenance is in
+[src/core/cheat/analog_db/README.md](src/core/cheat/analog_db/README.md).
