@@ -1448,6 +1448,10 @@ template <class S> void Gpu3D::sync_state(S& s) {
       else { Polygon copy = pram_[b * PRAM_BANK + i]; for (u32 j = 0; j < 10; ++j) copy.vtx[j] = static_cast<u16>(remap(copy.vtx[j], VRAM_BANK)); sync_polygon(s, copy); }
     }
   }
+  // GXSTAT's busy flag must follow the restored scheduler timeline, not
+  // the later session we are replacing. Older states omit these fields.
+  if constexpr (S::reading) { swap_wait_ = false; swap_busy_until_ = 0; }
+  s.fields(swap_wait_, swap_busy_until_);
   s.end();
   renderer_.sync_output(s);
   stack_err_ = gxstat_ & 0x8000u; box_result_ = gxstat_ & 2u; gxstat_ &= ~0x8002u;
