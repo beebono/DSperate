@@ -669,10 +669,12 @@ void Input::fill_analog(input::Frame& f) const {
     scale_stick(raw_rx_, raw_ry_, analog_deadzone_, analog_sens_right_, analog_invert_y_, f.cstick_x, f.cstick_y);
   // Triggers: the same past-3/4-travel rule axis() uses for trigger bindings.
   // A button-mapped trigger (H700) synthesises 0/32767, so this covers both.
-  // Two sticks only, as the setting says, and never under a hotkey chord.
+  // Two sticks only, as the setting says, and never under a hotkey chord. A
+  // trigger that is stylus_hold is the pen's, not ZL/ZR.
   if (mode != AnalogMode::Dual || pad_mod_down_) return;
-  f.zl = raw_lt_ > trigger_threshold();
-  f.zr = raw_rt_ > trigger_threshold();
+  const auto pen_hold = [&](int axis) { return stylus_chord_.kind == Bind::PadAxis && stylus_chord_.code == axis && !stylus_chord_.neg; };
+  f.zl = raw_lt_ > trigger_threshold() && !pen_hold(SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+  f.zr = raw_rt_ > trigger_threshold() && !pen_hold(SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
 }
 
 void Input::axis(Uint8 which, Sint16 value) {

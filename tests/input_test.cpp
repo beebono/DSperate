@@ -699,6 +699,16 @@ void test_analog_patch_claims_sticks() {
     const int x1 = in.stylus_x();
     in.update_stylus();
     CHECK(in.stylus_x() == x1 && in.frame().cstick_x > 0); }
+  { // A trigger that is stylus_hold moves the pen and is not ZL as well.
+    Rig r; r.set("pad.stylus_hold", "+lefttrigger"); Input& in = r.go();
+    in.set_analog_patch(true);
+    const int x0 = in.stylus_x();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 30000);
+    T::axis(in, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 32767);
+    T::axis(in, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 32767);
+    in.update_stylus();
+    const input::Frame f = in.frame();
+    CHECK(in.stylus_x() > x0 && !f.zl && f.zr); }
   { // The old name still binds it.
     Rig r; r.set("pad.stylus_dpad", "leftstick"); Input& in = r.go();
     in.set_analog_patch(true);
