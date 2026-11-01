@@ -671,20 +671,31 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
       std::fprintf(stderr, "cheats: %s\n", err.c_str());
     }
   }
-  // The analog controls patches can keep a database of their own, so a
-  // player's usrcheat.dat stays theirs.
-  const std::string analog_db = cfg.str("paths.analog_cheats");
-  if (!analog_db.empty() && nds.cart) {
+  // The analog controls patches keep a database of their own, so a player's
+  // usrcheat.dat stays theirs: paths.analog_cheats ("none" for no analog
+  // codes), else usrcheat-analog.dat beside the ROM or in the config dir.
+  // The copy built in (an empty path) covers a game that file lacks.
+  std::string analog_db = cfg.str("paths.analog_cheats");
+  if (analog_db.empty()) {
+    for (const std::string& candidate : {rom_dir + "/usrcheat-analog.dat", ds::sdl::Config::dir() + "/usrcheat-analog.dat"}) {
+      if (FILE* f = std::fopen(candidate.c_str(), "rb")) { std::fclose(f); analog_db = candidate; break; }
+    }
+  }
+  const auto merge_analog_from = [&](const std::string& path) {
     std::string err;
     ds::cheat::GameCheats analog;
-    if (ds::cheat::load_for_header(analog_db, header, analog, err)) {
-      if (ds::cheat::merge_analog(cheats, std::move(analog), ds::cheat::header_checksum(header))) {
-        VLOG("cheats: analog database -- %zu codes in all\n", cheats.codes.size());
-        nds.cheats.codes = cheats.codes;
-      }
-    } else if (!err.empty()) {
-      std::fprintf(stderr, "cheats: %s\n", err.c_str());
+    if (!ds::cheat::load_analog_for_header(path, header, analog, err)) {
+      if (!err.empty()) std::fprintf(stderr, "cheats: %s\n", err.c_str());
+      return false;
     }
+    if (!ds::cheat::merge_analog(cheats, std::move(analog), ds::cheat::header_checksum(header))) return false;
+    VLOG("cheats: analog codes from %s -- %zu codes in all\n", path.empty() ? "the built-in database" : path.c_str(), cheats.codes.size());
+    nds.cheats.codes = cheats.codes;
+    return true;
+  };
+  if (analog_db != "none" && nds.cart) {
+    const bool from_file = !analog_db.empty() && merge_analog_from(analog_db);
+    if (!from_file) merge_analog_from("");
   }
   // Names, not indices: a database update renumbers; a stale name is dropped.
   if (!cheats.codes.empty())

@@ -376,6 +376,49 @@ void test_merge_analog() {
   CHECK(main.codes[2].group == 1);                                  // renumbered past the game's own
 }
 
+// The database DSperate is built with: every entry parses, every real code
+// in it is an analog one, and SM64DS USA v1.0 is there at its own checksum
+// with both variants. The count of extended-layout ROMs is the one
+// docs/techniques/07 states.
+void test_builtin_analog() {
+  cheat::Database db;
+  std::string err;
+  CHECK(db.open_memory(cheat::builtin_analog_database(), "built-in", err));
+  CHECK(db.game_count() == 229);
+  size_t extended = 0, revisions = 0;
+  bool sm64ds = false;
+  std::vector<u32> seen;
+  for (const u32 code : db.game_codes()) {
+    bool dup = false;
+    for (const u32 s : seen) dup = dup || s == code;
+    if (dup) continue;
+    seen.push_back(code);
+    std::string one;
+    for (const cheat::GameCheats& g : db.entries_for(code, one)) {
+      ++revisions;
+      bool any_extended = false;
+      for (const cheat::Code& c : g.codes) {
+        CHECK(c.is_note() || c.analog);
+        if (!c.is_note() && cheat::reads_extended_analog(c)) any_extended = true;
+      }
+      if (any_extended) ++extended;
+      if (code == 0x454D5341u && g.checksum == 0xAEA63749u) {    // "ASME"
+        bool plain = false, nub = false;
+        for (const cheat::Code& c : g.codes) {
+          if (c.name == "CPAD") plain = true;
+          if (c.analog_nub()) nub = true;
+        }
+        sm64ds = plain && nub;
+      }
+    }
+    CHECK(one.empty());
+  }
+  CHECK(revisions == 229);
+  CHECK(sm64ds);
+  std::printf("built-in analog database: %zu revisions, %zu extended\n", revisions, extended);
+  CHECK(extended == 64);
+}
+
 void test_enforce_exclusive() {
   std::vector<cheat::Group> groups(2);
   groups[0].exclusive = true;
@@ -389,6 +432,7 @@ void test_enforce_exclusive() {
 
 int main() {
   test_merge_analog();
+  test_builtin_analog();
   test_enforce_exclusive();
   test_header();
   test_basic_entry();

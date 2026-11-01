@@ -59,9 +59,20 @@ void enforce_exclusive(std::vector<Code>& codes, const std::vector<Group>& group
 // another revision.
 bool merge_analog(GameCheats& into, GameCheats analog, u32 checksum);
 
+// The analog controls database DSperate is built with (analog_db/): shocoman's
+// CPAD codes, converted for emulators. Not under DSperate's licence; see
+// analog_db/README.md.
+std::vector<u8> builtin_analog_database();
+
+// load_for_header for the analog controls database: from `path`, or from the
+// built-in copy when `path` is empty.
+bool load_analog_for_header(const std::string& path, const u8 header[512], GameCheats& out, std::string& err);
+
 class Database {
 public:
   bool open(const std::string& path, std::string& err);
+  // The same over a file already in memory; `label` names it in errors.
+  bool open_memory(std::vector<u8> file, const std::string& label, std::string& err);
 
   const std::string& name() const { return name_; }
   bool has(u32 game_code) const;

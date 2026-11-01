@@ -25,6 +25,7 @@ add_library(dsperate_core STATIC
   cart/miniz/miniz_tdef.c
   cart/miniz/miniz.c
   cheat/ar_engine.cpp
+  cheat/analog_db.cpp
   cheat/database.cpp
   sched/scheduler.cpp
   cpu/cpu.cpp
@@ -112,6 +113,11 @@ set_property(SOURCE io/dsi_font.cpp APPEND PROPERTY OBJECT_DEPENDS
              "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable.dat"
              "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable-cn.dat"
              "${CMAKE_CURRENT_SOURCE_DIR}/io/dsi_font/TWLFontTable-kr.dat")
+# The analog controls database is linked in the same way (cheat/analog_db.cpp).
+set_property(SOURCE cheat/analog_db.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+             DSPERATE_ANALOG_DB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cheat/analog_db")
+set_property(SOURCE cheat/analog_db.cpp APPEND PROPERTY OBJECT_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/cheat/analog_db/usrcheat-analog.dat")
 # The Vulkan device layer behind the frontend's dma-buf import presenter
 # (frontend/sdl/gpu_present.cpp). Opt-in at build time and at run time both:
 # libvulkan is loaded with dlopen, so a build with this on still starts on a

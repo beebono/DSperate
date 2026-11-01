@@ -262,6 +262,7 @@ int main(int argc, char** argv) {
   bool no_aa = false;
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
+  const char* analog_db = nullptr;     // the analog controls database; null: the built-in one
   const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_boot = nullptr; const char* dsi_nand = nullptr; bool dsi_nand_boot = false; bool dsi_nand_write = false; const char* dsi_persist = nullptr; const char* dsi_install = nullptr; bool dsi_hide_installed = false; const char* dsi_tmd = nullptr; bool dsi_offline = false; bool dsi_autoload = false; bool dsi_hle = false; ds::u32 dsi_title_lo = 0; ds::bios::UserSettings user; const char* dsi_font = nullptr; const char* dsi_sd = nullptr; ds::u64 dsi_autoload_id = 0; const char* dsi_shortcuts = nullptr; bool dsi_shortcuts_on = true;
   int dsi_mode = -1;                   // -1 auto
   bool list_cheats = false;
@@ -335,6 +336,7 @@ int main(int argc, char** argv) {
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
     else if (arg("--cheats")) cheat_db = argv[++i];         // usrcheat.dat; the entry matching this ROM is loaded
+    else if (arg("--analog-cheats")) analog_db = argv[++i]; // usrcheat-analog.dat (exact ROM match only); default the built-in one, "none" for no analog codes
     else if (flag("--list-cheats")) list_cheats = true;     // print them (with their index) and exit
     else if (arg("--cheat")) enable_cheats.push_back(argv[++i]);   // enable one by name, or by "#N" from --list-cheats
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
@@ -526,18 +528,38 @@ int main(int argc, char** argv) {
     if (!scaled_out) { std::fprintf(stderr, "could not open %s\n", scaled_path); return 1; }
   }
 
-  if (rom && cheat_db) {
+  if (rom && (cheat_db || analog_db || list_cheats || !enable_cheats.empty())) {
     ds::cheat::GameCheats found;
     std::string err;
     // From the loaded cart, so a zipped ROM is looked up by the game's header.
     ds::u8 header[512] = {};
     if (nds.cart) nds.cart->rom_read(0, header, sizeof header);
-    if (!ds::cheat::load_for_header(cheat_db, header, found, err)) {
-      if (!err.empty()) { std::fprintf(stderr, "cheats: %s\n", err.c_str()); return 1; }
-      std::fprintf(stderr, "cheats: this ROM is not in %s\n", cheat_db);
+    bool have = false;
+    if (cheat_db) {
+      if (ds::cheat::load_for_header(cheat_db, header, found, err)) have = true;
+      else if (!err.empty()) { std::fprintf(stderr, "cheats: %s\n", err.c_str()); return 1; }
+      else std::fprintf(stderr, "cheats: this ROM is not in %s\n", cheat_db);
+      if (!err.empty()) std::fprintf(stderr, "cheats: %s\n", err.c_str());
+    }
+    // The analog codes as the SDL frontend merges them: this exact ROM only.
+    if (!analog_db || std::strcmp(analog_db, "none") != 0) {
+      ds::cheat::GameCheats analog;
+      std::string aerr;
+      if (ds::cheat::load_analog_for_header(analog_db ? analog_db : "", header, analog, aerr)) {
+        if (found.name.empty()) found.name = analog.name;
+        if (ds::cheat::merge_analog(found, std::move(analog), ds::cheat::header_checksum(header))) {
+          have = true;
+          std::fprintf(stderr, "cheats: analog codes from %s\n", analog_db ? analog_db : "the built-in database");
+        }
+      } else if (!aerr.empty()) {
+        std::fprintf(stderr, "cheats: %s\n", aerr.c_str());
+        return 1;
+      }
+    }
+    if (!have) {
+      std::fprintf(stderr, "cheats: no codes for this ROM\n");
       if (list_cheats) return 0;
     } else {
-      if (!err.empty()) std::fprintf(stderr, "cheats: %s\n", err.c_str());
       std::fprintf(stderr, "cheats: %s -- %zu codes in %zu groups\n",
                    found.name.c_str(), found.codes.size(), found.groups.size());
       if (list_cheats) {
