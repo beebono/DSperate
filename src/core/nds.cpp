@@ -45,6 +45,7 @@ NDS::NDS()
 NDS::~NDS() = default;
 
 void NDS::reset() {
+  cheats.forget_writes();   // the journal's originals belong to the pre-reset machine
   normalise_touch_calibration();
   normalise_boot_mode();
   sched.reset();
@@ -563,6 +564,7 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
     w.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending, dsi_dsp_started);
     w.end();
   }
+  cheats.save_journal(w);   // there only when an analog code has written
   return true;
 }
 
@@ -649,6 +651,8 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     r.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending, dsi_dsp_started);
     r.end();
   }
+  cheats.forget_writes();   // memory now matches the state, not the old journal
+  if (r.peek("CHJR")) cheats.load_journal(r);   // frontends' own chunks may follow
   if (!r.ok()) { err = r.error(); return false; }
   if (dsi) {
     dsi_nand.apply_state_delta(nand);

@@ -42,6 +42,8 @@ const Choice kWifiDns[]  = {{"wiimmfi", "WIIMMFI"}, {"host", "HOST"}};
 const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
                             {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
 const Choice kCheck[]    = {{"false", "[ ]"}, {"true", "[X]"}};
+const Choice kAnalog[]   = {{"off", "OFF"}, {"left", "LEFT STICK"}, {"right", "RIGHT STICK"}, {"dual", "TWO STICKS"}};
+const Choice kAnalogLayout[] = {{"auto", "AUTO"}, {"packed", "PACKED"}, {"extended", "EXTENDED"}};
 const Choice kLayout[]   = {{"vertical", "VERTICAL"}, {"horizontal", "HORIZONTAL"}, {"single", "SINGLE"},
                             {"pip", "PIP"}, {"dominant_v", "DOMINANT V"}, {"dominant_h", "DOMINANT H"}};
 const Choice kCorner[]   = {{"tl", "TOP LEFT"}, {"tr", "TOP RIGHT"}, {"bl", "BOTTOM LEFT"}, {"br", "BOTTOM RIGHT"}};
@@ -103,6 +105,24 @@ const Setting kEmuSettings[] = {
        "LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE"),
   pick("wifi.dns", "DNS", kWifiDns, 2, "wiimmfi", FlagRestart, Dep::NetInternet,
        "WHERE THE GAME LOOKS UP ITS SERVERS. NINTENDO'S ARE GONE; WIIMMFI REPLACES THEM"),
+  end(),
+};
+
+const Setting kAnalogSettings[] = {
+  pick("pad.analog", "ANALOG PATCH", kAnalog, 4, "off", FlagLive, Dep::None,
+       "NEEDS A CPAD CHEAT ON. TWO STICKS ADDS THE RIGHT STICK AND L2/R2"),
+  number("pad.analog_deadzone", "ANALOG DEADZONE", 0, 30000, 500, "6000", FlagLive, Dep::None,
+         "HOW FAR A STICK MUST MOVE BEFORE AN ANALOG PATCH SEES IT"),
+  number("pad.analog_sensitivity_left", "LEFT SENSITIVITY", 10, 300, 10, "100", FlagLive, Dep::None,
+         "UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL",
+         nullptr, nullptr, "%"),
+  number("pad.analog_sensitivity_right", "RIGHT SENSITIVITY", 10, 300, 10, "100", FlagLive, Dep::None,
+         "UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL",
+         nullptr, nullptr, "%"),
+  boolean("pad.analog_invert_y", "ANALOG INVERT Y", "false", FlagLive, Dep::None,
+          "FLIP THE STICKS' UP AND DOWN FOR AN ANALOG PATCH"),
+  pick("pad.analog_layout", "ANALOG LAYOUT", kAnalogLayout, 3, "auto", FlagLive, Dep::None,
+       "HOW THE PATCH WANTS STICK DATA ARRANGED. AUTO READS THE PATCH"),
   end(),
 };
 

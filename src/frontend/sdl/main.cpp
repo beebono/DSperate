@@ -600,9 +600,9 @@ std::vector<ds::sdl::Menu::GameEntry> enumerate_library(const ds::sdl::Config& c
 
 // Everything keyed to the ROM in the slot: save/states/screenshots/cheats
 // paths and the per-game .ini a hotkey writes to. Boot fills this once; the
-// loader cart resets the machine and re-opens it without redoing config
-// layering (a second per-game .ini merge would accumulate, not replace) --
-// only game_ini is re-keyed, so a post-launch hotkey targets the right game.
+// loader cart resets the machine and re-opens it. Its one launch per run adds
+// the picked game's .ini to a config that has had no game's, since a second
+// merge would accumulate, not replace.
 struct Session {
   std::string rom_path;         // what is in the slot
   std::string rom_dir;          // its directory: the default home for everything below
@@ -617,6 +617,8 @@ struct Session {
   void open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom, const char* save_arg);
   void load_enabled(NDS& nds) const;
   void save_enabled(NDS& nds) const;
+  // NDS::analog_patch follows pad.analog plus an enabled CPAD cheat.
+  void refresh_analog(NDS& nds, const ds::sdl::Config& cfg) const;
 };
 
 void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom, const char* save_arg) {
@@ -635,7 +637,12 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   // usrcheat.dat from paths.cheats, beside the ROM, or the config dir.
   cheats = ds::cheat::GameCheats{};
   nds.cheats.codes.clear();
+  nds.cheats.forget_writes();
   cheats_on_path.clear();
+  // Header from the loaded cart, not the file at rom_path: a zipped game's
+  // file starts with the archive header, so every lookup would miss.
+  u8 header[512] = {};
+  if (nds.cart) nds.cart->rom_read(0, header, sizeof header);
   std::string db = cfg.str("paths.cheats");
   // Path may name the file itself or its directory; avoid a double usrcheat.dat.
   if (!db.empty()) {
@@ -657,13 +664,24 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   }
   if (!db.empty()) {
     std::string err;
-    // Header from the loaded cart, not the file at rom_path: a zipped game's
-    // file starts with the archive header, so every lookup would miss.
-    u8 header[512] = {};
-    if (nds.cart) nds.cart->rom_read(0, header, sizeof header);
     if (nds.cart && ds::cheat::load_for_header(db, header, cheats, err)) {
       VLOG("cheats: %s -- %zu codes in %zu groups\n", cheats.name.c_str(), cheats.codes.size(), cheats.groups.size());
       nds.cheats.codes = cheats.codes;
+    } else if (!err.empty()) {
+      std::fprintf(stderr, "cheats: %s\n", err.c_str());
+    }
+  }
+  // The analog controls patches can keep a database of their own, so a
+  // player's usrcheat.dat stays theirs.
+  const std::string analog_db = cfg.str("paths.analog_cheats");
+  if (!analog_db.empty() && nds.cart) {
+    std::string err;
+    ds::cheat::GameCheats analog;
+    if (ds::cheat::load_for_header(analog_db, header, analog, err)) {
+      if (ds::cheat::merge_analog(cheats, std::move(analog), ds::cheat::header_checksum(header))) {
+        VLOG("cheats: analog database -- %zu codes in all\n", cheats.codes.size());
+        nds.cheats.codes = cheats.codes;
+      }
     } else if (!err.empty()) {
       std::fprintf(stderr, "cheats: %s\n", err.c_str());
     }
@@ -677,17 +695,50 @@ void Session::load_enabled(NDS& nds) const {
   if (cheats_on_path.empty()) return;
   FILE* f = std::fopen(cheats_on_path.c_str(), "rb");
   if (!f) return;
+  // The file is the player's choice, and it replaces the database's defaults.
+  for (ds::cheat::Code& c : nds.cheats.codes) c.enabled = false;
   char line[512];
-  size_t on = 0;
   while (std::fgets(line, sizeof line, f)) {
     std::string want(line);
     while (!want.empty() && (want.back() == '\n' || want.back() == '\r')) want.pop_back();
     if (want.empty()) continue;
     for (ds::cheat::Code& c : nds.cheats.codes)
-      if (!c.is_note() && c.name == want) { c.enabled = true; ++on; }
+      if (!c.is_note() && c.name == want) c.enabled = true;
   }
   std::fclose(f);
+  // A file can name two members of one exclusive group (written before the
+  // grouping existed, or by hand).
+  ds::cheat::enforce_exclusive(nds.cheats.codes, cheats.groups);
+  size_t on = 0;
+  for (const ds::cheat::Code& c : nds.cheats.codes) if (c.enabled) ++on;
   if (on) VLOG("cheats: %zu enabled from %s\n", on, cheats_on_path.c_str());
+}
+
+// Analog stays live only while the player wants sticks (pad.analog) and a
+// CPAD patch is enabled for this game; either one alone does nothing, so an
+// unpatched game never sees the 0x027FFDF0 writes.
+void Session::refresh_analog(NDS& nds, const ds::sdl::Config& cfg) const {
+  const bool wanted = ds::sdl::Input::analog_wanted(cfg);
+  const ds::cheat::AnalogRequest req = ds::cheat::analog_request(nds.cheats.codes);
+  if (req.schemes && !wanted)
+    std::fprintf(stderr, "analog: \"%s\" is enabled but pad.analog is off: the sticks will not reach it\n", req.name);
+  // Two schemes for one game install hooks over the same addresses; running
+  // both at once corrupts controls. Exclusive cheat groups keep the bundled
+  // schemes from ever being on together.
+  if (req.schemes > 1)
+    std::fprintf(stderr, "analog: %d CPAD codes are enabled at once; their hooks will fight. Enable exactly one.\n", req.schemes);
+  const bool on = wanted && req.schemes > 0, full = on && req.nub;
+  if (on != nds.analog_patch || full != nds.analog_full)
+    VLOG("analog: CPAD patch %s%s\n", on ? "active" : "inactive", full ? " (nub + ZL/ZR)" : "");
+  // With no feed, neither the last frame's stick values nor a state's may
+  // linger where a hook (or a later re-enable) reads.
+  if (!on && (nds.analog_patch || req.schemes)) ds::input::clear_analog(nds);
+  nds.analog_patch = on;
+  nds.analog_full = full;
+  const std::string layout = cfg.str("pad.analog_layout", "auto");
+  nds.analog_layout = layout == "extended" || (layout != "packed" && req.extended)
+                          ? NDS::AnalogLayout::Extended
+                          : NDS::AnalogLayout::Packed;
 }
 
 void Session::save_enabled(NDS& nds) const {
@@ -1194,17 +1245,17 @@ static int run(int argc, char** argv) {
   // Per-game files on top of the global one, CLI on top of both: title ID
   // first, then filename-keyed, so the filename wins. Rerun after the cart
   // loads to cover a zip (game code unreadable until unpacked).
-  auto merge_game_config = [&](const char* code) {
+  auto merge_game_config = [&](const char* code, const std::string& game) {
     std::vector<std::string> paths;
     if (code) paths.push_back(ds::sdl::Config::game_path_code(code));
-    paths.push_back(ds::sdl::Config::game_path_rom(rom_path));
+    paths.push_back(ds::sdl::Config::game_path_rom(game));
     for (const std::string& p : paths)
       if (!p.empty() && cfg.load(p)) VLOG("config: %s\n", p.c_str());
     apply_cli();
   };
   if (!boot_firmware) {
     char code[4];
-    merge_game_config(peek_game_code(rom_path, code) ? code : nullptr);
+    merge_game_config(peek_game_code(rom_path, code) ? code : nullptr, rom_path);
   }
 
   // Set before any thread exists so every later thread inherits it. Needs
@@ -1807,7 +1858,7 @@ sdl_ready:
   }
   // Merge again now the game code is known (first time for a zip).
   if (nds.cart) {
-    merge_game_config(nds.cart->header().game_code);
+    merge_game_config(nds.cart->header().game_code, rom_path);
     VLOG("game: %.12s [%.4s]\n", nds.cart->header().game_title, nds.cart->header().game_code);
     if (!nds.rom_zip_entry.empty()) VLOG("zip: %s\n", nds.rom_zip_entry.c_str());
   }
@@ -2020,6 +2071,7 @@ sdl_ready:
   ds::sdl::Menu menu;
   menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
   session.load_enabled(nds);
+  session.refresh_analog(nds, cfg);
   // DSI NAND LINKS: a .dspr.nds shortcut file per DSiWare title on
   // paths.dsi_nand while on, none while off. Refreshed at every start and
   // when the row is toggled. Reads its own NAND copy; session's untouched.
@@ -2602,6 +2654,12 @@ sdl_ready:
     if (is("emu.ff_speed")) { ff_speed = std::atoi(v.c_str()); return; }
     if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
     if (is("emu.autosave")) { autosave = on; return; }
+    if (is("pad.analog") || is("pad.analog_deadzone") || is("pad.analog_invert_y") || is("pad.analog_layout") ||
+        is("pad.analog_sensitivity_left") || is("pad.analog_sensitivity_right")) {
+      input.configure(cfg);
+      session.refresh_analog(nds, cfg);
+      return;
+    }
     if (is("video.aa")) { apply_aa(nds, aa_on(v)); return; }
     if (is("video.gpu3d")) { std::string why; if (!nds.gpu3d.renderer().set_gpu(on, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); return; }
     if (is("video.gpu_present")) { host.reopen_wanted = true; return; }
@@ -3074,6 +3132,16 @@ sdl_ready:
   // Starting a game from the loader cart's picker (and DS_LAUNCH_AT, which
   // does the same from a script).
   bool from_list = false;   // the game running was picked from the list: RESET goes back to the firmware
+  // Every way out of the menu, and of the session, goes through this. A cheat's enabled flag
+  // changes the moment it is toggled, so leaving without it (Reset, Load)
+  // runs the code while the stick channel it reads stays off, and a scheme
+  // that removes the digital controls then leaves the player with none.
+  auto apply_cheat_changes = [&] {
+    if (!menu.cheats_dirty()) return;
+    session.save_enabled(nds);
+    session.refresh_analog(nds, cfg);
+    menu.clear_cheats_dirty();
+  };
   auto launch_game = [&](const std::string& pick) {
     const ds::sdl::OffRealtime off_rt;   // reset, ROM, save and state: one-shot work
     VLOG("launcher: %s\n", pick.c_str());
@@ -3176,12 +3244,15 @@ sdl_ready:
     // --save deliberately not carried over: it pins one file for the command-line ROM.
     launcher = false;
     from_list = true;
+    merge_game_config(nds.cart ? nds.cart->header().game_code : nullptr, pick);
+    input.configure(cfg);
     session.open(nds, cfg, pick, nullptr);
 #if DSPERATE_CHEEVOS
     if (cheevos_on) { cheevos.unload_game(); cheevos_identify(pick); }
 #endif
     menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
     session.load_enabled(nds);
+    session.refresh_analog(nds, cfg);
     load_save(nds, session.sav);
     // After the battery save, so the state's SRAM wins; never during replay/recording.
     if (const std::string a = log.reading() || log.writing()
@@ -3189,6 +3260,7 @@ sdl_ready:
                                   : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
         !a.empty() && load_state_file(nds, a, loaded_layout, got_layout)) {
       std::fprintf(stderr, "state: autoloaded %s\n", a.c_str());
+      session.refresh_analog(nds, cfg);
       apply_loaded_layout();
       sd_note_toast();
     }
@@ -3210,7 +3282,7 @@ sdl_ready:
       case Menu::Result::None: break;
       case Menu::Result::Resume:
         state_slot = menu.slot();
-        if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
+        apply_cheat_changes();
         menu.set_open(false);
         display.set_page(false);
         set_paused(false);
@@ -3229,8 +3301,10 @@ sdl_ready:
         if (net_live) { std::fprintf(stderr, "state: not during a network session\n"); break; }
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
+        apply_cheat_changes();
         // A load leaves the menu too: the player wants to see where they landed.
         if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()), loaded_layout, got_layout)) {
+          session.refresh_analog(nds, cfg);
           apply_loaded_layout();
           sd_note_toast();
           state_slot = menu.slot();
@@ -3242,8 +3316,8 @@ sdl_ready:
           flush_save();
         } else refresh_slots();
         break;
-      case Menu::Result::Launch: launch_game(menu.chosen()); break;
-      case Menu::Result::Quit: input.request_quit(); break;
+      case Menu::Result::Launch: apply_cheat_changes(); launch_game(menu.chosen()); break;
+      case Menu::Result::Quit: apply_cheat_changes(); input.request_quit(); break;
       case Menu::Result::Delete: {
         const std::string path = slot_path(menu.doomed_slot());
         if (std::remove(path.c_str()) != 0) std::fprintf(stderr, "state: cannot delete %s: %s\n", path.c_str(), std::strerror(errno));
@@ -3258,6 +3332,7 @@ sdl_ready:
         if (net_live) { std::fprintf(stderr, "reset: not during a network session\n"); break; }
         if (save_readonly) { std::fprintf(stderr, "reset: not during a replay\n"); break; }
         if (log.writing()) { std::fprintf(stderr, "reset: not while recording\n"); break; }
+        apply_cheat_changes();
         if (from_list) {
           std::fprintf(stderr, "reset: back to the firmware\n");
           g_restart = true;
@@ -3305,7 +3380,7 @@ sdl_ready:
         // this tests "is the menu up", not "is the machine stopped".
         if (paused || menu.open()) {
           state_slot = menu.slot();
-          if (menu.cheats_dirty()) { session.save_enabled(nds); menu.clear_cheats_dirty(); }
+          apply_cheat_changes();
           menu.set_open(false);
           display.set_page(false);
           set_paused(false);
@@ -3375,6 +3450,7 @@ sdl_ready:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
         if (load_state_file(nds, state_path(nds, session.states_dir, state_slot), loaded_layout, got_layout)) {
+          session.refresh_analog(nds, cfg);
           apply_loaded_layout();
           audio.clear();
           pacer.reset();
@@ -3689,6 +3765,7 @@ sdl_ready:
         else if (nds.firmware_override_dirty())
           std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
         std::fprintf(stderr, "power off: rebooting the firmware\n");
+        apply_cheat_changes();
         autosave_now();       // the reset below discards the session
 #if DSPERATE_JIT
         if (jit) ds::jit::flush_all();
@@ -4015,6 +4092,7 @@ sdl_ready:
     }
   }
 
+  apply_cheat_changes();
   autosave_now();
   flush_save();
   discard_session_cache();

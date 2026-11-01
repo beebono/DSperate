@@ -154,6 +154,9 @@ split cleanly:
 - [05 — The SPU and audio output](05-spu-and-audio-output.md)
 - [06 — Game-specific behaviour](06-drastic-game-specific.md) — DraStic's
   per-game hack table and title-specific fixes, as a list to review
+- [07 — 3DS Circle Pad cheats, without the 3DS](07-3ds-circle-pad-cheats.md) —
+  not DraStic: DSperate's own support for shocoman's CPAD patches, and why
+  an emulator keeps the game hook and deletes the transport
 
 ## Confidence
 

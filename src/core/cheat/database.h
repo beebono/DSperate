@@ -46,6 +46,19 @@ bool load_for_rom(const std::string& db_path, const std::string& rom_path, GameC
 // the ROM path may name a zip.
 bool load_for_header(const std::string& db_path, const u8 header[512], GameCheats& out, std::string& err);
 
+// An exclusive group may arrive with several codes enabled; the first wins.
+// Two alternative schemes over the same addresses cannot run at once.
+void enforce_exclusive(std::vector<Code>& codes, const std::vector<Group>& groups);
+
+// Appends a game's entry from the analog controls database to `into`. Only
+// an entry for exactly this ROM is taken: a
+// hook patches fixed addresses, so best_entry's first-revision fallback would
+// install it over the wrong code. An analog code already in `into` goes, since
+// the two would install over the same addresses and both match by name when
+// the enabled set is restored. False, leaving `into` alone, when `analog` is
+// another revision.
+bool merge_analog(GameCheats& into, GameCheats analog, u32 checksum);
+
 class Database {
 public:
   bool open(const std::string& path, std::string& err);

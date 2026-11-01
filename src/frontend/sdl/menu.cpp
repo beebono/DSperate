@@ -195,7 +195,7 @@ constexpr int kCheatRow = 3;   // hidden when no database matched this ROM
 constexpr int kOptionsRow = 4; // hidden when the frontend gave no settings host
 constexpr int kCheevosRow = 5; // hidden unless RetroAchievements is built and on
 // The Options page's own entries, and which of them has no page yet.
-constexpr int kOptionPages = 5, kDsOptionsRow = 4;
+constexpr int kOptionPages = 6, kDsOptionsRow = 5;
 constexpr struct RootItem { const char* label; Menu::Result result; } kRoot[] = {
   {"SAVE STATE", Menu::Result::Save},
   {"LOAD STATE", Menu::Result::Load},
@@ -270,7 +270,7 @@ bool Menu::root_visible(int item) const {
   if (kRoot[item].result == Result::Save || kRoot[item].result == Result::Load ||
       kRoot[item].result == Result::Reset || item == kSlotRow)
     return have_states();
-  if (item == kCheatRow) return have_cheats();
+  if (item == kCheatRow) return have_cheats(false);
   if (item == kOptionsRow) return have_options();
   if (item == kCheevosRow) return have_cheevos();
   return true;
@@ -285,6 +285,11 @@ int Menu::root_rows() const {
 int Menu::root_item(int row) const {
   for (int i = 0; i < kRootRows; ++i) if (root_visible(i) && row-- == 0) return i;
   return kRootRows - 1;
+}
+
+bool Menu::have_cheats(bool analog) const {
+  if (codes_) for (const cheat::Code& c : *codes_) if (c.analog == analog) return true;
+  return false;
 }
 
 void Menu::push(Page p) {
@@ -305,6 +310,7 @@ void Menu::build_lines() {
   int last = -2;
   for (size_t i = 0; i < codes_->size(); ++i) {
     const cheat::Code& c = (*codes_)[i];
+    if (c.analog != cheats_analog_) continue;
     if (c.group != last) {
       if (c.group >= 0 && groups_ && static_cast<size_t>(c.group) < groups_->size())
         lines_.push_back({Line::Heading, c.group});
@@ -312,6 +318,15 @@ void Menu::build_lines() {
     }
     lines_.push_back({c.is_note() ? Line::Note : Line::Toggle, static_cast<int>(i)});
   }
+}
+
+void Menu::open_cheats(bool analog) {
+  cheats_analog_ = analog;
+  build_lines();
+  cheat_row_ = 0;
+  cheat_top_ = 0;
+  if (!lines_.empty() && lines_[0].kind != Line::Toggle) move_cheat_row(+1);
+  push(Page::Cheats);
 }
 
 // Moves to the next selectable line in `delta`'s direction, stopping at the
@@ -515,14 +530,7 @@ Menu::Result Menu::handle(u32 presses) {
   if (hit(B::BTN_B)) return Result::Resume;
   if (!hit(B::BTN_A) && !hit(B::BTN_START)) return Result::None;
   if (item == kSlotRow) { push(Page::Slot); slot_row_ = slot_; slot_delete_ = slot_armed_ = false; return Result::None; }
-  if (item == kCheatRow) {
-    build_lines();
-    cheat_row_ = 0;
-    cheat_top_ = 0;
-    if (!lines_.empty() && lines_[0].kind != Line::Toggle) move_cheat_row(+1);
-    push(Page::Cheats);
-    return Result::None;
-  }
+  if (item == kCheatRow) { open_cheats(false); return Result::None; }
   if (item == kOptionsRow) { push(Page::Options); return Result::None; }
   if (item == kCheevosRow) {
     // Always the account page: answers signed-in/has-set/why-not and carries
@@ -646,9 +654,9 @@ ListFrame list_frame(const Canvas& d, const char* title) {
 void Menu::draw_cheats(const Canvas& d) const {
   // Heading counts the codes, not the lines, to match the frontend's log.
   size_t on = 0;
-  if (codes_) for (const cheat::Code& c : *codes_) if (c.enabled) ++on;
+  if (codes_) for (const cheat::Code& c : *codes_) if (c.enabled && c.analog == cheats_analog_) ++on;
   char title[32];
-  std::snprintf(title, sizeof title, "CHEATS  %zu ON", on);
+  std::snprintf(title, sizeof title, "%s  %zu ON", cheats_analog_ ? "ANALOG CHEATS" : "CHEATS", on);
   const ListFrame f = list_frame(d, title);
   const Metrics& m = f.m;
   visible_ = f.visible;
@@ -963,6 +971,7 @@ const Setting* Menu::table() const {
   case Page::VisualFx:  return kVideoSettings;
   case Page::Layout:    return kLayoutSettings;
   case Page::DsOptions: return kUserSettings;
+  case Page::Analog:    return kAnalogSettings;
   default:              return kEmuSettings;
   }
 }
@@ -972,16 +981,23 @@ int Menu::table_slot() const {
   case Page::VisualFx:  return 1;
   case Page::Layout:    return 2;
   case Page::DsOptions: return 3;
+  case Page::Analog:    return 4;
   default:              return 0;
   }
+}
+
+int Menu::link_rows() const { return page() == Page::Analog && have_cheats(true) ? 1 : 0; }
+
+const Setting* Menu::setting_row(int row) const {
+  const int link = link_rows();
+  return row < link ? nullptr : &table()[row - link];
 }
 
 // Stops at the ends rather than wrapping. A row the host has switched off
 // can still be highlighted, so its reason shows in the note; it just
 // does not step.
 bool Menu::move_setting_row(int delta) {
-  const Setting* t = table();
-  const int n = settings_count(t);
+  const int n = settings_count(table()) + link_rows();
   const int slot = table_slot();
   const int at = set_row_[slot] + (delta > 0 ? 1 : -1);
   if (at < 0 || at >= n) return false;
@@ -990,8 +1006,9 @@ bool Menu::move_setting_row(int delta) {
 }
 
 void Menu::step_setting(int dir) {
-  const Setting* t = table();
-  const Setting& s = t[set_row_[table_slot()]];
+  const Setting* row = setting_row(set_row_[table_slot()]);
+  if (!row) return;
+  const Setting& s = *row;
   if (!host_->enabled(s)) return;
   if (s.type == Setting::Type::Text) return;   // A opens the editor instead
   const std::string cur = host_->get(s.key);
@@ -1012,7 +1029,7 @@ Menu::Result Menu::handle_options(u32 presses) {
     host_->set_save_per_game(!host_->save_per_game());
   if (hit(B::BTN_B)) { pop(); return Result::None; }
   if (save_row || (!hit(B::BTN_A) && !hit(B::BTN_START))) return Result::None;
-  static constexpr Page kPages[kOptionPages] = {Page::Emulation, Page::VisualFx, Page::Layout, Page::Controls, Page::DsOptions};
+  static constexpr Page kPages[kOptionPages] = {Page::Emulation, Page::VisualFx, Page::Layout, Page::Controls, Page::Analog, Page::DsOptions};
   push(kPages[opt_row_]);
   if (page() == Page::Controls) {
     // Open on the pad column when one is plugged in; keyboard otherwise.
@@ -1036,8 +1053,9 @@ Menu::Result Menu::handle_settings(u32 presses) {
   if (hit(B::BTN_RIGHT)) step_setting(+1);
   // A steps a setting forward too, so the page can be worked with one button.
   if (hit(B::BTN_A) || hit(B::BTN_START)) {
-    const Setting& cur = table()[set_row_[table_slot()]];
-    if (cur.type == Setting::Type::Text && host_->enabled(cur)) open_text_edit();
+    const Setting* cur = setting_row(set_row_[table_slot()]);
+    if (!cur) open_cheats(true);
+    else if (cur->type == Setting::Type::Text && host_->enabled(*cur)) open_text_edit();
     else step_setting(+1);
   }
   if (hit(B::BTN_B))     pop();
@@ -1045,7 +1063,7 @@ Menu::Result Menu::handle_settings(u32 presses) {
 }
 
 void Menu::draw_options(const Canvas& d) const {
-  static constexpr const char* kItems[kOptionPages] = {"EMULATION", "VISUAL FX", "LAYOUT", "CONTROLS", "DS OPTIONS"};
+  static constexpr const char* kItems[kOptionPages] = {"EMULATION", "VISUAL FX", "LAYOUT", "CONTROLS", "ANALOG", "DS OPTIONS"};
   Metrics m = metrics(d);
   const int rows = kOptionPages + (host_ && host_->has_game() ? 1 : 0);
   const bool per_game = host_ && host_->save_per_game();
@@ -1081,12 +1099,11 @@ void Menu::draw_options(const Canvas& d) const {
 }
 
 void Menu::draw_settings(const Canvas& d) const {
-  static constexpr const char* kTitles[4] = {"EMULATION", "VISUAL FX", "LAYOUT", "DS OPTIONS"};
+  static constexpr const char* kTitles[5] = {"EMULATION", "VISUAL FX", "LAYOUT", "DS OPTIONS", "ANALOG"};
   const ListFrame f = list_frame(d, kTitles[table_slot()]);
   const Metrics& m = f.m;
   visible_ = f.visible;
-  const Setting* t = table();
-  const int n = settings_count(t);
+  const int n = settings_count(table()) + link_rows();
   const int sel = set_row_[table_slot()];
 
   // Note under the list: two lines for the note, a third for what it takes to apply.
@@ -1101,11 +1118,13 @@ void Menu::draw_settings(const Canvas& d) const {
 
   const int value_w = f.avail / 2;
   for (int i = 0; i < visible && top + i < n; ++i) {
-    const Setting& s = t[top + i];
+    const Setting* row = setting_row(top + i);
     const int ry = f.py0 + m.list_rows_y + i * m.list_row_h;
-    const bool on = host_->enabled(s);
     const bool is_sel = top + i == sel;
     if (is_sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
+    if (!row) { draw_text(d, f.text_x, ry, m.list_s, kInk, "COMPATIBLE CHEATS"); continue; }
+    const Setting& s = *row;
+    const bool on = host_->enabled(s);
     const u32 ink = on ? kInk : kPanelEdgeDim;
     draw_text(d, f.text_x, ry, m.list_s, ink, fit(s.label, m.list_s, f.avail - value_w).c_str());
     const std::string v = on ? display_value(s, host_->get(s.key)) : "--";
@@ -1120,14 +1139,15 @@ void Menu::draw_settings(const Canvas& d) const {
   // The note, under a rule at the foot of the panel.
   const int note_y = f.py0 + m.list_rows_y + visible * m.list_row_h + m.list_s;
   fill_rect(d, f.px0 + m.pad, note_y, f.w - 2 * m.pad, std::max(1, m.list_s), kPanelEdgeDim);
-  const Setting& cur = t[sel];
-  const char* why = host_->disabled_reason(cur);
-  const char* line = why && *why ? why : cur.note;
+  const Setting* cur = setting_row(sel);
+  const char* why = cur ? host_->disabled_reason(*cur) : nullptr;
+  const char* line = why && *why ? why : cur ? cur->note : "ENABLE ONE OF THIS ROM'S PATCHES, THEN SET ANALOG PATCH BELOW";
   const u32 note_ink = why && *why ? kEdgeText : kDim;
   // What it takes to see the change; uses the second note line.
-  const char* when = (cur.flags & FlagRestart) ? "RESTART REQUIRED"
-                   : (cur.flags & FlagDeferred) ? "APPLIED WHEN THE MENU CLOSES" : nullptr;
-  if (when && !host_->enabled(cur)) when = nullptr;
+  const char* when = !cur ? nullptr
+                   : (cur->flags & FlagRestart) ? "RESTART REQUIRED"
+                   : (cur->flags & FlagDeferred) ? "APPLIED WHEN THE MENU CLOSES" : nullptr;
+  if (when && !host_->enabled(*cur)) when = nullptr;
   // DS Options with a firmware dump: changes go beside the dump, not the config.
   std::string when_text;
   if (when) {
@@ -1327,7 +1347,7 @@ int table_of(char c) {
 } // namespace
 
 void Menu::open_text_edit() {
-  const Setting& s = table()[set_row_[table_slot()]];
+  const Setting& s = *setting_row(set_row_[table_slot()]);
   edit_dest_ = EditDest::Setting;
   edit_key_ = s.key;
   edit_label_ = s.label;

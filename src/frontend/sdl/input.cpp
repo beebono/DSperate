@@ -145,6 +145,12 @@ std::string Input::axis_remap_default(int i) {
   return SDL_GameControllerGetStringForAxis(static_cast<SDL_GameControllerAxis>(i));
 }
 
+Input::AnalogMode Input::analog_mode_of(const std::string& s) {
+  return s == "left" ? AnalogMode::Left : s == "right" ? AnalogMode::Right : s == "dual" ? AnalogMode::Dual : AnalogMode::Off;
+}
+
+bool Input::analog_wanted(const Config& cfg) { return analog_mode_of(cfg.str("pad.analog", "off")) != AnalogMode::Off; }
+
 void Input::configure(const Config& cfg) {
   for (int i = 0; i < SDL_CONTROLLER_AXIS_MAX; ++i) {
     const std::string v0 = cfg.str(axis_remap_key(i), axis_remap_default(i));
@@ -236,6 +242,31 @@ void Input::configure(const Config& cfg) {
       std::fprintf(stderr, "config: pad.stick_dpad and pad.stick_face are both the %s stick; it will work both the d-pad and X/B/Y/A\n", sf.c_str());
   }
   deadzone_ = cfg.num("pad.stick_deadzone", 12000);
+  {
+    // analog: off (default) | left | right | dual -- sticks for a CPAD patch.
+    const std::string an = cfg.str("pad.analog", "off");
+    analog_mode_ = analog_mode_of(an);
+    if (analog_mode_ == AnalogMode::Off && an != "off")
+      std::fprintf(stderr, "config: pad.analog \"%s\" is not off | left | right | dual\n", an.c_str());
+    const std::string layout = cfg.str("pad.analog_layout", "auto");
+    if (layout != "auto" && layout != "packed" && layout != "extended")
+      std::fprintf(stderr, "config: pad.analog_layout \"%s\" is not auto | packed | extended\n", layout.c_str());
+    if (analog_mode_ != AnalogMode::Off) {
+      const bool uses_left = analog_mode_ == AnalogMode::Left || analog_mode_ == AnalogMode::Dual;
+      const bool uses_right = analog_mode_ == AnalogMode::Right || analog_mode_ == AnalogMode::Dual;
+      if ((uses_left && stylus_axis_ == StylusAxis::Left) || (uses_right && stylus_axis_ == StylusAxis::Right))
+        std::fprintf(stderr, "config: pad.analog and pad.stylus_axis share a stick; both will read it (set stylus_axis = none for a CPAD game)\n");
+      if ((uses_left && (stick_dpad_ == StylusAxis::Left || stick_face_ == StylusAxis::Left)) ||
+          (uses_right && (stick_dpad_ == StylusAxis::Right || stick_face_ == StylusAxis::Right)))
+        std::fprintf(stderr, "config: pad.analog shares a stick with pad.stick_dpad or pad.stick_face; it will press those too (set them to none for a CPAD game)\n");
+    }
+  }
+  analog_deadzone_ = cfg.num("pad.analog_deadzone", 6000);
+  if (analog_deadzone_ < 0) analog_deadzone_ = 0;
+  if (analog_deadzone_ > 30000) analog_deadzone_ = 30000;
+  analog_invert_y_ = cfg.flag("pad.analog_invert_y", false);
+  analog_sens_left_ = std::clamp(cfg.num("pad.analog_sensitivity_left", 100), 10, 300);
+  analog_sens_right_ = std::clamp(cfg.num("pad.analog_sensitivity_right", 100), 10, 300);
   {
     const std::string ff = cfg.str("pad.face_fix", "auto");
     if (ff != "auto" && ff != "off") std::fprintf(stderr, "config: pad.face_fix \"%s\" is not auto | off\n", ff.c_str());
@@ -589,12 +620,55 @@ bool Input::pad_down(const Bind& b, bool down) {
   return false;
 }
 
+// Radial deadzone and clamp for one stick: inside the deadzone the stick is
+// centred; outside it the remaining travel is rescaled to full range and the
+// magnitude is capped at 1, so a diagonal is full speed, not sqrt(2) times it.
+// Sensitivity, a percentage, applies before that cap: under 100 lowers the top
+// speed, and over 100 reaches it with less travel without raising it.
+static void scale_stick(Sint16 x, Sint16 y, int deadzone, int sensitivity, bool invert_y, s16& ox, s16& oy) {
+  const double dx = x, dy = y;
+  const double mag = std::sqrt(dx * dx + dy * dy);
+  if (mag <= deadzone || mag == 0.0) { ox = 0; oy = 0; return; }
+  double scaled = (mag - deadzone) / (32767.0 - deadzone) * sensitivity / 100.0;
+  if (scaled > 1.0) scaled = 1.0;
+  const double k = scaled * 32767.0 / mag;
+  ox = static_cast<s16>(dx * k);
+  oy = static_cast<s16>(dy * k);
+  // SDL's up is negative; the patches take the 3DS's, where up is positive.
+  if (!invert_y) oy = static_cast<s16>(-oy);
+}
+
+void Input::fill_analog(input::Frame& f) const {
+  if (analog_mode_ == AnalogMode::Off) return;
+  if (analog_mode_ == AnalogMode::Left || analog_mode_ == AnalogMode::Dual)
+    scale_stick(raw_lx_, raw_ly_, analog_deadzone_, analog_sens_left_, analog_invert_y_, f.cpad_x, f.cpad_y);
+  if (analog_mode_ == AnalogMode::Right)
+    scale_stick(raw_rx_, raw_ry_, analog_deadzone_, analog_sens_right_, analog_invert_y_, f.cpad_x, f.cpad_y);
+  if (analog_mode_ == AnalogMode::Dual)
+    scale_stick(raw_rx_, raw_ry_, analog_deadzone_, analog_sens_right_, analog_invert_y_, f.cstick_x, f.cstick_y);
+  // Triggers: the same past-3/4-travel rule axis() uses for trigger bindings.
+  // A button-mapped trigger (H700) synthesises 0/32767, so this covers both.
+  // Two sticks only, as the setting says, and never under a hotkey chord.
+  if (analog_mode_ != AnalogMode::Dual || pad_mod_down_) return;
+  f.zl = raw_lt_ > trigger_threshold();
+  f.zr = raw_rt_ > trigger_threshold();
+}
+
 void Input::axis(Uint8 which, Sint16 value) {
+  switch (which) {
+  case SDL_CONTROLLER_AXIS_LEFTX: raw_lx_ = value; break;
+  case SDL_CONTROLLER_AXIS_LEFTY: raw_ly_ = value; break;
+  case SDL_CONTROLLER_AXIS_RIGHTX: raw_rx_ = value; break;
+  case SDL_CONTROLLER_AXIS_RIGHTY: raw_ry_ = value; break;
+  case SDL_CONTROLLER_AXIS_TRIGGERLEFT: raw_lt_ = value; break;
+  case SDL_CONTROLLER_AXIS_TRIGGERRIGHT: raw_rt_ = value; break;
+  default: break;
+  }
   // Axis directions bound as buttons: edge detection with a threshold. Some
   // pads map triggers to a centred axis (SDL rescales rest to 16384), so a
   // stick deadzone would see release as still pressed; triggers need 3/4 travel.
   const bool trigger = which == SDL_CONTROLLER_AXIS_TRIGGERLEFT || which == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
-  const int threshold = trigger ? std::max(deadzone_, 24576) : deadzone_;
+  const int threshold = trigger ? trigger_threshold() : deadzone_;
   for (int dir = 0; dir < 2; ++dir) {
     const bool past = dir ? value > threshold : value < -threshold;
     if (past != axis_state_[which][dir]) {
@@ -948,6 +1022,7 @@ void Input::handle(const SDL_Event& e0, Display& display, Display* second) {
     if (pad_ && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad_))) {
       SDL_GameControllerClose(pad_); pad_ = nullptr;
       detect_faces();
+      raw_lx_ = raw_ly_ = raw_rx_ = raw_ry_ = raw_lt_ = raw_rt_ = 0;   // no release will come
     }
     break;
 

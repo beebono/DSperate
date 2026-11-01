@@ -170,7 +170,7 @@ void CpuContext::check_irq() {
     // AR codes run from the ARM7's VBlank handler, matching real hardware.
     // VBlank pending&&enabled can fire more than once a frame; harmless, AR
     // codes write fixed values.
-    if (which == Cpu::ARM7 && !nds->cheats.codes.empty()) {
+    if (which == Cpu::ARM7 && !nds->cheats.idle()) {
       const io::CpuIo& io7 = nds->io.cpu_io[static_cast<int>(Cpu::ARM7)];
       if ((io7.if_ & io7.ie) & (1u << io::IRQ_VBLANK)) nds->cheats.run(*nds);
     }

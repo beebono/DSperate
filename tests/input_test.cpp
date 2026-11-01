@@ -59,6 +59,7 @@ struct InputTestAccess {
     return in.pad_down(b, down);
   }
   static void axis(Input& in, SDL_GameControllerAxis a, Sint16 v) { in.axis(a, v); }
+  static void hold_mod(Input& in, bool down) { in.pad_mod_down_ = down; }
   static void physical_axis(Input& in, SDL_GameControllerAxis a, Sint16 v) { in.physical_axis(a, v); }
   static bool pen_down(const Input& in) { return in.stylus_down_ != 0; }
   static bool key_free(const Input& in, SDL_Keycode k) { return in.key_control_free(k); }
@@ -562,6 +563,76 @@ void test_axis_remap() {
   CHECK(Input::axis_remap_default(SDL_CONTROLLER_AXIS_RIGHTX) == "rightx");
 }
 
+// pad.analog: sticks reach the frame as proportional values for a CPAD
+// patch, with a radial deadzone; off by default, the fields stay zero.
+void test_analog_sticks() {
+  { Rig r; Input& in = r.go();                                   // off by default
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    const input::Frame f = in.frame();
+    CHECK(f.cpad_x == 0 && f.cpad_y == 0 && !f.zl && !f.zr); }
+  { Rig r; r.set("pad.analog", "left"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    input::Frame f = in.frame();
+    CHECK(f.cpad_x == 32767 && f.cpad_y == 0);
+    CHECK(f.cstick_x == 0 && f.cstick_y == 0);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 3000);                // inside the 6000 deadzone
+    f = in.frame();
+    CHECK(f.cpad_x == 0 && f.cpad_y == 0);
+    // A full diagonal clamps to full magnitude, not sqrt(2) times it.
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, 32767);
+    f = in.frame();
+    CHECK(f.cpad_x > 22000 && f.cpad_x < 24000);
+    CHECK(f.cpad_x == -f.cpad_y); }                              // down the stick is down for the patch
+  { Rig r; r.set("pad.analog", "dual"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -32768);
+    T::axis(in, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 32767);
+    const input::Frame f = in.frame();
+    CHECK(f.cstick_y == 32767);                                  // full up, positive as on a 3DS
+    CHECK(f.cpad_x == 0 && f.cpad_y == 0);
+    CHECK(f.zl && !f.zr); }
+  { Rig r; r.set("pad.analog", "left").set("pad.analog_invert_y", "true"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTY, 32767);
+    CHECK(in.frame().cpad_y == 32767); }
+  { // Sensitivity: each stick its own; lower cuts the top, higher saturates sooner.
+    Rig r; r.set("pad.analog", "dual").set("pad.analog_deadzone", "0")
+            .set("pad.analog_sensitivity_left", "50").set("pad.analog_sensitivity_right", "200");
+    Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 16384);
+    input::Frame f = in.frame();
+    CHECK(f.cpad_x >= 16382 && f.cpad_x <= 16384);
+    CHECK(f.cstick_x >= 32766);
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 32767);
+    f = in.frame();
+    CHECK(f.cstick_x == 32767 || f.cstick_x == 32766); }             // capped, not doubled
+  { Rig r; r.set("pad.analog", "right").set("pad.analog_deadzone", "0").set("pad.analog_sensitivity_right", "50");
+    Input& in = r.go();                                              // the right stick as the CPad
+    T::axis(in, SDL_CONTROLLER_AXIS_RIGHTX, 32767);
+    const input::Frame f = in.frame();
+    CHECK(f.cpad_x >= 16382 && f.cpad_x <= 16384); }
+  { // ZL/ZR are the two-stick mode's, and a hotkey chord is not a press.
+    Rig r; r.set("pad.analog", "left"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 32767);
+    CHECK(!in.frame().zr); }
+  { Rig r; r.set("pad.analog", "dual"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 32767);
+    T::hold_mod(in, true);
+    CHECK(!in.frame().zr);
+    T::hold_mod(in, false);
+    CHECK(in.frame().zr); }
+  { // SDL reports only changes, so a control held through a reconfigure stays held.
+    Rig r; r.set("pad.analog", "dual"); Input& in = r.go();
+    T::axis(in, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 32767);
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    r.go();
+    const input::Frame f = in.frame();
+    CHECK(f.zr && f.cpad_x == 32767); }
+  { Rig r; r.set("pad.analog", "sideways"); Input& in = r.go();  // unparseable: off
+    T::axis(in, SDL_CONTROLLER_AXIS_LEFTX, 32767);
+    CHECK(in.frame().cpad_x == 0); }
+}
+
 } // namespace
 } // namespace ds::sdl
 
@@ -589,6 +660,7 @@ int main() {
   ds::sdl::test_stick_dpad_names_a_stick();
   ds::sdl::test_stick_dpad_moves_the_pen_under_the_chord();
   ds::sdl::test_axis_remap();
+  ds::sdl::test_analog_sticks();
   std::printf("input tests passed\n");
   return 0;
 }
