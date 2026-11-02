@@ -2689,6 +2689,41 @@ void Renderer3D::clear_line(s32 y) {
   }
 }
 
+// The GPU edge cut's cut-out pass (lean_cutout.frag) places the alpha edge
+// from each fragment's texel and its four texel neighbours; reading those
+// four was the pass's whole cost. Flags in a texel word's spare bits, set
+// on the arena copy (the cache's own words stay as the CPU raster reads
+// them), give it the neighbours without a read: bits 23-26, the texel's
+// alpha is zero and the neighbour's is not or the reverse, toward +s, -s,
+// +t, -t (wrapping; the pass skips a direction across the border in a
+// clamp or flip mode, where the neighbour is the texel itself); bit 21,
+// any of the four; bit 22, such a texel lies within two texels (the
+// pre-test is made with the hardware's own texture coordinate, which can
+// be a texel off the span table's). Zero against non-zero is the alpha
+// test of the common case (reference 0, an opaque polygon); the pass keeps
+// the exact test for the pixel's own side.
+static void mark_alpha_edges(u32* t, u32 w, u32 h) {
+  std::vector<u8> m(static_cast<size_t>(w) * h), n(static_cast<size_t>(w) * h);
+  auto zero = [&](u32 x, u32 y) { return ((t[y * w + x] >> 16) & 0x1F) == 0; };
+  for (u32 y = 0; y < h; ++y)
+    for (u32 x = 0; x < w; ++x) {
+      const bool z = zero(x, y);
+      u32 dir = 0;
+      if (z != zero(x + 1 == w ? 0 : x + 1, y)) dir |= 1u << 23;
+      if (z != zero(x ? x - 1 : w - 1, y)) dir |= 1u << 24;
+      if (z != zero(x, y + 1 == h ? 0 : y + 1)) dir |= 1u << 25;
+      if (z != zero(x, y ? y - 1 : h - 1)) dir |= 1u << 26;
+      if (dir) { t[y * w + x] |= dir | (1u << 21); m[y * w + x] = 1; }
+    }
+  for (int pass = 0; pass < 2; ++pass) {   // dilate twice: within two texels
+    for (u32 y = 0; y < h; ++y)
+      for (u32 x = 0; x < w; ++x)
+        n[y * w + x] = m[y * w + x] | m[y * w + (x + 1 == w ? 0 : x + 1)] | m[y * w + (x ? x - 1 : w - 1)] | m[(y + 1 == h ? 0 : y + 1) * w + x] | m[(y ? y - 1 : h - 1) * w + x];
+    m.swap(n);
+  }
+  for (size_t i = 0; i < m.size(); ++i) if (m[i]) t[i] |= 1u << 22;
+}
+
 // The frame in the GPU raster's layout (vk_layout.h), the conversion the
 // GPU dispatch will do: polygons, flattened vertices, the decoded textures in
 // one arena, shadow-mask runs per scanline, the span-row -> polygon table.
@@ -2738,7 +2773,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
       if (r.texels) {
         auto it = arena.find(r.texels);
         u32 off;
-        if (it == arena.end()) { off = static_cast<u32>(tex.size()); tex.insert(tex.end(), r.texels, r.texels + r.words); arena.emplace(r.texels, off); }
+        if (it == arena.end()) { off = static_cast<u32>(tex.size()); tex.insert(tex.end(), r.texels, r.texels + r.words); mark_alpha_edges(tex.data() + off, static_cast<u32>(sh.width), static_cast<u32>(sh.height)); arena.emplace(r.texels, off); }
         else off = it->second;
         o.tex_offset = off; o.tex_w = static_cast<u32>(sh.width); o.tex_h = static_cast<u32>(sh.height); o.flags |= DS_PF_TEXTURED;
         const bool may_alpha = (p.texparam & (1u << 29)) || fmt == 5 || fmt == 7;
@@ -3235,6 +3270,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
       if (res.words != r.words || res.version != r.version) {
         if (gpu_arena_top_ + r.words > texcap) { gpu_job_wait(); lean_->wait_all(); gpu_resident_.clear(); gpu_arena_top_ = 0; return false; }
         std::memcpy(tex + gpu_arena_top_, r.texels, static_cast<size_t>(r.words) * sizeof(u32));
+        mark_alpha_edges(tex + gpu_arena_top_, static_cast<u32>(sh.width), static_cast<u32>(sh.height));
         res.off = gpu_arena_top_; res.words = r.words; res.version = r.version;
         gpu_arena_top_ += r.words;
       }

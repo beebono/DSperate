@@ -54,16 +54,16 @@ float edge_line(uint eb, uint e, int x, int y, float along) {
 vec3 edge_cut(uint base, int sx, int sy, float u, float v, uint s, float bw) {
   uint eb = base + 2u * 49152u;
   uint w = src[eb + uint(sy) * 256u + uint(sx)];
-  if (w == 0u) {
+  if ((w & 0x80000000u) == 0u) {   // no edge: 0, or the tag of a pixel beside an edge pixel (one neighbour lookup only for those)
     vec3 c = unpack(s);
-    if (bw <= 0.0) return c;
+    if (bw <= 0.0 || w == 0u) return c;
     float best = 0.0;
     const ivec2 nb[4] = ivec2[4](ivec2(0, -1), ivec2(0, 1), ivec2(-1, 0), ivec2(1, 0));
     for (int k = 0; k < 4; ++k) {
       int qx = sx + nb[k].x, qy = sy + nb[k].y;
       if (qx < 0 || qx > 255 || qy < 0 || qy > 191) continue;
       uint wn = src[eb + uint(qy) * 256u + uint(qx)];
-      if (wn == 0u) continue;
+      if ((wn & 0x80000000u) == 0u) continue;
       uint en = wn >> 24;
       bool vn = (en & 32u) != 0u, gn = (en & 64u) != 0u;
       // Only an edge whose outside is this pixel.

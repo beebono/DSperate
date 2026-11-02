@@ -654,10 +654,29 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (npoly) d.dev->flush(d.polys[slot], 0, sizeof(GpuPoly) * npoly);
   a.vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_INLINE);
   if (d.edges) {
-    // The band pass: every polygon's edges (lean_edge.vert skips all but the opaque ones).
+    // The band pass: every polygon's edges (lean_edge.vert skips all but the
+    // opaque ones). Six vertices an edge: the first four edges for every
+    // polygon, the other six only over runs of polygons that have a fifth
+    // (a few a frame, where a clip made one; most are triangles and quads),
+    // unless there are too many runs to be worth the draws.
     a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_band);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_eb, 1, 1, &d.set_eb, 0, nullptr);
-    if (npoly) a.vkCmdDraw(cb, 60, npoly, 0, 0);
+    if (npoly) {
+      constexpr u32 kMaxBandRuns = 32;   // beyond this many runs, one draw takes all
+      u32 runs = 0, run_first[kMaxBandRuns], run_count[kMaxBandRuns];
+      for (u32 k = 0; k < npoly && runs <= kMaxBandRuns; ++k) {
+        if (out_p[k].nverts <= 4) continue;
+        if (runs && run_first[runs - 1] + run_count[runs - 1] == k) ++run_count[runs - 1];
+        else if (runs < kMaxBandRuns) { run_first[runs] = k; run_count[runs] = 1; ++runs; }
+        else ++runs;   // one too many: all 60 for everyone
+      }
+      static const bool one_draw = std::getenv("DS_LEAN_BANDRUNS") && std::atoi(std::getenv("DS_LEAN_BANDRUNS")) == 0;   // debug: the single draw
+      if (runs > kMaxBandRuns || one_draw) a.vkCmdDraw(cb, 60, npoly, 0, 0);
+      else {
+        a.vkCmdDraw(cb, 24, npoly, 0, 0);
+        for (u32 r = 0; r < runs; ++r) a.vkCmdDraw(cb, 36, run_count[r], 24, run_first[r]);
+      }
+    }
     // The cut-out pass: the alpha-tested opaque polygons, drawn last in the opaque prefix.
     static const bool no_cutout = std::getenv("DS_LEAN_NOCUTOUT") && std::atoi(std::getenv("DS_LEAN_NOCUTOUT")) != 0;   // debug: polygon edges only
     if (first_ordered > n_early && !no_cutout) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_cutout); a.vkCmdDraw(cb, 24, first_ordered - n_early, 0, n_early); }
@@ -733,7 +752,8 @@ const u32* Lean::newest_ready(bool allow_lag) {
   if (d.asked_gen != d.gen) { d.asked_gen = d.gen; d.st.gap_ms += now_ms() - d.submit_at[newest]; ++d.st.gap_n; }
   if (d.fence_live[newest] && a.vkGetFenceStatus(d.vk->dev, d.fence[newest]) == VK_SUCCESS) finish_slot(d, newest);
   if (!d.fence_live[newest]) { ++d.st.newest; return static_cast<const u32*>(d.out[newest].ptr); }
-  if (allow_lag && d.gen >= 2) {
+  static const bool no_lag = std::getenv("DS_GPU_NOLAG") && std::atoi(std::getenv("DS_GPU_NOLAG")) != 0;   // debug: always the newest frame (deterministic dumps)
+  if (allow_lag && !no_lag && d.gen >= 2) {
     const u32 prev = static_cast<u32>((d.gen - 2) % Impl::kSlots);
     if (d.fence_live[prev] && a.vkGetFenceStatus(d.vk->dev, d.fence[prev]) == VK_SUCCESS) finish_slot(d, prev);
     if (!d.fence_live[prev] && d.valid[prev]) { ++d.st.lagged; return static_cast<const u32*>(d.out[prev].ptr); }

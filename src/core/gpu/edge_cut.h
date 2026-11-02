@@ -13,7 +13,9 @@
 //
 // Input: the screen's frame (0xAARRGGBB, Gpu::framebuffer) and its edge
 // plane (Gpu::edge_plane: 0xEERRGGBB, the edge byte over the pixel's own
-// colour; Renderer3D::set_edge_export has the byte's layout).
+// colour; Renderer3D::set_edge_export has the byte's layout). A word with
+// bit 31 clear is no edge: zero, or a GPU frame's tag on a pixel beside an
+// edge pixel, the only kind whose neighbours are worth looking up.
 #pragma once
 #include "core/types.h"
 
@@ -68,15 +70,15 @@ inline float edge_cut_clamp01(float k) { return k < 0 ? 0 : k > 1 ? 1 : k; }
 inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, float u, float v, float bw = 0) {
   const u32 s = frame[y * 256 + x];
   const u32 w = edges[y * 256 + x];
-  if (!w) {
-    if (bw <= 0) return s;
+  if (!(w >> 31)) {   // no edge: 0, or the tag of a pixel beside an edge pixel (Gpu3D::edge_line)
+    if (bw <= 0 || !w) return s;
     static const int nb[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
     u32 c = s; float best = 0;
     for (const auto& d : nb) {
       const int qx = x + d[0], qy = y + d[1];
       if (qx < 0 || qx > 255 || qy < 0 || qy > 191) continue;
       const u32 wn = edges[qy * 256 + qx];
-      if (!wn) continue;
+      if (!(wn >> 31)) continue;
       const u32 en = wn >> 24;
       const bool vn = en & 0x20, gn = en & 0x40;
       const bool toward = vn ? (d[0] == 0 && (d[1] == -1 ? !gn : gn)) : (d[1] == 0 && (d[0] == -1 ? !gn : gn));

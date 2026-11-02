@@ -13,7 +13,7 @@
 // crosses gets the edge byte (Renderer3D::set_edge_export's layout) on
 // either side: the polygon's own pixels (an opaque texel: its record is in
 // the pixel), and those where it is transparent and in front of what shows.
-// Five texel reads a fragment. (Tried on the RG DS Plus, On Tour: a
+// One texel read a fragment; the neighbours come as flags in the word. (Tried on the RG DS Plus, On Tour: a
 // bilinear contour sloped by fwidth, ~0.35 ms GPU but blind to half the
 // pixels, its slope only valid where a 2x2 quad straddles the edge; a
 // 16-texel footprint average, ~1.3 ms; a 3x3 screen-space mask, ~0.9 ms.)
@@ -34,10 +34,10 @@ layout(location = 0) out uint o_byte;
 #include "ds_shade.glsl"
 #include "ds_spans.glsl"
 
-// Whether texel (s, t) (whole texels) passes the alpha test, as shade_pixel
-// would make its alpha (modulate or toon: texel alpha times polygon alpha).
-float opaque_at(GpuPoly p, int s, int t, uint polyalpha) {
-  uint ta = (sample_tex(p, s << 4, t << 4) >> 16) & 0x1Fu;
+// Whether a texel word passes the alpha test, as shade_pixel would make its
+// alpha (modulate or toon: texel alpha times polygon alpha).
+float opaque_word(uint tw, uint polyalpha) {
+  uint ta = (tw >> 16) & 0x1Fu;
   uint a = ((ta + 1u) * (polyalpha + 1u) - 1u) >> 5;
   return a > pc.f.alpha_ref ? 1.0 : 0.0;
 }
@@ -52,10 +52,38 @@ void main() {
   // texel is the one the draw alpha-tested. The slope is the varying's.
   vec2 stv = interpolateAtOffset(v_st, vec2(-0.5)) / 16.0;   // texels, at the DS's point
   vec2 dx = dFdxFine(stv), dy = dFdyFine(stv);               // per screen pixel; before any discard that could differ within a quad
+  // Cheapest tests first (the derivatives above are the only thing that
+  // must precede a discard). The hardware's own texel: not within two
+  // texels of an alpha edge (Renderer3D::mark_alpha_edges, bit 22), and
+  // the pixel is done after one read. Then hidden pixels, before the rest.
+  if ((sample_tex(p, int(floor(stv.x)) << 4, int(floor(stv.y)) << 4) & 0x400000u) == 0u) discard;
+  // A magnified texture: its boundaries are many pixels apart, so most of
+  // the band is pixels with none near. The nearest s and t boundaries from
+  // the hardware's own coordinate, along the band axis as the loop below
+  // measures them; the span table's point is within about a pixel of it
+  // (the DS's 8-bit span factor over the row's range), so 2.5 px covers
+  // every line that could lie within 0.5 px of that point.
+  {
+    vec2 fr = stv - floor(stv);
+    vec2 gs = vec2(dx.x, dy.x), gt = vec2(dx.y, dy.y);
+    float dsn = min(fr.x, 1.0 - fr.x) / max(max(abs(gs.x), abs(gs.y)), 1e-6);
+    float dtn = min(fr.y, 1.0 - fr.y) / max(max(abs(gt.x), abs(gt.y)), 1e-6);
+    if (min(dsn, dtn) > 2.5) discard;
+  }
+  uint owner = subpassLoad(in_ids).x;
+  bool shows = owner == v_poly + 1u;
+  if (!shows && owner != 0u) {
+    float sd = subpassLoad(in_depth).r;
+    bool wbuf = (pc.f.flags & DS_FF_WBUFFER) != 0u;
+    if (!(wbuf ? gl_FragCoord.z > sd : gl_FragCoord.z < sd)) discard;   // behind what shows: not this polygon's edge
+  }
   ivec3 rgb9; ivec2 st4;
   vec2 st = ds_attrs(p, true, rgb9, st4) ? (vec2(st4) + 0.01) / 16.0 : stv;
   vec2 c0 = floor(st);
-  float own = opaque_at(p, int(c0.x), int(c0.y), polyalpha);
+  uint tw = sample_tex(p, int(c0.x) << 4, int(c0.y) << 4);
+  if ((tw & 0x200000u) == 0u) discard;   // no neighbour of the other alpha (bit 21)
+  float own = opaque_word(tw, polyalpha);
+  if ((own > 0.5) != shows) discard;   // the draw and this pass disagree on the pixel
   // The nearest flip: a texel beside this one (across an s or a t
   // boundary) of the other opacity. That boundary is a line on screen whose
   // direction the derivatives give; like the band pass, an X-major line is
@@ -64,11 +92,26 @@ void main() {
   // to the line along that axis.
   float bestd = 2.0;
   bool vert = false;
+  // Which neighbours are of the other alpha: the texel word's flags
+  // (Renderer3D::mark_alpha_edges, bits 23-26: +s, -s, +t, -t in the
+  // texture's own space), no read. The texel here is in the polygon's
+  // space: sample_tex folds a repeat and a flip, and in a mirrored tile
+  // the directions swap. Across the texture's border in a clamp or flip
+  // mode the neighbour is the texel itself: no boundary.
+  int tw_ = int(p.tex_w), th_ = int(p.tex_h);
+  bool rep_s = (p.texparam & 0x10000u) != 0u, rep_t = (p.texparam & 0x20000u) != 0u;
+  bool flp_s = (p.texparam & 0x40000u) != 0u, flp_t = (p.texparam & 0x80000u) != 0u;
+  ivec2 cu = ivec2(c0);
+  int fx = cu.x, fy = cu.y; bool mir_s = false, mir_t = false;
+  if (rep_s) { if (flp_s) { mir_s = (fx & tw_) != 0; fx &= tw_ - 1; if (mir_s) fx = tw_ - 1 - fx; } else fx &= tw_ - 1; } else fx = clamp(fx, 0, tw_ - 1);
+  if (rep_t) { if (flp_t) { mir_t = (fy & th_) != 0; fy &= th_ - 1; if (mir_t) fy = th_ - 1 - fy; } else fy &= th_ - 1; } else fy = clamp(fy, 0, th_ - 1);
   for (int k = 0; k < 4; ++k) {
     bool tax = k >= 2;                                  // a t boundary (a texel row's edge)
     float sg = (k & 1) != 0 ? -1.0 : 1.0;
-    vec2 cn = c0 + (tax ? vec2(0.0, sg) : vec2(sg, 0.0));
-    if (opaque_at(p, int(cn.x), int(cn.y), polyalpha) == own) continue;
+    int kf = (tax ? mir_t : mir_s) ? (k ^ 1) : k;       // the direction in the texture's space
+    if ((tw & (0x800000u << kf)) == 0u) continue;
+    bool crossing = tax ? ((kf & 1) == 0 ? fy + 1 >= th_ : fy <= 0) : ((kf & 1) == 0 ? fx + 1 >= tw_ : fx <= 0);
+    if (crossing && !(tax ? (rep_t && !flp_t) : (rep_s && !flp_s))) continue;
     float bnd = (tax ? c0.y : c0.x) + (sg > 0.0 ? 1.0 : 0.0);
     vec2 g = tax ? vec2(dx.y, dy.y) : vec2(dx.x, dy.x);  // that coordinate's screen gradient
     bool v = abs(g.y) >= abs(g.x);                       // the line (normal to g) X-major
@@ -80,14 +123,6 @@ void main() {
   if (abs(bestd) >= 0.5) discard;   // no flip, or the line lies in the neighbour (whose own pass places it)
   bool neg = bestd < 0.0;           // the line before the point: the outside is the negative neighbour
   float best = abs(bestd);
-  uint owner = subpassLoad(in_ids).x;
-  bool shows = owner == v_poly + 1u;
-  if (!shows && owner != 0u) {
-    float sd = subpassLoad(in_depth).r;
-    bool wbuf = (pc.f.flags & DS_FF_WBUFFER) != 0u;
-    if (!(wbuf ? gl_FragCoord.z > sd : gl_FragCoord.z < sd)) discard;   // behind what shows: not this polygon's edge
-  }
-  if ((own > 0.5) != shows) discard;   // the draw and this pass disagree on the pixel
   float tl = neg ? 0.5 - best : 0.5 + best;   // the line across the pixel, 0 at its negative side
   float share = neg ? 1.0 - tl : tl;
   int cov = clamp(int(round(share * 32.0)) - 1, 0, 31);

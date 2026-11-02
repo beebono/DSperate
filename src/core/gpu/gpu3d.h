@@ -130,7 +130,8 @@ public:
   // The edge plane of that line (Renderer3D::set_edge_export; after line(),
   // so synced), or null when not exported or the 3D layer is scrolled.
   // A GPU frame's edge bytes are made into the plane's words here, with the
-  // record's colour (unblended: the GPU raster has no AA blend). A pixel in
+  // record's colour (unblended: the GPU raster has no AA blend); a word
+  // with bit 31 clear is no edge (the tag below). A pixel in
   // a clump of edge pixels gets none: where a small-polygon mesh (a distant
   // kart, a face, wheel spokes) marks whole areas, the lines are too short to
   // judge and the cuts shred the picture, so a pixel with edge_density_ or
@@ -167,6 +168,20 @@ public:
     for (u32 x = 0; x < 256; ++x) {
       const u32 w = c[x];
       edge_words_[x] = b[x] && !dense[x] ? (static_cast<u32>(b[x]) << 24) | (w & 63) | (((w >> 8) & 63) << 6) | (((w >> 16) & 63) << 12) | (((w >> 24) & 31) << 18) : 0;
+    }
+    // The present's blend reaches one pixel past an edge pixel, so a pixel
+    // with no edge looks its four neighbours up for one; a tag word (byte
+    // 1: bit 7 clear, no edge) on the pixels beside an edge pixel spares
+    // the rest that. Beside: along the row by the words, above and below
+    // by the bytes (a superset where the density limit dropped one).
+    {
+      const u8* a = y ? b - 256 : nullptr;
+      const u8* d = y + 1 < 192 ? b + 256 : nullptr;
+      for (u32 x = 0; x < 256; ++x) {
+        if (edge_words_[x]) continue;
+        const bool beside = (x && (edge_words_[x - 1] >> 31)) || (x < 255 && (edge_words_[x + 1] >> 31)) || (a && a[x]) || (d && d[x]);
+        if (beside) { const u32 w = c[x]; edge_words_[x] = (1u << 24) | (w & 63) | (((w >> 8) & 63) << 6) | (((w >> 16) & 63) << 12) | (((w >> 24) & 31) << 18); }   // with the pixel's colour and alpha: Engine2D::edge_compose reads them
+      }
     }
     return edge_words_;
   }
