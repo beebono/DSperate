@@ -147,6 +147,7 @@ void Engine2D::render_line(u32 line) {
   struct AtExit { Engine2D* e; u32 line; ~AtExit() { if (g_outhash_on) e->debug_outhash(line); } } at_exit{this, line};
   cur_ = regs_.begin_line();
   top_mode_ = TOP_NONE;
+  bg_edge_any_[0] = bg_edge_any_[1] = bg_edge_any_[2] = bg_edge_any_[3] = false;
   if (!cur_.enabled) {
     // Powered-down engines output a fixed colour: black for A, white for B.
     out_.fill(num_ ? 0xFF3F3F3F : 0xFF000000);
@@ -217,7 +218,7 @@ void Engine2D::render_line(u32 line) {
             if ((cur_.layer_enable & (1 << bg)) && bg_[bg].any && (cur_.bgcnt[bg] & 3) == prio) { top = bg; break; }
         if (top >= 0 && line_all_opaque(bg_[top])) {
           prof::add(prof::C_2D_FAST_ONE, 1);
-          if (top == 0) top_mode_ = TOP_ALL_BG0;
+          top_mode_ = TOP_ALL; top_all_bg_ = top;
           kern::active::resolve16_one(bg_[top].v(), bg_[top].table, out_.data());
           return;
         }
@@ -244,8 +245,14 @@ void Engine2D::render_line(u32 line) {
 }
 
 bool Engine2D::edge_compose(Pixel* own, u8* bytes) const {
-  const bool is3d = !num_ && (cur_.dispcnt & 8) && cur_.enabled && !cur_.forced_blank;
-  if (!edge3d_ || !is3d || top_mode_ == TOP_NONE) return false;
+  if (top_mode_ == TOP_NONE || !cur_.enabled || cur_.forced_blank) return false;
+  const bool is3d = !num_ && (cur_.dispcnt & 8) && edge3d_;
+  // Carried edge bytes (Gpu::edge_vram_): per layer, those its bitmap row read this line.
+  const u8* carried[T_COUNT] = {};
+  bool any_carried = false;
+  for (int bg = 0; bg < 4; ++bg) if (bg_edge_any_[bg] && !(bg == 0 && is3d)) { carried[bg] = bg_edge_[bg]; any_carried = true; }
+  if (obj_edge_any_) { carried[T_OBJ_STD] = carried[T_OBJ_EXT] = carried[T_OBJ_DIRECT] = obj_edge_.data(); any_carried = true; }
+  if (!is3d && !any_carried) return false;
   // Whether the layer on top at x would be behind the 3D layer were it
   // opaque there: BG0's priority or lower (BG0 wins ties among BGs, a
   // sprite wins them over a BG), or the backdrop.
@@ -259,29 +266,29 @@ bool Engine2D::edge_compose(Pixel* own, u8* bytes) const {
   };
   bool any = false;
   for (u32 x = 0; x < 256; ++x) {
-    const u32 e = edge3d_[x];
     bytes[x] = 0; own[x] = 0;
-    if (!e) continue;
-    if (!((e >> 18) & 0x1F)) {
+    const u8 top = top_mode_ == TOP_ALL ? static_cast<u8>(top_all_bg_) : top_tid_[x];
+    const u32 e = is3d ? edge3d_[x] : 0;
+    if (e && !((e >> 18) & 0x1F)) {
       // A transparent 3D pixel (the GPU raster's plane marks the rear plane
       // beside an edge too): its own side is what shows through it.
-      if (top_mode_ == TOP_ALL_BG0 || !(cur_.layer_enable & 1) || !behind_3d(x)) continue;
-      own[x] = out_[x];
-      bytes[x] = static_cast<u8>(e >> 24);
-      any = true;
+      if (top_mode_ == TOP_ALL || !(cur_.layer_enable & 1) || !behind_3d(x)) continue;
+      own[x] = out_[x]; bytes[x] = static_cast<u8>(e >> 24); any = true;
       continue;
     }
-    if (top_mode_ != TOP_ALL_BG0 && top_tid_[x] != T_BG0) continue;
-    const Pixel p = (e & 0x3F) | (((e >> 6) & 0x3F) << 8) | (((e >> 12) & 0x3F) << 16) | (((e >> 18) & 0x1F) << 24);
-    Pixel o;
-    switch (top_mode_) {
-    case TOP_FADE: o = kern::ref::fade_pixel(cur_.bldcnt, cur_.evy, p, top_id_[x], win_[x]); break;
-    case TOP_FULL: o = kern::ref::composite_pixel(cur_.bldcnt, cur_.eva, cur_.evb, cur_.evy, p, second_[x], top_id_[x], K_3D, top_alpha_[x], second_id_[x], win_[x]); break;
-    default: o = (p & 0x00FFFFFF) | 0xFF000000; break;
+    if (e && top == T_BG0) {
+      const Pixel p = (e & 0x3F) | (((e >> 6) & 0x3F) << 8) | (((e >> 12) & 0x3F) << 16) | (((e >> 18) & 0x1F) << 24);
+      Pixel o;
+      switch (top_mode_) {
+      case TOP_FADE: o = kern::ref::fade_pixel(cur_.bldcnt, cur_.evy, p, top_id_[x], win_[x]); break;
+      case TOP_FULL: o = kern::ref::composite_pixel(cur_.bldcnt, cur_.eva, cur_.evb, cur_.evy, p, second_[x], top_id_[x], K_3D, top_alpha_[x], second_id_[x], win_[x]); break;
+      default: o = (p & 0x00FFFFFF) | 0xFF000000; break;
+      }
+      own[x] = o; bytes[x] = static_cast<u8>(e >> 24); any = true;
+      continue;
     }
-    own[x] = o;
-    bytes[x] = static_cast<u8>(e >> 24);
-    any = true;
+    // A captured image shown again: its edge pixel's own colour is the pixel as shown.
+    if (top < T_COUNT && carried[top] && carried[top][x]) { own[x] = out_[x]; bytes[x] = carried[top][x]; any = true; }
   }
   return any;
 }
@@ -510,7 +517,7 @@ void Engine2D::draw_bg_extended(u32 line, int bg) {
     const u32 base = (cnt & 0x1F00) << 6;
     const bool direct = cnt & (1 << 2);
     if (direct) plane.table = kern::direct_table();
-    if (!mosaic && dx == 0x100 && dy == 0) { bitmap_row_degenerate(plane, base, xmask, ymask, yshift, ofx == 0, direct, rx, ry); return; }
+    if (!mosaic && dx == 0x100 && dy == 0) { bitmap_row_degenerate(bg, plane, base, xmask, ymask, yshift, ofx == 0, direct, rx, ry); return; }
     u32 mosaic_phase = 0;
     s32 mosaic_rx = rx, mosaic_ry = ry;
     for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy,
@@ -576,7 +583,7 @@ void Engine2D::draw_bg_large(u32 line) {
   s32 rx = cur_.ref_x[0], ry = cur_.ref_y[0];
   const bool mosaic = (cnt & (1 << 6)) && cur_.bg_mosaic_w > 0;
   const u32 mw = cur_.bg_mosaic_w + 1;
-  if (!mosaic && dx == 0x100 && dy == 0) { bitmap_row_degenerate(plane, 0, xmask, ymask, yshift, ofx == 0, false, rx, ry); return; }
+  if (!mosaic && dx == 0x100 && dy == 0) { bitmap_row_degenerate(2, plane, 0, xmask, ymask, yshift, ofx == 0, false, rx, ry); return; }
   u32 mosaic_phase = 0;
   s32 mosaic_rx = rx, mosaic_ry = ry;
   for (u32 i = 0; i < 256; ++i, rx += dx, ry += dy,
@@ -596,7 +603,7 @@ void Engine2D::draw_bg_large(u32 line) {
 // width (or, with overflow transparent, to the span 0 <= column < width).
 // Each run is read a block at a time through the view's direct pointers
 // (an overlapping-bank block falls back to the OR read).
-void Engine2D::bitmap_row_degenerate(Layer& plane, u32 base, u32 xmask, u32 ymask, u32 yshift, bool wrap, bool direct, s32 rx, s32 ry) {
+void Engine2D::bitmap_row_degenerate(int bg, Layer& plane, u32 base, u32 xmask, u32 ymask, u32 yshift, bool wrap, bool direct, s32 rx, s32 ry) {
   const VramView& vv = bg_vram();
   const VramMap& vm = vram();
   if (!wrap && (static_cast<u32>(ry) & ~ymask)) return;
@@ -604,6 +611,10 @@ void Engine2D::bitmap_row_degenerate(Layer& plane, u32 base, u32 xmask, u32 ymas
   const u32 width = (xmask >> 8) + 1;
   const s32 x0 = rx >> 8;
   bool any = false;
+  // The edge cut: a direct-colour row read straight from one of banks A-D
+  // carries the captured pixels' edge bytes beside it (Gpu::edge_vram_).
+  u8* const erow = (edge_vram_ && direct) ? bg_edge_[bg] : nullptr;
+  if (erow) std::memset(erow, 0, 256);
   auto emit = [&](u32 texel, u32 i, u32 n) {
     // [i, i + n) of the line from texel offset `texel` of the row.
     u32 addr = base + (direct ? texel << 1 : texel);
@@ -614,6 +625,11 @@ void Engine2D::bitmap_row_degenerate(Layer& plane, u32 base, u32 xmask, u32 ymas
       if (const u8* p = vv.ptr[a / VramView::BLOCK]) {
         const u8* src = p + (a & (VramView::BLOCK - 1));
         any |= direct ? kern::active::bmp_row_16(reinterpret_cast<const u16*>(src), m, plane.v() + i) : kern::active::bmp_row_8(src, m, plane.v() + i);
+        if (erow)
+          for (int b = 0; b < 4; ++b) {
+            const u8* bank = vm.bank(b);
+            if (src >= bank && src < bank + 0x20000) { std::memcpy(erow + i, edge_vram_ + b * 65536 + (src - bank) / 2, m); bg_edge_any_[bg] = true; break; }
+          }
       } else if (direct) {
         for (u32 k = 0; k < m; ++k) { const u16 c = vm.read16(vv, addr + k * 2); if (c & 0x8000) { plane.v()[i + k] = c; any = true; } }
       } else {
@@ -700,6 +716,7 @@ void Engine2D::render_sprites(u32 line) {
   // Only the attribute plane needs clearing: obj_v_/obj_alpha_ readers are
   // gated on OA_OPAQUE.
   obj_attr_.fill(0); obj_win_.fill(0);
+  if (edge_vram_ && obj_edge_any_) { obj_edge_.fill(0); obj_edge_any_ = false; }
   if (!spr_.obj_enable) return;
 
   const u16* oam = regs_.oam();
@@ -780,6 +797,21 @@ void Engine2D::draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, b
     }
     if (window) { for (u32 i = 0; i < xend - xoff; ++i) if (col[i] & 0x8000) obj_win_[x + i] = 1; return; }
     kern::active::obj_row_bmp16(col, xend - xoff, a, static_cast<u8>(alpha + 1), obj_v_.data() + x, obj_attr_.data() + x, obj_alpha_.data() + x);
+    if (edge_vram_ && row) {
+      // The edge cut: a bitmap sprite read straight from one of banks A-D
+      // carries the captured pixels' edge bytes on the pixels it won (where
+      // this colour, alpha and attribute now stand).
+      for (int b = 0; b < 4; ++b) {
+        const u8* bank = vm.bank(b);
+        if (!(row >= bank && row < bank + 0x20000)) continue;
+        const u8* ebank = edge_vram_ + b * 65536 + (row - bank) / 2;
+        for (u32 i = xoff; i < xend; ++i) {
+          const u32 k = x + i - xoff, sx = hflip ? (w - 1 - i) : i;
+          if ((col[i - xoff] & 0x8000) && obj_v_[k] == col[i - xoff] && obj_alpha_[k] == alpha + 1 && (obj_attr_[k] & ~OA_OPAQUE) == a) { obj_edge_[k] = ebank[sx]; obj_edge_any_ |= ebank[sx] != 0; }
+        }
+        break;
+      }
+    }
     obj_prio_mask_ |= static_cast<u8>(1 << (a & OA_PRIO));
     return;
   }

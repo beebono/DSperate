@@ -218,7 +218,17 @@ private:
   std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> edge_fb_{};   // edge_plane
   u64 edge_rows_[2][3] = {};
   bool edge_export_ = false;
-  void output_edges(const Engine2D& en, int screen, u32 line);
+  // Edge bytes of captured pixels, one per 16-bit VRAM pixel of banks A-D:
+  // display capture fills them beside the colour, and VRAM display, bitmap
+  // BGs and bitmap sprites read them back, so a game that shows its 3D
+  // through a capture (On Tour, Golden Sun: Dark Dawn, Spirit Tracks) keeps
+  // its edges. CPU writes into a captured image are not tracked.
+  std::vector<u8> edge_vram_;
+  // Last frame's lines and edge words per screen, for output_edges' unchanged-line rule.
+  std::vector<u32> prev_fb_[2], prev_edge_[2];
+  u64 prev_rows_[2][3] = {};
+  void output_edges(const Engine2D& en, int screen, u32 line, const u32* shown);
+  void capture_edges(u32 cnt, u32 line, u32 width, u32 dst_bank, u32 lcdc);
   ScaleTarget scale_[2];
   static constexpr u32 SCALED_ROW_MAX = 4096;
   alignas(16) u32 chunk_even_[2][SCREEN_W];   // chunky: the even line, held until the odd one completes the block

@@ -818,26 +818,80 @@ void Gpu::set_edge_export(bool on) {
   nds_.gpu3d.sync_raster();   // no band still drawing with the old setting
   edge_export_ = on;
   nds_.gpu3d.renderer().set_edge_export(on);
-  for (int s = 0; s < 2; ++s) { edge_fb_[s].fill(0); edge_rows_[s][0] = edge_rows_[s][1] = edge_rows_[s][2] = 0; }
+  for (int s = 0; s < 2; ++s) {
+    edge_fb_[s].fill(0); edge_rows_[s][0] = edge_rows_[s][1] = edge_rows_[s][2] = 0;
+    if (on) { prev_fb_[s].assign(SCREEN_W * SCREEN_H, 0); prev_edge_[s].assign(SCREEN_W * SCREEN_H, 0); }
+    else { prev_fb_[s].clear(); prev_fb_[s].shrink_to_fit(); prev_edge_[s].clear(); prev_edge_[s].shrink_to_fit(); }
+  }
+  if (on) edge_vram_.assign(4 * 65536, 0); else { edge_vram_.clear(); edge_vram_.shrink_to_fit(); }
+  for (Engine2D& en : engine) en.set_edge_vram(on ? edge_vram_.data() : nullptr);
 }
 
-// The edge plane's line: engine A's edge pixels where the 3D layer shows, in
-// display mode 1 only (the VRAM and FIFO modes show no live 3D), through
-// the output stage's master brightness and expansion like the frame.
-void Gpu::output_edges(const Engine2D& en, int screen, u32 line) {
+// The edge plane's line: the edge pixels that show on it, through the
+// output stage's master brightness and expansion like the frame. Display
+// mode 1 composes them (Engine2D::edge_compose: the 3D layer's, a captured
+// image's on a bitmap layer); mode 2 shows a VRAM bank with the edge bytes
+// a capture left beside it. A line shown again unchanged keeps last frame's
+// edges (a game copying its captured frame to the other screen with the
+// CPU, as Golden Sun: Dark Dawn does): the edges are a function of the picture.
+void Gpu::output_edges(const Engine2D& en, int screen, u32 line, const u32* shown) {
   u32* const dst = edge_fb_[screen].data() + line * SCREEN_W;
   u64& row = edge_rows_[screen][line >> 6];
   const u64 bit = u64{1} << (line & 63);
-  alignas(16) Pixel own[256];
-  alignas(16) u8 bytes[256];
-  if (!screens_on_ || &en != &engine[0] || ((en.dispcnt() >> 16) & 3) != 1 || !en.edge_compose(own, bytes)) {
-    if (row & bit) { std::memset(dst, 0, SCREEN_W * sizeof(u32)); row &= ~bit; }
-    return;
+  bool any = false;
+  if (screens_on_) {
+    const u32 mode = &en == &engine[0] ? (en.dispcnt() >> 16) & 3 : (en.dispcnt() >> 16) & 1;
+    alignas(16) Pixel own[256];
+    alignas(16) u8 bytes[256];
+    if (mode == 1 && en.edge_compose(own, bytes)) {
+      alignas(16) u32 out[256];
+      kern::active::output_line(own, en.master_bright(), out);
+      for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (out[x] & 0x00FFFFFF) : 0;
+      any = true;
+    } else if (mode == 2) {
+      const u32 bank = (en.dispcnt() >> 18) & 3;
+      if (lcdc_mask_render_ & (1u << bank)) {
+        const u8* const eb = edge_vram_.data() + bank * 65536 + line * 256;
+        u32 nz = 0;
+        for (u32 x = 0; x < 256; ++x) { dst[x] = eb[x] ? (static_cast<u32>(eb[x]) << 24) | (shown[x] & 0x00FFFFFF) : 0; nz |= eb[x]; }
+        any = nz != 0;
+      }
+    }
   }
-  alignas(16) u32 out[256];
-  kern::active::output_line(own, en.master_bright(), out);
-  for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (out[x] & 0x00FFFFFF) : 0;
-  row |= bit;
+  u32* const pfb = prev_fb_[screen].data() + line * SCREEN_W;
+  u32* const ped = prev_edge_[screen].data() + line * SCREEN_W;
+  const u64 prev_bit = prev_rows_[screen][line >> 6] & bit;
+  if (!any && prev_bit && std::memcmp(shown, pfb, SCREEN_W * sizeof(u32)) == 0) { std::memcpy(dst, ped, SCREEN_W * sizeof(u32)); any = true; }
+  if (!any && (row & bit)) std::memset(dst, 0, SCREEN_W * sizeof(u32));
+  std::memcpy(pfb, shown, SCREEN_W * sizeof(u32));
+  if (any) { std::memcpy(ped, dst, SCREEN_W * sizeof(u32)); row |= bit; prev_rows_[screen][line >> 6] |= bit; }
+  else { row &= ~bit; prev_rows_[screen][line >> 6] &= ~bit; }
+}
+
+// The edge bytes of a captured line beside the colour (edge_vram_): source
+// A's (the 3D layer's, or engine A's composed line), source B's (the
+// bank's own), or for a blend the stronger source's.
+void Gpu::capture_edges(u32 cnt, u32 line, u32 width, u32 dst_bank, u32 lcdc) {
+  u8* const edst = edge_vram_.data() + dst_bank * 65536 + (((((cnt >> 18) & 3) << 14) + line * width) & 0xFFFF);
+  alignas(16) u8 ea[256] = {};
+  if (cnt & (1 << 24)) {
+    if (const u32* w = nds_.gpu3d.edge_line(ref3d_, line)) for (u32 x = 0; x < 256; ++x) ea[x] = static_cast<u8>(w[x] >> 24);
+  } else { alignas(16) Pixel own[256]; engine[0].edge_compose(own, ea); }
+  const u8* eb = nullptr;
+  if (!(cnt & (1 << 25))) {
+    const u32 dispcnt = engine[0].dispcnt();
+    const u32 src_bank = (dispcnt >> 18) & 3;
+    if (lcdc & (1u << src_bank)) {
+      u32 off = line * 256;
+      if (((dispcnt >> 16) & 3) != 2) off += ((cnt >> 26) & 3) << 14;
+      eb = edge_vram_.data() + src_bank * 65536 + (off & 0xFFFF);
+    }
+  }
+  const u32 mode = (cnt >> 29) & 3;
+  const u32 eva = std::min<u32>(cnt & 0x1F, 16), evb = std::min<u32>((cnt >> 8) & 0x1F, 16);
+  const u8* pick = mode == 0 ? ea : mode == 1 ? eb : (eva >= evb ? ea : eb);
+  if (!pick) std::memset(edst, 0, width);
+  else if (pick != edst) std::memmove(edst, pick, width);
 }
 
 void Gpu::output_engine(int e, u32 line) {
@@ -857,7 +911,7 @@ void Gpu::output_engine(int e, u32 line) {
       else { output_b(dst); expand_colours(dst); }
     }
   } else { for (u32 i = 0; i < 256; ++i) dst[i] = 0xFF000000; }
-  if (edge_export_ && !scaled) output_edges(en, screen, line);
+  if (edge_export_ && !scaled) output_edges(en, screen, line, dst);
   if (scaled) {
     if (e == 1 && bscale_defer_ && bscale_n_ < SCREEN_H) {
       StashedLine& st = bscale_[bscale_n_++];
@@ -1253,6 +1307,7 @@ void Gpu::capture(u32 line) {
     }
   }
 
+  if (edge_export_) capture_edges(cnt, line, width, dst_bank, lcdc);
   switch ((cnt >> 29) & 3) {
   case 0:
     kern::active::capture_a15(src_a, width, dst);
