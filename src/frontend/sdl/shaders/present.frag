@@ -32,10 +32,15 @@ float cut_pos(uint e) {
   float f = float((e & 31u) + 1u) / 32.0;
   return (e & 64u) != 0u ? 1.0 - f : f;
 }
-uint edge_cut(uint base, int sx, int sy, float u, float v, uint s) {
+vec3 unpack(uint s) { return vec3(float((s >> 16) & 255u), float((s >> 8) & 255u), float(s & 255u)); }
+
+// `soft` (DS_EDGE_BLEND=1, an experiment): instead of the hard cut, each
+// panel pixel mixes the two colours by its distance from the line, a
+// transition one panel pixel wide; `np` is panel pixels per source pixel.
+vec3 edge_cut(uint base, int sx, int sy, float u, float v, uint s, bool soft, vec2 np) {
   uint eb = base + 2u * 49152u;
   uint w = src[eb + uint(sy) * 256u + uint(sx)];
-  if (w == 0u) return s;
+  if (w == 0u) return unpack(s);
   uint e = w >> 24;
   bool vert = (e & 32u) != 0u, neg = (e & 64u) != 0u;
   float t = vert ? v : u, along = (vert ? u : v) - 0.5;
@@ -46,13 +51,13 @@ uint edge_cut(uint base, int sx, int sy, float u, float v, uint s) {
   bool inside = neg ? (t >= line) : (t < line);
   int px = vert ? sx : (neg ? sx - 1 : sx + 1), py = vert ? (neg ? sy - 1 : sy + 1) : sy;
   uint own = 0xFF000000u | (w & 0xFFFFFFu);
-  if (px < 0 || px > 255 || py < 0 || py > 191) return own;
+  if (px < 0 || px > 255 || py < 0 || py > 191) return unpack(own);
   uint o = src[base + uint(py) * 256u + uint(px)];
-  if (same_colour(own, o)) return s;   // a seam inside one surface: nothing to cut
-  return inside ? own : o;
+  if (same_colour(own, o)) return unpack(s);   // a seam inside one surface: nothing to cut
+  if (!soft) return unpack(inside ? own : o);
+  float dist = (neg ? t - line : line - t) * (vert ? np.y : np.x);   // panel pixels into the polygon's side
+  return mix(unpack(o), unpack(own), clamp(dist + 0.5, 0.0, 1.0));
 }
-
-vec3 unpack(uint s) { return vec3(float((s >> 16) & 255u), float((s >> 8) & 255u), float(s & 255u)); }
 
 void main() {
   ivec2 o = ivec2(d);
@@ -66,8 +71,7 @@ void main() {
   float fx = float(o.x) * pc.s.x + pc.s.z, fy = float(o.y) * pc.s.y + pc.s.w;
   int sx = min(int(fx), 255), sy = min(int(fy), 191);
   uint s = src[pc.b.z + uint(sy) * 256u + uint(sx)];
-  if ((pc.b.w & 0x200u) != 0u) s = edge_cut(pc.b.z, sx, sy, clamp(fx - float(sx), 0.0, 1.0), clamp(fy - float(sy), 0.0, 1.0), s);
-  vec3 col = unpack(s);
+  vec3 col = (pc.b.w & 0x200u) != 0u ? edge_cut(pc.b.z, sx, sy, clamp(fx - float(sx), 0.0, 1.0), clamp(fy - float(sy), 0.0, 1.0), s, (pc.b.w & 0x400u) != 0u, 1.0 / pc.s.xy) : unpack(s);
   uint gf = pc.b.w >> 16;
   if ((pc.b.w & 0x100u) != 0u && gf < 256u && (grid_seam(pc.b.w & 0xFFu, o.x, 0) || grid_seam(pc.b.w & 0xFFu, o.y, 1))) col = floor(col * (float(gf) / 256.0));
   dst = vec4(col / 255.0, 1.0);

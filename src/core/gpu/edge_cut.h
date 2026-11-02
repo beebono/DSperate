@@ -37,7 +37,9 @@ inline bool edge_cut_same(u32 a, u32 b) {
 }
 
 // The colour of the panel point (u, v) in [0, 1)^2 inside source pixel (x, y).
-inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, float u, float v) {
+// `np`: panel pixels per source pixel. Nonzero: DS_EDGE_BLEND's soft
+// version, the two colours mixed by the panel point's distance from the line.
+inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, float u, float v, float np = 0) {
   const u32 w = edges[y * 256 + x];
   if (!w) return frame[y * 256 + x];
   const u32 e = w >> 24;
@@ -59,17 +61,25 @@ inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, flo
   if (px < 0 || px > 255 || py < 0 || py > 191) return own;
   const u32 o = frame[py * 256 + px];
   if (edge_cut_same(own, o)) return frame[y * 256 + x];   // a seam inside one surface: nothing to cut
-  return inside ? own : o;
+  if (np <= 0) return inside ? own : o;
+  float k = ((neg ? t - line : line - t)) * np + 0.5f;
+  k = k < 0 ? 0 : k > 1 ? 1 : k;
+  u32 r = 0xFF000000u;
+  for (int sh = 0; sh < 24; sh += 8) {
+    const float c = static_cast<float>((o >> sh) & 255) + (static_cast<float>((own >> sh) & 255) - static_cast<float>((o >> sh) & 255)) * k;
+    r |= static_cast<u32>(c + 0.5f) << sh;
+  }
+  return r;
 }
 
 // A whole screen at n x: dst is (256 n) x (192 n), nearest outside the cut.
-inline void edge_cut_screen(const u32* frame, const u32* edges, int n, u32* dst) {
+inline void edge_cut_screen(const u32* frame, const u32* edges, int n, u32* dst, bool soft = false) {
   for (int y = 0; y < 192; ++y)
     for (int fy = 0; fy < n; ++fy) {
       u32* const row = dst + static_cast<size_t>(y * n + fy) * 256 * n;
       for (int x = 0; x < 256; ++x)
         for (int fx = 0; fx < n; ++fx)
-          row[x * n + fx] = edge_cut_sample(frame, edges, x, y, (fx + 0.5f) / n, (fy + 0.5f) / n);
+          row[x * n + fx] = edge_cut_sample(frame, edges, x, y, (fx + 0.5f) / n, (fy + 0.5f) / n, soft ? static_cast<float>(n) : 0.0f);
     }
 }
 

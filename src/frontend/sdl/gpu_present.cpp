@@ -402,6 +402,8 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
   for (int s = 0; s < 2; ++s) std::memcpy(dst + static_cast<size_t>(s) * kFrameWords, fb[s], sizeof(u32) * kFrameWords);
   // The edge planes: the marked lines copied, lines left over from this
   // slot's last frame cleared, the rest already zero.
+  // DS_EDGE_BLEND=1: the cut's two colours mixed by distance from the line (an experiment, present.frag).
+  static const bool soft_cut = std::getenv("DS_EDGE_BLEND") && std::atoi(std::getenv("DS_EDGE_BLEND")) != 0;
   bool cut[2] = {false, false};
   for (int s = 0; s < 2; ++s) {
     u32* const ep = dst + static_cast<size_t>(2 + s) * kFrameWords;
@@ -471,7 +473,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     pc.rect[0] = r.x; pc.rect[1] = r.y; pc.rect[2] = r.w; pc.rect[3] = r.h;
     pc.b[1] = 0;
     pc.b[2] = static_cast<u32>(slot) * kSlotWords + static_cast<u32>(views[v].screen) * kFrameWords;
-    pc.b[3] = static_cast<u32>(v) | (views[v].grid ? 0x100u : 0u) | (cut[views[v].screen & 1] ? 0x200u : 0u) | (std::min<u32>(grid, 256) << 16);
+    pc.b[3] = static_cast<u32>(v) | (views[v].grid ? 0x100u : 0u) | (cut[views[v].screen & 1] ? (soft_cut ? 0x600u : 0x200u) : 0u) | (std::min<u32>(grid, 256) << 16);
     pc.s[0] = 256.0f / static_cast<float>(r.w); pc.s[1] = 192.0f / static_cast<float>(r.h);
     pc.s[2] = 0.5f / static_cast<float>(r.w);   pc.s[3] = 0.5f / static_cast<float>(r.h);
     const bool fade = views[v].blends && inset_alpha < 255;
