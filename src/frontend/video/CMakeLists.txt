@@ -8,3 +8,11 @@ target_include_directories(dsperate_frontend_video PUBLIC ${CMAKE_CURRENT_SOURCE
 # Placement is float arithmetic: no fused multiply-add, so every architecture
 # lands on the same pixel (test_layout pins it).
 set_source_files_properties(layout.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+# GCC 8's LTO drops that per-file -ffp-contract=off once layout's code is
+# inlined into callers built without it, so the pixels move anyway (dominant_v
+# a pixel low, #23). Keep the file out of LTO there; placement runs only when
+# the layout or output size changes, so the lost inlining costs nothing. GCC 9
+# and later honour the option across LTO.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  set_property(SOURCE layout.cpp APPEND PROPERTY COMPILE_OPTIONS "-fno-lto")
+endif()
