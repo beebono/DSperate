@@ -183,7 +183,13 @@ train st     --frames 2400 "$DS_ROMS/Legend of Zelda, The - Spirit Tracks.nds" &
 # attract-mode demo, which starts around frame 1200 -- hence the frame count,
 # and hence this being the longest run of the batch.
 train nsmb   --frames 1500 "$DS_ROMS/New Super Mario Bros..nds" &
-SCENES="mlbis sm64 etody dbori meteos gsdd st nsmb"
+# Mid-song, from a save state: the CPU raster under the game's AA with a
+# display capture read back at every VBlank, slot 2's Guitar Grip, and frets
+# and strums in the replay. A save-state format change voids the .dss; record
+# the scene again then (--record with --load-state keeps the start frame).
+train ghontour --guitar-grip --save "$HERE/scenes/ghontour.sav" --load-state "$HERE/scenes/ghontour.dss" \
+  --replay "$HERE/scenes/ghontour.dsin" --frames 1200 "$DS_ROMS/Guitar Hero - On Tour.nds" &
+SCENES="mlbis sm64 etody dbori meteos gsdd st nsmb ghontour"
 if [ $DSI_OK = 1 ]; then
   # BIOS-only DSiWare: the launcher's hand-off is emulated over a synthetic
   # NAND, so this needs the four BIOS dumps and the DSi firmware but no NAND
