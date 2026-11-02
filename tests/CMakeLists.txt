@@ -167,6 +167,8 @@ if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE)   # the headers may be missing o
 endif()
 
 # RGA probe (gpu-raster branch): times the Rockchip 2D scaler (V4L2 mem2mem) on a dma-buf frame. Device-only, not a test.
+include(CheckIncludeFileCXX)
+check_include_file_cxx(linux/dma-buf.h DSPERATE_HAVE_DMABUF_H)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(rga_probe rga_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
   target_include_directories(rga_probe PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -175,11 +177,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(dmabuf_probe dmabuf_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
   target_include_directories(dmabuf_probe PRIVATE ${PROJECT_SOURCE_DIR}/src)
   # Integer nearest scaling from 1:1 RGA jobs (stride and rotation tricks); --sim checks the geometry anywhere.
-  add_executable(rga_nearest_probe rga_nearest_probe.cpp)
+  # Wants the dma-buf UAPI header, which the A30's sysroot (glibc 2.23) lacks: skipped there (the present probes too).
+  if(DSPERATE_HAVE_DMABUF_H)
+    add_executable(rga_nearest_probe rga_nearest_probe.cpp)
+  endif()
 endif()
 
 # GPU present probe: the fragment present against a nearest blit into imported dma-bufs. Device-only, not a test.
-if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND DSPERATE_HAVE_DMABUF_H)
   add_executable(vk_present_probe vk_present_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
   target_link_libraries(vk_present_probe PRIVATE dsperate_core ${CMAKE_DL_LIBS})
   target_include_directories(vk_present_probe PRIVATE ${DSPERATE_VULKAN_INCLUDE})
@@ -187,7 +192,7 @@ if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND CMAKE_SYSTEM_NAME STREQUAL "L
 endif()
 
 # GpuPresent end to end into dma-heap buffers, against a CPU model of the compute present it replaced. Device-only, not a test.
-if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND SDL2_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND SDL2_FOUND AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND DSPERATE_HAVE_DMABUF_H)
   add_executable(gpu_present_probe gpu_present_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/gpu_present.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
   target_link_libraries(gpu_present_probe PRIVATE dsperate_core ${SDL2_LIBRARIES} ${CMAKE_DL_LIBS})
   target_include_directories(gpu_present_probe PRIVATE ${DSPERATE_VULKAN_INCLUDE} ${SDL2_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR})
