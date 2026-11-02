@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include <algorithm>
+#include <cstring>
 #include "core/types.h"
 #include "core/gpu/render3d.h"
 
@@ -128,18 +130,49 @@ public:
   // The edge plane of that line (Renderer3D::set_edge_export; after line(),
   // so synced), or null when not exported or the 3D layer is scrolled.
   // A GPU frame's edge bytes are made into the plane's words here, with the
-  // record's colour (unblended: the GPU raster has no AA blend).
+  // record's colour (unblended: the GPU raster has no AA blend). A pixel in
+  // a clump of edge pixels gets none: where a small-polygon mesh (a distant
+  // kart, a face, wheel spokes) marks whole areas, the lines are too short to
+  // judge and the cuts shred the picture, so a pixel with edge_density_ or
+  // more edge pixels in its 3x3 (a straight line has 3, a corner about 5)
+  // shows whole (DS_EDGE_DENSITY=N; 0 keeps every pixel).
   const u32* edge_line(const Renderer3D::FrameRef& f, u32 y) const {
     if (render_xpos_) return nullptr;
     if (!f.edge_bytes) return f.edge_line(y);
     const u8* b = f.edge_bytes + y * 256;
+    bool any = false;
+    for (u32 x = 0; x < 256 && !any; x += 8) any = load64(b + x) != 0;
+    if (!any) { std::memset(edge_words_, 0, sizeof(edge_words_)); return edge_words_; }
     const u32* c = f.line(y);
+    // Eight columns at a time in byte lanes: 1 per edge pixel over the three
+    // rows (at most 3 a lane), then the three columns (at most 9), then
+    // lane + (0x80 - N) has bit 7 set where the count reaches N.
+    alignas(8) u8 col[272] = {};   // the 3-row count per column, 8 zero either side
+    alignas(8) u8 dense[256];
+    if (edge_density_) {
+      const u8* a = y ? b - 256 : nullptr;
+      const u8* d = y + 1 < 192 ? b + 256 : nullptr;
+      for (u32 x = 0; x < 256; x += 8) {
+        u64 n = nonzero_lanes(load64(b + x));
+        if (a) n += nonzero_lanes(load64(a + x));
+        if (d) n += nonzero_lanes(load64(d + x));
+        store64(col + 8 + x, n);
+      }
+      const u64 bias = 0x0101010101010101ull * static_cast<u64>(0x80 - std::min(edge_density_, 0x7F));
+      for (u32 x = 0; x < 256; x += 8) {
+        const u64 n = load64(col + 7 + x) + load64(col + 8 + x) + load64(col + 9 + x);
+        store64(dense + x, (n + bias) & 0x8080808080808080ull);
+      }
+    } else std::memset(dense, 0, sizeof(dense));
     for (u32 x = 0; x < 256; ++x) {
       const u32 w = c[x];
-      edge_words_[x] = b[x] ? (static_cast<u32>(b[x]) << 24) | (w & 63) | (((w >> 8) & 63) << 6) | (((w >> 16) & 63) << 12) | (((w >> 24) & 31) << 18) : 0;
+      edge_words_[x] = b[x] && !dense[x] ? (static_cast<u32>(b[x]) << 24) | (w & 63) | (((w >> 8) & 63) << 6) | (((w >> 16) & 63) << 12) | (((w >> 24) & 31) << 18) : 0;
     }
     return edge_words_;
   }
+  static u64 load64(const u8* p) { u64 v; std::memcpy(&v, p, 8); return v; }
+  static void store64(u8* p, u64 v) { std::memcpy(p, &v, 8); }
+  static u64 nonzero_lanes(u64 v) { return ((((v & 0x7F7F7F7F7F7F7F7Full) + 0x7F7F7F7F7F7F7F7Full) | v) >> 7) & 0x0101010101010101ull; }   // 1 in each byte that is not 0
   // Finish async raster; needed before touching texture VRAM (raster workers may still read it).
   void sync_raster();
   void debug_dump(FILE* f) { renderer_.debug_dump(f); }
@@ -227,6 +260,7 @@ private:
   // BG0HOFS of engine A, applied from its journal in display-line order on the compositor thread.
   u16 render_xpos_ = 0;
   mutable u32 edge_words_[256] = {};   // edge_line's GPU-frame row
+  int edge_density_ = 6;                // edge_line: the 3x3 count that drops a pixel (set at construction from DS_EDGE_DENSITY)
   std::atomic<bool> render_on_{false};
   alignas(16) u32 scrolled_[256] = {};
 

@@ -282,7 +282,10 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
 
 Gpu3D::~Gpu3D() { renderer_.sync_all(); }
 
-Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) { reset(); }
+Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) {
+  if (const char* e = std::getenv("DS_EDGE_DENSITY")) edge_density_ = std::atoi(e);   // the GPU edge cut's clump limit (edge_line)
+  reset();
+}
 
 void Gpu3D::reset_render_state() {
   render_count_.fill(0);
