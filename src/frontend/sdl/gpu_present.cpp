@@ -402,9 +402,9 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
   for (int s = 0; s < 2; ++s) std::memcpy(dst + static_cast<size_t>(s) * kFrameWords, fb[s], sizeof(u32) * kFrameWords);
   // The edge planes: the marked lines copied, lines left over from this
   // slot's last frame cleared, the rest already zero.
-  // DS_EDGE_BLEND=W: the cut's two colours mixed by distance from the line over a band W DS
-  // pixels wide (an experiment, present.frag; up to 3.9).
-  static const u32 blend16 = [] { const char* e = std::getenv("DS_EDGE_BLEND"); return e ? std::min<u32>(63, static_cast<u32>(std::atof(e) * 16.0 + 0.5)) : 0u; }();
+  // The cut's two colours are mixed by distance from the line over a band one DS pixel wide
+  // (present.frag). DS_EDGE_BLEND=W sets the width in DS pixels (up to 3.9); 0 is the hard cut.
+  static const u32 blend16 = [] { const char* e = std::getenv("DS_EDGE_BLEND"); return e ? std::min<u32>(63, static_cast<u32>(std::atof(e) * 16.0 + 0.5)) : 16u; }();
   bool cut[2] = {false, false};
   for (int s = 0; s < 2; ++s) {
     u32* const ep = dst + static_cast<size_t>(2 + s) * kFrameWords;

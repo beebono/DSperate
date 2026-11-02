@@ -45,11 +45,12 @@ float edge_line(uint eb, uint e, int x, int y, float along) {
   return pos + (pn - pos) * abs(along);
 }
 
-// The cut of panel point (u, v) in source pixel (sx, sy). `bw` (an
-// experiment, DS_EDGE_BLEND=W): instead of the hard cut, the two colours
+// The cut of panel point (u, v) in source pixel (sx, sy): the two colours
 // mixed by the point's distance from the line, over a band `bw` DS pixels
-// wide; a band wider than the edge pixel's own part reaches the pixel
-// beyond it (one with no edge of its own: its neighbours' are looked up).
+// wide (1 by default, DS_EDGE_BLEND; 0: the hard cut). A band wider than the
+// edge pixel's own part reaches the pixel beyond it (one with no edge of its
+// own: its neighbours' are looked up), which also smooths where the line
+// steps from one row of edge pixels to the next.
 vec3 edge_cut(uint base, int sx, int sy, float u, float v, uint s, float bw) {
   uint eb = base + 2u * 49152u;
   uint w = src[eb + uint(sy) * 256u + uint(sx)];

@@ -62,9 +62,9 @@ inline u32 edge_cut_mix(u32 a, u32 b, float k) {   // a + (b - a) * k, per chann
 inline float edge_cut_clamp01(float k) { return k < 0 ? 0 : k > 1 ? 1 : k; }
 
 // The colour of the panel point (u, v) in [0, 1)^2 inside source pixel
-// (x, y). `bw` (an experiment, DS_EDGE_BLEND=W): instead of the hard cut,
-// the two colours mixed by the point's distance from the line over a band
-// `bw` DS pixels wide, reaching into the pixel beyond the edge pixel.
+// (x, y). `bw` > 0 (the present's default, 1; DS_EDGE_BLEND): the two
+// colours mixed by the point's distance from the line over a band `bw` DS
+// pixels wide, reaching into the pixel beyond the edge pixel; 0: the hard cut.
 inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, float u, float v, float bw = 0) {
   const u32 s = frame[y * 256 + x];
   const u32 w = edges[y * 256 + x];
