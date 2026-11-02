@@ -3080,6 +3080,46 @@ u32 Renderer3D::gpu_span_rows(const Polygon& p, u32* out, u32 cap) {
   return h;
 }
 
+// Below this many rows the walk stays on this thread: waking the pool costs
+// more than it saves. Guitar Hero: On Tour's frames run ~5000 rows, ~2 ms here.
+static constexpr u32 kSpanParallelRows = 1024;
+
+void Renderer3D::gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, u32* spans) {
+  using namespace ds::gpu::vk;
+  const auto walk = [this, &jobs, spans](size_t a, size_t b) {
+    for (size_t k = a; k < b; ++k) gpu_span_rows(*jobs[k].poly, spans + DS_SPAN_WORDS * jobs[k].row, DS_MAX_SPAN_ROWS - jobs[k].row);
+  };
+  const u32 workers = band_count(2);
+  if (rows < kSpanParallelRows || workers == 0 || jobs.size() < 2) { walk(0, jobs.size()); return; }
+  if (!pool_) pool_ = std::make_unique<Pool>(thread_layout_on() || workers > 3 ? workers : 3);
+  // Chunks of whole polygons, about equal in rows; claimed in order by the
+  // workers and this thread alike. Each polygon writes only its own rows.
+  const u32 nchunks = std::min<u32>(MAX_BINS, static_cast<u32>(jobs.size()));
+  std::array<u32, MAX_BINS + 1> cut{};
+  for (u32 c = 1, k = 0; c < nchunks; ++c) {
+    const u32 target = static_cast<u32>(static_cast<u64>(rows) * c / nchunks);
+    while (k + 1 < jobs.size() && jobs[k + 1].row <= target) ++k;
+    cut[c] = std::max(cut[c - 1], static_cast<u32>(k));
+  }
+  cut[nchunks] = static_cast<u32>(jobs.size());
+  span_fn_ = [this, &walk, &cut, nchunks](u32) {
+    for (u32 c; (c = pool_->claim()) < nchunks;) { walk(cut[c], cut[c + 1]); pool_->mark_done(c); }
+  };
+  const u64 gen = pool_->dispatch(span_fn_, workers, nchunks);
+  for (u32 c; (c = pool_->claim_if(gen)) < nchunks;) { walk(cut[c], cut[c + 1]); pool_->thief_done(c); }
+  pool_->wait_idle();   // every worker back out of span_fn_, which refers to this frame
+  // DS_LEAN_SPAN_VERIFY=1: walk the rows again in order here and abort on any difference.
+  static const bool verify = std::getenv("DS_LEAN_SPAN_VERIFY") && std::atoi(std::getenv("DS_LEAN_SPAN_VERIFY")) != 0;
+  if (verify) {
+    static std::vector<u32> ref;
+    static u64 frames = 0;
+    ref.assign(static_cast<size_t>(rows) * DS_SPAN_WORDS, 0);
+    for (const SpanRowsJob& j : jobs) gpu_span_rows(*j.poly, ref.data() + DS_SPAN_WORDS * j.row, DS_MAX_SPAN_ROWS - j.row);
+    if (std::memcmp(ref.data(), spans, ref.size() * sizeof(u32)) != 0) { std::fprintf(stderr, "[spans] VERIFY FAILED: parallel walk differs (frame %llu, %u rows)\n", (unsigned long long)nds_.frame_count, rows); std::abort(); }
+    if (++frames % 600 == 0) std::fprintf(stderr, "[spans] verify: %llu parallel frames matched\n", (unsigned long long)frames);
+  }
+}
+
 bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly) {
   using namespace ds::gpu::vk;
   const double t0 = g_gpu_trace.on ? now_ms() : 0;
@@ -3093,6 +3133,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   static const bool no_span = std::getenv("DS_LEAN_NOSPAN") && std::atoi(std::getenv("DS_LEAN_NOSPAN")) != 0;   // DS_LEAN_NOSPAN=1: no span table, the GPU's own interpolation (measurement)
   u32 np = 0, nv = 0, nrows = 0, first_ordered = ~0u, opaque_rows = 0;
   const bool alpha_all_fail = rs_->alpha_ref >= 31;
+  span_jobs_.clear();
   for (u32 i = 0; i < npoly; ++i) {
     const Polygon& p = *polys[i];
     if (p.degenerate) continue;
@@ -3115,7 +3156,13 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     o.xmin = xmin; o.xmax = xmax;
     nv += p.nverts;
     // The span table rows (vk_layout.h): the CPU raster's own row endpoints.
-    if (!no_span) if (const u32 h = gpu_span_rows(p, spans + DS_SPAN_WORDS * nrows, DS_MAX_SPAN_ROWS - nrows)) { o.span_base = nrows; nrows += h; }
+    // Laid out here (rows on screen, refused when the table is full, as
+    // gpu_span_rows decides), walked below by gpu_fill_spans.
+    if (!no_span) {
+      const s32 ry0 = std::max(p.ytop, 0), ry1 = std::min(p.ybot, 191);
+      const u32 h = ry1 >= ry0 ? static_cast<u32>(ry1 - ry0) + 1 : 0;
+      if (h && h <= DS_MAX_SPAN_ROWS - nrows) { o.span_base = nrows; span_jobs_.push_back({&p, nrows}); nrows += h; }
+    }
     const u32 fmt = (p.texparam >> 26) & 7;
     if ((dispcnt_ & 1) && fmt != 0) {
       Shade sh; texture_fields(sh, p);
@@ -3135,6 +3182,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     ++np;
   }
   if (first_ordered == ~0u) { first_ordered = np; opaque_rows = nrows; }
+  gpu_fill_spans(span_jobs_, nrows, spans);
   *ps = GpuPost{};
   ps->fog_color = rs_->fog_color; ps->fog_offset = rs_->fog_offset; ps->fog_shift = rs_->fog_shift;
   for (u32 i = 0; i < rs_->fog_density.size() && i < 34; ++i) ps->density[i] = rs_->fog_density[i];

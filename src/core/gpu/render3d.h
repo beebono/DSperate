@@ -321,6 +321,14 @@ private:
   // scanlines [max(ytop, 0), min(ybot, 191)]: the per-line endpoints precompute_lines derives.
   // Returns the rows written, 0 if `cap` rows would not hold them.
   u32  gpu_span_rows(const Polygon& p, u32* out, u32 cap);
+  // The span table's rows for one GPU frame, walked on the band pool (idle
+  // while the GPU draws) and this thread together: the emulation thread
+  // only lays out where each polygon's rows go. `jobs` pairs a polygon with
+  // its first row; the output is the same as walking them in order here.
+  struct SpanRowsJob { const Polygon* poly; u32 row; };
+  void gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, u32* spans);
+  std::vector<SpanRowsJob> span_jobs_;
+  std::function<void(u32)> span_fn_;   // the pool keeps a reference until wait_idle
   void rewind_edge(Edge& e);
   void refresh_edge_state(Edge& e) const;   // called from both edge setups and once per polygon for the flat case
   void setup_shade(Shade& sh, const Polygon& p);
