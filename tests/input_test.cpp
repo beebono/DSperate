@@ -538,11 +538,17 @@ void test_guitar_grip_frets() {
 
 // The strum bindings play a stroke down the strings, then a lifted frame,
 // alternating direction; the d-pad's vertical pair is theirs only while the
-// grip is in and the menu is shut.
+// grip is in, a fret is held and the menu is shut.
 void test_guitar_grip_strum() {
   constexpr u32 kUpDown = (1u << B::BTN_UP) | (1u << B::BTN_DOWN);
   Rig r; Input& in = r.go();
   in.set_guitar_grip(true);
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_DOWN, true));                // no fret: the game's d-pad
+  ds::input::Frame plain = in.frame();
+  CHECK((plain.buttons & (1u << B::BTN_DOWN)) && !plain.down);
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, true));             // green, with down still held...
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_DOWN, false));               // ...whose release is still the game's
+  CHECK((in.frame().buttons & kUpDown) == 0);
   CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_DOWN, true));
   CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_DOWN, false));
   int ys[5];
@@ -559,9 +565,20 @@ void test_guitar_grip_strum() {
   for (int i = 0; i < 5; ++i) in.frame();
   CHECK(!in.frame().down);
   CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_UP, false));
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, false));
   in.set_menu_open(true);                                                  // the menu navigates with the d-pad
   CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_DOWN, true));
   CHECK((in.take_menu_presses() >> B::BTN_DOWN) & 1);
+
+  // A stickless handheld: a stylus hold on Select still moves the pen with
+  // the d-pad, the strum's up/down included, while no fret is held.
+  Rig r2; r2.set("pad.stylus_hold", "back"); Input& in2 = r2.go();
+  in2.set_guitar_grip(true);
+  const int y0 = in2.stylus_y();
+  CHECK(T::pad(in2, SDL_CONTROLLER_BUTTON_BACK, true));
+  CHECK(T::pad(in2, SDL_CONTROLLER_BUTTON_DPAD_DOWN, true));
+  for (int i = 0; i < 8; ++i) in2.update_stylus();
+  CHECK(in2.stylus_y() > y0 && !in2.frame().down);
 }
 
 // Under the pad.stylus_hold chord the d-pad stick is the pen's, as the d-pad

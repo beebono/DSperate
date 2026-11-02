@@ -85,7 +85,7 @@ public:
     if (menu_open_ && !on) { held_back_ = buttons_ | stick_ | face_stick_; touch_held_back_ = touching_ || stylus_down_ != 0; }
     menu_open_ = on;
     if (!on) menu_faces_ = 0;
-    if (on) { frets_ = frets_pressed_ = 0; strum_step_ = 0; strum_queued_ = false; }   // the menu has the controls now
+    if (on) { frets_ = frets_pressed_ = 0; strum_step_ = 0; strum_queued_ = false; strum_held_ = 0; }   // the menu has the controls now
   }
   // Pad face buttons pressed while the menu is open, by SDL position and
   // regardless of bindings: bit n = SDL_CONTROLLER_BUTTON n (south, east,
@@ -126,8 +126,10 @@ public:
   // whatever DS button shares the control.
   // The strum bindings (keys.strum, pad.strum and pad.strum.alt) play a
   // stroke across the touch screen's strings in their place, for a handheld
-  // without one, alternating down and up like a pick.
-  void set_guitar_grip(bool on) { grip_on_ = on; frets_ = frets_pressed_ = 0; strum_step_ = 0; strum_queued_ = false; }
+  // without one, alternating down and up like a pick -- while a fret is held
+  // (the games have no open notes); otherwise the control is the game's, and
+  // the stylus hold's, as usual.
+  void set_guitar_grip(bool on) { grip_on_ = on; frets_ = frets_pressed_ = 0; strum_step_ = 0; strum_queued_ = false; strum_held_ = 0; }
   static const char* fret_name(int i);          // "grip_green".. for the config keys
   static const char* strum_key_default();
   static const char* strum_pad_default(int slot);
@@ -254,6 +256,7 @@ private:
   Bind key_strum_, pad_strum_[HOT_SLOTS];
   int  strum_step_ = 0;                         // frames of the stroke played so far, 0 idle
   bool strum_up_ = false, strum_queued_ = false;
+  u8   strum_held_ = 0;                         // strum controls whose press was a strum (bit 0 key, 1-2 pad slots): their release is too
   void strum_press() { if (strum_step_) strum_queued_ = true; else strum_step_ = 1; }
   void strum_frame(input::Frame& f);
   void set_fret(int i, bool down) {

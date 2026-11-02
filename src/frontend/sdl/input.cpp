@@ -551,7 +551,10 @@ bool Input::key_down(SDL_Keycode k, bool down) {
   if (grip_on_ && !menu_open_) {   // the menu navigates with these controls
     for (int i = 0; i < FRETS; ++i)
       if (key_fret_[i].kind == Bind::Key && key_fret_[i].code == k) { set_fret(i, down); return true; }
-    if (key_strum_.kind == Bind::Key && key_strum_.code == k) { if (down) strum_press(); return true; }
+    if (key_strum_.kind == Bind::Key && key_strum_.code == k && (down ? frets_ != 0 : (strum_held_ & 1) != 0)) {
+      if (down) { strum_held_ |= 1; strum_press(); } else strum_held_ &= static_cast<u8>(~1u);
+      return true;
+    }
   }
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     if (key_map_[i].kind == Bind::Key && key_map_[i].code == k) { set(static_cast<B>(i), down); return true; }
@@ -600,8 +603,13 @@ bool Input::pad_down(const Bind& b, bool down) {
   if (grip_on_ && !menu_open_) {   // the menu navigates with these controls
     for (int i = 0; i < FRETS; ++i)
       if (same(pad_fret_[i]) && (!down || !pad_mod_down_ || ((frets_ >> i) & 1))) { set_fret(i, down); return true; }
-    for (int sl = 0; sl < HOT_SLOTS; ++sl)
-      if (same(pad_strum_[sl]) && !pad_mod_down_) { if (down) strum_press(); return true; }
+    for (int sl = 0; sl < HOT_SLOTS; ++sl) {
+      const u8 bit = static_cast<u8>(2u << sl);
+      if (same(pad_strum_[sl]) && (down ? frets_ != 0 && !pad_mod_down_ : (strum_held_ & bit) != 0)) {
+        if (down) { strum_held_ |= bit; strum_press(); } else strum_held_ &= static_cast<u8>(~bit);
+        return true;
+      }
+    }
   }
   // Tap button and d-pad chord yield to the pad modifier: mod+<tap button>
   // can be a hotkey. A release always ends an in-progress tap or chord.

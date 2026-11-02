@@ -449,7 +449,7 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # grip_red = 2
 # grip_yellow = 3
 # grip_blue = 4
-# strum = Space                 # with the grip in: a strum across the touch screen's strings
+# strum = Space                 # with the grip in and a fret held: a strum across the touch screen
 
 # Controller values are SDL controller button names (a b x y back guide
 # start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft
@@ -480,9 +480,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # grip_red = +lefttrigger       # controls from DS L and R for the time
 # grip_yellow = +righttrigger
 # grip_blue = rightshoulder
-# strum = dpdown                # with the grip in: a stroke across the touch screen's strings,
-# strum.alt = dpup              # alternating down and up, for a handheld without a touch screen;
-                                # the d-pad's up and down go to it rather than the game meanwhile
+# strum = dpdown                # with the grip in and a fret held: a stroke across the touch
+# strum.alt = dpup              # screen's strings, alternating down and up, for a handheld without
+                                # one. With no fret held the control is the game's (and the stylus
+                                # hold's) as usual
 # stick_dpad = left             # left | right | none: a stick that also works the d-pad
                                 # (true/false are the old spellings of left/none)
 # stick_face = none             # none | left | right: a stick that also works the face buttons,
