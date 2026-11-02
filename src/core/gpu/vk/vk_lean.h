@@ -25,13 +25,16 @@ namespace ds::gpu::vk {
 class Lean {
 public:
   // `msaa`: 4x MSAA where the device has it (video.aa on the GPU raster); else 1 sample.
-  static std::unique_ptr<Lean> create(Device& dev, bool msaa, std::string* why = nullptr);
+  // `edges`: the edge cut instead (core/gpu/edge_cut.h): 1 sample, and beside
+  // each record the edge plane of the drawn polygons (edges_for).
+  static std::unique_ptr<Lean> create(Device& dev, bool msaa, bool edges, std::string* why = nullptr);
   ~Lean();
   Lean(const Lean&) = delete;
   Lean& operator=(const Lean&) = delete;
 
   bool ready() const { return ready_; }
   bool msaa() const;   // 4x MSAA in use (else 1 sample: the device could not)
+  bool edges() const;  // the edge plane is drawn
 
   // Frame input: polygons, vertices and post tables are host staging
   // (rewritten freely between submits); the texel arena is mapped device
@@ -57,6 +60,10 @@ public:
   // `allow_lag`, the frame before it (one frame of latency instead of a
   // stall); else a wait on the newest. Null before the first frame.
   const u32* newest_ready(bool allow_lag);
+  // The edge bytes drawn with record `out` (from output / newest_ready), one
+  // per pixel, the edge byte of Renderer3D::set_edge_export's layout (the
+  // pixel's colour is the record's); null without edges.
+  const u8* edges_for(const u32* out) const;
   bool has_frame() const;
 
   // GPU time of the last waited frame in ns (DS_VK_TIMING=1 and timestamps), else 0.

@@ -23,6 +23,8 @@ DS_INCBIN(ds_vk_lean_frag_opq, "lean_frag_opq.spv");
 DS_INCBIN(ds_vk_lean_frag_trans, "lean_frag_trans.spv");
 DS_INCBIN(ds_vk_lean_resolve, "lean_resolve_frag.spv");
 DS_INCBIN(ds_vk_lean_resolve_1x, "lean_resolve_1x_frag.spv");
+DS_INCBIN(ds_vk_lean_edge_vert, "lean_edge_vert.spv");
+DS_INCBIN(ds_vk_lean_edge_frag, "lean_edge_frag.spv");
 
 namespace ds::gpu::vk {
 
@@ -35,4 +37,6 @@ Spirv shader_lean_frag_trans() { return { reinterpret_cast<const u32*>(ds_vk_lea
 Spirv shader_lean_frag_early() { return { reinterpret_cast<const u32*>(ds_vk_lean_frag_early_data), static_cast<size_t>(ds_vk_lean_frag_early_end - ds_vk_lean_frag_early_data) }; }
 Spirv shader_lean_resolve_1x() { return { reinterpret_cast<const u32*>(ds_vk_lean_resolve_1x_data), static_cast<size_t>(ds_vk_lean_resolve_1x_end - ds_vk_lean_resolve_1x_data) }; }
 Spirv shader_lean_resolve() { return { reinterpret_cast<const u32*>(ds_vk_lean_resolve_data), static_cast<size_t>(ds_vk_lean_resolve_end - ds_vk_lean_resolve_data) }; }
+Spirv shader_lean_edge_vert() { return { reinterpret_cast<const u32*>(ds_vk_lean_edge_vert_data), static_cast<size_t>(ds_vk_lean_edge_vert_end - ds_vk_lean_edge_vert_data) }; }
+Spirv shader_lean_edge_frag() { return { reinterpret_cast<const u32*>(ds_vk_lean_edge_frag_data), static_cast<size_t>(ds_vk_lean_edge_frag_end - ds_vk_lean_edge_frag_data) }; }
 } // namespace ds::gpu::vk

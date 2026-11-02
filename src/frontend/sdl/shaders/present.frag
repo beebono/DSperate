@@ -23,6 +23,11 @@ bool grid_seam(uint v, int o, int axis) {
 // block is cut along the edge line, its position across the axis from the
 // coverage, its tilt toward the next edge pixel along the run; each panel
 // pixel takes the pixel's own colour or the outside neighbour's.
+// Within one 6-bit step a channel (8-bit: 4): two polygons of one surface.
+bool same_colour(uint a, uint b) {
+  ivec3 d = abs(ivec3(int((a >> 16) & 255u), int((a >> 8) & 255u), int(a & 255u)) - ivec3(int((b >> 16) & 255u), int((b >> 8) & 255u), int(b & 255u)));
+  return max(d.x, max(d.y, d.z)) <= 4;
+}
 float cut_pos(uint e) {
   float f = float((e & 31u) + 1u) / 32.0;
   return (e & 64u) != 0u ? 1.0 - f : f;
@@ -40,8 +45,11 @@ uint edge_cut(uint base, int sx, int sy, float u, float v, uint s) {
   float line = pos + (pn - pos) * abs(along);
   bool inside = neg ? (t >= line) : (t < line);
   int px = vert ? sx : (neg ? sx - 1 : sx + 1), py = vert ? (neg ? sy - 1 : sy + 1) : sy;
-  if (inside || px < 0 || px > 255 || py < 0 || py > 191) return 0xFF000000u | (w & 0xFFFFFFu);
-  return src[base + uint(py) * 256u + uint(px)];
+  uint own = 0xFF000000u | (w & 0xFFFFFFu);
+  if (px < 0 || px > 255 || py < 0 || py > 191) return own;
+  uint o = src[base + uint(py) * 256u + uint(px)];
+  if (same_colour(own, o)) return s;   // a seam inside one surface: nothing to cut
+  return inside ? own : o;
 }
 
 vec3 unpack(uint s) { return vec3(float((s >> 16) & 255u), float((s >> 8) & 255u), float(s & 255u)); }

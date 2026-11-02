@@ -1527,7 +1527,7 @@ template <int mode, bool textured, bool aa, bool opq>
   const uint8x8_t pa2 = vdup_n_u8(static_cast<u8>((polyattr >> 24) | 0x40));
   const uint8x8_t pa2id = vand_u8(pa2, vdup_n_u8(0x7F));
   const uint8x8_t pa3id = vdup_n_u8(static_cast<u8>((polyattr >> 24) & 0x3F)), v40_8 = vdup_n_u8(0x40);
-  const uint8x8_t v7f8 = vdup_n_u8(0x7F), v0f8 = vdup_n_u8(0x0F), v1f8 = vdup_n_u8(0x1F), v3f8 = vdup_n_u8(0x3F);
+  const uint8x8_t v7f8 = vdup_n_u8(0x7F), v0f8 = vdup_n_u8(0x0F), v3f8 = vdup_n_u8(0x3F);
   const uint8x8_t one8 = vdup_n_u8(1), v32_8 = vdup_n_u8(32), zero8 = vdup_n_u8(0);
   auto plot8 = [&](u32 base, const uint32x4_t* m, const uint8x8x4_t& src, const int32x4_t* z) __attribute__((always_inline)) {
     const uint8x8x4_t da = vld4_u8(ab + base * 4), dc = vld4_u8(cb + base * 4);
@@ -2839,7 +2839,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   texels_in_ = &poly_texels_;
   if (gpu_dump_path_ && nds_.frame_count == gpu_dump_frame_) gpu_dump(gx, polys, npoly);
   lean_retired_.reset();
-  if (gpu_on_ && lean_ && lean_aa_ != aa_) gpu_rebuild();
+  if (gpu_on_ && lean_ && (lean_aa_ != aa_ || lean_edges_ != gpu_edges())) gpu_rebuild();
   if (gpu_on_ && gpu_submit(gx, polys, npoly)) { gpu_frame_ = true; pending_bands_ = 0; return; }
   gpu_frame_ = false;
   if (prof::enabled && !prep_done) { prof::add_timed(prof::R3D_PREP, prof::now_ns() - t_prep0); prep_done = true; }
@@ -3039,14 +3039,14 @@ void Renderer3D::set_aa(bool on) {
 void Renderer3D::gpu_rebuild() {
   sync_all(); gpu_job_wait(); lean_->wait_all();
   std::string why;
-  std::unique_ptr<vk::Lean> fresh = vk::Lean::create(*vk_dev_, aa_, &why);
+  std::unique_ptr<vk::Lean> fresh = vk::Lean::create(*vk_dev_, aa_, gpu_edges(), &why);
   lean_retired_ = std::move(lean_);
   if (!fresh || !fresh->ready()) {
     std::fprintf(stderr, "gpu3d: rebuild for AA %s failed (%s), drawing on the CPU\n", aa_ ? "on" : "off", why.c_str());
     gpu_on_ = false;
     return;
   }
-  lean_ = std::move(fresh); lean_aa_ = aa_;
+  lean_ = std::move(fresh); lean_aa_ = aa_; lean_edges_ = gpu_edges();
   gpu_resident_.clear(); gpu_arena_top_ = 0;
 }
 
@@ -3056,7 +3056,7 @@ bool Renderer3D::set_gpu(bool on, std::string* why) {
   std::string reason;
   if (!vk_dev_) vk_dev_ = vk::Device::shared(&reason);
   if (!vk_dev_) { if (why) *why = reason; return false; }
-  if (!lean_) { lean_ = vk::Lean::create(*vk_dev_, aa_, &reason); lean_aa_ = aa_; }
+  if (!lean_) { lean_ = vk::Lean::create(*vk_dev_, aa_, gpu_edges(), &reason); lean_aa_ = aa_; lean_edges_ = gpu_edges(); }
   if (!lean_ || !lean_->ready()) { lean_.reset(); if (why) *why = reason; return false; }
   lean_->wait_all(); gpu_resident_.clear(); gpu_arena_top_ = 0;
   gpu_job_start();
@@ -3286,6 +3286,7 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
       const double t0 = g_gpu_trace.on ? now_ms() : 0;
       gpu_job_wait();
       f.out = lean_ ? lean_->newest_ready(f.allow_lag) : nullptr;
+      f.edge_bytes = f.out ? lean_->edges_for(f.out) : nullptr;
       if (!f.out) f.out = out_[display_].data();   // a Lean with no frame yet: a stale picture, not a null read
       if (g_gpu_trace.on) { const double w = now_ms() - t0; g_gpu_trace.wait_ms += w; g_gpu_trace.wait_max = std::max(g_gpu_trace.wait_max, w); if (w > 0.2) ++g_gpu_trace.waited; }
     }

@@ -246,11 +246,32 @@ void Engine2D::render_line(u32 line) {
 bool Engine2D::edge_compose(Pixel* own, u8* bytes) const {
   const bool is3d = !num_ && (cur_.dispcnt & 8) && cur_.enabled && !cur_.forced_blank;
   if (!edge3d_ || !is3d || top_mode_ == TOP_NONE) return false;
+  // Whether the layer on top at x would be behind the 3D layer were it
+  // opaque there: BG0's priority or lower (BG0 wins ties among BGs, a
+  // sprite wins them over a BG), or the backdrop.
+  const u32 p3d = cur_.bgcnt[0] & 3;
+  auto behind_3d = [&](u32 x) {
+    const u8 t = top_tid_[x];
+    if (t == T_BACKDROP) return true;
+    if (t >= T_BG1 && t <= T_BG3) return (cur_.bgcnt[t] & 3u) >= p3d;
+    if (t >= T_OBJ_STD && t <= T_OBJ_DIRECT) return (obj_attr_[x] & OA_PRIO) > p3d;
+    return false;
+  };
   bool any = false;
   for (u32 x = 0; x < 256; ++x) {
     const u32 e = edge3d_[x];
     bytes[x] = 0; own[x] = 0;
-    if (!e || (top_mode_ != TOP_ALL_BG0 && top_tid_[x] != T_BG0)) continue;
+    if (!e) continue;
+    if (!((e >> 18) & 0x1F)) {
+      // A transparent 3D pixel (the GPU raster's plane marks the rear plane
+      // beside an edge too): its own side is what shows through it.
+      if (top_mode_ == TOP_ALL_BG0 || !(cur_.layer_enable & 1) || !behind_3d(x)) continue;
+      own[x] = out_[x];
+      bytes[x] = static_cast<u8>(e >> 24);
+      any = true;
+      continue;
+    }
+    if (top_mode_ != TOP_ALL_BG0 && top_tid_[x] != T_BG0) continue;
     const Pixel p = (e & 0x3F) | (((e >> 6) & 0x3F) << 8) | (((e >> 12) & 0x3F) << 16) | (((e >> 18) & 0x1F) << 24);
     Pixel o;
     switch (top_mode_) {

@@ -20,6 +20,10 @@ layout(location = 3) noperspective in float v_z;
 layout(location = 4) in float v_zp;
 layout(location = 0) out vec4 o_col;
 layout(location = 1) out float o_fog;   // the polygon's fog bit; blended with MIN so a pixel keeps fog only if every layer had it (the DS rule)
+// The edge cut's polygon record (lean_edge.frag reads it): the pixel's front
+// opaque polygon + 1 (16 bits), kept by the opaque passes only. Without the
+// attachment (no cut) the write goes nowhere.
+layout(location = 2) out uint o_id;
 #ifdef DS_EARLY
 // Polygons whose alpha cannot fail the test (no cut-out texture): no
 // discard, so the depth test runs before shading and overdraw costs nothing.
@@ -145,4 +149,5 @@ void main() {
   uint ab = alpha == 0u ? 0u : min(255u, (alpha + 1u) * 8u);
   o_col = vec4(float(r), float(g), float(b), float(ab)) / 255.0;
   o_fog = float(fogbit);
+  o_id = v_poly + 1u;
 }

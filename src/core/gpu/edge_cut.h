@@ -27,6 +27,15 @@ inline float edge_cut_pos(u32 e) {
   return (e & 0x40) ? 1.0f - f : f;   // outside negative: the polygon is at the positive end
 }
 
+// Within one 6-bit step a channel (8-bit: 4): two polygons of one surface.
+inline bool edge_cut_same(u32 a, u32 b) {
+  for (int sh = 0; sh < 24; sh += 8) {
+    const int d = static_cast<int>((a >> sh) & 255) - static_cast<int>((b >> sh) & 255);
+    if (d < -4 || d > 4) return false;
+  }
+  return true;
+}
+
 // The colour of the panel point (u, v) in [0, 1)^2 inside source pixel (x, y).
 inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, float u, float v) {
   const u32 w = edges[y * 256 + x];
@@ -45,10 +54,12 @@ inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, flo
   }
   const float line = pos + (pn - pos) * (along < 0 ? -along : along);
   const bool inside = neg ? t >= line : t < line;
-  if (inside) return 0xFF000000u | (w & 0x00FFFFFFu);
+  const u32 own = 0xFF000000u | (w & 0x00FFFFFFu);
   const int px = vert ? x : (neg ? x - 1 : x + 1), py = vert ? (neg ? y - 1 : y + 1) : y;
-  if (px < 0 || px > 255 || py < 0 || py > 191) return 0xFF000000u | (w & 0x00FFFFFFu);
-  return frame[py * 256 + px];
+  if (px < 0 || px > 255 || py < 0 || py > 191) return own;
+  const u32 o = frame[py * 256 + px];
+  if (edge_cut_same(own, o)) return frame[y * 256 + x];   // a seam inside one surface: nothing to cut
+  return inside ? own : o;
 }
 
 // A whole screen at n x: dst is (256 n) x (192 n), nearest outside the cut.

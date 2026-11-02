@@ -80,7 +80,9 @@ public:
   // null: none). After render_line, edge_compose gives each of the line's
   // edge pixels that shows (the top layer there is the 3D layer) its
   // unblended 3D colour taken through the same colour effects as the line,
-  // in `own`, and the edge byte in `bytes`; elsewhere `bytes` is zero.
+  // in `own`, and the edge byte in `bytes`; elsewhere `bytes` is zero. A
+  // transparent 3D pixel's word (the rear plane beside an edge) gives the
+  // pixel as shown, where the 3D layer would be in front of what shows.
   // False when no edge pixel shows.
   void set_3d_edges(const u32* e) { edge3d_ = e; }
   bool edge_compose(Pixel* own, u8* bytes) const;

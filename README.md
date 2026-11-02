@@ -154,8 +154,11 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   chunky 2x2 cells; optional integer scaling (letterbox or crop).
 - **3D anti-aliasing** (`video.aa`, `--aa`, the ANTI-ALIASING menu row): the
   hardware's own edge blend on the software rasteriser (pixel-exact with
-  melonDS), 4x MSAA on the GPU one, which also smooths the creases and cut-out
-  edges the DS leaves stepped.
+  melonDS). On the GPU one, the Vulkan present cuts polygon edges at panel
+  density instead (hard steps, four per DS pixel at 4x, from the polygons'
+  sub-pixel geometry; about the cost of 4x MSAA on the RG DS Plus); under
+  other presents 4x MSAA, which also smooths the creases and cut-out edges
+  the DS leaves stepped.
 - **Screen gap** (`video.screen_gap`, `--screen-gap`): a distance in panel
   pixels between the two screens of a stacked, side-by-side or dominant pair,
   or `auto`, which pushes them to the panel's edges when the fit leaves room.

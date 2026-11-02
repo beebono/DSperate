@@ -409,6 +409,7 @@ public:
     // before the compositor's batch as well (see sync_line).
     mutable const u32* out = nullptr;
     const u32* edges = nullptr;   // the edge plane (set_edge_export), or null
+    mutable const u8* edge_bytes = nullptr;   // a GPU frame's edge bytes instead (vk::Lean::edges_for), picked with its record
     bool gpu = false, allow_lag = true;
     u64 gen = 0;
     u32 nbins = 0;
@@ -446,6 +447,8 @@ private:
   std::unique_ptr<vk::Lean> lean_;
   std::unique_ptr<vk::Lean> lean_retired_;   // the Lean gpu_rebuild() replaced, kept one frame for readers of its record
   bool lean_aa_ = false;   // the AA setting lean_ was created for (msaa() is what the device granted)
+  bool lean_edges_ = false;   // lean_ draws the edge plane (in place of MSAA)
+  bool gpu_edges() const { return aa_ && edge_export_; }   // the GPU raster's AA is the edge cut
   void gpu_rebuild();
   // The GPU submit (command recording + queue call, ~0.9 ms) runs on its own
   // thread, off the emulation thread: gpu_submit() fills the staging buffers

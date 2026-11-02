@@ -8,8 +8,10 @@
 namespace ds::gpu::vk {
 struct Lean::Impl {};
 Lean::~Lean() = default;
-std::unique_ptr<Lean> Lean::create(Device&, bool, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
+std::unique_ptr<Lean> Lean::create(Device&, bool, bool, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
 bool Lean::msaa() const { return false; }
+bool Lean::edges() const { return false; }
+const u8* Lean::edges_for(const u32*) const { return nullptr; }
 GpuPoly* Lean::poly_buffer() { return nullptr; }
 GpuVert* Lean::vert_buffer() { return nullptr; }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = 0; return nullptr; }
@@ -61,6 +63,12 @@ struct Lean::Impl {
   const Api* api = nullptr;
   Device* dev = nullptr;
   bool msaa = false, timing = false;
+  // The edge cut (1 sample): the draw keeps each pixel's front opaque
+  // polygon (ids, 16 bits, on tile), a band pass around every polygon edge
+  // places the edge lines (lean_edge.vert/.frag) as edge bytes (ebyte,
+  // copied out beside the record). Attachments stay within the G52's 128
+  // bits a pixel, past which its tiles halve.
+  bool edges = false;
   double tick_ns = 0;
   VkFormat ds_format = VK_FORMAT_D24_UNORM_S8_UINT;
 
@@ -73,12 +81,18 @@ struct Lean::Impl {
   std::vector<GpuPoly> host_polys;
   std::vector<GpuVert> host_verts;
   GpuPost host_post{};
-  Buffer polys[kSlots], verts[kSlots], post[kSlots], texels, out[kSlots], spans[kSlots];
+  Buffer polys[kSlots], verts[kSlots], post[kSlots], texels, out[kSlots], spans[kSlots], edge[kSlots];
   std::vector<u32> host_spans;   // the span table staging (vk_layout.h), filled by the caller
   u32 tex_flushed = 0;   // arena words already flushed to the GPU
   VkBufferView texel_view = VK_NULL_HANDLE;
   struct Img { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
   Img col_ms, ds_ms, fog_ms, res;   // multisampled colour, depth/stencil and fog flag (transient); the 1x resolved record
+  Img ids, ebyte;                   // edges (see `edges`)
+  VkShaderModule mod_evert = VK_NULL_HANDLE, mod_efrag = VK_NULL_HANDLE;
+  VkDescriptorSetLayout dsl_eb = VK_NULL_HANDLE;
+  VkPipelineLayout layout_eb = VK_NULL_HANDLE;
+  VkDescriptorSet set_eb = VK_NULL_HANDLE;
+  VkPipeline pipe_band = VK_NULL_HANDLE;
   VkImageView ds_depth_view = VK_NULL_HANDLE;   // the depth aspect alone, for the resolve's input attachment
   VkShaderModule mod_vert = VK_NULL_HANDLE, mod_frag = VK_NULL_HANDLE, mod_frag_early = VK_NULL_HANDLE, mod_frag_opq = VK_NULL_HANDLE, mod_frag_trans = VK_NULL_HANDLE, mod_res = VK_NULL_HANDLE, mod_fs = VK_NULL_HANDLE;
   bool nostencil = false;   // DS_LEAN_NOSTENCIL=1: translucent pass B alone, always (debug)
@@ -111,10 +125,14 @@ struct Lean::Impl {
     for (u32 i = 0; i < kSlots; ++i) if (fence_live[i]) { a.vkWaitForFences(vk->dev, 1, &fence[i], VK_TRUE, ~0ull); fence_live[i] = false; }
     for (auto& wb : pipe) for (auto& row : wb) for (auto& p : row) if (p) a.vkDestroyPipeline(vk->dev, p, nullptr);
     if (pipe_resolve) a.vkDestroyPipeline(vk->dev, pipe_resolve, nullptr);
+    if (pipe_band) a.vkDestroyPipeline(vk->dev, pipe_band, nullptr);
+    if (layout_eb) a.vkDestroyPipelineLayout(vk->dev, layout_eb, nullptr);
+    if (dsl_eb) a.vkDestroyDescriptorSetLayout(vk->dev, dsl_eb, nullptr);
+    for (VkShaderModule* m : {&mod_evert, &mod_efrag}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
     if (fb) a.vkDestroyFramebuffer(vk->dev, fb, nullptr);
     if (rp) a.vkDestroyRenderPass(vk->dev, rp, nullptr);
     if (ds_depth_view) a.vkDestroyImageView(vk->dev, ds_depth_view, nullptr);
-    for (Img* im : {&col_ms, &ds_ms, &fog_ms, &res}) {
+    for (Img* im : {&col_ms, &ds_ms, &fog_ms, &res, &ids, &ebyte}) {
       if (im->view) a.vkDestroyImageView(vk->dev, im->view, nullptr);
       if (im->img) a.vkDestroyImage(vk->dev, im->img, nullptr);
       if (im->mem) a.vkFreeMemory(vk->dev, im->mem, nullptr);
@@ -129,12 +147,18 @@ struct Lean::Impl {
     for (VkShaderModule* m : {&mod_vert, &mod_frag, &mod_frag_early, &mod_frag_opq, &mod_frag_trans, &mod_res, &mod_fs}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
     if (texel_view) a.vkDestroyBufferView(vk->dev, texel_view, nullptr);
     if (texels) dev->free(texels);
-    for (u32 i = 0; i < kSlots; ++i) for (Buffer* b : {&polys[i], &verts[i], &post[i], &out[i], &spans[i]}) if (*b) dev->free(*b);
+    for (u32 i = 0; i < kSlots; ++i) for (Buffer* b : {&polys[i], &verts[i], &post[i], &out[i], &spans[i], &edge[i]}) if (*b) dev->free(*b);
   }
 };
 
 Lean::~Lean() { if (d_) d_->destroy(); }
 bool Lean::msaa() const { return d_->msaa; }
+bool Lean::edges() const { return d_->edges; }
+const u8* Lean::edges_for(const u32* o) const {
+  if (!d_->edges) return nullptr;
+  for (u32 i = 0; i < Impl::kSlots; ++i) if (o == d_->out[i].ptr) return static_cast<const u8*>(d_->edge[i].ptr);
+  return nullptr;
+}
 GpuPoly* Lean::poly_buffer() { return d_->host_polys.data(); }
 GpuVert* Lean::vert_buffer() { return d_->host_verts.data(); }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = kTexelWords; return static_cast<u32*>(d_->texels.ptr); }
@@ -147,7 +171,7 @@ u32 Lean::draws() const { return d_->last_draws; }
 Lean::Stats Lean::stats(bool reset) { std::lock_guard<std::mutex> lk(d_->m); Stats s = d_->st; if (reset) d_->st = Stats{}; return s; }
 static double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
+std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, bool edges, std::string* why) {
   auto fail_null = [&](const char* m) { if (why) *why = m; return nullptr; };
   const DeviceInternal* vk = dev.internal();
   if (!vk || !vk->api) return fail_null("no Vulkan context");
@@ -158,7 +182,8 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
   Impl& d = *self->d_;
   d.vk = vk; d.api = &a; d.dev = &dev;
   auto fail = [&](const char* m) { if (why) *why = m; return nullptr; };
-  d.msaa = msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
+  d.edges = edges;
+  d.msaa = !edges && msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
   const VkSampleCountFlagBits samples = d.msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
 
   // Buffers.
@@ -174,6 +199,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     d.out[i] = dev.alloc(sizeof(u32) * W * H, Access::CpuRead);
     d.spans[i] = dev.alloc(sizeof(u32) * DS_SPAN_TABLE_WORDS, Access::CpuWrite);
     if (!d.polys[i] || !d.verts[i] || !d.post[i] || !d.out[i] || !d.spans[i]) return fail("buffer allocation");
+    if (d.edges && !(d.edge[i] = dev.alloc(W * H, Access::CpuRead))) return fail("buffer allocation");
   }
   {
     VkBufferViewCreateInfo bv{}; bv.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO; bv.buffer = vk_buf(d.texels); bv.format = VK_FORMAT_R32_UINT; bv.offset = 0; bv.range = VK_WHOLE_SIZE;
@@ -187,6 +213,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
   };
   if (!shader(shader_lean_vert(), &d.mod_vert) || !shader(shader_lean_frag(), &d.mod_frag) || !shader(shader_lean_frag_early(), &d.mod_frag_early) || !shader(shader_lean_frag_opq(), &d.mod_frag_opq) || !shader(shader_lean_frag_trans(), &d.mod_frag_trans) || !shader(d.msaa ? shader_lean_resolve() : shader_lean_resolve_1x(), &d.mod_res) || !shader(shader_tri_fs(), &d.mod_fs))
     return fail("lean shaders rejected by the driver");
+  if (d.edges && (!shader(shader_lean_edge_vert(), &d.mod_evert) || !shader(shader_lean_edge_frag(), &d.mod_efrag))) return fail("edge shaders rejected by the driver");
   d.nostencil = std::getenv("DS_LEAN_NOSTENCIL") && std::atoi(std::getenv("DS_LEAN_NOSTENCIL")) != 0;
 
   // Descriptors: set 0 = polys, verts, texels (texel buffer), post, spans; set 1 = the MS colour as input attachment.
@@ -195,16 +222,25 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     for (u32 i = 0; i < 5; ++i) { b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; b[i].descriptorType = i == 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; }
     VkDescriptorSetLayoutCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci.bindingCount = 5; ci.pBindings = b;
     if (a.vkCreateDescriptorSetLayout(vk->dev, &ci, nullptr, &d.dsl) != VK_SUCCESS) return fail("descriptor layout");
-    VkDescriptorSetLayoutBinding ib[3]{};
-    for (u32 i = 0; i < 3; ++i) { ib[i].binding = i; ib[i].descriptorCount = 1; ib[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; ib[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; }
+    VkDescriptorSetLayoutBinding ib[4]{};
+    for (u32 i = 0; i < 4; ++i) { ib[i].binding = i; ib[i].descriptorCount = 1; ib[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; ib[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; }
     VkDescriptorSetLayoutCreateInfo ci2{}; ci2.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci2.bindingCount = 3; ci2.pBindings = ib;
     if (a.vkCreateDescriptorSetLayout(vk->dev, &ci2, nullptr, &d.dsl_in) != VK_SUCCESS) return fail("input attachment layout");
+    if (d.edges) {
+      VkDescriptorSetLayoutCreateInfo ci3{}; ci3.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci3.bindingCount = 2; ci3.pBindings = ib;
+      if (a.vkCreateDescriptorSetLayout(vk->dev, &ci3, nullptr, &d.dsl_eb) != VK_SUCCESS) return fail("band input layout");
+    }
     VkDescriptorSetLayout sets[2] = {d.dsl, d.dsl_in};
     VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; pcr.size = sizeof(GpuFrame);
     VkPipelineLayoutCreateInfo pli{}; pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pli.setLayoutCount = 2; pli.pSetLayouts = sets; pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pcr;
     if (a.vkCreatePipelineLayout(vk->dev, &pli, nullptr, &d.layout) != VK_SUCCESS) return fail("pipeline layout");
-    VkDescriptorPoolSize psz[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * Impl::kSlots}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 3}};
-    VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = Impl::kSlots + 1; dpi.poolSizeCount = 3; dpi.pPoolSizes = psz;
+    if (d.edges) {
+      VkDescriptorSetLayout sets_eb[2] = {d.dsl, d.dsl_eb};   // set 0 as the draw's, so its binding carries over
+      VkPipelineLayoutCreateInfo pl2 = pli; pl2.pSetLayouts = sets_eb;
+      if (a.vkCreatePipelineLayout(vk->dev, &pl2, nullptr, &d.layout_eb) != VK_SUCCESS) return fail("band pipeline layout");
+    }
+    VkDescriptorPoolSize psz[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * Impl::kSlots}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 6}};
+    VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = Impl::kSlots + 2; dpi.poolSizeCount = 3; dpi.pPoolSizes = psz;
     if (a.vkCreateDescriptorPool(vk->dev, &dpi, nullptr, &d.pool) != VK_SUCCESS) return fail("descriptor pool");
     VkDescriptorSetLayout layouts[Impl::kSlots + 1];
     for (u32 i = 0; i < Impl::kSlots; ++i) layouts[i] = d.dsl;
@@ -214,6 +250,10 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     if (a.vkAllocateDescriptorSets(vk->dev, &dsa, got) != VK_SUCCESS) return fail("descriptor sets");
     for (u32 i = 0; i < Impl::kSlots; ++i) d.set[i] = got[i];
     d.set_in = got[Impl::kSlots];
+    if (d.edges) {
+      VkDescriptorSetAllocateInfo da2{}; da2.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; da2.descriptorPool = d.pool; da2.descriptorSetCount = 1; da2.pSetLayouts = &d.dsl_eb;
+      if (a.vkAllocateDescriptorSets(vk->dev, &da2, &d.set_eb) != VK_SUCCESS) return fail("band descriptor set");
+    }
     for (u32 sl = 0; sl < Impl::kSlots; ++sl) {
       VkDescriptorBufferInfo bi[5]{};
       const Buffer* src[5] = {&d.polys[sl], &d.verts[sl], &d.texels, &d.post[sl], &d.spans[sl]};
@@ -267,6 +307,12 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
   }
   if (!make_image(VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_COLOR_BIT, d.fog_ms, samples)) return fail("MSAA fog attachment");
   if (!make_image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.res, VK_SAMPLE_COUNT_1_BIT)) return fail("resolve attachment");
+  if (d.edges) {
+    const VkImageUsageFlags tile = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | transient;
+    if (!make_image(VK_FORMAT_R16_UINT, tile, VK_IMAGE_ASPECT_COLOR_BIT, d.ids, VK_SAMPLE_COUNT_1_BIT) ||
+        !make_image(VK_FORMAT_R8_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.ebyte, VK_SAMPLE_COUNT_1_BIT))
+      return fail("edge attachments");
+  }
   {
     VkDescriptorImageInfo di[3]{};
     di[0].imageView = d.col_ms.view; di[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -275,11 +321,20 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     VkWriteDescriptorSet w[3]{};
     for (u32 i = 0; i < 3; ++i) { w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = d.set_in; w[i].dstBinding = i; w[i].descriptorCount = 1; w[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; w[i].pImageInfo = &di[i]; }
     a.vkUpdateDescriptorSets(vk->dev, 3, w, 0, nullptr);
+    if (d.edges) {
+      // The band pass's polygon record and depth.
+      VkDescriptorImageInfo bi2[2]{};
+      bi2[0].imageView = d.ids.view; bi2[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      bi2[1].imageView = d.ds_depth_view; bi2[1].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+      VkWriteDescriptorSet we[2]{};
+      for (u32 i = 0; i < 2; ++i) { we[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; we[i].descriptorCount = 1; we[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; we[i].dstSet = d.set_eb; we[i].dstBinding = i; we[i].pImageInfo = &bi2[i]; }
+      a.vkUpdateDescriptorSets(vk->dev, 2, we, 0, nullptr);
+    }
   }
 
   // Render pass: subpass 0 draws into the MS colour + depth/stencil, subpass 1 resolves into the 1x record.
   {
-    VkAttachmentDescription at[4]{};
+    VkAttachmentDescription at[6]{};
     at[0].format = VK_FORMAT_R8G8B8A8_UNORM; at[0].samples = samples; at[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     at[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; at[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     at[1].format = d.ds_format; at[1].samples = samples; at[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -287,20 +342,34 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     at[2].format = VK_FORMAT_R32_UINT; at[2].samples = VK_SAMPLE_COUNT_1_BIT; at[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     at[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; at[2].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     at[3] = at[0]; at[3].format = VK_FORMAT_R8_UNORM;   // the fog flag: cleared to the rear plane's, never stored
-    VkAttachmentReference c0[2] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}}, ds0{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference in1[3] = {{0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}, {3, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}}, c1{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription sp[2]{};
-    sp[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[0].colorAttachmentCount = 2; sp[0].pColorAttachments = c0; sp[0].pDepthStencilAttachment = &ds0;
-    sp[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[1].inputAttachmentCount = 3; sp[1].pInputAttachments = in1; sp[1].colorAttachmentCount = 1; sp[1].pColorAttachments = &c1;
-    VkSubpassDependency dep[2]{};
+    // Edges: 4 the polygon record (on tile) and 5 the edge bytes (stored,
+    // copied out), both cleared to zero: the rear plane, no edge.
+    at[4] = at[3]; at[4].format = VK_FORMAT_R16_UINT; at[4].samples = VK_SAMPLE_COUNT_1_BIT;
+    at[5] = at[2]; at[5].format = VK_FORMAT_R8_UINT; at[5].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    VkAttachmentReference c0[3] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}}, ds0{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference in1[3] = {{0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}, {3, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkAttachmentReference c1{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference inb[2] = {{4, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}}, cb1{5, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sp[3]{};
+    const u32 sp_res = d.edges ? 2 : 1;   // the resolve's subpass (edges: the band pass is 1)
+    sp[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[0].colorAttachmentCount = d.edges ? 3 : 2; sp[0].pColorAttachments = c0; sp[0].pDepthStencilAttachment = &ds0;
+    sp[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[1].inputAttachmentCount = 2; sp[1].pInputAttachments = inb; sp[1].colorAttachmentCount = 1; sp[1].pColorAttachments = &cb1;
+    sp[sp_res].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[sp_res].inputAttachmentCount = 3; sp[sp_res].pInputAttachments = in1; sp[sp_res].colorAttachmentCount = 1; sp[sp_res].pColorAttachments = &c1;
+    // The band pass's edge bytes go out after the render pass, as the record does: kept through the resolve.
+    const u32 keep_ebyte = 5;
+    if (d.edges) { sp[2].preserveAttachmentCount = 1; sp[2].pPreserveAttachments = &keep_ebyte; }
+    VkSubpassDependency dep[4]{};
     dep[0].srcSubpass = 0; dep[0].dstSubpass = 1; dep[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT; dep[0].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     dep[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; dep[0].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT; dep[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-    dep[1].srcSubpass = 1; dep[1].dstSubpass = VK_SUBPASS_EXTERNAL; dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dep[1].srcSubpass = sp_res; dep[1].dstSubpass = VK_SUBPASS_EXTERNAL; dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
     dep[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; dep[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    VkRenderPassCreateInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpi.attachmentCount = 4; rpi.pAttachments = at; rpi.subpassCount = 2; rpi.pSubpasses = sp; rpi.dependencyCount = 2; rpi.pDependencies = dep;
+    // Edges: the draw to the resolve too, and the band pass's bytes to the copy.
+    dep[2] = dep[0]; dep[2].dstSubpass = 2;
+    dep[3] = dep[1]; dep[3].srcSubpass = 1;
+    VkRenderPassCreateInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpi.attachmentCount = d.edges ? 6 : 4; rpi.pAttachments = at; rpi.subpassCount = d.edges ? 3 : 2; rpi.pSubpasses = sp; rpi.dependencyCount = d.edges ? 4 : 2; rpi.pDependencies = dep;
     if (a.vkCreateRenderPass(vk->dev, &rpi, nullptr, &d.rp) != VK_SUCCESS) return fail("render pass");
-    VkImageView views[4] = {d.col_ms.view, d.ds_ms.view, d.res.view, d.fog_ms.view};
-    VkFramebufferCreateInfo fbi{}; fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbi.renderPass = d.rp; fbi.attachmentCount = 4; fbi.pAttachments = views; fbi.width = W; fbi.height = H; fbi.layers = 1;
+    VkImageView views[6] = {d.col_ms.view, d.ds_ms.view, d.res.view, d.fog_ms.view, d.ids.view, d.ebyte.view};
+    VkFramebufferCreateInfo fbi{}; fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbi.renderPass = d.rp; fbi.attachmentCount = d.edges ? 6 : 4; fbi.pAttachments = views; fbi.width = W; fbi.height = H; fbi.layers = 1;
     if (a.vkCreateFramebuffer(vk->dev, &fbi, nullptr, &d.fb) != VK_SUCCESS) return fail("framebuffer");
   }
 
@@ -347,9 +416,10 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
         so.compareOp = VK_COMPARE_OP_NOT_EQUAL; so.compareMask = S_MASK; so.passOp = VK_STENCIL_OP_REPLACE; so.writeMask = S_MASK | S_T | S_CODE; break;
     }
     dss.front = so; dss.back = so;
-    VkPipelineColorBlendAttachmentState cba[2]{};
+    VkPipelineColorBlendAttachmentState cba[3]{};
     cba[0].colorWriteMask = (kind == P_MASK || stencil_only) ? 0u : 0xFu;
     cba[1].colorWriteMask = (kind == P_MASK || stencil_only) ? 0u : 0x1u;
+    cba[2].colorWriteMask = (kind == P_OPAQUE || kind == P_OPAQUE_EARLY || kind == P_TRANS_OPQ) ? 0x1u : 0u;   // edges: the opaque passes keep the polygon record
     const bool blend = kind == P_TRANS_B || kind == P_TRANS_B_DW || kind == P_SHADOW;
     if (blend) {
       cba[0].blendEnable = VK_TRUE;
@@ -360,7 +430,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
       cba[1].srcColorBlendFactor = VK_BLEND_FACTOR_ONE; cba[1].dstColorBlendFactor = VK_BLEND_FACTOR_ONE; cba[1].colorBlendOp = VK_BLEND_OP_MIN;
       cba[1].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cba[1].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cba[1].alphaBlendOp = VK_BLEND_OP_MIN;
     }
-    VkPipelineColorBlendStateCreateInfo cbs{}; cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbs.attachmentCount = 2; cbs.pAttachments = cba;
+    VkPipelineColorBlendStateCreateInfo cbs{}; cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbs.attachmentCount = d.edges ? 3 : 2; cbs.pAttachments = cba;
     const VkDynamicState dyn = VK_DYNAMIC_STATE_STENCIL_REFERENCE;
     VkPipelineDynamicStateCreateInfo dys{}; dys.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dys.dynamicStateCount = 1; dys.pDynamicStates = &dyn;
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = stencil_only ? 1 : 2; gpi.pStages = st;
@@ -384,8 +454,17 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     VkPipelineColorBlendStateCreateInfo cbs{}; cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbs.attachmentCount = 1; cbs.pAttachments = &cba;
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = 2; gpi.pStages = st;
     gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
-    gpi.pColorBlendState = &cbs; gpi.layout = d.layout; gpi.renderPass = d.rp; gpi.subpass = 1;
+    gpi.pColorBlendState = &cbs; gpi.layout = d.layout; gpi.renderPass = d.rp; gpi.subpass = d.edges ? 2 : 1;
     if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gpi, nullptr, &d.pipe_resolve) != VK_SUCCESS) return fail("resolve pipeline");
+    if (d.edges) {
+      // The band pass: lean_edge.vert/.frag, no depth or stencil (the
+      // fragment tests depth itself), the edge byte its one output.
+      st[0].module = d.mod_evert; st[1].module = d.mod_efrag;
+      VkPipelineColorBlendAttachmentState cbb{}; cbb.colorWriteMask = 0x1u;
+      VkPipelineColorBlendStateCreateInfo cbs2 = cbs; cbs2.attachmentCount = 1; cbs2.pAttachments = &cbb;
+      VkGraphicsPipelineCreateInfo g2 = gpi; g2.pColorBlendState = &cbs2; g2.layout = d.layout_eb; g2.subpass = 1;
+      if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_band) != VK_SUCCESS) return fail("band pipeline");
+    }
   }
 
   // Commands, fence, timestamps.
@@ -404,7 +483,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, std::string* why) {
     }
   }
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean: 1x%s, %s depth/stencil\n", d.msaa ? " with 4x MSAA" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8");
+  std::fprintf(stderr, "gpu lean: 1x%s, %s depth/stencil\n", d.msaa ? " with 4x MSAA" : d.edges ? " with the edge cut" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8");
   return self;
 }
 
@@ -445,6 +524,12 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     for (u32 v = 0; v < p.nverts; ++v) { const GpuVert& q = gv[p.first_vert + v]; s0 = std::min(s0, q.s); s1 = std::max(s1, q.s); t0 = std::min(t0, q.t); t1 = std::max(t1, q.t); }
     auto pk = [](s32 lo, s32 hi) { return static_cast<u32>(std::clamp(lo + 32768, 0, 65535)) | (static_cast<u32>(std::clamp(hi + 32768, 0, 65535)) << 16); };
     p.row_base = pk(s0, s1); p.pad_ = pk(t0, t1);
+    if (d.edges) {   // the band pass's inside point (lean_edge.vert): the centroid, 28.4, s16 x | y << 16
+      s32 cx = 0, cy = 0;
+      for (u32 v = 0; v < p.nverts; ++v) { cx += gv[p.first_vert + v].fx; cy += gv[p.first_vert + v].fy; }
+      if (p.nverts) { cx /= static_cast<s32>(p.nverts); cy /= static_cast<s32>(p.nverts); }
+      p.vbot = (static_cast<u32>(std::clamp(cx, -32768, 32767)) & 0xFFFF) | (static_cast<u32>(std::clamp(cy, -32768, 32767)) << 16);
+    }
   }
 
   // The frame's id codes (see the stencil layout).
@@ -471,7 +556,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (d.timing) { a.vkCmdResetQueryPool(cb, d.qpool, 2 * slot, 2); a.vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, d.qpool, 2 * slot); }   // bottom of pipe: after the queue ahead, so the span is this frame's own
 
   // Clear: the rear plane's colour and alpha; depth; stencil drawn where the rear plane has alpha.
-  VkClearValue cv[4]{};
+  VkClearValue cv[6]{};   // edges: [4] [5] zero (the rear plane, no edge)
   {
     const u32 c = f.clear_color, ca = (c >> 24) & 0x1F;
     cv[0].color.float32[0] = static_cast<float>(c & 0x3F) / 255.f; cv[0].color.float32[1] = static_cast<float>((c >> 8) & 0x3F) / 255.f; cv[0].color.float32[2] = static_cast<float>((c >> 16) & 0x3F) / 255.f;
@@ -481,7 +566,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     cv[1].depthStencil.stencil = ca ? (S_DRAWN | code[(f.clear_attr >> 24) & 0x3F]) : 0;
     cv[3].color.float32[0] = (f.clear_attr & 0x8000) ? 1.f : 0.f;   // the rear plane's fog bit
   }
-  VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rbi.renderPass = d.rp; rbi.framebuffer = d.fb; rbi.renderArea = {{0, 0}, {W, H}}; rbi.clearValueCount = 4; rbi.pClearValues = cv;
+  VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rbi.renderPass = d.rp; rbi.framebuffer = d.fb; rbi.renderArea = {{0, 0}, {W, H}}; rbi.clearValueCount = d.edges ? 6 : 4; rbi.pClearValues = cv;
   a.vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 0, 1, &d.set[slot], 0, nullptr);
   a.vkCmdPushConstants(cb, d.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GpuFrame), &f);
@@ -564,6 +649,13 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (npoly > first_ordered) std::memcpy(out_p + first_ordered, gp + first_ordered, sizeof(GpuPoly) * (npoly - first_ordered));
   if (npoly) d.dev->flush(d.polys[slot], 0, sizeof(GpuPoly) * npoly);
   a.vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_INLINE);
+  if (d.edges) {
+    // The band pass: every polygon's edges (lean_edge.vert skips all but the opaque ones).
+    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_band);
+    a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_eb, 1, 1, &d.set_eb, 0, nullptr);
+    if (npoly) a.vkCmdDraw(cb, 60, npoly, 0, 0);
+    a.vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_INLINE);
+  }
   a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_resolve);
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 1, 1, &d.set_in, 0, nullptr);
   a.vkCmdDraw(cb, 3, 1, 0, 0);
@@ -571,6 +663,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   // The record to the CPU-readable buffer.
   VkBufferImageCopy rg{}; rg.bufferRowLength = W; rg.bufferImageHeight = H; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; rg.imageExtent = {W, H, 1};
   a.vkCmdCopyImageToBuffer(cb, d.res.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk_buf(d.out[slot]), 1, &rg);
+  if (d.edges) a.vkCmdCopyImageToBuffer(cb, d.ebyte.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk_buf(d.edge[slot]), 1, &rg);
   VkMemoryBarrier mb{}; mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER; mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
   a.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
   if (d.timing) a.vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, d.qpool, 2 * slot + 1);
@@ -597,6 +690,7 @@ static void finish_slot(Lean::Impl& d, u32 slot) {
   const Api& a = *d.api;
   d.fence_live[slot] = false;
   d.dev->invalidate(d.out[slot], 0, sizeof(u32) * W * H);
+  if (d.edges) d.dev->invalidate(d.edge[slot], 0, W * H);
   d.valid[slot] = true;
   if (d.timing) {
     u64 t[2] = {0, 0};

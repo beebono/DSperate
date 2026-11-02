@@ -127,7 +127,19 @@ public:
   const u32* line(const Renderer3D::FrameRef& f, u32 y);
   // The edge plane of that line (Renderer3D::set_edge_export; after line(),
   // so synced), or null when not exported or the 3D layer is scrolled.
-  const u32* edge_line(const Renderer3D::FrameRef& f, u32 y) const { return render_xpos_ ? nullptr : f.edge_line(y); }
+  // A GPU frame's edge bytes are made into the plane's words here, with the
+  // record's colour (unblended: the GPU raster has no AA blend).
+  const u32* edge_line(const Renderer3D::FrameRef& f, u32 y) const {
+    if (render_xpos_) return nullptr;
+    if (!f.edge_bytes) return f.edge_line(y);
+    const u8* b = f.edge_bytes + y * 256;
+    const u32* c = f.line(y);
+    for (u32 x = 0; x < 256; ++x) {
+      const u32 w = c[x];
+      edge_words_[x] = b[x] ? (static_cast<u32>(b[x]) << 24) | (w & 63) | (((w >> 8) & 63) << 6) | (((w >> 16) & 63) << 12) | (((w >> 24) & 31) << 18) : 0;
+    }
+    return edge_words_;
+  }
   // Finish async raster; needed before touching texture VRAM (raster workers may still read it).
   void sync_raster();
   void debug_dump(FILE* f) { renderer_.debug_dump(f); }
@@ -214,6 +226,7 @@ private:
   RenderState rstate_;
   // BG0HOFS of engine A, applied from its journal in display-line order on the compositor thread.
   u16 render_xpos_ = 0;
+  mutable u32 edge_words_[256] = {};   // edge_line's GPU-frame row
   std::atomic<bool> render_on_{false};
   alignas(16) u32 scrolled_[256] = {};
 
