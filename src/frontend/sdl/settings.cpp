@@ -42,6 +42,7 @@ const Choice kWifiDns[]  = {{"wiimmfi", "WIIMMFI"}, {"host", "HOST"}};
 const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
                             {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
 const Choice kCheck[]    = {{"false", "[ ]"}, {"true", "[X]"}};
+const Choice kRumble[]   = {{"auto", "AUTO"}, {"on", "ON"}, {"off", "OFF"}};
 const Choice kAnalog[]   = {{"auto", "AUTO"}, {"off", "OFF"}, {"left", "LEFT STICK"}, {"right", "RIGHT STICK"}, {"dual", "TWO STICKS"}};
 const Choice kAnalogLayout[] = {{"auto", "AUTO"}, {"packed", "PACKED"}, {"extended", "EXTENDED"}};
 const Choice kLayout[]   = {{"vertical", "VERTICAL"}, {"horizontal", "HORIZONTAL"}, {"single", "SINGLE"},
@@ -101,6 +102,15 @@ const Setting kEmuSettings[] = {
           "DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED"),
   boolean("emu.dsi_nand_shortcuts", "DSI NAND LINKS", "false", FlagLive, Dep::ShortcutsPath,
           "GAME LIST ENTRIES THAT START THE NAND'S DSIWARE WITHOUT THE DSI MENU"),
+  // Always this game's own file: "don't ask again" wrote it there.
+  boolean("slot2.ask", "ASK FOR GBA GAME", "true", FlagRestart, Dep::Slot2Link,
+          "BEFORE THIS GAME STARTS, OFFER THE GBA GAMES IT READS. KEPT FOR THIS GAME"),
+  pick("slot2.rumble", "RUMBLE PAK", kRumble, 3, "auto", FlagRestart, Dep::None,
+       "IN SLOT 2 WHEN NO GBA GAME IS. AUTO: WHEN THE CONTROLLER CAN RUMBLE"),
+  number("slot2.rumble_strength", "RUMBLE STRENGTH", 10, 100, 10, "100", FlagLive, Dep::RumblePak,
+         "HOW HARD THE MOTOR RUNS WHEN THE GAME RUMBLES", nullptr, nullptr, "%"),
+  number("slot2.solar", "SOLAR SENSOR", 0, 10, 1, "5", FlagLive, Dep::SolarSensor,
+         "THE SUNLIGHT A BOKTAI CARTRIDGE SEES: 0 DARK, 10 FULL SUN"),
   pick("net.mode", "NETWORK FEATURES", kNetMode, 5, "off", FlagLive, Dep::Net,
        "LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE"),
   pick("wifi.dns", "DNS", kWifiDns, 2, "wiimmfi", FlagRestart, Dep::NetInternet,

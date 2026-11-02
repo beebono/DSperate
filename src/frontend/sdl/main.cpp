@@ -21,6 +21,7 @@
 #include "core/io/dsi_title_install.h"
 #include "core/io/dsi_nand_launch.h"
 #include "core/cheat/database.h"
+#include "core/slot2/compat.h"
 #include "core/cart/miniz/miniz_tdef.h"
 #if DSPERATE_JIT
 #include "core/cpu/jit/jit.h"
@@ -241,6 +242,9 @@ const char* kUsage =
     "  --states DIR    save states and the auto slot go in DIR (paths.states; default beside the ROM)\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n"
+    "  --gba-rom F     the GBA game F in slot 2 for this run, without asking (slot2.gba)\n"
+    "  --rumble-pak    the Rumble Pak in slot 2, whatever the controller (slot2.rumble = on)\n"
+    "  --no-slot2      slot 2 empty: no GBA game, no prompt, no Rumble Pak\n"
     "  --clear-cache   delete every unpacked zipped game (the .dsperate directories beside the\n"
     "                  games and paths.cache) except the one being launched, then run as usual\n";
 
@@ -337,6 +341,51 @@ void write_save(NDS& nds, const std::string& path) {
   std::fclose(f);
   if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "save: cannot write %s\n", path.c_str()); return; }
   nds.cart->clear_sram_dirty();
+}
+
+// Slot 2. slot2.gba as a path: a bare file name lives in paths.gba_games;
+// empty or "none" is no game.
+std::string gba_path(const ds::sdl::Config& cfg) {
+  const std::string v = cfg.str("slot2.gba");
+  if (v.empty() || v == "none") return "";
+  const std::string dir = cfg.str("paths.gba_games");
+  return v.find('/') != std::string::npos || dir.empty() ? v : dir + "/" + v;
+}
+// How a picked game is remembered: by file name when it is in paths.gba_games,
+// so the folder can move without the per-game files going stale.
+std::string gba_setting(const std::string& path, const ds::sdl::Config& cfg) {
+  const std::string dir = cfg.str("paths.gba_games");
+  return !dir.empty() && rom_dir_of(path) == dir ? base_name(path) : path;
+}
+std::string gba_save_path(const std::string& gba, const ds::sdl::Config& cfg) { return save_path(gba, cfg.str("paths.gba_saves")); }
+
+// The GBA games in paths.gba_games that the DS game in slot 1 reads, by
+// name; empty for a game that reads none.
+std::vector<ds::sdl::Menu::GameEntry> gba_offers(const NDS& nds, const ds::sdl::Config& cfg) {
+  std::vector<ds::sdl::Menu::GameEntry> out;
+  const std::string dir = cfg.str("paths.gba_games");
+  const ds::slot2::Linkage* link = nds.cart && !nds.dsi ? ds::slot2::linkage_for(nds.cart->header().game_code) : nullptr;
+  if (!link || dir.empty()) return out;
+  DIR* d = opendir(dir.c_str());
+  if (!d) { std::fprintf(stderr, "slot2: cannot read %s\n", dir.c_str()); return out; }
+  while (dirent* e = readdir(d)) {
+    const std::string name = e->d_name;
+    if (name.empty() || name[0] == '.' || rom_ext(name) != ".gba") continue;
+    char code[5], title[13];
+    const std::string path = dir + "/" + name;
+    if (ds::slot2::peek_game(path, code, title) && ds::slot2::accepts(*link, code)) out.push_back({rom_stem(name), path});
+  }
+  closedir(d);
+  std::sort(out.begin(), out.end(), [](const ds::sdl::Menu::GameEntry& a, const ds::sdl::Menu::GameEntry& b) { return a.title < b.title; });
+  return out;
+}
+
+void write_gba_save(NDS& nds, const std::string& path) {
+  ds::slot2::GameCart* g = nds.gba_cart();
+  if (!g || !g->save_dirty() || path.empty()) return;
+  std::string err;
+  if (!ds::slot2::write_save(*g, path, err)) { std::fprintf(stderr, "slot2: %s\n", err.c_str()); return; }
+  g->clear_save_dirty();
 }
 
 // Both screens into one PNG at the layout's natural size. Reads the
@@ -610,6 +659,7 @@ struct Session {
   std::string states_dir;       // save states (and the autosave's PNG)
   std::string shots_dir;        // manual screenshots (F9); paths.screenshots, else states_dir
   std::string sav;              // battery save
+  std::string gba_sav;          // the slot-2 GBA game's save; empty with no game in slot 2
   std::string cheats_on_path;   // which cheats are on, one name per line
   ds::cheat::GameCheats cheats; // the database entry for this ROM; the menu points at its groups
 
@@ -1154,6 +1204,9 @@ static int run(int argc, char** argv) {
     else if (arg("--replay")) replay = argv[++i];
     else if (arg("--save")) save_arg = argv[++i];
     else if (arg("--saves")) cli.set("paths.saves", argv[++i]);
+    else if (arg("--gba-rom")) { cli.set("slot2.gba", argv[++i]); cli.set("slot2.ask", "false"); }
+    else if (flag("--rumble-pak")) cli.set("slot2.rumble", "on");
+    else if (flag("--no-slot2")) { cli.set("slot2.gba", "none"); cli.set("slot2.ask", "false"); cli.set("slot2.rumble", "off"); }
     else if (arg("--states")) cli.set("paths.states", argv[++i]);
     else if (arg("--load-state")) load_state = argv[++i];
     else if (arg("--autosave-png")) cli.set("emu.autosave_png", argv[++i]);
@@ -1703,9 +1756,9 @@ sdl_ready:
     SDL_Quit();
     return code;
   };
-  // One frame of a centred notice over the game's screens, dimmed (black
-  // before a game has drawn anything).
-  auto draw_notice_frame = [&](const std::string& title, const char* line2, const char* line3) {
+  // One frame of `paint` over the game's screens, dimmed (black before a
+  // game has drawn anything): a notice, or the slot-2 prompt.
+  auto draw_overlay_frame = [&](const std::function<void(const ds::sdl::Canvas&)>& paint) {
     const int menu_screen = dual_window ? 0 : display.current_layout().primary;
     const u32* fb[2];
     for (int i = 0; i < 2; ++i) {
@@ -1715,7 +1768,7 @@ sdl_ready:
     }
     // Drawn on the panel's own pixels where writable, at panel resolution.
     const bool on_canvas = display.canvas_capable();
-    if (!on_canvas) ds::sdl::draw_notice(ds_canvas(menu_fb[menu_screen].data()), title.c_str(), line2, line3);
+    if (!on_canvas) paint(ds_canvas(menu_fb[menu_screen].data()));
     ds::sdl::Display::Target target[2] = {};
     if (dual_window) sync_dual_modes(display, display2);
     bool scaled = display.begin_frame(target);
@@ -1728,7 +1781,7 @@ sdl_ready:
       if (dual_window) display2.finish_views();
       ds::sdl::Display::CanvasView cv;
       if (on_canvas && display.canvas(cv)) {
-        ds::sdl::draw_notice(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h}, title.c_str(), line2, line3);
+        paint(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h});
         // Whole canvas: nothing else redraws the letterbox around it.
         display.note_canvas_draw_all();
       }
@@ -1739,6 +1792,9 @@ sdl_ready:
       display.draw(fb);
       if (dual_window) display2.draw(fb);
     }
+  };
+  auto draw_notice_frame = [&](const std::string& title, const char* line2, const char* line3) {
+    draw_overlay_frame([&](const ds::sdl::Canvas& c) { ds::sdl::draw_notice(c, title.c_str(), line2, line3); });
   };
   bool rom_cancelled = false;   // the last load_rom_notice was stopped with B
   // Loads a ROM with an "unpacking" notice if it takes more than a moment.
@@ -1899,6 +1955,102 @@ sdl_ready:
 #else
   (void)jit;
 #endif
+  // Slot 2, before anything runs: a game that reads GBA games looks for one
+  // in its first frames. Under --record/--replay nothing is asked and auto
+  // rumble stays out, so a run is the same on any controller.
+  const bool slot2_fixed = record || replay;
+  // What slot 2 holds this session: the GBA game at `gba` (empty: none),
+  // else the Rumble Pak when slot2.rumble wants one. Replaces what was there.
+  auto rumble_wanted = [&] {
+    const std::string r = cfg.str("slot2.rumble", "auto");
+    return r == "on" || (r == "auto" && !slot2_fixed && input.has_rumble());
+  };
+  auto fill_slot2 = [&](const std::string& gba) {
+    nds.slot2.reset();
+    session.gba_sav.clear();
+    if (nds.dsi || !nds.cart) return;
+    if (!gba.empty()) {
+      const std::string sav = gba_save_path(gba, cfg);
+      std::string err;
+      if (std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game(gba, sav, err)) {
+        g->set_light_level(cfg.num("slot2.solar", 5));
+        std::fprintf(stderr, "slot2: %s [%s], save %s%s\n", rom_stem(base_name(gba)).c_str(), g->game_code(),
+                     ds::slot2::save_type_name(g->save_type()), g->solar_sensor() ? ", solar sensor" : "");
+        session.gba_sav = sav;
+        nds.slot2 = std::move(g);
+        return;
+      }
+      std::fprintf(stderr, "slot2: %s\n", err.c_str());
+    }
+    if (rumble_wanted()) {
+      nds.slot2 = std::make_unique<ds::slot2::RumblePak>();
+      VLOG("slot2: Rumble Pak\n");
+    }
+  };
+  // The GBA game for slot 2: slot2.gba, unless the game reads GBA games,
+  // some are in paths.gba_games and slot2.ask says to offer them first.
+  auto choose_slot2 = [&]() -> std::string {
+    const std::string fixed = gba_path(cfg);
+    if (nds.dsi || !nds.cart || slot2_fixed || !cfg.flag("slot2.ask", true)) return fixed;
+    const std::vector<ds::sdl::Menu::GameEntry> offers = gba_offers(nds, cfg);
+    if (offers.empty()) return fixed;
+    std::vector<std::string> rows;
+    int sel = 0;
+    for (size_t i = 0; i < offers.size(); ++i) {
+      rows.push_back(offers[i].title);
+      if (offers[i].path == fixed) sel = static_cast<int>(i);
+    }
+    rows.push_back(rumble_wanted() ? "NO GBA GAME (RUMBLE PAK)" : "NO GBA GAME");
+    const int none = static_cast<int>(rows.size()) - 1, toggle = none + 1;
+    if (cfg.str("slot2.gba") == "none") sel = none;
+    bool remember = false, moving = false;
+    int picked = -1;
+    Uint32 moved_at = SDL_GetTicks();
+    input.set_menu_open(true);
+    display.set_page(true);
+    for (bool dirty = true; picked < 0;) {
+      SDL_Event e;
+      while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
+      if (input.quit() || g_signalled) { picked = none; break; }
+      using B = ds::io::Io::Button;
+      const u32 p = input.take_menu_presses();
+      const auto pressed = [&](u32 b) { return ((p >> b) & 1) != 0; };
+      if (pressed(B::BTN_UP) || pressed(B::BTN_DOWN)) {
+        sel = (sel + (pressed(B::BTN_UP) ? toggle : 1)) % (toggle + 1);
+        moved_at = SDL_GetTicks();
+        dirty = true;
+      }
+      if (pressed(B::BTN_A)) {
+        if (sel == toggle) { remember = !remember; dirty = true; }
+        else picked = sel;
+      }
+      if (pressed(B::BTN_B)) { picked = none; remember = false; }   // B: nothing this time, nothing kept
+      if ((dirty || moving) && picked < 0) {
+        dirty = false;
+        draw_overlay_frame([&](const ds::sdl::Canvas& c) {
+          moving = ds::sdl::draw_picker(c, "GBA CARTRIDGE", "THIS GAME SUPPORTS THESE", rows, sel, remember, "DON'T ASK AGAIN FOR THIS GAME",
+                                        "A INSERT   B NO GBA GAME", SDL_GetTicks() - moved_at);
+        });
+        display.flush();
+        if (dual_window) display2.flush();
+      }
+      SDL_Delay(moving ? 30 : 10);
+    }
+    (void)input.take_actions();   // a hotkey pressed over the prompt is not for the game
+    input.set_menu_open(false);
+    display.set_page(false);
+    const std::string path = picked < none ? offers[static_cast<size_t>(picked)].path : std::string();
+    if (remember && !session.game_ini.empty()) {
+      const std::string v = path.empty() ? "none" : gba_setting(path, cfg);
+      for (const auto& [k, val] : {std::pair<const char*, std::string>{"slot2.ask", "false"}, {"slot2.gba", v}}) {
+        cfg.set(k, val);
+        if (!ds::sdl::Config::store(session.game_ini, k, val)) std::fprintf(stderr, "settings: cannot write %s\n", session.game_ini.c_str());
+      }
+      VLOG("slot2: remembered %s for this game in %s\n", v.c_str(), session.game_ini.c_str());
+    }
+    return path;
+  };
+  fill_slot2(choose_slot2());
   // A replay must start from the same battery save every time, so it's loaded read-only.
   load_save(nds, session.sav);
   const bool save_readonly = replay != nullptr;
@@ -2184,7 +2336,18 @@ sdl_ready:
     if (r.files || r.dirs || r.removed) VLOG("dsi sd: %d files written, %d folders made, %d removed in %s\n", r.files, r.dirs, r.removed, nds.dsi_sd.folder().c_str());
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi sd: %s\n", n.c_str());
   };
-  auto flush_save = [&] { if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav); flush_dsi(); flush_sd(); };
+  auto flush_save = [&] {
+    if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav);
+    if (!save_readonly) write_gba_save(nds, session.gba_sav);
+    flush_dsi();
+    flush_sd();
+  };
+  // The slot-2 GBA game's save goes out like the battery save, once writes
+  // have stopped for a second. The Rumble Pak's motor follows the game: any
+  // change in a frame is a pulse a little over a frame long, so a game
+  // toggling it every frame (a steady buzz) never lets it drop between.
+  u32 gba_writes_seen = 0, rumble_seen = 0;
+  u64 gba_quiet_since = 0;
   // Whether fb_ holds the last run frame's picture (true after an unscaled
   // frame; false after a scanline-tier frame written straight to the panel).
   bool fb_current = false;
@@ -2309,7 +2472,9 @@ sdl_ready:
       if (std::strcmp(key, "video.layout") == 0) pending_mode = value;
       cfg.set(key, value);
       apply(key, value);
-      const std::string& path = per_game && !game_ini.empty() ? game_ini : global_ini;
+      // The slot-2 prompt's answer is kept per game whatever SAVE PER GAME says.
+      const bool game_only = std::strcmp(key, "slot2.ask") == 0;
+      const std::string& path = (per_game || game_only) && !game_ini.empty() ? game_ini : global_ini;
       if (!ds::sdl::Config::store(path, key, value))
         std::fprintf(stderr, "settings: cannot write %s\n", path.c_str());
     }
@@ -2606,6 +2771,14 @@ sdl_ready:
         return (net_live && *net_live) ? "NOT DURING A NETWORK SESSION" : "";
       case ds::sdl::Dep::ShortcutsPath:
         return shortcuts_dir(cfg).empty() ? "NEEDS PATHS.DSI_GAMES OR PATHS.GAMES" : "";
+      case ds::sdl::Dep::Slot2Link:
+        if (nds.dsi) return "A DSI HAS NO GBA SLOT";
+        if (!nds.cart || !ds::slot2::linkage_for(nds.cart->header().game_code)) return "THIS GAME READS NO GBA GAMES";
+        return cfg.str("paths.gba_games").empty() ? "NEEDS PATHS.GBA_GAMES" : "";
+      case ds::sdl::Dep::RumblePak:
+        return nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak ? "" : "NO RUMBLE PAK IN SLOT 2";
+      case ds::sdl::Dep::SolarSensor:
+        return nds.gba_cart() && nds.gba_cart()->solar_sensor() ? "" : "NO BOKTAI CARTRIDGE IN SLOT 2";
       }
       return "";
     }
@@ -2654,6 +2827,7 @@ sdl_ready:
     const auto is = [&](const char* k) { return std::strcmp(key, k) == 0; };
     const bool on = v == "1" || v == "true" || v == "yes" || v == "on";
     if (is("pad.stylus_speed")) { host.reconfigure_input(); return; }
+    if (is("slot2.solar")) { if (ds::slot2::GameCart* g = nds.gba_cart()) g->set_light_level(std::atoi(v.c_str())); return; }
     if (is("emu.frameskip")) { if (!net_live) fs_limit = std::atoi(v.c_str()); return; }
     if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }
     if (is("emu.dsi_nand_shortcuts")) {
@@ -3269,6 +3443,8 @@ sdl_ready:
     menu.set_cheats(&nds.cheats.codes, &session.cheats.groups);
     session.load_enabled(nds);
     session.refresh_analog(nds, cfg);
+    fill_slot2(choose_slot2());
+    rumble_seen = gba_writes_seen = 0;
     load_save(nds, session.sav);
     // After the battery save, so the state's SRAM wins; never during replay/recording.
     if (const std::string a = log.reading() || log.writing()
@@ -4078,6 +4254,14 @@ sdl_ready:
     if (nds.cart && nds.cart->sram_dirty()) {
       if (nds.cart->sram_writes() != sram_writes_seen) { sram_writes_seen = nds.cart->sram_writes(); sram_quiet_since = frames; }
       else if (frames - sram_quiet_since >= 60) flush_save();
+    }
+    if (const ds::slot2::GameCart* g = nds.gba_cart(); g && g->save_dirty()) {
+      if (g->save_writes() != gba_writes_seen) { gba_writes_seen = g->save_writes(); gba_quiet_since = frames; }
+      else if (frames - gba_quiet_since >= 60) flush_save();
+    }
+    if (nds.slot2 && nds.slot2->rumble_events() != rumble_seen) {
+      rumble_seen = nds.slot2->rumble_events();
+      input.rumble(cfg.num("slot2.rumble_strength", 100), 40);
     }
     if (dsi_mode && nds.dsi_nand.writes != nand_exported) {
       if (nds.dsi_nand.writes != nand_writes_seen) { nand_writes_seen = nds.dsi_nand.writes; nand_quiet_since = frames; }

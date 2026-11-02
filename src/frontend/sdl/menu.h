@@ -95,6 +95,18 @@ void dim_framebuffer(u32* px, u32 n);
 // Small centred panel with a title, a second line, and a dim third one: the
 // "unpacking" notice a first launch of a zipped game shows.
 void draw_notice(const Canvas& d, const char* title, const char* line2, const char* line3);
+// A selected name too long for its row scrolls sideways: still for half a
+// second, then 26 px/s, a pause at the end, then back. How far it has
+// scrolled `ms` after the selection last moved, for `overflow` px too many.
+int marquee_px(int overflow, u32 ms);
+// A modal list the frontend runs before a game starts (the slot-2 GBA
+// cartridge prompt): `title`, a dim `note`, one row per choice, then a
+// checkbox row and a `hint` line. `selected` is a choice's index, or
+// rows.size() for the checkbox. The list scrolls to keep it in view; a
+// selected name too long for its row runs as a marquee, `marquee_ms` after
+// the selection last moved. True when it does, so the caller keeps drawing.
+bool draw_picker(const Canvas& d, const char* title, const char* note, const std::vector<std::string>& rows, int selected, bool remember,
+                 const char* remember_label, const char* hint, u32 marquee_ms);
 
 // Achievement unlock, bottom-right corner (game keeps playing behind it, DS
 // picture is centred). Sizes to its text up to two thirds of the canvas,
@@ -229,9 +241,6 @@ private:
   std::string chosen_;           // the path Result::Launch names
 
   static constexpr u32 kRepeatDelayMs = 400, kRepeatRateMs = 55;
-  // A selected name too long for the panel scrolls sideways: still for half
-  // a second, then 26 px/s, pause at the end, then snaps back.
-  static constexpr u32 kMarqueeDelayMs = 500, kMarqueeHoldMs = 900, kMarqueePxPerSec = 26;
 
   bool dirty_ = false;
   int  repeat_dir_ = 0;          // -1 up, +1 down, 0 nothing held

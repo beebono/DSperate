@@ -111,6 +111,12 @@ public:
 
   // Rebinding, for the Controls page.
   bool has_pad() const { return pad_ != nullptr; }
+  // The open controller's rumble motor, for the slot-2 Rumble Pak. On
+  // ROCKNIX the handheld's own motor counts: InputPlumber's virtual pad
+  // forwards its rumble to the pwm-vibrator. rumble() runs both motors at
+  // `strength` percent for `ms`, replacing whatever pulse was running.
+  bool has_rumble() const;
+  void rumble(int strength, u32 ms);
   // While capturing, the next physical key or pad control is taken as a name
   // instead of fed to the game or matched against a hotkey. `pad` picks
   // which device is listened to.

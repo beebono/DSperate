@@ -43,6 +43,9 @@ enum class Dep : u8 {
   // a peer or server instead of the emulator.
   NetSession,
   ShortcutsPath,      // a folder for NAND title shortcuts: paths.dsi_games, else paths.games
+  Slot2Link,          // the game reads GBA games (slot2/compat.h), and paths.gba_games is set
+  RumblePak,          // the Rumble Pak is in slot 2 this session
+  SolarSensor,        // a Boktai cartridge is in slot 2
 };
 
 struct Setting {

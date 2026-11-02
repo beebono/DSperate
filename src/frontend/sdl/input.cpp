@@ -398,6 +398,20 @@ void Input::detect_faces() {
                phys[0] != 0 && phys[2] != 2 ? "a/b and x/y" : phys[0] != 0 ? "a/b" : "x/y");
 }
 
+bool Input::has_rumble() const {
+  return pad_ && SDL_GameControllerHasRumble(pad_);
+}
+
+void Input::rumble(int strength, u32 ms) {
+  if (!pad_) return;
+  const Uint16 level = static_cast<Uint16>(0xFFFF * std::clamp(strength, 0, 100) / 100);
+  static bool warned = false;
+  if (SDL_GameControllerRumble(pad_, level, level, ms) != 0 && !warned) {
+    warned = true;
+    std::fprintf(stderr, "rumble: %s\n", SDL_GetError());
+  }
+}
+
 void Input::close() {
   if (pad_) { SDL_GameControllerClose(pad_); pad_ = nullptr; }
 }

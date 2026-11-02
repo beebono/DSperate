@@ -399,16 +399,19 @@ int Menu::list_row() const {
   return cheat_row_;
 }
 
-int Menu::marquee_offset(int overflow) const {
+int marquee_px(int overflow, u32 ms) {
+  constexpr u32 kMarqueeDelayMs = 500, kMarqueeHoldMs = 900, kMarqueePxPerSec = 26;
   if (overflow <= 0) return 0;
   const u32 scroll_ms = static_cast<u32>(overflow) * 1000u / kMarqueePxPerSec;
   const u32 cycle = kMarqueeDelayMs + scroll_ms + kMarqueeHoldMs;
-  const u32 t = marquee_ms_ % cycle;    // still, scroll, hold, and round again
+  const u32 t = ms % cycle;    // still, scroll, hold, and round again
   if (t < kMarqueeDelayMs) return 0;
   if (t < kMarqueeDelayMs + scroll_ms)
     return static_cast<int>((t - kMarqueeDelayMs) * kMarqueePxPerSec / 1000u);
   return overflow;
 }
+
+int Menu::marquee_offset(int overflow) const { return marquee_px(overflow, marquee_ms_); }
 
 Menu::Result Menu::update(u32 presses, u32 held, u32 ms) {
   using B = io::Io::Button;
@@ -650,6 +653,42 @@ ListFrame list_frame(const Canvas& d, const char* title) {
   return f;
 }
 } // namespace
+
+bool draw_picker(const Canvas& d, const char* title, const char* note, const std::vector<std::string>& rows, int selected, bool remember,
+                 const char* remember_label, const char* hint, u32 marquee_ms) {
+  const ListFrame f = list_frame(d, title);
+  const Metrics& m = f.m;
+  const int n = static_cast<int>(rows.size());
+  const auto row_y = [&](int i) { return f.py0 + m.list_rows_y + i * m.list_row_h; };
+  const auto highlight = [&](int i) { fill_rect(d, f.px0 + m.list_s * 4, row_y(i) - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel); };
+  // The note on top, the choices, a gap, the toggle, the hint at the foot.
+  int at = 0;
+  if (note && *note) draw_text(d, f.text_x, row_y(at++), m.list_s, kDim, fit(note, m.list_s, f.avail).c_str());
+  const int fixed = at + 3;
+  const int shown = std::max(1, f.visible - fixed);
+  int top = selected < n ? std::max(0, selected - shown + 1) : std::max(0, n - shown);
+  bool moving = false;
+  for (int i = 0; i < shown && top + i < n; ++i, ++at) {
+    const std::string& name = rows[static_cast<size_t>(top + i)];
+    const bool sel = top + i == selected;
+    if (sel) highlight(at);
+    const int overflow = text_width(m.list_s, name.c_str()) - f.avail;
+    if (!sel || overflow <= 0) { draw_text(d, f.text_x, row_y(at), m.list_s, sel ? kInk : kDim, fit(name, m.list_s, f.avail).c_str()); continue; }
+    moving = true;
+    const int clip0 = g_clip_x0, clip1 = g_clip_x1;
+    g_clip_x0 = f.text_x;
+    g_clip_x1 = f.text_x + f.avail;
+    draw_text(d, f.text_x - marquee_px(overflow, marquee_ms), row_y(at), m.list_s, kInk, name.c_str());
+    g_clip_x0 = clip0;
+    g_clip_x1 = clip1;
+  }
+  const int toggle = f.visible - 2;
+  if (selected == n) highlight(toggle);
+  const std::string box = std::string(remember ? "[X] " : "[ ] ") + remember_label;
+  draw_text(d, f.text_x, row_y(toggle), m.list_s, selected == n ? kInk : kDim, fit(box, m.list_s, f.avail).c_str());
+  draw_text(d, f.text_x, row_y(toggle + 1), m.list_s, kEdgeText, fit(hint, m.list_s, f.avail).c_str());
+  return moving;
+}
 
 void Menu::draw_cheats(const Canvas& d) const {
   // Heading counts the codes, not the lines, to match the frontend's log.
