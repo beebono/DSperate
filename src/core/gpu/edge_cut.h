@@ -40,15 +40,26 @@ inline bool edge_cut_same(u32 a, u32 b) {
 
 // The edge line of edge byte `e` at source pixel (x, y), across the run's
 // axis, at `along` (-0.5..0.5) along it: tilted toward the next edge pixel
-// of the same kind on that side.
+// of the same kind on that side, else toward one whose outside faces back,
+// beside it or one step across the axis toward the outside (a shallow line
+// is held alternately by the polygon's pixel and the one just outside it:
+// the same line, its position carried over by that step).
 inline float edge_cut_line(const u32* edges, u32 e, int x, int y, float along) {
-  const bool vert = e & 0x20;
+  const bool vert = e & 0x20, neg = e & 0x40;
   const int nx = x + (vert ? (along < 0 ? -1 : 1) : 0), ny = y + (vert ? 0 : (along < 0 ? -1 : 1));
   const float pos = edge_cut_pos(e);
   float pn = pos;
   if (nx >= 0 && nx < 256 && ny >= 0 && ny < 192) {
     const u32 n = edges[ny * 256 + nx] >> 24;
     if ((n & 0xE0) == (e & 0xE0)) pn = edge_cut_pos(n);
+    else if ((n & 0xE0) == ((e ^ 0x40) & 0xE0)) pn = edge_cut_pos(n);   // the pixel beside it on the same row, the line's other side
+    else {
+      const int ox = nx + (vert ? 0 : (neg ? -1 : 1)), oy = ny + (vert ? (neg ? -1 : 1) : 0);
+      if (ox >= 0 && ox < 256 && oy >= 0 && oy < 192) {
+        const u32 o = edges[oy * 256 + ox] >> 24;
+        if ((o & 0xE0) == ((e ^ 0x40) & 0xE0)) pn = edge_cut_pos(o) + (neg ? -1.0f : 1.0f);
+      }
+    }
   }
   return pos + (pn - pos) * (along < 0 ? -along : along);
 }

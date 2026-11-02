@@ -891,6 +891,9 @@ int main(int argc, char** argv) {
         ds::gpu::edge_cut_screen(nds.gpu.framebuffer(k), nds.gpu.edge_plane(k), cut_n, cut_px.data(), std::getenv("DS_EDGE_BLEND") ? static_cast<float>(std::atof(std::getenv("DS_EDGE_BLEND"))) : 1.0f);
         std::fwrite(cut_px.data(), 4, cut_px.size(), cut_out);
       }
+    if (cut_out && std::getenv("DS_DUMP_EDGE") && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {   // DS_DUMP_EDGE=FILE with --dump-cut: the top screen's edge plane words (Renderer3D::set_edge_export) of the last dumped frame
+      FILE* ef = std::fopen(std::getenv("DS_DUMP_EDGE"), "wb"); std::fwrite(nds.gpu.edge_plane(0), 4, 256 * 192, ef); std::fclose(ef);
+    }
     if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
       // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);

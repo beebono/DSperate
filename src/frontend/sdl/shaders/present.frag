@@ -36,12 +36,25 @@ vec3 unpack(uint s) { return vec3(float((s >> 16) & 255u), float((s >> 8) & 255u
 
 // The edge line of edge byte `e` at source pixel (x, y), across the run's
 // axis, at `along` (-0.5..0.5) along it: tilted toward the next edge pixel
-// of the same kind on that side.
+// of the same kind on that side, else toward one whose outside faces back,
+// beside it or one step across the axis toward the outside (a shallow line
+// is held alternately by the polygon's pixel and the one just outside it).
 float edge_line(uint eb, uint e, int x, int y, float along) {
-  bool vert = (e & 32u) != 0u;
+  bool vert = (e & 32u) != 0u, neg = (e & 64u) != 0u;
   int nx = x + (vert ? (along < 0.0 ? -1 : 1) : 0), ny = y + (vert ? 0 : (along < 0.0 ? -1 : 1));
   float pos = cut_pos(e), pn = pos;
-  if (nx >= 0 && nx < 256 && ny >= 0 && ny < 192) { uint n = src[eb + uint(ny) * 256u + uint(nx)] >> 24; if ((n & 224u) == (e & 224u)) pn = cut_pos(n); }
+  if (nx >= 0 && nx < 256 && ny >= 0 && ny < 192) {
+    uint n = src[eb + uint(ny) * 256u + uint(nx)] >> 24;
+    if ((n & 224u) == (e & 224u)) pn = cut_pos(n);
+    else if ((n & 224u) == ((e ^ 64u) & 224u)) pn = cut_pos(n);   // beside it on the same row, the line's other side
+    else {
+      int ox = nx + (vert ? 0 : (neg ? -1 : 1)), oy = ny + (vert ? (neg ? -1 : 1) : 0);
+      if (ox >= 0 && ox < 256 && oy >= 0 && oy < 192) {
+        uint o = src[eb + uint(oy) * 256u + uint(ox)] >> 24;
+        if ((o & 224u) == ((e ^ 64u) & 224u)) pn = cut_pos(o) + (neg ? -1.0 : 1.0);
+      }
+    }
+  }
   return pos + (pn - pos) * abs(along);
 }
 
