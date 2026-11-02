@@ -2,10 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // Which DS games read which GBA games. Gathered from the games' documented
-// dual-slot features, with the codes taken from dumps' headers. Not listed
-// for want of a dump to read the code from: Feel the Magic XY/XX (it reads
-// the GBA games listed under The Rub Rabbits!, plus Sonic Pinball Party and
-// Space Channel 5).
+// dual-slot features, with the codes taken from dumps' headers.
 #include "core/slot2/compat.h"
 
 #include <cstring>
@@ -41,6 +38,7 @@ constexpr const char* SHREK[] = {"B4U", nullptr};
 constexpr const char* MYSTERIOS_MENACE[] = {"ASE", nullptr};
 constexpr const char* SUPER_ROBOT[] = {"ASR", "AJ9", "A6S", "B6J", "AOG", "B2R", "FSR", nullptr};
 constexpr const char* SEGA_GBA[] = {"ACR", "APY", "ASO", "A2N", "B3S", "BSB", nullptr};
+constexpr const char* SEGA_GBA_FEEL[] = {"ACR", "APY", "ASO", "A2N", "B3S", "BSB", "A3V", "A5U", nullptr};
 constexpr const char* SIMS_2[] = {"B46", nullptr};
 constexpr const char* WARIOWARE[] = {"RZW", nullptr};
 constexpr const char* YOSHIS_ISLAND[] = {"A3A", nullptr};
@@ -52,6 +50,7 @@ constexpr Linkage TABLE[] = {
   {"ACV", ARIA_OF_SORROW},     // Castlevania: Dawn of Sorrow (same region only)
   {"ABB", BAND_BROTHERS},      // Daigassou! Band-Brothers
   {"AE4", EYESHIELD_21},       // Eyeshield 21: Max Devil Power
+  {"APR", SEGA_GBA_FEEL},      // Feel the Magic: XY/XX
   {"A6F", FFTA},               // Final Fantasy Tactics A2
   {"AFG", FROGGER},            // Frogger: Helmet Chaos
   {"AHR", FULLMETAL},          // Fullmetal Alchemist: Dual Sympathy
