@@ -48,8 +48,8 @@ uint shade_pixel(GpuPoly p, uint blendmode, uint polyalpha, bool textured,
     }
   }
   if (textured) {
-    uint packed = sample_tex(p, s, t);
-    uint tcol = packed & 0xFFFFu, ta = (packed >> 16) & 0x1Fu;
+    uint texw = sample_tex(p, s, t);
+    uint tcol = texw & 0xFFFFu, ta = (texw >> 16) & 0x1Fu;
     uint tr = c15_to_18(tcol, 0u), tg = c15_to_18(tcol, 4u), tb = c15_to_18(tcol, 9u);
     if ((blendmode & 1u) != 0u) {          // decal
       if (ta == 0u)       { r = vr; g = vg; b = vb; }

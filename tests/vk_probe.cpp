@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
   if (!dev) { std::fprintf(stderr, "no Vulkan device: %s\n", why.c_str()); return 1; }
   std::printf("device: %s (graphics %d, msaa4 %d, int64 atomics %d, timestamps %s)\n", dev->name().c_str(), (int)dev->limits().graphics, (int)dev->limits().msaa4,
               (int)dev->limits().int64_atomics, dev->limits().timestamp_period_ns > 0 ? "yes" : "no");
-  std::unique_ptr<Lean> L = Lean::create(*dev, std::getenv("DS_VK_MSAA") && std::atoi(std::getenv("DS_VK_MSAA")) != 0, std::getenv("DS_VK_EDGES") && std::atoi(std::getenv("DS_VK_EDGES")) != 0, &why);
+  std::unique_ptr<Lean> L = Lean::create(dev, std::getenv("DS_VK_MSAA") && std::atoi(std::getenv("DS_VK_MSAA")) != 0, std::getenv("DS_VK_EDGES") && std::atoi(std::getenv("DS_VK_EDGES")) != 0, &why);
   if (!L || !L->ready()) { std::fprintf(stderr, "GPU raster unavailable: %s\n", why.c_str()); return 1; }
 
   auto upload = [&]() {

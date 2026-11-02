@@ -1670,7 +1670,7 @@ sdl_ready:
     const char* g = std::getenv("DS_GPU3D");
     const bool want = g ? std::atoi(g) != 0 : cfg.flag("video.gpu3d", false);
     nds.gpu3d.renderer().set_aa(aa_on(cfg.str("video.aa", "false")));   // before the raster starts: its MSAA is fixed at creation
-    if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on\n"); }
+    if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on (%s)\n", nds.gpu3d.renderer().gpu_api()); }
   }
   // Let fullscreen windows take their final size before the ROM loads (see
   // Display::settle_step); bounded, in case no configure comes.

@@ -128,7 +128,24 @@ set_property(SOURCE cheat/analog_db.cpp APPEND PROPERTY OBJECT_DEPENDS
 option(DSPERATE_VULKAN "Build the Vulkan dma-buf import presenter and the GPU 3D raster" ON)
 # Always compiled: without the headers they are stubs that decline, so the
 # renderer and the presenters build the same everywhere.
-target_sources(dsperate_core PRIVATE gpu/vk/vk_device.cpp gpu/vk/vk_lean.cpp)
+target_sources(dsperate_core PRIVATE gpu/vk/vk_device.cpp gpu/vk/vk_lean.cpp gpu/gpu_raster.cpp)
+# The OpenGL ES 3.1 raster (gpu/gl/gl_lean.cpp): libEGL / libGLESv2 are
+# dlopen'd and the GLSL ES sources linked in as text (gl_shaders.cpp), so it
+# builds everywhere with no headers; Raster3D::create tries it after Vulkan.
+option(DSPERATE_GLES "Build the OpenGL ES 3D raster (for devices without Vulkan)" ON)
+if(DSPERATE_GLES)
+  target_sources(dsperate_core PRIVATE gpu/gl/gl_api.cpp gpu/gl/gl_shaders.cpp gpu/gl/gl_lean.cpp)
+  set_property(SOURCE gpu/gl/gl_shaders.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+               DSPERATE_GL_SHADER_DIR="${CMAKE_CURRENT_SOURCE_DIR}/gpu/gl/shaders"
+               DSPERATE_VK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk")
+  file(GLOB DSPERATE_GL_GLSL "${CMAKE_CURRENT_SOURCE_DIR}/gpu/gl/shaders/*")
+  set_property(SOURCE gpu/gl/gl_shaders.cpp APPEND PROPERTY OBJECT_DEPENDS ${DSPERATE_GL_GLSL}
+               "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/vk_layout.h" "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/ds_shade.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/ds_spans.glsl")
+  target_compile_definitions(dsperate_core PUBLIC DSPERATE_GLES=1)
+  target_link_libraries(dsperate_core PUBLIC ${CMAKE_DL_LIBS})
+else()
+  target_sources(dsperate_core PRIVATE gpu/gl/gl_lean_stub.cpp)
+endif()
 if(DSPERATE_VULKAN)
   # The Vulkan headers are architecture-independent and nothing is linked
   # against (vk_device.cpp dlopens libvulkan on the device), so a cross build

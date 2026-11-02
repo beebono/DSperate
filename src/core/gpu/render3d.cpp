@@ -2,7 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "core/gpu/render3d.h"
 #include "core/gpu/vk/vk_dump.h"
-#include "core/gpu/vk/vk_lean.h"
+#include "core/gpu/gpu_raster.h"
 #include <unordered_map>
 #include "core/handoff_stats.h"
 #include "core/div64.h"
@@ -2703,7 +2703,13 @@ void Renderer3D::clear_line(s32 y) {
 // test of the common case (reference 0, an opaque polygon); the pass keeps
 // the exact test for the pixel's own side.
 static void mark_alpha_edges(u32* t, u32 w, u32 h) {
-  std::vector<u8> m(static_cast<size_t>(w) * h), n(static_cast<size_t>(w) * h);
+  const size_t n_tex = static_cast<size_t>(w) * h;
+  // A texture with no transparent texel (most) has no edge: one pass over the alphas and out.
+  bool any_zero = false, any_opaque = false;
+  for (size_t i = 0; i < n_tex && !(any_zero && any_opaque); ++i) { if (((t[i] >> 16) & 0x1F) == 0) any_zero = true; else any_opaque = true; }
+  if (!any_zero || !any_opaque) return;
+  static thread_local std::vector<u8> m, n;   // the texture is marked on the one thread that fills the arena
+  m.assign(n_tex, 0); n.assign(n_tex, 0);
   auto zero = [&](u32 x, u32 y) { return ((t[y * w + x] >> 16) & 0x1F) == 0; };
   for (u32 y = 0; y < h; ++y)
     for (u32 x = 0; x < w; ++x) {
@@ -2875,7 +2881,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   if (gpu_dump_path_ && nds_.frame_count == gpu_dump_frame_) gpu_dump(gx, polys, npoly);
   lean_retired_.reset();
   if (gpu_on_ && lean_ && (lean_aa_ != aa_ || lean_edges_ != gpu_edges())) gpu_rebuild();
-  if (gpu_on_ && gpu_submit(gx, polys, npoly)) { gpu_frame_ = true; pending_bands_ = 0; return; }
+  if (gpu_on_ && gpu_submit(gx, polys, npoly)) { gpu_frame_ = true; ++gpu_gen_; pending_bands_ = 0; return; }
   gpu_frame_ = false;
   if (prof::enabled && !prep_done) { prof::add_timed(prof::R3D_PREP, prof::now_ns() - t_prep0); prep_done = true; }
 
@@ -3049,7 +3055,7 @@ Renderer3D::FrameRef Renderer3D::frame_ref(bool allow_lag) const {
     // A GPU frame: no bands to wait for; the record (the newest the GPU has
     // finished, or, allowed, the one before) is picked at the first line
     // read.
-    f.nbins = 0; f.gpu = true; f.allow_lag = allow_lag; f.out = nullptr;
+    f.nbins = 0; f.gpu = true; f.allow_lag = allow_lag; f.out = nullptr; f.gpu_gen = gpu_gen_;
     return f;
   }
   f.nbins = pending_bands_;
@@ -3074,7 +3080,7 @@ void Renderer3D::set_aa(bool on) {
 void Renderer3D::gpu_rebuild() {
   sync_all(); gpu_job_wait(); lean_->wait_all();
   std::string why;
-  std::unique_ptr<vk::Lean> fresh = vk::Lean::create(*vk_dev_, aa_, gpu_edges(), &why);
+  std::unique_ptr<Raster3D> fresh = Raster3D::create(aa_, gpu_edges(), &why);
   lean_retired_ = std::move(lean_);
   if (!fresh || !fresh->ready()) {
     std::fprintf(stderr, "gpu3d: rebuild for AA %s failed (%s), drawing on the CPU\n", aa_ ? "on" : "off", why.c_str());
@@ -3082,16 +3088,16 @@ void Renderer3D::gpu_rebuild() {
     return;
   }
   lean_ = std::move(fresh); lean_aa_ = aa_; lean_edges_ = gpu_edges();
-  gpu_resident_.clear(); gpu_arena_top_ = 0;
+  gpu_resident_.clear(); gpu_arena_top_ = 0; gpu_gen_ = 0;
 }
+
+const char* Renderer3D::gpu_api() const { return gpu_on_ && lean_ ? lean_->api() : ""; }
 
 bool Renderer3D::set_gpu(bool on, std::string* why) {
   if (!on) { sync_all(); gpu_job_wait(); if (lean_) lean_->wait(); gpu_on_ = false; return true; }
   if (gpu_on_) return true;
   std::string reason;
-  if (!vk_dev_) vk_dev_ = vk::Device::shared(&reason);
-  if (!vk_dev_) { if (why) *why = reason; return false; }
-  if (!lean_) { lean_ = vk::Lean::create(*vk_dev_, aa_, gpu_edges(), &reason); lean_aa_ = aa_; lean_edges_ = gpu_edges(); }
+  if (!lean_) { lean_ = Raster3D::create(aa_, gpu_edges(), &reason); lean_aa_ = aa_; lean_edges_ = gpu_edges(); }
   if (!lean_ || !lean_->ready()) { lean_.reset(); if (why) *why = reason; return false; }
   lean_->wait_all(); gpu_resident_.clear(); gpu_arena_top_ = 0;
   gpu_job_start();
@@ -3110,11 +3116,11 @@ namespace {
 struct GpuTrace {
   bool on = std::getenv("DS_GPU_TRACE") && std::atoi(std::getenv("DS_GPU_TRACE")) != 0;
   double build_ms = 0, submit_ms = 0, wait_ms = 0, wait_max = 0; u32 frames = 0, waited = 0, refused = 0, draws = 0;
-  void tick(vk::Lean& lean) {
+  void tick(Raster3D& lean) {
     if (++frames < 600) return;
-    const vk::Lean::Stats st = lean.stats(true);
-    std::fprintf(stderr, "gpu3d trace: build %.2f ms/frame, submit %.2f (slot wait %.2f, prep %.2f, record %.2f, queue %.2f), compositor wait %.2f (max %.2f), waits %u/600, refused %u; newest %u lagged %u stalled %u nolag %u; gpu %.2f ms (%u timed); latency %.2f ms (%u exact); read gap %.2f ms; %.0f draws/frame\n",
-                 build_ms / frames, submit_ms / frames, st.slot_wait_ms / frames, st.prep_ms / frames, st.record_ms / frames, st.queue_ms / frames, wait_ms / frames, wait_max, waited, refused, st.newest, st.lagged, st.stalled, st.nolag, st.timed ? st.gpu_ms / st.timed : 0.0, st.timed, st.lat_n ? st.lat_ms / st.lat_n : 0.0, st.lat_n, st.gap_n ? st.gap_ms / st.gap_n : 0.0, static_cast<double>(draws) / frames);
+    const Raster3D::Stats st = lean.stats(true);
+    std::fprintf(stderr, "gpu3d trace: build %.2f ms/frame, submit %.2f (slot wait %.2f, prep %.2f, record %.2f, queue %.2f), compositor wait %.2f (max %.2f), waits %u/600, refused %u; newest %u lagged %u stalled %u nolag %u; gpu %.2f ms (%u timed); latency %.2f ms (%u exact); read gap %.2f ms; %.0f draws/frame; %u W-buffered\n",
+                 build_ms / frames, submit_ms / frames, st.slot_wait_ms / frames, st.prep_ms / frames, st.record_ms / frames, st.queue_ms / frames, wait_ms / frames, wait_max, waited, refused, st.newest, st.lagged, st.stalled, st.nolag, st.timed ? st.gpu_ms / st.timed : 0.0, st.timed, st.lat_n ? st.lat_ms / st.lat_n : 0.0, st.lat_n, st.gap_n ? st.gap_ms / st.gap_n : 0.0, static_cast<double>(draws) / frames, st.wbuf);
     build_ms = submit_ms = wait_ms = wait_max = 0; frames = waited = refused = draws = 0;
   }
 };
@@ -3221,7 +3227,7 @@ void Renderer3D::gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, 
 bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly) {
   using namespace ds::gpu::vk;
   const double t0 = g_gpu_trace.on ? now_ms() : 0;
-  struct Done { double t0; vk::Lean& lean; bool ok = false; ~Done() { if (g_gpu_trace.on) { if (!ok) ++g_gpu_trace.refused; g_gpu_trace.tick(lean); } } } done{t0, *lean_};
+  struct Done { double t0; Raster3D& lean; bool ok = false; ~Done() { if (g_gpu_trace.on) { if (!ok) ++g_gpu_trace.refused; g_gpu_trace.tick(lean); } } } done{t0, *lean_};
   gpu_job_wait();   // the previous submit is done with the staging buffers (long since: it takes ~1 ms)
   GpuPoly* const gp = lean_->poly_buffer();
   GpuVert* const gv = lean_->vert_buffer();
@@ -3269,8 +3275,11 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
       GpuResident& res = gpu_resident_[r.id];
       if (res.words != r.words || res.version != r.version) {
         if (gpu_arena_top_ + r.words > texcap) { gpu_job_wait(); lean_->wait_all(); gpu_resident_.clear(); gpu_arena_top_ = 0; return false; }
-        std::memcpy(tex + gpu_arena_top_, r.texels, static_cast<size_t>(r.words) * sizeof(u32));
-        mark_alpha_edges(tex + gpu_arena_top_, static_cast<u32>(sh.width), static_cast<u32>(sh.height));
+        // The flags are computed on a cached copy: the arena is mapped
+        // write-combined (both backends), and mark_alpha_edges reads every texel's neighbours.
+        gpu_scratch_.assign(r.texels, r.texels + r.words);
+        mark_alpha_edges(gpu_scratch_.data(), static_cast<u32>(sh.width), static_cast<u32>(sh.height));
+        std::memcpy(tex + gpu_arena_top_, gpu_scratch_.data(), static_cast<size_t>(r.words) * sizeof(u32));
         res.off = gpu_arena_top_; res.words = r.words; res.version = r.version;
         gpu_arena_top_ += r.words;
       }
@@ -3320,8 +3329,10 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
   if (f.gpu) {
     if (!f.out) {
       const double t0 = g_gpu_trace.on ? now_ms() : 0;
-      gpu_job_wait();
-      f.out = lean_ ? lean_->newest_ready(f.allow_lag) : nullptr;
+      // The frame before this one serves under the lag rule while the job
+      // thread is still recording this one, with no wait on it.
+      f.out = lean_ ? lean_->frame_ready(f.gpu_gen, f.allow_lag) : nullptr;
+      if (!f.out) { gpu_job_wait(); f.out = lean_ ? lean_->frame_ready(f.gpu_gen, f.allow_lag) : nullptr; }
       f.edge_bytes = f.out ? lean_->edges_for(f.out) : nullptr;
       if (!f.out) f.out = out_[display_].data();   // a Lean with no frame yet: a stale picture, not a null read
       if (g_gpu_trace.on) { const double w = now_ms() - t0; g_gpu_trace.wait_ms += w; g_gpu_trace.wait_max = std::max(g_gpu_trace.wait_max, w); if (w > 0.2) ++g_gpu_trace.waited; }

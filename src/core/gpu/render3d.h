@@ -20,7 +20,7 @@
 namespace ds { struct NDS; }
 
 namespace ds::gpu {
-namespace vk { class Device; class Lean; }
+class Raster3D;
 
 class Gpu3D;
 struct Polygon;
@@ -87,12 +87,13 @@ public:
   // --dump-gpu-frame: write NDS frame `frame`'s polygon list in the GPU raster's layout
   // (vk_dump.h) to `path`; the frame is drawn on the CPU as usual.
   void set_gpu_dump(const char* path, u64 frame) { gpu_dump_path_ = path; gpu_dump_frame_ = frame; }
-  // The GPU 3D raster (vk_lean.h): the frame's polygon list drawn on the GPU
-  // at 1x with MSAA, one frame of lag allowed under load; a refused frame
-  // (texture arena full, list past the buffers) goes to the band workers.
-  // May decline (no Vulkan); `why` takes the reason. Coordinator only.
+  // The GPU 3D raster (gpu_raster.h: Vulkan, else OpenGL ES): the frame's
+  // polygon list drawn on the GPU at 1x, one frame of lag allowed under load;
+  // a refused frame (texture arena full, list past the buffers) goes to the
+  // band workers. May decline (no driver); `why` takes the reason. Coordinator only.
   bool set_gpu(bool on, std::string* why = nullptr);
   bool gpu_active() const { return gpu_on_; }
+  const char* gpu_api() const;   // the backend drawing (gpu_active()), else ""
 private:
   NDS& nds_;
   // Holds a whole chunk of scanlines at once (render_chunk draws chunk at a
@@ -409,9 +410,10 @@ public:
     // before the compositor's batch as well (see sync_line).
     mutable const u32* out = nullptr;
     const u32* edges = nullptr;   // the edge plane (set_edge_export), or null
-    mutable const u8* edge_bytes = nullptr;   // a GPU frame's edge bytes instead (vk::Lean::edges_for), picked with its record
+    mutable const u8* edge_bytes = nullptr;   // a GPU frame's edge bytes instead (Raster3D::edges_for), picked with its record
     bool gpu = false, allow_lag = true;
     u64 gen = 0;
+    u64 gpu_gen = 0;   // the GPU submit this frame was rendered with (Raster3D::frame_ready)
     u32 nbins = 0;
     std::array<s32, MAX_BINS + 1> bin_y{};
     const u32* line(u32 y) const { return out + y * 256; }
@@ -443,9 +445,8 @@ private:
   std::vector<const u32*> poly_texels_;
   const char* gpu_dump_path_ = nullptr; u64 gpu_dump_frame_ = ~u64{0};
   void gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npoly);
-  std::shared_ptr<vk::Device> vk_dev_;
-  std::unique_ptr<vk::Lean> lean_;
-  std::unique_ptr<vk::Lean> lean_retired_;   // the Lean gpu_rebuild() replaced, kept one frame for readers of its record
+  std::unique_ptr<Raster3D> lean_;
+  std::unique_ptr<Raster3D> lean_retired_;   // the Lean gpu_rebuild() replaced, kept one frame for readers of its record
   bool lean_aa_ = false;   // the AA setting lean_ was created for (msaa() is what the device granted)
   bool lean_edges_ = false;   // lean_ draws the edge plane (in place of MSAA)
   bool gpu_edges() const { return aa_ && edge_export_; }   // the GPU raster's AA is the edge cut
@@ -461,9 +462,11 @@ private:
   bool gpu_job_wait();   // the last posted submit's result (true: on the GPU)
   bool gpu_on_ = false;
   bool gpu_frame_ = false;   // the last drawn frame went to the GPU: lean_ holds the picture, not out_[]
+  u64 gpu_gen_ = 0;          // GPU submits posted (the last frame's is gpu_gen_)
   struct GpuResident { u32 off = 0, words = 0, version = 0; };
   std::unordered_map<u32, GpuResident> gpu_resident_;   // decoded texture (cache id) -> arena offset
   u32 gpu_arena_top_ = 0;
+  std::vector<u32> gpu_scratch_;   // a decoded texture while its alpha-edge flags are marked (gpu_submit)
   bool gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly);   // false: draw on the CPU instead
   std::vector<std::unique_ptr<Renderer3D>> bands_;      // workers 1..n-1 (band 0 is this)
   u64 band_ns_[8] = {};                                 // last frame's per-band wall time (workers write their own slot)

@@ -8,7 +8,7 @@
 namespace ds::gpu::vk {
 struct Lean::Impl {};
 Lean::~Lean() = default;
-std::unique_ptr<Lean> Lean::create(Device&, bool, bool, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
+std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device>, bool, bool, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
 bool Lean::msaa() const { return false; }
 bool Lean::edges() const { return false; }
 const u8* Lean::edges_for(const u32*) const { return nullptr; }
@@ -21,7 +21,7 @@ bool Lean::submit(u32, u32, u32, const GpuFrame&) { return false; }
 void Lean::wait() {}
 void Lean::wait_all() {}
 const u32* Lean::output() { return nullptr; }
-const u32* Lean::newest_ready(bool) { return nullptr; }
+const u32* Lean::frame_ready(u64, bool) { return nullptr; }
 bool Lean::has_frame() const { return false; }
 u64 Lean::gpu_ns() const { return 0; }
 u32 Lean::draws() const { return 0; }
@@ -62,6 +62,7 @@ struct Lean::Impl {
   const DeviceInternal* vk = nullptr;
   const Api* api = nullptr;
   Device* dev = nullptr;
+  std::shared_ptr<Device> keep;   // the device outlives this raster
   bool msaa = false, timing = false;
   // The edge cut (1 sample): the draw keeps each pixel's front opaque
   // polygon (ids, 16 bits, on tile), a band pass around every polygon edge
@@ -165,15 +166,17 @@ GpuVert* Lean::vert_buffer() { return d_->host_verts.data(); }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = kTexelWords; return static_cast<u32*>(d_->texels.ptr); }
 GpuPost* Lean::post_buffer() { return &d_->host_post; }
 u32* Lean::span_buffer() { return d_->host_spans.data(); }
-const u32* Lean::output() { return newest_ready(false); }
+const u32* Lean::output() { return frame_ready(0, false); }
 bool Lean::has_frame() const { return d_->gen != 0; }
 u64 Lean::gpu_ns() const { return d_->last_gpu_ns; }
 u32 Lean::draws() const { return d_->last_draws; }
 Lean::Stats Lean::stats(bool reset) { std::lock_guard<std::mutex> lk(d_->m); Stats s = d_->st; if (reset) d_->st = Stats{}; return s; }
 static double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
-std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, bool edges, std::string* why) {
+std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool edges, std::string* why) {
   auto fail_null = [&](const char* m) { if (why) *why = m; return nullptr; };
+  if (!devp) return fail_null("no Vulkan context");
+  Device& dev = *devp;
   const DeviceInternal* vk = dev.internal();
   if (!vk || !vk->api) return fail_null("no Vulkan context");
   const Api& a = *vk->api;
@@ -181,7 +184,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, bool edges, std::stri
   std::unique_ptr<Lean> self(new Lean);
   self->d_ = std::make_unique<Impl>();
   Impl& d = *self->d_;
-  d.vk = vk; d.api = &a; d.dev = &dev;
+  d.vk = vk; d.api = &a; d.dev = &dev; d.keep = devp;
   auto fail = [&](const char* m) { if (why) *why = m; return nullptr; };
   d.edges = edges;
   d.msaa = !edges && msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
@@ -707,6 +710,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   d.st.record_ms += t_q - t_rec; d.st.queue_ms += now_ms() - t_q; d.st.slot_wait_ms += t_prep - t_in; d.st.prep_ms += t_rec - t_prep;
   d.fence_live[slot] = true; d.submit_at[slot] = t_in;
   d.last_draws = draws;
+  if (wbuf) ++d.st.wbuf;
   ++d.gen;
   return true;
 }
@@ -743,24 +747,40 @@ void Lean::wait_all() {
   d.tex_flushed = 0;
 }
 
-const u32* Lean::newest_ready(bool allow_lag) {
+// Slot `slot` finished (seen signalled, no wait): make it readable.
+static void poll_slot(Lean::Impl& d, u32 slot) {
+  if (d.fence_live[slot] && d.api->vkGetFenceStatus(d.vk->dev, d.fence[slot]) == VK_SUCCESS) finish_slot(d, slot);
+}
+
+const u32* Lean::frame_ready(u64 want, bool allow_lag) {
   Impl& d = *d_;
   std::lock_guard<std::mutex> lk(d.m);
   if (!d.gen) return nullptr;
-  const Api& a = *d.api;
-  const u32 newest = static_cast<u32>((d.gen - 1) % Impl::kSlots);
-  if (d.asked_gen != d.gen) { d.asked_gen = d.gen; d.st.gap_ms += now_ms() - d.submit_at[newest]; ++d.st.gap_n; }
-  if (d.fence_live[newest] && a.vkGetFenceStatus(d.vk->dev, d.fence[newest]) == VK_SUCCESS) finish_slot(d, newest);
-  if (!d.fence_live[newest]) { ++d.st.newest; return static_cast<const u32*>(d.out[newest].ptr); }
-  static const bool no_lag = std::getenv("DS_GPU_NOLAG") && std::atoi(std::getenv("DS_GPU_NOLAG")) != 0;   // debug: always the newest frame (deterministic dumps)
-  if (allow_lag && !no_lag && d.gen >= 2) {
-    const u32 prev = static_cast<u32>((d.gen - 2) % Impl::kSlots);
-    if (d.fence_live[prev] && a.vkGetFenceStatus(d.vk->dev, d.fence[prev]) == VK_SUCCESS) finish_slot(d, prev);
+  // The frame asked for, clamped to the resident ones (the newest when 0).
+  // One not submitted yet: the newest under the lag rule if it is done, else nothing (the caller waits for the submit).
+  static const bool no_lag = std::getenv("DS_GPU_NOLAG") && std::atoi(std::getenv("DS_GPU_NOLAG")) != 0;   // debug: never the frame before (deterministic dumps)
+  if (want > d.gen) {
+    if (!allow_lag || no_lag) return nullptr;
+    const u32 newest = static_cast<u32>((d.gen - 1) % Impl::kSlots);
+    if (d.fence_live[newest]) { d.api->vkWaitForFences(d.vk->dev, 1, &d.fence[newest], VK_TRUE, ~0ull); d.st.lat_ms += now_ms() - d.submit_at[newest]; ++d.st.lat_n; finish_slot(d, newest); }
+    ++d.st.lagged; return static_cast<const u32*>(d.out[newest].ptr);
+  }
+  if (want == 0) want = d.gen;
+  if (d.gen - want >= Impl::kSlots) want = d.gen - Impl::kSlots + 1;
+  const u32 slot = static_cast<u32>((want - 1) % Impl::kSlots);
+  if (d.asked_gen != want) { d.asked_gen = want; d.st.gap_ms += now_ms() - d.submit_at[slot]; ++d.st.gap_n; }
+  poll_slot(d, slot);
+  if (!d.fence_live[slot]) { ++d.st.newest; return static_cast<const u32*>(d.out[slot].ptr); }
+  if (allow_lag && !no_lag && want >= 2 && d.gen - (want - 1) < Impl::kSlots) {
+    const u32 prev = static_cast<u32>((want - 2) % Impl::kSlots);
+    poll_slot(d, prev);
     if (!d.fence_live[prev] && d.valid[prev]) { ++d.st.lagged; return static_cast<const u32*>(d.out[prev].ptr); }
   }
   if (allow_lag) ++d.st.stalled; else ++d.st.nolag;
-  wait_locked(d);
-  return static_cast<const u32*>(d.out[newest].ptr);
+  d.api->vkWaitForFences(d.vk->dev, 1, &d.fence[slot], VK_TRUE, ~0ull);
+  d.st.lat_ms += now_ms() - d.submit_at[slot]; ++d.st.lat_n;
+  finish_slot(d, slot);
+  return static_cast<const u32*>(d.out[slot].ptr);
 }
 
 } // namespace ds::gpu::vk
