@@ -587,6 +587,12 @@ bool Input::pad_down(const Bind& b, bool down) {
   if (down && pad_mod_down_ && !(b.kind == pad_mod_.kind && b.code == pad_mod_.code)) pad_mod_used_ = true;
   auto same = [&](const Bind& x) { return x.kind == b.kind && x.code == b.code && (x.kind != Bind::PadAxis || x.neg == b.neg); };
   if (b.kind == Bind::PadButton) { if (down) held_ |= 1u << b.code; else held_ &= ~(1u << b.code); }
+  // With the Guitar Grip in, a fret beats the pen's tap and hold on the same
+  // control (an L2 stylus hold would otherwise eat the red fret); under the
+  // modifier a press is left for the hotkeys. A release always lets go.
+  if (grip_on_)
+    for (int i = 0; i < FRETS; ++i)
+      if (same(pad_fret_[i]) && (!down || !pad_mod_down_ || ((frets_ >> i) & 1))) { set_fret(i, down); return true; }
   // Tap button and d-pad chord yield to the pad modifier: mod+<tap button>
   // can be a hotkey. A release always ends an in-progress tap or chord.
   for (int sl = 0; sl < HOT_SLOTS; ++sl) {
@@ -657,9 +663,6 @@ bool Input::pad_down(const Bind& b, bool down) {
       if (same(pad_hot_[static_cast<int>(Action::FastForward)][sl])) ff_pad_ = false;
       if (same(pad_hot_[static_cast<int>(Action::Mic)][sl])) mic_pad_ = false;
     }
-  if (grip_on_)
-    for (int i = 0; i < FRETS; ++i)
-      if (same(pad_fret_[i])) { set_fret(i, down); return true; }
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     if (same(pad_map_[i])) { set(static_cast<B>(i), down); return true; }
   return false;

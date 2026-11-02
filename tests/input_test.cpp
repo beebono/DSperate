@@ -510,6 +510,32 @@ void test_stick_dpad_names_a_stick() {
     T::axis(in, SDL_CONTROLLER_AXIS_RIGHTY, -30000); CHECK((in.frame().buttons & kDpad) == 0); }
 }
 
+// The Guitar Grip's frets default to L1, L2, R2, R1. While it is in they take
+// those controls from DS L/R, and from a stylus hold on the same trigger (an
+// L2 hold used to eat the red fret); out of the slot the controls are as before.
+void test_guitar_grip_frets() {
+  constexpr u32 kLR = (1u << B::BTN_L) | (1u << B::BTN_R);
+  Rig r; r.set("pad.stylus_hold", "+lefttrigger"); Input& in = r.go();
+  in.set_guitar_grip(true);
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, true));
+  T::physical_axis(in, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 32767);
+  T::physical_axis(in, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, 32767);
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, true));
+  ds::input::Frame f = in.frame();
+  CHECK(f.frets == 0xF && (f.buttons & kLR) == 0);
+  T::physical_axis(in, SDL_CONTROLLER_AXIS_TRIGGERLEFT, 0);
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, false));
+  f = in.frame();
+  CHECK(f.frets == 0xC);                                   // yellow and blue still held
+  const int x0 = in.stylus_x();
+  for (int i = 0; i < 8; ++i) in.update_stylus();
+  CHECK(in.stylus_x() == x0);                              // the hold never engaged
+  in.set_guitar_grip(false);
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, true));
+  f = in.frame();
+  CHECK(f.frets == 0 && (f.buttons & (1u << B::BTN_L)));   // L1 is DS L again
+}
+
 // Under the pad.stylus_hold chord the d-pad stick is the pen's, as the d-pad
 // is: the game lets go of it for as long as the chord is held, and a stick
 // still tilted on release is the d-pad again without having to move.
@@ -728,6 +754,7 @@ void test_analog_patch_claims_sticks() {
 } // namespace ds::sdl
 
 int main() {
+  ds::sdl::test_guitar_grip_frets();
   ds::sdl::test_fallback_is_inert_by_default();
   ds::sdl::test_fallback_rescues_an_orphaned_button();
   ds::sdl::test_fallback_yields_to_a_real_binding();
