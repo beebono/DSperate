@@ -1789,6 +1789,12 @@ sdl_ready:
       if (dual_window) display2.present();
       set_scale_targets(target, false);
     } else {
+      // GPU present scales on its own: the overlay goes on its plane, as the pause menu's does.
+      ds::sdl::Display::CanvasView cv;
+      if (on_canvas && display.canvas(cv)) {
+        paint(ds::sdl::Canvas{cv.px, cv.pitch, cv.w, cv.h});
+        display.note_canvas_draw_all();
+      }
       display.draw(fb);
       if (dual_window) display2.draw(fb);
     }
@@ -2005,7 +2011,7 @@ sdl_ready:
     if (cfg.str("slot2.gba") == "none") sel = none;
     bool remember = false, moving = false;
     int picked = -1;
-    Uint32 moved_at = SDL_GetTicks();
+    Uint32 moved_at = SDL_GetTicks(), drawn_at = 0;
     input.set_menu_open(true);
     display.set_page(true);
     for (bool dirty = true; picked < 0;) {
@@ -2025,8 +2031,11 @@ sdl_ready:
         else picked = sel;
       }
       if (pressed(B::BTN_B)) { picked = none; remember = false; }   // B: nothing this time, nothing kept
-      if ((dirty || moving) && picked < 0) {
+      // Redrawn now and then even unchanged: right after startup a Wayland
+      // window can drop the first frames committed before it is configured.
+      if ((dirty || moving || SDL_GetTicks() - drawn_at >= 200) && picked < 0) {
         dirty = false;
+        drawn_at = SDL_GetTicks();
         draw_overlay_frame([&](const ds::sdl::Canvas& c) {
           moving = ds::sdl::draw_picker(c, "GBA CARTRIDGE", "THIS GAME SUPPORTS THESE", rows, sel, remember, "DON'T ASK AGAIN FOR THIS GAME",
                                         "A INSERT   B NO GBA GAME", SDL_GetTicks() - moved_at);
