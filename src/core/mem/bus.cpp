@@ -589,12 +589,57 @@ u32 Bus::io_read(Cpu cpu, u32 addr, u32 width) {
     u32 v = 0; std::memcpy(&v, bios7i.get() + (addr & 0xFFFF & ~(width / 8 - 1)), width / 8); return v;
   }
   if ((addr & 0xFF000000) == 0x06000000) return vram_read(cpu, addr, width);
+  if (!nds_.dsi && addr >= 0x08000000 && addr < 0x0B000000) return slot2_read(cpu, addr, width);
   if ((addr & 0xFF000000) == 0x08000000 || (addr & 0xFF000000) == 0x09000000) {
-    // Open bus pattern per GBATEK.
+    // DSi: no slot 2. Open bus pattern per GBATEK.
     u32 v = static_cast<u32>((addr >> 1) & 0xFFFF) | (static_cast<u32>(((addr + 2) >> 1) & 0xFFFF) << 16);
     return width == 8 ? (v >> ((addr & 1) * 8)) & 0xFF : width == 16 ? v & 0xFFFF : v;
   }
   return 0;
+}
+
+// Slot 2 (melonDS's NDS.cpp ARM9/ARM7 Read/Write for 0x08-0x0A): the CPU
+// EXMEMCNT bit 7 does not give the slot to reads zeros and writes nothing.
+// The ROM bus is 16 bits wide, the SRAM bus 8; wider accesses are split.
+// An empty slot reads back the address on the ROM bus, with the bits the
+// slowest wait states let decay, and 0xFF on the SRAM bus.
+namespace {
+const bool slot2_trace = std::getenv("DS_SLOT2_TRACE") != nullptr;   // log every slot-2 access the owning CPU makes
+}
+u32 Bus::slot2_read(Cpu cpu, u32 addr, u32 width) {
+  if (((nds_.io.exmemcnt & 0x80) != 0) != (cpu == Cpu::ARM7)) return 0;
+  slot2::Device* dev = nds_.slot2.get();
+  u32 v;
+  if (addr >= 0x0A000000) {
+    auto rd = [&](u32 a) -> u32 { return dev ? dev->sram_read8(a) : 0xFF; };
+    v = rd(addr);
+    if (width >= 16) v |= rd(addr + 1) << 8;
+    if (width == 32) v |= rd(addr + 2) << 16 | rd(addr + 3) << 24;
+  } else {
+    static constexpr u16 decay[4] = {0xFE08, 0x0000, 0x0000, 0xFFFF};   // by the ROM's first-access wait (EXMEMCNT bits 2-3)
+    const u16 open = decay[(nds_.io.exmemcnt >> 2) & 3];
+    auto rd = [&](u32 a) -> u32 { return dev ? dev->rom_read16(a) : (((a >> 1) & 0xFFFF) | open); };
+    v = width == 8 ? ((addr & 1) ? rd(addr - 1) >> 8 : rd(addr) & 0xFF) : rd(addr);
+    if (width == 32) v |= rd(addr + 2) << 16;
+  }
+  if (slot2_trace)
+    std::fprintf(stderr, "[slot2] arm%d read%u %08x = %0*x pc %08x frame %llu\n", cpu == Cpu::ARM9 ? 9 : 7, width, addr, static_cast<int>(width / 4), v,
+                 nds_.cpu(cpu).hot.regs[15], static_cast<unsigned long long>(nds_.frame_count));
+  return v;
+}
+void Bus::slot2_write(Cpu cpu, u32 addr, u32 width, u32 v) {
+  if (((nds_.io.exmemcnt & 0x80) != 0) != (cpu == Cpu::ARM7)) return;
+  if (slot2_trace)
+    std::fprintf(stderr, "[slot2] arm%d write%u %08x = %0*x pc %08x frame %llu\n", cpu == Cpu::ARM9 ? 9 : 7, width, addr, static_cast<int>(width / 4), v,
+                 nds_.cpu(cpu).hot.regs[15], static_cast<unsigned long long>(nds_.frame_count));
+  slot2::Device* dev = nds_.slot2.get();
+  if (!dev) return;
+  if (addr >= 0x0A000000) {
+    for (u32 i = 0; i < width / 8; ++i) dev->sram_write8(addr + i, static_cast<u8>(v >> (i * 8)));
+  } else if (width >= 16) {   // byte stores to the ROM bus go nowhere
+    dev->rom_write16(addr, static_cast<u16>(v));
+    if (width == 32) dev->rom_write16(addr + 2, static_cast<u16>(v >> 16));
+  }
 }
 void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
   if (watch_on && (addr & ~0x7FFu) == (watch_addr & ~0x7FFu) && watch_host[cpu == Cpu::ARM9 ? 0 : 1]) {
@@ -619,6 +664,9 @@ void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
     vram_write(cpu, addr, width, v);
     return;
   }
+  case 0x08: case 0x09: case 0x0A:
+    if (!nds_.dsi) slot2_write(cpu, addr, width, v);
+    return;
   default: return;
   }
 }

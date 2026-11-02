@@ -161,6 +161,8 @@ private:
   Timing timing_;
   gpu::VramMap vram_map_;
   u32 vram_read(Cpu cpu, u32 addr, u32 width);
+  u32 slot2_read(Cpu cpu, u32 addr, u32 width);    // 0x08000000-0x0AFFFFFF on a DS
+  void slot2_write(Cpu cpu, u32 addr, u32 width, u32 v);
   void vram_write(Cpu cpu, u32 addr, u32 width, u32 v);
   void map_fixed_regions();
   void map_main_ram(PageTable& pt);

@@ -15,6 +15,7 @@
 #include "core/cart/cart.h"
 #include "core/cart/zip.h"
 #include "core/cheat/ar_engine.h"
+#include "core/slot2/slot2.h"
 
 #include <atomic>
 #include <memory>
@@ -206,6 +207,14 @@ struct NDS {
   dma::Dma   dma;
   dma::Ndma  ndma;                 // DSi only; idle on a DS
   std::unique_ptr<cart::Cart> cart;
+  // Slot 2 (the GBA slot, slot2/slot2.h): a GBA game or the Rumble Pak,
+  // null when empty. The frontend inserts it before the first frame and it
+  // stays for the session; reset() keeps it. A DSi has no slot 2: the bus
+  // ignores a device here while `dsi` is set.
+  std::unique_ptr<slot2::Device> slot2;
+  slot2::GameCart* gba_cart() const {
+    return slot2 && slot2->kind() == slot2::Kind::Game ? static_cast<slot2::GameCart*>(slot2.get()) : nullptr;
+  }
 
   // Action Replay codes, run from the ARM7's VBlank IRQ when enabled. Which
   // cheats are on is the frontend's business and not part of a save state;

@@ -241,6 +241,7 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
+  const char *gba_rom = nullptr, *gba_save = nullptr; int gba_light = 5; bool rumble_pak = false;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
@@ -335,6 +336,10 @@ int main(int argc, char** argv) {
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
+    else if (arg("--gba-rom")) gba_rom = argv[++i];         // a GBA game in slot 2 (DS mode only)
+    else if (arg("--gba-save")) gba_save = argv[++i];       // its save, read-only like --save; default none
+    else if (arg("--gba-light")) gba_light = std::atoi(argv[++i]);   // Boktai solar sensor, 0 (dark) to 10
+    else if (flag("--rumble-pak")) rumble_pak = true;       // the DS Rumble Pak in slot 2; motor changes are counted at exit
     else if (arg("--cheats")) cheat_db = argv[++i];         // usrcheat.dat; the entry matching this ROM is loaded
     else if (arg("--analog-cheats")) analog_db = argv[++i]; // usrcheat-analog.dat (exact ROM match only); default the built-in one, "none" for no analog codes
     else if (flag("--list-cheats")) list_cheats = true;     // print them (with their index) and exit
@@ -608,6 +613,20 @@ int main(int argc, char** argv) {
     if (!(nds.dsi && nds.dsi_nand_boot && lo)) { std::fprintf(stderr, "--dsi-autoload needs a NAND boot and --dsi-install or --dsi-autoload-id\n"); return 1; }
     nds.dsi_autoload(lo, hi);
     std::fprintf(stderr, "dsi: autoload %08x%08x (TLNC)\n", hi, lo);
+  }
+  if (gba_rom || rumble_pak) {
+    if (gba_rom && rumble_pak) { std::fprintf(stderr, "--gba-rom and --rumble-pak both want slot 2\n"); return 2; }
+    if (nds.dsi) std::fprintf(stderr, "slot2: a DSi has no slot 2; ignored\n");
+    else if (rumble_pak) { nds.slot2 = std::make_unique<ds::slot2::RumblePak>(); std::fprintf(stderr, "slot2: Rumble Pak\n"); }
+    else {
+      std::string err;
+      std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game(gba_rom, gba_save ? gba_save : "", err);
+      if (!g) { std::fprintf(stderr, "slot2: %s\n", err.c_str()); return 1; }
+      g->set_light_level(gba_light);
+      std::fprintf(stderr, "slot2: %s [%s], save %s%s\n", g->title(), g->game_code(), ds::slot2::save_type_name(g->save_type()),
+                   g->solar_sensor() ? ", solar sensor" : "");
+      nds.slot2 = std::move(g);
+    }
   }
   // Never written back -- this is a harness.
   if (save && nds.cart) {
@@ -959,6 +978,9 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "dsi persist: out %d saves, %d system files, %d photos\n", r.saves, r.system_files, r.photos);
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi persist: %s\n", n.c_str());
   }
+  if (nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak) std::fprintf(stderr, "slot2: %u rumble changes\n", nds.slot2->rumble_events());
+  if (const ds::slot2::GameCart* g = nds.gba_cart(); g && g->save_writes())
+    std::fprintf(stderr, "slot2: %u GBA save writes (not written back)\n", g->save_writes());
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));

@@ -24,6 +24,8 @@ add_library(dsperate_core STATIC
   cart/miniz/miniz_tinfl.c
   cart/miniz/miniz_tdef.c
   cart/miniz/miniz.c
+  slot2/slot2.cpp
+  slot2/compat.cpp
   cheat/ar_engine.cpp
   cheat/analog_db.cpp
   cheat/database.cpp

@@ -55,6 +55,7 @@ void NDS::reset() {
   dma.reset();
   dma.set_clock9_shift(dsi ? 2 : 1); ndma.reset(); ndma.set_clock9_shift(dsi ? 2 : 1);
   if (cart) cart->reset();
+  if (slot2) slot2->reset();
   arm9->reset(Cpu::ARM9, this);
   arm7->reset(Cpu::ARM7, this);
   // ARM9 vectors high (CP15 V set), ITCM enabled (32 KB at 0), DTCM off until the BIOS programs it.
@@ -564,6 +565,15 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
     w.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending, dsi_dsp_started);
     w.end();
   }
+  // Slot 2, there only when something is in it: the device's kind and
+  // identity, then its own fields.
+  if (slot2 && !dsi) {
+    w.begin("SLT2");
+    w.put(static_cast<u8>(slot2->kind()));
+    w.put(slot2->identity());
+    slot2->sync_state(w);
+    w.end();
+  }
   cheats.save_journal(w);   // there only when an analog code has written
   return true;
 }
@@ -650,6 +660,23 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     r.begin("DSIH");
     r.fields(dsi_loader_launched, exit_requested, dsi_soft_reset_pending, dsi_dsp_started);
     r.end();
+  }
+  // A state made with something else in slot 2 (or nothing) restores the
+  // machine around the device that is in it now, which starts afresh.
+  if (r.peek("SLT2")) {
+    r.begin("SLT2");
+    u8 kind = 0; u64 ident = 0;
+    r.fields(kind, ident);
+    if (slot2 && kind == static_cast<u8>(slot2->kind()) && ident == slot2->identity()) slot2->sync_state(r);
+    else {
+      const char* was = kind == static_cast<u8>(slot2::Kind::Game) ? (slot2 && slot2->kind() == slot2::Kind::Game ? "another GBA game" : "a GBA game")
+                      : kind == static_cast<u8>(slot2::Kind::RumblePak) ? "the Rumble Pak" : "a device";
+      std::fprintf(stderr, "state: made with %s in slot 2, and %s; slot 2 starts afresh\n", was, slot2 ? "something else is in it now" : "it is empty now");
+      if (slot2) slot2->reset();
+    }
+    r.end();
+  } else if (slot2) {
+    slot2->reset();
   }
   cheats.forget_writes();   // memory now matches the state, not the old journal
   if (r.peek("CHJR")) cheats.load_journal(r);   // frontends' own chunks may follow
