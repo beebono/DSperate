@@ -383,8 +383,9 @@ void Renderer3D::gpu_job_start() {
     for (;;) {
       j->cv.wait(lk, [j] { return j->pending || j->quit; });
       if (j->quit) return;
-      const u32 np = j->np, nv = j->nv, ntex = j->ntex; const vk::GpuFrame f = j->f;
+      const u32 np = j->np, nv = j->nv, ntex = j->ntex, rows = j->rows; const vk::GpuFrame f = j->f;
       lk.unlock();
+      gpu_fill_spans(span_jobs_, rows, lean_->span_buffer(), true);
       const bool ok = lean_->submit(np, nv, ntex, f);
       lk.lock();
       j->ok = ok; j->pending = false;
@@ -392,9 +393,9 @@ void Renderer3D::gpu_job_start() {
     }
   });
 }
-void Renderer3D::gpu_job_post(u32 np, u32 nv, u32 ntex, const vk::GpuFrame& f) {
+void Renderer3D::gpu_job_post(u32 np, u32 nv, u32 ntex, u32 rows, const vk::GpuFrame& f) {
   GpuJob* j = gpu_job_.get();
-  { std::lock_guard<std::mutex> lk(j->m); j->np = np; j->nv = nv; j->ntex = ntex; j->f = f; j->pending = true; }
+  { std::lock_guard<std::mutex> lk(j->m); j->np = np; j->nv = nv; j->ntex = ntex; j->rows = rows; j->f = f; j->pending = true; }
   j->cv.notify_all();
 }
 bool Renderer3D::gpu_job_wait() {
@@ -3188,13 +3189,13 @@ u32 Renderer3D::gpu_span_rows(const Polygon& p, u32* out, u32 cap) {
 // more than it saves. Guitar Hero: On Tour's frames run ~5000 rows, ~2 ms here.
 static constexpr u32 kSpanParallelRows = 1024;
 
-void Renderer3D::gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, u32* spans) {
+void Renderer3D::gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, u32* spans, bool serial) {
   using namespace ds::gpu::vk;
   const auto walk = [this, &jobs, spans](size_t a, size_t b) {
     for (size_t k = a; k < b; ++k) gpu_span_rows(*jobs[k].poly, spans + DS_SPAN_WORDS * jobs[k].row, DS_MAX_SPAN_ROWS - jobs[k].row);
   };
   const u32 workers = band_count(2);
-  if (rows < kSpanParallelRows || workers == 0 || jobs.size() < 2) { walk(0, jobs.size()); return; }
+  if (serial || rows < kSpanParallelRows || workers == 0 || jobs.size() < 2) { walk(0, jobs.size()); return; }
   if (!pool_) pool_ = std::make_unique<Pool>(thread_layout_on() || workers > 3 ? workers : 3);
   // Chunks of whole polygons, about equal in rows; claimed in order by the
   // workers and this thread alike. Each polygon writes only its own rows.
@@ -3290,7 +3291,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     ++np;
   }
   if (first_ordered == ~0u) { first_ordered = np; opaque_rows = nrows; }
-  gpu_fill_spans(span_jobs_, nrows, spans);
+  (void)spans;   // the span table is walked on the job thread (gpu_job_start), from span_jobs_
   *ps = GpuPost{};
   ps->fog_color = rs_->fog_color; ps->fog_offset = rs_->fog_offset; ps->fog_shift = rs_->fog_shift;
   for (u32 i = 0; i < rs_->fog_density.size() && i < 34; ++i) ps->density[i] = rs_->fog_density[i];
@@ -3315,7 +3316,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   // dropped frame at the next read, never as a CPU fallback.
   if (np > DS_MAX_POLYS || nv > DS_MAX_VERTS) return false;
   const double t1 = g_gpu_trace.on ? now_ms() : 0;
-  gpu_job_post(np, nv, gpu_arena_top_, f);
+  gpu_job_post(np, nv, gpu_arena_top_, nrows, f);
   done.ok = true;
   if (g_gpu_trace.on) { g_gpu_trace.draws += lean_->draws(); const double t2 = now_ms(); g_gpu_trace.build_ms += t1 - t0; g_gpu_trace.submit_ms += t2 - t1; }   // draws: the frame before's
   return done.ok;
@@ -3352,6 +3353,8 @@ void Renderer3D::sync_line(const FrameRef& f, s32 y) {
 // that changes what workers are reading (Bus::update_vram is the only way
 // texture VRAM/banking can move).
 void Renderer3D::sync_all() {
+  // A GPU frame's job thread may still be walking the raster bank's polygons (the span table).
+  if (gpu_frame_) gpu_job_wait();
   // Unconditional, not just while bins are outstanding: a worker can still be
   // inside the job after pending_bands_ clears (marks its last bin from in
   // there). Waiting on an idle pool costs one uncontended lock.

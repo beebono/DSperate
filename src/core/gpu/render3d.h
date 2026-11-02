@@ -352,7 +352,7 @@ private:
   // only lays out where each polygon's rows go. `jobs` pairs a polygon with
   // its first row; the output is the same as walking them in order here.
   struct SpanRowsJob { const Polygon* poly; u32 row; };
-  void gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, u32* spans);
+  void gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, u32* spans, bool serial);   // serial: this thread alone (the job thread; the pool is the bands')
   std::vector<SpanRowsJob> span_jobs_;
   std::function<void(u32)> span_fn_;   // the pool keeps a reference until wait_idle
   void rewind_edge(Edge& e);
@@ -455,10 +455,13 @@ private:
   // thread, off the emulation thread: gpu_submit() fills the staging buffers
   // and the texel arena, then posts the Lean::submit call. gpu_job_wait()
   // before anything that reads the result or rewrites the staging.
-  struct GpuJob { std::thread thread; std::mutex m; std::condition_variable cv; bool pending = false, quit = false, ok = false; u32 np = 0, nv = 0, ntex = 0; vk::GpuFrame f{}; };
+  // The span-table walk (gpu_fill_spans, ~3 ms on an A53) runs on the job
+  // thread too, before the submit: span_jobs_ names the raster bank's
+  // polygons, which Gpu3D holds until sync_all() has seen the job done.
+  struct GpuJob { std::thread thread; std::mutex m; std::condition_variable cv; bool pending = false, quit = false, ok = false; u32 np = 0, nv = 0, ntex = 0, rows = 0; vk::GpuFrame f{}; };
   std::unique_ptr<GpuJob> gpu_job_;
   void gpu_job_start();
-  void gpu_job_post(u32 np, u32 nv, u32 ntex, const vk::GpuFrame& f);
+  void gpu_job_post(u32 np, u32 nv, u32 ntex, u32 rows, const vk::GpuFrame& f);
   bool gpu_job_wait();   // the last posted submit's result (true: on the GPU)
   bool gpu_on_ = false;
   bool gpu_frame_ = false;   // the last drawn frame went to the GPU: lean_ holds the picture, not out_[]
