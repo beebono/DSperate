@@ -3,9 +3,9 @@
 //
 // Which DS games read which GBA games. Gathered from the games' documented
 // dual-slot features, with the codes taken from dumps' headers. Not listed
-// for want of a dump to read the code from: Feel the Magic XY/XX and Kirby:
-// Canvas Curse (both read the GBA games listed under The Rub Rabbits! and
-// the two Kirby GBA games respectively).
+// for want of a dump to read the code from: Feel the Magic XY/XX (it reads
+// the GBA games listed under The Rub Rabbits!, plus Sonic Pinball Party and
+// Space Channel 5).
 #include "core/slot2/compat.h"
 
 #include <cstring>
@@ -20,6 +20,7 @@ constexpr const char* ARIA_OF_SORROW[] = {"A2C", nullptr};
 constexpr const char* BAND_BROTHERS[] = {"ZBB", nullptr};   // the Request Selection expansion cartridge
 constexpr const char* EYESHIELD_21[] = {"BE4", nullptr};
 constexpr const char* FFTA[] = {"AFX", nullptr};
+constexpr const char* KIRBY_GBA[] = {"A7K", "B8K", nullptr};
 constexpr const char* FROGGER[] = {"BFJ", "AFR", "AFB", nullptr};
 constexpr const char* FULLMETAL[] = {"BH2", "BHR", nullptr};
 constexpr const char* GOEMON[] = {"BG2", nullptr};
@@ -58,6 +59,7 @@ constexpr Linkage TABLE[] = {
   {"ABC", MINERAL_TOWN},       // Harvest Moon DS
   {"AKP", KIM_POSSIBLE},       // Kim Possible: Kimmunicator
   {"CKN", YGGDRA_UNION},       // Knights in the Nightmare
+  {"ATK", KIRBY_GBA},          // Kirby: Canvas Curse
   {"ALK", BOKTAI},             // Lunar Knights (the solar sensor too)
   {"AM6", MADDEN},             // Madden NFL 06
   {"A5T", BN5_DS},             // Mega Man Battle Network 5: Double Team DS
