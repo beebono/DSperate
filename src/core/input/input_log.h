@@ -51,7 +51,8 @@ void decimate_mic(Frame& f, const s16* mic, size_t mic_count);
 // Input log file: one record per frame, replayable headlessly (deterministic given ROM, BIOS,
 // battery save).
 //
-// Layout: 16-byte header ("DSIN", version u32, frame count u32 written on close, 4 reserved),
+// Layout: 16-byte header ("DSIN", version u32, frame count u32 written on close, start frame
+// u32: the machine's frame count when the log began, 0 from boot or in older logs),
 // then one record per frame. Version 2 records: buttons u16, x u8, y u8, flags u8 (bit 0 pen
 // down, bit 1 lid closed), Guitar Grip frets u8 (zero in older logs), 2 reserved, eight s8
 // mic samples. Version 1 records are the first
@@ -67,12 +68,20 @@ public:
   void write(const Frame& f);
   bool read(Frame& f);            // false at the end
   u32  frames() const { return count_; }
+  // A recording begun from a save state starts at that state's frame, not
+  // at boot; set before closing (it is written with the frame count).
+  void set_start(u32 frame) { start_ = frame; }
+  u32  start() const { return start_; }
+  // Replay resuming from a state at `frame`: skips the records before it.
+  // False when the log begins after `frame` (it was made from a later state).
+  bool wind_to(u64 frame);
   bool writing() const { return f_ && write_; }
   bool reading() const { return f_ && !write_; }
 
 private:
   FILE* f_ = nullptr;
   bool  write_ = false;
+  u32   start_ = 0;
   u32   count_ = 0;
   size_t record_ = 16;
 };

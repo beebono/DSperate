@@ -2110,7 +2110,10 @@ sdl_ready:
       if (!load_state) std::fprintf(stderr, "state: autoloaded %s\n", start_state);
       // The state's view replaces the config's, dual-window aside.
       if (got_layout && !dual_window) { display.set_layout(layout); apply_visibility(); }
-      if (log.reading()) { ds::input::Frame f; for (u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
+      // A log made from this state starts at its frame; one from boot winds forward to it.
+      if (log.reading() && !log.wind_to(nds.frame_count))
+        std::fprintf(stderr, "replay: the log starts at frame %u, after this state's %llu; it will not line up\n", log.start(), static_cast<unsigned long long>(nds.frame_count));
+      if (log.writing()) log.set_start(static_cast<u32>(nds.frame_count));
     }
   }
   startup_off_rt.reset();

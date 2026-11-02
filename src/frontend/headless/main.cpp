@@ -706,8 +706,10 @@ int main(int argc, char** argv) {
     if (bytes.empty() || !nds.load_state(r, err)) { std::fprintf(stderr, "cannot load state %s: %s\n", load_state, bytes.empty() ? "unreadable" : err.c_str()); return 1; }
     std::fprintf(stderr, "state: loaded %s (frame %llu)\n", load_state, static_cast<unsigned long long>(nds.frame_count));
     dump_cpu_timing(nds, "load");
-    // replay continues from the state's frame, not the log's start
-    if (log.reading()) { ds::input::Frame f; for (ds::u64 k = 0; k < nds.frame_count && log.read(f); ++k) {} }
+    // replay continues from the state's frame: a log made from this state starts there,
+    // one from boot winds forward to it
+    if (log.reading() && !log.wind_to(nds.frame_count))
+      std::fprintf(stderr, "replay: the log starts at frame %u, after this state's %llu; it will not line up\n", log.start(), static_cast<unsigned long long>(nds.frame_count));
   }
   auto write_state = [&](int after) {
     if (!save_state_path || save_state_at != after) return true;

@@ -91,7 +91,7 @@ bool Log::open_write(const std::string& path) {
   std::memcpy(h, MAGIC, 4);
   std::memcpy(h + 4, &VERSION, 4);
   std::fwrite(h, 1, HEADER, f_);
-  write_ = true; count_ = 0;
+  write_ = true; count_ = 0; start_ = 0;
   return true;
 }
 
@@ -106,6 +106,7 @@ bool Log::open_read(const std::string& path) {
   if (ver != 1 && ver != 2 && ver != VERSION) { close(); return false; }
   record_ = ver == 1 ? RECORD_V1 : ver == 2 ? RECORD_V2 : RECORD;
   std::memcpy(&count_, h + 8, 4);
+  std::memcpy(&start_, h + 12, 4);
   if (count_ == 0) {                       // recording was cut short: count from the size
     const long here = std::ftell(f_);
     std::fseek(f_, 0, SEEK_END);
@@ -118,12 +119,20 @@ bool Log::open_read(const std::string& path) {
 
 void Log::close() {
   if (!f_) return;
-  if (write_) {                            // patch the frame count into the header
+  if (write_) {                            // patch the frame count and start into the header
     std::fseek(f_, 8, SEEK_SET);
     std::fwrite(&count_, 4, 1, f_);
+    std::fwrite(&start_, 4, 1, f_);
   }
   std::fclose(f_);
   f_ = nullptr; write_ = false;
+}
+
+bool Log::wind_to(u64 frame) {
+  if (frame < start_) return false;
+  Frame f;
+  for (u64 k = start_; k < frame && read(f); ++k) {}
+  return true;
 }
 
 void Log::write(const Frame& f) {
