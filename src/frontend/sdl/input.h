@@ -58,6 +58,7 @@ public:
     fill_analog(f);
     f.frets = grip_on_ ? static_cast<u8>(frets_ | frets_pressed_) : 0;
     frets_pressed_ = 0;
+    strum_frame(f);
     pressed_ = 0; stick_pressed_ = 0; touched_ = false;
     menu_fb_pressed_ = 0;   // menu fallback presses die with their frame
     return f;
@@ -84,6 +85,7 @@ public:
     if (menu_open_ && !on) { held_back_ = buttons_ | stick_ | face_stick_; touch_held_back_ = touching_ || stylus_down_ != 0; }
     menu_open_ = on;
     if (!on) menu_faces_ = 0;
+    if (on) { frets_ = frets_pressed_ = 0; strum_step_ = 0; strum_queued_ = false; }   // the menu has the controls now
   }
   // Pad face buttons pressed while the menu is open, by SDL position and
   // regardless of bindings: bit n = SDL_CONTROLLER_BUTTON n (south, east,
@@ -122,8 +124,13 @@ public:
   // While the Guitar Grip is in slot 2, its four fret bindings (keys/pad
   // grip_green, grip_red, grip_yellow, grip_blue) work the frets instead of
   // whatever DS button shares the control.
-  void set_guitar_grip(bool on) { grip_on_ = on; frets_ = frets_pressed_ = 0; }
+  // The strum bindings (keys.strum, pad.strum and pad.strum.alt) play a
+  // stroke across the touch screen's strings in their place, for a handheld
+  // without one, alternating down and up like a pick.
+  void set_guitar_grip(bool on) { grip_on_ = on; frets_ = frets_pressed_ = 0; strum_step_ = 0; strum_queued_ = false; }
   static const char* fret_name(int i);          // "grip_green".. for the config keys
+  static const char* strum_key_default();
+  static const char* strum_pad_default(int slot);
   static const char* fret_key_default(int i);
   static const char* fret_pad_default(int i);
   // While capturing, the next physical key or pad control is taken as a name
@@ -244,6 +251,11 @@ private:
   Bind key_fret_[FRETS], pad_fret_[FRETS];
   bool grip_on_ = false;
   u8   frets_ = 0, frets_pressed_ = 0;          // held now; pressed since the last frame
+  Bind key_strum_, pad_strum_[HOT_SLOTS];
+  int  strum_step_ = 0;                         // frames of the stroke played so far, 0 idle
+  bool strum_up_ = false, strum_queued_ = false;
+  void strum_press() { if (strum_step_) strum_queued_ = true; else strum_step_ = 1; }
+  void strum_frame(input::Frame& f);
   void set_fret(int i, bool down) {
     if (down) { frets_ |= static_cast<u8>(1u << i); frets_pressed_ |= static_cast<u8>(1u << i); } else frets_ &= static_cast<u8>(~(1u << i));
   }

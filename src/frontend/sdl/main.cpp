@@ -1066,6 +1066,8 @@ constexpr Extra kExtras[] = {
   {"keys.grip_red",    "pad.grip_red",        "GRIP RED"},
   {"keys.grip_yellow", "pad.grip_yellow",     "GRIP YELLOW"},
   {"keys.grip_blue",   "pad.grip_blue",       "GRIP BLUE"},
+  {"keys.strum",       "pad.strum",           "GRIP STRUM"},
+  {nullptr,            "pad.strum.alt",       "GRIP STRUM (2)"},
   // Axis remap: push the control the positive direction reads (stick
   // right/down, trigger pressed); stores physical axis + inverted flag.
   {nullptr,            "pad.axis_leftx",      "L STICK RIGHT"},
@@ -1114,6 +1116,9 @@ const char* extra_default(const char* key, bool pad, const ds::sdl::Config& cfg)
   }
   if (std::strcmp(key, "pad.stick_face") == 0)    return ds::sdl::Input::stick_face_default();
   if (std::strcmp(key, "pad.stick_dpad") == 0)    return ds::sdl::Input::stick_dpad_default();
+  if (std::strcmp(key, "keys.strum") == 0) return ds::sdl::Input::strum_key_default();
+  if (std::strcmp(key, "pad.strum") == 0) return ds::sdl::Input::strum_pad_default(0);
+  if (std::strcmp(key, "pad.strum.alt") == 0) return ds::sdl::Input::strum_pad_default(1);
   for (int i = 0; i < 4; ++i)
     if (std::strcmp(std::strchr(key, '.') + 1, ds::sdl::Input::fret_name(i)) == 0)
       return pad ? ds::sdl::Input::fret_pad_default(i) : ds::sdl::Input::fret_key_default(i);

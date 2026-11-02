@@ -536,6 +536,34 @@ void test_guitar_grip_frets() {
   CHECK(f.frets == 0 && (f.buttons & (1u << B::BTN_L)));   // L1 is DS L again
 }
 
+// The strum bindings play a stroke down the strings, then a lifted frame,
+// alternating direction; the d-pad's vertical pair is theirs only while the
+// grip is in and the menu is shut.
+void test_guitar_grip_strum() {
+  constexpr u32 kUpDown = (1u << B::BTN_UP) | (1u << B::BTN_DOWN);
+  Rig r; Input& in = r.go();
+  in.set_guitar_grip(true);
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_DOWN, true));
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_DOWN, false));
+  int ys[5];
+  for (int i = 0; i < 5; ++i) {
+    const ds::input::Frame f = in.frame();
+    CHECK((f.buttons & kUpDown) == 0);
+    ys[i] = f.down ? f.y : -1;
+    if (i < 4) CHECK(f.down && f.x == 150);
+  }
+  CHECK(ys[0] < ys[1] && ys[1] < ys[2] && ys[2] < ys[3] && ys[4] == -1);   // down the strings, then lifted
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_UP, true));
+  const ds::input::Frame up = in.frame();
+  CHECK(up.down && up.y == ys[3]);                                         // the next stroke goes back up
+  for (int i = 0; i < 5; ++i) in.frame();
+  CHECK(!in.frame().down);
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_UP, false));
+  in.set_menu_open(true);                                                  // the menu navigates with the d-pad
+  CHECK(T::pad(in, SDL_CONTROLLER_BUTTON_DPAD_DOWN, true));
+  CHECK((in.take_menu_presses() >> B::BTN_DOWN) & 1);
+}
+
 // Under the pad.stylus_hold chord the d-pad stick is the pen's, as the d-pad
 // is: the game lets go of it for as long as the chord is held, and a stick
 // still tilted on release is the d-pad again without having to move.
@@ -755,6 +783,7 @@ void test_analog_patch_claims_sticks() {
 
 int main() {
   ds::sdl::test_guitar_grip_frets();
+  ds::sdl::test_guitar_grip_strum();
   ds::sdl::test_fallback_is_inert_by_default();
   ds::sdl::test_fallback_rescues_an_orphaned_button();
   ds::sdl::test_fallback_yields_to_a_real_binding();

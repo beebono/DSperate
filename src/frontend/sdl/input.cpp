@@ -48,6 +48,9 @@ const char* const kStickDpadDefault = "left";
 const char* const kFretNames[4] = {"grip_green", "grip_red", "grip_yellow", "grip_blue"};
 const char* const kFretKeyDefaults[4] = {"1", "2", "3", "4"};
 const char* const kFretPadDefaults[4] = {"leftshoulder", "+lefttrigger", "+righttrigger", "rightshoulder"};
+// Strum: the d-pad's vertical pair, as a guitar controller's strum bar.
+const char* const kStrumKeyDefault = "Space";
+const char* const kStrumPadDefaults[2] = {"dpdown", "dpup"};
 
 // Held actions: an edge on both press and release.
 bool is_hold(Action a) { return a == Action::FastForward || a == Action::Mic; }
@@ -260,6 +263,8 @@ void Input::configure(const Config& cfg) {
     key_fret_[i] = parse_key(cfg.str(std::string("keys.") + kFretNames[i], kFretKeyDefaults[i]));
     pad_fret_[i] = parse_pad(cfg.str(std::string("pad.") + kFretNames[i], kFretPadDefaults[i]));
   }
+  key_strum_ = parse_key(cfg.str("keys.strum", kStrumKeyDefault));
+  for (int sl = 0; sl < HOT_SLOTS; ++sl) pad_strum_[sl] = parse_pad(cfg.str(std::string("pad.strum") + hot_suffix(sl), kStrumPadDefaults[sl]));
   {
     // stick_dpad: left (default)|right|none, also works d-pad. stick_face:
     // none (default)|left|right, directions X(up)/B(down)/Y(left)/A(right).
@@ -543,9 +548,11 @@ bool Input::key_down(SDL_Keycode k, bool down) {
     else fire(a, down);
     return true;
   }
-  if (grip_on_)
+  if (grip_on_ && !menu_open_) {   // the menu navigates with these controls
     for (int i = 0; i < FRETS; ++i)
       if (key_fret_[i].kind == Bind::Key && key_fret_[i].code == k) { set_fret(i, down); return true; }
+    if (key_strum_.kind == Bind::Key && key_strum_.code == k) { if (down) strum_press(); return true; }
+  }
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     if (key_map_[i].kind == Bind::Key && key_map_[i].code == k) { set(static_cast<B>(i), down); return true; }
   return false;
@@ -590,9 +597,12 @@ bool Input::pad_down(const Bind& b, bool down) {
   // With the Guitar Grip in, a fret beats the pen's tap and hold on the same
   // control (an L2 stylus hold would otherwise eat the red fret); under the
   // modifier a press is left for the hotkeys. A release always lets go.
-  if (grip_on_)
+  if (grip_on_ && !menu_open_) {   // the menu navigates with these controls
     for (int i = 0; i < FRETS; ++i)
       if (same(pad_fret_[i]) && (!down || !pad_mod_down_ || ((frets_ >> i) & 1))) { set_fret(i, down); return true; }
+    for (int sl = 0; sl < HOT_SLOTS; ++sl)
+      if (same(pad_strum_[sl]) && !pad_mod_down_) { if (down) strum_press(); return true; }
+  }
   // Tap button and d-pad chord yield to the pad modifier: mod+<tap button>
   // can be a hotkey. A release always ends an in-progress tap or chord.
   for (int sl = 0; sl < HOT_SLOTS; ++sl) {
@@ -825,6 +835,30 @@ const char* Input::mod_default(bool pad) { return pad ? kModDefaultPad : kModDef
 const char* Input::stylus_button_default() { return kStylusButtonDefault; }
 const char* Input::stylus_hold_default() { return kStylusHoldDefault; }
 const char* Input::fret_name(int i) { return kFretNames[i]; }
+const char* Input::strum_key_default() { return kStrumKeyDefault; }
+const char* Input::strum_pad_default(int slot) { return kStrumPadDefaults[slot]; }
+
+// A stroke across the strings Guitar Hero: On Tour draws on the touch screen:
+// four frames down (or up) a line through the middle of the guitar body,
+// crossing all six strings, then a frame lifted before a queued one starts.
+// Measured headless: strokes like this score; a touch that doesn't move doesn't.
+void Input::strum_frame(input::Frame& f) {
+  if (!grip_on_ || !strum_step_) return;
+  static constexpr u8 kX = 150, kY[4] = {50, 85, 120, 155};
+  if (strum_step_ <= 4) {
+    const int i = strum_step_ - 1;
+    f.x = kX;
+    f.y = kY[strum_up_ ? 3 - i : i];
+    f.down = true;
+    ++strum_step_;
+    return;
+  }
+  // Fifth frame: lifted, so a queued stroke starts as a new touch.
+  f.down = false;
+  strum_up_ = !strum_up_;
+  strum_step_ = strum_queued_ ? 1 : 0;
+  strum_queued_ = false;
+}
 const char* Input::fret_key_default(int i) { return kFretKeyDefaults[i]; }
 const char* Input::fret_pad_default(int i) { return kFretPadDefaults[i]; }
 const char* Input::stick_face_default() { return kStickFaceDefault; }
