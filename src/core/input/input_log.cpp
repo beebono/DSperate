@@ -65,6 +65,7 @@ void apply(NDS& nds, const Frame& f, const s16* mic, size_t mic_count) {
   nds.io.set_buttons(f.buttons);
   nds.io.set_touch(f.x, f.y, f.down);
   nds.io.set_lid(f.lid);
+  if (nds.slot2 && nds.slot2->kind() == slot2::Kind::GuitarGrip) static_cast<slot2::GuitarGrip*>(nds.slot2.get())->set_frets(f.frets);
   if (nds.analog_patch) apply_analog(nds, f);
   if (mic) { nds.io.set_mic(mic, mic_count); return; }
   // Widen the logged samples into the core's own buffer once per frame.
@@ -130,6 +131,7 @@ void Log::write(const Frame& f) {
   std::memcpy(r, &f.buttons, 2);
   r[2] = f.x; r[3] = f.y;
   r[4] = static_cast<u8>((f.down ? 1 : 0) | (f.lid ? 2 : 0) | (f.zl ? 4 : 0) | (f.zr ? 8 : 0));
+  r[5] = f.frets;
   std::memcpy(r + 8, f.mic, Frame::MIC_SAMPLES);
   std::memcpy(r + 16, &f.cpad_x, 2);
   std::memcpy(r + 18, &f.cpad_y, 2);
@@ -146,6 +148,7 @@ bool Log::read(Frame& f) {
   std::memcpy(&f.buttons, r, 2);
   f.x = r[2]; f.y = r[3]; f.down = r[4] & 1; f.lid = (r[4] & 2) != 0;
   f.zl = (r[4] & 4) != 0; f.zr = (r[4] & 8) != 0;   // v1/v2 records leave these clear
+  f.frets = r[5] & 0xF;
   std::memcpy(f.mic, r + 8, Frame::MIC_SAMPLES);
   if (record_ >= RECORD) {
     std::memcpy(&f.cpad_x, r + 16, 2);

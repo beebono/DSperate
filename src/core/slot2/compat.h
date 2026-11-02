@@ -22,5 +22,8 @@ struct Linkage {
 const Linkage* linkage_for(const char ds_code[4]);
 // Whether `gba_code` (four letters) is one the entry accepts.
 bool accepts(const Linkage& link, const char gba_code[4]);
+// Whether the DS game (four letters; region ignored) is played with the
+// Guitar Grip in slot 2.
+bool uses_guitar_grip(const char ds_code[4]);
 
 } // namespace ds::slot2

@@ -56,6 +56,8 @@ public:
     input::Frame f{static_cast<u16>((buttons_ | pressed_ | stick_ | face_stick_) & ~held_back_), static_cast<u8>(touch_x_), static_cast<u8>(touch_y_),
                          !touch_held_back_ && (touching_ || touched_ || stylus_down_ != 0)};
     fill_analog(f);
+    f.frets = grip_on_ ? static_cast<u8>(frets_ | frets_pressed_) : 0;
+    frets_pressed_ = 0;
     pressed_ = 0; stick_pressed_ = 0; touched_ = false;
     menu_fb_pressed_ = 0;   // menu fallback presses die with their frame
     return f;
@@ -117,6 +119,13 @@ public:
   // `strength` percent for `ms`, replacing whatever pulse was running.
   bool has_rumble() const;
   void rumble(int strength, u32 ms);
+  // While the Guitar Grip is in slot 2, its four fret bindings (keys/pad
+  // grip_green, grip_red, grip_yellow, grip_blue) work the frets instead of
+  // whatever DS button shares the control.
+  void set_guitar_grip(bool on) { grip_on_ = on; frets_ = frets_pressed_ = 0; }
+  static const char* fret_name(int i);          // "grip_green".. for the config keys
+  static const char* fret_key_default(int i);
+  static const char* fret_pad_default(int i);
   // While capturing, the next physical key or pad control is taken as a name
   // instead of fed to the game or matched against a hotkey. `pad` picks
   // which device is listened to.
@@ -231,6 +240,13 @@ private:
   Bind key_hot_[static_cast<int>(Action::Count)][HOT_SLOTS];
   Bind pad_hot_[static_cast<int>(Action::Count)][HOT_SLOTS];
   Bind key_mod_, pad_mod_;
+  static constexpr int FRETS = 4;               // green, red, yellow, blue: slot2::GuitarGrip::Fret bit order
+  Bind key_fret_[FRETS], pad_fret_[FRETS];
+  bool grip_on_ = false;
+  u8   frets_ = 0, frets_pressed_ = 0;          // held now; pressed since the last frame
+  void set_fret(int i, bool down) {
+    if (down) { frets_ |= static_cast<u8>(1u << i); frets_pressed_ |= static_cast<u8>(1u << i); } else frets_ &= static_cast<u8>(~(1u << i));
+  }
   bool key_mod_down_ = false, key_mod_used_ = false, pad_mod_down_ = false, pad_mod_used_ = false;
   int  key_mod_alone_ = -1, pad_mod_alone_ = -1;   // the action bound to "mod" alone, or -1
   int  pad_mod_button_ = -1;   // the DS button the pad modifier would otherwise be

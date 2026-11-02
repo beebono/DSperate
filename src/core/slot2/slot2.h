@@ -2,7 +2,8 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // What sits in the DS's slot 2 (the GBA slot): a GBA game cartridge, with
-// its save memory and the Boktai solar sensor, or a DS Rumble Pak. Adapted
+// its save memory and the Boktai solar sensor, a DS Rumble Pak, or the
+// Guitar Hero: On Tour Guitar Grip. Adapted
 // from melonDS's GBACart.cpp (GPLv3, melonDS team), behaviour per GBATEK.
 //
 // The bus (mem/bus.cpp) owns the slot's address decode and EXMEMCNT
@@ -20,7 +21,7 @@ namespace ds::state { class Writer; class Reader; }
 
 namespace ds::slot2 {
 
-enum class Kind : u8 { None = 0, Game = 1, RumblePak = 2 };
+enum class Kind : u8 { None = 0, Game = 1, RumblePak = 2, GuitarGrip = 3 };
 
 class Device {
 public:
@@ -154,6 +155,26 @@ public:
 private:
   u16 state_ = 0;
   u32 events_ = 0;
+};
+
+// The Guitar Grip from Guitar Hero: On Tour: four fret buttons, read back on
+// the SRAM bus active low (green bit 6, red 5, yellow 4, blue 3). The ROM bus
+// answers with the ID the games look for.
+class GuitarGrip final : public Device {
+public:
+  enum Fret : u8 { Green = 1, Red = 2, Yellow = 4, Blue = 8 };
+  Kind kind() const override { return Kind::GuitarGrip; }
+  u16 rom_read16(u32) const override { return 0xF9FF; }
+  u8 sram_read8(u32) override;
+  // The frets held this frame (Fret bits), set from the input frame like
+  // the DS's own buttons; not machine state, so nothing goes in a state.
+  void set_frets(u8 frets) { frets_ = frets & 0xF; }
+  u8 frets() const { return frets_; }
+  void sync_state(state::Writer&) override {}
+  void sync_state(state::Reader&) override {}
+
+private:
+  u8 frets_ = 0;
 };
 
 } // namespace ds::slot2

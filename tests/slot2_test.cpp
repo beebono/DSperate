@@ -8,6 +8,7 @@
 #include "core/slot2/compat.h"
 #include "core/slot2/slot2.h"
 #include "core/state/state.h"
+#include "core/input/input_log.h"
 #include "check.h"
 
 #include <cstring>
@@ -166,6 +167,25 @@ void test_rumble() {
   CHECK(p.rumble_events() == 2);
 }
 
+// Frets read back active low on the SRAM bus, fed from the input frame.
+void test_guitar_grip() {
+  using G = slot2::GuitarGrip;
+  NDS nds;
+  nds.reset();
+  nds.io.exmemcnt = 0x0004;
+  nds.slot2 = std::make_unique<G>();
+  CHECK(nds.bus.dma_read16(Cpu::ARM9, 0x080000AC) == 0xF9FF && nds.bus.dma_read16(Cpu::ARM9, 0x0801FFFE) == 0xF9FF);
+  CHECK(nds.bus.dma_read8(Cpu::ARM9, 0x0A000000) == 0xFF);   // nothing held
+  input::Frame f;
+  f.frets = G::Green | G::Blue;
+  input::apply(nds, f);
+  CHECK(nds.bus.dma_read8(Cpu::ARM9, 0x0A000000) == static_cast<u8>(~(0x40 | 0x08)));
+  f.frets = G::Red | G::Yellow;
+  input::apply(nds, f);
+  CHECK(nds.bus.dma_read8(Cpu::ARM9, 0x0A000000) == static_cast<u8>(~(0x20 | 0x10)));
+  CHECK(slot2::uses_guitar_grip("YGHJ") && slot2::uses_guitar_grip("BGHP") && slot2::uses_guitar_grip("C6QX") && !slot2::uses_guitar_grip("CPUE"));
+}
+
 void test_bus() {
   NDS nds;
   nds.reset();
@@ -247,6 +267,7 @@ int main() {
   test_flash64_ignores_bank();
   test_solar_sensor();
   test_rumble();
+  test_guitar_grip();
   test_bus();
   test_state();
   test_linkage();

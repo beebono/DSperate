@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
-// Slot-2 devices. The GBA cartridge, its Flash protocol, the solar sensor
-// and the Rumble Pak are adapted from melonDS's GBACart.cpp (GPLv3, melonDS
+// Slot-2 devices. The GBA cartridge, its Flash protocol, the solar sensor,
+// the Rumble Pak and the Guitar Grip are adapted from melonDS's GBACart.cpp (GPLv3, melonDS
 // team; its Flash handling is in turn from DeSmuME).
 #include "core/slot2/slot2.h"
 #include "core/state/state.h"
@@ -322,6 +322,10 @@ void RumblePak::rom_write16(u32, u16 v) {
   if (v == state_) return;
   state_ = v;
   ++events_;
+}
+
+u8 GuitarGrip::sram_read8(u32) {
+  return static_cast<u8>(~(((frets_ & Green) ? 0x40 : 0) | ((frets_ & Red) ? 0x20 : 0) | ((frets_ & Yellow) ? 0x10 : 0) | ((frets_ & Blue) ? 0x08 : 0)));
 }
 
 void RumblePak::sync_state(state::Writer& w) { w.put(state_); }

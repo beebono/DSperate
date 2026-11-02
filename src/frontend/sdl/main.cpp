@@ -1061,6 +1061,11 @@ constexpr Extra kExtras[] = {
   {nullptr,            "pad.stylus_hold",     "STYLUS HOLD"},
   {nullptr,            "pad.stick_dpad",      "STICK DPAD"},
   {nullptr,            "pad.stick_face",      "STICK ABXY"},
+  // The Guitar Grip's frets, used only while it is in slot 2.
+  {"keys.grip_green",  "pad.grip_green",      "GRIP GREEN"},
+  {"keys.grip_red",    "pad.grip_red",        "GRIP RED"},
+  {"keys.grip_yellow", "pad.grip_yellow",     "GRIP YELLOW"},
+  {"keys.grip_blue",   "pad.grip_blue",       "GRIP BLUE"},
   // Axis remap: push the control the positive direction reads (stick
   // right/down, trigger pressed); stores physical axis + inverted flag.
   {nullptr,            "pad.axis_leftx",      "L STICK RIGHT"},
@@ -1109,6 +1114,9 @@ const char* extra_default(const char* key, bool pad, const ds::sdl::Config& cfg)
   }
   if (std::strcmp(key, "pad.stick_face") == 0)    return ds::sdl::Input::stick_face_default();
   if (std::strcmp(key, "pad.stick_dpad") == 0)    return ds::sdl::Input::stick_dpad_default();
+  for (int i = 0; i < 4; ++i)
+    if (std::strcmp(std::strchr(key, '.') + 1, ds::sdl::Input::fret_name(i)) == 0)
+      return pad ? ds::sdl::Input::fret_pad_default(i) : ds::sdl::Input::fret_key_default(i);
   if (extra_is_axis_remap(key))
     for (int i = 0; i < ds::sdl::Input::axis_remap_count(); ++i)
       if (ds::sdl::Input::axis_remap_key(i) == key) {
@@ -1974,6 +1982,7 @@ sdl_ready:
   auto fill_slot2 = [&](const std::string& gba) {
     nds.slot2.reset();
     session.gba_sav.clear();
+    input.set_guitar_grip(false);
     if (nds.dsi || !nds.cart) return;
     if (!gba.empty()) {
       const std::string sav = gba_save_path(gba, cfg);
@@ -1987,6 +1996,14 @@ sdl_ready:
         return;
       }
       std::fprintf(stderr, "slot2: %s\n", err.c_str());
+    }
+    // The Guitar Hero games refuse to start without their grip. Its frets
+    // are in the input log, so it goes in under --record/--replay too.
+    if (cfg.str("slot2.guitar_grip", "auto") != "off" && ds::slot2::uses_guitar_grip(nds.cart->header().game_code)) {
+      nds.slot2 = std::make_unique<ds::slot2::GuitarGrip>();
+      input.set_guitar_grip(true);
+      VLOG("slot2: Guitar Grip\n");
+      return;
     }
     if (rumble_wanted()) {
       nds.slot2 = std::make_unique<ds::slot2::RumblePak>();

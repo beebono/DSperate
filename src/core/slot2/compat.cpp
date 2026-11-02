@@ -6,6 +6,7 @@
 #include "core/slot2/compat.h"
 
 #include <cstring>
+#include <initializer_list>
 
 namespace ds::slot2 {
 
@@ -93,6 +94,16 @@ const Linkage* linkage_for(const char ds_code[4]) {
   for (const Linkage& l : TABLE)
     if (std::memcmp(l.ds, ds_code, 3) == 0) return &l;
   return nullptr;
+}
+
+// Every region shares the first three letters (USA E, Europe P/X, Japan J, Korea K).
+bool uses_guitar_grip(const char ds_code[4]) {
+  for (const char* c : {"YGH",    // Guitar Hero: On Tour
+                        "CGS",    // Guitar Hero: On Tour - Decades
+                        "C6Q",    // Guitar Hero: On Tour - Modern Hits
+                        "BGH"})   // Band Hero
+    if (std::memcmp(c, ds_code, 3) == 0) return true;
+  return false;
 }
 
 bool accepts(const Linkage& link, const char gba_code[4]) {

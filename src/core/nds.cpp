@@ -670,7 +670,8 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     if (slot2 && kind == static_cast<u8>(slot2->kind()) && ident == slot2->identity()) slot2->sync_state(r);
     else {
       const char* was = kind == static_cast<u8>(slot2::Kind::Game) ? (slot2 && slot2->kind() == slot2::Kind::Game ? "another GBA game" : "a GBA game")
-                      : kind == static_cast<u8>(slot2::Kind::RumblePak) ? "the Rumble Pak" : "a device";
+                      : kind == static_cast<u8>(slot2::Kind::RumblePak) ? "the Rumble Pak"
+                      : kind == static_cast<u8>(slot2::Kind::GuitarGrip) ? "the Guitar Grip" : "a device";
       std::fprintf(stderr, "state: made with %s in slot 2, and %s; slot 2 starts afresh\n", was, slot2 ? "something else is in it now" : "it is empty now");
       if (slot2) slot2->reset();
     }

@@ -44,6 +44,10 @@ const char* const kStylusAxisDefault = "right";
 const char* const kStylusHoldDefault = "none";
 const char* const kStickFaceDefault = "none";
 const char* const kStickDpadDefault = "left";
+// The Guitar Grip's frets, top to bottom: the shoulders and triggers on a pad.
+const char* const kFretNames[4] = {"grip_green", "grip_red", "grip_yellow", "grip_blue"};
+const char* const kFretKeyDefaults[4] = {"1", "2", "3", "4"};
+const char* const kFretPadDefaults[4] = {"leftshoulder", "+lefttrigger", "+righttrigger", "rightshoulder"};
 
 // Held actions: an edge on both press and release.
 bool is_hold(Action a) { return a == Action::FastForward || a == Action::Mic; }
@@ -252,6 +256,10 @@ void Input::configure(const Config& cfg) {
   }
   // stylus_hold; pad.stylus_dpad is its old name, from when it only took the d-pad.
   stylus_chord_ = parse_pad(cfg.str("pad.stylus_hold", cfg.str("pad.stylus_dpad", kStylusHoldDefault)));
+  for (int i = 0; i < FRETS; ++i) {
+    key_fret_[i] = parse_key(cfg.str(std::string("keys.") + kFretNames[i], kFretKeyDefaults[i]));
+    pad_fret_[i] = parse_pad(cfg.str(std::string("pad.") + kFretNames[i], kFretPadDefaults[i]));
+  }
   {
     // stick_dpad: left (default)|right|none, also works d-pad. stick_face:
     // none (default)|left|right, directions X(up)/B(down)/Y(left)/A(right).
@@ -535,6 +543,9 @@ bool Input::key_down(SDL_Keycode k, bool down) {
     else fire(a, down);
     return true;
   }
+  if (grip_on_)
+    for (int i = 0; i < FRETS; ++i)
+      if (key_fret_[i].kind == Bind::Key && key_fret_[i].code == k) { set_fret(i, down); return true; }
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     if (key_map_[i].kind == Bind::Key && key_map_[i].code == k) { set(static_cast<B>(i), down); return true; }
   return false;
@@ -646,6 +657,9 @@ bool Input::pad_down(const Bind& b, bool down) {
       if (same(pad_hot_[static_cast<int>(Action::FastForward)][sl])) ff_pad_ = false;
       if (same(pad_hot_[static_cast<int>(Action::Mic)][sl])) mic_pad_ = false;
     }
+  if (grip_on_)
+    for (int i = 0; i < FRETS; ++i)
+      if (same(pad_fret_[i])) { set_fret(i, down); return true; }
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     if (same(pad_map_[i])) { set(static_cast<B>(i), down); return true; }
   return false;
@@ -807,6 +821,9 @@ std::string Input::pad_label(const std::string& s0) {
 const char* Input::mod_default(bool pad) { return pad ? kModDefaultPad : kModDefaultKey; }
 const char* Input::stylus_button_default() { return kStylusButtonDefault; }
 const char* Input::stylus_hold_default() { return kStylusHoldDefault; }
+const char* Input::fret_name(int i) { return kFretNames[i]; }
+const char* Input::fret_key_default(int i) { return kFretKeyDefaults[i]; }
+const char* Input::fret_pad_default(int i) { return kFretPadDefaults[i]; }
 const char* Input::stick_face_default() { return kStickFaceDefault; }
 const char* Input::stick_dpad_default() { return kStickDpadDefault; }
 bool Input::parse_stick(const std::string& s, StylusAxis& out) {

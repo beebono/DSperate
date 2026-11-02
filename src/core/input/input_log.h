@@ -23,13 +23,16 @@ struct Frame {
   s16  cpad_x = 0, cpad_y = 0;       // main stick (Circle Pad)
   s16  cstick_x = 0, cstick_y = 0;   // second stick (C-Stick / nub)
   bool zl = false, zr = false;
+  // Guitar Grip frets held (slot2::GuitarGrip::Fret bits); reach the game
+  // only while the grip is in slot 2.
+  u8   frets = 0;
   // MIC_SAMPLES evenly spaced samples over the frame (~480 Hz); enough for loudness detection.
   s8   mic[MIC_SAMPLES] = {};
   bool silent() const { for (s8 m : mic) if (m) return false; return true; }
   bool operator==(const Frame& o) const {
     if (buttons != o.buttons || x != o.x || y != o.y || down != o.down || lid != o.lid) return false;
     if (cpad_x != o.cpad_x || cpad_y != o.cpad_y || cstick_x != o.cstick_x || cstick_y != o.cstick_y) return false;
-    if (zl != o.zl || zr != o.zr) return false;
+    if (zl != o.zl || zr != o.zr || frets != o.frets) return false;
     for (int i = 0; i < MIC_SAMPLES; ++i) if (mic[i] != o.mic[i]) return false;
     return true;
   }
@@ -50,7 +53,8 @@ void decimate_mic(Frame& f, const s16* mic, size_t mic_count);
 //
 // Layout: 16-byte header ("DSIN", version u32, frame count u32 written on close, 4 reserved),
 // then one record per frame. Version 2 records: buttons u16, x u8, y u8, flags u8 (bit 0 pen
-// down, bit 1 lid closed), 3 reserved, eight s8 mic samples. Version 1 records are the first
+// down, bit 1 lid closed), Guitar Grip frets u8 (zero in older logs), 2 reserved, eight s8
+// mic samples. Version 1 records are the first
 // 8 bytes only (silent mic, lid open). Version 3 records are 24 bytes: the version 2 record
 // (flags gain bit 2 ZL, bit 3 ZR) followed by cpad_x, cpad_y, cstick_x, cstick_y as s16.
 class Log {
