@@ -89,6 +89,13 @@ struct Lean::Impl {
   void wait_sync(u32 slot) { if (sync[slot]) a->eglClientWaitSyncKHR(dpy, sync[slot], 0, EGL_FOREVER_KHR); }
   void drop_sync(u32 slot) { if (sync[slot]) { a->eglDestroySyncKHR(dpy, sync[slot]); sync[slot] = nullptr; } }
   void bind_thread() { if (a->eglGetCurrentContext() != ctx) a->eglMakeCurrent(dpy, surf, surf, ctx); }
+  // A pass kind's program and state (set_state), the stencil reference per run; the program's u_base location.
+  GLint use_kind(u32 kind, bool wbuf, bool eq, u32 ref);
+  // Every program drawn once in every pass kind's state at creation, so the
+  // driver compiles its variants (Mali: blend and masks fold into the
+  // fragment shader) before the first frame that needs them, not during it
+  // (20-45 ms stalls on the G31). The polygon texture holds zeros: nothing is drawn.
+  void warm();
 
   // The collector: frames in submit order, each waited and copied out.
   void collect_loop() {
@@ -368,10 +375,14 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
   a.glGenVertexArrays(1, &d.vao);
   if (d.timing) a.glGenQueriesEXT(Impl::kSlots, d.query);
   if (a.glGetError() != GL_NO_ERROR) return fail("GL error during setup");
+  static const bool no_warm = std::getenv("DS_GL_NOWARM") && std::atoi(std::getenv("DS_GL_NOWARM")) != 0;   // debug: measure the first-use stalls
+  const double t_warm = now_ms();
+  if (!no_warm) d.warm();
+  if (a.glGetError() != GL_NO_ERROR) return fail("GL error during warm-up");
   if (d.egl_sync) d.collector = std::thread([&d] { d.collect_loop(); });
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean (OpenGL ES): %s | %s; 1x%s, %s depth/stencil%s%s\n", a.glGetString(GL_RENDERER), a.glGetString(GL_VERSION), d.edges ? " with the edge cut" : " (no MSAA)",
-               d24 ? "D24S8" : "D32S8", d.indexed ? "" : ", no per-attachment blend", d.egl_sync ? "" : ", no EGL fences (frames finish synchronously)");
+  std::fprintf(stderr, "gpu lean (OpenGL ES): %s | %s; 1x%s, %s depth/stencil%s%s; warm-up %.0f ms\n", a.glGetString(GL_RENDERER), a.glGetString(GL_VERSION), d.edges ? " with the edge cut" : " (no MSAA)",
+               d24 ? "D24S8" : "D32S8", d.indexed ? "" : ", no per-attachment blend", d.egl_sync ? "" : ", no EGL fences (frames finish synchronously)", now_ms() - t_warm);
   return self;
 }
 
@@ -415,6 +426,62 @@ void set_state(Lean::Impl& d, u32 kind, bool eq, u32 ref, bool wbuf) {
     else a.glDisable(GL_BLEND);
   }
 }
+}
+
+GLint Lean::Impl::use_kind(u32 kind, bool wbuf, bool eq, u32 ref) {
+  GLuint prog; GLint loc;
+  if (kind == P_MASK_CLEAR) { prog = prog_mask; loc = -1; }
+  else if (kind == P_SHADOW_PREP) { prog = prog_prep; loc = loc_base_prep; }
+  else {
+    const u32 v = kind == P_OPAQUE_EARLY ? V_EARLY : kind == P_TRANS_OPQ ? V_OPQ : (kind == P_TRANS_A || kind == P_TRANS_B || kind == P_TRANS_A_DW || kind == P_TRANS_B_DW) ? V_TRANS : V_PLAIN;
+    prog = prog_draw[wbuf ? 1 : 0][v]; loc = loc_base_draw[wbuf ? 1 : 0][v];
+  }
+  if (prog != bound_prog) { a->glUseProgram(prog); bound_prog = prog; }
+  set_state(*this, kind, eq, ref, wbuf);
+  return loc;
+}
+
+void Lean::Impl::warm() {
+  Api& g = *a;
+  std::vector<u32> zero(kPullW * 4, 0);
+  g.glActiveTexture(GL_TEXTURE0); g.glBindTexture(GL_TEXTURE_2D, tex_polys[0]);
+  g.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kPullW, 1, GL_RGBA_INTEGER, GL_UNSIGNED_INT, zero.data());
+  g.glActiveTexture(GL_TEXTURE0 + 1); g.glBindTexture(GL_TEXTURE_2D, tex_verts[0]);
+  std::memset(map_frame[0], 0, sizeof(GpuFrame));
+  g.glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_frame[0]);
+  g.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo_polys[0]);
+  g.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_texels);
+  g.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, ssbo_post[0]);
+  g.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, ssbo_spans[0]);
+  g.glBindVertexArray(vao);
+  g.glBindFramebuffer(GL_FRAMEBUFFER, fbo_draw);
+  g.glViewport(0, 0, W, H);
+  g.glEnable(GL_STENCIL_TEST);
+  for (u32 wd = 0; wd < 2; ++wd)
+    for (u32 kind = 0; kind < P_COUNT; ++kind) {
+      const GLint loc = use_kind(kind, wd != 0, false, 0);
+      if (loc >= 0) g.glUniform1i(loc, 0);
+      if (kind == P_MASK_CLEAR) g.glDrawArrays(GL_TRIANGLES, 0, 3); else g.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, 1);
+    }
+  g.glDisable(GL_STENCIL_TEST); g.glDisable(GL_DEPTH_TEST); g.glDepthMask(0);
+  if (indexed) { g.glDisablei(GL_BLEND, 0); g.glDisablei(GL_BLEND, 1); g.glColorMaski(0, 1, 1, 1, 1); g.glColorMaski(1, 1, 1, 1, 1); g.glColorMaski(2, 1, 1, 1, 1); }
+  else g.glDisable(GL_BLEND);
+  g.glColorMask(1, 1, 1, 1);
+  if (edges) {
+    g.glBindFramebuffer(GL_FRAMEBUFFER, fbo_edge);
+    g.glActiveTexture(GL_TEXTURE0 + 2); g.glBindTexture(GL_TEXTURE_2D, t_ids);
+    g.glActiveTexture(GL_TEXTURE0 + 3); g.glBindTexture(GL_TEXTURE_2D, t_ds);
+    g.glUseProgram(prog_band); g.glUniform1i(loc_base_band, 0); g.glDrawArraysInstanced(GL_TRIANGLES, 0, 60, 1);
+    g.glUseProgram(prog_cutout); g.glUniform1i(loc_base_cutout, 0); g.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, 1);
+  }
+  g.glBindFramebuffer(GL_FRAMEBUFFER, fbo_res);
+  g.glActiveTexture(GL_TEXTURE0 + 2); g.glBindTexture(GL_TEXTURE_2D, t_col);
+  g.glActiveTexture(GL_TEXTURE0 + 3); g.glBindTexture(GL_TEXTURE_2D, t_ds);
+  g.glActiveTexture(GL_TEXTURE0 + 4); g.glBindTexture(GL_TEXTURE_2D, t_fog);
+  g.glUseProgram(prog_resolve); g.glDrawArrays(GL_TRIANGLES, 0, 3);
+  bound_prog = prog_resolve;
+  g.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  g.glFinish();
 }
 
 bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
@@ -518,19 +585,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   }
   a.glEnable(GL_STENCIL_TEST);
   u32 draws = 0;
-  // A pass kind's program and state, the stencil reference per run.
-  auto use = [&](u32 kind, bool eq, u32 ref) {
-    GLuint prog; GLint loc;
-    if (kind == P_MASK_CLEAR) { prog = d.prog_mask; loc = -1; }
-    else if (kind == P_SHADOW_PREP) { prog = d.prog_prep; loc = d.loc_base_prep; }
-    else {
-      const u32 v = kind == P_OPAQUE_EARLY ? V_EARLY : kind == P_TRANS_OPQ ? V_OPQ : (kind == P_TRANS_A || kind == P_TRANS_B || kind == P_TRANS_A_DW || kind == P_TRANS_B_DW) ? V_TRANS : V_PLAIN;
-      prog = d.prog_draw[wbuf ? 1 : 0][v]; loc = d.loc_base_draw[wbuf ? 1 : 0][v];
-    }
-    if (prog != d.bound_prog) { a.glUseProgram(prog); d.bound_prog = prog; }
-    set_state(d, kind, eq, ref, wbuf);
-    return loc;
-  };
+  auto use = [&](u32 kind, bool eq, u32 ref) { return d.use_kind(kind, wbuf, eq, ref); };
   auto draw = [&](GLint loc, u32 first, u32 count) { if (loc >= 0) a.glUniform1i(loc, static_cast<GLint>(first)); a.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, static_cast<GLsizei>(count)); ++draws; };
   if (first_ordered) {
     for (u32 k = 0; k < first_ordered;) {
