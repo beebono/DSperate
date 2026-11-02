@@ -282,13 +282,15 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # pixels blended by coverage, when the game asks for it). On the GPU
                                 # raster the Vulkan present smooths the polygon edges at panel density
                                 # from the polygons' own sub-pixel lines (a blend one DS pixel wide
-                                # across each line); 4x MSAA under other presents. The older mode
-                                # words accurate / enhanced read as true.
-# gpu3d = false                 # draw the 3D layer on the GPU (Vulkan, 1x, MSAA with aa): the polygon
+                                # across each line); 4x MSAA under other presents. enhanced: on the
+                                # GPU raster texture cut-out edges are smoothed too (the CPU raster
+                                # shows the hardware's blend either way). The older mode words
+                                # accurate / smooth read as true.
+# gpu3d = false                 # draw the 3D layer on the GPU (Vulkan, else OpenGL ES 3.1; 1x, MSAA with aa on Vulkan): the polygon
                                 # list goes to the GPU after each swap and the compositor reads the
                                 # finished frame, at most one frame late under load. Frees the CPU of the
                                 # 3D raster; the CPU raster stays the exact reference and the fallback
-                                # where there is no Vulkan. Pairs with gpu_present = rga on the RK3566,
+                                # where there is no driver. Pairs with gpu_present = rga on the RK3566,
                                 # which keeps the GPU for the 3D layer alone.
 # sink = auto                   # where frames go. auto picks per device: the display engine's hardware
                                 # scaler where /dev/disp answers (Miyoo A30 and other Allwinner boards),

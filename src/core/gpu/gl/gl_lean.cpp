@@ -674,7 +674,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
       }
     }
     static const bool no_cutout = std::getenv("DS_LEAN_NOCUTOUT") && std::atoi(std::getenv("DS_LEAN_NOCUTOUT")) != 0;
-    if (first_ordered > n_early && !no_cutout) { a.glUseProgram(d.prog_cutout); d.bound_prog = d.prog_cutout; a.glUniform1i(d.loc_base_cutout, static_cast<GLint>(n_early)); a.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, static_cast<GLsizei>(first_ordered - n_early)); ++draws; }
+    if (first_ordered > n_early && (f.flags2 & DS_FF2_CUTOUT) && !no_cutout) { a.glUseProgram(d.prog_cutout); d.bound_prog = d.prog_cutout; a.glUniform1i(d.loc_base_cutout, static_cast<GLint>(n_early)); a.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, static_cast<GLsizei>(first_ordered - n_early)); ++draws; }
   }
   // The resolve into the record, and the record (and the edge bytes) to the slot's PBO.
   a.glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_res);

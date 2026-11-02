@@ -22,6 +22,7 @@ const Choice kIntScale[] = {{"off", "OFF"}, {"under", "UNDER"}, {"over", "OVER"}
 const Choice kSeam[]     = {{"dark", "DARK"}, {"blend", "BLEND"}, {"blend_linear", "BLEND LINEAR"}};
 const Choice kChunky[]   = {{"false", "OFF"}, {"mean", "DEFAULT"}, {"extreme", "ADAPTIVE"},
                             {"mode", "COMMON"}, {"tl", "FIRST"}, {"min", "DARKEST"}, {"max", "LIGHTEST"}};
+const Choice kAa[]       = {{"false", "OFF"}, {"true", "ON"}, {"enhanced", "ENHANCED"}};
 const Choice kScreen[]   = {{"top", "TOP"}, {"bottom", "BOTTOM"}};
 // GBATEK's order, matching the firmware.
 const Choice kColour[]   = {{"0", "GREY"}, {"1", "BROWN"}, {"2", "RED"}, {"3", "PINK"},
@@ -149,8 +150,8 @@ const Setting kVideoSettings[] = {
        "DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES"),
   number("video.chunky_cell", "CHUNKY CELL", 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
          "PANEL PIXELS PER CELL", "auto", "AUTO"),
-  boolean("video.aa", "ANTI-ALIASING", "false", FlagLive, Dep::None,
-          "3D EDGES: THE HARDWARE'S BLEND ON THE CPU RASTER; ON THE GPU RASTER SMOOTHED AT PANEL DENSITY FROM THE POLYGONS' OWN LINES (4X MSAA WITHOUT A VULKAN PRESENT)"),
+  pick("video.aa", "ANTI-ALIASING", kAa, 3, "false", FlagLive, Dep::None,
+       "3D EDGES: THE HARDWARE'S BLEND ON THE CPU RASTER; ON THE GPU RASTER SMOOTHED AT PANEL DENSITY FROM THE POLYGONS' OWN LINES. ENHANCED ALSO SMOOTHS TEXTURE CUT-OUT EDGES THERE (GPU 3D ONLY)"),
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,
           "DRAW THE 3D LAYER ON THE GPU. NEEDS VULKAN; THE CPU DRAWS IT OTHERWISE"),
   boolean("video.fps", "FPS COUNTER", "false", FlagLive, Dep::None,

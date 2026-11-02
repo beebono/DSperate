@@ -253,6 +253,7 @@ int main(int argc, char** argv) {
   long gpu_dump_frame = -1; const char* gpu_dump_path = nullptr;   // --dump-gpu-frame
   const char* rec3d_path = nullptr;   // --dump-3d
   bool gpu3d = false;   // --gpu3d
+  bool aa_enhanced = false;   // --aa-enhanced: video.aa = enhanced (the GPU raster's cut-out pass)
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit = true;                    // both CPUs; --interp clears it
@@ -356,6 +357,7 @@ int main(int argc, char** argv) {
     else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
+    else if (flag("--aa-enhanced")) aa_enhanced = true;
     else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, gpu_raster.h: Vulkan, else OpenGL ES); declines to the CPU without a driver
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
     else if (arg("--frameskip")) frameskip = std::atoi(argv[++i]);          // skip drawing N of every N+1 frames (Gpu::set_frame_skip); a dump of a skipped frame is stale
@@ -524,6 +526,7 @@ int main(int argc, char** argv) {
     }
   }
   nds.gpu3d.renderer().set_aa(!no_aa);
+  nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced);
   std::vector<ds::u32> scaled_px[2]; std::vector<ds::u16> scaled_xrun; FILE* scaled_out = nullptr;
   if (scaled_n > 0 && scaled_path) {
     const ds::u32 W = ds::SCREEN_W * scaled_n, H = ds::SCREEN_H * scaled_n;

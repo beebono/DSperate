@@ -186,6 +186,7 @@ const char* kUsage =
     "  --timing M      CPU cycle model: fast (default: constant memory and jump costs, much cheaper)\n"
     "                  | exact (melonDS's per-access model); emu.timing\n"
     "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): the hardware's edge blend on the\n"
+    "  --aa-enhanced   ... video.aa = enhanced: on the GPU raster texture cut-out edges are smoothed too\n"
     "                  CPU raster; on the GPU raster, 3D edges smoothed at panel density from the\n"
     "                  polygons' own lines by the Vulkan present (4x MSAA under other presents)\n"
     "  --gpu3d / --no-gpu3d  the 3D layer drawn on the GPU (video.gpu3d, off by default); the CPU\n"
@@ -300,11 +301,15 @@ std::string save_path(const std::string& rom, const std::string& dir) {
   return dir.empty() ? rom_stem(rom) + ".sav" : dir + "/" + base_name(rom_stem(rom)) + ".sav";
 }
 
-// video.aa: true / false. The older mode words still read: accurate / enhanced / smooth as on, off as off.
+// video.aa: false / true / enhanced. Enhanced: on the GPU raster the edge
+// cut also cuts texture cut-out edges (the cut-out pass, ~0.4 ms of GPU);
+// the CPU raster shows the hardware's blend either way. The older mode
+// words still read: accurate / smooth as on, off as off.
 bool aa_on(const std::string& v) {
   return v == "true" || v == "1" || v == "yes" || v == "on" || v == "accurate" || v == "enhanced" || v == "smooth";
 }
-void apply_aa(NDS& nds, bool on) { nds.gpu3d.renderer().set_aa(on); }
+bool aa_enhanced(const std::string& v) { return v == "enhanced"; }
+void apply_aa(NDS& nds, const std::string& v) { nds.gpu3d.renderer().set_aa(aa_on(v)); nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced(v)); }
 
 void load_save(NDS& nds, const std::string& path) {
   const ds::sdl::OffRealtime off_rt;
@@ -1262,6 +1267,7 @@ static int run(int argc, char** argv) {
     else if (flag("--frameskip-capture")) cli.set("emu.frameskip_capture", "true");
     else if (flag("--no-frameskip-capture")) cli.set("emu.frameskip_capture", "false");
     else if (flag("--aa")) cli.set("video.aa", "true");
+    else if (flag("--aa-enhanced")) cli.set("video.aa", "enhanced");
     else if (flag("--no-aa")) cli.set("video.aa", "false");
     else if (flag("--gpu3d")) cli.set("video.gpu3d", "true");
     else if (flag("--preload-rom")) cli.set("cart.preload", "true");
@@ -1669,7 +1675,7 @@ sdl_ready:
   {
     const char* g = std::getenv("DS_GPU3D");
     const bool want = g ? std::atoi(g) != 0 : cfg.flag("video.gpu3d", false);
-    nds.gpu3d.renderer().set_aa(aa_on(cfg.str("video.aa", "false")));   // before the raster starts: its MSAA is fixed at creation
+    apply_aa(nds, cfg.str("video.aa", "false"));   // before the raster starts: its MSAA is fixed at creation
     if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on (%s)\n", nds.gpu3d.renderer().gpu_api()); }
   }
   // Let fullscreen windows take their final size before the ROM loads (see
@@ -1957,8 +1963,8 @@ sdl_ready:
   Session session;
   session.open(nds, cfg, rom_path, save_arg);
 
-  cfg.set("video.aa", aa_on(cfg.str("video.aa", "false")) ? "true" : "false");
-  apply_aa(nds, aa_on(cfg.str("video.aa", "false")));
+  cfg.set("video.aa", aa_enhanced(cfg.str("video.aa", "false")) ? "enhanced" : aa_on(cfg.str("video.aa", "false")) ? "true" : "false");
+  apply_aa(nds, cfg.str("video.aa", "false"));
   if (!boot_firmware || nds.dsi) nds.setup_direct_boot();   // on a DSi this is the NAND boot
   if (nds.dsi && dsi_title_lo && !dsi_menu) nds.dsi_autoload(dsi_title_lo);
   // Off in the core by default for reproducibility. Not under --replay: a
@@ -2885,7 +2891,7 @@ sdl_ready:
       session.refresh_analog(nds, cfg);
       return;
     }
-    if (is("video.aa")) { apply_aa(nds, aa_on(v)); return; }
+    if (is("video.aa")) { apply_aa(nds, v); return; }
     if (is("video.gpu3d")) { std::string why; if (!nds.gpu3d.renderer().set_gpu(on, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); return; }
     if (is("video.gpu_present")) { host.reopen_wanted = true; return; }
     if (is("video.fps")) { fps_osd = on; if (on && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; } return; }

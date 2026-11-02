@@ -682,7 +682,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     }
     // The cut-out pass: the alpha-tested opaque polygons, drawn last in the opaque prefix.
     static const bool no_cutout = std::getenv("DS_LEAN_NOCUTOUT") && std::atoi(std::getenv("DS_LEAN_NOCUTOUT")) != 0;   // debug: polygon edges only
-    if (first_ordered > n_early && !no_cutout) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_cutout); a.vkCmdDraw(cb, 24, first_ordered - n_early, 0, n_early); }
+    if (first_ordered > n_early && (f.flags2 & DS_FF2_CUTOUT) && !no_cutout) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_cutout); a.vkCmdDraw(cb, 24, first_ordered - n_early, 0, n_early); }
     a.vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_INLINE);
   }
   a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_resolve);
