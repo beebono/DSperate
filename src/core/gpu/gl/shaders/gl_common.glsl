@@ -10,7 +10,7 @@ precision highp usampler2D;
 #define DS_GLSL 1
 #include "vk_layout.h"
 layout(std140, binding = 0) uniform PCB { GpuFrame f; } pc;
-// DS_GL_WCLIP (gl_lean.cpp, an experiment): a W-buffered frame keeps 1/w in the clip z (nearer is larger) instead of writing w by gl_FragDepth.
+// DS_WCLIP (gl_lean.cpp, the default): a W-buffered frame keeps wscale / w in the clip z (nearer is larger) instead of writing w by gl_FragDepth.
 #ifndef DS_WCLIP
 #define DS_WCLIP 0
 #endif

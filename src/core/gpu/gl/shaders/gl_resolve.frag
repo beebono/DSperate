@@ -35,7 +35,7 @@ void main() {
     uint fr = c15_to_18(fc, 0u), fg = c15_to_18(fc, 4u), fb = c15_to_18(fc, 9u), fa = (fc >> 16) & 0x1Fu;
     float dz = texelFetch(s_depth, xy, 0).r;
     bool wbuf = (pc.f.flags & DS_FF_WBUFFER) != 0u;
-    uint z = (wbuf && DS_WCLIP != 0) ? uint(clamp(1.0 / max(dz, 5.96e-8), 0.0, 16777215.0)) : uint(clamp(dz * 16777215.0, 0.0, 16777215.0));   // the DS depth / 2^24 (gl_lean.vert), or 1/w under DS_GL_WCLIP
+    uint z = (wbuf && DS_WCLIP != 0) ? uint(clamp(uintBitsToFloat(pc.f.wscale) / max(dz, 5.96e-8), 0.0, 16777215.0)) : uint(clamp(dz * 16777215.0, 0.0, 16777215.0));   // the DS depth / 2^24 (gl_lean.vert), or 1/w under DS_GL_WCLIP
     uint d = fog_density(z);
     if (fog_colour) rgb = (uvec3(fr, fg, fb) * d + rgb * (128u - d)) >> 7;
     a5 = (fa * d + a5 * (128u - d)) >> 7;

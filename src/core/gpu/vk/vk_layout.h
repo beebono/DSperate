@@ -132,6 +132,11 @@ struct GpuFrame {
   uint   nrows;         // span rows this frame, all polygons: the span pass is one lane per row
   uint   flags;         // DS_FF_*
   uint   flags2;        // DS_FF2_* (flags is full: bits 16-31 are the shadow run)
+  // GL raster, W-buffered frames under DS_WCLIP: the clip z carries
+  // wscale / w (float bits), wscale a little under the frame's nearest w, so
+  // the scene fills the clip range and the far end keeps its precision.
+  uint   wscale;
+  uint   pad2_[2];
 };
 
 #define DS_FF_WBUFFER 0x1u   // frame depth-tests on W (SWAP_BUFFERS bit 1); triangle path picks pipelines by it

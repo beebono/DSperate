@@ -23,8 +23,10 @@
 //   attachments as textures after it (0.3 MB of tile writeback);
 // - DS row y draws on GL row y, so gl_FragCoord is the DS coordinate and
 //   the record reads back top row first with no flip;
-// - W-buffered frames write gl_FragDepth from the perspective-correct w
-//   (GL's fixed depth mapping has no room for the Vulkan path's 1/w);
+// - W-buffered frames keep wscale / w in the clip z, wscale the frame's
+//   nearest w, so the far end keeps its precision through GL's fixed depth
+//   mapping (the Vulkan path stores 1/w as is); DS_GL_WCLIP=0 writes
+//   gl_FragDepth from the perspective-correct w instead, exact but late;
 // - the record and the edge bytes leave through RGBA8 attachments and
 //   glReadPixels into persistently mapped PBOs, their bytes the record's
 //   own layout;

@@ -27,8 +27,7 @@ void main() {
   GpuVert vt = at_b ? vb : va;
   float w = max(float(vt.w), 1.0);
   float zd = ds_depth(vt, p.attr);
-  bool wbuf = (pc.f.flags & DS_FF_WBUFFER) != 0u;
-  float zc = wbuf ? (DS_WCLIP != 0 ? (1.0 / max(zd, 1.0) * 2.0 - 1.0) * w : 0.0) : (zd / 16777215.0 * 2.0 - 1.0) * w;
+  float zc = ds_clip_z(zd, p.attr, w);
   gl_Position = vec4((pos.x / 256.0 * 2.0 - 1.0) * w, (pos.y / 192.0 * 2.0 - 1.0) * w, zc, w);
   v_zp = zd;
 }

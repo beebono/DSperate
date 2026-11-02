@@ -331,8 +331,12 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
   // W-buffer depth write), the stencil-only pair, the resolve, the edge passes.
   {
     std::string err;
-    // DS_GL_WCLIP=1 (experiment): W-buffered frames test 1/w in the clip z (early depth, less precision) instead of writing gl_FragDepth.
-    const bool wclip = std::getenv("DS_GL_WCLIP") && std::atoi(std::getenv("DS_GL_WCLIP")) != 0;
+    // W-buffered frames: the clip z carries wscale / w (early depth test;
+    // ~25% less GPU time on On Tour than gl_FragDepth, which forces late
+    // depth) with the frame's nearest w as the scale so the far end keeps
+    // its precision (gl_pull.glsl, ds_clip_z). DS_GL_WCLIP=0: gl_FragDepth
+    // from the perspective-correct w instead, exact to the DS's 24 bits.
+    const bool wclip = !(std::getenv("DS_GL_WCLIP") && std::atoi(std::getenv("DS_GL_WCLIP")) == 0);
     d.wclip = wclip;
     const std::string vdefs = wclip ? "#define DS_WCLIP 1\n" : "";
     const GLuint vs_lean = compile(a, GL_VERTEX_SHADER, source(text_lean_vert(), vdefs), &err);
@@ -506,6 +510,15 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
 
   GpuFrame f = fin;
   const bool wbuf = (f.flags & DS_FF_WBUFFER) != 0;
+  // The clip z of a W-buffered frame carries wscale / w (gl_pull.glsl, ds_clip_z).
+  f.wscale = 0x3F800000u;   // 1.0f
+  if (wbuf && d.wclip) {
+    s32 wmin = 0x7FFFFFFF;
+    for (u32 k = 0; k < nvert; ++k) wmin = std::min(wmin, d.host_verts[k].z);
+    const float ws = std::max(1.0f, static_cast<float>(wmin) - 300.0f);   // room for a decal's pull
+    std::memcpy(&f.wscale, &ws, sizeof ws);
+  }
+  float wscale_f = 1.0f; std::memcpy(&wscale_f, &f.wscale, sizeof wscale_f);
   GpuPoly* gpw = d.host_polys.data();
   const GpuPoly* gp = gpw;
   const GpuVert* gv = d.host_verts.data();
@@ -581,7 +594,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     a.glClearBufferfv(GL_COLOR, 0, col);
     a.glClearBufferfv(GL_COLOR, 1, fog);
     if (d.edges) a.glClearBufferuiv(GL_COLOR, 2, zero);
-    a.glClearBufferfi(GL_DEPTH_STENCIL, 0, wbuf && d.wclip ? 1.f / std::max(cz, 1.f) : std::min(1.f, cz / 16777215.f), ca ? static_cast<GLint>(S_DRAWN | code[(f.clear_attr >> 24) & 0x3F]) : 0);
+    a.glClearBufferfi(GL_DEPTH_STENCIL, 0, wbuf && d.wclip ? std::min(1.f, wscale_f / std::max(cz, 1.f)) : std::min(1.f, cz / 16777215.f), ca ? static_cast<GLint>(S_DRAWN | code[(f.clear_attr >> 24) & 0x3F]) : 0);
   }
   a.glEnable(GL_STENCIL_TEST);
   u32 draws = 0;

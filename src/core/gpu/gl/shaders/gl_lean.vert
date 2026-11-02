@@ -31,8 +31,7 @@ void main() {
   if (p.ybot == p.ytop) oy = (vi == 1u || vi == 2u) ? 1.0 : 0.0;
   float x = (sxf + ox) / 256.0 * 2.0 - 1.0, y = (syf + oy) / 192.0 * 2.0 - 1.0;
   float zd = ds_depth(vt, p.attr);
-  bool wbuf = (pc.f.flags & DS_FF_WBUFFER) != 0u;
-  float zc = wbuf ? (DS_WCLIP != 0 ? (1.0 / max(zd, 1.0) * 2.0 - 1.0) * w : 0.0) : (zd / 16777215.0 * 2.0 - 1.0) * w;
+  float zc = ds_clip_z(zd, p.attr, w);
   gl_Position = vec4(x * w, y * w, zc, w);
   v_poly = pi;
   v_rgb = vec3(float(vt.r), float(vt.g), float(vt.b));

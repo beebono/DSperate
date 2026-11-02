@@ -30,3 +30,19 @@ float ds_depth(GpuVert vt, uint attr) {
   if ((attr & 0x4000u) != 0u) z = max(z - (wbuf ? 255.0 : 512.0), 0.0);
   return z;
 }
+// The clip z: the DS depth over 2^24 (Z-buffered, or W-buffered through
+// gl_FragDepth, where the clip z is unused); under DS_WCLIP a W-buffered
+// frame carries 1/w, nearer larger. GL maps it to depth (ndc + 1) / 2, a
+// float near 1 for far w, so a decal's 255-of-w pull (ds_depth) is below
+// the float's step at the back of a scene and the decal ties with its
+// surface (On Tour's stage poster): a decal is kept at least a few steps
+// nearer than its surface, whichever is more.
+float ds_clip_z(float zd, uint attr, float w) {
+  bool wbuf = (pc.f.flags & DS_FF_WBUFFER) != 0u;
+  if (!wbuf) return (zd / 16777215.0 * 2.0 - 1.0) * w;
+  if (DS_WCLIP == 0) return 0.0;
+  float ws = uintBitsToFloat(pc.f.wscale);
+  float inv = ws / max(zd, 1.0);
+  if ((attr & 0x4000u) != 0u) inv = max(inv, ws / max(zd + 255.0, 1.0) + 4e-7);
+  return (min(inv, 1.0) * 2.0 - 1.0) * w;
+}
