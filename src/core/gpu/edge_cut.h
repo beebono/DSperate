@@ -36,17 +36,11 @@ inline bool edge_cut_same(u32 a, u32 b) {
   return true;
 }
 
-// The colour of the panel point (u, v) in [0, 1)^2 inside source pixel (x, y).
-// `np`: panel pixels per source pixel. Nonzero: DS_EDGE_BLEND's soft
-// version, the two colours mixed by the panel point's distance from the line.
-inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, float u, float v, float np = 0) {
-  const u32 w = edges[y * 256 + x];
-  if (!w) return frame[y * 256 + x];
-  const u32 e = w >> 24;
-  const bool vert = e & 0x20, neg = e & 0x40;
-  const float t = vert ? v : u, along = (vert ? u : v) - 0.5f;
-  // The neighbour along the run on this side, if it is an edge pixel of the
-  // same kind (axis and side), gives the line's tilt.
+// The edge line of edge byte `e` at source pixel (x, y), across the run's
+// axis, at `along` (-0.5..0.5) along it: tilted toward the next edge pixel
+// of the same kind on that side.
+inline float edge_cut_line(const u32* edges, u32 e, int x, int y, float along) {
+  const bool vert = e & 0x20;
   const int nx = x + (vert ? (along < 0 ? -1 : 1) : 0), ny = y + (vert ? 0 : (along < 0 ? -1 : 1));
   const float pos = edge_cut_pos(e);
   float pn = pos;
@@ -54,32 +48,70 @@ inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, flo
     const u32 n = edges[ny * 256 + nx] >> 24;
     if ((n & 0xE0) == (e & 0xE0)) pn = edge_cut_pos(n);
   }
-  const float line = pos + (pn - pos) * (along < 0 ? -along : along);
+  return pos + (pn - pos) * (along < 0 ? -along : along);
+}
+
+inline u32 edge_cut_mix(u32 a, u32 b, float k) {   // a + (b - a) * k, per channel
+  u32 r = 0xFF000000u;
+  for (int sh = 0; sh < 24; sh += 8) {
+    const float c = static_cast<float>((a >> sh) & 255) + (static_cast<float>((b >> sh) & 255) - static_cast<float>((a >> sh) & 255)) * k;
+    r |= static_cast<u32>(c + 0.5f) << sh;
+  }
+  return r;
+}
+inline float edge_cut_clamp01(float k) { return k < 0 ? 0 : k > 1 ? 1 : k; }
+
+// The colour of the panel point (u, v) in [0, 1)^2 inside source pixel
+// (x, y). `bw` (an experiment, DS_EDGE_BLEND=W): instead of the hard cut,
+// the two colours mixed by the point's distance from the line over a band
+// `bw` DS pixels wide, reaching into the pixel beyond the edge pixel.
+inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, float u, float v, float bw = 0) {
+  const u32 s = frame[y * 256 + x];
+  const u32 w = edges[y * 256 + x];
+  if (!w) {
+    if (bw <= 0) return s;
+    static const int nb[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};
+    u32 c = s; float best = 0;
+    for (const auto& d : nb) {
+      const int qx = x + d[0], qy = y + d[1];
+      if (qx < 0 || qx > 255 || qy < 0 || qy > 191) continue;
+      const u32 wn = edges[qy * 256 + qx];
+      if (!wn) continue;
+      const u32 en = wn >> 24;
+      const bool vn = en & 0x20, gn = en & 0x40;
+      const bool toward = vn ? (d[0] == 0 && (d[1] == -1 ? !gn : gn)) : (d[1] == 0 && (d[0] == -1 ? !gn : gn));
+      if (!toward) continue;
+      const u32 own = 0xFF000000u | (wn & 0x00FFFFFFu);
+      if (edge_cut_same(own, s)) continue;
+      const float tn = vn ? v - static_cast<float>(d[1]) : u - static_cast<float>(d[0]);
+      const float ln = edge_cut_line(edges, en, qx, qy, (vn ? u : v) - 0.5f);
+      const float k = edge_cut_clamp01(0.5f + (gn ? tn - ln : ln - tn) / bw);
+      if (k > best) { best = k; c = edge_cut_mix(s, own, k); }
+    }
+    return c;
+  }
+  const u32 e = w >> 24;
+  const bool vert = e & 0x20, neg = e & 0x40;
+  const float t = vert ? v : u;
+  const float line = edge_cut_line(edges, e, x, y, (vert ? u : v) - 0.5f);
   const bool inside = neg ? t >= line : t < line;
   const u32 own = 0xFF000000u | (w & 0x00FFFFFFu);
   const int px = vert ? x : (neg ? x - 1 : x + 1), py = vert ? (neg ? y - 1 : y + 1) : y;
   if (px < 0 || px > 255 || py < 0 || py > 191) return own;
   const u32 o = frame[py * 256 + px];
-  if (edge_cut_same(own, o)) return frame[y * 256 + x];   // a seam inside one surface: nothing to cut
-  if (np <= 0) return inside ? own : o;
-  float k = ((neg ? t - line : line - t)) * np + 0.5f;
-  k = k < 0 ? 0 : k > 1 ? 1 : k;
-  u32 r = 0xFF000000u;
-  for (int sh = 0; sh < 24; sh += 8) {
-    const float c = static_cast<float>((o >> sh) & 255) + (static_cast<float>((own >> sh) & 255) - static_cast<float>((o >> sh) & 255)) * k;
-    r |= static_cast<u32>(c + 0.5f) << sh;
-  }
-  return r;
+  if (edge_cut_same(own, o)) return s;   // a seam inside one surface: nothing to cut
+  if (bw <= 0) return inside ? own : o;
+  return edge_cut_mix(o, own, edge_cut_clamp01(0.5f + (neg ? t - line : line - t) / bw));
 }
 
 // A whole screen at n x: dst is (256 n) x (192 n), nearest outside the cut.
-inline void edge_cut_screen(const u32* frame, const u32* edges, int n, u32* dst, bool soft = false) {
+inline void edge_cut_screen(const u32* frame, const u32* edges, int n, u32* dst, float bw = 0) {
   for (int y = 0; y < 192; ++y)
     for (int fy = 0; fy < n; ++fy) {
       u32* const row = dst + static_cast<size_t>(y * n + fy) * 256 * n;
       for (int x = 0; x < 256; ++x)
         for (int fx = 0; fx < n; ++fx)
-          row[x * n + fx] = edge_cut_sample(frame, edges, x, y, (fx + 0.5f) / n, (fy + 0.5f) / n, soft ? static_cast<float>(n) : 0.0f);
+          row[x * n + fx] = edge_cut_sample(frame, edges, x, y, (fx + 0.5f) / n, (fy + 0.5f) / n, bw);
     }
 }
 
