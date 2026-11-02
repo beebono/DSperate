@@ -88,11 +88,11 @@ struct Lean::Impl {
   struct Img { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
   Img col_ms, ds_ms, fog_ms, res;   // multisampled colour, depth/stencil and fog flag (transient); the 1x resolved record
   Img ids, ebyte;                   // edges (see `edges`)
-  VkShaderModule mod_evert = VK_NULL_HANDLE, mod_efrag = VK_NULL_HANDLE;
+  VkShaderModule mod_evert = VK_NULL_HANDLE, mod_efrag = VK_NULL_HANDLE, mod_cfrag = VK_NULL_HANDLE;
   VkDescriptorSetLayout dsl_eb = VK_NULL_HANDLE;
   VkPipelineLayout layout_eb = VK_NULL_HANDLE;
   VkDescriptorSet set_eb = VK_NULL_HANDLE;
-  VkPipeline pipe_band = VK_NULL_HANDLE;
+  VkPipeline pipe_band = VK_NULL_HANDLE, pipe_cutout = VK_NULL_HANDLE;
   VkImageView ds_depth_view = VK_NULL_HANDLE;   // the depth aspect alone, for the resolve's input attachment
   VkShaderModule mod_vert = VK_NULL_HANDLE, mod_frag = VK_NULL_HANDLE, mod_frag_early = VK_NULL_HANDLE, mod_frag_opq = VK_NULL_HANDLE, mod_frag_trans = VK_NULL_HANDLE, mod_res = VK_NULL_HANDLE, mod_fs = VK_NULL_HANDLE;
   bool nostencil = false;   // DS_LEAN_NOSTENCIL=1: translucent pass B alone, always (debug)
@@ -126,9 +126,10 @@ struct Lean::Impl {
     for (auto& wb : pipe) for (auto& row : wb) for (auto& p : row) if (p) a.vkDestroyPipeline(vk->dev, p, nullptr);
     if (pipe_resolve) a.vkDestroyPipeline(vk->dev, pipe_resolve, nullptr);
     if (pipe_band) a.vkDestroyPipeline(vk->dev, pipe_band, nullptr);
+    if (pipe_cutout) a.vkDestroyPipeline(vk->dev, pipe_cutout, nullptr);
     if (layout_eb) a.vkDestroyPipelineLayout(vk->dev, layout_eb, nullptr);
     if (dsl_eb) a.vkDestroyDescriptorSetLayout(vk->dev, dsl_eb, nullptr);
-    for (VkShaderModule* m : {&mod_evert, &mod_efrag}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
+    for (VkShaderModule* m : {&mod_evert, &mod_efrag, &mod_cfrag}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
     if (fb) a.vkDestroyFramebuffer(vk->dev, fb, nullptr);
     if (rp) a.vkDestroyRenderPass(vk->dev, rp, nullptr);
     if (ds_depth_view) a.vkDestroyImageView(vk->dev, ds_depth_view, nullptr);
@@ -213,7 +214,7 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, bool edges, std::stri
   };
   if (!shader(shader_lean_vert(), &d.mod_vert) || !shader(shader_lean_frag(), &d.mod_frag) || !shader(shader_lean_frag_early(), &d.mod_frag_early) || !shader(shader_lean_frag_opq(), &d.mod_frag_opq) || !shader(shader_lean_frag_trans(), &d.mod_frag_trans) || !shader(d.msaa ? shader_lean_resolve() : shader_lean_resolve_1x(), &d.mod_res) || !shader(shader_tri_fs(), &d.mod_fs))
     return fail("lean shaders rejected by the driver");
-  if (d.edges && (!shader(shader_lean_edge_vert(), &d.mod_evert) || !shader(shader_lean_edge_frag(), &d.mod_efrag))) return fail("edge shaders rejected by the driver");
+  if (d.edges && (!shader(shader_lean_edge_vert(), &d.mod_evert) || !shader(shader_lean_edge_frag(), &d.mod_efrag) || !shader(shader_lean_cutout_frag(), &d.mod_cfrag))) return fail("edge shaders rejected by the driver");
   d.nostencil = std::getenv("DS_LEAN_NOSTENCIL") && std::atoi(std::getenv("DS_LEAN_NOSTENCIL")) != 0;
 
   // Descriptors: set 0 = polys, verts, texels (texel buffer), post, spans; set 1 = the MS colour as input attachment.
@@ -464,6 +465,9 @@ std::unique_ptr<Lean> Lean::create(Device& dev, bool msaa, bool edges, std::stri
       VkPipelineColorBlendStateCreateInfo cbs2 = cbs; cbs2.attachmentCount = 1; cbs2.pAttachments = &cbb;
       VkGraphicsPipelineCreateInfo g2 = gpi; g2.pColorBlendState = &cbs2; g2.layout = d.layout_eb; g2.subpass = 1;
       if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_band) != VK_SUCCESS) return fail("band pipeline");
+      // The cut-out pass: the draw's vertex stage, lean_cutout.frag, likewise.
+      st[0].module = d.mod_vert; st[1].module = d.mod_cfrag;
+      if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_cutout) != VK_SUCCESS) return fail("cut-out pipeline");
     }
   }
 
@@ -654,6 +658,9 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_band);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_eb, 1, 1, &d.set_eb, 0, nullptr);
     if (npoly) a.vkCmdDraw(cb, 60, npoly, 0, 0);
+    // The cut-out pass: the alpha-tested opaque polygons, drawn last in the opaque prefix.
+    static const bool no_cutout = std::getenv("DS_LEAN_NOCUTOUT") && std::atoi(std::getenv("DS_LEAN_NOCUTOUT")) != 0;   // debug: polygon edges only
+    if (first_ordered > n_early && !no_cutout) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_cutout); a.vkCmdDraw(cb, 24, first_ordered - n_early, 0, n_early); }
     a.vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_INLINE);
   }
   a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_resolve);

@@ -23,6 +23,7 @@ Spirv shader_lean_frag_trans();   // ... its other pixels only (the translucent 
 Spirv shader_lean_resolve(); // ... and the resolve into the 3D layer record
 Spirv shader_lean_edge_vert();     // the edge cut: a band around each polygon edge ...
 Spirv shader_lean_edge_frag();     // ... placing the edge line in the pixels it crosses (lean_edge.vert/.frag)
+Spirv shader_lean_cutout_frag();   // ... and cut-out textures' edges (lean_cutout.frag)
 Spirv shader_lean_resolve_1x();   // ... the same over single-sample attachments (aa off)
 
 } // namespace ds::gpu::vk
