@@ -284,6 +284,7 @@ Gpu3D::~Gpu3D() { renderer_.sync_all(); }
 
 Gpu3D::Gpu3D(NDS& nds) : nds_(nds), renderer_(nds) {
   if (const char* e = std::getenv("DS_EDGE_DENSITY")) edge_density_ = std::atoi(e);   // the GPU edge cut's clump limit (edge_line)
+  if (const char* e = std::getenv("DS_EDGE_GAP")) edge_gap_ = std::atoi(e) != 0;      // the GPU edge cut's gap fill (edge_line)
   reset();
 }
 
