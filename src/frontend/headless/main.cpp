@@ -241,7 +241,7 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
-  const char *gba_rom = nullptr, *gba_save = nullptr; int gba_light = 5; bool rumble_pak = false;
+  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr; int gba_light = 5; bool rumble_pak = false;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
@@ -338,6 +338,7 @@ int main(int argc, char** argv) {
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
     else if (arg("--gba-rom")) gba_rom = argv[++i];         // a GBA game in slot 2 (DS mode only)
     else if (arg("--gba-save")) gba_save = argv[++i];       // its save, read-only like --save; default none
+    else if (arg("--gba-save-out")) gba_save_out = argv[++i];   // at exit, the GBA save as the run left it (for checking what a game wrote)
     else if (arg("--gba-light")) gba_light = std::atoi(argv[++i]);   // Boktai solar sensor, 0 (dark) to 10
     else if (flag("--rumble-pak")) rumble_pak = true;       // the DS Rumble Pak in slot 2; motor changes are counted at exit
     else if (arg("--cheats")) cheat_db = argv[++i];         // usrcheat.dat; the entry matching this ROM is loaded
@@ -981,6 +982,11 @@ int main(int argc, char** argv) {
   if (nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak) std::fprintf(stderr, "slot2: %u rumble changes\n", nds.slot2->rumble_events());
   if (const ds::slot2::GameCart* g = nds.gba_cart(); g && g->save_writes())
     std::fprintf(stderr, "slot2: %u GBA save writes (not written back)\n", g->save_writes());
+  if (const ds::slot2::GameCart* g = nds.gba_cart(); g && gba_save_out) {
+    std::string err;
+    if (ds::slot2::write_save(*g, gba_save_out, err)) std::fprintf(stderr, "slot2: wrote the GBA save to %s\n", gba_save_out);
+    else std::fprintf(stderr, "slot2: %s\n", err.c_str());
+  }
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
               static_cast<unsigned long long>(nds.sched.now()));
