@@ -278,11 +278,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # chunky_threshold = 180        # extreme only: luma distance (0..255) an outlier needs to win over the mean
 # chunky_cell = auto            # panel pixels per cell: auto (4..16, whatever divides the screen) | pair
                                 # (2x2 DS pixels) | N (or the nearest size below N that divides the screen)
-# aa = false                    # 3D anti-aliasing: on the CPU raster the edges the game anti-aliases
-                                # are cut at panel density by the Vulkan present (hard steps, four per DS
-                                # pixel at 4x); the emulated frame and captures keep the hardware's edge
-                                # blend, which other presents show. On the GPU raster 4x MSAA. The older
-                                # mode words accurate / enhanced read as true.
+# aa = false                    # 3D anti-aliasing: on the CPU raster the hardware's edge blend (edge
+                                # pixels blended by coverage, when the game asks for it), on the GPU
+                                # raster 4x MSAA. The older mode words accurate / enhanced read as true.
 # gpu3d = false                 # draw the 3D layer on the GPU (Vulkan, 1x, MSAA with aa): the polygon
                                 # list goes to the GPU after each swap and the compositor reads the
                                 # finished frame, at most one frame late under load. Frees the CPU of the

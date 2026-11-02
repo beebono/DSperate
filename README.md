@@ -152,13 +152,10 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
 - **Scaling filters** applied per scanline straight into the presented buffer:
   nearest, bilinear, LCD grid, box-filter seams (sharp, shimmer-free), and
   chunky 2x2 cells; optional integer scaling (letterbox or crop).
-- **3D anti-aliasing** (`video.aa`, `--aa`, the ANTI-ALIASING menu row): on
-  the software rasteriser, the Vulkan present cuts the 3D edges the game
-  anti-aliases at panel density (hard steps, four per DS pixel at 4x, instead
-  of the DS's soft 1x blend); the emulated frame and display captures keep the
-  hardware's own blend (pixel-exact with melonDS), which is also what other
-  presents show. 4x MSAA on the GPU rasteriser, which also smooths the creases
-  and cut-out edges the DS leaves stepped.
+- **3D anti-aliasing** (`video.aa`, `--aa`, the ANTI-ALIASING menu row): the
+  hardware's own edge blend on the software rasteriser (pixel-exact with
+  melonDS), 4x MSAA on the GPU one, which also smooths the creases and cut-out
+  edges the DS leaves stepped.
 - **Screen gap** (`video.screen_gap`, `--screen-gap`): a distance in panel
   pixels between the two screens of a stacked, side-by-side or dominant pair,
   or `auto`, which pushes them to the panel's edges when the fit leaves room.

@@ -185,9 +185,8 @@ const char* kUsage =
     "  --interp        interpreter instead of the recompiler\n"
     "  --timing M      CPU cycle model: fast (default: constant memory and jump costs, much cheaper)\n"
     "                  | exact (melonDS's per-access model); emu.timing\n"
-    "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): on the CPU raster, 3D edges cut\n"
-    "                  at panel density by the Vulkan present (the hardware's edge blend elsewhere;\n"
-    "                  captures always get the blend); 4x MSAA on the GPU raster\n"
+    "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): the hardware's edge blend on the\n"
+    "                  CPU raster, 4x MSAA on the GPU raster\n"
     "  --gpu3d / --no-gpu3d  the 3D layer drawn on the GPU (video.gpu3d, off by default); the CPU\n"
     "                  raster where there is no Vulkan\n"
     "  --frameskip N   skip drawing up to N frames in N+1 (0 = off); emu.frameskip. Skipping runs\n"
@@ -4081,13 +4080,15 @@ sdl_ready:
         display.present();
         if (dual_window) display2.present();
       } else {
-        // The edge cut (core/gpu/edge_cut.h): video.aa on the CPU raster cuts
-        // 3D edges at panel density under a Vulkan present (the RGA cannot)
-        // instead of showing the 1x blend. Takes effect from the next frame.
-        // DS_EDGE_CUT=0 shows the blend.
-        static const bool cut_off = [] { const char* e = std::getenv("DS_EDGE_CUT"); return e && *e == '0'; }();
+        // The edge cut (core/gpu/edge_cut.h): 3D edges cut at panel density
+        // by the Vulkan present (the RGA cannot). Meant for video.aa on the
+        // GPU raster, in place of its MSAA (not built yet); the CPU raster
+        // shows the hardware's blend, its accurate AA. DS_EDGE_CUT=1 cuts the
+        // CPU raster's edges anyway: the reference the GPU raster's cut is
+        // checked against. Takes effect from the next frame.
+        static const bool cut_cpu = [] { const char* e = std::getenv("DS_EDGE_CUT"); return e && *e == '1'; }();
         auto vk_present = [](const ds::sdl::Display& d) { return d.gpu_present() && !d.rga_present(); };
-        const bool cut = !cut_off && vk_present(display) && (!dual_window || vk_present(display2)) &&
+        const bool cut = cut_cpu && vk_present(display) && (!dual_window || vk_present(display2)) &&
                          nds.gpu3d.renderer().aa() && !nds.gpu3d.renderer().gpu_active();
         nds.gpu.set_edge_export(cut);
         ds::sdl::EdgePlanes edges;
