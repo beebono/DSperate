@@ -70,6 +70,20 @@ public:
   // for it), 4x MSAA on the GPU raster. Coordinator only.
   void set_aa(bool on);
   bool aa() const { return aa_; }
+  // The panel-density edge cut (core/gpu/edge_cut.h): beside each output
+  // line, the final pass writes an edge plane (FrameRef::edges), one word a
+  // pixel, zero where nothing is cut. An edge pixel the AA blend mixes keeps
+  // its blended colour in the output (captures and hashes see the exact
+  // frame) and records here what the present needs to cut it instead:
+  //   bits 0-17  its unblended colour, R G B 6 bits each (R lowest)
+  //   bits 18-22 its unblended alpha
+  //   bits 24-31 the edge byte: bit 7 edge, bit 6 the outside is the
+  //              negative neighbour (left / up), bit 5 the run's axis is
+  //              vertical (the outside above or below), bits 0-4 the
+  //              polygon's coverage, (cov + 1) / 32 of the pixel.
+  // Only where the game's own AA blends (phase 1). Coordinator only.
+  void set_edge_export(bool on) { edge_export_ = on; }
+  bool edge_export() const { return edge_export_; }
   // --dump-gpu-frame: write NDS frame `frame`'s polygon list in the GPU raster's layout
   // (vk_dump.h) to `path`; the frame is drawn on the CPU as usual.
   void set_gpu_dump(const char* path, u64 frame) { gpu_dump_path_ = path; gpu_dump_frame_ = frame; }
@@ -91,7 +105,8 @@ private:
 
   // Colour: R 0-5, G 8-13, B 16-21, A 24-28.
   // Attr: bits 0-3 edge flags (L/R/T/B), bit 4 back-facing, bits 8-12 AA
-  // coverage, bit 15 fog, bits 16-21 translucent polygon id, bit 22
+  // coverage, bit 13 the edge run's outside is above/below (X-major) and
+  // bit 14 it is the up/left neighbour (both set only under edge export), bit 15 fog, bits 16-21 translucent polygon id, bit 22
   // translucent, bits 24-29 opaque polygon id.
   // Second half of each buffer: pixel underneath (AA). +8 words slack for
   // 8-lane resolve groups starting near the last ring row's end.
@@ -100,6 +115,7 @@ private:
   // display isn't reading (display_ ^ 1), letting compositing of frame N
   // continue past line 215 of frame N+1.
   std::array<u32, 256 * 192> out_[2]{};
+  std::array<u32, 256 * 192> edge_[2]{};   // the edge planes beside out_ (set_edge_export)
   u32 display_ = 0;
   std::array<u8, 256 * RING> stencil_{};   // one row per ring line
   // Per ring line: was the previous polygon drawn on it a shadow mask
@@ -217,6 +233,13 @@ private:
   const RenderState* rs_ = nullptr;
   bool game_aa_ = false;                  // AA blend runs (game asked and aa_ allows)
   bool aa_ = true, aa_rendered_ = true;   // aa_rendered_: the setting the kept frame was drawn with
+  bool edge_export_ = false, edge_rendered_ = false;   // see set_edge_export; edge_rendered_ as aa_rendered_
+  // The edge export's seam test reads the line above before its final pass
+  // touched it: saved here per line (raw_line_ is the line in raw_row_[0]).
+  alignas(16) u32 raw_row_[2][256] = {};
+  s32 raw_line_ = -100;
+  bool raw_prev_ = false;   // raw_row_ holds the line above the one in its final pass
+  void export_edges(s32 y);
   // rs_->dispcnt with bit 4 cleared when AA is off: kills the whole under
   // layer for the frame (AA blend, under-layer depth test, translucent plot,
   // fog, shadow stencil bit 2's under-layer writes).
@@ -262,6 +285,7 @@ private:
     s32 xdraw, lim0, lim1, lim2;
     s32 l_cov, r_cov;
     int yedge;
+    u16 l_dir, r_dir;   // attr bits 13-14 of the edge runs (edge export only)
     bool l_fill, r_fill, wf_skip;
   };
   std::array<SpanJob, 256> jobs_{};
@@ -277,6 +301,7 @@ private:
     s32 l_len, r_len, l_cov, r_cov;
     s32 xa, xb;              // the clipped screen range [xa, xb)
     int yedge;
+    u16 l_dir, r_dir;        // attr bits 13-14 of the edge runs (edge export only)
     bool l_fill, r_fill, wf_skip;
   };
   std::array<LineSpan, CHUNK> lines_{};
@@ -357,7 +382,7 @@ private:
   // range it emits, since the final pass reads two neighbours.
   void build_edges();   // from list_polys_ / list_count_, latched by render() or prepare_worker
   void seed_active(s32 y);
-  void render_band(s32 y0, s32 y1, u32* dst);
+  void render_band(s32 y0, s32 y1, u32* dst, u32* edst);
   void prepare_worker(const Gpu3D& gx, const Polygon* const* polys, u32 npoly, const std::vector<const u32*>* texels, const RenderState* rs);
   RenderState rs_frame_;   // coordinator's copy; the engine's own may be rewritten at the next VBlank mid-raster
   static u32 band_count(u32 polygons);
@@ -383,11 +408,13 @@ public:
     // ref is taken at the start of the display frame: the GPU gets the lines
     // before the compositor's batch as well (see sync_line).
     mutable const u32* out = nullptr;
+    const u32* edges = nullptr;   // the edge plane (set_edge_export), or null
     bool gpu = false, allow_lag = true;
     u64 gen = 0;
     u32 nbins = 0;
     std::array<s32, MAX_BINS + 1> bin_y{};
     const u32* line(u32 y) const { return out + y * 256; }
+    const u32* edge_line(u32 y) const { return edges ? edges + y * 256 : nullptr; }
   };
   // `allow_lag`: a GPU frame not finished yet may be stood in for by the one
   // before it (one frame of 3D latency instead of a stall); a display-capture
@@ -403,6 +430,7 @@ private:
 
   u32  edge_count_ = 0;
   u32* out_dst_ = nullptr;                              // where final_pass writes
+  u32* out_edge_dst_ = nullptr;                         // where it writes the edge plane (null: not exporting)
   const std::vector<const u32*>* texels_in_ = nullptr;  // decoded textures per polygon (render() records them)
   // Latched once by the coordinator after sync_all and handed to every band;
   // workers never read the engine's live list (SWAP can finalise the next
@@ -458,7 +486,8 @@ private:
     std::array<s32, MAX_BINS + 1> bin_y{};
     u32 nbins = 0;
     u32* dst = nullptr;
-    bool aa = false;
+    u32* edst = nullptr;
+    bool aa = false, edge_export = false;
   };
   DispatchCtx ctx_[2];
   struct StealBand { std::unique_ptr<Renderer3D> band; std::atomic<bool> busy{false}; u64 gen = ~u64{0}; };

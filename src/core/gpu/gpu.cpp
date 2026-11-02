@@ -799,7 +799,7 @@ void Gpu::step_engine(int e, u32 line) {
   const bool draw = !skip_frame_ && !(e == 1 && !screen_visible_[en.screen()]);
   if (!draw) skipped_[e] = true; else if (skipped_[e]) { skipped_[e] = false; en.render_sprites(line); }
   // Reading the 3D line joins the raster bands: skip it when the raster never ran.
-  if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); }
+  if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); en.set_3d_edges(edge_export_ ? nds_.gpu3d.edge_line(ref3d_, line) : nullptr); }
   if (draw) { en.render_line(line); output_engine(e, line); }
   if (e == 0 && capture_render_ && !skip_frame_) { DS_PROF(CAPTURE); capture(line); }
   // Sprites are rendered one line ahead of the backgrounds.
@@ -813,6 +813,33 @@ void Gpu::step_engine(int e, u32 line) {
 // The output stage for one engine's line: display mode, master brightness,
 // 6->8 bit expansion, into the screen POWCNT1 bit 15 gives it (or scaled
 // straight into the frontend's buffer).
+void Gpu::set_edge_export(bool on) {
+  if (on == edge_export_) return;
+  nds_.gpu3d.sync_raster();   // no band still drawing with the old setting
+  edge_export_ = on;
+  nds_.gpu3d.renderer().set_edge_export(on);
+  for (int s = 0; s < 2; ++s) { edge_fb_[s].fill(0); edge_rows_[s][0] = edge_rows_[s][1] = edge_rows_[s][2] = 0; }
+}
+
+// The edge plane's line: engine A's edge pixels where the 3D layer shows, in
+// display mode 1 only (the VRAM and FIFO modes show no live 3D), through
+// the output stage's master brightness and expansion like the frame.
+void Gpu::output_edges(const Engine2D& en, int screen, u32 line) {
+  u32* const dst = edge_fb_[screen].data() + line * SCREEN_W;
+  u64& row = edge_rows_[screen][line >> 6];
+  const u64 bit = u64{1} << (line & 63);
+  alignas(16) Pixel own[256];
+  alignas(16) u8 bytes[256];
+  if (!screens_on_ || &en != &engine[0] || ((en.dispcnt() >> 16) & 3) != 1 || !en.edge_compose(own, bytes)) {
+    if (row & bit) { std::memset(dst, 0, SCREEN_W * sizeof(u32)); row &= ~bit; }
+    return;
+  }
+  alignas(16) u32 out[256];
+  kern::active::output_line(own, en.master_bright(), out);
+  for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (out[x] & 0x00FFFFFF) : 0;
+  row |= bit;
+}
+
 void Gpu::output_engine(int e, u32 line) {
   prof::Scope sc(prof::OUTPUT, e == 0);
   const Engine2D& en = engine[e];
@@ -830,6 +857,7 @@ void Gpu::output_engine(int e, u32 line) {
       else { output_b(dst); expand_colours(dst); }
     }
   } else { for (u32 i = 0; i < 256; ++i) dst[i] = 0xFF000000; }
+  if (edge_export_ && !scaled) output_edges(en, screen, line);
   if (scaled) {
     if (e == 1 && bscale_defer_ && bscale_n_ < SCREEN_H) {
       StashedLine& st = bscale_[bscale_n_++];

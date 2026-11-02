@@ -4,6 +4,7 @@
 #include "core/types.h"
 #include "frontend/video/layout.h"
 
+#include <cstring>
 #include <memory>
 #include <string>
 
@@ -12,6 +13,26 @@ struct SDL_Window;
 namespace ds::sdl {
 
 class ScanoutOut;
+// The edge cut's planes (Gpu::edge_plane / edge_rows) per screen, and the
+// core frames they belong to: an edge pixel the frontend drew over (the
+// OSD, the screenshot flash: the frame shown differs from the core's there)
+// is not cut. Null planes: no cut on that screen.
+struct EdgePlanes {
+  const u32* plane[2] = {nullptr, nullptr};
+  const u64* rows[2] = {nullptr, nullptr};
+  const u32* frame[2] = {nullptr, nullptr};
+};
+// The lines `rows` marks of screen s's edge plane into dst (the same
+// layout); the other lines are left as they are, never read.
+inline void copy_edge_rows(u32* dst, const EdgePlanes& e, int s, const u32* shown) {
+  const u32* const src = e.plane[s];
+  const u32* const core = e.frame[s] && e.frame[s] != shown ? e.frame[s] : nullptr;
+  for (u32 y = 0; y < 192; ++y) {
+    if (!((e.rows[s][y >> 6] >> (y & 63)) & 1)) continue;
+    std::memcpy(dst + y * 256, src + y * 256, 256 * sizeof(u32));
+    if (core) for (u32 i = y * 256; i < y * 256 + 256; ++i) if (src[i] && shown[i] != core[i]) dst[i] = 0;
+  }
+}
 
 // A presenter that takes the core's whole 256x192 frames and composes the
 // output itself on the GPU: layout, scaling, rotation, LCD filters, the
@@ -29,6 +50,7 @@ public:
     frontend::Rect drawn;        // where the frontend drew on overlay() this frame
     u32 grid = 256;              // LCD grid brightness on a seam, 0..256 (256 = off)
     bool linear = false;         // video.linear; off: the RGA draws whole-number scales exactly
+    EdgePlanes edges;            // the edge cut (Vulkan only; the RGA cannot cut)
   };
 
   const std::string& name() const { return name_; }   // for the log: what presents, on which device

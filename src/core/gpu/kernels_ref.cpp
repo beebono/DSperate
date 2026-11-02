@@ -59,21 +59,24 @@ bool line_has_translucent_3d(const Pixel* line3d) {
 void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, const Pixel* second,
                     const u8* top_id, const u8* top_kind, const u8* top_alpha, const u8* second_id,
                     const u8* win, Pixel* out) {
+  for (u32 i = 0; i < 256; ++i)
+    out[i] = composite_pixel(bldcnt, eva, evb, evy, top[i], second[i], top_id[i], top_kind[i], top_alpha[i], second_id[i], win[i]);
+}
+
+Pixel composite_pixel(u32 bldcnt, u32 eva, u32 evb, u32 evy, Pixel a, Pixel b, u8 top_id, u8 kind, u8 top_alpha, u8 second_id, u8 win) {
   const u32 effect = (bldcnt >> 6) & 3;
-  for (u32 i = 0; i < 256; ++i) {
-    const Pixel a = top[i], b = second[i];
-    const u32 t1 = top_id[i], t2 = static_cast<u32>(second_id[i]) << 8;
-    const u8 kind = top_kind[i];
+  {
+    const u32 t1 = top_id, t2 = static_cast<u32>(second_id) << 8;
     Pixel o = a;
     if ((kind == K_OBJ_SEMI || kind == K_OBJ_BITMAP) && (bldcnt & t2)) {
       // Semi-transparent and bitmap sprites blend whenever the layer below is
       // a second target, regardless of the selected effect.
-      const u32 ea = (kind == K_OBJ_BITMAP) ? top_alpha[i] : eva;
+      const u32 ea = (kind == K_OBJ_BITMAP) ? top_alpha : eva;
       const u32 eb = (kind == K_OBJ_BITMAP) ? 16 - ea : evb;
       o = blend(a, b, ea, eb);
     } else if (kind == K_3D && (bldcnt & t2)) {
       o = blend_3d(a, b);
-    } else if ((bldcnt & t1) && (win[i] & 0x20)) {
+    } else if ((bldcnt & t1) && (win & 0x20)) {
       switch (effect) {
       case 1: if (bldcnt & t2) o = blend(a, b, eva, evb); break;
       case 2: o = brighten(a, evy, 0x8); break;
@@ -81,7 +84,7 @@ void composite_line(u32 bldcnt, u32 eva, u32 evb, u32 evy, const Pixel* top, con
       default: break;
       }
     }
-    out[i] = (o & 0x00FFFFFF) | 0xFF000000;
+    return (o & 0x00FFFFFF) | 0xFF000000;
   }
 }
 
@@ -193,13 +196,15 @@ void resolve16_top(const u16* top, const u8* top_tid, const Pixel* const* tables
 }
 
 void composite_line_fade(u32 bldcnt, u32 evy, const Pixel* top, const u8* top_id, const u8* win, Pixel* out) {
+  for (u32 i = 0; i < 256; ++i) out[i] = fade_pixel(bldcnt, evy, top[i], top_id[i], win[i]);
+}
+
+Pixel fade_pixel(u32 bldcnt, u32 evy, Pixel a, u8 top_id, u8 win) {
   const u32 effect = (bldcnt >> 6) & 3;
-  for (u32 i = 0; i < 256; ++i) {
-    Pixel o = top[i];
-    if ((bldcnt & top_id[i]) && (win[i] & 0x20))
-      o = effect == 2 ? brighten(o, evy, 0x8) : darken(o, evy, 0x7);
-    out[i] = (o & 0x00FFFFFF) | 0xFF000000;
-  }
+  Pixel o = a;
+  if ((bldcnt & top_id) && (win & 0x20))
+    o = effect == 2 ? brighten(o, evy, 0x8) : darken(o, evy, 0x7);
+  return (o & 0x00FFFFFF) | 0xFF000000;
 }
 
 void resolve16_full(const u16* top, const u8* top_tid, const u16* second, const u8* second_tid,

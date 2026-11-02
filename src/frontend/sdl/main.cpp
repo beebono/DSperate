@@ -185,8 +185,9 @@ const char* kUsage =
     "  --interp        interpreter instead of the recompiler\n"
     "  --timing M      CPU cycle model: fast (default: constant memory and jump costs, much cheaper)\n"
     "                  | exact (melonDS's per-access model); emu.timing\n"
-    "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): the hardware's edge blend on the\n"
-    "                  CPU raster, 4x MSAA on the GPU raster\n"
+    "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): on the CPU raster, 3D edges cut\n"
+    "                  at panel density by the Vulkan present (the hardware's edge blend elsewhere;\n"
+    "                  captures always get the blend); 4x MSAA on the GPU raster\n"
     "  --gpu3d / --no-gpu3d  the 3D layer drawn on the GPU (video.gpu3d, off by default); the CPU\n"
     "                  raster where there is no Vulkan\n"
     "  --frameskip N   skip drawing up to N frames in N+1 (0 = off); emu.frameskip. Skipping runs\n"
@@ -4080,6 +4081,18 @@ sdl_ready:
         display.present();
         if (dual_window) display2.present();
       } else {
+        // The edge cut (core/gpu/edge_cut.h): video.aa on the CPU raster cuts
+        // 3D edges at panel density under a Vulkan present (the RGA cannot)
+        // instead of showing the 1x blend. Takes effect from the next frame.
+        // DS_EDGE_CUT=0 shows the blend.
+        static const bool cut_off = [] { const char* e = std::getenv("DS_EDGE_CUT"); return e && *e == '0'; }();
+        auto vk_present = [](const ds::sdl::Display& d) { return d.gpu_present() && !d.rga_present(); };
+        const bool cut = !cut_off && vk_present(display) && (!dual_window || vk_present(display2)) &&
+                         nds.gpu3d.renderer().aa() && !nds.gpu3d.renderer().gpu_active();
+        nds.gpu.set_edge_export(cut);
+        ds::sdl::EdgePlanes edges;
+        if (nds.gpu.edge_export())
+          for (int s = 0; s < 2; ++s) { edges.plane[s] = nds.gpu.edge_plane(s); edges.rows[s] = nds.gpu.edge_rows(s); edges.frame[s] = nds.gpu.framebuffer(s); }
         const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
         if (cursor) {
           std::memcpy(cursor_fb.data(), fb[1], cursor_fb.size() * 4);
@@ -4120,7 +4133,7 @@ sdl_ready:
 
         if (!present_sync && display.gpu_present() && (!dual_window || display2.gpu_present())) {
           ds::sdl::Display* const ds_[2] = {&display, &display2};
-          ds::sdl::Display::draw_async(ds_, dual_window ? 2 : 1, fb);
+          ds::sdl::Display::draw_async(ds_, dual_window ? 2 : 1, fb, &edges);
         } else {
           // Pinned (thread layout), the emulation thread presents here as a
           // normal task: the kernel work a present queues on this core (a
@@ -4133,8 +4146,8 @@ sdl_ready:
           int rt_pol = 0; sched_param rt_sp{};
           const bool drop_rt = present_nort && pthread_getschedparam(pthread_self(), &rt_pol, &rt_sp) == 0 && (rt_pol == SCHED_RR || rt_pol == SCHED_FIFO);
           if (drop_rt) { sched_param z{}; sched_setscheduler(0, SCHED_OTHER, &z); }
-          display.draw(fb);
-          if (dual_window) display2.draw(fb);
+          display.draw(fb, &edges);
+          if (dual_window) display2.draw(fb, &edges);
           if (drop_rt) sched_setscheduler(0, rt_pol, &rt_sp);
         }
       }

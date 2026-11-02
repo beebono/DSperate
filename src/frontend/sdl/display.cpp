@@ -369,7 +369,7 @@ bool Display::settle_step(const u32* const blank[SCREENS]) {
   // Commit a frame: the surface maps on its first buffer, and the compositor
   // sends the fullscreen configure after that. Drawing at the new size is
   // what makes the buffers follow it.
-  if (gpu_) draw_gpu(blank);
+  if (gpu_) draw_gpu(blank, nullptr);
   else {
     Target t[SCREENS] = {};
     if (begin_frame(t)) present();
@@ -421,16 +421,20 @@ bool Display::prepare_gpu(GpuFrame& f) {
   return true;
 }
 
-void Display::draw_gpu(const u32* const fb[SCREENS]) {
+void Display::draw_gpu(const u32* const fb[SCREENS], const EdgePlanes* edges) {
   GpuFrame f;
-  if (prepare_gpu(f)) f.p->present(fb, f.v, f.n, f.params);
+  if (!prepare_gpu(f)) return;
+  if (edges) f.params.edges = *edges;
+  f.p->present(fb, f.v, f.n, f.params);
 }
 
-void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS]) {
+void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const EdgePlanes* edges) {
   // One copy of the frame for every window: the core writes the next frame
   // into fb while the present thread reads this one. Reused once the job
   // that read it is done.
   static std::vector<u32> stage[SCREENS];
+  static std::vector<u32> estage[SCREENS];   // the edge planes' marked lines (the others are never read)
+  static u64 erows[SCREENS][3];
   static u64 stage_job = 0;
   // A frame reaches the sink at the next present, when its fence has long
   // signalled: on the Mali-G52 a present's compute takes ~5 ms from submit
@@ -443,7 +447,7 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
   for (int i = 0; i < n && i < 2; ++i) {
     Display& d = *ds[i];
     d.sync();
-    if (!d.gpu_) { d.draw(fb); continue; }
+    if (!d.gpu_) { d.draw(fb, edges); continue; }
     if (d.prepare_gpu(frames[nf])) owners[nf++] = &d;
   }
   if (!nf) return;
@@ -453,6 +457,16 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
     stage[s].resize(static_cast<size_t>(SCREEN_W) * SCREEN_H);
     std::memcpy(stage[s].data(), fb[s], stage[s].size() * sizeof(u32));
   }
+  EdgePlanes staged;
+  if (edges)
+    for (int s = 0; s < SCREENS; ++s) {
+      if (!edges->plane[s] || !edges->rows[s]) continue;
+      estage[s].resize(static_cast<size_t>(SCREEN_W) * SCREEN_H);
+      copy_edge_rows(estage[s].data(), *edges, s, fb[s]);
+      for (int k = 0; k < 3; ++k) erows[s][k] = edges->rows[s][k];
+      staged.plane[s] = estage[s].data(); staged.rows[s] = erows[s];
+    }
+  for (int k = 0; k < nf; ++k) frames[k].params.edges = staged;
   stage_job = pt.post([frames, nf] {
     const u32* const sfb[SCREENS] = {stage[0].data(), stage[1].data()};
     for (int k = 0; k < nf; ++k) {
@@ -464,9 +478,9 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
   for (int k = 0; k < nf; ++k) owners[k]->job_ = stage_job;
 }
 
-void Display::draw(const u32* const fb[SCREENS]) {
+void Display::draw(const u32* const fb[SCREENS], const EdgePlanes* edges) {
   sync();
-  if (gpu_) { draw_gpu(fb); return; }
+  if (gpu_) { draw_gpu(fb, edges); return; }
   if (disp_) {
     if (disp_->overlay_available()) { disp_->overlay_changed(canvas_taken_); canvas_taken_ = false; }
     const u32* slots[DispOut::VIEWS] = {nullptr, nullptr};

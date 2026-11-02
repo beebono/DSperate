@@ -86,6 +86,16 @@ public:
   void set_lazy(bool on) { lazy_enabled_ = on; }   // off: per-line rendering (tests)
 
   const u32* framebuffer(int screen) const { return fb_[screen].data(); }   // 0 = top, 1 = bottom
+  // The edge cut (core/gpu/edge_cut.h): beside each screen's frame, a plane
+  // of the 3D edge pixels that show on it, 0xEERRGGBB: the edge byte
+  // (Renderer3D::set_edge_export) over the pixel's unblended colour as the
+  // output stage would show it; zero elsewhere, and everywhere on a screen
+  // no 3D layer reaches. edge_rows: which lines have any, one bit a line.
+  // Frontend side; the frame (framebuffer) is unaffected. Off by default.
+  void set_edge_export(bool on);
+  bool edge_export() const { return edge_export_; }
+  const u32* edge_plane(int screen) const { return edge_fb_[screen].data(); }
+  const u64* edge_rows(int screen) const { return edge_rows_[screen]; }
 
   // A screen the frontend does not show. Its driving engine skips drawing but
   // keeps journal/latches/windows/lazy-2D bookkeeping running so it's exact
@@ -205,6 +215,10 @@ private:
   alignas(16) std::array<u16, 256> fifo_line_{};
   bool run_fifo_ = false;
   std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb_{};
+  std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> edge_fb_{};   // edge_plane
+  u64 edge_rows_[2][3] = {};
+  bool edge_export_ = false;
+  void output_edges(const Engine2D& en, int screen, u32 line);
   ScaleTarget scale_[2];
   static constexpr u32 SCALED_ROW_MAX = 4096;
   alignas(16) u32 chunk_even_[2][SCREEN_W];   // chunky: the even line, held until the odd one completes the block

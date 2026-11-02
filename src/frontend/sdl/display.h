@@ -47,13 +47,15 @@ public:
   bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout, int only_screen = -1, int display_index = 0);
   void close();
 
-  void draw(const u32* const fb[SCREENS]);
+  // `edges`: the edge cut's planes for fb (core/gpu/edge_cut.h), or null.
+  // Only a Vulkan present cuts; the others ignore them.
+  void draw(const u32* const fb[SCREENS], const EdgePlanes* edges = nullptr);
   // The frame loop's present: each GPU-presenting window of `ds` takes the
   // frame on the present thread (present_thread.h) and this returns once the
   // frame is copied out, so `fb` may change straight after. The others draw
   // here, as draw() does. Every other call on a window waits for its present
   // first, so none of them sees one half done.
-  static void draw_async(Display* const ds[], int n, const u32* const fb[SCREENS]);
+  static void draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const EdgePlanes* edges = nullptr);
 
   // Per-scanline scaling: the core scales each line into place as it's
   // produced, straight into the window surface or a scanout tier's buffer
@@ -259,7 +261,7 @@ private:
   // the overlay's rect) so it can be presented on another.
   struct GpuFrame { FramePresenter* p = nullptr; FramePresenter::View v[SCREENS]; int n = 0; FramePresenter::Params params; };
   bool prepare_gpu(GpuFrame& f);        // false: nothing to present (the presenter was lost)
-  void draw_gpu(const u32* const fb[SCREENS]);
+  void draw_gpu(const u32* const fb[SCREENS], const EdgePlanes* edges);
   mutable u64       job_ = 0;             // present thread ticket of this window's last frame; 0 once waited for
   void sync() const;                    // wait for it
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL

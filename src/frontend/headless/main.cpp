@@ -3,6 +3,7 @@
 //
 // Headless frontend: boots the BIOS/firmware (and optionally a ROM), runs N
 // frames, optionally tracing instructions or dumping frames/audio.
+#include "core/gpu/edge_cut.h"
 #include "core/nds.h"
 #include "core/cpu/timing_mode.h"
 #include "core/pc_sampler.h"
@@ -248,6 +249,7 @@ int main(int argc, char** argv) {
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
   const char* pc_profile = nullptr;
   int dump_from = 0, dump_count = 0;   // --dump-from/--dump-count: window of a large dump
+  int cut_n = 0; const char* cut_path = nullptr;   // --dump-cut
   long gpu_dump_frame = -1; const char* gpu_dump_path = nullptr;   // --dump-gpu-frame
   const char* rec3d_path = nullptr;   // --dump-3d
   bool gpu3d = false;   // --gpu3d
@@ -326,6 +328,7 @@ int main(int argc, char** argv) {
     else if (arg("--trace")) trace = argv[++i];
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
+    else if (arg("--dump-cut")) { cut_n = std::atoi(argv[++i]); cut_path = argv[++i]; }   // N FILE: both screens through the edge cut (core/gpu/edge_cut.h) at Nx, raw 0xAARRGGBB
     else if (arg("--dump-3d")) rec3d_path = argv[++i];   // FILE: the 3D layer record as the compositor reads it (256x192 words: RGB666 + 5-bit alpha in 24-28), for the --dump-from/--dump-count frames
     else if (arg("--dump-gpu-frame")) { gpu_dump_frame = std::atol(argv[++i]); gpu_dump_path = argv[++i]; }   // N FILE: frame N's polygon list in the GPU raster's layout (vk_dump.h)
 
@@ -664,6 +667,13 @@ int main(int argc, char** argv) {
   if (dump && !dump_out) { std::fprintf(stderr, "could not open %s\n", dump); return 1; }
   if (gpu_dump_path && gpu_dump_frame >= 0) nds.gpu3d.renderer().set_gpu_dump(gpu_dump_path, static_cast<ds::u64>(gpu_dump_frame));
   if (gpu3d) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); }
+  FILE* cut_out = nullptr; std::vector<ds::u32> cut_px;
+  if (cut_n > 0 && cut_path) {
+    cut_out = std::fopen(cut_path, "wb");
+    if (!cut_out) { std::fprintf(stderr, "could not open %s\n", cut_path); return 1; }
+    cut_px.resize(static_cast<size_t>(256 * cut_n) * static_cast<size_t>(192 * cut_n));
+    nds.gpu.set_edge_export(true);
+  }
   FILE* hash_out = hash_frames ? std::fopen(hash_frames, "w") : nullptr;
   if (hash_frames && !hash_out) { std::fprintf(stderr, "could not open %s\n", hash_frames); return 1; }
   ds::input::Log log;
@@ -873,6 +883,11 @@ int main(int argc, char** argv) {
     }
     if (scaled_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
       for (int k = 0; k < 2; ++k) std::fwrite(scaled_px[k].data(), 4, scaled_px[k].size(), scaled_out);
+    if (cut_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
+      for (int k = 0; k < 2; ++k) {
+        ds::gpu::edge_cut_screen(nds.gpu.framebuffer(k), nds.gpu.edge_plane(k), cut_n, cut_px.data());
+        std::fwrite(cut_px.data(), 4, cut_px.size(), cut_out);
+      }
     if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
       // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
@@ -928,6 +943,7 @@ int main(int argc, char** argv) {
     else std::fprintf(stderr, "firmware override: saved %s\n", fw_override);
   }
   if (dump_out) std::fclose(dump_out);
+  if (cut_out) std::fclose(cut_out);
   if (hash_out) std::fclose(hash_out);
   if (scaled_out) std::fclose(scaled_out);
   if (audio_out) std::fclose(audio_out);

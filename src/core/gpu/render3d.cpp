@@ -625,7 +625,7 @@ template <bool textured>
 
 [[gnu::always_inline]] inline void Renderer3D::plot_translucent(u32 addr, u32 color, u32 z, u32 polyattr, bool shadow) {
   const u32 dstattr = attr_[addr];
-  u32 attr = (polyattr & 0xE0F0) | ((polyattr >> 8) & 0xFF0000) | (1u << 22) | (dstattr & 0xFF001F0F);
+  u32 attr = (polyattr & 0xE0F0) | ((polyattr >> 8) & 0xFF0000) | (1u << 22) | (dstattr & 0xFF007F0F);   // the destination keeps its edge flags, coverage and edge direction
   if (shadow) {
     // Shadows skip pixels of their own polygon id, opaque or translucent.
     if (dstattr & (1u << 22)) { if ((dstattr & 0x007F0000) == (attr & 0x007F0000)) return; }
@@ -1555,7 +1555,7 @@ template <int mode, bool textured, bool aa, bool opq>
     vst4_u8(cb + base * 4, oc);
     uint8x8x4_t oa;
     oa.val[0] = vbsl_u8(m8, vorr_u8(pa0, vand_u8(da.val[0], v0f8)), da.val[0]);
-    oa.val[1] = vbsl_u8(m8, vorr_u8(vand_u8(pa1, vorr_u8(da.val[1], v7f8)), vand_u8(da.val[1], v1f8)), da.val[1]);
+    oa.val[1] = vbsl_u8(m8, vorr_u8(vand_u8(pa1, vorr_u8(da.val[1], v7f8)), vand_u8(da.val[1], v7f8)), da.val[1]);
     oa.val[2] = vbsl_u8(m8, pa2, da.val[2]);
     oa.val[3] = da.val[3];
     vst4_u8(ab + base * 4, oa);
@@ -1767,6 +1767,18 @@ template <int mode, bool textured, bool aa, bool opq>
 }
 #endif
 
+namespace {
+// The edge export's direction of an edge run, as attr bits 13-14. A Y-major
+// run crosses the row steeply, so the uncovered part of its pixel is beside
+// it (a left run's on the left); an X-major run crosses at a shallow angle,
+// so it is above or below: above when the polygon lies below the edge (a
+// left edge stepping left as y grows, a right edge stepping right).
+template <class S> inline u16 edge_dir(const S& s, bool left) {
+  if (!s.xmajor) return left ? 0x4000 : 0;
+  return static_cast<u16>(0x2000 | ((s.negative == left) ? 0x4000 : 0));
+}
+} // namespace
+
 #if DSPERATE_NEON && defined(__arm__)
 void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
   const Polygon& p = *e.poly;
@@ -1774,6 +1786,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
   const bool always_fill = sh.always_fill;
   const bool wireframe = sh.wireframe;
   const bool aa = sh.dispcnt & (1 << 4);   // coverage is only read by the AA resolve
+  const bool dirs = aa && edge_export_;    // the edge runs' directions, for the edge export
   const bool flat = p.ytop == p.ybot;
   const s32 ybot1 = p.ybot - 1;
   const s32 ytop = p.ytop;
@@ -1814,6 +1827,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
 
     int astart = 0;   // which edge's attributes are the span's left end
     bool l_fill, r_fill; s32 l_len, r_len, l_cov, r_cov;
+    u16 l_dir = 0, r_dir = 0;
     // Everything below that is not a function of y comes out of the Edge; only
     // the bottom-line test and the edge_params (which walk dx) are per scanline.
     const bool ybot_line = y == ybot1;
@@ -1823,6 +1837,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
       astart = 1;
       e.right.edge_params<true>(aa, &l_len, &l_cov);
       e.left.edge_params<true>(aa, &r_len, &r_cov);
+      if (dirs) { l_dir = edge_dir(e.right, true); r_dir = edge_dir(e.left, false); }
       std::swap(xstart, xend); std::swap(wl, wr); std::swap(zl, zr);
       if (always_fill) { l_fill = r_fill = true; }
       else {
@@ -1832,6 +1847,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
     } else {
       e.left.edge_params<false>(aa, &l_len, &l_cov);
       e.right.edge_params<false>(aa, &r_len, &r_cov);
+      if (dirs) { l_dir = edge_dir(e.left, true); r_dir = edge_dir(e.right, false); }
       // Fill rules: left edge fills when slope<=1, right when >1/vertical; negative
       // X-major edge's bottom pixel fills next to a flat bottom; overlapping edges fill.
       if (always_fill) { l_fill = r_fill = true; }
@@ -1851,7 +1867,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
     ls.wl = wl; ls.wr = wr; ls.zl = zl; ls.zr = zr;
     ls.l_len = l_len; ls.r_len = r_len; ls.l_cov = l_cov; ls.r_cov = r_cov;
     ls.xa = x; ls.xb = std::min(xend + 1, 256);
-    ls.yedge = yedge;
+    ls.yedge = yedge; ls.l_dir = l_dir; ls.r_dir = r_dir;
     ls.l_fill = l_fill; ls.r_fill = r_fill;
     ls.wf_skip = wireframe && !yedge;
     // r g b s t at both ends; computed even for lines the depth pre-pass will kill,
@@ -1871,6 +1887,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
   const bool always_fill = sh.always_fill;
   const bool wireframe = sh.wireframe;
   const bool aa = sh.dispcnt & (1 << 4);   // coverage is only read by the AA resolve
+  const bool dirs = aa && edge_export_;    // the edge runs' directions, for the edge export
   const bool flat = p.ytop == p.ybot;
   const s32 ybot1 = p.ybot - 1;
   const s32 ytop = p.ytop;
@@ -1893,6 +1910,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
     const Vertex *vlcur, *vlnext, *vrcur, *vrnext;
     const Interp<1>* istart; const Interp<1>* iend;
     bool l_fill, r_fill; s32 l_len, r_len, l_cov, r_cov;
+    u16 l_dir = 0, r_dir = 0;
     // Everything below that is not a function of y comes out of the Edge; only
     // the bottom-line test and the edge_params (which walk dx) are per scanline.
     const bool ybot_line = y == ybot1;
@@ -1903,6 +1921,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
       istart = &e.right.interp; iend = &e.left.interp;
       e.right.edge_params<true>(aa, &l_len, &l_cov);
       e.left.edge_params<true>(aa, &r_len, &r_cov);
+      if (dirs) { l_dir = edge_dir(e.right, true); r_dir = edge_dir(e.left, false); }
       std::swap(xstart, xend); std::swap(wl, wr); std::swap(zl, zr);
       if (always_fill) { l_fill = r_fill = true; }
       else {
@@ -1915,6 +1934,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
       istart = &e.left.interp; iend = &e.right.interp;
       e.left.edge_params<false>(aa, &l_len, &l_cov);
       e.right.edge_params<false>(aa, &r_len, &r_cov);
+      if (dirs) { l_dir = edge_dir(e.left, true); r_dir = edge_dir(e.right, false); }
       if (always_fill) { l_fill = r_fill = true; }
       else {
         l_fill = e.nx_l || (bottom_fill && e.lxm) ||
@@ -1932,7 +1952,7 @@ void Renderer3D::precompute_lines(Edge& e, s32 y0, s32 y1) {
     ls.wl = wl; ls.wr = wr; ls.zl = zl; ls.zr = zr;
     ls.l_len = l_len; ls.r_len = r_len; ls.l_cov = l_cov; ls.r_cov = r_cov;
     ls.xa = x; ls.xb = std::min(xend + 1, 256);
-    ls.yedge = yedge;
+    ls.yedge = yedge; ls.l_dir = l_dir; ls.r_dir = r_dir;
     ls.l_fill = l_fill; ls.r_fill = r_fill;
     ls.wf_skip = wireframe && !yedge;
     ls.al[0] = istart->interpolate(vlcur->fcol[0], vlnext->fcol[0]);
@@ -2021,7 +2041,7 @@ void Renderer3D::stage_line(Edge& e, s32 y, const LineSpan& ls) {
 
   SpanJob& j = jobs_[njobs_++];
   j.y = y; j.ca = ca; j.cb = cb; j.off = off + static_cast<u32>(ca - xa);
-  j.xdraw = xa; j.yedge = ls.yedge; j.l_cov = ls.l_cov; j.r_cov = ls.r_cov;
+  j.xdraw = xa; j.yedge = ls.yedge; j.l_cov = ls.l_cov; j.r_cov = ls.r_cov; j.l_dir = ls.l_dir; j.r_dir = ls.r_dir;
   j.lim0 = std::min({ls.xstart + ls.l_len, ls.xend + 1, 256});
   j.lim1 = std::min({ls.xend - ls.r_len + 1, ls.xend + 1, 256});
   j.lim2 = std::min(ls.xend + 1, 256);
@@ -2070,10 +2090,10 @@ template <typename Range>
     x = xlimit;
   };
   if (j.l_cov & static_cast<s32>(0x80000000u)) { xcov = (j.l_cov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
-  if (!j.l_fill) x = j.lim0; else draw_span(j.lim0, 0, j.yedge | 0x1);
+  if (!j.l_fill) x = j.lim0; else draw_span(j.lim0, 0, j.yedge | 0x1 | j.l_dir);
   if (j.wf_skip) x = std::max(x, j.lim1); else draw_span(j.lim1, 1, j.yedge);
   if (j.r_cov & static_cast<s32>(0x80000000u)) { xcov = (j.r_cov >> 12) & 0x3FF; if (xcov == 0x3FF) xcov = 0; }
-  if (j.r_fill) draw_span(j.lim2, 2, j.yedge | 0x2);
+  if (j.r_fill) draw_span(j.lim2, 2, j.yedge | 0x2 | j.r_dir);
 }
 
 // One call per batch instead of per span. The range body inlines into the
@@ -2272,6 +2292,43 @@ u32 Renderer3D::fog_density(u32 addr) const {
 
 // The scalar passes: the specification the NEON final_pass is checked against
 // (selftest_final_pass), and the whole of final_pass on non-NEON builds.
+// The edge plane's line y (set_edge_export), from the line's attributes
+// before the AA blend mixes it: for every pixel the blend will mix, the
+// edge byte and its colour as it is now (fogged, unblended). Skipped: an
+// outside neighbour that is another, nearer polygon (that polygon's own edge
+// is what shows there), and a seam whose two sides have the same colour
+// (two polygons of one surface: nothing to cut). The seam test reads raw
+// colours (before fog and the blend) so a band's first line, whose line
+// above has had no final pass, decides as any other line does.
+void Renderer3D::export_edges(s32 y) {
+  u32* const eb = out_edge_dst_ + y * 256;
+  if (!game_aa_ || !line_touched_[y]) { std::memset(eb, 0, 256 * sizeof(u32)); return; }
+  const u32 row = row_of(y) + 1, up = row_of(y - 1) + 1, dn = row_of(y + 1) + 1;
+  const u32* const raw = raw_row_[y & 1];
+  const u32* const raw_up = raw_prev_ ? raw_row_[(y - 1) & 1] : &color_[up];
+  auto near = [](u32 a, u32 b) {
+    for (u32 sh = 0; sh < 24; sh += 8) {
+      const int d = static_cast<int>((a >> sh) & 0x3F) - static_cast<int>((b >> sh) & 0x3F);
+      if (d < -1 || d > 1) return false;
+    }
+    return true;
+  };
+  for (int x = 0; x < 256; ++x) {
+    const u32 addr = row + static_cast<u32>(x);
+    const u32 attr = attr_[addr];
+    const u32 cov = (attr >> 8) & 0x1F;
+    if (!(attr & 0xF) || cov == 0x1F) { eb[x] = 0; continue; }
+    const bool vert = attr & 0x2000, neg = attr & 0x4000;
+    const u32 n = vert ? (neg ? up : dn) + static_cast<u32>(x) : (neg ? addr - 1 : addr + 1);
+    const int nx = x + (neg ? -1 : 1);
+    const u32 nraw = vert ? (neg ? raw_up[x] : color_[n]) : (nx >= 0 && nx < 256 ? raw[nx] : color_[n]);
+    if (((attr_[n] >> 24) != (attr >> 24) && depth_[n] < depth_[addr]) || near(raw[x], nraw)) { eb[x] = 0; continue; }
+    const u32 c = color_[addr];
+    const u32 e = 0x80 | (neg ? 0x40 : 0) | (vert ? 0x20 : 0) | cov;
+    eb[x] = (c & 0x3F) | (((c >> 8) & 0x3F) << 6) | (((c >> 16) & 0x3F) << 12) | (((c >> 24) & 0x1F) << 18) | (e << 24);
+  }
+}
+
 void Renderer3D::final_pass_ref(s32 y) {
   const u32 dispcnt = dispcnt_;
   // Edge marking and anti-aliasing act on polygon pixels (edge flags); fog
@@ -2282,7 +2339,8 @@ void Renderer3D::final_pass_ref(s32 y) {
     const bool clear_fog = (rs_->dispcnt & (1 << 14)) || (rs_->clear_attr1 & 0x8000);
     work = (dispcnt & (1 << 7)) && clear_fog;
   }
-  if (!work) { std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32)); return; }
+  if (out_edge_dst_) { raw_prev_ = raw_line_ == y - 1; std::memcpy(raw_row_[y & 1], &color_[row_of(y) + 1], sizeof raw_row_[0]); raw_line_ = y; }
+  if (!work) { if (out_edge_dst_) export_edges(y); std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32)); return; }
   if (dispcnt & (1 << 5)) {
     // Edge marking on the topmost pixels, against the four neighbours.
     const u32 up = row_of(y - 1) + 1, dn = row_of(y + 1) + 1;
@@ -2327,6 +2385,7 @@ void Renderer3D::final_pass_ref(s32 y) {
       if (attr_[addr] & (1 << 15)) apply(addr);
     }
   }
+  if (out_edge_dst_) export_edges(y);
   if (game_aa_) {
     // Anti-aliasing: blend edge pixels with the pixel underneath by coverage.
     for (int x = 0; x < 256; ++x) {
@@ -2363,7 +2422,8 @@ void Renderer3D::final_pass(s32 y) {
     const bool clear_fog = (rs_->dispcnt & (1 << 14)) || (rs_->clear_attr1 & 0x8000);
     work = (dispcnt & (1 << 7)) && clear_fog;
   }
-  if (!work) { std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32)); return; }
+  if (out_edge_dst_) { raw_prev_ = raw_line_ == y - 1; std::memcpy(raw_row_[y & 1], &color_[row_of(y) + 1], sizeof raw_row_[0]); raw_line_ = y; }
+  if (!work) { if (out_edge_dst_) export_edges(y); std::memcpy(&out_dst_[y * 256], &color_[row_of(y) + 1], 256 * sizeof(u32)); return; }
   // Three passes as 16-pixel byte-plane kernels (ld4/st4), matching the
   // scalar loops below bit for bit.
   u8* const cb = reinterpret_cast<u8*>(color_.data());
@@ -2482,6 +2542,7 @@ void Renderer3D::final_pass(s32 y) {
       if (compat::maxv_u8(ufog)) apply16(under, ufog);
     }
   }
+  if (out_edge_dst_) export_edges(y);
   if (game_aa_) {
     // Anti-aliasing: blend edge pixels with the pixel underneath by coverage.
     // Coverage 31 keeps the top pixel, 0 takes the one underneath whole;
@@ -2745,7 +2806,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   // An unchanged polygon list + registers still needs every texture it uses
   // validated (a memcmp each) in case VRAM changed underneath; the previous
   // colour buffer is kept only if nothing needed re-decoding.
-  if (gx.render_identical() && rendered_once_ && aa_ == aa_rendered_) {
+  if (gx.render_identical() && rendered_once_ && aa_ == aa_rendered_ && edge_export_ == edge_rendered_) {
     for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
       const Polygon& p = *polys[i];
       const u32 fmt = (p.texparam >> 26) & 7;
@@ -2756,7 +2817,7 @@ void Renderer3D::render(const Gpu3D& gx) {
     if (texcache_.decodes_this_frame() == 0) { prof::add(prof::C_R3D_FRAMES_KEPT, 1); return; }
   }
   rendered_once_ = true;
-  aa_rendered_ = aa_;
+  aa_rendered_ = aa_; edge_rendered_ = edge_export_;
   // Emulation thread only does what it must: resolve the (non-thread-safe)
   // texture cache to plain pointers and count drawing polygons. Edge setup
   // moved off it; job 0 builds its own edges on its pool thread like workers 1..n.
@@ -2793,6 +2854,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   }
   // Buffer the display isn't reading; becomes the displayed one after dispatch.
   u32* const dst = out_[display_ ^ 1].data();
+  u32* const edst = edge_export_ ? edge_[display_ ^ 1].data() : nullptr;
   // DS_DEBUG_R3D_BINS=fwd|each: with DS_HOST_CORES=1, draw inline as 8 bins in ascending order, on this
   // one instance (fwd) or a fresh one per bin (each) -- the band path's seeding and overlap, reproducibly.
   // Must equal one band. DS_DEBUG_R3D_BINS_LOG=1 prints the cuts.
@@ -2808,22 +2870,22 @@ void Renderer3D::render(const Gpu3D& gx) {
       Renderer3D* r = this;
       if (dbg_bins[0] == 'e' && b > 0) {
         if (!fresh) fresh = std::make_unique<Renderer3D>(nds_);
-        fresh->aa_ = aa_;
+        fresh->aa_ = aa_; fresh->edge_export_ = edge_export_;
         fresh->prepare_worker(gx, list_polys_, list_count_, &poly_texels_, &rs_frame_);
         r = fresh.get();
       }
-      r->render_band(bin_y_[b], bin_y_[b + 1], dst);
+      r->render_band(bin_y_[b], bin_y_[b + 1], dst, edst);
     }
     display_ ^= 1; return;
   }
-  if (nb == 0) { pending_bands_ = 0; build_edges(); render_band(0, 192, dst); display_ ^= 1; return; }
+  if (nb == 0) { pending_bands_ = 0; build_edges(); render_band(0, 192, dst, edst); display_ ^= 1; return; }
 
   // Pool is never shrunk; only `nb` gets work, so the lag cut costs a
   // dispatch flag rather than creating/joining threads mid-scene.
   if (bands_.size() < nb - 1) {
     while (bands_.size() < nb - 1) bands_.push_back(std::make_unique<Renderer3D>(nds_));
   }
-  for (auto& b : bands_) b->aa_ = aa_;
+  for (auto& b : bands_) { b->aa_ = aa_; b->edge_export_ = edge_export_; }
   // Never replaced once big enough: the compositor may still be waiting on it
   // for the previous frame's bands (sync_line). Sized for 3 by default (the
   // usual max); unused workers are never woken (Pool::dispatch).
@@ -2835,7 +2897,7 @@ void Renderer3D::render(const Gpu3D& gx) {
   const Gpu3D& gxr = gx;
   // job_fn_ is a member since the job outlives this call. Workers claim bins
   // until exhausted (not one band each), so an uneven split costs nothing.
-  job_fn_ = [this, &gxr, dst](u32 w) {
+  job_fn_ = [this, &gxr, dst, edst](u32 w) {
     const u64 t0 = prof::now_ns();
     Renderer3D* r = this;
     if (w != 0) { r = bands_[w - 1].get(); r->prepare_worker(gxr, list_polys_, list_count_, &poly_texels_, &rs_frame_); }
@@ -2844,7 +2906,7 @@ void Renderer3D::render(const Gpu3D& gx) {
       const u32 b = pool_->claim();
       if (b >= nbins_) break;
       const s32 y0 = bin_y_[b], y1 = bin_y_[b + 1];
-      if (y0 < y1) r->render_band(y0, y1, dst);
+      if (y0 < y1) r->render_band(y0, y1, dst, edst);
       pool_->mark_done(b);
     }
     // Per worker, own slot, no synchronisation; read next frame after sync_all.
@@ -2858,7 +2920,7 @@ void Renderer3D::render(const Gpu3D& gx) {
     // Next generation's slot; sync_all above guarantees no thief two back is still reading it.
     DispatchCtx& c = ctx_[(gen_ + 1) & 1];
     c.gx = &gx; c.polys = list_polys_; c.npoly = list_count_; c.texels = poly_texels_; c.rs = rs_frame_;
-    c.bin_y = bin_y_; c.nbins = nbins_; c.dst = dst; c.aa = aa_;
+    c.bin_y = bin_y_; c.nbins = nbins_; c.dst = dst; c.edst = edst; c.aa = aa_; c.edge_export = edge_export_;
   }
   gen_ = pool_->dispatch(job_fn_, nb, nbins_);
   display_ ^= 1;
@@ -2958,6 +3020,7 @@ Renderer3D::FrameRef Renderer3D::frame_ref(bool allow_lag) const {
   f.nbins = pending_bands_;
   if (pending_bands_) f.bin_y = bin_y_;
   f.out = out_[display_].data();
+  if (edge_rendered_) f.edges = edge_[display_].data();
   return f;
 }
 
@@ -3277,12 +3340,12 @@ bool Renderer3D::steal_bins(u64 gen, u32 upto) {
     if (c >= cx.nbins) { result = pool_->done(gen, mask); break; }
     if (sb->gen != gen) {
       if (!sb->band) sb->band = std::make_unique<Renderer3D>(nds_);
-      sb->band->aa_ = cx.aa;
+      sb->band->aa_ = cx.aa; sb->band->edge_export_ = cx.edge_export;
       sb->band->prepare_worker(*cx.gx, cx.polys, cx.npoly, &cx.texels, &cx.rs);
       sb->gen = gen;
     }
     const s32 y0 = cx.bin_y[c], y1 = cx.bin_y[c + 1];
-    if (y0 < y1) sb->band->render_band(y0, y1, cx.dst);
+    if (y0 < y1) sb->band->render_band(y0, y1, cx.dst, cx.edst);
     pool_->thief_done(c);
     prof::add(prof::C_R3D_STOLEN, 1);
   }
@@ -3376,8 +3439,9 @@ void Renderer3D::seed_active(s32 y) {
 // Rasterise output lines [y0, y1) into dst. The final pass of a line reads
 // the lines either side of it, so one extra line above is rasterised (and
 // the border row stands in at the top and bottom of the screen).
-void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
-  out_dst_ = dst;
+void Renderer3D::render_band(s32 y0, s32 y1, u32* dst, u32* edst) {
+  out_dst_ = dst; out_edge_dst_ = edst;
+  raw_line_ = -100;   // no line of this frame saved yet (the marker must not carry over from the last frame's lines)
   const s32 first = y0 > 0 ? y0 - 1 : 0;
   const s32 last = y1 + 1 < 192 ? y1 + 1 : 192;
   // Bins overlap by the line or two final_pass needs either side of a

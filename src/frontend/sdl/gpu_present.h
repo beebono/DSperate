@@ -20,6 +20,7 @@
 #include <string>
 
 namespace ds::sdl {
+struct EdgePlanes;
 
 class GpuPresent {
 public:
@@ -38,8 +39,9 @@ public:
   // out in; `rot` maps it onto the presented buffer. False if nothing shown.
   // `drawn`: rectangle the frontend's overlay drew this frame (see overlay()).
   // `grid`: LCD grid brightness on a seam, 0..256 (256 = off).
+  // `edges`: the edge cut's planes (core/gpu/edge_cut.h), or null: no cut.
   bool present(ScanoutOut& out, const u32* const fb[2], const View* views, int nviews, int rot, int lw, int lh, u8 inset_alpha,
-               SDL_Rect drawn = SDL_Rect{0, 0, 0, 0}, u32 grid = 256);
+               SDL_Rect drawn = SDL_Rect{0, 0, 0, 0}, u32 grid = 256, const EdgePlanes* edges = nullptr);
   // Canvas for the frontend's overlays (OSD, pause menu, notices) for the
   // coming frame: `lw`x`lh`, pitch `lw`, 0xAARRGGBB, alpha honoured,
   // host-cached. Pre-cleared where the frame before last drew.

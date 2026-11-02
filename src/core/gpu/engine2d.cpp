@@ -146,6 +146,7 @@ void Engine2D::debug_outhash(u32 line) {
 void Engine2D::render_line(u32 line) {
   struct AtExit { Engine2D* e; u32 line; ~AtExit() { if (g_outhash_on) e->debug_outhash(line); } } at_exit{this, line};
   cur_ = regs_.begin_line();
+  top_mode_ = TOP_NONE;
   if (!cur_.enabled) {
     // Powered-down engines output a fixed colour: black for A, white for B.
     out_.fill(num_ ? 0xFF3F3F3F : 0xFF000000);
@@ -216,12 +217,14 @@ void Engine2D::render_line(u32 line) {
             if ((cur_.layer_enable & (1 << bg)) && bg_[bg].any && (cur_.bgcnt[bg] & 3) == prio) { top = bg; break; }
         if (top >= 0 && line_all_opaque(bg_[top])) {
           prof::add(prof::C_2D_FAST_ONE, 1);
+          if (top == 0) top_mode_ = TOP_ALL_BG0;
           kern::active::resolve16_one(bg_[top].v(), bg_[top].table, out_.data());
           return;
         }
       }
     }
     select_layers_flat();
+    top_mode_ = TOP_FLAT;
     return;
   }
   prof::add(prof::C_2D_EFFECT_LIVE, 1);
@@ -231,11 +234,35 @@ void Engine2D::render_line(u32 line) {
     prof::add(prof::C_2D_FULL_FADE, 1);
     { DS_PROF(SELECT); select_layers_top(); }
     { DS_PROF(EFFECTS); kern::active::composite_line_fade(cur_.bldcnt, cur_.evy, top_.data(), top_id_.data(), win_.data(), out_.data()); }
+    top_mode_ = TOP_FADE;
     return;
   }
   prof::add(prof::C_2D_FULL_SECOND, 1);
   { DS_PROF(SELECT); select_layers(); }
   { DS_PROF(EFFECTS); colour_effects(); }
+  top_mode_ = TOP_FULL;
+}
+
+bool Engine2D::edge_compose(Pixel* own, u8* bytes) const {
+  const bool is3d = !num_ && (cur_.dispcnt & 8) && cur_.enabled && !cur_.forced_blank;
+  if (!edge3d_ || !is3d || top_mode_ == TOP_NONE) return false;
+  bool any = false;
+  for (u32 x = 0; x < 256; ++x) {
+    const u32 e = edge3d_[x];
+    bytes[x] = 0; own[x] = 0;
+    if (!e || (top_mode_ != TOP_ALL_BG0 && top_tid_[x] != T_BG0)) continue;
+    const Pixel p = (e & 0x3F) | (((e >> 6) & 0x3F) << 8) | (((e >> 12) & 0x3F) << 16) | (((e >> 18) & 0x1F) << 24);
+    Pixel o;
+    switch (top_mode_) {
+    case TOP_FADE: o = kern::ref::fade_pixel(cur_.bldcnt, cur_.evy, p, top_id_[x], win_[x]); break;
+    case TOP_FULL: o = kern::ref::composite_pixel(cur_.bldcnt, cur_.eva, cur_.evb, cur_.evy, p, second_[x], top_id_[x], K_3D, top_alpha_[x], second_id_[x], win_[x]); break;
+    default: o = (p & 0x00FFFFFF) | 0xFF000000; break;
+    }
+    own[x] = o;
+    bytes[x] = static_cast<u8>(e >> 24);
+    any = true;
+  }
+  return any;
 }
 
 // Whether any pixel of the line could be changed by the colour-effects pass.

@@ -143,6 +143,12 @@ inline Pixel resolve_one(const Pixel* tab, u16 c) {
   u32  NS##depth_candidates_shadow(int mode, const s32* z, const u32* dstz, const u32* dstattr, const u8* stencil, u32 n, u8* pass, u32 under_off);
 
 namespace ref { DS_KERNEL_LIST() }
+namespace ref {
+// One pixel of composite_line / composite_line_fade, for the edge cut's
+// unblended colours (Engine2D::edge_compose): the same arithmetic, scalar.
+Pixel composite_pixel(u32 bldcnt, u32 eva, u32 evb, u32 evy, Pixel a, Pixel b, u8 top_id, u8 kind, u8 top_alpha, u8 second_id, u8 win);
+Pixel fade_pixel(u32 bldcnt, u32 evy, Pixel a, u8 top_id, u8 win);
+}
 #if DSPERATE_NEON
 namespace neon { DS_KERNEL_LIST() }
 namespace active = neon;

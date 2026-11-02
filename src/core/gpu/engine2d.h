@@ -76,6 +76,14 @@ public:
 
   // Engine A: 256 RGB666 with 5-bit alpha in bits 24-28 (0 = transparent), or null.
   void set_3d_line(const Pixel* line) { line3d_ = line; }
+  // The edge cut: the 3D line's edge plane (Renderer3D::set_edge_export;
+  // null: none). After render_line, edge_compose gives each of the line's
+  // edge pixels that shows (the top layer there is the 3D layer) its
+  // unblended 3D colour taken through the same colour effects as the line,
+  // in `own`, and the edge byte in `bytes`; elsewhere `bytes` is zero.
+  // False when no edge pixel shows.
+  void set_3d_edges(const u32* e) { edge3d_ = e; }
+  bool edge_compose(Pixel* own, u8* bytes) const;
 
   u32 bldcnt() const { return regs_.bldcnt(); }
   u32 eva() const { return regs_.eva(); }
@@ -139,6 +147,10 @@ private:
   alignas(16) std::array<u8, 256> top_id_{}, top_kind_{}, top_alpha_{}, second_id_{};
   alignas(16) std::array<Pixel, 256> out_{};
   const Pixel* line3d_ = nullptr;
+  const u32* edge3d_ = nullptr;
+  // How render_line resolved the line, for edge_compose: which of the
+  // per-pixel records above hold this line's values.
+  enum : u8 { TOP_NONE, TOP_ALL_BG0, TOP_FLAT, TOP_FADE, TOP_FULL } top_mode_ = TOP_NONE;
 
   const VramMap& vram() const;
   const VramMap* vm_override_ = nullptr;

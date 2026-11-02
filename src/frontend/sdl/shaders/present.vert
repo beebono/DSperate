@@ -6,7 +6,7 @@
 layout(push_constant) uniform P {
   ivec4 rect;     // x, y, w, h in the logical frame
   uvec4 a;        // presented w, h; logical w, h
-  uvec4 b;        // rotation (0/90/180/270), mode (0 view, 1 overlay), source base (words), view index | grid on << 8 | grid brightness << 16
+  uvec4 b;        // rotation (0/90/180/270), mode (0 view, 1 overlay), source base (words), view index | grid on << 8 | edge cut << 9 | grid brightness << 16
   vec4 s;         // view: 256/w, 192/h, 0.5/w, 0.5/h
 } pc;
 layout(location = 0) out vec2 d;
