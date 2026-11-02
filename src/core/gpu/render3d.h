@@ -70,6 +70,9 @@ public:
   // for it), 4x MSAA on the GPU raster. Coordinator only.
   void set_aa(bool on);
   bool aa() const { return aa_; }
+  // video.aa = enhanced: on the GPU raster the edge cut also cuts texture cut-out edges (the cut-out pass). Nothing on the CPU raster.
+  void set_aa_enhanced(bool on) { aa_enhanced_ = on; }
+  bool aa_enhanced() const { return aa_enhanced_; }
   // The panel-density edge cut (core/gpu/edge_cut.h): beside each output
   // line, the final pass writes an edge plane (FrameRef::edges), one word a
   // pixel, zero where nothing is cut. An edge pixel the AA blend mixes keeps
@@ -233,7 +236,8 @@ private:
   const Gpu3D* gx_ = nullptr;
   const RenderState* rs_ = nullptr;
   bool game_aa_ = false;                  // AA blend runs (game asked and aa_ allows)
-  bool aa_ = true, aa_rendered_ = true;   // aa_rendered_: the setting the kept frame was drawn with
+  bool aa_ = true, aa_rendered_ = true;
+  bool aa_enhanced_ = false;   // aa_rendered_: the setting the kept frame was drawn with
   bool edge_export_ = false, edge_rendered_ = false;   // see set_edge_export; edge_rendered_ as aa_rendered_
   // The edge export's seam test reads the line above before its final pass
   // touched it: saved here per line (raw_line_ is the line in raw_row_[0]).
@@ -352,7 +356,15 @@ private:
   // only lays out where each polygon's rows go. `jobs` pairs a polygon with
   // its first row; the output is the same as walking them in order here.
   struct SpanRowsJob { const Polygon* poly; u32 row; };
-  void gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, u32* spans, bool serial);   // serial: this thread alone (the job thread; the pool is the bands')
+  void gpu_walk_spans(size_t a, size_t b);
+  void gpu_spans_start(u32 rows, u32* spans);   // emulation thread
+  void gpu_spans_finish(u32 rows);              // job thread
+  u32* span_dst_ = nullptr;
+  std::vector<u32> span_cut_;   // chunk bounds, MAX_BINS + 1
+  u32 span_nchunks_ = 0;
+  u64 span_gen_ = 0;
+  bool span_pending_ = false, span_serial_ = false;
+  mutable bool capture_hint_ = false;   // the last display frame allowed no lag (display capture): see gpu_spans_start
   std::vector<SpanRowsJob> span_jobs_;
   std::function<void(u32)> span_fn_;   // the pool keeps a reference until wait_idle
   void rewind_edge(Edge& e);
@@ -455,9 +467,10 @@ private:
   // thread, off the emulation thread: gpu_submit() fills the staging buffers
   // and the texel arena, then posts the Lean::submit call. gpu_job_wait()
   // before anything that reads the result or rewrites the staging.
-  // The span-table walk (gpu_fill_spans, ~3 ms on an A53) runs on the job
-  // thread too, before the submit: span_jobs_ names the raster bank's
-  // polygons, which Gpu3D holds until sync_all() has seen the job done.
+  // The span-table walk (~3 ms on an A53) runs before the submit on the
+  // job thread, or on the emulation thread for capture frames
+  // (gpu_spans_start / gpu_spans_finish): span_jobs_ names the raster
+  // bank's polygons, which Gpu3D holds until sync_all() has seen the job done.
   struct GpuJob { std::thread thread; std::mutex m; std::condition_variable cv; bool pending = false, quit = false, ok = false; u32 np = 0, nv = 0, ntex = 0, rows = 0; vk::GpuFrame f{}; };
   std::unique_ptr<GpuJob> gpu_job_;
   void gpu_job_start();

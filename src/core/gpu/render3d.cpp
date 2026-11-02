@@ -385,7 +385,7 @@ void Renderer3D::gpu_job_start() {
       if (j->quit) return;
       const u32 np = j->np, nv = j->nv, ntex = j->ntex, rows = j->rows; const vk::GpuFrame f = j->f;
       lk.unlock();
-      gpu_fill_spans(span_jobs_, rows, lean_->span_buffer(), true);
+      gpu_spans_finish(rows);
       const bool ok = lean_->submit(np, nv, ntex, f);
       lk.lock();
       j->ok = ok; j->pending = false;
@@ -3057,6 +3057,7 @@ Renderer3D::FrameRef Renderer3D::frame_ref(bool allow_lag) const {
     // finished, or, allowed, the one before) is picked at the first line
     // read.
     f.nbins = 0; f.gpu = true; f.allow_lag = allow_lag; f.out = nullptr; f.gpu_gen = gpu_gen_;
+    capture_hint_ = !allow_lag;   // a capture frame: the next walk goes before the submit (gpu_spans_start)
     return f;
   }
   f.nbins = pending_bands_;
@@ -3189,38 +3190,69 @@ u32 Renderer3D::gpu_span_rows(const Polygon& p, u32* out, u32 cap) {
 // more than it saves. Guitar Hero: On Tour's frames run ~5000 rows, ~2 ms here.
 static constexpr u32 kSpanParallelRows = 1024;
 
-void Renderer3D::gpu_fill_spans(const std::vector<SpanRowsJob>& jobs, u32 rows, u32* spans, bool serial) {
+// The walk of one polygon's rows into the slot's span table.
+void Renderer3D::gpu_walk_spans(size_t a, size_t b) {
   using namespace ds::gpu::vk;
-  const auto walk = [this, &jobs, spans](size_t a, size_t b) {
-    for (size_t k = a; k < b; ++k) gpu_span_rows(*jobs[k].poly, spans + DS_SPAN_WORDS * jobs[k].row, DS_MAX_SPAN_ROWS - jobs[k].row);
-  };
+  for (size_t k = a; k < b; ++k) gpu_span_rows(*span_jobs_[k].poly, span_dst_ + DS_SPAN_WORDS * span_jobs_[k].row, DS_MAX_SPAN_ROWS - span_jobs_[k].row);
+}
+
+// Emulation thread: where the frame's span table is walked depends on
+// whether the GPU's latency lands on the frame. A display-capture frame
+// reads the 3D layer as soon as it is drawn (no lag allowed), so the
+// submit must come as early as possible: the walk runs here, over the band
+// pool with this thread taking part (RG DS Plus, On Tour: 7-10% of frames
+// over budget this way, 15-17% with the walk after the post). Otherwise the
+// compositor shows the frame before and the emulation thread is the
+// critical path: the job thread walks it, serially, before the submit
+// (RG35XX SP, Mario Kart: 9.5 ms median work against 12.3; dispatching to
+// the pool from there was worse again, 12-14, the workers contending with
+// the 2D engines'). A small frame is walked here outright. No band
+// dispatch can overlap the job's walk: the next frame's render waits for
+// the job first, as sync_all does. DS_SPAN_WALK=emu|job overrides.
+void Renderer3D::gpu_spans_start(u32 rows, u32* spans) {
+  span_dst_ = spans;
+  span_pending_ = false;
   const u32 workers = band_count(2);
-  if (serial || rows < kSpanParallelRows || workers == 0 || jobs.size() < 2) { walk(0, jobs.size()); return; }
+  if (rows < kSpanParallelRows || workers == 0 || span_jobs_.size() < 2) { gpu_walk_spans(0, span_jobs_.size()); return; }
+  static const char* const force = std::getenv("DS_SPAN_WALK");
+  const bool here = force ? !std::strcmp(force, "emu") : capture_hint_;
+  if (!here) { span_pending_ = true; span_serial_ = true; return; }
   if (!pool_) pool_ = std::make_unique<Pool>(thread_layout_on() || workers > 3 ? workers : 3);
-  // Chunks of whole polygons, about equal in rows; claimed in order by the
-  // workers and this thread alike. Each polygon writes only its own rows.
-  const u32 nchunks = std::min<u32>(MAX_BINS, static_cast<u32>(jobs.size()));
-  std::array<u32, MAX_BINS + 1> cut{};
+  const u32 nchunks = std::min<u32>(MAX_BINS, static_cast<u32>(span_jobs_.size()));
+  span_cut_.assign(MAX_BINS + 1, 0);
   for (u32 c = 1, k = 0; c < nchunks; ++c) {
     const u32 target = static_cast<u32>(static_cast<u64>(rows) * c / nchunks);
-    while (k + 1 < jobs.size() && jobs[k + 1].row <= target) ++k;
-    cut[c] = std::max(cut[c - 1], static_cast<u32>(k));
+    while (k + 1 < span_jobs_.size() && span_jobs_[k + 1].row <= target) ++k;
+    span_cut_[c] = std::max(span_cut_[c - 1], static_cast<u32>(k));
   }
-  cut[nchunks] = static_cast<u32>(jobs.size());
-  span_fn_ = [this, &walk, &cut, nchunks](u32) {
-    for (u32 c; (c = pool_->claim()) < nchunks;) { walk(cut[c], cut[c + 1]); pool_->mark_done(c); }
+  span_cut_[nchunks] = static_cast<u32>(span_jobs_.size());
+  span_nchunks_ = nchunks;
+  span_fn_ = [this, nchunks](u32) {
+    for (u32 c; (c = pool_->claim()) < nchunks;) { gpu_walk_spans(span_cut_[c], span_cut_[c + 1]); pool_->mark_done(c); }
   };
-  const u64 gen = pool_->dispatch(span_fn_, workers, nchunks);
-  for (u32 c; (c = pool_->claim_if(gen)) < nchunks;) { walk(cut[c], cut[c + 1]); pool_->thief_done(c); }
-  pool_->wait_idle();   // every worker back out of span_fn_, which refers to this frame
+  span_gen_ = pool_->dispatch(span_fn_, workers, nchunks);
+  span_pending_ = true; span_serial_ = false;
+  gpu_spans_finish(rows);
+}
+
+// Job thread (or, inline, the emulation thread): the walk left pending by gpu_spans_start.
+void Renderer3D::gpu_spans_finish(u32 rows) {
+  if (!span_pending_) return;
+  if (span_serial_) gpu_walk_spans(0, span_jobs_.size());
+  else {
+    for (u32 c; (c = pool_->claim_if(span_gen_)) < span_nchunks_;) { gpu_walk_spans(span_cut_[c], span_cut_[c + 1]); pool_->thief_done(c); }
+    pool_->wait_idle();
+  }
+  span_pending_ = false;
   // DS_LEAN_SPAN_VERIFY=1: walk the rows again in order here and abort on any difference.
   static const bool verify = std::getenv("DS_LEAN_SPAN_VERIFY") && std::atoi(std::getenv("DS_LEAN_SPAN_VERIFY")) != 0;
   if (verify) {
+    using namespace ds::gpu::vk;
     static std::vector<u32> ref;
     static u64 frames = 0;
     ref.assign(static_cast<size_t>(rows) * DS_SPAN_WORDS, 0);
-    for (const SpanRowsJob& j : jobs) gpu_span_rows(*j.poly, ref.data() + DS_SPAN_WORDS * j.row, DS_MAX_SPAN_ROWS - j.row);
-    if (std::memcmp(ref.data(), spans, ref.size() * sizeof(u32)) != 0) { std::fprintf(stderr, "[spans] VERIFY FAILED: parallel walk differs (frame %llu, %u rows)\n", (unsigned long long)nds_.frame_count, rows); std::abort(); }
+    for (const SpanRowsJob& j : span_jobs_) gpu_span_rows(*j.poly, ref.data() + DS_SPAN_WORDS * j.row, DS_MAX_SPAN_ROWS - j.row);
+    if (std::memcmp(ref.data(), span_dst_, ref.size() * sizeof(u32)) != 0) { std::fprintf(stderr, "[spans] VERIFY FAILED: parallel walk differs (frame %llu, %u rows)\n", (unsigned long long)nds_.frame_count, rows); std::abort(); }
     if (++frames % 600 == 0) std::fprintf(stderr, "[spans] verify: %llu parallel frames matched\n", (unsigned long long)frames);
   }
 }
@@ -3291,7 +3323,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     ++np;
   }
   if (first_ordered == ~0u) { first_ordered = np; opaque_rows = nrows; }
-  (void)spans;   // the span table is walked on the job thread (gpu_job_start), from span_jobs_
+  gpu_spans_start(nrows, spans);   // the pool walks; the job thread finishes it before the submit
   *ps = GpuPost{};
   ps->fog_color = rs_->fog_color; ps->fog_offset = rs_->fog_offset; ps->fog_shift = rs_->fog_shift;
   for (u32 i = 0; i < rs_->fog_density.size() && i < 34; ++i) ps->density[i] = rs_->fog_density[i];
@@ -3302,6 +3334,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   f.first_ordered = first_ordered; f.opaque_rows = opaque_rows; f.nrows = nrows;
   for (u32 i = 0; i < npoly; ++i) if (!polys[i]->degenerate) { if (polys[i]->wbuffer) f.flags |= DS_FF_WBUFFER; break; }
   if (lean_->msaa()) f.flags2 |= DS_FF2_MSAA;   // vertices on pixel corners (lean.vert)
+  if (aa_enhanced_ && gpu_edges()) f.flags2 |= DS_FF2_CUTOUT;
   {
     const u16 c = static_cast<u16>(rs_->clear_attr1);
     auto ch = [](u16 v, u32 shift) { u32 x = (shift == 0 ? (v << 1) : (v >> shift)) & 0x3E; return x ? x + 1 : x; };
