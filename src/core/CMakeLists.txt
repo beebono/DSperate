@@ -63,6 +63,11 @@ add_library(dsperate_core STATIC
   io/dsi_font.cpp
   io/dsi_nwifi.cpp
 )
+# GCC < 9 keeps C++17 std::filesystem (io/dsi_*) in a separate library. PUBLIC,
+# so every executable linking the core gets it, the tests included (#24).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
+  target_link_libraries(dsperate_core PUBLIC stdc++fs)
+endif()
 target_include_directories(dsperate_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 # The .symver in pow_compat.c only reaches the binary if this TU is kept out
