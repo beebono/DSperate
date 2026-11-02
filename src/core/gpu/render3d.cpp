@@ -3296,10 +3296,16 @@ bool Renderer3D::steal_bins(u64 gen, u32 upto) {
 u32 Renderer3D::band_count(u32 polygons) {
   if (polygons < 2) return 0;
   // Three on three+ cores, two on two; a single core draws inline. The thread
-  // layout pins two, one beside each 2D engine; the emulation thread steals
-  // bins as it reaches them (the fourth core is the aux one).
+  // layout pins one beside each 2D engine and the third on the aux core; the
+  // emulation thread steals bins as it reaches them. The third matters when
+  // the raster has a deadline: Guitar Hero: On Tour reads its capture of the
+  // 3D layer back at every VBlank, and with CPU AA two bands missed it in 16%
+  // of frames (RG DS Plus), three in 0.8%; scenes without that deadline are
+  // unchanged, audio on the aux core unaffected.
   const u32 cores = host_cores();
-  if (thread_layout_on() && cores >= 4) return 2;
+  // DS_R3D_BANDS=n: that many (1..8), for measuring the split.
+  static const u32 forced = [] { const char* e = std::getenv("DS_R3D_BANDS"); const int n = e ? std::atoi(e) : 0; return n >= 1 && n <= 8 ? static_cast<u32>(n) : 0u; }();
+  if (forced) return forced;
   return cores >= 3 ? 3 : cores >= 2 ? 2 : 0;
 }
 

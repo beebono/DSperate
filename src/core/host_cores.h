@@ -23,7 +23,7 @@ void name_current_thread(const char* name);
 //          audio, SDL, input, driver threads, anything we did not start
 //   core B: 2D engine A + 3D band 0      core C: 2D engine B + 3D band 1
 //   core D: emulation (CPU cores, JIT, scheduler; steals raster bins)
-// Bands past 1 share the aux core. Off, or fewer cores: threads migrate
+// Band 2 (and any past it) shares the aux core. Off, or fewer cores: threads migrate
 // freely. DS_PIN="emu=3,band0=1,line=2,aux=0,..." overrides per role.
 enum class ThreadRole { Emu, Band, Line, EngineA, Aux };
 void set_thread_layout(bool on);
