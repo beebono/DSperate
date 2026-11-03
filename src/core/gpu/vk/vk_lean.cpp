@@ -31,6 +31,7 @@ Lean::Stats Lean::stats(bool) { return {}; }
 
 #include "core/gpu/vk/vk_internal.h"
 #include "core/gpu/vk/vk_shaders.h"
+#include "core/gpu/vk/vk_seams.h"
 
 #include <algorithm>
 #include <chrono>
@@ -81,6 +82,7 @@ struct Lean::Impl {
   // append-only: a frame reads only what was in it when it was submitted.
   std::vector<GpuPoly> host_polys;
   std::vector<GpuVert> host_verts;
+  SeamTable seams;   // the band pass's shared-edge marks (vk_seams.h)
   GpuPost host_post{};
   Buffer polys[kSlots], verts[kSlots], post[kSlots], texels, out[kSlots], spans[kSlots], edge[kSlots];
   std::vector<u32> host_spans;   // the span table staging (vk_layout.h), filled by the caller
@@ -510,6 +512,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   const double t_prep = now_ms();
   // The arena's new texels (append-only: earlier frames' ranges are unchanged).
   if (ntexels > d.tex_flushed) { d.dev->flush(d.texels, sizeof(u32) * d.tex_flushed, sizeof(u32) * (ntexels - d.tex_flushed)); d.tex_flushed = ntexels; }
+  if (d.edges) mark_shared_edges(d.host_polys.data(), npoly, d.host_verts.data(), d.seams);
   std::memcpy(d.verts[slot].ptr, d.host_verts.data(), sizeof(GpuVert) * nvert);
   d.dev->flush(d.verts[slot], 0, sizeof(GpuVert) * nvert);
   std::memcpy(d.post[slot].ptr, &d.host_post, sizeof(GpuPost));
@@ -674,10 +677,14 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
         else ++runs;   // one too many: all 60 for everyone
       }
       static const bool one_draw = std::getenv("DS_LEAN_BANDRUNS") && std::atoi(std::getenv("DS_LEAN_BANDRUNS")) == 0;   // debug: the single draw
-      if (runs > kMaxBandRuns || one_draw) a.vkCmdDraw(cb, 60, npoly, 0, 0);
-      else {
-        a.vkCmdDraw(cb, 24, npoly, 0, 0);
-        for (u32 r = 0; r < runs; ++r) a.vkCmdDraw(cb, 36, run_count[r], 24, run_first[r]);
+      // Twice: vertex ids 0-59 draw the shared edges (seams), 60-119 the rest,
+      // after them, so a silhouette's byte wins a pixel both reach (vk_seams.h).
+      for (u32 pass = 0; pass < 120; pass += 60) {
+        if (runs > kMaxBandRuns || one_draw) a.vkCmdDraw(cb, 60, npoly, pass, 0);
+        else {
+          a.vkCmdDraw(cb, 24, npoly, pass, 0);
+          for (u32 r = 0; r < runs; ++r) a.vkCmdDraw(cb, 36, run_count[r], pass + 24, run_first[r]);
+        }
       }
     }
     // The cut-out pass: the alpha-tested opaque polygons, drawn last in the opaque prefix.

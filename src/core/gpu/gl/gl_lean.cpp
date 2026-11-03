@@ -4,6 +4,7 @@
 
 #include "core/gpu/gl/gl_api.h"
 #include "core/gpu/gl/gl_shaders.h"
+#include "core/gpu/vk/vk_seams.h"
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +43,7 @@ struct Lean::Impl {
   // the persistently mapped buffers below (and the vertex stage's textures).
   std::vector<GpuPoly> host_polys, sorted;
   std::vector<GpuVert> host_verts;
+  vk::SeamTable seams;   // the band pass's shared-edge marks (vk_seams.h)
   std::vector<u32> host_spans;
   GpuPost host_post{};
   std::vector<std::pair<s64, u32>> key;
@@ -568,6 +570,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   }
   a.glActiveTexture(GL_TEXTURE0); a.glBindTexture(GL_TEXTURE_2D, d.tex_polys[slot]);
   if (npoly) a.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kPullW, static_cast<GLsizei>((npoly * 4 + kPullW - 1) / kPullW), GL_RGBA_INTEGER, GL_UNSIGNED_INT, out_p);
+  if (d.edges) vk::mark_shared_edges(gpw, npoly, d.host_verts.data(), d.seams);
   a.glActiveTexture(GL_TEXTURE0 + 1); a.glBindTexture(GL_TEXTURE_2D, d.tex_verts[slot]);
   if (nvert) a.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kPullW, static_cast<GLsizei>((nvert * 3 + kPullW - 1) / kPullW), GL_RGBA_INTEGER, GL_UNSIGNED_INT, gv);
   a.glBindBufferBase(GL_UNIFORM_BUFFER, 0, d.ubo_frame[slot]);
@@ -666,11 +669,13 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
         else ++runs;
       }
       static const bool one_draw = std::getenv("DS_LEAN_BANDRUNS") && std::atoi(std::getenv("DS_LEAN_BANDRUNS")) == 0;
-      a.glUniform1i(d.loc_base_band, 0);
-      if (runs > kMaxBandRuns || one_draw) { a.glDrawArraysInstanced(GL_TRIANGLES, 0, 60, static_cast<GLsizei>(npoly)); ++draws; }
-      else {
-        a.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, static_cast<GLsizei>(npoly)); ++draws;
-        for (u32 r = 0; r < runs; ++r) { a.glUniform1i(d.loc_base_band, static_cast<GLint>(run_first[r])); a.glDrawArraysInstanced(GL_TRIANGLES, 24, 36, static_cast<GLsizei>(run_count[r])); ++draws; }
+      for (GLint pass = 0; pass < 120; pass += 60) {   // seams (vertex ids 0-59) first, the rest after: vk_lean.cpp
+        a.glUniform1i(d.loc_base_band, 0);
+        if (runs > kMaxBandRuns || one_draw) { a.glDrawArraysInstanced(GL_TRIANGLES, pass, 60, static_cast<GLsizei>(npoly)); ++draws; }
+        else {
+          a.glDrawArraysInstanced(GL_TRIANGLES, pass, 24, static_cast<GLsizei>(npoly)); ++draws;
+          for (u32 r = 0; r < runs; ++r) { a.glUniform1i(d.loc_base_band, static_cast<GLint>(run_first[r])); a.glDrawArraysInstanced(GL_TRIANGLES, pass + 24, 36, static_cast<GLsizei>(run_count[r])); ++draws; }
+        }
       }
     }
     static const bool no_cutout = std::getenv("DS_LEAN_NOCUTOUT") && std::atoi(std::getenv("DS_LEAN_NOCUTOUT")) != 0;

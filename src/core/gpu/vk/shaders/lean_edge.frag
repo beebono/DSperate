@@ -30,8 +30,11 @@ void main() {
   if (owner == v_poly + 1u) {
     if (!inside) discard;
   } else {
-    // Outside the polygon, and only where it is in front of what the pixel shows.
-    if (inside) discard;
+    // Not this polygon's pixel: only where it is in front of what the pixel
+    // shows (the rear plane: always). Either side of the line: a pixel whose
+    // centre is just inside but which the fill rules gave to what is behind
+    // (a vertex on the centre) is still crossed by this edge, and no other
+    // edge describes it.
     if (owner != 0u) {
       float sd = subpassLoad(in_depth).r;
       bool wbuf = (pc.f.flags & DS_FF_WBUFFER) != 0u;
@@ -44,6 +47,13 @@ void main() {
   float l = vert ? a.y + (c.x - a.x) * d.y / d.x : a.x + (c.y - a.y) * d.x / d.y;
   float t = l - (vert ? floor(c.y) : floor(c.x));
   if (t <= 0.0 || t >= 1.0) discard;
+  // Only where that crossing lies on the edge itself: the band reaches a
+  // pixel past each end, and the line extended past its vertex would write
+  // over the next edge's pixels (a seam between two faces of a hill meeting
+  // its crest put its byte on the sea pixel there, cutting it the wrong way).
+  vec2 pcross = vert ? vec2(c.x, l) : vec2(l, c.y);
+  float s = dot(pcross - a, d) / dot(d, d), sm = 0.05 / length(d);
+  if (s < -sm || s > 1.0 + sm) discard;
   bool neg = t < 0.5;            // the centre on the positive side: the outside is the negative neighbour
   float share = neg ? 1.0 - t : t;
   int cov = clamp(int(round(share * 32.0)) - 1, 0, 31);
