@@ -55,7 +55,10 @@ void main() {
   bool vert = abs(d.x) >= abs(d.y);
   float l = vert ? a.y + (c.x - a.x) * d.y / d.x : a.x + (c.y - a.y) * d.x / d.y;
   float t = l - (vert ? floor(c.y) : floor(c.x));
-  if (t <= 0.0 || t >= 1.0) discard;
+  // A crossing on the pixel's border counts (t of 0 or 1: full or no
+  // coverage): the byte keeps the present's blend band continuous there;
+  // without it the band stopped dead at the pixel, a hard seam in a soft edge.
+  if (t < 0.0 || t > 1.0) discard;
   // Only where that crossing lies on the edge itself: the band reaches a
   // pixel past each end, and the line extended past its vertex would write
   // over the next edge's pixels (a seam between two faces of a hill meeting
@@ -77,6 +80,5 @@ void main() {
   // claims differ), the face on the negative side, by a smaller step still.
   gl_FragDepth = gl_FragCoord.z + abs(t - 0.5) * (1.0 / 65536.0 / 3.0) + (poly_neg ? 0.0 : 1.0 / 1048576.0 / 3.0);
   int cov = clamp(int(round(share * 32.0)) - 1, 0, 31);
-  if (cov >= 31) discard;
   o_byte = 0x80u | (neg ? 0x40u : 0u) | (vert ? 0x20u : 0u) | uint(cov);
 }
