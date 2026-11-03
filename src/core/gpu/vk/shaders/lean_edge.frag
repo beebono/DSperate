@@ -32,11 +32,13 @@ float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
 void main() {
   vec2 c = gl_FragCoord.xy;   // the pixel's centre
   vec2 a = v_line.xy, b = v_line.zw, d = b - a;
-  bool inside = cross2(d, c - a) * cross2(d, v_in - a) > 0.0;
   uint owner = subpassLoad(in_ids).x;
-  if (owner == v_poly + 1u) {
-    if (!inside) discard;
-  } else {
+  bool own = owner == v_poly + 1u;
+  // The polygon's own pixel: the line crosses it, whichever side its centre
+  // is on (the fill rules give a polygon pixels whose centre lies just
+  // outside an edge; discarding those left the pixel whole, a tooth of the
+  // polygon's colour past its line, every few pixels along a shallow crest).
+  if (!own) {
     // Not this polygon's pixel: only where it is in front of what the pixel
     // shows (the rear plane: always). Either side of the line: a pixel whose
     // centre is just inside but which the fill rules gave to what is behind
@@ -61,10 +63,20 @@ void main() {
   vec2 pcross = vert ? vec2(c.x, l) : vec2(l, c.y);
   float s = dot(pcross - a, d) / dot(d, d), sm = 0.05 / length(d);
   if (s < -sm || s > 1.0 + sm) discard;
-  bool neg = t < 0.5;            // the centre on the positive side: the outside is the negative neighbour
-  float share = neg ? 1.0 - t : t;
+  // The pixel's own colour stays on its owner's side of the line: the
+  // polygon's side (its interior point v_in) for the polygon's own pixel,
+  // the far side for a pixel of what is behind. Not the side its centre is
+  // on: the two differ on the pixels above, and the byte must say where
+  // the colour stays. The outside is the other side.
+  float lin = vert ? a.y + (v_in.x - a.x) * d.y / d.x : a.x + (v_in.y - a.y) * d.x / d.y;
+  bool poly_neg = vert ? v_in.y < lin : v_in.x < lin;   // the polygon on the negative side (above / left) of the line
+  bool own_neg = own == poly_neg;
+  bool neg = !own_neg;           // the outside is the negative neighbour when the owner is on the positive side
+  float share = own_neg ? t : 1.0 - t;   // the owner's share of the pixel
+  // ... and for two faces' seam crossing a pixel owned by neither (their
+  // claims differ), the face on the negative side, by a smaller step still.
+  gl_FragDepth = gl_FragCoord.z + abs(t - 0.5) * (1.0 / 65536.0 / 3.0) + (poly_neg ? 0.0 : 1.0 / 1048576.0 / 3.0);
   int cov = clamp(int(round(share * 32.0)) - 1, 0, 31);
   if (cov >= 31) discard;
-  gl_FragDepth = gl_FragCoord.z + abs(t - 0.5) * (1.0 / 65536.0 / 3.0);
   o_byte = 0x80u | (neg ? 0x40u : 0u) | (vert ? 0x20u : 0u) | uint(cov);
 }
