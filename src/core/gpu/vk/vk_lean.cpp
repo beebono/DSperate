@@ -94,7 +94,7 @@ struct Lean::Impl {
   VkBufferView texel_view = VK_NULL_HANDLE;
   struct Img { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
   Img col_ms, ds_ms, fog_ms, res;   // multisampled colour, depth/stencil and fog flag (transient); the 1x resolved record
-  Img ids, ebyte, edepth;           // edges (see `edges`): the record, the bytes, the band pass's own depth
+  Img ids, ebyte, edepth;           // edges (see `edges`): the record (stored for the band pass), the edge bytes, the band pass's own depth
   VkShaderModule mod_evert = VK_NULL_HANDLE, mod_efrag = VK_NULL_HANDLE, mod_cfrag = VK_NULL_HANDLE;
   VkDescriptorSetLayout dsl_eb = VK_NULL_HANDLE;
   VkPipelineLayout layout_eb = VK_NULL_HANDLE;
@@ -108,8 +108,8 @@ struct Lean::Impl {
   VkPipelineLayout layout = VK_NULL_HANDLE;
   VkDescriptorPool pool = VK_NULL_HANDLE;
   VkDescriptorSet set[kSlots] = {}, set_in = VK_NULL_HANDLE;
-  VkRenderPass rp = VK_NULL_HANDLE;
-  VkFramebuffer fb = VK_NULL_HANDLE;
+  VkRenderPass rp = VK_NULL_HANDLE, rp2 = VK_NULL_HANDLE;   // the draw and resolve; the edge cut's band pass (its own pass: see create)
+  VkFramebuffer fb = VK_NULL_HANDLE, fb2 = VK_NULL_HANDLE;
   VkPipeline pipe[2][2][P_COUNT] = {};   // [wbuffer][depth-equal][kind]
   VkPipeline pipe_resolve = VK_NULL_HANDLE;
   VkCommandPool cpool = VK_NULL_HANDLE;
@@ -138,7 +138,9 @@ struct Lean::Impl {
     if (dsl_eb) a.vkDestroyDescriptorSetLayout(vk->dev, dsl_eb, nullptr);
     for (VkShaderModule* m : {&mod_evert, &mod_efrag, &mod_cfrag}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
     if (fb) a.vkDestroyFramebuffer(vk->dev, fb, nullptr);
+    if (fb2) a.vkDestroyFramebuffer(vk->dev, fb2, nullptr);
     if (rp) a.vkDestroyRenderPass(vk->dev, rp, nullptr);
+    if (rp2) a.vkDestroyRenderPass(vk->dev, rp2, nullptr);
     if (ds_depth_view) a.vkDestroyImageView(vk->dev, ds_depth_view, nullptr);
     for (Img* im : {&col_ms, &ds_ms, &fog_ms, &res, &ids, &ebyte, &edepth}) {
       if (im->view) a.vkDestroyImageView(vk->dev, im->view, nullptr);
@@ -313,7 +315,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
   }
   const VkImageUsageFlags transient = VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
   if (!make_image(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_COLOR_BIT, d.col_ms, samples)) return fail("MSAA colour attachment");
-  if (!make_image(d.ds_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, d.ds_ms, samples)) return fail("MSAA depth/stencil attachment");
+  // Edges: the depth and the polygon record are stored for the band pass's render pass, so not transient.
+  if (!make_image(d.ds_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | (d.edges ? 0u : transient), VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, d.ds_ms, samples)) return fail("MSAA depth/stencil attachment");
   {
     VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = d.ds_ms.img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = d.ds_format; vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
     if (a.vkCreateImageView(vk->dev, &vi, nullptr, &d.ds_depth_view) != VK_SUCCESS) return fail("depth input view");
@@ -322,9 +325,9 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
   if (!make_image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.res, VK_SAMPLE_COUNT_1_BIT)) return fail("resolve attachment");
   if (d.edges) {
     const VkImageUsageFlags tile = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | transient;
-    if (!make_image(VK_FORMAT_R16_UINT, tile, VK_IMAGE_ASPECT_COLOR_BIT, d.ids, VK_SAMPLE_COUNT_1_BIT) ||
+    if (!make_image(VK_FORMAT_R16_UINT, tile & ~transient, VK_IMAGE_ASPECT_COLOR_BIT, d.ids, VK_SAMPLE_COUNT_1_BIT) ||
         !make_image(VK_FORMAT_R8_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.ebyte, VK_SAMPLE_COUNT_1_BIT) ||
-        !make_image(d.ds_format, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, d.edepth, VK_SAMPLE_COUNT_1_BIT))
+        !make_image(VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_DEPTH_BIT, d.edepth, VK_SAMPLE_COUNT_1_BIT))   // 32-bit: a third of the range per class must hold the edge depth and the tie-break (16 bits lost both)
       return fail("edge attachments");
   }
   {
@@ -347,46 +350,64 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
   }
 
   // Render pass: subpass 0 draws into the MS colour + depth/stencil, subpass 1 resolves into the 1x record.
+  // Edges: the polygon record and the depth are stored, and the band pass
+  // runs in a render pass of its own (rp2) with a depth attachment of its own:
+  // anything more inside this pass (a seventh attachment, a depth attachment
+  // in a later subpass, an attachment read back by its own subpass) cost the
+  // Mali 3-8 ms a frame; the store and reload cost ~0.3.
   {
-    VkAttachmentDescription at[7]{};
+    VkAttachmentDescription at[5]{};
     at[0].format = VK_FORMAT_R8G8B8A8_UNORM; at[0].samples = samples; at[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     at[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; at[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    at[1].format = d.ds_format; at[1].samples = samples; at[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    at[1].format = d.ds_format; at[1].samples = samples; at[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at[1].storeOp = d.edges ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
     at[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; at[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     at[2].format = VK_FORMAT_R32_UINT; at[2].samples = VK_SAMPLE_COUNT_1_BIT; at[2].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     at[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; at[2].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     at[3] = at[0]; at[3].format = VK_FORMAT_R8_UNORM;   // the fog flag: cleared to the rear plane's, never stored
-    // Edges: 4 the polygon record (on tile) and 5 the edge bytes (stored,
-    // copied out), both cleared to zero: the rear plane, no edge.
-    at[4] = at[3]; at[4].format = VK_FORMAT_R16_UINT; at[4].samples = VK_SAMPLE_COUNT_1_BIT;
-    at[5] = at[2]; at[5].format = VK_FORMAT_R8_UINT; at[5].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    // 6: the band pass's depth (nearest edge wins a pixel two cross), cleared far, never stored.
-    at[6] = at[1]; at[6].samples = VK_SAMPLE_COUNT_1_BIT; at[6].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    // Edges: 4 the polygon record, cleared to zero (the rear plane), stored for the band pass.
+    at[4] = at[3]; at[4].format = VK_FORMAT_R16_UINT; at[4].samples = VK_SAMPLE_COUNT_1_BIT; at[4].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkAttachmentReference c0[3] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}}, ds0{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
     VkAttachmentReference in1[3] = {{0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}, {3, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
     VkAttachmentReference c1{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference inb[2] = {{4, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}}, cb1{5, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, dsb{6, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription sp[3]{};
-    const u32 sp_res = d.edges ? 2 : 1;   // the resolve's subpass (edges: the band pass is 1)
+    VkSubpassDescription sp[2]{};
     sp[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[0].colorAttachmentCount = d.edges ? 3 : 2; sp[0].pColorAttachments = c0; sp[0].pDepthStencilAttachment = &ds0;
-    sp[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[1].inputAttachmentCount = 2; sp[1].pInputAttachments = inb; sp[1].colorAttachmentCount = 1; sp[1].pColorAttachments = &cb1; sp[1].pDepthStencilAttachment = &dsb;
-    sp[sp_res].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[sp_res].inputAttachmentCount = 3; sp[sp_res].pInputAttachments = in1; sp[sp_res].colorAttachmentCount = 1; sp[sp_res].pColorAttachments = &c1;
-    // The band pass's edge bytes go out after the render pass, as the record does: kept through the resolve.
-    const u32 keep_ebyte = 5;
-    if (d.edges) { sp[2].preserveAttachmentCount = 1; sp[2].pPreserveAttachments = &keep_ebyte; }
-    VkSubpassDependency dep[4]{};
+    sp[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp[1].inputAttachmentCount = 3; sp[1].pInputAttachments = in1; sp[1].colorAttachmentCount = 1; sp[1].pColorAttachments = &c1;
+    VkSubpassDependency dep[3]{};
     dep[0].srcSubpass = 0; dep[0].dstSubpass = 1; dep[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT; dep[0].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     dep[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; dep[0].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT; dep[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-    dep[1].srcSubpass = sp_res; dep[1].dstSubpass = VK_SUBPASS_EXTERNAL; dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dep[1].srcSubpass = 1; dep[1].dstSubpass = VK_SUBPASS_EXTERNAL; dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
     dep[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; dep[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    // Edges: the draw to the resolve too, and the band pass's bytes to the copy.
-    dep[2] = dep[0]; dep[2].dstSubpass = 2;
-    dep[3] = dep[1]; dep[3].srcSubpass = 1;
-    VkRenderPassCreateInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpi.attachmentCount = d.edges ? 7 : 4; rpi.pAttachments = at; rpi.subpassCount = d.edges ? 3 : 2; rpi.pSubpasses = sp; rpi.dependencyCount = d.edges ? 4 : 2; rpi.pDependencies = dep;
+    // Edges: the draw's record and depth to the band pass's render pass.
+    dep[2] = dep[0]; dep[2].dstSubpass = VK_SUBPASS_EXTERNAL; dep[2].dependencyFlags = 0;
+    VkRenderPassCreateInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpi.attachmentCount = d.edges ? 5 : 4; rpi.pAttachments = at; rpi.subpassCount = 2; rpi.pSubpasses = sp; rpi.dependencyCount = d.edges ? 3 : 2; rpi.pDependencies = dep;
     if (a.vkCreateRenderPass(vk->dev, &rpi, nullptr, &d.rp) != VK_SUCCESS) return fail("render pass");
-    VkImageView views[7] = {d.col_ms.view, d.ds_ms.view, d.res.view, d.fog_ms.view, d.ids.view, d.ebyte.view, d.edepth.view};
-    VkFramebufferCreateInfo fbi{}; fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbi.renderPass = d.rp; fbi.attachmentCount = d.edges ? 7 : 4; fbi.pAttachments = views; fbi.width = W; fbi.height = H; fbi.layers = 1;
+    VkImageView views[5] = {d.col_ms.view, d.ds_ms.view, d.res.view, d.fog_ms.view, d.ids.view};
+    VkFramebufferCreateInfo fbi{}; fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbi.renderPass = d.rp; fbi.attachmentCount = d.edges ? 5 : 4; fbi.pAttachments = views; fbi.width = W; fbi.height = H; fbi.layers = 1;
     if (a.vkCreateFramebuffer(vk->dev, &fbi, nullptr, &d.fb) != VK_SUCCESS) return fail("framebuffer");
+  }
+  if (d.edges) {
+    // The band pass's render pass: the record and depth loaded (read as input
+    // attachments), the edge bytes out (stored, copied), its own depth (the
+    // class-biased edge depth, lean_edge.vert: the nearest edge of a pixel
+    // two cross keeps it).
+    VkAttachmentDescription at[4]{};
+    at[0].format = VK_FORMAT_R16_UINT; at[0].samples = VK_SAMPLE_COUNT_1_BIT; at[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; at[0].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    at[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[0].initialLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; at[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    at[1] = at[0]; at[1].format = d.ds_format; at[1].initialLayout = at[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    at[2] = at[0]; at[2].format = VK_FORMAT_R8_UINT; at[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE; at[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; at[2].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    at[3] = at[0]; at[3].format = VK_FORMAT_D32_SFLOAT; at[3].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at[3].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; at[3].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference inb[2] = {{0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}}, cb{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, dsb{3, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sp{}; sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp.inputAttachmentCount = 2; sp.pInputAttachments = inb; sp.colorAttachmentCount = 1; sp.pColorAttachments = &cb; sp.pDepthStencilAttachment = &dsb;
+    VkSubpassDependency dep[2]{};
+    dep[0].srcSubpass = VK_SUBPASS_EXTERNAL; dep[0].dstSubpass = 0; dep[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT; dep[0].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    dep[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; dep[0].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+    dep[1].srcSubpass = 0; dep[1].dstSubpass = VK_SUBPASS_EXTERNAL; dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dep[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; dep[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    VkRenderPassCreateInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpi.attachmentCount = 4; rpi.pAttachments = at; rpi.subpassCount = 1; rpi.pSubpasses = &sp; rpi.dependencyCount = 2; rpi.pDependencies = dep;
+    if (a.vkCreateRenderPass(vk->dev, &rpi, nullptr, &d.rp2) != VK_SUCCESS) return fail("band render pass");
+    VkImageView views[4] = {d.ids.view, d.ds_ms.view, d.ebyte.view, d.edepth.view};
+    VkFramebufferCreateInfo fbi{}; fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbi.renderPass = d.rp2; fbi.attachmentCount = 4; fbi.pAttachments = views; fbi.width = W; fbi.height = H; fbi.layers = 1;
+    if (a.vkCreateFramebuffer(vk->dev, &fbi, nullptr, &d.fb2) != VK_SUCCESS) return fail("band framebuffer");
   }
 
   // Pipelines: one vertex/fragment pair, the DS rules in depth, stencil and blend state.
@@ -470,20 +491,20 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     VkPipelineColorBlendStateCreateInfo cbs{}; cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbs.attachmentCount = 1; cbs.pAttachments = &cba;
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = 2; gpi.pStages = st;
     gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
-    gpi.pColorBlendState = &cbs; gpi.layout = d.layout; gpi.renderPass = d.rp; gpi.subpass = d.edges ? 2 : 1;
+    gpi.pColorBlendState = &cbs; gpi.layout = d.layout; gpi.renderPass = d.rp; gpi.subpass = 1;
     if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gpi, nullptr, &d.pipe_resolve) != VK_SUCCESS) return fail("resolve pipeline");
     if (d.edges) {
-      // The band pass: lean_edge.vert/.frag, the edge byte its one output, a
-      // plain depth test on its own attachment (the vertex stage's class-biased
-      // depth: the nearest edge of a pixel two cross keeps it, whatever the
-      // list's order); the fragment tests the draw's depth itself.
+      // The band pass (rp2): lean_edge.vert/.frag, the edge byte its one
+      // output, a plain depth test on its own attachment (the class-biased
+      // edge depth: the nearest edge of a pixel two cross keeps it, whatever
+      // the order drawn); the fragment tests the draw's depth itself.
       st[0].module = d.mod_evert; st[1].module = d.mod_efrag;
       VkPipelineColorBlendAttachmentState cbb{}; cbb.colorWriteMask = 0x1u;
       VkPipelineColorBlendStateCreateInfo cbs2 = cbs; cbs2.attachmentCount = 1; cbs2.pAttachments = &cbb;
       VkPipelineDepthStencilStateCreateInfo dsb{}; dsb.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; dsb.depthTestEnable = VK_TRUE; dsb.depthWriteEnable = VK_TRUE; dsb.depthCompareOp = VK_COMPARE_OP_LESS;
-      VkGraphicsPipelineCreateInfo g2 = gpi; g2.pColorBlendState = &cbs2; g2.pDepthStencilState = &dsb; g2.layout = d.layout_eb; g2.subpass = 1;
+      VkGraphicsPipelineCreateInfo g2 = gpi; g2.pColorBlendState = &cbs2; g2.pDepthStencilState = &dsb; g2.layout = d.layout_eb; g2.renderPass = d.rp2; g2.subpass = 0;
       if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_band) != VK_SUCCESS) return fail("band pipeline");
-      // The cut-out pass: the draw's vertex stage, lean_cutout.frag, no depth test (its byte wins).
+      // The cut-out pass: the draw's vertex stage, lean_cutout.frag, after the band (no depth test: its byte wins).
       st[0].module = d.mod_vert; st[1].module = d.mod_cfrag;
       VkPipelineDepthStencilStateCreateInfo dsc{}; dsc.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; g2.pDepthStencilState = &dsc;
       if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_cutout) != VK_SUCCESS) return fail("cut-out pipeline");
@@ -580,8 +601,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (d.timing) { a.vkCmdResetQueryPool(cb, d.qpool, 2 * slot, 2); a.vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, d.qpool, 2 * slot); }   // bottom of pipe: after the queue ahead, so the span is this frame's own
 
   // Clear: the rear plane's colour and alpha; depth; stencil drawn where the rear plane has alpha.
-  VkClearValue cv[7]{};   // edges: [4] [5] zero (the rear plane, no edge), [6] the band depth, far
-  cv[6].depthStencil = {1.f, 0};
+  VkClearValue cv[5]{};   // edges: [4] zero (the rear plane)
   {
     const u32 c = f.clear_color, ca = (c >> 24) & 0x1F;
     cv[0].color.float32[0] = static_cast<float>(c & 0x3F) / 255.f; cv[0].color.float32[1] = static_cast<float>((c >> 8) & 0x3F) / 255.f; cv[0].color.float32[2] = static_cast<float>((c >> 16) & 0x3F) / 255.f;
@@ -591,7 +611,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     cv[1].depthStencil.stencil = ca ? (S_DRAWN | code[(f.clear_attr >> 24) & 0x3F]) : 0;
     cv[3].color.float32[0] = (f.clear_attr & 0x8000) ? 1.f : 0.f;   // the rear plane's fog bit
   }
-  VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rbi.renderPass = d.rp; rbi.framebuffer = d.fb; rbi.renderArea = {{0, 0}, {W, H}}; rbi.clearValueCount = d.edges ? 7 : 4; rbi.pClearValues = cv;
+  VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rbi.renderPass = d.rp; rbi.framebuffer = d.fb; rbi.renderArea = {{0, 0}, {W, H}}; rbi.clearValueCount = d.edges ? 5 : 4; rbi.pClearValues = cv;
   a.vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 0, 1, &d.set[slot], 0, nullptr);
   GpuFrame fp = f; fp.scale = d.scale;
@@ -682,15 +702,22 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (npoly > first_ordered) std::memcpy(out_p + first_ordered, gp + first_ordered, sizeof(GpuPoly) * (npoly - first_ordered));
   if (npoly) d.dev->flush(d.polys[slot], 0, sizeof(GpuPoly) * npoly);
   a.vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_INLINE);
+  a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_resolve);
+  a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 1, 1, &d.set_in, 0, nullptr);
+  a.vkCmdDraw(cb, 3, 1, 0, 0);
+  a.vkCmdEndRenderPass(cb);
   if (d.edges) {
-    // The band pass: every polygon's edges (lean_edge.vert skips all but the
-    // opaque ones). Six vertices an edge: the first four edges for every
-    // polygon, the other six only over runs of polygons that have a fifth
-    // (a few a frame, where a clip made one; most are triangles and quads),
-    // unless there are too many runs to be worth the draws.
+    // The band pass, in its render pass: every polygon's edges (lean_edge.vert
+    // skips all but the opaque ones). Six vertices an edge: the first four
+    // edges for every polygon, the other six only over runs of polygons that
+    // have a fifth (a few a frame, where a clip made one; most are triangles
+    // and quads), unless there are too many runs to be worth the draws.
+    VkClearValue cv2[4]{}; cv2[3].depthStencil = {1.f, 0};
+    VkRenderPassBeginInfo rb2{}; rb2.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rb2.renderPass = d.rp2; rb2.framebuffer = d.fb2; rb2.renderArea = {{0, 0}, {W, H}}; rb2.clearValueCount = 4; rb2.pClearValues = cv2;
+    a.vkCmdBeginRenderPass(cb, &rb2, VK_SUBPASS_CONTENTS_INLINE);
     a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_band);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_eb, 1, 1, &d.set_eb, 0, nullptr);
-    if (npoly) {
+    {
       constexpr u32 kMaxBandRuns = 32;   // beyond this many runs, one draw takes all
       u32 runs = 0, run_first[kMaxBandRuns], run_count[kMaxBandRuns];
       for (u32 k = 0; k < npoly && runs <= kMaxBandRuns; ++k) {
@@ -700,26 +727,19 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
         else ++runs;   // one too many: all 60 for everyone
       }
       static const bool one_draw = std::getenv("DS_LEAN_BANDRUNS") && std::atoi(std::getenv("DS_LEAN_BANDRUNS")) == 0;   // debug: the single draw
-      // Three times: vertex ids 0-59 the seams, 60-119 the outlines between
-      // DS polygon ids, 120-179 the silhouettes, each class after the one
-      // before and nearer in the band depth (lean_edge.vert, vk_seams.h).
-      for (u32 pass = 0; pass < 180; pass += 60) {
-        if (runs > kMaxBandRuns || one_draw) a.vkCmdDraw(cb, 60, npoly, pass, 0);
+      if (npoly) {
+        if (runs > kMaxBandRuns || one_draw) a.vkCmdDraw(cb, 60, npoly, 0, 0);
         else {
-          a.vkCmdDraw(cb, 24, npoly, pass, 0);
-          for (u32 r = 0; r < runs; ++r) a.vkCmdDraw(cb, 36, run_count[r], pass + 24, run_first[r]);
+          a.vkCmdDraw(cb, 24, npoly, 0, 0);
+          for (u32 r = 0; r < runs; ++r) a.vkCmdDraw(cb, 36, run_count[r], 24, run_first[r]);
         }
       }
     }
     // The cut-out pass: the alpha-tested opaque polygons, drawn last in the opaque prefix.
     static const bool no_cutout = std::getenv("DS_LEAN_NOCUTOUT") && std::atoi(std::getenv("DS_LEAN_NOCUTOUT")) != 0;   // debug: polygon edges only
     if (first_ordered > n_early && (f.flags2 & DS_FF2_CUTOUT) && !no_cutout) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_cutout); a.vkCmdDraw(cb, 24, first_ordered - n_early, 0, n_early); }
-    a.vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_INLINE);
+    a.vkCmdEndRenderPass(cb);
   }
-  a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_resolve);
-  a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 1, 1, &d.set_in, 0, nullptr);
-  a.vkCmdDraw(cb, 3, 1, 0, 0);
-  a.vkCmdEndRenderPass(cb);
   // The record to the CPU-readable buffer.
   VkBufferImageCopy rg{}; rg.bufferRowLength = W; rg.bufferImageHeight = H; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; rg.imageExtent = {W, H, 1};
   a.vkCmdCopyImageToBuffer(cb, d.res.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk_buf(d.out[slot]), 1, &rg);

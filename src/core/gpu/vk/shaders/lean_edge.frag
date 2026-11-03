@@ -8,7 +8,7 @@
 // the pixels just outside it where it is in front of what was drawn there,
 // so the present cuts the whole line though the draw lit each pixel whole.
 // Reads the draw's polygon record and depth for this pixel only (input
-// attachments: on tile); writes the byte and the pipeline's depth (its own
+// attachments); writes the byte and the pipeline's depth (its own
 // attachment: the class-biased value lean_edge.vert sets, nearest wins).
 #extension GL_GOOGLE_include_directive : require
 #define DS_GLSL 1
@@ -24,8 +24,7 @@ layout(location = 0) out uint o_byte;
 // The band depth with a tie-break: two edges meeting at a vertex have the
 // same depth in that pixel, so the one crossing nearer the pixel's centre
 // is set a little nearer (2^-16 of the class's third at most), and the
-// list's order never decides. Writing it here costs the early test only on
-// this small pass.
+// order drawn never decides. (Measured free on the Mali.)
 layout(depth_greater) out float gl_FragDepth;
 
 float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
@@ -62,10 +61,10 @@ void main() {
   vec2 pcross = vert ? vec2(c.x, l) : vec2(l, c.y);
   float s = dot(pcross - a, d) / dot(d, d), sm = 0.05 / length(d);
   if (s < -sm || s > 1.0 + sm) discard;
-  gl_FragDepth = gl_FragCoord.z + abs(t - 0.5) * (1.0 / 65536.0 / 3.0);
   bool neg = t < 0.5;            // the centre on the positive side: the outside is the negative neighbour
   float share = neg ? 1.0 - t : t;
   int cov = clamp(int(round(share * 32.0)) - 1, 0, 31);
   if (cov >= 31) discard;
+  gl_FragDepth = gl_FragCoord.z + abs(t - 0.5) * (1.0 / 65536.0 / 3.0);
   o_byte = 0x80u | (neg ? 0x40u : 0u) | (vert ? 0x20u : 0u) | uint(cov);
 }

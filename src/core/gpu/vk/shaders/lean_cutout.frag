@@ -30,7 +30,7 @@ layout(input_attachment_index = 0, set = 1, binding = 0) uniform usubpassInput i
 layout(input_attachment_index = 1, set = 1, binding = 1) uniform subpassInput in_depth;
 layout(location = 0) flat in uint v_poly;
 layout(location = 2) in vec2 v_st;
-layout(location = 0) out uint o_byte;
+layout(location = 0) out uint o_byte;   // after the band pass's byte pass: a cut-out edge's byte wins the pixel
 #include "ds_shade.glsl"
 #include "ds_spans.glsl"
 
