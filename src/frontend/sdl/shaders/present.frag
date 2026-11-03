@@ -101,6 +101,8 @@ vec3 edge_cut(uint base, int sx, int sy, float u, float v, uint s, float bw) {
   if (px < 0 || px > 255 || py < 0 || py > 191) return unpack(own);
   uint o = src[base + uint(py) * 256u + uint(px)];
   if (same_colour(own, o)) return unpack(s);   // a seam inside one surface: nothing to cut
+  // Another line of the same axis in the outside pixel, its outside facing back: a strip between two edges that owns neither pixel (edge_cut.h); the pixel stays whole.
+  { uint n = src[eb + uint(py) * 256u + uint(px)] >> 24; if ((n & 128u) != 0u && ((n ^ e) & 96u) == 64u) return unpack(s); }
   if (bw <= 0.0) return unpack(inside ? own : o);
   return mix(unpack(o), unpack(own), clamp(0.5 + (neg ? t - line : line - t) / bw, 0.0, 1.0));
 }

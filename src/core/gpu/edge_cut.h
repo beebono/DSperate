@@ -113,6 +113,11 @@ inline u32 edge_cut_sample(const u32* frame, const u32* edges, int x, int y, flo
   if (px < 0 || px > 255 || py < 0 || py > 191) return own;
   const u32 o = frame[py * 256 + px];
   if (edge_cut_same(own, o)) return s;   // a seam inside one surface: nothing to cut
+  // The outside pixel cut by another line of the same axis whose outside
+  // faces back: two edges with a strip between them that owns neither pixel
+  // (a horizon just above a hill's crest), so the DS drew it in neither; the
+  // neighbour's colour is not the strip's, and the pixel stays whole.
+  { const u32 n = edges[py * 256 + px] >> 24; if ((n & 0x80) && ((n ^ e) & 0x60) == 0x40) return s; }
   if (bw <= 0) return inside ? own : o;
   return edge_cut_mix(o, own, edge_cut_clamp01(0.5f + (neg ? t - line : line - t) / bw));
 }
