@@ -611,6 +611,13 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     // Key: alpha-tested last, then by stencil code (one reference per run; nearly all are code 0), then near to far.
     for (u32 k = 0; k < first_ordered; ++k) { const bool at = (gp[k].flags & DS_PF_TEX_ALPHA) != 0, eq = (gp[k].attr & 0x4000u) != 0; d.key.emplace_back((at ? (s64{1} << 40) : 0) + (eq ? (s64{1} << 38) : 0) + (s64{code_of(gp[k])} << 32) + nearest(gp[k]), k); }
     std::sort(d.key.begin(), d.key.end());
+    // DS_LEAN_KEYREV=1: the prefix far to near instead (diagnostic: the
+    // depth test makes the order free, so any output that changes is order-dependent).
+    static const bool keyrev = std::getenv("DS_LEAN_KEYREV") && std::atoi(std::getenv("DS_LEAN_KEYREV")) != 0;
+    if (keyrev) {   // within each class (the alpha-tested run stays last: the pipelines differ)
+      auto mid = std::find_if(d.key.begin(), d.key.end(), [](const std::pair<s64, u32>& k) { return (k.first >> 40) != 0; });
+      std::reverse(d.key.begin(), mid); std::reverse(mid, d.key.end());
+    }
     for (u32 k = 0; k < first_ordered; ++k) { out_p[k] = gp[d.key[k].second]; if (!(out_p[k].flags & DS_PF_TEX_ALPHA)) ++n_early; }
     for (u32 k = 0; k < first_ordered;) {
       const u32 c = code_of(out_p[k]); const bool early = k < n_early, eq = (out_p[k].attr & 0x4000u) != 0;

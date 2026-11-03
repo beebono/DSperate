@@ -109,6 +109,11 @@ int main(int argc, char** argv) {
     const u32* out = L->output();
     std::FILE* o = std::fopen(ppm, "wb");
     if (!o) { std::fprintf(stderr, "cannot write %s\n", ppm); return 1; }
+    if (std::strlen(ppm) > 5 && !std::strcmp(ppm + std::strlen(ppm) - 5, ".edge")) {   // the edge plane (DS_VK_EDGES=1): one byte per pixel
+      const u8* e = L->edges_for(out);
+      if (!e) { std::fprintf(stderr, "no edge plane (DS_VK_EDGES=1?)\n"); return 1; }
+      std::fwrite(e, 1, 256 * 192 * S * S, o); std::fclose(o); std::printf("wrote %s\n", ppm); return 0;
+    }
     if (std::strlen(ppm) > 4 && !std::strcmp(ppm + std::strlen(ppm) - 4, ".raw")) {   // the record itself: RGB666 + 5-bit alpha words
       std::fwrite(out, sizeof(u32), 256 * 192 * S * S, o); std::fclose(o); return 0;
     }
