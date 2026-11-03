@@ -2738,7 +2738,8 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
   using namespace ds::gpu::vk;
   std::FILE* f = std::fopen(gpu_dump_path_, "wb");
   if (!f) { std::fprintf(stderr, "gpu dump: could not open %s\n", gpu_dump_path_); return; }
-  std::vector<GpuPoly> gp; std::vector<GpuVert> gv; std::vector<u32> tex, shrun, rowpoly;
+  std::vector<GpuPoly> gp; std::vector<GpuVert> gv; std::vector<u32> tex, shrun, rowpoly, spans;
+  u32 nspanrows = 0;
   std::vector<u8> line_mask(192, 0); std::vector<u32> line_run(192, 0);
   std::unordered_map<const u32*, u32> arena;   // decoded texture -> word offset
   bool any_mask = false;
@@ -2773,6 +2774,12 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
     o.row_base = nrows;
     for (u32 r = 0; r < rows; ++r) rowpoly.push_back(static_cast<u32>(gp.size()));
     nrows += rows;
+    // The span table rows, as the live conversion lays them out (gpu_span_rows).
+    if (rows && rows <= DS_MAX_SPAN_ROWS - nspanrows) {
+      spans.resize(static_cast<size_t>(nspanrows + rows) * DS_SPAN_WORDS);
+      if (gpu_span_rows(p, spans.data() + static_cast<size_t>(nspanrows) * DS_SPAN_WORDS, DS_MAX_SPAN_ROWS - nspanrows)) { o.span_base = nspanrows; nspanrows += rows; }
+      else spans.resize(static_cast<size_t>(nspanrows) * DS_SPAN_WORDS);
+    }
     const u32 fmt = (p.texparam >> 26) & 7;
     if ((dispcnt_ & 1) && fmt != 0) {
       Shade sh; texture_fields(sh, p);
@@ -2792,7 +2799,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
   }
   if (first_ordered == ~0u) { first_ordered = static_cast<u32>(gp.size()); opaque_rows = nrows; }
   GpuDumpHeader h;
-  h.npoly = static_cast<u32>(gp.size()); h.nvert = static_cast<u32>(gv.size()); h.ntexels = static_cast<u32>(tex.size()); h.nrows = nrows; h.frame = nds_.frame_count;
+  h.npoly = static_cast<u32>(gp.size()); h.nvert = static_cast<u32>(gv.size()); h.ntexels = static_cast<u32>(tex.size()); h.nrows = nrows; h.nspanrows = nspanrows; h.frame = nds_.frame_count;
   h.f.npoly = h.npoly; h.f.scale = 1; h.f.dispcnt = dispcnt_; h.f.alpha_ref = rs_->alpha_ref;
   h.f.first_ordered = first_ordered; h.f.opaque_rows = opaque_rows; h.f.nrows = nrows;
   for (u32 i = 0; i < npoly; ++i) if (!polys[i]->degenerate) { if (polys[i]->wbuffer) h.f.flags |= DS_FF_WBUFFER; break; }
@@ -2813,6 +2820,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
   std::fwrite(tex.data(), sizeof(u32), tex.size(), f);
   std::fwrite(shrun.data(), sizeof(u32), shrun.size(), f);
   std::fwrite(rowpoly.data(), sizeof(u32), rowpoly.size(), f);
+  std::fwrite(spans.data(), sizeof(u32), spans.size(), f);
   std::fclose(f);
   std::fprintf(stderr, "gpu dump: frame %llu -> %s: %u polygons (%u opaque prefix), %u vertices, %u texel words, %u span rows\n",
                (unsigned long long)nds_.frame_count, gpu_dump_path_, h.npoly, first_ordered, h.nvert, h.ntexels, nrows);
@@ -2879,7 +2887,7 @@ void Renderer3D::render(const Gpu3D& gx) {
     }
   }
   texels_in_ = &poly_texels_;
-  if (gpu_dump_path_ && nds_.frame_count == gpu_dump_frame_) gpu_dump(gx, polys, npoly);
+  if (gpu_dump_path_ && nds_.frame_count >= gpu_dump_frame_) gpu_dump(gx, polys, npoly);   // the first frame rendered at or after the one asked for (identical lists are skipped above)
   lean_retired_.reset();
   if (gpu_on_ && lean_ && (lean_aa_ != aa_ || lean_edges_ != gpu_edges())) gpu_rebuild();
   if (gpu_on_ && gpu_submit(gx, polys, npoly)) { gpu_frame_ = true; ++gpu_gen_; pending_bands_ = 0; return; }

@@ -10,6 +10,7 @@ struct Lean::Impl {};
 Lean::~Lean() = default;
 std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device>, bool, bool, std::string* why) { if (why) *why = "built without Vulkan"; return nullptr; }
 bool Lean::msaa() const { return false; }
+u32 Lean::scale() const { return 1; }
 bool Lean::edges() const { return false; }
 const u8* Lean::edges_for(const u32*) const { return nullptr; }
 GpuPoly* Lean::poly_buffer() { return nullptr; }
@@ -44,7 +45,9 @@ Lean::Stats Lean::stats(bool) { return {}; }
 namespace ds::gpu::vk {
 
 namespace {
-constexpr u32 W = 256, H = 192;
+// The attachment size: 256x192 times DS_LEAN_SCALE (a probe switch: the
+// renderer reads the record as 1x; vk_probe writes it at the scale).
+u32 W = 256, H = 192;
 constexpr u32 kTexelWords = 2u << 20;   // 8 MB of decoded texels
 constexpr u32 kMaxDraws = 4096;
 // Stencil layout: bit 7 drawn, bit 6 shadow mask, bit 5 the last write was
@@ -65,6 +68,7 @@ struct Lean::Impl {
   Device* dev = nullptr;
   std::shared_ptr<Device> keep;   // the device outlives this raster
   bool msaa = false, timing = false;
+  u32 scale = 1;
   // The edge cut (1 sample): the draw keeps each pixel's front opaque
   // polygon (ids, 16 bits, on tile), a band pass around every polygon edge
   // places the edge lines (lean_edge.vert/.frag) as edge bytes (ebyte,
@@ -157,6 +161,7 @@ struct Lean::Impl {
 
 Lean::~Lean() { if (d_) d_->destroy(); }
 bool Lean::msaa() const { return d_->msaa; }
+u32 Lean::scale() const { return d_->scale; }
 bool Lean::edges() const { return d_->edges; }
 const u8* Lean::edges_for(const u32* o) const {
   if (!d_->edges) return nullptr;
@@ -189,6 +194,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
   d.vk = vk; d.api = &a; d.dev = &dev; d.keep = devp;
   auto fail = [&](const char* m) { if (why) *why = m; return nullptr; };
   d.edges = edges;
+  { const char* e = std::getenv("DS_LEAN_SCALE"); d.scale = std::clamp(e ? static_cast<u32>(std::atoi(e)) : 1u, 1u, 4u); W = 256 * d.scale; H = 192 * d.scale; }
+  if (d.edges && d.scale > 1) return fail("edge cut at a scale above 1");
   d.msaa = !edges && msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
   const VkSampleCountFlagBits samples = d.msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
 
@@ -579,7 +586,8 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rbi.renderPass = d.rp; rbi.framebuffer = d.fb; rbi.renderArea = {{0, 0}, {W, H}}; rbi.clearValueCount = d.edges ? 6 : 4; rbi.pClearValues = cv;
   a.vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 0, 1, &d.set[slot], 0, nullptr);
-  a.vkCmdPushConstants(cb, d.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GpuFrame), &f);
+  GpuFrame fp = f; fp.scale = d.scale;
+  a.vkCmdPushConstants(cb, d.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GpuFrame), &fp);
   u32 draws = 0;
   VkPipeline bound = VK_NULL_HANDLE;
   auto use = [&](VkPipeline p) { if (p != bound) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p); bound = p; } };

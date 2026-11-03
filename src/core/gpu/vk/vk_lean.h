@@ -37,6 +37,7 @@ public:
   bool ready() const override { return ready_; }
   const char* api() const override { return "Vulkan"; }
   bool msaa() const override;
+  u32 scale() const;   // the attachment scale (DS_LEAN_SCALE, probe-only): the record is 256*scale x 192*scale
   bool edges() const override;
   GpuPoly* poly_buffer() override;
   GpuVert* vert_buffer() override;

@@ -31,17 +31,20 @@ int main(int argc, char** argv) {
   if (!f) { std::fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
   GpuDumpHeader h;
   if (std::fread(&h, sizeof h, 1, f) != 1 || h.magic != GpuDumpHeader::kMagic) { std::fprintf(stderr, "not a gpu frame dump\n"); return 1; }
-  std::vector<GpuPoly> gp(h.npoly); std::vector<GpuVert> gv(h.nvert); std::vector<u32> tex(h.ntexels), shrun(static_cast<size_t>(h.npoly) * DS_SHRUN_LINES), rowpoly(h.nrows);
+  if (h.version != 2) { std::fprintf(stderr, "dump version %u: regenerate it with this build's headless --dump-gpu-frame\n", h.version); return 1; }
+  std::vector<GpuPoly> gp(h.npoly); std::vector<GpuVert> gv(h.nvert); std::vector<u32> tex(h.ntexels), shrun(static_cast<size_t>(h.npoly) * DS_SHRUN_LINES), rowpoly(h.nrows), spans(static_cast<size_t>(h.nspanrows) * DS_SPAN_WORDS);
   auto rd = [&](void* p, size_t n) { return n == 0 || std::fread(p, n, 1, f) == 1; };
   if (!rd(gp.data(), sizeof(GpuPoly) * gp.size()) || !rd(gv.data(), sizeof(GpuVert) * gv.size()) || !rd(tex.data(), sizeof(u32) * tex.size()) ||
-      !rd(shrun.data(), sizeof(u32) * shrun.size()) || !rd(rowpoly.data(), sizeof(u32) * rowpoly.size())) { std::fprintf(stderr, "short dump\n"); return 1; }
+      !rd(shrun.data(), sizeof(u32) * shrun.size()) || !rd(rowpoly.data(), sizeof(u32) * rowpoly.size()) || !rd(spans.data(), sizeof(u32) * spans.size())) { std::fprintf(stderr, "short dump\n"); return 1; }
   std::fclose(f);
   // Experiment switches: DS_PROBE_DISPCNT=hex replaces DISP3DCNT (bit 4 AA, bit 5 edge
   // marking, bit 7 fog); DS_PROBE_NOTEX=1 draws every polygon untextured.
   if (const char* e = std::getenv("DS_PROBE_DISPCNT")) h.f.dispcnt = static_cast<u32>(std::strtoul(e, nullptr, 16));
   if (const char* e = std::getenv("DS_PROBE_NOTEX"); e && std::atoi(e)) for (auto& p : gp) p.flags &= ~(DS_PF_TEXTURED | DS_PF_TEX_ALPHA);
-  std::printf("frame %llu: %u polygons (%u opaque prefix), %u vertices, %u texel words, %u rows, dispcnt %04x%s\n",
-              (unsigned long long)h.frame, h.npoly, h.f.first_ordered, h.nvert, h.ntexels, h.nrows, h.f.dispcnt, (h.f.flags & DS_FF_WBUFFER) ? ", W-buffer" : "");
+  // DS_PROBE_NOSPAN=1: no span table, the hardware's own interpolation (what a scaled render would use).
+  if (const char* e = std::getenv("DS_PROBE_NOSPAN"); e && std::atoi(e)) for (auto& p : gp) p.span_base = DS_SPAN_NONE;
+  std::printf("frame %llu: %u polygons (%u opaque prefix), %u vertices, %u texel words, %u rows, %u span rows, dispcnt %04x%s\n",
+              (unsigned long long)h.frame, h.npoly, h.f.first_ordered, h.nvert, h.ntexels, h.nrows, h.nspanrows, h.f.dispcnt, (h.f.flags & DS_FF_WBUFFER) ? ", W-buffer" : "");
 
   std::string why;
   std::shared_ptr<Device> dev = Device::shared(&why);
@@ -57,6 +60,7 @@ int main(int argc, char** argv) {
     std::memcpy(L->vert_buffer(), gv.data(), sizeof(GpuVert) * gv.size());
     if (tex.size() > cap) { std::fprintf(stderr, "texel arena too small (%zu > %u)\n", tex.size(), cap); std::exit(1); }
     std::memcpy(t, tex.data(), sizeof(u32) * tex.size());
+    if (!spans.empty()) std::memcpy(L->span_buffer(), spans.data(), sizeof(u32) * spans.size());
     *L->post_buffer() = h.post;
   };
   auto submit = [&]() { return L->submit(h.npoly, h.nvert, h.ntexels, h.f); };
@@ -101,7 +105,7 @@ int main(int argc, char** argv) {
   auto q = [&](double p) { return ms[std::min(ms.size() - 1, static_cast<size_t>(p * ms.size()))]; };
   std::printf("submit+wait per frame: median %.2f ms, p90 %.2f, p99 %.2f, max %.2f (%d frames, %.1f ms total)\n", q(0.5), q(0.9), q(0.99), ms.back(), iters, total);
   if (ppm) {
-    const u32 S = 1u;
+    const u32 S = L->scale();
     const u32* out = L->output();
     std::FILE* o = std::fopen(ppm, "wb");
     if (!o) { std::fprintf(stderr, "cannot write %s\n", ppm); return 1; }

@@ -47,6 +47,7 @@ vec2 st_bounds_hi(GpuPoly p) { return vec2(float(int(p.row_base >> 16) - 32768),
 // CPU raster's at every pixel the DS draws. A pixel the GPU's coverage
 // reaches past the span reads the nearest endpoint. False: no row (the
 // fallback is the hardware's interpolation).
+#define DS_FRAG_SCALE int(pc.f.scale)
 #include "ds_spans.glsl"
 
 void main() {

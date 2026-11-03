@@ -11,13 +11,14 @@ namespace ds::gpu::vk {
 
 struct GpuDumpHeader {
   static constexpr u32 kMagic = 0x44475046;   // "FPGD"
-  u32 magic = kMagic, version = 1;
+  u32 magic = kMagic, version = 2;
   u32 npoly = 0, nvert = 0, ntexels = 0, nrows = 0;   // array lengths that follow, in entries
+  u32 nspanrows = 0;                                    // span table rows (version 2: the table follows rowpoly)
   u64 frame = 0;                                        // NDS frame number
   GpuFrame f{};
   GpuPost post{};
 };
 // File body after the header: GpuPoly[npoly], GpuVert[nvert], u32 texels[ntexels],
-// u32 shrun[npoly * DS_SHRUN_LINES], u32 rowpoly[nrows].
+// u32 shrun[npoly * DS_SHRUN_LINES], u32 rowpoly[nrows], u32 spans[nspanrows * DS_SPAN_WORDS].
 
 } // namespace ds::gpu::vk
