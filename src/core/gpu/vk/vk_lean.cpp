@@ -98,6 +98,7 @@ struct Lean::Impl {
   VkShaderModule mod_evert = VK_NULL_HANDLE, mod_efrag = VK_NULL_HANDLE, mod_cfrag = VK_NULL_HANDLE;
   VkDescriptorSetLayout dsl_eb = VK_NULL_HANDLE;
   VkPipelineLayout layout_eb = VK_NULL_HANDLE;
+  VkSampler samp_ids = VK_NULL_HANDLE;   // edges: the record sampled by the band pass (a seam's neighbour)
   VkDescriptorSet set_eb = VK_NULL_HANDLE;
   VkPipeline pipe_band = VK_NULL_HANDLE, pipe_cutout = VK_NULL_HANDLE;
   VkImageView ds_depth_view = VK_NULL_HANDLE;   // the depth aspect alone, for the resolve's input attachment
@@ -135,6 +136,7 @@ struct Lean::Impl {
     if (pipe_band) a.vkDestroyPipeline(vk->dev, pipe_band, nullptr);
     if (pipe_cutout) a.vkDestroyPipeline(vk->dev, pipe_cutout, nullptr);
     if (layout_eb) a.vkDestroyPipelineLayout(vk->dev, layout_eb, nullptr);
+    if (samp_ids) a.vkDestroySampler(vk->dev, samp_ids, nullptr);
     if (dsl_eb) a.vkDestroyDescriptorSetLayout(vk->dev, dsl_eb, nullptr);
     for (VkShaderModule* m : {&mod_evert, &mod_efrag, &mod_cfrag}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
     if (fb) a.vkDestroyFramebuffer(vk->dev, fb, nullptr);
@@ -242,7 +244,9 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     VkDescriptorSetLayoutCreateInfo ci2{}; ci2.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci2.bindingCount = 3; ci2.pBindings = ib;
     if (a.vkCreateDescriptorSetLayout(vk->dev, &ci2, nullptr, &d.dsl_in) != VK_SUCCESS) return fail("input attachment layout");
     if (d.edges) {
-      VkDescriptorSetLayoutCreateInfo ci3{}; ci3.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci3.bindingCount = 2; ci3.pBindings = ib;
+      // The band pass: the record and depth as input attachments, and the record again sampled, for a seam's neighbour (lean_edge.frag).
+      VkDescriptorSetLayoutBinding ib3[3] = {ib[0], ib[1], ib[2]}; ib3[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      VkDescriptorSetLayoutCreateInfo ci3{}; ci3.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; ci3.bindingCount = 3; ci3.pBindings = ib3;
       if (a.vkCreateDescriptorSetLayout(vk->dev, &ci3, nullptr, &d.dsl_eb) != VK_SUCCESS) return fail("band input layout");
     }
     VkDescriptorSetLayout sets[2] = {d.dsl, d.dsl_in};
@@ -254,8 +258,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
       VkPipelineLayoutCreateInfo pl2 = pli; pl2.pSetLayouts = sets_eb;
       if (a.vkCreatePipelineLayout(vk->dev, &pl2, nullptr, &d.layout_eb) != VK_SUCCESS) return fail("band pipeline layout");
     }
-    VkDescriptorPoolSize psz[3] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * Impl::kSlots}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 6}};
-    VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = Impl::kSlots + 2; dpi.poolSizeCount = 3; dpi.pPoolSizes = psz;
+    VkDescriptorPoolSize psz[4] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * Impl::kSlots}, {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 6}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}};
+    VkDescriptorPoolCreateInfo dpi{}; dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dpi.maxSets = Impl::kSlots + 2; dpi.poolSizeCount = 4; dpi.pPoolSizes = psz;
     if (a.vkCreateDescriptorPool(vk->dev, &dpi, nullptr, &d.pool) != VK_SUCCESS) return fail("descriptor pool");
     VkDescriptorSetLayout layouts[Impl::kSlots + 1];
     for (u32 i = 0; i < Impl::kSlots; ++i) layouts[i] = d.dsl;
@@ -325,7 +329,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
   if (!make_image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.res, VK_SAMPLE_COUNT_1_BIT)) return fail("resolve attachment");
   if (d.edges) {
     const VkImageUsageFlags tile = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | transient;
-    if (!make_image(VK_FORMAT_R16_UINT, tile & ~transient, VK_IMAGE_ASPECT_COLOR_BIT, d.ids, VK_SAMPLE_COUNT_1_BIT) ||
+    if (!make_image(VK_FORMAT_R16_UINT, (tile & ~transient) | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.ids, VK_SAMPLE_COUNT_1_BIT) ||
         !make_image(VK_FORMAT_R8_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.ebyte, VK_SAMPLE_COUNT_1_BIT) ||
         !make_image(VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_DEPTH_BIT, d.edepth, VK_SAMPLE_COUNT_1_BIT))   // 32-bit: a third of the range per class must hold the edge depth and the tie-break (16 bits lost both)
       return fail("edge attachments");
@@ -340,12 +344,16 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     a.vkUpdateDescriptorSets(vk->dev, 3, w, 0, nullptr);
     if (d.edges) {
       // The band pass's polygon record and depth.
-      VkDescriptorImageInfo bi2[2]{};
+      VkSamplerCreateInfo sci{}; sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO; sci.magFilter = sci.minFilter = VK_FILTER_NEAREST; sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+      sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+      if (a.vkCreateSampler(vk->dev, &sci, nullptr, &d.samp_ids) != VK_SUCCESS) return fail("record sampler");
+      VkDescriptorImageInfo bi2[3]{};
       bi2[0].imageView = d.ids.view; bi2[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       bi2[1].imageView = d.ds_depth_view; bi2[1].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-      VkWriteDescriptorSet we[2]{};
-      for (u32 i = 0; i < 2; ++i) { we[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; we[i].descriptorCount = 1; we[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; we[i].dstSet = d.set_eb; we[i].dstBinding = i; we[i].pImageInfo = &bi2[i]; }
-      a.vkUpdateDescriptorSets(vk->dev, 2, we, 0, nullptr);
+      bi2[2] = bi2[0]; bi2[2].sampler = d.samp_ids;
+      VkWriteDescriptorSet we[3]{};
+      for (u32 i = 0; i < 3; ++i) { we[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; we[i].descriptorCount = 1; we[i].descriptorType = i == 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT; we[i].dstSet = d.set_eb; we[i].dstBinding = i; we[i].pImageInfo = &bi2[i]; }
+      a.vkUpdateDescriptorSets(vk->dev, 3, we, 0, nullptr);
     }
   }
 
@@ -400,7 +408,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     VkSubpassDescription sp{}; sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS; sp.inputAttachmentCount = 2; sp.pInputAttachments = inb; sp.colorAttachmentCount = 1; sp.pColorAttachments = &cb; sp.pDepthStencilAttachment = &dsb;
     VkSubpassDependency dep[2]{};
     dep[0].srcSubpass = VK_SUBPASS_EXTERNAL; dep[0].dstSubpass = 0; dep[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT; dep[0].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dep[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; dep[0].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
+    dep[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT; dep[0].dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
     dep[1].srcSubpass = 0; dep[1].dstSubpass = VK_SUBPASS_EXTERNAL; dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT; dep[1].dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT;
     dep[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; dep[1].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     VkRenderPassCreateInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpi.attachmentCount = 4; rpi.pAttachments = at; rpi.subpassCount = 1; rpi.pSubpasses = &sp; rpi.dependencyCount = 2; rpi.pDependencies = dep;

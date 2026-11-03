@@ -12,8 +12,13 @@
 // shared; bit 1, shared by polygons of different DS polygon ids (POLYGON_ATTR
 // bits 24-29: the id the hardware's edge marking outlines between, so games
 // give objects their own), an object's outline against another rather than
-// a seam within it. The band pass draws the three classes in turn: seams,
-// id outlines, then silhouettes (lean_edge.vert).
+// a seam within it; bits 2 up, the other polygon's index plus one, so the
+// band pass can tell a pixel the seam really divides (owned by one of the
+// two) from one of a third surface the seam only crosses in front of or
+// beside (SM64DS: the backdrop's sky/sea horizon running into a hill cut the
+// sky pixels above the crest with the hill's green). The band pass draws
+// the three classes in turn: seams, id outlines, then silhouettes
+// (lean_edge.vert).
 #include "core/gpu/vk/vk_layout.h"
 #include <cstdint>
 #include <vector>
@@ -44,7 +49,7 @@ inline void mark_shared_edges(const GpuPoly* polys, u32 npoly, GpuVert* verts, S
         if (t.gen[h] != t.g) { t.gen[h] = t.g; t.key[h] = key; t.vert[h] = ia; t.poly[h] = k; break; }
         if (t.key[h] == key) {
           const u32 m = ((polys[t.poly[h]].attr >> 24) & 0x3Fu) != ((p.attr >> 24) & 0x3Fu) ? 3u : 1u;
-          verts[t.vert[h]].pad_ |= m; verts[ia].pad_ |= m; break;
+          verts[t.vert[h]].pad_ = (verts[t.vert[h]].pad_ & 3u) | m | ((k + 1) << 2); verts[ia].pad_ = (verts[ia].pad_ & 3u) | m | ((t.poly[h] + 1) << 2); break;
         }
         h = (h + 1) & mask;
       }

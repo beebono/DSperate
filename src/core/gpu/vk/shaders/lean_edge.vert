@@ -16,6 +16,7 @@ layout(location = 0) flat out uint v_poly;
 layout(location = 1) flat out vec4 v_line;   // the edge, a.xy and b.xy in pixels
 layout(location = 2) flat out vec2 v_in;     // a point inside the polygon: its centroid (Lean::submit puts it in vbot)
 layout(location = 3) noperspective out float v_zt;   // the edge's true depth (gl_FragCoord.z carries the class)
+layout(location = 4) flat out uint v_seam;   // a seam: the other polygon's index plus one (vk_seams.h); 0 for a silhouette
 
 vec2 vpos(GpuVert v) { return vec2(float(v.fx), float(v.fy)) / 16.0 - 0.25; }
 
@@ -30,7 +31,7 @@ void main() {
   // crossing nearer its centre: never the order drawn.
   uint vi = uint(gl_VertexIndex);
   uint e = vi / 6u, k = vi % 6u;
-  v_poly = pi; v_line = vec4(0.0); v_in = vec2(0.0); v_zt = 1.0;
+  v_poly = pi; v_line = vec4(0.0); v_in = vec2(0.0); v_zt = 1.0; v_seam = 0u;
   bool skip = e >= p.nverts || p.nverts < 3u || (p.flags & (DS_PF_TRANSLUCENT | DS_PF_SHADOW | DS_PF_SHADOW_MASK)) != 0u ||
               p.xmax == p.xmin || p.ybot == p.ytop;   // lines have no area to cut
   if (skip) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return; }
@@ -39,6 +40,7 @@ void main() {
   float len = length(d);
   if (len < 1e-4) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return; }
   uint cls = (va.pad_ & 1u) == 0u ? 2u : ((va.pad_ & 2u) != 0u ? 1u : 0u);
+  v_seam = cls == 2u ? 0u : (va.pad_ >> 2u);
   v_line = vec4(a, b); v_in = vec2(float(int(p.vbot << 16) >> 16), float(int(p.vbot) >> 16)) / 16.0 - 0.25;
   // Corners 0 1 2 / 2 1 3: bit 0 the b end, bit 1 the positive side.
   const uint corner[6] = uint[6](0u, 1u, 2u, 2u, 1u, 3u);

@@ -7,19 +7,25 @@
 // line counts: the polygon's own pixels (its record is in the pixel), and
 // the pixels just outside it where it is in front of what was drawn there,
 // so the present cuts the whole line though the draw lit each pixel whole.
-// Reads the draw's polygon record and depth for this pixel only (input
-// attachments); writes the byte and the pipeline's depth (its own
-// attachment: the class-biased value lean_edge.vert sets, nearest wins).
+// Reads the draw's polygon record and depth for this pixel (input
+// attachments), and for a seam the record of the pixel across the line
+// (the same image sampled; its own render pass, so a neighbour is fine);
+// writes the byte and the pipeline's depth (its own attachment: the
+// class-biased value lean_edge.vert sets, nearest wins).
 #extension GL_GOOGLE_include_directive : require
 #define DS_GLSL 1
 #include "vk_layout.h"
+layout(std430, binding = 0) readonly buffer Polys { GpuPoly polys[]; };
+layout(std430, binding = 1) readonly buffer Verts { GpuVert verts[]; };
 layout(push_constant) uniform PC { GpuFrame f; } pc;
 layout(input_attachment_index = 0, set = 1, binding = 0) uniform usubpassInput in_ids;
 layout(input_attachment_index = 1, set = 1, binding = 1) uniform subpassInput in_depth;
+layout(set = 1, binding = 2) uniform usampler2D ids_tex;   // the record again, for the neighbour
 layout(location = 0) flat in uint v_poly;
 layout(location = 1) flat in vec4 v_line;
 layout(location = 2) flat in vec2 v_in;
 layout(location = 3) noperspective in float v_zt;
+layout(location = 4) flat in uint v_seam;
 layout(location = 0) out uint o_byte;
 // The band depth with a tie-break: two edges meeting at a vertex have the
 // same depth in that pixel, so the one crossing nearer the pixel's centre
@@ -28,6 +34,26 @@ layout(location = 0) out uint o_byte;
 layout(depth_greater) out float gl_FragDepth;
 
 float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
+vec2 vpos(GpuVert v) { return vec2(float(v.fx), float(v.fy)) / 16.0 - 0.25; }   // as lean_edge.vert
+
+// Whether the pixel's record `rec` (polygon index plus one) is one of the
+// polygons along this seam: this one, the partner the seam table paired it
+// with, else any polygon with an edge on the same two points (an edge three
+// or more polygons share has one partner recorded, whichever came last,
+// and which that is must not matter).
+bool on_seam(uint rec) {
+  if (rec == 0u) return false;
+  if (rec == v_poly + 1u || rec == v_seam) return true;
+  GpuPoly p = polys[rec - 1u];
+  if (p.nverts < 3u || p.nverts > 10u) return false;
+  vec2 prev = vpos(verts[p.first_vert + p.nverts - 1u]);
+  for (uint i = 0u; i < p.nverts; ++i) {
+    vec2 cur = vpos(verts[p.first_vert + i]);
+    if ((prev == v_line.xy && cur == v_line.zw) || (prev == v_line.zw && cur == v_line.xy)) return true;
+    prev = cur;
+  }
+  return false;
+}
 
 void main() {
   vec2 c = gl_FragCoord.xy;   // the pixel's centre
@@ -76,6 +102,19 @@ void main() {
   bool own_neg = own == poly_neg;
   bool neg = !own_neg;           // the outside is the negative neighbour when the owner is on the positive side
   float share = own_neg ? t : 1.0 - t;   // the owner's share of the pixel
+  // A seam divides its two polygons: the byte says the pixel's colour
+  // stays on one side of the line and the outside neighbour's colour fills
+  // the other. Only true where this pixel and that neighbour are the two
+  // polygons' own; where either is a third surface (the hill the
+  // backdrop's horizon runs into, the sky a hill's face seam reaches at
+  // the crest) the seam says nothing about the pixel, and the silhouette
+  // there, if any, has its own byte.
+  if (v_seam != 0u) {
+    ivec2 q = ivec2(c) + (vert ? ivec2(0, neg ? -1 : 1) : ivec2(neg ? -1 : 1, 0));
+    ivec2 sz = textureSize(ids_tex, 0);
+    bool offscreen = q.x < 0 || q.y < 0 || q.x >= sz.x || q.y >= sz.y;
+    if (!on_seam(owner) || (!offscreen && !on_seam(texelFetch(ids_tex, q, 0).x))) discard;
+  }
   // ... and for two faces' seam crossing a pixel owned by neither (their
   // claims differ), the face on the negative side, by a smaller step still.
   gl_FragDepth = gl_FragCoord.z + abs(t - 0.5) * (1.0 / 65536.0 / 3.0) + (poly_neg ? 0.0 : 1.0 / 1048576.0 / 3.0);
