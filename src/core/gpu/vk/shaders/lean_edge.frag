@@ -8,7 +8,8 @@
 // the pixels just outside it where it is in front of what was drawn there,
 // so the present cuts the whole line though the draw lit each pixel whole.
 // Reads the draw's polygon record and depth for this pixel only (input
-// attachments: on tile); writes nothing else.
+// attachments: on tile); writes the byte and the pipeline's depth (its own
+// attachment: the class-biased value lean_edge.vert sets, nearest wins).
 #extension GL_GOOGLE_include_directive : require
 #define DS_GLSL 1
 #include "vk_layout.h"
@@ -18,7 +19,14 @@ layout(input_attachment_index = 1, set = 1, binding = 1) uniform subpassInput in
 layout(location = 0) flat in uint v_poly;
 layout(location = 1) flat in vec4 v_line;
 layout(location = 2) flat in vec2 v_in;
+layout(location = 3) noperspective in float v_zt;
 layout(location = 0) out uint o_byte;
+// The band depth with a tie-break: two edges meeting at a vertex have the
+// same depth in that pixel, so the one crossing nearer the pixel's centre
+// is set a little nearer (2^-16 of the class's third at most), and the
+// list's order never decides. Writing it here costs the early test only on
+// this small pass.
+layout(depth_greater) out float gl_FragDepth;
 
 float cross2(vec2 a, vec2 b) { return a.x * b.y - a.y * b.x; }
 
@@ -38,7 +46,7 @@ void main() {
     if (owner != 0u) {
       float sd = subpassLoad(in_depth).r;
       bool wbuf = (pc.f.flags & DS_FF_WBUFFER) != 0u;
-      if (!(wbuf ? gl_FragCoord.z > sd : gl_FragCoord.z < sd)) discard;
+      if (!(wbuf ? v_zt > sd : v_zt < sd)) discard;
     }
   }
   // The line across the pixel's centre column (an X-major edge: the outside
@@ -54,6 +62,7 @@ void main() {
   vec2 pcross = vert ? vec2(c.x, l) : vec2(l, c.y);
   float s = dot(pcross - a, d) / dot(d, d), sm = 0.05 / length(d);
   if (s < -sm || s > 1.0 + sm) discard;
+  gl_FragDepth = gl_FragCoord.z + abs(t - 0.5) * (1.0 / 65536.0 / 3.0);
   bool neg = t < 0.5;            // the centre on the positive side: the outside is the negative neighbour
   float share = neg ? 1.0 - t : t;
   int cov = clamp(int(round(share * 32.0)) - 1, 0, 31);

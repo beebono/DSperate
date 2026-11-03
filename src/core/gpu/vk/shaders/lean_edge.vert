@@ -15,25 +15,33 @@ layout(push_constant) uniform PC { GpuFrame f; } pc;
 layout(location = 0) flat out uint v_poly;
 layout(location = 1) flat out vec4 v_line;   // the edge, a.xy and b.xy in pixels
 layout(location = 2) flat out vec2 v_in;     // a point inside the polygon: its centroid (Lean::submit puts it in vbot)
+layout(location = 3) noperspective out float v_zt;   // the edge's true depth (gl_FragCoord.z carries the class)
 
 vec2 vpos(GpuVert v) { return vec2(float(v.fx), float(v.fy)) / 16.0 - 0.25; }
 
 void main() {
   uint pi = uint(gl_InstanceIndex);
   GpuPoly p = polys[pi];
-  // Vertex ids 0-59: the shared edges (seams, GpuVert::pad_ bit 0, vk_seams.h); 60-119, drawn after: the rest.
+  // Vertex ids 0-59: the seams (shared edges within one DS polygon id,
+  // vk_seams.h); 60-119: outlines between ids; 120-179: silhouettes (unshared).
+  // Each class is drawn after the one before, and the band pipeline's depth
+  // test keeps the nearest edge of a pixel two cross: the depth written is
+  // the edge's own in a third of the range per class, the highest class
+  // nearest, so a later class wins whatever its depth, and within a class
+  // the nearer edge does. Both stable under the list's order.
   uint vi = uint(gl_VertexIndex);
-  bool sil = vi >= 60u;
-  if (sil) vi -= 60u;
+  uint cls = vi / 60u;
+  vi -= cls * 60u;
   uint e = vi / 6u, k = vi % 6u;
-  v_poly = pi; v_line = vec4(0.0); v_in = vec2(0.0);
+  v_poly = pi; v_line = vec4(0.0); v_in = vec2(0.0); v_zt = 1.0;
   bool skip = e >= p.nverts || p.nverts < 3u || (p.flags & (DS_PF_TRANSLUCENT | DS_PF_SHADOW | DS_PF_SHADOW_MASK)) != 0u ||
               p.xmax == p.xmin || p.ybot == p.ytop;   // lines have no area to cut
   if (skip) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return; }
   GpuVert va = verts[p.first_vert + e], vb = verts[p.first_vert + (e + 1u == p.nverts ? 0u : e + 1u)];
   vec2 a = vpos(va), b = vpos(vb), d = b - a;
   float len = length(d);
-  if (len < 1e-4 || ((va.pad_ & 1u) != 0u) == sil) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return; }
+  uint ecls = (va.pad_ & 1u) == 0u ? 2u : ((va.pad_ & 2u) != 0u ? 1u : 0u);
+  if (len < 1e-4 || ecls != cls) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return; }
   v_line = vec4(a, b); v_in = vec2(float(int(p.vbot << 16) >> 16), float(int(p.vbot) >> 16)) / 16.0 - 0.25;
   // Corners 0 1 2 / 2 1 3: bit 0 the b end, bit 1 the positive side.
   const uint corner[6] = uint[6](0u, 1u, 2u, 2u, 1u, 3u);
@@ -49,5 +57,6 @@ void main() {
   float zd = z;
   if ((p.attr & 0x4000u) != 0u) zd = max(z - (wbuf ? 255.0 : 512.0), 0.0);
   float zc = wbuf ? (1.0 / max(zd, 1.0)) * w : (zd / 16777215.0) * w;
-  gl_Position = vec4((pos.x / 256.0 * 2.0 - 1.0) * w, (pos.y / 192.0 * 2.0 - 1.0) * w, zc, w);
+  v_zt = zc / w;
+  gl_Position = vec4((pos.x / 256.0 * 2.0 - 1.0) * w, (pos.y / 192.0 * 2.0 - 1.0) * w, (float(2u - cls) / 3.0) * w + zc / 3.0, w);
 }
