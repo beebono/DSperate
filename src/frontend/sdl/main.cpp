@@ -314,6 +314,16 @@ bool aa_on(const std::string& v) {
 }
 bool aa_enhanced(const std::string& v) { return v == "enhanced"; }
 void apply_aa(NDS& nds, const std::string& v) { nds.gpu3d.renderer().set_aa(aa_on(v)); nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced(v)); }
+// Whether the edge cut runs (the frame loop has why): video.aa = enhanced on
+// the GPU raster (`gpu_on`: it is, or is about to be, the GPU's) through the
+// Vulkan present on every window. DS_EDGE_CUT=0 never, =1 with plain
+// video.aa and on the CPU raster too.
+bool edge_cut_wanted(NDS& nds, const ds::sdl::Display& d1, const ds::sdl::Display& d2, bool dual, bool gpu_on) {
+  static const int cut_env = [] { const char* e = std::getenv("DS_EDGE_CUT"); return e && *e ? *e - '0' : -1; }();
+  auto vk_present = [](const ds::sdl::Display& d) { return d.gpu_present() && !d.rga_present(); };
+  return cut_env != 0 && vk_present(d1) && (!dual || vk_present(d2)) &&
+         nds.gpu3d.renderer().aa() && ((gpu_on && nds.gpu3d.renderer().aa_enhanced()) || cut_env == 1);
+}
 
 void load_save(NDS& nds, const std::string& path) {
   const ds::sdl::OffRealtime off_rt;
@@ -1699,6 +1709,9 @@ sdl_ready:
     const char* g = std::getenv("DS_GPU3D");
     const bool want = g ? std::atoi(g) != 0 : cfg.flag("video.gpu3d", false);
     apply_aa(nds, cfg.str("video.aa", "false"));   // before the raster starts: its MSAA is fixed at creation
+    // So is the edge cut: an enhanced launch builds the cut's raster once,
+    // not the MSAA one and then the cut on the first frame.
+    if (want) nds.gpu.set_edge_export(edge_cut_wanted(nds, display, display2, dual_window, true));
     if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on (%s)\n", nds.gpu3d.renderer().gpu_api()); }
   }
   // Let fullscreen windows take their final size before the ROM loads (see
@@ -4120,11 +4133,7 @@ sdl_ready:
         // DS_EDGE_CUT=1 cuts with plain video.aa too, and the CPU raster's
         // edges (the reference the GPU's are checked against). Takes effect
         // from the next frame.
-        static const int cut_env = [] { const char* e = std::getenv("DS_EDGE_CUT"); return e && *e ? *e - '0' : -1; }();
-        auto vk_present = [](const ds::sdl::Display& d) { return d.gpu_present() && !d.rga_present(); };
-        const bool cut = cut_env != 0 && vk_present(display) && (!dual_window || vk_present(display2)) &&
-                         nds.gpu3d.renderer().aa() && ((nds.gpu3d.renderer().gpu_active() && nds.gpu3d.renderer().aa_enhanced()) || cut_env == 1);
-        nds.gpu.set_edge_export(cut);
+        nds.gpu.set_edge_export(edge_cut_wanted(nds, display, display2, dual_window, nds.gpu3d.renderer().gpu_active()));
         ds::sdl::EdgePlanes edges;
         if (nds.gpu.edge_export())
           for (int s = 0; s < 2; ++s) { edges.plane[s] = nds.gpu.edge_plane(s); edges.rows[s] = nds.gpu.edge_rows(s); edges.frame[s] = nds.gpu.framebuffer(s); }
