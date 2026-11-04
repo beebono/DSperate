@@ -424,6 +424,12 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
   const VkBool32 span_exact = std::getenv("DS_SPAN_EXACT") && std::atoi(std::getenv("DS_SPAN_EXACT")) != 0;
   const VkSpecializationMapEntry span_me{0, 0, sizeof(VkBool32)};
   const VkSpecializationInfo span_si{1, &span_me, sizeof(VkBool32), &span_exact};
+  // DS_MSAA_SHARP=0..1: the 4x resolve's pull towards each edge pixel's
+  // majority surface (lean_resolve.frag), constant_id 1 of the resolve; 0 the
+  // plain coverage mean.
+  const float msaa_sharp = std::getenv("DS_MSAA_SHARP") ? std::clamp(static_cast<float>(std::atof(std::getenv("DS_MSAA_SHARP"))), 0.0f, 1.0f) : 0.0f;
+  const VkSpecializationMapEntry sharp_me{1, 0, sizeof(float)};
+  const VkSpecializationInfo sharp_si{1, &sharp_me, sizeof(float), &msaa_sharp};
   // Pipelines: one vertex/fragment pair, the DS rules in depth, stencil and blend state.
   auto pipeline = [&](bool wbuf, bool eq, u32 kind, VkPipeline* out) {
     VkPipelineShaderStageCreateInfo st[2]{};
@@ -495,7 +501,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     VkPipelineShaderStageCreateInfo st[2]{};
     st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = d.mod_fs; st[0].pName = "main";
-    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = d.mod_res; st[1].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = d.mod_res; st[1].pName = "main"; st[1].pSpecializationInfo = &sharp_si;
     VkPipelineVertexInputStateCreateInfo vin{}; vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkViewport vp{0.f, 0.f, static_cast<float>(W), static_cast<float>(H), 0.f, 1.f}; VkRect2D sc{{0, 0}, {W, H}};
