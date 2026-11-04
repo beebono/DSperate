@@ -431,6 +431,9 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
   const VkSpecializationMapEntry sharp_me{1, 0, sizeof(float)};
   const VkSpecializationInfo sharp_si{1, &sharp_me, sizeof(float), &msaa_sharp};
   // Pipelines: one vertex/fragment pair, the DS rules in depth, stencil and blend state.
+  // Built through the device's pipeline cache (~7 s from SPIR-V on the Mali
+  // blob, a fraction from the cache), which is written back once they exist.
+  const auto t_pipes = std::chrono::steady_clock::now();
   auto pipeline = [&](bool wbuf, bool eq, u32 kind, VkPipeline* out) {
     VkPipelineShaderStageCreateInfo st[2]{};
     st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -494,7 +497,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = stencil_only ? 1 : 2; gpi.pStages = st;
     gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
     gpi.pDepthStencilState = &dss; gpi.pColorBlendState = &cbs; gpi.pDynamicState = &dys; gpi.layout = d.layout; gpi.renderPass = d.rp; gpi.subpass = 0;
-    return a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gpi, nullptr, out) == VK_SUCCESS;
+    return a.vkCreateGraphicsPipelines(vk->dev, vk->pcache, 1, &gpi, nullptr, out) == VK_SUCCESS;
   };
   for (u32 wb = 0; wb < 2; ++wb) for (u32 eq = 0; eq < 2; ++eq) for (u32 k = 0; k < P_COUNT; ++k) if (!pipeline(wb != 0, eq != 0, k, &d.pipe[wb][eq][k])) return fail("graphics pipeline");
   {
@@ -513,7 +516,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = 2; gpi.pStages = st;
     gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
     gpi.pColorBlendState = &cbs; gpi.layout = d.layout; gpi.renderPass = d.rp; gpi.subpass = 1;
-    if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gpi, nullptr, &d.pipe_resolve) != VK_SUCCESS) return fail("resolve pipeline");
+    if (a.vkCreateGraphicsPipelines(vk->dev, vk->pcache, 1, &gpi, nullptr, &d.pipe_resolve) != VK_SUCCESS) return fail("resolve pipeline");
     if (d.edges) {
       // The band pass (rp2): lean_edge.vert/.frag, the edge byte its one
       // output, a plain depth test on its own attachment (the class-biased
@@ -524,11 +527,11 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
       VkPipelineColorBlendStateCreateInfo cbs2 = cbs; cbs2.attachmentCount = 1; cbs2.pAttachments = &cbb;
       VkPipelineDepthStencilStateCreateInfo dsb{}; dsb.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; dsb.depthTestEnable = VK_TRUE; dsb.depthWriteEnable = VK_TRUE; dsb.depthCompareOp = VK_COMPARE_OP_LESS;
       VkGraphicsPipelineCreateInfo g2 = gpi; g2.pColorBlendState = &cbs2; g2.pDepthStencilState = &dsb; g2.layout = d.layout_eb; g2.renderPass = d.rp2; g2.subpass = 0;
-      if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_band) != VK_SUCCESS) return fail("band pipeline");
+      if (a.vkCreateGraphicsPipelines(vk->dev, vk->pcache, 1, &g2, nullptr, &d.pipe_band) != VK_SUCCESS) return fail("band pipeline");
       // The cut-out pass: the draw's vertex stage, lean_cutout.frag, after the band (no depth test: its byte wins).
       st[0].module = d.mod_vert; st[1].module = d.mod_cfrag; st[1].pSpecializationInfo = &span_si;
       VkPipelineDepthStencilStateCreateInfo dsc{}; dsc.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; g2.pDepthStencilState = &dsc;
-      if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_cutout) != VK_SUCCESS) return fail("cut-out pipeline");
+      if (a.vkCreateGraphicsPipelines(vk->dev, vk->pcache, 1, &g2, nullptr, &d.pipe_cutout) != VK_SUCCESS) return fail("cut-out pipeline");
     }
   }
 
@@ -548,7 +551,9 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     }
   }
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean: 1x%s, %s depth/stencil%s\n", d.msaa ? " with 4x MSAA" : d.edges ? " with the edge cut" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8", span_exact ? ", exact spans" : "");
+  const double pipes_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_pipes).count();
+  dev.save_pipeline_cache();
+  std::fprintf(stderr, "gpu lean: 1x%s, %s depth/stencil%s; pipelines %.0f ms\n", d.msaa ? " with 4x MSAA" : d.edges ? " with the edge cut" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8", span_exact ? ", exact spans" : "", pipes_ms);
   return self;
 }
 

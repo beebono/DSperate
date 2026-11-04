@@ -315,11 +315,12 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut& out, std::string* why) 
   VkGraphicsPipelineCreateInfo gp{}; gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gp.stageCount = 2; gp.pStages = st;
   gp.pVertexInputState = &vin; gp.pInputAssemblyState = &ia; gp.pViewportState = &vs; gp.pRasterizationState = &rs; gp.pMultisampleState = &ms;
   gp.pColorBlendState = &cbs; gp.pDynamicState = &ds; gp.layout = d.layout; gp.renderPass = d.rp;
-  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe) != VK_SUCCESS) return fail("present pipeline failed to compile");
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, d.vk->pcache, 1, &gp, nullptr, &d.pipe) != VK_SUCCESS) return fail("present pipeline failed to compile");
   blend.blendEnable = VK_TRUE;
-  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe_fade) != VK_SUCCESS) return fail("fade pipeline failed to compile");
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, d.vk->pcache, 1, &gp, nullptr, &d.pipe_fade) != VK_SUCCESS) return fail("fade pipeline failed to compile");
   blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &d.pipe_over) != VK_SUCCESS) return fail("overlay pipeline failed to compile");
+  if (d.a->vkCreateGraphicsPipelines(d.vk->dev, d.vk->pcache, 1, &gp, nullptr, &d.pipe_over) != VK_SUCCESS) return fail("overlay pipeline failed to compile");
+  d.dev->save_pipeline_cache();
 
   VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxBufs * kSlots * kBindings};
   VkDescriptorPoolCreateInfo dp{}; dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dp.maxSets = kMaxBufs * kSlots; dp.poolSizeCount = 1; dp.pPoolSizes = &ps;

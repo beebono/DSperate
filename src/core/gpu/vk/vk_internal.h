@@ -28,6 +28,7 @@ namespace ds::gpu::vk {
   F(vkCreateShaderModule) F(vkDestroyShaderModule) \
   F(vkCreateDescriptorSetLayout) F(vkDestroyDescriptorSetLayout) \
   F(vkCreatePipelineLayout) F(vkDestroyPipelineLayout) \
+  F(vkCreatePipelineCache) F(vkDestroyPipelineCache) F(vkGetPipelineCacheData) \
   F(vkCreateComputePipelines) F(vkDestroyPipeline) \
   F(vkCreateDescriptorPool) F(vkDestroyDescriptorPool) \
   F(vkAllocateDescriptorSets) F(vkUpdateDescriptorSets) \
@@ -71,6 +72,9 @@ struct DeviceInternal {
   VkPhysicalDevice phys = VK_NULL_HANDLE;
   u32              qfam = 0;
   VkDeviceSize     non_coherent_atom = 1;
+  // Every pipeline is created through this cache (Device::set_pipeline_cache_file);
+  // VK_NULL_HANDLE when there is none. Internally synchronised.
+  VkPipelineCache  pcache = VK_NULL_HANDLE;
 };
 
 inline VkBuffer vk_buf(const Buffer& b) { return reinterpret_cast<VkBuffer>(b.handle); }

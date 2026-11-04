@@ -13,6 +13,7 @@
 #include "core/host_cores.h"
 #include "core/cart/zip.h"
 #include "core/cart/zip_cache.h"
+#include "core/gpu/vk/vk_device.h"
 #include "core/profile.h"
 #include "core/frame_report.h"
 #include "core/input/input_log.h"
@@ -249,7 +250,9 @@ const char* kUsage =
     "  --rumble-pak    the Rumble Pak in slot 2, whatever the controller (slot2.rumble = on)\n"
     "  --no-slot2      slot 2 empty: no GBA game, no prompt, no Rumble Pak\n"
     "  --clear-cache   delete every unpacked zipped game (the .dsperate directories beside the\n"
-    "                  games and paths.cache) except the one being launched, then run as usual\n";
+    "                  games and paths.cache) except the one being launched, and the compiled\n"
+    "                  Vulkan pipelines (vk_pipelines.bin in paths.cache, else ~/.cache/dsperate),\n"
+    "                  then run as usual\n";
 
 std::string rom_dir_of(const std::string& rom) {
   const size_t slash = rom.find_last_of('/');
@@ -1667,6 +1670,25 @@ sdl_ready:
       if (vs.upper_display >= nd || vs.lower_display >= nd || vs.upper_display == vs.lower_display) {
         std::fprintf(stderr, "DS_DUAL_SCREENS: displays %d/%d, %d available\n", vs.upper_display, vs.lower_display, nd); SDL_Quit(); return 1;
       }
+    }
+  }
+  // The Vulkan pipeline cache (Device::set_pipeline_cache_file), before the
+  // first window opens the device: vk_pipelines.bin in paths.cache, else
+  // $XDG_CACHE_HOME/dsperate or ~/.cache/dsperate (never /tmp, RAM on a
+  // handheld). The zip cache's sweep only touches unpacked games, so it
+  // stays until --clear-cache.
+  {
+    std::string dir = cfg.str("paths.cache", "");
+    if (dir.empty()) {
+      if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x) dir = std::string(x) + "/dsperate";
+      else if (const char* h = std::getenv("HOME"); h && *h) dir = std::string(h) + "/.cache/dsperate";
+    }
+    if (!dir.empty()) {
+      for (size_t i = 1; i <= dir.size(); ++i)
+        if (i == dir.size() || dir[i] == '/') ::mkdir(dir.substr(0, i).c_str(), 0755);
+      const std::string file = dir + "/vk_pipelines.bin";
+      if (clear_cache && std::remove(file.c_str()) == 0) std::fprintf(stderr, "cache: cleared the Vulkan pipeline cache\n");
+      ds::gpu::vk::Device::set_pipeline_cache_file(file);
     }
   }
   if (!open_displays(vs, display, display2)) { SDL_Quit(); return 1; }

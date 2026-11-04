@@ -33,7 +33,9 @@ std::shared_ptr<Device> Device::shared(std::string* why) {
 
 namespace {
 std::vector<std::string> g_present_exts;
+std::string g_pcache_file;
 }
+void Device::set_pipeline_cache_file(const std::string& path) { g_pcache_file = path; }
 void Device::set_present_extensions(const char* const* names, u32 count) {
   g_present_exts.assign(names, names + count);
 }
@@ -53,6 +55,7 @@ void   Device::invalidate(const Buffer&, size_t, size_t) {}
 Buffer Device::import_host(void*, size_t) { return {}; }
 void   Device::flush(const Buffer&, size_t, size_t) {}
 const  DeviceInternal* Device::internal() const { return nullptr; }
+void   Device::save_pipeline_cache() {}
 
 #else
 
@@ -66,6 +69,9 @@ struct Device::Impl {
   u32      qfam = 0;
   bool     has_host_import = false;
   bool     device_local = true;   // the chosen CpuRead type is also DEVICE_LOCAL
+  std::string pcache_file;        // set_pipeline_cache_file at creation
+  size_t   pcache_saved = 0;      // the cache data's size when read or last written
+  std::mutex pcache_mutex;        // save_pipeline_cache may run on the submit and video threads
   DeviceInternal internal{};
   VkPhysicalDeviceMemoryProperties memprops{};
 
@@ -97,7 +103,11 @@ Device::Device() : d_(std::make_unique<Impl>()) {}
 
 Device::~Device() {
   if (!d_) return;
-  if (d_->dev) { d_->api.vkDeviceWaitIdle(d_->dev); d_->api.vkDestroyDevice(d_->dev, nullptr); }
+  if (d_->dev) {
+    d_->api.vkDeviceWaitIdle(d_->dev);
+    if (d_->internal.pcache) { save_pipeline_cache(); d_->api.vkDestroyPipelineCache(d_->dev, d_->internal.pcache, nullptr); }
+    d_->api.vkDestroyDevice(d_->dev, nullptr);
+  }
   if (d_->inst) d_->api.vkDestroyInstance(d_->inst, nullptr);
   if (d_->lib) dlclose(d_->lib);
 }
@@ -317,7 +327,43 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   d.internal.queue2 = d.queue2;
   d.internal.phys = d.phys;
   d.internal.qfam = d.qfam;
+
+  // The pipeline cache, seeded from the file when there is one.
+  if (d.api.vkCreatePipelineCache) {
+    std::vector<char> seed;
+    d.pcache_file = g_pcache_file;
+    if (!d.pcache_file.empty())
+      if (std::FILE* f = std::fopen(d.pcache_file.c_str(), "rb")) {
+        std::fseek(f, 0, SEEK_END); const long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+        if (n > 0) { seed.resize(static_cast<size_t>(n)); if (std::fread(seed.data(), 1, seed.size(), f) != seed.size()) seed.clear(); }
+        std::fclose(f);
+      }
+    VkPipelineCacheCreateInfo ci{}; ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    ci.initialDataSize = seed.size(); ci.pInitialData = seed.empty() ? nullptr : seed.data();
+    if (d.api.vkCreatePipelineCache(d.dev, &ci, nullptr, &d.internal.pcache) != VK_SUCCESS && !seed.empty()) {
+      ci.initialDataSize = 0; ci.pInitialData = nullptr;   // data the driver refuses outright: start empty
+      d.api.vkCreatePipelineCache(d.dev, &ci, nullptr, &d.internal.pcache);
+    }
+    size_t n = 0;
+    if (d.internal.pcache && d.api.vkGetPipelineCacheData(d.dev, d.internal.pcache, &n, nullptr) == VK_SUCCESS) d.pcache_saved = n;
+  }
   return self;
+}
+
+void Device::save_pipeline_cache() {
+  Impl& d = *d_;
+  if (!d.internal.pcache || d.pcache_file.empty() || !d.api.vkGetPipelineCacheData) return;
+  std::lock_guard<std::mutex> lk(d.pcache_mutex);
+  size_t n = 0;
+  if (d.api.vkGetPipelineCacheData(d.dev, d.internal.pcache, &n, nullptr) != VK_SUCCESS || n == 0 || n == d.pcache_saved) return;
+  std::vector<char> data(n);
+  if (d.api.vkGetPipelineCacheData(d.dev, d.internal.pcache, &n, data.data()) != VK_SUCCESS) return;
+  const std::string tmp = d.pcache_file + ".part";
+  std::FILE* f = std::fopen(tmp.c_str(), "wb");
+  if (!f) return;
+  const bool ok = std::fwrite(data.data(), 1, n, f) == n;
+  if (std::fclose(f) != 0 || !ok || std::rename(tmp.c_str(), d.pcache_file.c_str()) != 0) { std::remove(tmp.c_str()); return; }
+  d.pcache_saved = n;
 }
 
 Buffer Device::alloc(size_t size, Access access) {

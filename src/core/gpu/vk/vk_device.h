@@ -48,6 +48,16 @@ public:
   // Device created afterwards; limits().present says whether they (and
   // VK_KHR_swapchain) were enabled.
   static void set_present_extensions(const char* const* names, u32 count);
+  // Where the compiled pipelines persist between runs (the Mali blob takes
+  // ~7 s to build the 3D raster's from SPIR-V; from the cache, a fraction).
+  // Takes effect for a Device created afterwards; empty: no file, the cache
+  // lives for the process only. The driver checks the data's header itself
+  // and starts empty on a mismatch (a new driver, another GPU).
+  static void set_pipeline_cache_file(const std::string& path);
+  // Writes the pipeline cache to that file when it has grown since it was
+  // read or last written (after a batch of pipelines is built). Atomic: a
+  // temporary file renamed over the old.
+  void save_pipeline_cache();
   ~Device();
 
   Device(const Device&) = delete;

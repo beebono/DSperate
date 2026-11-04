@@ -215,7 +215,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # screenshots = /path/to/shots  # the screenshot hotkey. Default: the states directory
 # cache = /path/to/cache        # where zipped games are unpacked when they cannot be unpacked beside
                                 # the zip (a read-only card). Default: <zip dir>/.dsperate/. Kept
-                                # between runs (see [cart]); never /tmp, which is RAM on a handheld
+                                # between runs (see [cart]); never /tmp, which is RAM on a handheld.
+                                # Also holds vk_pipelines.bin, the compiled Vulkan pipelines (default
+                                # ~/.cache/dsperate/), which only --clear-cache deletes
 # analog_cheats = /path/to/usrcheat-analog.dat   # A second database, the file itself, for
                                 #   analog controls (CPAD) patches. Taken for an exact ROM match only.
                                 #   Default: usrcheat-analog.dat beside the ROM, then in this
