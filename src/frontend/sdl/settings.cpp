@@ -121,7 +121,7 @@ const Setting kEmuSettings[] = {
 
 const Setting kAnalogSettings[] = {
   pick("pad.analog", "ANALOG PATCH", kAnalog, 5, "auto", FlagLive, Dep::None,
-       "NEEDS A CPAD CHEAT ON. AUTO USES TWO STICKS (RIGHT STICK, L2/R2) IF THE PAD HAS THEM"),
+       "NEEDS A CPAD CHEAT ON. AUTO USES CONTROLS AS AVAILABLE"),
   number("pad.analog_deadzone", "ANALOG DEADZONE", 0, 30000, 500, "6000", FlagLive, Dep::None,
          "HOW FAR A STICK MUST MOVE BEFORE AN ANALOG PATCH SEES IT"),
   number("pad.analog_sensitivity_left", "LEFT SENSITIVITY", 10, 300, 10, "100", FlagLive, Dep::None,
@@ -151,9 +151,9 @@ const Setting kVideoSettings[] = {
   number("video.chunky_cell", "CHUNKY CELL", 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
          "PANEL PIXELS PER CELL", "auto", "AUTO"),
   pick("video.aa", "ANTI-ALIASING", kAa, 3, "false", FlagLive, Dep::None,
-       "3D EDGES: THE HARDWARE'S BLEND ON THE CPU RASTER, 4X MSAA ON THE GPU RASTER. ENHANCED (GPU 3D ONLY): SHARPER EDGES CUT AT PANEL DENSITY FROM THE POLYGONS' OWN LINES, TEXTURE CUT-OUTS TOO; COSTS MORE CPU"),
+       "DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)"),
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,
-          "DRAW THE 3D LAYER ON THE GPU. NEEDS VULKAN; THE CPU DRAWS IT OTHERWISE"),
+          "DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED"),
   boolean("video.fps", "FPS COUNTER", "false", FlagLive, Dep::None,
           "FRAMES PER SECOND IN THE CORNER OF THE SCREEN"),
   boolean("video.fullscreen", "FULLSCREEN", "false", FlagDeferred, Dep::Windowed, nullptr),
