@@ -418,6 +418,12 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     if (a.vkCreateFramebuffer(vk->dev, &fbi, nullptr, &d.fb2) != VK_SUCCESS) return fail("band framebuffer");
   }
 
+  // DS_SPAN_EXACT=1: the span table's exact integer interpolation along a
+  // row instead of its float form (ds_spans.glsl), as constant_id 0 of the
+  // stages that read it (the draw and the cut-out pass).
+  const VkBool32 span_exact = std::getenv("DS_SPAN_EXACT") && std::atoi(std::getenv("DS_SPAN_EXACT")) != 0;
+  const VkSpecializationMapEntry span_me{0, 0, sizeof(VkBool32)};
+  const VkSpecializationInfo span_si{1, &span_me, sizeof(VkBool32), &span_exact};
   // Pipelines: one vertex/fragment pair, the DS rules in depth, stencil and blend state.
   auto pipeline = [&](bool wbuf, bool eq, u32 kind, VkPipeline* out) {
     VkPipelineShaderStageCreateInfo st[2]{};
@@ -426,6 +432,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = kind == P_MASK_CLEAR ? d.mod_fs : d.mod_vert; st[0].pName = "main";
     const bool trans_pass = kind == P_TRANS_A || kind == P_TRANS_B || kind == P_TRANS_A_DW || kind == P_TRANS_B_DW;
     st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = kind == P_OPAQUE_EARLY ? d.mod_frag_early : kind == P_TRANS_OPQ ? d.mod_frag_opq : trans_pass ? d.mod_frag_trans : d.mod_frag; st[1].pName = "main";
+    st[1].pSpecializationInfo = &span_si;
     const bool stencil_only = kind == P_MASK_CLEAR || kind == P_SHADOW_PREP;
     VkPipelineVertexInputStateCreateInfo vin{}; vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -513,7 +520,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
       VkGraphicsPipelineCreateInfo g2 = gpi; g2.pColorBlendState = &cbs2; g2.pDepthStencilState = &dsb; g2.layout = d.layout_eb; g2.renderPass = d.rp2; g2.subpass = 0;
       if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_band) != VK_SUCCESS) return fail("band pipeline");
       // The cut-out pass: the draw's vertex stage, lean_cutout.frag, after the band (no depth test: its byte wins).
-      st[0].module = d.mod_vert; st[1].module = d.mod_cfrag;
+      st[0].module = d.mod_vert; st[1].module = d.mod_cfrag; st[1].pSpecializationInfo = &span_si;
       VkPipelineDepthStencilStateCreateInfo dsc{}; dsc.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO; g2.pDepthStencilState = &dsc;
       if (a.vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &g2, nullptr, &d.pipe_cutout) != VK_SUCCESS) return fail("cut-out pipeline");
     }
@@ -535,7 +542,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, bool
     }
   }
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean: 1x%s, %s depth/stencil\n", d.msaa ? " with 4x MSAA" : d.edges ? " with the edge cut" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8");
+  std::fprintf(stderr, "gpu lean: 1x%s, %s depth/stencil%s\n", d.msaa ? " with 4x MSAA" : d.edges ? " with the edge cut" : " (no MSAA)", d.ds_format == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8", span_exact ? ", exact spans" : "");
   return self;
 }
 

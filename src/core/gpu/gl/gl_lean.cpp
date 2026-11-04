@@ -37,7 +37,7 @@ struct Lean::Impl {
   EGLDisplay dpy = nullptr;
   EGLContext ctx = nullptr;
   EGLSurface surf = nullptr;
-  bool edges = false, timing = false, indexed = false, egl_sync = false, nostencil = false, wclip = false;
+  bool edges = false, timing = false, indexed = false, egl_sync = false, nostencil = false, wclip = false, span_exact = false;
   static constexpr u32 kSlots = 4;
   // Host staging as the Vulkan raster has it; the slot's device copies are
   // the persistently mapped buffers below (and the vertex stage's textures).
@@ -341,13 +341,17 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
     const bool wclip = !(std::getenv("DS_GL_WCLIP") && std::atoi(std::getenv("DS_GL_WCLIP")) == 0);
     d.wclip = wclip;
     const std::string vdefs = wclip ? "#define DS_WCLIP 1\n" : "";
+    // DS_SPAN_EXACT=1: the span table's exact integer interpolation along a
+    // row instead of its float form (ds_spans.glsl), for the draw and the cut-out pass.
+    d.span_exact = std::getenv("DS_SPAN_EXACT") && std::atoi(std::getenv("DS_SPAN_EXACT")) != 0;
+    const std::string sdefs = d.span_exact ? "#define DS_SPAN_EXACT 1\n" : "";
     const GLuint vs_lean = compile(a, GL_VERTEX_SHADER, source(text_lean_vert(), vdefs), &err);
     const GLuint vs_fs = compile(a, GL_VERTEX_SHADER, source(text_fs_vert(), ""), &err);
     const GLuint fs_null = compile(a, GL_FRAGMENT_SHADER, source(text_null_frag(), ""), &err);
     if (!vs_lean || !vs_fs || !fs_null) { if (why) *why = err; return nullptr; }
     static const char* const variant_defs[V_COUNT] = {"", "#define DS_EARLY 1\n", "#define DS_ALPHA_SEL 1\n", "#define DS_ALPHA_SEL 2\n"};
     for (u32 wd = 0; wd < 2; ++wd) for (u32 v = 0; v < V_COUNT; ++v) {
-      const std::string defs = std::string(variant_defs[v]) + (wd && !wclip ? "#define DS_WDEPTH 1\n" : "");
+      const std::string defs = std::string(variant_defs[v]) + (wd && !wclip ? "#define DS_WDEPTH 1\n" : "") + sdefs;
       const GLuint fs = compile(a, GL_FRAGMENT_SHADER, source(text_lean_frag(), defs), &err);
       d.prog_draw[wd][v] = link(a, vs_lean, fs, &err);
       if (fs) a.glDeleteShader(fs);
@@ -367,7 +371,7 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
     if (d.edges) {
       const GLuint vs_edge = compile(a, GL_VERTEX_SHADER, source(text_edge_vert(), vdefs), &err);
       const GLuint fs_edge = compile(a, GL_FRAGMENT_SHADER, source(text_edge_frag(), vdefs), &err);
-      const GLuint fs_cut = compile(a, GL_FRAGMENT_SHADER, source(text_cutout_frag(), vdefs), &err);
+      const GLuint fs_cut = compile(a, GL_FRAGMENT_SHADER, source(text_cutout_frag(), vdefs + sdefs), &err);
       d.prog_band = link(a, vs_edge, fs_edge, &err);
       d.prog_cutout = link(a, vs_lean, fs_cut, &err);
       for (GLuint s : {vs_edge, fs_edge, fs_cut}) if (s) a.glDeleteShader(s);
@@ -387,8 +391,8 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
   if (a.glGetError() != GL_NO_ERROR) return fail("GL error during warm-up");
   if (d.egl_sync) d.collector = std::thread([&d] { d.collect_loop(); });
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean (OpenGL ES): %s | %s; 1x%s, %s depth/stencil%s%s; warm-up %.0f ms\n", a.glGetString(GL_RENDERER), a.glGetString(GL_VERSION), d.edges ? " with the edge cut" : " (no MSAA)",
-               d24 ? "D24S8" : "D32S8", d.indexed ? "" : ", no per-attachment blend", d.egl_sync ? "" : ", no EGL fences (frames finish synchronously)", now_ms() - t_warm);
+  std::fprintf(stderr, "gpu lean (OpenGL ES): %s | %s; 1x%s, %s depth/stencil%s%s%s; warm-up %.0f ms\n", a.glGetString(GL_RENDERER), a.glGetString(GL_VERSION), d.edges ? " with the edge cut" : " (no MSAA)",
+               d24 ? "D24S8" : "D32S8", d.span_exact ? ", exact spans" : "", d.indexed ? "" : ", no per-attachment blend", d.egl_sync ? "" : ", no EGL fences (frames finish synchronously)", now_ms() - t_warm);
   return self;
 }
 
