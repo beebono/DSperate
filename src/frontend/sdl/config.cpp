@@ -280,11 +280,12 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # (2x2 DS pixels) | N (or the nearest size below N that divides the screen)
 # aa = false                    # 3D anti-aliasing: on the CPU raster the hardware's edge blend (edge
                                 # pixels blended by coverage, when the game asks for it). On the GPU
-                                # raster the Vulkan present smooths the polygon edges at panel density
-                                # from the polygons' own sub-pixel lines (a blend one DS pixel wide
-                                # across each line); 4x MSAA under other presents. enhanced: on the
-                                # GPU raster texture cut-out edges are smoothed too (the CPU raster
-                                # shows the hardware's blend either way). The older mode words
+                                # raster 4x MSAA. enhanced: on the GPU raster the Vulkan present
+                                # smooths the polygon edges at panel density from the polygons' own
+                                # sub-pixel lines (a blend one DS pixel wide across each line),
+                                # texture cut-out edges too: sharper, ~5 ms more CPU a frame in 3D-heavy
+                                # games; 4x MSAA under other presents (the CPU raster shows the
+                                # hardware's blend either way). The older mode words
                                 # accurate / smooth read as true.
 # gpu3d = false                 # draw the 3D layer on the GPU (Vulkan, else OpenGL ES 3.1; 1x, MSAA with aa on Vulkan): the polygon
                                 # list goes to the GPU after each swap and the compositor reads the

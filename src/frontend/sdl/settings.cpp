@@ -151,7 +151,7 @@ const Setting kVideoSettings[] = {
   number("video.chunky_cell", "CHUNKY CELL", 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
          "PANEL PIXELS PER CELL", "auto", "AUTO"),
   pick("video.aa", "ANTI-ALIASING", kAa, 3, "false", FlagLive, Dep::None,
-       "3D EDGES: THE HARDWARE'S BLEND ON THE CPU RASTER; ON THE GPU RASTER SMOOTHED AT PANEL DENSITY FROM THE POLYGONS' OWN LINES. ENHANCED ALSO SMOOTHS TEXTURE CUT-OUT EDGES THERE (GPU 3D ONLY)"),
+       "3D EDGES: THE HARDWARE'S BLEND ON THE CPU RASTER, 4X MSAA ON THE GPU RASTER. ENHANCED (GPU 3D ONLY): SHARPER EDGES CUT AT PANEL DENSITY FROM THE POLYGONS' OWN LINES, TEXTURE CUT-OUTS TOO; COSTS MORE CPU"),
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,
           "DRAW THE 3D LAYER ON THE GPU. NEEDS VULKAN; THE CPU DRAWS IT OTHERWISE"),
   boolean("video.fps", "FPS COUNTER", "false", FlagLive, Dep::None,

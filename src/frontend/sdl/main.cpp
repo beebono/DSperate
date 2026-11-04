@@ -186,9 +186,10 @@ const char* kUsage =
     "  --timing M      CPU cycle model: fast (default: constant memory and jump costs, much cheaper)\n"
     "                  | exact (melonDS's per-access model); emu.timing\n"
     "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): the hardware's edge blend on the\n"
-    "  --aa-enhanced   ... video.aa = enhanced: on the GPU raster texture cut-out edges are smoothed too\n"
-    "                  CPU raster; on the GPU raster, 3D edges smoothed at panel density from the\n"
-    "                  polygons' own lines by the Vulkan present (4x MSAA under other presents)\n"
+    "                  CPU raster, 4x MSAA on the GPU raster\n"
+    "  --aa-enhanced   video.aa = enhanced: on the GPU raster, 3D edges (texture cut-outs too) cut\n"
+    "                  at panel density from the polygons' own lines by the Vulkan present instead:\n"
+    "                  sharper, more CPU (MSAA under other presents)\n"
     "  --gpu3d / --no-gpu3d  the 3D layer drawn on the GPU (video.gpu3d, off by default); the CPU\n"
     "                  raster where there is no Vulkan\n"
     "  --frameskip N   skip drawing up to N frames in N+1 (0 = off); emu.frameskip. Skipping runs\n"
@@ -301,8 +302,8 @@ std::string save_path(const std::string& rom, const std::string& dir) {
   return dir.empty() ? rom_stem(rom) + ".sav" : dir + "/" + base_name(rom_stem(rom)) + ".sav";
 }
 
-// video.aa: false / true / enhanced. Enhanced: on the GPU raster the edge
-// cut also cuts texture cut-out edges (the cut-out pass, ~0.4 ms of GPU);
+// video.aa: false / true / enhanced. On the GPU raster true is 4x MSAA and
+// enhanced the edge cut, texture cut-out edges included (the cut-out pass);
 // the CPU raster shows the hardware's blend either way. The older mode
 // words still read: accurate / smooth as on, off as off.
 bool aa_on(const std::string& v) {
@@ -4087,16 +4088,20 @@ sdl_ready:
         display.present();
         if (dual_window) display2.present();
       } else {
-        // The edge cut (core/gpu/edge_cut.h): video.aa on the GPU raster cuts
-        // 3D edges at panel density in the Vulkan present (the RGA cannot)
-        // instead of drawing with 4x MSAA. The CPU raster shows the hardware's
-        // blend, its accurate AA. DS_EDGE_CUT=0 keeps MSAA; DS_EDGE_CUT=1 cuts
-        // the CPU raster's edges too (the reference the GPU's are checked
-        // against). Takes effect from the next frame.
+        // The edge cut (core/gpu/edge_cut.h): video.aa = enhanced on the GPU
+        // raster cuts 3D edges at panel density in the Vulkan present (the RGA
+        // cannot) instead of drawing with 4x MSAA, which plain video.aa keeps:
+        // the cut's GPU frame is cheaper, but its edge plane costs the
+        // emulation thread (edge_line, the compositor's and capture's edge
+        // words) ~5 ms a frame in Golden Sun: Dark Dawn. The CPU raster shows
+        // the hardware's blend, its accurate AA. DS_EDGE_CUT=0 keeps MSAA;
+        // DS_EDGE_CUT=1 cuts with plain video.aa too, and the CPU raster's
+        // edges (the reference the GPU's are checked against). Takes effect
+        // from the next frame.
         static const int cut_env = [] { const char* e = std::getenv("DS_EDGE_CUT"); return e && *e ? *e - '0' : -1; }();
         auto vk_present = [](const ds::sdl::Display& d) { return d.gpu_present() && !d.rga_present(); };
         const bool cut = cut_env != 0 && vk_present(display) && (!dual_window || vk_present(display2)) &&
-                         nds.gpu3d.renderer().aa() && (nds.gpu3d.renderer().gpu_active() || cut_env == 1);
+                         nds.gpu3d.renderer().aa() && ((nds.gpu3d.renderer().gpu_active() && nds.gpu3d.renderer().aa_enhanced()) || cut_env == 1);
         nds.gpu.set_edge_export(cut);
         ds::sdl::EdgePlanes edges;
         if (nds.gpu.edge_export())
