@@ -207,7 +207,8 @@ renderer.
 
 CMake switches: `DSPERATE_JIT`, `DSPERATE_NEON`, `DSPERATE_TESTS`,
 `DSPERATE_HEADLESS`, `DSPERATE_SDL`, `DSPERATE_WAYLAND`, `DSPERATE_CHEEVOS`,
-`DSPERATE_NET`, `DSPERATE_HARDEN`, `DSPERATE_TUNE` (extra `-mcpu`/`-mtune`
+`DSPERATE_NET`, `DSPERATE_LUA` (the headless harness's `--lua`, when Lua 5.4 is
+found), `DSPERATE_HARDEN`, `DSPERATE_TUNE` (extra `-mcpu`/`-mtune`
 flags, e.g. `-mcpu=cortex-a55`), and `DSPERATE_PGO=generate|use` (profiles for
 AArch64 and ARMv7 are committed under [pgo/](pgo/)).
 
@@ -226,7 +227,9 @@ slot, `F4`/`F10` cycle layout, `F6` swap screens, `F9` screenshot, `L` lid,
 `dsperate-headless` is the measurement harness: no window or audio, boots the
 firmware or a ROM with `--direct`, and offers instruction traces, frame and
 audio dumps, save-state checkpoints and cheats from the command line. It never
-writes a battery save back.
+writes a battery save back. With `--lua SCRIPT` a Lua 5.4 script drives it frame
+by frame instead (memory, buttons, states, screenshots); see
+[docs/headless-scripting.md](docs/headless-scripting.md).
 
 ## Diagnostics, tests and tools
 

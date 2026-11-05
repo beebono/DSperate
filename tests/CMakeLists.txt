@@ -69,6 +69,12 @@ add_executable(test_aes aes_test.cpp)
 target_link_libraries(test_aes PRIVATE dsperate_core)
 add_test(NAME aes COMMAND test_aes)
 
+if(TARGET dsperate_headless_lua)
+  add_executable(test_lua_host lua_host_test.cpp)
+  target_link_libraries(test_lua_host PRIVATE dsperate_headless_lua)
+  add_test(NAME lua_host COMMAND test_lua_host)
+endif()
+
 add_executable(test_texcache texcache_test.cpp)
 target_link_libraries(test_texcache PRIVATE dsperate_core)
 add_test(NAME texcache COMMAND test_texcache)

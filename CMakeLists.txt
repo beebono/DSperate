@@ -19,6 +19,7 @@ option(DSPERATE_SDL      "Build the SDL2 frontend (off when SDL2 is not found)" 
 option(DSPERATE_WAYLAND  "Build the Wayland dmabuf scanout tier (off when SDL2 has no Wayland)" ON)
 option(DSPERATE_CHEEVOS  "Build RetroAchievements support"                  ON)
 option(DSPERATE_NET      "Build the Wi-Fi transports (local wireless over the LAN)" ON)
+option(DSPERATE_LUA      "Build the headless frontend's --lua scripting (off when Lua 5.4 is not found)" ON)
 
 # JIT and NEON kernels are gated separately: an ARMv7 host gets NEON kernels
 # with its own JIT backend, a non-ARM host gets neither.

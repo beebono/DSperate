@@ -24,6 +24,9 @@
 #include "core/profile.h"
 #include "core/frame_report.h"
 #include "core/cheat/database.h"
+#if DSPERATE_LUA
+#include "frontend/headless/lua_host.h"
+#endif
 
 #include <cstdio>
 #include <thread>
@@ -242,6 +245,7 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
+  const char* lua_script = nullptr;
   const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
@@ -359,6 +363,7 @@ int main(int argc, char** argv) {
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
     else if (flag("--aa-enhanced")) aa_enhanced = true;
     else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, gpu_raster.h: Vulkan, else OpenGL ES); declines to the CPU without a driver
+    else if (arg("--lua")) lua_script = argv[++i];                          // run SCRIPT instead of the fixed frame loop (lua_host.h, docs/headless-scripting.md)
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
     else if (arg("--frameskip")) frameskip = std::atoi(argv[++i]);          // skip drawing N of every N+1 frames (Gpu::set_frame_skip); a dump of a skipped frame is stale
     else if (flag("--frameskip-capture")) frameskip_capture = true;          // INEXACT: skip frames that display-capture too
@@ -779,6 +784,19 @@ int main(int argc, char** argv) {
 #endif
   if (ds::mem::fmc::on()) ds::mem::fmc::set_counting(stats_from == 0);
   if (pc_profile && !ds::pcsample::start()) { std::fprintf(stderr, "--pc-profile: no sampler on this platform\n"); return 1; }
+  if (lua_script) {
+#if DSPERATE_LUA
+    // The script owns the frame loop: --frames and the per-frame dumps of
+    // the fixed loop below don't apply (--load-state above does).
+    ds::headless::LuaHost lua(nds);
+    const int rc = lua.run_file(lua_script);
+    std::fprintf(stderr, "lua: %s ended at frame %llu (exit %d)\n", lua_script, static_cast<unsigned long long>(nds.frame_count), rc);
+    return rc;
+#else
+    std::fprintf(stderr, "--lua: this dsperate-headless was built without Lua (DSPERATE_LUA)\n");
+    return 2;
+#endif
+  }
   const auto pace_start = std::chrono::steady_clock::now();
   for (int i = 0; i < frames; ++i) {
     if (pc_profile && i == stats_from) ds::pcsample::set_active(true);
