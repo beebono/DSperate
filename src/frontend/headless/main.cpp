@@ -27,6 +27,7 @@
 #if DSPERATE_LUA
 #include "frontend/headless/lua_host.h"
 #endif
+#include "frontend/headless/read_log.h"
 
 #include <cstdio>
 #include <thread>
@@ -246,6 +247,7 @@ int main(int argc, char** argv) {
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
   const char* lua_script = nullptr;
+  const char* read_log_path = nullptr; const char* read_ranges = nullptr;
   const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
@@ -363,6 +365,8 @@ int main(int argc, char** argv) {
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
     else if (flag("--aa-enhanced")) aa_enhanced = true;
     else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, gpu_raster.h: Vulkan, else OpenGL ES); declines to the CPU without a driver
+    else if (arg("--read-log")) { read_log_path = argv[++i]; setenv("DS_FASTMEM", "0", 1); }   // FILE: which instructions read which addresses (read_log.h); needs --interp and a census build
+    else if (arg("--read-range")) read_ranges = argv[++i];                 // LO-HI[,LO-HI...] (hex) for --read-log; default main RAM
     else if (arg("--lua")) lua_script = argv[++i];                          // run SCRIPT instead of the fixed frame loop (lua_host.h, docs/headless-scripting.md)
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
     else if (arg("--frameskip")) frameskip = std::atoi(argv[++i]);          // skip drawing N of every N+1 frames (Gpu::set_frame_skip); a dump of a skipped frame is stale
@@ -784,6 +788,18 @@ int main(int argc, char** argv) {
 #endif
   if (ds::mem::fmc::on()) ds::mem::fmc::set_counting(stats_from == 0);
   if (pc_profile && !ds::pcsample::start()) { std::fprintf(stderr, "--pc-profile: no sampler on this platform\n"); return 1; }
+  // TRACE_START_FRAME / TRACE_END_FRAME bound it as they bound --trace.
+  ds::headless::ReadLog read_log;
+  if (read_log_path) {
+    if (!ds::headless::ReadLog::available()) { std::fprintf(stderr, "--read-log needs a census build (-DDSPERATE_CENSUS=1): it listens on the census access hook\n"); return 2; }
+    if (jit) { std::fprintf(stderr, "--read-log needs --interp: the recompiler's inline loads never reach it\n"); return 2; }
+    std::vector<ds::headless::ReadLog::Range> ranges;
+    if (!ds::headless::ReadLog::parse_ranges(read_ranges ? read_ranges : "02000000-023FFFFF", ranges)) {
+      std::fprintf(stderr, "--read-range: expected LO-HI[,LO-HI...] in hex, got %s\n", read_ranges);
+      return 2;
+    }
+    read_log.start(nds, read_log_path, ranges, static_cast<ds::u64>(trace_from), static_cast<ds::u64>(trace_end));
+  }
   if (lua_script) {
 #if DSPERATE_LUA
     // The script owns the frame loop: --frames and the per-frame dumps of

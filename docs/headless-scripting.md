@@ -1,4 +1,4 @@
-# Scripting the headless harness
+# Scripting and read logs in the headless harness
 
 `dsperate-headless` normally runs a fixed number of frames. With `--lua SCRIPT`
 a Lua 5.4 script runs the machine instead: it owns the frame loop, reads and
@@ -54,8 +54,42 @@ ds.screenshot("walked.png", "top")
 print(string.format("frame %d, word at 0x02000000 = %08x", ds.framecount(), ds.read32(0x02000000)))
 ```
 
+## The read log
+
+`--read-log FILE` records which instructions read which guest addresses, for
+finding the code that reads a data structure: a level, a table, a file the game
+loaded and unpacked. Every data load the interpreter makes inside the
+`--read-range` windows (hex `LO-HI` pairs, comma-separated; main RAM by
+default) is counted by CPU, reading instruction and address, and at exit the
+counts are written as runs of neighbouring bytes:
+
+    # dsperate read log 1
+    # read  cpu  pc  lo  hi  reads  first frame  last frame
+    read	arm9	0204d7f4	0208fb14	0208fb17	1920	3591	3650
+
+It adds nothing to the core: it listens on the per-access census hook
+(`g_census_access` in `cpu_mem.h`), which every interpreter data access already
+calls with its address. So it needs a census build (`-DDSPERATE_CENSUS=1`) and
+`--interp` (the recompiler's loads are inline host loads that never reach the
+hook), and the harness refuses `--read-log` without either. The hook doesn't
+say whether an access loads or stores, or its width, so the log decodes the
+instruction at the CPU's PC (r15 less the pipeline, as `--trace` prints it) and
+keeps the loads (LDR, LDRB, LDRH, LDRSB, LDRSH, LDRD, LDM, POP and SWP's read,
+ARM and Thumb). Reads by the built-in BIOS's decompression calls show the
+BIOS's PC, with the caller in LR. `TRACE_START_FRAME` and `TRACE_END_FRAME`
+bound it as they bound `--trace`, and it works in Lua mode too, so a script can
+play to the moment that matters. The interpreter runs a frame in a few
+milliseconds on a recent ARM core.
+
+With it, the existing `DS_CART_LOG=1` (each card command, so each `B7` read's
+ROM offset) and `DS_DEBUG_DMA=1` (each DMA channel start with its source and
+destination) show where a file came from and where it was copied.
+
 ## Tests
 
 `tests/lua_host_test.cpp` (ctest `lua_host`) runs scripts on a blank cartridge:
 memory through both CPUs, keys, frames, state round trips, screenshots, exit
-codes and errors.
+codes and errors. `tests/read_log_test.cpp` (ctest `read_log`) checks range
+lists and the load decoder, and in a census build the runs per CPU and
+instruction, the frame window, and an interpreted load reaching it through the
+census hook with its PC while a store doesn't.

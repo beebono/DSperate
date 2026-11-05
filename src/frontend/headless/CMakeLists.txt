@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# The read log (read_log.h) is a library so tests/ can check it.
+add_library(dsperate_headless_read_log STATIC read_log.cpp)
+target_link_libraries(dsperate_headless_read_log PUBLIC dsperate_core)
 add_executable(dsperate-headless main.cpp)
+target_link_libraries(dsperate-headless PRIVATE dsperate_headless_read_log)
 target_link_libraries(dsperate-headless PRIVATE dsperate_core)
 if(DSPERATE_NET)
   target_link_libraries(dsperate-headless PRIVATE dsperate_net)

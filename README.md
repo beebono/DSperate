@@ -228,7 +228,9 @@ slot, `F4`/`F10` cycle layout, `F6` swap screens, `F9` screenshot, `L` lid,
 firmware or a ROM with `--direct`, and offers instruction traces, frame and
 audio dumps, save-state checkpoints and cheats from the command line. It never
 writes a battery save back. With `--lua SCRIPT` a Lua 5.4 script drives it frame
-by frame instead (memory, buttons, states, screenshots); see
+by frame instead (memory, buttons, states, screenshots), and `--read-log FILE`
+(with `--interp`, in a `-DDSPERATE_CENSUS=1` build) records which instructions
+read which addresses; see
 [docs/headless-scripting.md](docs/headless-scripting.md).
 
 ## Diagnostics, tests and tools
