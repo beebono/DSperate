@@ -235,16 +235,26 @@ bool Display::open_kms(int rot) {
 }
 
 // The scanline path's pixels in a dma-buf instead of the shm surface.
-// Needs the window surface first (the size it's configured at), and falls
-// back to it if the dma-buf is lost later.
+// Sized from the window, never from SDL's window surface: asking for that
+// builds a GL framebuffer on the same wl_surface, and where GL is Zink that
+// is a Vulkan swapchain with an explicit-sync (drm_syncobj) surface, which
+// our plain attaches then violate (the compositor disconnects us). SDL has
+// the configured size by now: its Wayland window waits for the first
+// configure before CreateWindow returns. The shm surface is only fetched
+// if the dma-buf is lost later.
 bool Display::open_dmabuf(int rot) {
-  if (!open_surface_scaling(rot)) return false;
+  scaled_ = true;
+  rot_ = rot;
   int ow = 0, oh = 0;
-  output_size(ow, oh);   // the presented size, whatever the rotation
+  SDL_GetWindowSize(win_, &ow, &oh);   // the presented size, whatever the rotation
+  if (ow <= 0 || oh <= 0) { scaled_ = false; rot_ = 0; return false; }
   auto dm = std::make_unique<DmabufOut>();
   if (gpu_wanted_) dm->set_bufs(DmabufOut::DEFAULT_BUFS + 1);
-  if (!dm->open(win_, ow, oh, only_screen_ >= 0 ? display_index_ : -1)) return false;
+  if (!dm->open(win_, ow, oh, only_screen_ >= 0 ? display_index_ : -1)) { scaled_ = false; rot_ = 0; return false; }
   out_ = std::move(dm);
+  layout();
+  build_scale();
+  if (!scaled_) { out_->close(); out_.reset(); rot_ = 0; return false; }
   SDL_GetWindowSize(win_, &open_w_, &open_h_);
   if (try_gpu_present()) return true;
   std::fprintf(stderr, "video: dmabuf, %s driver, scanline scaling, rot %d\n", SDL_GetCurrentVideoDriver(), rot_);
