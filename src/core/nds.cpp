@@ -122,7 +122,14 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
   if (have9 != have7) return fail(std::string(have9 ? p7 : p9) + ": the other BIOS half is present; both or neither");
   if (have9) { b9 = slurp(p9); if (b9.size() != mem::Bus::BIOS9_SIZE) return fail(p9 + ": not a 4 KB ARM9 BIOS"); }
   if (have7) { b7 = slurp(p7); if (b7.size() != mem::Bus::BIOS7_SIZE) return fail(p7 + ": not a 16 KB ARM7 BIOS"); }
-  if (exists(pfw)) { fw = slurp(pfw); if (fw.empty()) return fail(pfw + ": empty firmware"); }
+  if (exists(pfw)) {
+    fw = slurp(pfw);
+    // Only the real image sizes: 128 KB (DSi), 256 KB (DS) or 512 KB (DS Lite,
+    // iQue). Anything else is a mis-saved download; booting on it gives the
+    // game a user-settings block it rejects (touch calibration collapses to 0,0).
+    if (fw.size() != 0x20000 && fw.size() != 0x40000 && fw.size() != 0x80000)
+      return fail(pfw + ": " + std::to_string(fw.size()) + " bytes is not a firmware dump (128, 256 or 512 KB)");
+  }
   std::memset(bus.bios9.get(), 0, mem::Bus::BIOS9_SIZE);
   std::memset(bus.bios7.get(), 0, mem::Bus::BIOS7_SIZE);
   if (b9.empty()) std::memcpy(bus.bios9.get(), bios::kFreeBios9, bios::kFreeBios9_len);
@@ -395,8 +402,9 @@ void NDS::setup_direct_boot() {
   for (u32 i = arm9_start; i < h.arm9_size; i += 4) w32(h.arm9_ram_address + i, rom32(h.arm9_rom_offset + i));
   for (u32 i = 0; i < h.arm7_size; i += 4) bus.dma_write32(Cpu::ARM7, h.arm7_ram_address + i, rom32(h.arm7_rom_offset + i));
 
-  // Firmware user settings, as the firmware copies them.
-  if (firmware.size() >= 0x40000) {
+  // Firmware user settings, as the firmware copies them. The 0x20 pointer
+  // holds in the 128 KB DSi image too (normalise_touch_calibration's bound).
+  if (firmware.size() >= 0x20000) {
     const u16 user_off = static_cast<u16>(firmware[0x20] | (firmware[0x21] << 8));
     w32(0x027FF864, 0);
     w32(0x027FF868, static_cast<u32>(user_off) << 3);

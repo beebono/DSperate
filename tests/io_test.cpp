@@ -8,6 +8,8 @@
 #include "core/input/input_log.h"
 
 #include <cstdio>
+#include <fstream>
+#include <vector>
 #include <cstring>
 #include <memory>
 
@@ -554,6 +556,17 @@ static void test_generated_firmware() {
   CHECK_EQ(nds->load_bios("/dev/null", "/dev/null", "", user, &err), false);
   CHECK_EQ(err.empty(), false);
   CHECK_EQ(nds->load_bios("/dev/null", "/nonexistent/bios7.bin", "", user, &err), false);   // one half only
+  // A firmware of no real image size (a mis-saved download) is refused, not
+  // booted on: the game would get a settings block it rejects.
+  {
+    std::ofstream f("io_test_badfw.bin", std::ios::binary);
+    std::vector<char> junk(0x30000, 'x');
+    f.write(junk.data(), static_cast<std::streamsize>(junk.size()));
+  }
+  err.clear();
+  CHECK_EQ(nds->load_bios("", "", "io_test_badfw.bin", user, &err), false);
+  CHECK_EQ(err.find("not a firmware dump") != std::string::npos, true);
+  std::remove("io_test_badfw.bin");
 }
 
 static void test_power_off() {

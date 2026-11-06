@@ -328,6 +328,10 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
   }
   static const char* kRegionNames[6] = {"Japan", "USA", "Europe", "Australia", "China", "Korea"};
 
+  // A dump of another size passed load_bios's check as a DS image; its
+  // settings block is the DS layout, which the launcher would misread.
+  if (!firmware_synthetic && firmware.size() != 0x20000)
+    return fail("firmware: " + std::to_string(firmware.size()) + " bytes is not a DSi firmware image (128 KB)");
   if (firmware_synthetic && firmware.size() != 0x20000) {
     firmware = bios::generate_firmware_dsi(user, region.language, region.language_mask);
     firmware_ap_slot = bios::stamp_access_point(firmware);
