@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cctype>
 #include <cstring>
 #include <cmath>
@@ -500,6 +501,9 @@ Input::Panel Input::touch_panel(SDL_TouchID id) {
   touch_cache_.emplace_back(id, p);
   return p;
 }
+
+// DS_TOUCH_DEBUG: each finger down/up through the mapping, for panels we can't test on.
+static bool touch_debug() { static const bool on = std::getenv("DS_TOUCH_DEBUG") != nullptr; return on; }
 
 // Dual-window: the window a finger belongs to. SDL's evdev backend (KMSDRM)
 // attaches no window to touches, so an unmapped one goes to the lower panel.
@@ -1152,10 +1156,21 @@ void Input::handle(const SDL_Event& e0, Display& display, Display* second) {
     if (!d) break;
     int w = 0, h = 0;
     d->output_size(w, h);
-    touch_at(static_cast<int>(e.tfinger.x * w), static_cast<int>(e.tfinger.y * h), *d);
+    const int wx = static_cast<int>(e.tfinger.x * w), wy = static_cast<int>(e.tfinger.y * h);
+    if (touch_debug() && e.type == SDL_FINGERDOWN) {
+      int ww = 0, wh = 0;
+      if (SDL_Window* sw = SDL_GetWindowFromID(d->window_id())) SDL_GetWindowSize(sw, &ww, &wh);
+      int scr = -1, sx = -1, sy = -1;
+      const bool hit = d->map_point(wx, wy, scr, sx, sy);
+      std::fprintf(stderr, "touch-dbg: down norm %.4f,%.4f ev-win %u -> %s win %u (window %dx%d, output %dx%d) px %d,%d -> %s screen %d ds %d,%d\n",
+                   static_cast<double>(e.tfinger.x), static_cast<double>(e.tfinger.y), e.tfinger.windowID,
+                   d == second ? "lower" : "upper", d->window_id(), ww, wh, w, h, wx, wy, hit ? "hit" : "miss", scr, sx, sy);
+    }
+    touch_at(wx, wy, *d);
     break;
   }
   case SDL_FINGERUP:
+    if (touch_debug()) std::fprintf(stderr, "touch-dbg: up ev-win %u\n", e.tfinger.windowID);
     if (finger_target(e.tfinger, display, second)) touching_ = false;
     break;
 
