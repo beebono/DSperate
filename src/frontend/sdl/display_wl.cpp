@@ -166,13 +166,18 @@ const zwp_linux_buffer_params_v1_listener params_listener = { on_created, on_fai
 } // namespace
 
 bool DmabufOut::alloc_buf(Buf& b) {
-  const size_t bytes = static_cast<size_t>(w_) * h_ * 4;
+  // Rows padded to 64 bytes: a GPU importing a linear dma-buf wants an
+  // aligned pitch (Mali: 16 pixels), and an unaligned one (an 854-wide
+  // panel: 3416 bytes) passes the create_params check only to come out
+  // black or torn at composite time. Every consumer reads stride().
+  pitch_ = (w_ + 15) & ~15;
+  const size_t bytes = static_cast<size_t>(pitch_) * h_ * 4;
   b.fd = dmaheap::alloc(bytes, [&](int fd) {
     zwp_linux_buffer_params_v1* p = zwp_linux_dmabuf_v1_create_params(g_.dmabuf);
     Created c;
     zwp_linux_buffer_params_v1_add_listener(p, &params_listener, &c);
     // plane 0, layout settled by pick_modifier() at bind time
-    zwp_linux_buffer_params_v1_add(p, fd, 0, 0, w_ * 4,
+    zwp_linux_buffer_params_v1_add(p, fd, 0, 0, static_cast<u32>(pitch_) * 4,
                                    static_cast<u32>(g_.mod >> 32), static_cast<u32>(g_.mod));
     zwp_linux_buffer_params_v1_create(p, w_, h_, FMT_XRGB8888, 0);
     while (!c.done && wl_display_roundtrip_queue(dpy_, g_.q) >= 0) {}
@@ -262,12 +267,12 @@ void DmabufOut::close() {
   // Only per-instance objects die here; globals live for the connection.
   for (Buf& b : bufs_) drop_buf(b);
   // Size 0: a sink whose reopen failed must not look usable at its new size.
-  dpy_ = nullptr; surf_ = nullptr; q_ = nullptr; cur_ = -1; dead_ = false; w_ = h_ = 0;
+  dpy_ = nullptr; surf_ = nullptr; q_ = nullptr; cur_ = -1; dead_ = false; w_ = h_ = 0; pitch_ = 0;
 }
 
 bool DmabufOut::dmabuf_plane(int buf, DmabufPlane& out) const {
   if (buf < 0 || buf >= nbufs_ || bufs_[buf].fd < 0) return false;
-  out.fd = bufs_[buf].fd; out.offset = 0; out.stride_bytes = static_cast<u32>(w_) * 4;
+  out.fd = bufs_[buf].fd; out.offset = 0; out.stride_bytes = static_cast<u32>(pitch_) * 4;
   out.width = static_cast<u32>(w_); out.height = static_cast<u32>(h_); out.fourcc = FMT_XRGB8888;
   return true;
 }
