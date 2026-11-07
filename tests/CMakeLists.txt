@@ -77,7 +77,7 @@ add_test(NAME texcache COMMAND test_texcache)
 # needs rather than the SDL frontend (which is an executable, and needs a
 # display to do anything).
 add_executable(test_menu menu_test.cpp ../src/frontend/sdl/menu.cpp ../src/frontend/sdl/ui_font.cpp ../src/frontend/sdl/settings.cpp)
-target_link_libraries(test_menu PRIVATE dsperate_core)
+target_link_libraries(test_menu PRIVATE dsperate_core dsperate_i18n)
 add_test(NAME menu COMMAND test_menu)
 
 # The settings file, likewise frontend code: the menu and the layout hotkeys
@@ -198,3 +198,9 @@ if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE AND SDL2_FOUND AND CMAKE_SYSTEM_N
   target_include_directories(gpu_present_probe PRIVATE ${DSPERATE_VULKAN_INCLUDE} ${SDL2_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR})
   target_compile_definitions(gpu_present_probe PRIVATE DSPERATE_PRESENT_SHADER_DIR="${PROJECT_SOURCE_DIR}/src/frontend/sdl/shaders")
 endif()
+
+# The frontend's translations: the .po reader, locale names, user catalogs,
+# and every built-in po/*.po loading cleanly.
+add_executable(test_i18n i18n_test.cpp)
+target_link_libraries(test_i18n PRIVATE dsperate_i18n)
+add_test(NAME i18n COMMAND test_i18n)

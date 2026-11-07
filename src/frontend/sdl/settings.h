@@ -19,6 +19,7 @@ enum Flag : u8 {
   FlagLive    = 0,        // takes effect as soon as it is set
   FlagDeferred = 1u << 0, // applied when the menu closes, not per-step (layout changes)
   FlagRestart = 1u << 1,  // only read at startup; the row says so
+  FlagVerbatim = 1u << 2, // choice labels are names, never translated (the menu language row)
 };
 
 // Why a row might be switched off; the menu asks the host rather than
@@ -115,6 +116,13 @@ extern const Setting kVideoSettings[];
 extern const Setting kLayoutSettings[];
 extern const Setting kUserSettings[];
 int settings_count(const Setting* table);
+
+// The MENU LANGUAGE row's choices are the languages found at startup (built
+// in, plus the user's lang directory): AUTO, then each by its own name.
+// Slots past the last stay empty and are never offered.
+constexpr int kMaxUiLanguages = 32;
+struct UiLanguage { std::string code, name; };
+void set_ui_languages(const std::vector<UiLanguage>& languages);
 
 std::string display_value(const Setting& s, const std::string& value);
 // Value one step in `dir`: clamped at the ends for numbers, wraps for choices.

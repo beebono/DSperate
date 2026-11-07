@@ -160,6 +160,13 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # picked with the hotkey is remembered.
 # Every line is a comment showing the default; delete the # to change one.
 
+[ui]
+# language = auto               # the menus' language: auto (the system's, from LANG), en, or a
+                                # code such as zh_CN. Built-in translations come from po/ in the
+                                # source; a <code>.po in a lang folder beside this file adds a
+                                # language or replaces one (docs/translating.md). Global only:
+                                # a game's own file cannot change it
+
 [user]                          # what games see as the console's owner when no firmware dump is
                                 # given (with a dump, its own settings apply), and the DSi's
                                 # settings when DSiWare runs without a NAND

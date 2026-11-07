@@ -43,6 +43,7 @@
 #include "input.h"
 #include "lid.h"
 #include "loader_cart.h"
+#include "frontend/i18n/i18n.h"
 #include "menu.h"
 #include "cpu_gov.h"
 #include "pacer.h"
@@ -1309,6 +1310,21 @@ static int run(int argc, char** argv) {
   const std::string global_ini = config_arg ? std::string(config_arg) : ds::sdl::Config::global_path();
   if (!config_arg) ds::sdl::Config::write_default(global_ini);
   if (!cfg.load(global_ini) && config_arg) { std::fprintf(stderr, "cannot read %s\n", config_arg); return 2; }
+  // The menus' language: from the global file only, set before anything is
+  // drawn (a game's own file is read later). User catalogs sit in lang/
+  // beside the config file in use.
+  {
+    const size_t slash = global_ini.rfind('/');
+    ds::i18n::set_user_dir((slash == std::string::npos ? std::string(".") : global_ini.substr(0, slash)) + "/lang");
+    const std::string lang = cfg.str("ui.language", "auto");
+    if (!ds::i18n::set_language(lang))
+      std::fprintf(stderr, "lang: no %s translation, so the menus stay in English\n", lang.c_str());
+    else if (ds::i18n::language() != "en")
+      std::fprintf(stderr, "lang: %s\n", ds::i18n::language().c_str());
+    std::vector<ds::sdl::UiLanguage> langs;
+    for (const ds::i18n::Language& l : ds::i18n::languages()) langs.push_back({l.code, l.name});
+    ds::sdl::set_ui_languages(langs);
+  }
   // paths.dsi_nand stands in for --dsi-nand only under --dsi-mode.
   const std::string dsi_nand_cfg = dsi_mode_asked && !dsi_nand ? cfg.str("paths.dsi_nand") : std::string();
   if (!dsi_nand_cfg.empty()) dsi_nand = dsi_nand_cfg.c_str();
@@ -2549,9 +2565,11 @@ sdl_ready:
       if (std::strcmp(key, "video.layout") == 0) pending_mode = value;
       cfg.set(key, value);
       apply(key, value);
-      // The slot-2 prompt's answer is kept per game whatever SAVE PER GAME says.
+      // The slot-2 prompt's answer is kept per game whatever SAVE PER GAME says;
+      // the menu language is global whatever it says (it is set before a game's file is read).
       const bool game_only = std::strcmp(key, "slot2.ask") == 0;
-      const std::string& path = (per_game || game_only) && !game_ini.empty() ? game_ini : global_ini;
+      const bool global_only = std::strcmp(key, "ui.language") == 0;
+      const std::string& path = (per_game || game_only) && !global_only && !game_ini.empty() ? game_ini : global_ini;
       if (!ds::sdl::Config::store(path, key, value))
         std::fprintf(stderr, "settings: cannot write %s\n", path.c_str());
     }
@@ -2904,6 +2922,10 @@ sdl_ready:
     const auto is = [&](const char* k) { return std::strcmp(key, k) == 0; };
     const bool on = v == "1" || v == "true" || v == "yes" || v == "on";
     if (is("pad.stylus_speed")) { host.reconfigure_input(); return; }
+    if (is("ui.language")) {
+      if (!ds::i18n::set_language(v)) std::fprintf(stderr, "lang: no %s translation, so the menus stay in English\n", v.c_str());
+      return;
+    }
     if (is("slot2.solar")) { if (ds::slot2::GameCart* g = nds.gba_cart()) g->set_light_level(std::atoi(v.c_str())); return; }
     if (is("emu.frameskip")) { if (!net_live) fs_limit = std::atoi(v.c_str()); return; }
     if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }

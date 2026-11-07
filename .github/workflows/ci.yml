@@ -41,6 +41,8 @@ jobs:
           ctest --preset host --output-on-failure
       - name: configs/default.ini matches the built-in defaults
         run: tools/gen_example_configs.sh && git diff --exit-code configs/default.ini
+      - name: po/dsperate.pot matches the sources
+        run: python3 tools/i18n_extract.py --check
       # Two tarballs from one build. The standard one is what a distro with a
       # current libstdc++ wants (ROCKNIX packages it as a binary): dynamically
       # linked and stripped. The -static one carries libstdc++/libgcc inside

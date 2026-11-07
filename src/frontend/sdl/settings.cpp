@@ -3,6 +3,7 @@
 #include "frontend/sdl/settings.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +49,14 @@ const Choice kAnalog[]   = {{"auto", "AUTO"}, {"off", "OFF"}, {"left", "LEFT STI
 const Choice kAnalogLayout[] = {{"auto", "AUTO"}, {"packed", "PACKED"}, {"extended", "EXTENDED"}};
 const Choice kLayout[]   = {{"vertical", "VERTICAL"}, {"horizontal", "HORIZONTAL"}, {"single", "SINGLE"},
                             {"pip", "PIP"}, {"dominant_v", "DOMINANT V"}, {"dominant_h", "DOMINANT H"}};
+// Filled by set_ui_languages; a slot with an empty value is never offered.
+// Every slot starts empty rather than null, so nothing can read a null value.
+std::array<Choice, kMaxUiLanguages> kUiLanguages = [] {
+  std::array<Choice, kMaxUiLanguages> a{};
+  a.fill(Choice{"", ""});
+  a[0] = Choice{"auto", "AUTO"};
+  return a;
+}();
 const Choice kCorner[]   = {{"tl", "TOP LEFT"}, {"tr", "TOP RIGHT"}, {"bl", "BOTTOM LEFT"}, {"br", "BOTTOM RIGHT"}};
 
 constexpr Setting boolean(const char* k, const char* l, const char* def, u8 f, Dep d, const char* n) {
@@ -75,6 +84,10 @@ constexpr Setting end() { return Setting{nullptr, nullptr, T::Bool, nullptr, 0, 
 } // namespace
 
 const Setting kEmuSettings[] = {
+  // Always the global file (the host refuses a per-game copy): the language
+  // is set before a game's own file is read.
+  pick("ui.language", "MENU LANGUAGE", kUiLanguages.data(), kMaxUiLanguages, "auto", FlagLive | FlagVerbatim, Dep::None,
+       "THE LANGUAGE OF THESE MENUS. AUTO FOLLOWS THE SYSTEM'S"),
   number("emu.frameskip", "FRAMESKIP", 0, 3, 1, "0", FlagLive, Dep::NetSession,
          "DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL"),
   pick("emu.frameskip_mode", "FRAMESKIP MODE", kSkipMode, 2, "adaptive", FlagLive, Dep::FrameskipMode,
@@ -212,6 +225,18 @@ const Setting kUserSettings[] = {
   end(),
 };
 
+void set_ui_languages(const std::vector<UiLanguage>& languages) {
+  // Owned here so the table's pointers stay valid; set once, at startup.
+  static std::vector<UiLanguage> kept;
+  kept = languages;
+  for (int i = 1; i < kMaxUiLanguages; ++i) kUiLanguages[i] = Choice{"", ""};
+  int n = 1;
+  for (const UiLanguage& l : kept) {
+    if (n == kMaxUiLanguages) break;
+    kUiLanguages[n++] = Choice{l.code.c_str(), l.name.c_str()};
+  }
+}
+
 int settings_count(const Setting* table) {
   int n = 0;
   while (table[n].key) ++n;
@@ -296,7 +321,7 @@ std::string step_value(const Setting& s, const std::string& value, int dir, cons
     // Wraps (lists are short); skips choices the tier disallows; gives up if none are allowed.
     for (int n = 0; n < s.nchoices; ++n) {
       i = (i + (dir > 0 ? 1 : s.nchoices - 1)) % s.nchoices;
-      if (host.value_allowed(s, s.choices[i].value)) return s.choices[i].value;
+      if (*s.choices[i].value && host.value_allowed(s, s.choices[i].value)) return s.choices[i].value;
     }
     return v;
   }
