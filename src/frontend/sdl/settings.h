@@ -19,7 +19,7 @@ enum Flag : u8 {
   FlagLive    = 0,        // takes effect as soon as it is set
   FlagDeferred = 1u << 0, // applied when the menu closes, not per-step (layout changes)
   FlagRestart = 1u << 1,  // only read at startup; the row says so
-  FlagVerbatim = 1u << 2, // choice labels are names, never translated (the menu language row)
+  FlagVerbatim = 1u << 2, // choice labels are names, not translated (the menu language row; its AUTO is)
 };
 
 // Why a row might be switched off; the menu asks the host rather than
@@ -51,6 +51,9 @@ enum class Dep : u8 {
 
 struct Setting {
   const char* key;                 // "video.linear"
+  // Label, choice labels, sentinel label and note are English, marked N_()
+  // and translated where drawn; a choice marked NC_(key, ...) takes the key
+  // as its context. Keys, values and suffixes (units) are not translated.
   const char* label;               // "BILINEAR"
   enum class Type : u8 { Bool, Pick, Int, Percent, Text } type;   // Text: `lo` is max chars kept
   const Choice* choices; u8 nchoices;
@@ -73,7 +76,7 @@ struct SettingsHost {
   virtual std::string get(const char* key) const = 0;   // "" if unset; caller falls back to table default
   virtual void set(const char* key, const std::string& value) = 0;
   virtual bool enabled(const Setting& s) const = 0;
-  virtual const char* disabled_reason(const Setting& s) const = 0;   // "" when enabled
+  virtual const char* disabled_reason(const Setting& s) const = 0;   // "" when enabled; already translated
   // Whether a choice is offered at all, e.g. the display-engine tier can only
   // do the mean of chunky cells, so the others aren't shown rather than shown and ignored.
   virtual bool value_allowed(const Setting& s, const char* value) const = 0;

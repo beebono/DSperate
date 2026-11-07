@@ -92,9 +92,12 @@ def extract():
                 ctx, msgid = None, c_unescape(m.group(2))
             else:
                 ctx, msgid = c_unescape(m.group(4)), c_unescape(m.group(5))
-            if not msgid:
-                continue
+            if not msgid or (ctx, msgid) == (b'language name', b'ENGLISH'):
+                continue   # empty, or the language's name, which render() always writes first
             line = text.count('\n', 0, m.start()) + 1
+            if b'\x04' in msgid or (ctx and b'\x04' in ctx):
+                sys.exit('%s:%d: a translatable string holds \\x04, which gettext reserves as its context '
+                         'separator: pass the button icon as a {n} argument instead' % (rel, line))
             key = (ctx, msgid)
             if key not in entries:
                 entries[key] = {'refs': [], 'notes': []}

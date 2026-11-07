@@ -44,6 +44,9 @@
 #include "lid.h"
 #include "loader_cart.h"
 #include "frontend/i18n/i18n.h"
+
+using ds::i18n::tr;
+using ds::i18n::trf;
 #include "menu.h"
 #include "cpu_gov.h"
 #include "pacer.h"
@@ -597,7 +600,7 @@ bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout
   std::string err;
   if (!nds.load_state(r, err)) {
     std::fprintf(stderr, "state: cannot load %s: %s\n", path.c_str(), err.c_str());
-    g_state_refused = "REJECTED";
+    g_state_refused = tr("REJECTED");
     return false;
   }
   layout_loaded = read_layout_chunk(r, layout);
@@ -1075,41 +1078,42 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
 // Controls page rows that are neither a DS button nor a hotkey.
 struct Extra { const char* key_keys; const char* key_pad; const char* label; };
 constexpr Extra kExtras[] = {
-  {"hotkeys.modifier", "padhotkeys.modifier", "MODIFIER"},
-  {nullptr,            "pad.stylus_button",   "STYLUS TAP"},
-  {nullptr,            "pad.stylus_button.alt", "STYLUS TAP (2)"},
-  {nullptr,            "pad.stylus_axis",     "STYLUS STICK"},
-  {nullptr,            "pad.stylus_hold",     "STYLUS HOLD"},
-  {nullptr,            "pad.stick_dpad",      "STICK DPAD"},
-  {nullptr,            "pad.stick_face",      "STICK ABXY"},
+  {"hotkeys.modifier", "padhotkeys.modifier", N_("MODIFIER")},
+  {nullptr,            "pad.stylus_button",   N_("STYLUS TAP")},
+  {nullptr,            "pad.stylus_button.alt", N_("STYLUS TAP (2)")},
+  {nullptr,            "pad.stylus_axis",     N_("STYLUS STICK")},
+  {nullptr,            "pad.stylus_hold",     N_("STYLUS HOLD")},
+  {nullptr,            "pad.stick_dpad",      N_("STICK DPAD")},
+  {nullptr,            "pad.stick_face",      N_("STICK ABXY")},
   // The Guitar Grip's frets, used only while it is in slot 2.
-  {"keys.grip_green",  "pad.grip_green",      "GRIP GREEN"},
-  {"keys.grip_red",    "pad.grip_red",        "GRIP RED"},
-  {"keys.grip_yellow", "pad.grip_yellow",     "GRIP YELLOW"},
-  {"keys.grip_blue",   "pad.grip_blue",       "GRIP BLUE"},
-  {"keys.strum",       "pad.strum",           "GRIP STRUM"},
-  {nullptr,            "pad.strum.alt",       "GRIP STRUM (2)"},
+  {"keys.grip_green",  "pad.grip_green",      N_("GRIP GREEN")},
+  {"keys.grip_red",    "pad.grip_red",        N_("GRIP RED")},
+  {"keys.grip_yellow", "pad.grip_yellow",     N_("GRIP YELLOW")},
+  {"keys.grip_blue",   "pad.grip_blue",       N_("GRIP BLUE")},
+  {"keys.strum",       "pad.strum",           N_("GRIP STRUM")},
+  {nullptr,            "pad.strum.alt",       N_("GRIP STRUM (2)")},
   // Axis remap: push the control the positive direction reads (stick
   // right/down, trigger pressed); stores physical axis + inverted flag.
-  {nullptr,            "pad.axis_leftx",      "L STICK RIGHT"},
-  {nullptr,            "pad.axis_lefty",      "L STICK DOWN"},
-  {nullptr,            "pad.axis_rightx",     "R STICK RIGHT"},
-  {nullptr,            "pad.axis_righty",     "R STICK DOWN"},
-  {nullptr,            "pad.axis_lefttrigger", "L2 AXIS"},
-  {nullptr,            "pad.axis_righttrigger", "R2 AXIS"},
+  {nullptr,            "pad.axis_leftx",      N_("L STICK RIGHT")},
+  {nullptr,            "pad.axis_lefty",      N_("L STICK DOWN")},
+  {nullptr,            "pad.axis_rightx",     N_("R STICK RIGHT")},
+  {nullptr,            "pad.axis_righty",     N_("R STICK DOWN")},
+  {nullptr,            "pad.axis_lefttrigger", N_("L2 AXIS")},
+  {nullptr,            "pad.axis_righttrigger", N_("R2 AXIS")},
 };
 // Rows holding a stick rather than a single control.
 bool extra_is_stick(const char* key) { return std::strcmp(key, "pad.stylus_axis") == 0 || std::strcmp(key, "pad.stick_dpad") == 0 || std::strcmp(key, "pad.stick_face") == 0; }
 bool extra_is_axis_remap(const char* key) { return std::strncmp(key, "pad.axis_", 9) == 0; }
 // e.g. "-righty" -> physical control + whether inverted.
 std::string axis_remap_label(const std::string& v0) {
-  if (v0 == "none") return "NONE";
+  if (v0 == "none") return tr("NONE");
   const bool inv = !v0.empty() && v0[0] == '-';
   const std::string v = !v0.empty() && (v0[0] == '-' || v0[0] == '+') ? v0.substr(1) : v0;
-  std::string n = v == "leftx" ? "L STICK X" : v == "lefty" ? "L STICK Y" : v == "rightx" ? "R STICK X" : v == "righty" ? "R STICK Y"
+  std::string n = v == "leftx" ? tr("L STICK X") : v == "lefty" ? tr("L STICK Y") : v == "rightx" ? tr("R STICK X") : v == "righty" ? tr("R STICK Y")
                 : v == "lefttrigger" ? "L2" : v == "righttrigger" ? "R2" : v;
-  for (char& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-  return inv ? n + " INV" : n;
+  if (v == n) for (char& ch : n) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+  // TRANSLATORS: an inverted axis: {1} is the stick axis, e.g. L STICK X.
+  return inv ? trf("{1} INV", {n}) : n;
 }
 bool extra_in_column(const Extra& e, bool pad) { return pad || e.key_keys; }
 int extra_count(bool pad) {
@@ -1906,11 +1910,11 @@ sdl_ready:
       if (!shown && now - start < 300) { SDL_Delay(10); continue; }   // a loose or cached game never shows it
       if (!shown) display.set_page(true);
       shown = true;
-      char line2[32];
-      if (cancel) std::snprintf(line2, sizeof line2, "STOPPING");
-      else if (now - last_change > 5000) std::snprintf(line2, sizeof line2, "WAITING ON THE CARD");
-      else std::snprintf(line2, sizeof line2, "UNPACKING%.*s", dots, "...");
-      draw_notice_frame(title, line2, "FIRST LAUNCH ONLY    B CANCELS");
+      std::string line2;
+      if (cancel) line2 = tr("STOPPING");
+      else if (now - last_change > 5000) line2 = tr("WAITING ON THE CARD");
+      else line2 = tr("UNPACKING") + std::string(static_cast<size_t>(dots), '.');
+      draw_notice_frame(title, line2.c_str(), tr("FIRST LAUNCH ONLY    B CANCELS"));
       SDL_Delay(50);
     }
     worker.join();
@@ -1935,7 +1939,7 @@ sdl_ready:
       while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
       // Presses in the first half second are the one that launched the game.
       if (input.take_menu_presses() && SDL_GetTicks() - start > 500) break;
-      draw_notice_frame(title, why, "ANY BUTTON RETURNS");
+      draw_notice_frame(title, why, tr("ANY BUTTON RETURNS"));
       SDL_Delay(50);
     }
     display.set_page(false);
@@ -1943,12 +1947,12 @@ sdl_ready:
   // The panel's line for a ROM that would not load, from what the loader said.
   auto rom_failure = [](const std::string& path, const std::string& err) -> const char* {
     if (FILE* f = std::fopen(path.c_str(), "rb")) std::fclose(f);
-    else return "FILE CANNOT BE READ";
-    if (err.find("corrupt zip") != std::string::npos || err.find("not a zip") != std::string::npos) return "THE ZIP IS DAMAGED";
-    if (err.find("no .nds") != std::string::npos) return "NO GAME IN THE ZIP";
+    else return tr("FILE CANNOT BE READ");
+    if (err.find("corrupt zip") != std::string::npos || err.find("not a zip") != std::string::npos) return tr("THE ZIP IS DAMAGED");
+    if (err.find("no .nds") != std::string::npos) return tr("NO GAME IN THE ZIP");
     if (err.find("in the archive") != std::string::npos || err.find("the archive is") != std::string::npos ||
-        err.find("compression method") != std::string::npos) return "ZIP NOT SUPPORTED";
-    return "NOT A DS GAME";
+        err.find("compression method") != std::string::npos) return tr("ZIP NOT SUPPORTED");
+    return tr("NOT A DS GAME");
   };
   auto discard_session_cache = [&] {
     if (cache_session && !nds.rom_cache_path.empty()) { ds::cart::remove_cached(nds.rom_cache_path); nds.rom_cache_path.clear(); }
@@ -1966,7 +1970,7 @@ sdl_ready:
   // From the ROM to the starting state: still off the real-time class (startup_off_rt
   // above). Inflating a big zipped ROM alone can outlast RLIMIT_RTTIME.
   if (!bios_error.empty()) {
-    start_failed(rom_path, bios_error.find("firmware") != std::string::npos ? "FIRMWARE IS BAD" : "DS BIOS IS BAD");
+    start_failed(rom_path, bios_error.find("firmware") != std::string::npos ? tr("FIRMWARE IS BAD") : tr("DS BIOS IS BAD"));
     return quit_early(1);
   }
   if (dsi_hle && rom_shortcut) {
@@ -2087,7 +2091,7 @@ sdl_ready:
       rows.push_back(offers[i].title);
       if (offers[i].path == fixed) sel = static_cast<int>(i);
     }
-    rows.push_back(rumble_wanted() ? "NO GBA GAME (RUMBLE PAK)" : "NO GBA GAME");
+    rows.push_back(rumble_wanted() ? tr("NO GBA GAME (RUMBLE PAK)") : tr("NO GBA GAME"));
     const int none = static_cast<int>(rows.size()) - 1, toggle = none + 1;
     if (cfg.str("slot2.gba") == "none") sel = none;
     bool remember = false, moving = false;
@@ -2118,8 +2122,8 @@ sdl_ready:
         dirty = false;
         drawn_at = SDL_GetTicks();
         draw_overlay_frame([&](const ds::sdl::Canvas& c) {
-          moving = ds::sdl::draw_picker(c, "GBA CARTRIDGE", "THIS GAME SUPPORTS THESE", rows, sel, remember, "DON'T ASK AGAIN FOR THIS GAME",
-                                        "A INSERT   B NO GBA GAME", SDL_GetTicks() - moved_at);
+          moving = ds::sdl::draw_picker(c, tr("GBA CARTRIDGE"), tr("THIS GAME SUPPORTS THESE"), rows, sel, remember, tr("DON'T ASK AGAIN FOR THIS GAME"),
+                                        tr("A INSERT   B NO GBA GAME"), SDL_GetTicks() - moved_at);
         });
         display.flush();
         if (dual_window) display2.flush();
@@ -2164,7 +2168,7 @@ sdl_ready:
     bool got_layout = false;
     // Unreadable --load-state fails the run; an unreadable auto state just boots normally.
     if (!load_state_file(nds, start_state, layout, got_layout)) {
-      if (load_state) { start_failed(rom_path, "STATE NOT LOADED"); return quit_early(1); }
+      if (load_state) { start_failed(rom_path, tr("STATE NOT LOADED")); return quit_early(1); }
     } else {
       if (!load_state) std::fprintf(stderr, "state: autoloaded %s\n", start_state);
       // The state's view replaces the config's, dual-window aside.
@@ -2340,21 +2344,21 @@ sdl_ready:
     // A folder paths.dsi_games has since moved away from keeps its
     // shortcuts; only the currently-named folder is updated or cleared.
     const std::string dir = shortcuts_dir(cfg);
-    if (dir.empty()) return "NO SHORTCUT FOLDER";
+    if (dir.empty()) return tr("NO SHORTCUT FOLDER");
     ds::io::NandImage nand;
     std::vector<ds::u8> b7;
     if (on) {
-      if (shortcut_nand.empty() || !std::filesystem::exists(shortcut_nand)) return "NO DSI NAND (PATHS.DSI_NAND)";
-      if (!have_dsi_bios()) return "NO DSI BIOS";
-      if (!nand.open(shortcut_nand)) return "THE DSI NAND CANNOT BE READ";
+      if (shortcut_nand.empty() || !std::filesystem::exists(shortcut_nand)) return tr("NO DSI NAND (PATHS.DSI_NAND)");
+      if (!have_dsi_bios()) return tr("NO DSI BIOS");
+      if (!nand.open(shortcut_nand)) return tr("THE DSI NAND CANNOT BE READ");
       std::ifstream f(dsi_bios7i, std::ios::binary);
       b7.assign(std::istreambuf_iterator<char>(f), {});
-      if (b7.size() < 0x10000) return "THE DSI BIOS CANNOT BE READ";
+      if (b7.size() < 0x10000) return tr("THE DSI BIOS CANNOT BE READ");
     }
     const ds::io::ShortcutSync r = ds::io::sync_shortcuts(dir, on ? &nand : nullptr, on ? b7.data() : nullptr, on);
     if (r.written || r.removed) std::fprintf(stderr, "dsi shortcuts: %d written, %d removed in %s\n", r.written, r.removed, dir.c_str());
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi shortcuts: %s\n", n.c_str());
-    return std::to_string(r.written) + " ADDED, " + std::to_string(r.removed) + " REMOVED";
+    return trf("{1} ADDED, {2} REMOVED", {std::to_string(r.written), std::to_string(r.removed)});
   };
   if (cfg.flag("emu.dsi_nand_shortcuts", false)) sync_nand_shortcuts(true);
   std::string shortcuts_note;   // what the last change of the row did, for a toast
@@ -2619,8 +2623,8 @@ sdl_ready:
       const std::string v = cfg.str(key, extra_default(key, pad, cfg));
       if (extra_is_axis_remap(key)) return axis_remap_label(v);
       if (extra_is_stick(key))   // true/false: stick_dpad's old spellings (Input::parse_stick)
-        return v == "left" || v == "true" || v == "1" ? "LEFT STICK" : v == "right" ? "RIGHT STICK" : "NONE";
-      return pad ? ds::sdl::Input::pad_label(v) : upper(v);
+        return v == "left" || v == "true" || v == "1" ? tr("LEFT STICK") : v == "right" ? tr("RIGHT STICK") : tr("NONE");
+      return pad ? ds::sdl::Input::pad_label(v) : v == "none" ? std::string(tr("NONE")) : upper(v);
     }
 
     Binding binding(bool pad, int i) const override {
@@ -2643,19 +2647,20 @@ sdl_ready:
           if (k >= extra_count(pad)) return out;   // past the end: no row
           const Extra& e = extra_at(pad, k);
           out.key = extra_key(e, pad);
-          out.label = e.label;
+          out.label = tr(e.label);
           out.value = extra_value(e, pad);
           return out;                              // already in the page's terms
         }
         const char* name = ds::sdl::action_name(static_cast<ds::sdl::Action>(a));
         out.key = (pad ? "padhotkeys." : "hotkeys.") + std::string(name) + ds::sdl::Input::hot_suffix(slot);
-        // "FAST FORWARD TOGGLE" doesn't fit the row at the menu's size.
-        out.label = upper(std::strcmp(name, "fast_forward_toggle") == 0 ? "ff_toggle" : name) + (slot ? " (2)" : "");
+        const char* label = tr(ds::sdl::action_label(static_cast<ds::sdl::Action>(a)));
+        // TRANSLATORS: a hotkey's second binding: {1} is the hotkey, e.g. SAVE STATE.
+        out.label = slot ? trf("{1} (2)", {label}) : std::string(label);
         out.value = hot_value(pad, a, slot);
       }
       // Display only: the file keeps SDL's lower-case names; pad values also
       // get position pips and L1/L2/SELECT spellings (pad_label).
-      out.value = pad ? ds::sdl::Input::pad_label(out.value) : upper(out.value);
+      out.value = pad ? ds::sdl::Input::pad_label(out.value) : out.value == "none" ? std::string(tr("NONE")) : upper(out.value);
       return out;
     }
 
@@ -2736,7 +2741,7 @@ sdl_ready:
     bool user_in_firmware() const { return !nds.firmware_synthetic; }
 
     const char* user_settings_note() const override {
-      return user_in_firmware() ? "IN THE FIRMWARE" : nullptr;
+      return user_in_firmware() ? tr("IN THE FIRMWARE") : nullptr;
     }
 
     static bool is_user_key(const char* key) { return std::strncmp(key, "user.", 5) == 0; }
@@ -2822,58 +2827,58 @@ sdl_ready:
       case ds::sdl::Dep::None: return "";
       case ds::sdl::Dep::FrameskipMode:
         // Frameskip is forced to 0 for a session, so its mode is moot too.
-        if (net_live && *net_live) return "NOT DURING A NETWORK SESSION";
-        return cfg.num("emu.frameskip", 0) > 0 ? "" : "ONLY WITH FRAMESKIP ON";
+        if (net_live && *net_live) return tr("NOT DURING A NETWORK SESSION");
+        return cfg.num("emu.frameskip", 0) > 0 ? "" : tr("ONLY WITH FRAMESKIP ON");
       case ds::sdl::Dep::PanelEffects:
         if (display.rga_present()) return "";   // off: exact at whole-number scales, bilinear between
-        return panel_effects() ? "" : "THIS SCREEN SCALES IN HARDWARE";
+        return panel_effects() ? "" : tr("THIS SCREEN SCALES IN HARDWARE");
       case ds::sdl::Dep::GridSeam:
-        if (display.rga_present()) return std::strcmp(s.key, "video.seam") == 0 ? "THE RGA DRAWS THE DARK GRID ONLY" : "";
-        if (!panel_effects()) return "THIS SCREEN SCALES IN HARDWARE";
-        return flag("video.linear", false) ? "BILINEAR IS ON" : "";
+        if (display.rga_present()) return std::strcmp(s.key, "video.seam") == 0 ? tr("THE RGA DRAWS THE DARK GRID ONLY") : "";
+        if (!panel_effects()) return tr("THIS SCREEN SCALES IN HARDWARE");
+        return flag("video.linear", false) ? tr("BILINEAR IS ON") : "";
       case ds::sdl::Dep::Chunky:
-        if (display.rga_present()) return "NOT ON THE RGA PRESENT";
-        return flag("video.linear", false) ? "BILINEAR IS ON" : "";
+        if (display.rga_present()) return tr("NOT ON THE RGA PRESENT");
+        return flag("video.linear", false) ? tr("BILINEAR IS ON") : "";
       case ds::sdl::Dep::ChunkyCell:
-        if (display.rga_present()) return "NOT ON THE RGA PRESENT";
-        if (flag("video.linear", false)) return "BILINEAR IS ON";
-        return cfg.str("video.chunky", "false") == "false" ? "ONLY WITH CHUNKY ON" : "";
+        if (display.rga_present()) return tr("NOT ON THE RGA PRESENT");
+        if (flag("video.linear", false)) return tr("BILINEAR IS ON");
+        return cfg.str("video.chunky", "false") == "false" ? tr("ONLY WITH CHUNKY ON") : "";
       case ds::sdl::Dep::Windowed:
         // A tier that owns the panel is already filling it.
-        return display.scaling() && !display.window() ? "THIS SCREEN IS ALWAYS FULL" : "";
+        return display.scaling() && !display.window() ? tr("THIS SCREEN IS ALWAYS FULL") : "";
       case ds::sdl::Dep::OneWindow:
-        return vs.dual_window ? "NOT WITH TWO WINDOWS" : "";
+        return vs.dual_window ? tr("NOT WITH TWO WINDOWS") : "";
       case ds::sdl::Dep::Pip:
-        return pip ? "" : "PIP LAYOUT ONLY";
+        return pip ? "" : tr("PIP LAYOUT ONLY");
       case ds::sdl::Dep::PipTouchHold:
-        if (!pip) return "PIP LAYOUT ONLY";
-        return l.pip_alpha < 1.0 ? "" : "ONLY WHEN THE PIP FADES";
+        if (!pip) return tr("PIP LAYOUT ONLY");
+        return l.pip_alpha < 1.0 ? "" : tr("ONLY WHEN THE PIP FADES");
       case ds::sdl::Dep::Dominant:
-        return dominant ? "" : "DOMINANT LAYOUTS ONLY";
+        return dominant ? "" : tr("DOMINANT LAYOUTS ONLY");
       case ds::sdl::Dep::DominantThreshold:
-        if (!dominant) return "DOMINANT LAYOUTS ONLY";
-        return cfg.str("video.dominant_ratio", "auto") == "auto" ? "" : "ONLY WHEN THE RATIO IS AUTO";
+        if (!dominant) return tr("DOMINANT LAYOUTS ONLY");
+        return cfg.str("video.dominant_ratio", "auto") == "auto" ? "" : tr("ONLY WHEN THE RATIO IS AUTO");
       case ds::sdl::Dep::Net:
 #if DSPERATE_NET
         return "";
 #else
-        return "THIS BUILD HAS NO NETWORKING";
+        return tr("THIS BUILD HAS NO NETWORKING");
 #endif
       case ds::sdl::Dep::NetInternet:
         // Reads the config, not the session: the row is restart-only.
-        return cfg.str("net.mode", "off") == "internet" ? "" : "ONLY WITH NETWORK FEATURES ON INTERNET";
+        return cfg.str("net.mode", "off") == "internet" ? "" : tr("ONLY WITH NETWORK FEATURES ON INTERNET");
       case ds::sdl::Dep::NetSession:
-        return (net_live && *net_live) ? "NOT DURING A NETWORK SESSION" : "";
+        return (net_live && *net_live) ? tr("NOT DURING A NETWORK SESSION") : "";
       case ds::sdl::Dep::ShortcutsPath:
-        return shortcuts_dir(cfg).empty() ? "NEEDS PATHS.DSI_GAMES OR PATHS.GAMES" : "";
+        return shortcuts_dir(cfg).empty() ? tr("NEEDS PATHS.DSI_GAMES OR PATHS.GAMES") : "";
       case ds::sdl::Dep::Slot2Link:
-        if (nds.dsi) return "A DSI HAS NO GBA SLOT";
-        if (!nds.cart || !ds::slot2::linkage_for(nds.cart->header().game_code)) return "THIS GAME READS NO GBA GAMES";
-        return cfg.str("paths.gba_games").empty() ? "NEEDS PATHS.GBA_GAMES" : "";
+        if (nds.dsi) return tr("A DSI HAS NO GBA SLOT");
+        if (!nds.cart || !ds::slot2::linkage_for(nds.cart->header().game_code)) return tr("THIS GAME READS NO GBA GAMES");
+        return cfg.str("paths.gba_games").empty() ? tr("NEEDS PATHS.GBA_GAMES") : "";
       case ds::sdl::Dep::RumblePak:
-        return nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak ? "" : "NO RUMBLE PAK IN SLOT 2";
+        return nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak ? "" : tr("NO RUMBLE PAK IN SLOT 2");
       case ds::sdl::Dep::SolarSensor:
-        return nds.gba_cart() && nds.gba_cart()->solar_sensor() ? "" : "NO BOKTAI CARTRIDGE IN SLOT 2";
+        return nds.gba_cart() && nds.gba_cart()->solar_sensor() ? "" : tr("NO BOKTAI CARTRIDGE IN SLOT 2");
       }
       return "";
     }
@@ -2992,9 +2997,9 @@ sdl_ready:
   auto sd_note_toast = [&] {
     if (nds.sd_card_note.empty()) return;
     Toast t;
-    t.header = "SD CARD";
-    t.title = "LEFT OUT OF THE STATE";
-    t.detail = nds.sd_card_note.find("without one") != std::string::npos ? "THE STATE HAD NO CARD" : "ITS FOLDER HAS CHANGED";
+    t.header = tr("SD CARD");
+    t.title = tr("LEFT OUT OF THE STATE");
+    t.detail = nds.sd_card_note.find("without one") != std::string::npos ? tr("THE STATE HAD NO CARD") : tr("ITS FOLDER HAS CHANGED");
     t.frames = TOAST_FRAMES * 2;
     toast_queue.push_back(std::move(t));
   };
@@ -3145,7 +3150,7 @@ sdl_ready:
   // thirds of the DS screen width.
   auto net_toast = [&](const char* title, const char* detail, int frames) {
     Toast t;
-    t.header = "LOCAL WIRELESS";
+    t.header = tr("LOCAL WIRELESS");
     t.title = title;
     if (detail) t.detail = detail;
     t.frames = frames;
@@ -3157,13 +3162,13 @@ sdl_ready:
     if (!lan->ok() || !lan->start_discovery()) {
       std::fprintf(stderr, "lan: %s\n", lan->error().c_str());
       lan.reset();
-      net_toast("SCAN FAILED", "THE NETWORK REFUSED IT", TOAST_FRAMES);
+      net_toast(tr("SCAN FAILED"), tr("THE NETWORK REFUSED IT"), TOAST_FRAMES);
       return;
     }
     scanning = true;
     scan_began_ms = SDL_GetTicks();
     VLOG("lan: the game is on the air; looking for a session\n");
-    net_toast("LOOKING FOR A SESSION", nullptr, static_cast<int>(kScanMs) * 60 / 1000);
+    net_toast(tr("LOOKING FOR A SESSION"), nullptr, static_cast<int>(kScanMs) * 60 / 1000);
   };
   auto finish_guest_scan = [&] {
     scanning = false;
@@ -3171,7 +3176,7 @@ sdl_ready:
     if (!lan->scan_join(lan_name)) {
       std::fprintf(stderr, "lan: %s\n", lan->error().c_str());
       lan.reset();
-      net_toast("NO SESSION FOUND", "NOBODY IS HOSTING HERE", TOAST_FRAMES);
+      net_toast(tr("NO SESSION FOUND"), tr("NOBODY IS HOSTING HERE"), TOAST_FRAMES);
       return;
     }
     nds.io.wifi.set_transport(lan.get());
@@ -3179,7 +3184,7 @@ sdl_ready:
     take_away_for_session();
     menu.set_network_session(true);
     VLOG("lan: joined %s as player %d\n", lan->peer_name().c_str(), lan->my_id());
-    net_toast("JOINED A SESSION", lan->peer_name().c_str(), TOAST_INFO_FRAMES);
+    net_toast(tr("JOINED A SESSION"), lan->peer_name().c_str(), TOAST_INFO_FRAMES);
   };
   {
     // What the flags and net.mode asked for, in the words set_net_mode takes.
@@ -3215,7 +3220,7 @@ sdl_ready:
         shot_pending = true;
       if (!cfg.flag("cheevos.toasts", true)) continue;
       Toast t;
-      t.header = m.kind == ds::cheevos::Message::Kind::Unlock ? "ACHIEVEMENT UNLOCKED"
+      t.header = m.kind == ds::cheevos::Message::Kind::Unlock ? tr("ACHIEVEMENT UNLOCKED")
                : m.kind == ds::cheevos::Message::Kind::Problem ? "RETROACHIEVEMENTS" : nullptr;
       t.title = m.text;
       t.detail = m.detail;
@@ -3235,30 +3240,28 @@ sdl_ready:
       sum = c->summary();
     }
     std::string status() const override {
-      if (!c) return "NOT AVAILABLE IN THIS BUILD";
+      if (!c) return tr("NOT AVAILABLE IN THIS BUILD");
       switch (c->state()) {
       case ds::cheevos::State::Off:
-        return c->unavailable_reason().empty() ? "TURNED OFF" : c->unavailable_reason();
-      case ds::cheevos::State::SignedOut:   return "NOT SIGNED IN";
-      case ds::cheevos::State::SigningIn:   return "SIGNING IN...";
-      case ds::cheevos::State::SignedIn:    return "SIGNED IN AS " + c->username();
-      case ds::cheevos::State::LoadingGame: return "LOADING ACHIEVEMENTS...";
-      case ds::cheevos::State::Playing:     return "SIGNED IN AS " + c->username();
+        return c->unavailable_reason().empty() ? std::string(tr("TURNED OFF")) : c->unavailable_reason();
+      case ds::cheevos::State::SignedOut:   return tr("NOT SIGNED IN");
+      case ds::cheevos::State::SigningIn:   return tr("SIGNING IN...");
+      case ds::cheevos::State::SignedIn:    return trf("SIGNED IN AS {1}", {c->username()});
+      case ds::cheevos::State::LoadingGame: return tr("LOADING ACHIEVEMENTS...");
+      case ds::cheevos::State::Playing:     return trf("SIGNED IN AS {1}", {c->username()});
       case ds::cheevos::State::EmptySet:
-        return "NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET";
+        return tr("NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET");
       case ds::cheevos::State::NoSet:
-        return "NO ACHIEVEMENTS FOR THIS ROM - HASH " + c->game_hash();
+        return trf("NO ACHIEVEMENTS FOR THIS ROM - HASH {1}", {c->game_hash()});
       }
       return "";
     }
     std::string progress() const override {
       if (!c || sum.total == 0) return {};
-      char buf[128];
       // Encore explains why an already-earned achievement unlocks again.
-      std::snprintf(buf, sizeof buf, "%u/%u EARNED  %u/%u POINTS%s",
-                    sum.unlocked, sum.total, sum.points_earned, sum.points,
-                    c->encore() ? "  (ENCORE)" : "");
-      return buf;
+      const std::initializer_list<std::string> n = {std::to_string(sum.unlocked), std::to_string(sum.total),
+                                                    std::to_string(sum.points_earned), std::to_string(sum.points)};
+      return c->encore() ? trf("{1}/{2} EARNED  {3}/{4} POINTS  (ENCORE)", n) : trf("{1}/{2} EARNED  {3}/{4} POINTS", n);
     }
     bool signed_in() const override {
       if (!c) return false;
@@ -3733,7 +3736,7 @@ sdl_ready:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (save_state_file(nds, state_path(nds, session.states_dir, state_slot), display.current_layout())) {
           flush_save();   // the .sav and the state never diverge
-          show_slot("STATE " + std::to_string(state_slot) + " SAVED");
+          show_slot(trf("STATE {1} SAVED", {std::to_string(state_slot)}));
         }
         break;
       case A::LoadState:
@@ -3747,7 +3750,7 @@ sdl_ready:
           pacer.reset();
           fs_debt_ms = 0;
           flush_save();
-          show_slot("STATE " + std::to_string(state_slot) + " LOADED");
+          show_slot(trf("STATE {1} LOADED", {std::to_string(state_slot)}));
           sd_note_toast();
         }
         break;
@@ -4021,7 +4024,7 @@ sdl_ready:
 
     if (!shortcuts_note.empty()) {
       Toast t;
-      t.header = "NAND SHORTCUTS";
+      t.header = tr("NAND SHORTCUTS");
       t.title = std::move(shortcuts_note);
       t.frames = TOAST_INFO_FRAMES;
       toast_queue.push_back(std::move(t));
@@ -4033,9 +4036,9 @@ sdl_ready:
       if (dsp_warned) {
         std::fprintf(stderr, "dsi: this title uses the DSi's DSP, which DSperate does not emulate; it will likely not work\n");
         Toast t;
-        t.header = "DSI DSP";
-        t.title = "GAME LIKELY WON'T WORK";   // toast lines hold about 24 characters
-        t.detail = "DSP IS NOT EMULATED";
+        t.header = tr("DSI DSP");
+        t.title = tr("GAME LIKELY WON'T WORK");   // toast lines hold about 24 characters
+        t.detail = tr("DSP IS NOT EMULATED");
         t.frames = TOAST_FRAMES * 2;
         toast_queue.push_back(std::move(t));
       }

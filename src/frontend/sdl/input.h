@@ -20,6 +20,8 @@ enum class Action : u8 {
   VolumeUp, VolumeDown, Mute, LayoutNext, LayoutPrev, ScreenSwap, PipCornerNext, Fullscreen, Screenshot, Lid, Mic, FpsToggle, Count
 };
 const char* action_name(Action a);
+// The Controls page's English name for it ("FAST FORWARD"), marked for translation.
+const char* action_label(Action a);
 
 // Keyboard, game controller and touch folded into the DS's button mask and
 // pen position, handed to the core once a frame. Bindings come from the

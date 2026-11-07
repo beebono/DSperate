@@ -227,6 +227,8 @@ private:
   // reads SURE? in red), second A deletes. Auto state is reachable only here.
   bool slot_delete_ = false, slot_armed_ = false;
   std::string slot_notice_;
+  // The root page's slot row for `slot`, with the notice after it.
+  std::string slot_row_text(int slot) const;
   bool used_[kAutoSlot + 1] = {};
 
   std::vector<cheat::Code>* codes_ = nullptr;

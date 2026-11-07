@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/menu.h"
 #include "frontend/sdl/ui_font.h"
+#include "frontend/i18n/i18n.h"
 #include "core/io/io.h"
 
 #include <algorithm>
@@ -13,6 +14,8 @@
 #include <iterator>
 
 namespace ds::sdl {
+using i18n::tr;
+using i18n::trf;
 namespace {
 
 // 5x7 glyphs, one byte per row, bits 4..0 left to right; ' ' (0x20) to ']'
@@ -65,6 +68,8 @@ struct Metrics {
   int list_row_h, list_rows_y;
 };
 
+bool tall_glyphs();
+
 // Metrics for an explicit glyph scale. Pages that must shrink to fit step
 // this down directly: deriving a smaller scale by shrinking the canvas and
 // re-asking does not always converge.
@@ -73,7 +78,9 @@ Metrics metrics_for(int s) {
   m.s = std::clamp(s, 2, 10);
   // Cheat names are sentences and a game can have thousands, so list pages
   // drop to half scale (about thirty characters across, twelve at a time).
-  m.list_s = std::max(1, m.s / 2);
+  // Not to 1 in a language the 5x7 font lacks: its characters need the
+  // 16x21 font at scale 2, the small one being taller than a scale-1 row.
+  m.list_s = std::max(tall_glyphs() ? 2 : 1, m.s / 2);
   m.glyph_px = kGlyphH * m.s;
   m.row_h    = m.glyph_px + 2 * m.s;
   m.title_y  = 4 * m.s;
@@ -177,6 +184,17 @@ Span span_of(const Ch& c, int scale, uifont::Glyph* g = nullptr) {
   return {adv, std::max(0, adv - ink_end)};
 }
 
+// Whether the menu's language is written in a script the 5x7 font lacks
+// (CJK, Cyrillic, Greek...), going by the catalog's name for itself.
+bool tall_glyphs() {
+  const char* name = i18n::trc("language name", "ENGLISH");
+  for (const char* p = name; *p;) {
+    const Ch c = next_char(p);
+    if (!c.ascii && c.cp >= 0x370) return true;
+  }
+  return false;
+}
+
 // Drops the last code point, so trimming for width never leaves a lead byte behind.
 void pop_char(std::string& s) {
   while (!s.empty()) {
@@ -257,15 +275,15 @@ constexpr int kCheevosRow = 5; // hidden unless RetroAchievements is built and o
 // The Options page's own entries, and which of them has no page yet.
 constexpr int kOptionPages = 6, kDsOptionsRow = 5;
 constexpr struct RootItem { const char* label; Menu::Result result; } kRoot[] = {
-  {"SAVE STATE", Menu::Result::Save},
-  {"LOAD STATE", Menu::Result::Load},
+  {N_("SAVE STATE"), Menu::Result::Save},
+  {N_("LOAD STATE"), Menu::Result::Load},
   {nullptr,      Menu::Result::None},
-  {"CHEATS",     Menu::Result::None},
-  {"OPTIONS",    Menu::Result::None},
-  {"ACHIEVEMENTS", Menu::Result::None},
-  {"RESUME",     Menu::Result::Resume},
-  {"RESET",      Menu::Result::Reset},
-  {"QUIT",       Menu::Result::Quit},
+  {N_("CHEATS"),     Menu::Result::None},
+  {N_("OPTIONS"),    Menu::Result::None},
+  {N_("ACHIEVEMENTS"), Menu::Result::None},
+  {N_("RESUME"),     Menu::Result::Resume},
+  {N_("RESET"),      Menu::Result::Reset},
+  {N_("QUIT"),       Menu::Result::Quit},
 };
 static_assert(static_cast<int>(std::size(kRoot)) == Menu::kRootRows, "kRootRows must match the table");
 static_assert(kRoot[kOptionsRow].result == Menu::Result::None, "kOptionsRow must name the options row");
@@ -623,6 +641,49 @@ std::string fit(const std::string& text, int scale, int width_px) {
   while (!out.empty() && text_width(scale, (out + "...").c_str()) > width_px) pop_char(out);
   return out + "...";
 }
+
+// How many bytes of `s` make its first line within `width_px`: up to the last
+// space that fits, else as many whole characters as fit (CJK has no spaces to
+// break at; a Latin word longer than the line is cut too), never none. The
+// caller drops the spaces at the break.
+size_t line_break(const std::string& s, int scale, int width_px) {
+  if (text_width(scale, s.c_str()) <= width_px) return s.size();
+  size_t fits = 0, space = std::string::npos;
+  for (const char* p = s.c_str(); *p;) {
+    const char* q = p;
+    next_char(q);
+    const size_t end = static_cast<size_t>(q - s.c_str());
+    // A break at a space needs only what is before it, so it counts even
+    // when the space itself would not fit.
+    if (*p == ' ') space = static_cast<size_t>(p - s.c_str());
+    if (text_width(scale, s.substr(0, end).c_str()) > width_px) break;
+    fits = end;
+    p = q;
+  }
+  if (space != std::string::npos && space > 0) return space;
+  if (fits == 0) {   // not even one character fits: take one anyway
+    const char* q = s.c_str();
+    next_char(q);
+    fits = static_cast<size_t>(q - s.c_str());
+  }
+  return fits;
+}
+
+// `text` broken into lines of `width_px`, at most `max_lines` (the last cut
+// with an ellipsis if text is left over).
+std::vector<std::string> wrap(const std::string& text, int scale, int width_px, int max_lines) {
+  std::vector<std::string> out;
+  std::string rest = text;
+  while (!rest.empty() && static_cast<int>(out.size()) < max_lines) {
+    const size_t n = line_break(rest, scale, width_px);
+    std::string line = rest.substr(0, n);
+    rest.erase(0, n);
+    while (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
+    if (static_cast<int>(out.size()) + 1 == max_lines && !rest.empty()) line = fit(line + " " + rest, scale, width_px);
+    out.push_back(line);
+  }
+  return out;
+}
 } // namespace
 
 void draw_notice(const Canvas& d, const char* title, const char* line2, const char* line3) {
@@ -764,14 +825,14 @@ void Menu::draw_cheats(const Canvas& d) const {
   // Heading counts the codes, not the lines, to match the frontend's log.
   size_t on = 0;
   if (codes_) for (const cheat::Code& c : *codes_) if (c.enabled && c.analog == cheats_analog_) ++on;
-  char title[32];
-  std::snprintf(title, sizeof title, "%s  %zu ON", cheats_analog_ ? "ANALOG CHEATS" : "CHEATS", on);
-  const ListFrame f = list_frame(d, title);
+  const std::string count = std::to_string(on);
+  const std::string title = cheats_analog_ ? trf("ANALOG CHEATS  {1} ON", {count}) : trf("CHEATS  {1} ON", {count});
+  const ListFrame f = list_frame(d, title.c_str());
   const Metrics& m = f.m;
   visible_ = f.visible;
 
   if (lines_.empty()) {
-    draw_text(d, f.text_x + m.list_s * 2, f.py0 + m.list_rows_y + m.list_s * 4, m.list_s, kDim, "NO CHEATS FOR THIS GAME");
+    draw_text(d, f.text_x + m.list_s * 2, f.py0 + m.list_rows_y + m.list_s * 4, m.list_s, kDim, tr("NO CHEATS FOR THIS GAME"));
     return;
   }
 
@@ -826,16 +887,16 @@ void Menu::draw_cheats(const Canvas& d) const {
 
 void Menu::draw_games(const Canvas& d) const {
   const int n = games_ ? static_cast<int>(games_->size()) : 0;
-  char title[32];
-  std::snprintf(title, sizeof title, "GAMES  %d", n);
-  const ListFrame f = list_frame(d, title);
+  const std::string title = trf("GAMES  {1}", {std::to_string(n)});
+  const ListFrame f = list_frame(d, title.c_str());
   const Metrics& m = f.m;
   visible_ = f.visible;
 
   if (n == 0) {
-    const char* why[] = {"NO GAMES FOUND -- SET", "[PATHS] GAMES IN THE", "CONFIG FILE"};
-    for (int i = 0; i < 3; ++i)
-      draw_text(d, f.text_x + m.list_s * 2, f.py0 + m.list_rows_y + m.list_s * 4 + i * m.list_row_h, m.list_s, kDim, why[i]);
+    const std::vector<std::string> why =
+        wrap(tr("NO GAMES FOUND -- SET [PATHS] GAMES IN THE CONFIG FILE"), m.list_s, f.avail - m.list_s * 2, 4);
+    for (size_t i = 0; i < why.size(); ++i)
+      draw_text(d, f.text_x + m.list_s * 2, f.py0 + m.list_rows_y + m.list_s * 4 + static_cast<int>(i) * m.list_row_h, m.list_s, kDim, why[i].c_str());
     return;
   }
 
@@ -870,13 +931,13 @@ void Menu::draw_games(const Canvas& d) const {
 
 // Two lines per achievement: name, then description or measured progress.
 void Menu::draw_cheevos(const Canvas& d) const {
-  char title[40] = "ACHIEVEMENTS";
+  std::string title = tr("ACHIEVEMENTS");
   if (cheevos_ && cheevos_->row_count() > 0) {
     int unlocked = 0;
     for (int i = 0; i < cheevos_->row_count(); ++i) if (cheevos_->row(i).unlocked) ++unlocked;
-    std::snprintf(title, sizeof title, "ACHIEVEMENTS  %d/%d", unlocked, cheevos_->row_count());
+    title = trf("ACHIEVEMENTS  {1}/{2}", {std::to_string(unlocked), std::to_string(cheevos_->row_count())});
   }
-  const ListFrame f = list_frame(d, title);
+  const ListFrame f = list_frame(d, title.c_str());
   const Metrics& m = f.m;
   // Two text rows per entry; list_visible() assumes one-line rows.
   const int entry_h = 2 * m.list_row_h + 2 * m.list_s;   // a little air between entries
@@ -885,7 +946,7 @@ void Menu::draw_cheevos(const Canvas& d) const {
   const int n = cheevos_ ? cheevos_->row_count() : 0;
   if (n == 0) {
     draw_text(d, f.text_x + m.list_s * 2, f.py0 + m.list_rows_y + m.list_s * 4, m.list_s, kDim,
-              "NO ACHIEVEMENTS LOADED");
+              tr("NO ACHIEVEMENTS LOADED"));
     return;
   }
 
@@ -907,7 +968,7 @@ void Menu::draw_cheevos(const Canvas& d) const {
     if (r.points) head += "  " + std::to_string(r.points) + "P";
     draw_text(d, f.text_x, y, m.list_s, ink, fit(head, m.list_s, f.avail).c_str());
 
-    const std::string detail = r.unsupported ? "NOT SUPPORTED BY THIS EMULATOR YET" : r.detail;
+    const std::string detail = r.unsupported ? std::string(tr("NOT SUPPORTED BY THIS EMULATOR YET")) : r.detail;
     if (detail.empty()) continue;
     const int dx = f.text_x + 4 * m.list_s, davail = f.avail - 4 * m.list_s;
     const int dy = y + m.list_row_h;
@@ -975,13 +1036,13 @@ int account_rows(const CheevosHost* h, AccountRow out[kAccountRows]) {
 struct AccountLabel { const char* text; bool toggle; CheevosHost::Option opt; };
 AccountLabel account_label(AccountRow r) {
   switch (r) {
-  case AccountRow::SignOut:    return {"SIGN OUT", false, CheevosHost::Option::Toasts};
-  case AccountRow::SignIn:     return {"SIGN IN", false, CheevosHost::Option::Toasts};
-  case AccountRow::List:       return {"VIEW ACHIEVEMENTS", false, CheevosHost::Option::Toasts};
-  case AccountRow::Toasts:     return {"UNLOCK NOTICES", true, CheevosHost::Option::Toasts};
-  case AccountRow::Screenshot: return {"SCREENSHOT ON UNLOCK", true, CheevosHost::Option::Screenshot};
+  case AccountRow::SignOut:    return {N_("SIGN OUT"), false, CheevosHost::Option::Toasts};
+  case AccountRow::SignIn:     return {N_("SIGN IN"), false, CheevosHost::Option::Toasts};
+  case AccountRow::List:       return {N_("VIEW ACHIEVEMENTS"), false, CheevosHost::Option::Toasts};
+  case AccountRow::Toasts:     return {N_("UNLOCK NOTICES"), true, CheevosHost::Option::Toasts};
+  case AccountRow::Screenshot: return {N_("SCREENSHOT ON UNLOCK"), true, CheevosHost::Option::Screenshot};
   // Read only when a game loads, so it can't affect one already running.
-  case AccountRow::Encore:     return {"ENCORE (NEXT LAUNCH)", true, CheevosHost::Option::Encore};
+  case AccountRow::Encore:     return {N_("ENCORE (NEXT LAUNCH)"), true, CheevosHost::Option::Encore};
   }
   return {"", false, CheevosHost::Option::Toasts};
 }
@@ -994,18 +1055,7 @@ void Menu::draw_cheevos_account(const Canvas& d) const {
   const std::string status = cheevos_ ? cheevos_->status() : std::string{};
   int y = f.py0 + m.list_rows_y;
   // Status can be long; wrapped over as many lines as it takes rather than cut.
-  std::string rest = status;
-  const int cols = std::max(8, f.avail / (kAdvance * m.list_s));
-  while (!rest.empty()) {
-    std::string line = rest;
-    if (static_cast<int>(line.size()) > cols) {
-      size_t cut = line.rfind(' ', static_cast<size_t>(cols));
-      if (cut == std::string::npos || cut == 0) cut = static_cast<size_t>(cols);
-      line = rest.substr(0, cut);
-      rest = rest.substr(cut == static_cast<size_t>(cols) ? cut : cut + 1);
-    } else {
-      rest.clear();
-    }
+  for (const std::string& line : wrap(status, m.list_s, f.avail, 1 << 20)) {
     draw_text(d, f.text_x, y, m.list_s, kDim, line.c_str());
     y += m.list_row_h;
   }
@@ -1024,9 +1074,9 @@ void Menu::draw_cheevos_account(const Canvas& d) const {
     const AccountLabel L = account_label(rows[i]);
     if (i == account_row_)
       fill_rect(d, f.px0 + m.list_s * 2, y - m.list_s * 2, f.w - m.list_s * 10, m.list_row_h, kSel);
-    draw_text(d, f.text_x, y, m.list_s, kInk, L.text);
+    draw_text(d, f.text_x, y, m.list_s, kInk, tr(L.text));
     if (L.toggle) {
-      const char* state = cheevos_->option(L.opt) ? "ON" : "OFF";
+      const char* state = cheevos_->option(L.opt) ? tr("ON") : tr("OFF");
       // Right-aligned, in the scroll bar's margin.
       draw_text(d, f.px0 + f.w - m.pad - text_width(m.list_s, state), y, m.list_s,
                 cheevos_->option(L.opt) ? kInk : kDim, state);
@@ -1172,19 +1222,20 @@ Menu::Result Menu::handle_settings(u32 presses) {
 }
 
 void Menu::draw_options(const Canvas& d) const {
-  static constexpr const char* kItems[kOptionPages] = {"EMULATION", "VISUAL FX", "LAYOUT", "CONTROLS", "ANALOG", "DS OPTIONS"};
+  static constexpr const char* kItems[kOptionPages] = {N_("EMULATION"), N_("VISUAL FX"), N_("LAYOUT"), N_("CONTROLS"), N_("ANALOG"), N_("DS OPTIONS")};
   Metrics m = metrics(d);
   const int rows = kOptionPages + (host_ && host_->has_game() ? 1 : 0);
   const bool per_game = host_ && host_->save_per_game();
-  char save_row[40];
-  std::snprintf(save_row, sizeof save_row, "SAVE TO < %s >", per_game ? "THIS GAME" : "GLOBAL");
+  const std::string save_this = trf("SAVE TO < {1} >", {tr("THIS GAME")});
+  const std::string save_global = trf("SAVE TO < {1} >", {tr("GLOBAL")});
+  const std::string& save_row = per_game ? save_this : save_global;
   // Sized for the widest row the page can ever draw, not the current one, so
   // toggling save-to doesn't resize the panel.
-  static constexpr const char* kWidestSaveRow = "SAVE TO < THIS GAME >";
   const auto widest_row = [&](const Metrics& mm) {
     int w = 0;
-    for (int i = 0; i < kOptionPages; ++i) w = std::max(w, text_width(mm.s, kItems[i]));
-    if (rows > kOptionPages) w = std::max(w, text_width(mm.s, kWidestSaveRow));
+    for (int i = 0; i < kOptionPages; ++i) w = std::max(w, text_width(mm.s, tr(kItems[i])));
+    if (rows > kOptionPages)
+      w = std::max({w, text_width(mm.s, save_this.c_str()), text_width(mm.s, save_global.c_str())});
     return w;
   };
   // Step the scale down rather than clip, as the root page does.
@@ -1194,22 +1245,22 @@ void Menu::draw_options(const Canvas& d) const {
   const int panel_h = panel_height(m, rows);
   const int px0 = (d.w - panel_w) / 2, py0 = (d.h - panel_h) / 2;
   panel(d, px0, py0, panel_w, panel_h);
-  draw_text(d, px0 + (panel_w - text_width(m.s, "OPTIONS")) / 2, py0 + m.title_y, m.s, kInk, "OPTIONS");
+  draw_text(d, px0 + (panel_w - text_width(m.s, tr("OPTIONS"))) / 2, py0 + m.title_y, m.s, kInk, tr("OPTIONS"));
   fill_rect(d, px0 + m.pad, py0 + m.rule_y, panel_w - 2 * m.pad, std::max(1, m.s / 2), kEdge);
   for (int i = 0; i < rows; ++i) {
     const int ry = py0 + m.rows_y + i * m.row_h;
     if (i == opt_row_) fill_rect(d, px0 + m.pad, ry - m.s, panel_w - 2 * m.pad, m.row_h, kSel);
     if (i < kOptionPages) {
-      draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, kInk, kItems[i]);
+      draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, kInk, tr(kItems[i]));
       continue;
     }
-    draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, kInk, save_row);
+    draw_text(d, px0 + m.pad + 3 * m.s, ry, m.s, kInk, save_row.c_str());
   }
 }
 
 void Menu::draw_settings(const Canvas& d) const {
-  static constexpr const char* kTitles[5] = {"EMULATION", "VISUAL FX", "LAYOUT", "DS OPTIONS", "ANALOG"};
-  const ListFrame f = list_frame(d, kTitles[table_slot()]);
+  static constexpr const char* kTitles[5] = {N_("EMULATION"), N_("VISUAL FX"), N_("LAYOUT"), N_("DS OPTIONS"), N_("ANALOG")};
+  const ListFrame f = list_frame(d, tr(kTitles[table_slot()]));
   const Metrics& m = f.m;
   visible_ = f.visible;
   const int n = settings_count(table()) + link_rows();
@@ -1231,11 +1282,11 @@ void Menu::draw_settings(const Canvas& d) const {
     const int ry = f.py0 + m.list_rows_y + i * m.list_row_h;
     const bool is_sel = top + i == sel;
     if (is_sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
-    if (!row) { draw_text(d, f.text_x, ry, m.list_s, kInk, "COMPATIBLE CHEATS"); continue; }
+    if (!row) { draw_text(d, f.text_x, ry, m.list_s, kInk, tr("COMPATIBLE CHEATS")); continue; }
     const Setting& s = *row;
     const bool on = host_->enabled(s);
     const u32 ink = on ? kInk : kPanelEdgeDim;
-    draw_text(d, f.text_x, ry, m.list_s, ink, fit(s.label, m.list_s, f.avail - value_w).c_str());
+    draw_text(d, f.text_x, ry, m.list_s, ink, fit(tr(s.label), m.list_s, f.avail - value_w).c_str());
     const std::string v = on ? display_value(s, host_->get(s.key)) : "--";
     // A text field is opened, not stepped, so it gets no arrows.
     const bool steps = s.type != Setting::Type::Text;
@@ -1250,12 +1301,14 @@ void Menu::draw_settings(const Canvas& d) const {
   fill_rect(d, f.px0 + m.pad, note_y, f.w - 2 * m.pad, std::max(1, m.list_s), kPanelEdgeDim);
   const Setting* cur = setting_row(sel);
   const char* why = cur ? host_->disabled_reason(*cur) : nullptr;
-  const char* line = why && *why ? why : cur ? cur->note : "ENABLE ONE OF THIS ROM'S PATCHES, THEN SET ANALOG PATCH BELOW";
+  // The host's reasons come translated; the table's notes are translated here.
+  const char* line = why && *why ? why : cur ? (cur->note ? tr(cur->note) : nullptr)
+                                             : tr("ENABLE ONE OF THIS ROM'S PATCHES, THEN SET ANALOG PATCH BELOW");
   const u32 note_ink = why && *why ? kEdgeText : kDim;
   // What it takes to see the change; uses the second note line.
   const char* when = !cur ? nullptr
-                   : (cur->flags & FlagRestart) ? "RESTART REQUIRED"
-                   : (cur->flags & FlagDeferred) ? "APPLIED WHEN THE MENU CLOSES" : nullptr;
+                   : (cur->flags & FlagRestart) ? tr("RESTART REQUIRED")
+                   : (cur->flags & FlagDeferred) ? tr("APPLIED WHEN THE MENU CLOSES") : nullptr;
   if (when && !host_->enabled(*cur)) when = nullptr;
   // DS Options with a firmware dump: changes go beside the dump, not the config.
   std::string when_text;
@@ -1266,24 +1319,10 @@ void Menu::draw_settings(const Canvas& d) const {
     when = when_text.c_str();
   }
   if (line) {
-    const int lines = note_lines;
-    // Wrapped on spaces rather than cut with an ellipsis.
-    std::string rest = line;
-    for (int i = 0; i < lines && !rest.empty(); ++i) {
-      std::string take = rest;
-      size_t cut = std::string::npos;
-      while (text_width(m.list_s, take.c_str()) > f.avail) {
-        cut = take.find_last_of(' ');
-        if (cut == std::string::npos) break;
-        take.resize(cut);
-      }
-      // One word longer than the row: cut it rather than loop forever.
-      if (text_width(m.list_s, take.c_str()) > f.avail) take = fit(take, m.list_s, f.avail);
-      draw_text(d, f.text_x, note_y + 2 * m.list_s + i * m.list_row_h, m.list_s, note_ink, take.c_str());
-      if (take.size() >= rest.size()) break;
-      rest.erase(0, take.size());
-      while (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
-    }
+    // Wrapped at spaces, or between characters where there are none (CJK).
+    const std::vector<std::string> lines = wrap(line, m.list_s, f.avail, note_lines);
+    for (size_t i = 0; i < lines.size(); ++i)
+      draw_text(d, f.text_x, note_y + 2 * m.list_s + static_cast<int>(i) * m.list_row_h, m.list_s, note_ink, lines[i].c_str());
   }
   if (when) draw_text(d, f.text_x, note_y + 2 * m.list_s + note_lines * m.list_row_h, m.list_s, kEdgeText, fit(when, m.list_s, f.avail).c_str());
 }
@@ -1373,9 +1412,8 @@ Menu::Result Menu::handle_controls(u32 presses) {
 }
 
 void Menu::draw_controls(const Canvas& d) const {
-  char title[32];
-  std::snprintf(title, sizeof title, "CONTROLS  %s", bind_pad_ ? "PAD" : "KEYBOARD");
-  const ListFrame f = list_frame(d, title);
+  const std::string title = trf("CONTROLS  {1}", {bind_pad_ ? tr("PAD") : tr("KEYBOARD")});
+  const ListFrame f = list_frame(d, title.c_str());
   const Metrics& m = f.m;
   visible_ = f.visible;
 
@@ -1402,10 +1440,10 @@ void Menu::draw_controls(const Canvas& d) const {
     if (is_sel) fill_rect(d, f.px0 + m.list_s * 4, ry - m.list_s * 2, f.w - m.list_s * 14, m.list_row_h, kSel);
     const bool speed_row = row == bindings;
     const SettingsHost::Binding b = speed_row ? SettingsHost::Binding{} : host_->binding(bind_pad_, row);
-    const std::string label = speed_row ? "STYLUS SPEED" : b.label;
+    const std::string label = speed_row ? std::string(tr("STYLUS SPEED")) : b.label;
     const std::string raw = speed_row ? host_->get("pad.stylus_speed") : b.value;
     const std::string v = speed_row ? (raw.empty() ? "4.0 PX/F" : raw + " PX/F")
-                       : is_sel && listening ? "PRESS ANY..."
+                       : is_sel && listening ? tr("PRESS ANY...")
                        : (raw.empty() || raw == "none" ? "--" : raw);
     const u32 ink = is_sel && listening && !speed_row ? kEdgeText : (v == "--" ? kDim : kInk);
     draw_text(d, f.text_x, ry, m.list_s, kInk, fit(label, m.list_s, f.avail - value_w).c_str());
@@ -1419,13 +1457,17 @@ void Menu::draw_controls(const Canvas& d) const {
   // Footer names DS buttons by position pip, since the pad in hand may print
   // different letters on the same four buttons.
   const bool pad = host_->has_pad();
-  const char* help1 = sel == bindings ? "LEFT/RIGHT CHANGE SPEED"
-                    : listening ? "PRESS THE CONTROL TO BIND,"
-                    : reset_armed_ ? (pad ? "\x04 AGAIN: RESET ALL" : "X AGAIN: RESET ALL")
-                    : pad ? "\x02 BIND   \x03 CLEAR   \x04 DEFAULTS" : "A BIND   Y CLEAR   X DEFAULTS";
-  const char* help2 = sel == bindings ? "UP/DOWN SELECT  L/R COLUMN"
-                    : listening ? "OR ESCAPE TO CANCEL"
-                    : host_->has_pad() ? "L/R KEYBOARD OR PAD" : "L/R SWAP COLUMN";
+  // Buttons go in as {n}: a face-button icon with a pad, else the DS letter.
+  // (Not in the strings themselves: gettext reserves \004.)
+  const std::string help1 = sel == bindings ? std::string(tr("LEFT/RIGHT CHANGE SPEED"))
+                          : listening ? std::string(tr("PRESS THE CONTROL TO BIND,"))
+                          // TRANSLATORS: {1} is a button.
+                          : reset_armed_ ? trf("{1} AGAIN: RESET ALL", {pad ? "\x04" : "X"})
+                          // TRANSLATORS: {1}, {2}, {3} are buttons; keep each beside the word it labels.
+                          : trf("{1} BIND   {2} CLEAR   {3} DEFAULTS", {pad ? "\x02" : "A", pad ? "\x03" : "Y", pad ? "\x04" : "X"});
+  const char* help2 = sel == bindings ? tr("UP/DOWN SELECT  L/R COLUMN")
+                    : listening ? tr("OR ESCAPE TO CANCEL")
+                    : host_->has_pad() ? tr("L/R KEYBOARD OR PAD") : tr("L/R SWAP COLUMN");
   draw_text(d, f.text_x, foot_y + 2 * m.list_s, m.list_s, reset_armed_ && !listening ? kDanger : kDim, fit(help1, m.list_s, f.avail).c_str());
   draw_text(d, f.text_x, foot_y + 2 * m.list_s + m.list_row_h, m.list_s, kDim, fit(help2, m.list_s, f.avail).c_str());
   const std::vector<std::string> clash = host_->collisions();
@@ -1442,7 +1484,7 @@ const char* const kCharTables[] = {
   " abcdefghijklmnopqrstuvwxyz",
   " 0123456789.,!?'-&+()/:@",
 };
-const char* const kCharTableNames[] = {"CAPITALS", "LOWERCASE", "NUM+SYM"};
+const char* const kCharTableNames[] = {N_("CAPITALS"), N_("LOWERCASE"), N_("NUM+SYM")};
 constexpr int kCharTableCount = 3;
 // Widest a field is laid out before it wraps (two lines, like the console's own screen).
 constexpr int kEditCols = 13;
@@ -1459,7 +1501,7 @@ void Menu::open_text_edit() {
   const Setting& s = *setting_row(set_row_[table_slot()]);
   edit_dest_ = EditDest::Setting;
   edit_key_ = s.key;
-  edit_label_ = s.label;
+  edit_label_ = tr(s.label);
   edit_max_ = s.lo;
   const std::string cur = host_->get(s.key);
   edit_buf_ = cur.empty() ? default_value(s) : cur;
@@ -1475,7 +1517,7 @@ void Menu::open_text_edit() {
 void Menu::open_credential_edit(EditDest dest) {
   edit_dest_ = dest;
   edit_key_.clear();
-  edit_label_ = dest == EditDest::CheevosUser ? "RA USERNAME" : "RA PASSWORD";
+  edit_label_ = dest == EditDest::CheevosUser ? tr("RA USERNAME") : tr("RA PASSWORD");
   edit_max_ = dest == EditDest::CheevosUser ? 20 : 32;
   edit_buf_ = " ";
   edit_pos_ = 0;
@@ -1559,8 +1601,11 @@ Menu::Result Menu::handle_text_edit(u32 presses) {
 }
 
 void Menu::draw_text_edit(const Canvas& d) const {
-  static constexpr const char* kHelp1 = "UP/DOWN LETTER   L/R TABLE";
-  static constexpr const char* kHelp2 = "\x02 DONE   \x01 CANCEL";
+  const std::string help1 = tr("UP/DOWN LETTER   L/R TABLE");
+  // TRANSLATORS: {1} and {2} are face-button icons; keep each beside the word it labels.
+  const std::string help2 = trf("{1} DONE   {2} CANCEL", {"\x02", "\x01"});
+  const char* const kHelp1 = help1.c_str();
+  const char* const kHelp2 = help2.c_str();
   Metrics m = metrics(d);
   // Wide enough for the field or the help line, whichever is wider; scale
   // steps down rather than clip. A long field wraps over two lines, as the
@@ -1597,9 +1642,15 @@ void Menu::draw_text_edit(const Canvas& d) const {
   // Font is uppercase-only; the table name is the only case indicator.
   const int below = fy + rows * m.row_h + m.s;
   const int avail = panel_w - 6 * m.s;
-  draw_text(d, fx, below, m.list_s, kEdgeText, kCharTableNames[edit_table_]);
+  draw_text(d, fx, below, m.list_s, kEdgeText, tr(kCharTableNames[edit_table_]));
   draw_text(d, fx, below + m.list_row_h, m.list_s, kDim, fit(kHelp1, m.list_s, avail).c_str());
   draw_text(d, fx, below + 2 * m.list_row_h, m.list_s, kDim, fit(kHelp2, m.list_s, avail).c_str());
+}
+
+std::string Menu::slot_row_text(int slot) const {
+  std::string t = trf("SLOT < {1} >", {std::to_string(slot)});
+  if (!slot_notice_.empty()) t += " " + slot_notice_;
+  return t;
 }
 
 void Menu::draw(const Canvas& d) const {
@@ -1620,9 +1671,9 @@ void Menu::draw(const Canvas& d) const {
     if (slots) return w;
     for (int i = 0; i < kRootRows; ++i) {
       if (!root_visible(i)) continue;
-      // The slot row formats its own text; "SLOT < 0 >" is its widest form.
-      const char* label = kRoot[i].label ? kRoot[i].label : (slot_notice_.empty() ? "SLOT < 0 >" : "SLOT < 0 > REJECTED");
-      w = std::max(w, text_width(mm.s, label) + 6 * mm.s + 2 * mm.pad);
+      // The slot row formats its own text; a one-digit slot is its widest form.
+      const std::string label = kRoot[i].label ? std::string(tr(kRoot[i].label)) : slot_row_text(0);
+      w = std::max(w, text_width(mm.s, label.c_str()) + 6 * mm.s + 2 * mm.pad);
     }
     return w;
   };
@@ -1636,15 +1687,17 @@ void Menu::draw(const Canvas& d) const {
   panel(d, px0, py0, panel_w, panel_h);
 
   // Not PAUSED during a network session: the game behind this page keeps running.
-  const char* title = slots ? (slot_delete_ ? "DELETE STATE" : "STATE SLOT") : (net_session_ ? "MENU" : "PAUSED");
+  const char* title = slots ? (slot_delete_ ? tr("DELETE STATE") : tr("STATE SLOT")) : (net_session_ ? tr("MENU") : tr("PAUSED"));
   draw_text(d, px0 + (panel_w - text_width(scale, title)) / 2, py0 + title_y, scale, slots && slot_delete_ ? kDanger : kInk, title);
   if (slots) {
-    const char* help = slot_delete_ ? "\x03 DONE" : "\x03 DELETE";
+    // TRANSLATORS: {1} is a face-button icon.
+    const std::string help_text = slot_delete_ ? trf("{1} DONE", {"\x03"}) : trf("{1} DELETE", {"\x03"});
+    const char* help = help_text.c_str();
     draw_text(d, px0 + (panel_w - text_width(scale, help)) / 2, py0 + rows_y + (kSlotRows + 1) * row_h, scale, kDim, help);
   }
   fill_rect(d, px0 + m.pad, py0 + rule_y, panel_w - 2 * m.pad, std::max(1, m.s / 2), kEdge);
 
-  char buf[24];
+  std::string buf;
   for (int i = 0; i < (slots ? kAutoSlot + 1 : root_rows()); ++i) {
     // Slots fill a column at a time: 0-4 left, 5-9 right, auto state below both.
     const int col = slots && i != kAutoSlot ? i / kSlotRows : 0;
@@ -1652,15 +1705,15 @@ void Menu::draw(const Canvas& d) const {
     const int cell_x = px0 + m.pad + col * cell_w;
     const int ry = py0 + rows_y + (slots ? (i == kAutoSlot ? kSlotRows : i % kSlotRows) : i) * row_h;
     if (i == (slots ? slot_row_ : row_)) fill_rect(d, cell_x, ry - m.s, cell_w, row_h, kSel);
-    const char* label = buf;
     const int item = slots ? i : root_item(i);
     const bool doomed = slots && slot_armed_ && i == slot_row_;
-    const char* tag = doomed ? "SURE?" : used_[i] ? "USED" : "EMPTY";
-    if (slots && i == kAutoSlot) std::snprintf(buf, sizeof buf, "AUTO %s", tag);
-    else if (slots) std::snprintf(buf, sizeof buf, "%d %s", i, tag);
-    else if (item == kSlotRow) std::snprintf(buf, sizeof buf, "SLOT < %d >%s%s", slot_,
-                                             slot_notice_.empty() ? "" : " ", slot_notice_.c_str());
-    else label = kRoot[item].label;
+    const char* tag = doomed ? tr("SURE?") : used_[i] ? tr("USED") : tr("EMPTY");
+    if (slots && i == kAutoSlot) buf = trf("AUTO {1}", {tag});
+    // TRANSLATORS: a state slot's row: {1} is its number, {2} USED, EMPTY or SURE?.
+    else if (slots) buf = trf("{1} {2}", {std::to_string(i), tag});
+    else if (item == kSlotRow) buf = slot_row_text(slot_);
+    else buf = tr(kRoot[item].label);
+    const char* label = buf.c_str();
     // An empty slot reads dimmer: the menu says what is there before the player commits.
     const bool weak = (slots && (!used_[i] || (i == kAutoSlot && !slot_delete_))) || (!slots && kRoot[item].result == Result::Load && !used_[slot_]);
     // A refused state warns in colour until the player moves off it; the

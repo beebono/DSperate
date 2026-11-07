@@ -4,6 +4,7 @@
 #include "display.h"
 #include "pad_faces.h"
 #include "core/nds.h"
+#include "frontend/i18n/i18n.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -105,6 +106,15 @@ const char* pad_token_label(const std::string& s) {
 } // namespace
 
 const char* action_name(Action a) { return kActionNames[static_cast<int>(a)]; }
+
+// What the Controls page calls each hotkey, in English (translated where drawn).
+const char* const kActionLabels[static_cast<int>(Action::Count)] = {
+  N_("QUIT"), N_("PAUSE"), N_("FAST FORWARD"),
+  N_("FF TOGGLE"),   // "FAST FORWARD TOGGLE" doesn't fit the row at the menu's size
+  N_("SAVE STATE"), N_("LOAD STATE"), N_("SLOT NEXT"), N_("SLOT PREV"),
+  N_("VOLUME UP"), N_("VOLUME DOWN"), N_("MUTE"), N_("LAYOUT NEXT"), N_("LAYOUT PREV"), N_("SCREEN SWAP"),
+  N_("PIP CORNER NEXT"), N_("FULLSCREEN"), N_("SCREENSHOT"), N_("LID"), N_("MIC"), N_("FPS")};
+const char* action_label(Action a) { return kActionLabels[static_cast<int>(a)]; }
 
 Input::Bind Input::parse_key(const std::string& s0) {
   Bind b;
@@ -825,7 +835,7 @@ void Input::update_stylus() {
 std::string Input::pad_label(const std::string& s0) {
   std::string s = s0, out;
   if (s.compare(0, 4, "mod+") == 0) { out = "MOD+"; s = s.substr(4); }
-  if (s.empty() || s == "none" || s == "null") return out.empty() ? std::string("NONE") : out + "NONE";
+  if (s.empty() || s == "none" || s == "null") return out + i18n::tr("NONE");
   std::string head = s, with;
   if (const size_t plus = s.find('+', 1); plus != std::string::npos && s[0] != '+' && s[0] != '-') {
     head = s.substr(0, plus);
@@ -1067,7 +1077,8 @@ std::vector<std::string> Input::collisions() const {
   // First: this one cannot be recovered from without a text editor.
   for (const int i : {static_cast<int>(B::BTN_A), static_cast<int>(B::BTN_B)})
     if (!reachable(i))
-      out.push_back(std::string(kButtonNames[i]) + (pad_ ? " IS UNREACHABLE; \x04 TWICE RESETS" : " IS UNREACHABLE; X TWICE RESETS"));
+      // TRANSLATORS: {1} is a DS button (A or B), {2} the button that resets the bindings.
+      out.push_back(i18n::trf("{1} IS UNREACHABLE; {2} TWICE RESETS", {kButtonNames[i], pad_ ? "\x04" : "X"}));
   const auto same = [](const Bind& a, const Bind& b) {
     return a.kind != Bind::None && a.kind == b.kind && a.code == b.code &&
            a.neg == b.neg && a.mod == b.mod && a.with == b.with;
@@ -1075,17 +1086,19 @@ std::vector<std::string> Input::collisions() const {
   // Two DS buttons on one control: the second never fires.
   for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i)
     for (int j = i + 1; j < static_cast<int>(B::BTN_COUNT); ++j) {
-      if (same(key_map_[i], key_map_[j])) out.push_back(std::string(kButtonNames[i]) + " AND " + kButtonNames[j] + " SHARE A KEY");
-      if (same(pad_map_[i], pad_map_[j])) out.push_back(std::string(kButtonNames[i]) + " AND " + kButtonNames[j] + " SHARE A BUTTON");
+      // TRANSLATORS: {1} and {2} are DS buttons (A, B, SELECT...).
+      if (same(key_map_[i], key_map_[j])) out.push_back(i18n::trf("{1} AND {2} SHARE A KEY", {kButtonNames[i], kButtonNames[j]}));
+      if (same(pad_map_[i], pad_map_[j])) out.push_back(i18n::trf("{1} AND {2} SHARE A BUTTON", {kButtonNames[i], kButtonNames[j]}));
     }
   if (pad_mod_alone_ >= 0 && pad_mod_button_ >= 0)
-    out.push_back(std::string(kActionNames[pad_mod_alone_]) + " HIDES PAD " + kButtonNames[pad_mod_button_]);
+    out.push_back(i18n::trf("{1} HIDES PAD {2}", {i18n::tr(kActionLabels[pad_mod_alone_]), kButtonNames[pad_mod_button_]}));
   // A hotkey on the same control as a DS button: hotkey tried first, button dead.
   for (int a = 0; a < static_cast<int>(Action::Count); ++a)
     for (int i = 0; i < static_cast<int>(B::BTN_COUNT); ++i) {
       for (int sl = 0; sl < HOT_SLOTS; ++sl) {
-        if (same(key_hot_[a][sl], key_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES KEY " + kButtonNames[i]);
-        if (same(pad_hot_[a][sl], pad_map_[i])) out.push_back(std::string(kActionNames[a]) + " HIDES PAD " + kButtonNames[i]);
+        // TRANSLATORS: {1} is a hotkey (SAVE STATE...), {2} a DS button (A, B, SELECT...).
+        if (same(key_hot_[a][sl], key_map_[i])) out.push_back(i18n::trf("{1} HIDES KEY {2}", {i18n::tr(kActionLabels[a]), kButtonNames[i]}));
+        if (same(pad_hot_[a][sl], pad_map_[i])) out.push_back(i18n::trf("{1} HIDES PAD {2}", {i18n::tr(kActionLabels[a]), kButtonNames[i]}));
       }
     }
   return out;

@@ -38,16 +38,18 @@ MENU LANGUAGE setting lists it as.
   them (`"SLOT < {1} >"` can become `"< {1} > 号存档"`), but none can be dropped
   or added. A string whose placeholders don't match is ignored and shows in
   English, with a warning on the console.
-- **`\001` to `\004` are button icons** (the face buttons' positions). Keep them,
-  next to the button they label.
+- **A placeholder can be a button**: a face-button icon with a controller, a DS
+  letter (A, X...) on the keyboard. The `#.` note above such a string says so;
+  keep each one beside the word it labels (`{1} DONE`).
 - **Case does not matter.** The menu font has capitals only and folds lower
   case onto them, so write the case your language normally uses.
 - **Length.** The menu is a fixed-width panel. Long rows scroll when selected
   and other text may be cut short, so a translation near the English length
   reads best. A CJK character is about a third wider than a Latin letter.
 - **Context.** A comment starting `#.` above a string explains where it is
-  shown. A `msgctxt` line marks a string whose English is ambiguous (`ON` as a
-  switch and `ON` as a count): translate each as its context says.
+  shown. A `msgctxt` line marks a string whose English means something else
+  elsewhere (`HOST` in the context `wifi.dns` is the system's own DNS, not
+  hosting a session): translate each as its context says.
 - **Lines marked `#, fuzzy`** are treated as untranslated. Check them and remove
   the mark.
 
@@ -105,7 +107,8 @@ Code that shows text marks it for translation:
 | `tr("SAVE STATE")` | A string, translated where it is drawn. |
 | `trf("SLOT < {1} >", {std::to_string(n)})` | A format. Never build a sentence from pieces, or a translation cannot reorder it. |
 | `trc("switch", "ON")` | A string that needs a context to translate. |
-| `N_("SAVE STATE")`, `NC_("switch", "ON")` | A table entry: marked, not translated where it stands; `tr()` it where it is drawn. |
+| `N_("SAVE STATE")`, `NC_("switch", "ON")` | A table entry: marked, not translated where it stands; `tr()` it where it is drawn. A settings choice marked `NC_` takes the setting's key as its context (`NC_("wifi.dns", "HOST")`). |
+| `trf("{1} DONE", {"\x03"})` | A face-button icon goes in as an argument, never in the string: gettext reserves `\004`. |
 | `// TRANSLATORS: ...` | On the line above a call: a note in the template. |
 
 Run `python3 tools/i18n_extract.py` after changing any of them and commit

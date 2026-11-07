@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/settings.h"
+#include "frontend/i18n/i18n.h"
 
 #include <algorithm>
 #include <array>
@@ -14,50 +15,51 @@ namespace {
 
 using T = Setting::Type;
 
-const Choice kOnOff[]   = {{"false", "OFF"}, {"true", "ON"}};
-const Choice kSkipMode[] = {{"adaptive", "ADAPTIVE"}, {"fixed", "FIXED"}};
+const Choice kOnOff[]   = {{"false", N_("OFF")}, {"true", N_("ON")}};
+const Choice kSkipMode[] = {{"adaptive", N_("ADAPTIVE")}, {"fixed", N_("FIXED")}};
 // Panel-typical rates, plus the console's own (auto, the default) and no limit.
-const Choice kLimiter[] = {{"auto", "CONSOLE (59.8)"}, {"30", "30"}, {"60", "60"}, {"120", "120"},
-                           {"144", "144"}, {"240", "240"}, {"off", "UNLIMITED"}};
-const Choice kIntScale[] = {{"off", "OFF"}, {"under", "UNDER"}, {"over", "OVER"}};
-const Choice kSeam[]     = {{"dark", "DARK"}, {"blend", "BLEND"}, {"blend_linear", "BLEND LINEAR"}};
-const Choice kChunky[]   = {{"false", "OFF"}, {"mean", "DEFAULT"}, {"extreme", "ADAPTIVE"},
-                            {"mode", "COMMON"}, {"tl", "FIRST"}, {"min", "DARKEST"}, {"max", "LIGHTEST"}};
-const Choice kAa[]       = {{"false", "OFF"}, {"true", "ON"}, {"enhanced", "ENHANCED"}};
-const Choice kScreen[]   = {{"top", "TOP"}, {"bottom", "BOTTOM"}};
+const Choice kLimiter[] = {{"auto", N_("CONSOLE (59.8)")}, {"30", "30"}, {"60", "60"}, {"120", "120"},
+                           {"144", "144"}, {"240", "240"}, {"off", N_("UNLIMITED")}};
+const Choice kIntScale[] = {{"off", N_("OFF")}, {"under", N_("UNDER")}, {"over", N_("OVER")}};
+const Choice kSeam[]     = {{"dark", N_("DARK")}, {"blend", N_("BLEND")}, {"blend_linear", N_("BLEND LINEAR")}};
+const Choice kChunky[]   = {{"false", N_("OFF")}, {"mean", N_("DEFAULT")}, {"extreme", N_("ADAPTIVE")},
+                            {"mode", N_("COMMON")}, {"tl", N_("FIRST")}, {"min", N_("DARKEST")}, {"max", N_("LIGHTEST")}};
+const Choice kAa[]       = {{"false", N_("OFF")}, {"true", N_("ON")}, {"enhanced", N_("ENHANCED")}};
+const Choice kScreen[]   = {{"top", N_("TOP")}, {"bottom", N_("BOTTOM")}};
 // GBATEK's order, matching the firmware.
-const Choice kColour[]   = {{"0", "GREY"}, {"1", "BROWN"}, {"2", "RED"}, {"3", "PINK"},
-                            {"4", "ORANGE"}, {"5", "YELLOW"}, {"6", "LIME"}, {"7", "GREEN"},
-                            {"8", "DARK GREEN"}, {"9", "TURQUOISE"}, {"10", "BLUE"}, {"11", "DARK BLUE"},
-                            {"12", "PURPLE"}, {"13", "VIOLET"}, {"14", "MAGENTA"}, {"15", "DARK PINK"}};
-const Choice kMonth[]    = {{"1", "JANUARY"}, {"2", "FEBRUARY"}, {"3", "MARCH"}, {"4", "APRIL"},
-                            {"5", "MAY"}, {"6", "JUNE"}, {"7", "JULY"}, {"8", "AUGUST"},
-                            {"9", "SEPTEMBER"}, {"10", "OCTOBER"}, {"11", "NOVEMBER"}, {"12", "DECEMBER"}};
+const Choice kColour[]   = {{"0", N_("GREY")}, {"1", N_("BROWN")}, {"2", N_("RED")}, {"3", N_("PINK")},
+                            {"4", N_("ORANGE")}, {"5", N_("YELLOW")}, {"6", N_("LIME")}, {"7", N_("GREEN")},
+                            {"8", N_("DARK GREEN")}, {"9", N_("TURQUOISE")}, {"10", N_("BLUE")}, {"11", N_("DARK BLUE")},
+                            {"12", N_("PURPLE")}, {"13", N_("VIOLET")}, {"14", N_("MAGENTA")}, {"15", N_("DARK PINK")}};
+const Choice kMonth[]    = {{"1", N_("JANUARY")}, {"2", N_("FEBRUARY")}, {"3", N_("MARCH")}, {"4", N_("APRIL")},
+                            {"5", N_("MAY")}, {"6", N_("JUNE")}, {"7", N_("JULY")}, {"8", N_("AUGUST")},
+                            {"9", N_("SEPTEMBER")}, {"10", N_("OCTOBER")}, {"11", N_("NOVEMBER")}, {"12", N_("DECEMBER")}};
 // AUTO is --netplay (join if heard, else host); HOST/GUEST fix the role up
 // front. Join address stays a command-line flag; discovery finds hosts itself.
-const Choice kNetMode[]  = {{"off", "OFF"}, {"auto", "AUTO"}, {"host", "HOST"}, {"guest", "GUEST"},
-                            {"internet", "INTERNET"}};
+const Choice kNetMode[]  = {{"off", N_("OFF")}, {"auto", N_("AUTO")}, {"host", N_("HOST")}, {"guest", N_("GUEST")},
+                            {"internet", N_("INTERNET")}};
 // A plain-address DNS form also exists in the config but has nowhere in a
 // pick row. WIIMMFI is default since Nintendo WFC is gone; HOST resolves to
 // nothing unless pointed at a private server.
-const Choice kWifiDns[]  = {{"wiimmfi", "WIIMMFI"}, {"host", "HOST"}};
-const Choice kLanguage[] = {{"0", "JAPANESE"}, {"1", "ENGLISH"}, {"2", "FRENCH"},
-                            {"3", "GERMAN"}, {"4", "ITALIAN"}, {"5", "SPANISH"}};
+const Choice kWifiDns[]  = {{"wiimmfi", "WIIMMFI"}, {"host", NC_("wifi.dns", "HOST")}};
+const Choice kLanguage[] = {{"0", N_("JAPANESE")}, {"1", N_("ENGLISH")}, {"2", N_("FRENCH")},
+                            {"3", N_("GERMAN")}, {"4", N_("ITALIAN")}, {"5", N_("SPANISH")}};
 const Choice kCheck[]    = {{"false", "[ ]"}, {"true", "[X]"}};
-const Choice kRumble[]   = {{"auto", "AUTO"}, {"on", "ON"}, {"off", "OFF"}};
-const Choice kAnalog[]   = {{"auto", "AUTO"}, {"off", "OFF"}, {"left", "LEFT STICK"}, {"right", "RIGHT STICK"}, {"dual", "TWO STICKS"}};
-const Choice kAnalogLayout[] = {{"auto", "AUTO"}, {"packed", "PACKED"}, {"extended", "EXTENDED"}};
-const Choice kLayout[]   = {{"vertical", "VERTICAL"}, {"horizontal", "HORIZONTAL"}, {"single", "SINGLE"},
-                            {"pip", "PIP"}, {"dominant_v", "DOMINANT V"}, {"dominant_h", "DOMINANT H"}};
+const Choice kRumble[]   = {{"auto", N_("AUTO")}, {"on", N_("ON")}, {"off", N_("OFF")}};
+const Choice kAnalog[]   = {{"auto", N_("AUTO")}, {"off", N_("OFF")}, {"left", N_("LEFT STICK")}, {"right", N_("RIGHT STICK")}, {"dual", N_("TWO STICKS")}};
+const Choice kAnalogLayout[] = {{"auto", N_("AUTO")}, {"packed", N_("PACKED")}, {"extended", N_("EXTENDED")}};
+const Choice kLayout[]   = {{"vertical", N_("VERTICAL")}, {"horizontal", N_("HORIZONTAL")}, {"single", N_("SINGLE")},
+                            // TRANSLATORS: PIP is picture in picture (the small screen over the large one); DOMINANT V and H, a large screen with a small one under or beside it. Match the CYCLE rows and PIP rows.
+                            {"pip", N_("PIP")}, {"dominant_v", N_("DOMINANT V")}, {"dominant_h", N_("DOMINANT H")}};
 // Filled by set_ui_languages; a slot with an empty value is never offered.
 // Every slot starts empty rather than null, so nothing can read a null value.
 std::array<Choice, kMaxUiLanguages> kUiLanguages = [] {
   std::array<Choice, kMaxUiLanguages> a{};
   a.fill(Choice{"", ""});
-  a[0] = Choice{"auto", "AUTO"};
+  a[0] = Choice{"auto", N_("AUTO")};
   return a;
 }();
-const Choice kCorner[]   = {{"tl", "TOP LEFT"}, {"tr", "TOP RIGHT"}, {"bl", "BOTTOM LEFT"}, {"br", "BOTTOM RIGHT"}};
+const Choice kCorner[]   = {{"tl", N_("TOP LEFT")}, {"tr", N_("TOP RIGHT")}, {"bl", N_("BOTTOM LEFT")}, {"br", N_("BOTTOM RIGHT")}};
 
 constexpr Setting boolean(const char* k, const char* l, const char* def, u8 f, Dep d, const char* n) {
   return Setting{k, l, T::Bool, kOnOff, 2, 0, 0, 0, nullptr, nullptr, nullptr, def, f, d, n};
@@ -86,142 +88,143 @@ constexpr Setting end() { return Setting{nullptr, nullptr, T::Bool, nullptr, 0, 
 const Setting kEmuSettings[] = {
   // Always the global file (the host refuses a per-game copy): the language
   // is set before a game's own file is read.
-  pick("ui.language", "MENU LANGUAGE", kUiLanguages.data(), kMaxUiLanguages, "auto", FlagLive | FlagVerbatim, Dep::None,
-       "THE LANGUAGE OF THESE MENUS. AUTO FOLLOWS THE SYSTEM'S"),
-  number("emu.frameskip", "FRAMESKIP", 0, 3, 1, "0", FlagLive, Dep::NetSession,
-         "DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL"),
-  pick("emu.frameskip_mode", "FRAMESKIP MODE", kSkipMode, 2, "adaptive", FlagLive, Dep::FrameskipMode,
-       "ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME"),
-  pick("emu.limiter", "FRAME LIMITER", kLimiter, 7, "auto", FlagLive, Dep::NetSession,
-       "THE RATE THE GAME IS HELD TO. CONSOLE IS THE ONE THE GAME WAS WRITTEN FOR"),
+  pick("ui.language", N_("MENU LANGUAGE"), kUiLanguages.data(), kMaxUiLanguages, "auto", FlagLive | FlagVerbatim, Dep::None,
+       N_("THE LANGUAGE OF THESE MENUS. AUTO FOLLOWS THE SYSTEM'S")),
+  number("emu.frameskip", N_("FRAMESKIP"), 0, 3, 1, "0", FlagLive, Dep::NetSession,
+         N_("DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL")),
+  pick("emu.frameskip_mode", N_("FRAMESKIP MODE"), kSkipMode, 2, "adaptive", FlagLive, Dep::FrameskipMode,
+       N_("ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME")),
+  pick("emu.limiter", N_("FRAME LIMITER"), kLimiter, 7, "auto", FlagLive, Dep::NetSession,
+       N_("THE RATE THE GAME IS HELD TO. CONSOLE IS THE ONE THE GAME WAS WRITTEN FOR")),
   // Whole percent in the file ("100"), so not a Percent row (0..1 fraction).
-  number("emu.speed", "GAME SPEED", 25, 400, 5, "100", FlagLive, Dep::NetSession,
-         "HOW FAST THE GAME RUNS AGAINST THE LIMITER", nullptr, nullptr, "%"),
+  number("emu.speed", N_("GAME SPEED"), 25, 400, 5, "100", FlagLive, Dep::NetSession,
+         N_("HOW FAST THE GAME RUNS AGAINST THE LIMITER"), nullptr, nullptr, "%"),
   // Multiple of real time (a floor), not of the limiter, so it never slows
   // the game below this even on a fast limiter.
-  number("emu.ff_speed", "FAST FORWARD SPEED", 2, 16, 1, "0", FlagLive, Dep::NetSession,
-         "AT LEAST THIS MANY TIMES REAL TIME WHILE FAST FORWARD IS HELD", "0", "UNLIMITED", "X"),
-  number("emu.ff_skip", "FAST FORWARD SKIP", 0, 9, 1, "3", FlagLive, Dep::NetSession,
-         "WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE"),
+  number("emu.ff_speed", N_("FAST FORWARD SPEED"), 2, 16, 1, "0", FlagLive, Dep::NetSession,
+         N_("AT LEAST THIS MANY TIMES REAL TIME WHILE FAST FORWARD IS HELD"), "0", N_("UNLIMITED"), "X"),
+  number("emu.ff_skip", N_("FAST FORWARD SKIP"), 0, 9, 1, "3", FlagLive, Dep::NetSession,
+         N_("WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE")),
   // AUTO raises the buffer only when the machine keeps up yet still ran dry
   // (a hitch, not a machine too slow to keep up at all).
-  number("audio.buffer_size", "AUDIO BUFFER", 20, 200, 10, "auto", FlagLive, Dep::None,
-         "SOUND HELD AHEAD. LOWER IS LESS DELAY, LESS SLACK BEFORE A LATE FRAME IS HEARD",
-         "auto", "AUTO", " MS"),
-  boolean("emu.autosave", "AUTOSAVE ON QUIT", "false", FlagLive, Dep::None,
-          "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"),
-  boolean("emu.autoload", "AUTOLOAD ON START", "false", FlagRestart, Dep::None,
-          "WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE"),
-  boolean("emu.dsi_hide_installed", "HIDE NAND DSIWARE", "false", FlagRestart, Dep::None,
-          "DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED"),
-  boolean("emu.dsi_nand_shortcuts", "DSI NAND LINKS", "false", FlagLive, Dep::ShortcutsPath,
-          "GAME LIST ENTRIES THAT START THE NAND'S DSIWARE WITHOUT THE DSI MENU"),
+  number("audio.buffer_size", N_("AUDIO BUFFER"), 20, 200, 10, "auto", FlagLive, Dep::None,
+         N_("SOUND HELD AHEAD. LOWER IS LESS DELAY, LESS SLACK BEFORE A LATE FRAME IS HEARD"),
+         "auto", N_("AUTO"), " MS"),
+  boolean("emu.autosave", N_("AUTOSAVE ON QUIT"), "false", FlagLive, Dep::None,
+          N_("SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM")),
+  boolean("emu.autoload", N_("AUTOLOAD ON START"), "false", FlagRestart, Dep::None,
+          N_("WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE")),
+  boolean("emu.dsi_hide_installed", N_("HIDE NAND DSIWARE"), "false", FlagRestart, Dep::None,
+          N_("DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED")),
+  boolean("emu.dsi_nand_shortcuts", N_("DSI NAND LINKS"), "false", FlagLive, Dep::ShortcutsPath,
+          N_("GAME LIST ENTRIES THAT START THE NAND'S DSIWARE WITHOUT THE DSI MENU")),
   // Always this game's own file: "don't ask again" wrote it there.
-  boolean("slot2.ask", "ASK FOR GBA GAME", "true", FlagRestart, Dep::Slot2Link,
-          "BEFORE THIS GAME STARTS, OFFER THE GBA GAMES IT READS. KEPT FOR THIS GAME"),
-  pick("slot2.rumble", "RUMBLE PAK", kRumble, 3, "auto", FlagRestart, Dep::None,
-       "IN SLOT 2 WHEN NO GBA GAME IS. AUTO: WHEN THE CONTROLLER CAN RUMBLE"),
-  number("slot2.rumble_strength", "RUMBLE STRENGTH", 10, 100, 10, "100", FlagLive, Dep::RumblePak,
-         "HOW HARD THE MOTOR RUNS WHEN THE GAME RUMBLES", nullptr, nullptr, "%"),
-  number("slot2.solar", "SOLAR SENSOR", 0, 10, 1, "5", FlagLive, Dep::SolarSensor,
-         "THE SUNLIGHT A BOKTAI CARTRIDGE SEES: 0 DARK, 10 FULL SUN"),
-  pick("net.mode", "NETWORK FEATURES", kNetMode, 5, "off", FlagLive, Dep::Net,
-       "LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE"),
+  boolean("slot2.ask", N_("ASK FOR GBA GAME"), "true", FlagRestart, Dep::Slot2Link,
+          N_("BEFORE THIS GAME STARTS, OFFER THE GBA GAMES IT READS. KEPT FOR THIS GAME")),
+  // TRANSLATORS: Nintendo's slot-2 accessory: its official name in your language where it has one.
+  pick("slot2.rumble", N_("RUMBLE PAK"), kRumble, 3, "auto", FlagRestart, Dep::None,
+       N_("IN SLOT 2 WHEN NO GBA GAME IS. AUTO: WHEN THE CONTROLLER CAN RUMBLE")),
+  number("slot2.rumble_strength", N_("RUMBLE STRENGTH"), 10, 100, 10, "100", FlagLive, Dep::RumblePak,
+         N_("HOW HARD THE MOTOR RUNS WHEN THE GAME RUMBLES"), nullptr, nullptr, "%"),
+  number("slot2.solar", N_("SOLAR SENSOR"), 0, 10, 1, "5", FlagLive, Dep::SolarSensor,
+         N_("THE SUNLIGHT A BOKTAI CARTRIDGE SEES: 0 DARK, 10 FULL SUN")),
+  pick("net.mode", N_("NETWORK FEATURES"), kNetMode, 5, "off", FlagLive, Dep::Net,
+       N_("LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE")),
   pick("wifi.dns", "DNS", kWifiDns, 2, "wiimmfi", FlagRestart, Dep::NetInternet,
-       "WHERE THE GAME LOOKS UP ITS SERVERS. NINTENDO'S ARE GONE; WIIMMFI REPLACES THEM"),
+       N_("WHERE THE GAME LOOKS UP ITS SERVERS. NINTENDO'S ARE GONE; WIIMMFI REPLACES THEM")),
   end(),
 };
 
 const Setting kAnalogSettings[] = {
-  pick("pad.analog", "ANALOG PATCH", kAnalog, 5, "auto", FlagLive, Dep::None,
-       "NEEDS A CPAD CHEAT ON. AUTO USES CONTROLS AS AVAILABLE"),
-  number("pad.analog_deadzone", "ANALOG DEADZONE", 0, 30000, 500, "6000", FlagLive, Dep::None,
-         "HOW FAR A STICK MUST MOVE BEFORE AN ANALOG PATCH SEES IT"),
-  number("pad.analog_sensitivity_left", "LEFT SENSITIVITY", 10, 300, 10, "100", FlagLive, Dep::None,
-         "UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL",
+  pick("pad.analog", N_("ANALOG PATCH"), kAnalog, 5, "auto", FlagLive, Dep::None,
+       N_("NEEDS A CPAD CHEAT ON. AUTO USES CONTROLS AS AVAILABLE")),
+  number("pad.analog_deadzone", N_("ANALOG DEADZONE"), 0, 30000, 500, "6000", FlagLive, Dep::None,
+         N_("HOW FAR A STICK MUST MOVE BEFORE AN ANALOG PATCH SEES IT")),
+  number("pad.analog_sensitivity_left", N_("LEFT SENSITIVITY"), 10, 300, 10, "100", FlagLive, Dep::None,
+         N_("UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL"),
          nullptr, nullptr, "%"),
-  number("pad.analog_sensitivity_right", "RIGHT SENSITIVITY", 10, 300, 10, "100", FlagLive, Dep::None,
-         "UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL",
+  number("pad.analog_sensitivity_right", N_("RIGHT SENSITIVITY"), 10, 300, 10, "100", FlagLive, Dep::None,
+         N_("UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL"),
          nullptr, nullptr, "%"),
-  boolean("pad.analog_invert_y", "ANALOG INVERT Y", "false", FlagLive, Dep::None,
-          "FLIP THE STICKS' UP AND DOWN FOR AN ANALOG PATCH"),
-  pick("pad.analog_layout", "ANALOG LAYOUT", kAnalogLayout, 3, "auto", FlagLive, Dep::None,
-       "HOW THE PATCH WANTS STICK DATA ARRANGED. AUTO READS THE PATCH"),
+  boolean("pad.analog_invert_y", N_("ANALOG INVERT Y"), "false", FlagLive, Dep::None,
+          N_("FLIP THE STICKS' UP AND DOWN FOR AN ANALOG PATCH")),
+  pick("pad.analog_layout", N_("ANALOG LAYOUT"), kAnalogLayout, 3, "auto", FlagLive, Dep::None,
+       N_("HOW THE PATCH WANTS STICK DATA ARRANGED. AUTO READS THE PATCH")),
   end(),
 };
 
 const Setting kVideoSettings[] = {
-  pick("video.integer_scale", "INTEGER SCALE", kIntScale, 3, "off", FlagDeferred, Dep::None,
-       "WHOLE PANEL PIXELS PER DS PIXEL. UNDER LETTERBOXES, OVER CROPS"),
-  boolean("video.linear", "BILINEAR", "false", FlagDeferred, Dep::PanelEffects,
-          "SMOOTH SCALING. OVERRIDES THE GRID, SEAMS AND CHUNKY"),
-  percent("video.lcd_grid", "LCD GRID", 0, 100, 10, "0", FlagDeferred, Dep::GridSeam,
-          "A DARK SEAM AROUND EVERY DS PIXEL, LIKE THE ORIGINAL SCREEN"),
-  pick("video.seam", "SEAM", kSeam, 3, "dark", FlagDeferred, Dep::GridSeam,
-       "DARK DRAWS THE GRID. BLEND SOFTENS ONLY THE STRADDLING PIXEL"),
-  pick("video.chunky", "CHUNKY", kChunky, 7, "false", FlagDeferred, Dep::Chunky,
-       "DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES"),
-  number("video.chunky_cell", "CHUNKY CELL", 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
-         "PANEL PIXELS PER CELL", "auto", "AUTO"),
-  pick("video.aa", "ANTI-ALIASING", kAa, 3, "false", FlagLive, Dep::None,
-       "DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)"),
+  pick("video.integer_scale", N_("INTEGER SCALE"), kIntScale, 3, "off", FlagDeferred, Dep::None,
+       N_("WHOLE PANEL PIXELS PER DS PIXEL. UNDER LETTERBOXES, OVER CROPS")),
+  boolean("video.linear", N_("BILINEAR"), "false", FlagDeferred, Dep::PanelEffects,
+          N_("SMOOTH SCALING. OVERRIDES THE GRID, SEAMS AND CHUNKY")),
+  percent("video.lcd_grid", N_("LCD GRID"), 0, 100, 10, "0", FlagDeferred, Dep::GridSeam,
+          N_("A DARK SEAM AROUND EVERY DS PIXEL, LIKE THE ORIGINAL SCREEN")),
+  pick("video.seam", N_("SEAM"), kSeam, 3, "dark", FlagDeferred, Dep::GridSeam,
+       N_("DARK DRAWS THE GRID. BLEND SOFTENS ONLY THE STRADDLING PIXEL")),
+  pick("video.chunky", N_("CHUNKY"), kChunky, 7, "false", FlagDeferred, Dep::Chunky,
+       N_("DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES")),
+  number("video.chunky_cell", N_("CHUNKY CELL"), 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
+         N_("PANEL PIXELS PER CELL"), "auto", N_("AUTO")),
+  pick("video.aa", N_("ANTI-ALIASING"), kAa, 3, "false", FlagLive, Dep::None,
+       N_("DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)")),
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,
-          "DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED"),
-  boolean("video.fps", "FPS COUNTER", "false", FlagLive, Dep::None,
-          "FRAMES PER SECOND IN THE CORNER OF THE SCREEN"),
-  boolean("video.fullscreen", "FULLSCREEN", "false", FlagDeferred, Dep::Windowed, nullptr),
+          N_("DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED")),
+  boolean("video.fps", N_("FPS COUNTER"), "false", FlagLive, Dep::None,
+          N_("FRAMES PER SECOND IN THE CORNER OF THE SCREEN")),
+  boolean("video.fullscreen", N_("FULLSCREEN"), "false", FlagDeferred, Dep::Windowed, nullptr),
   end(),
 };
 
 const Setting kLayoutSettings[] = {
-  pick("video.layout", "LAYOUT", kLayout, 6, "vertical", FlagDeferred, Dep::OneWindow,
-       "HOW THE TWO SCREENS SHARE THE WINDOW"),
-  pick("video.screen", "MAIN SCREEN", kScreen, 2, "top", FlagDeferred, Dep::None,
-       "THE SCREEN SHOWN ALONE, LARGE OR FIRST"),
-  number("video.screen_gap", "SCREEN GAP", 0, 128, 4, "0", FlagDeferred, Dep::OneWindow,
-         "PANEL PIXELS BETWEEN THE TWO SCREENS WHEN THEY ARE STACKED OR SIDE BY SIDE. AUTO PUSHES THEM TO THE EDGES", "auto", "AUTO"),
-  pick("video.pip_corner", "PIP CORNER", kCorner, 4, "br", FlagDeferred, Dep::Pip,
-       "WHERE THE SMALL SCREEN SITS"),
-  percent("video.pip_scale", "PIP SIZE", 10, 90, 5, "0.33", FlagDeferred, Dep::Pip,
-          "HOW BIG THE SMALL SCREEN IS AGAINST THE LARGE ONE"),
-  percent("video.pip_alpha", "PIP OPACITY", 0, 100, 10, "1", FlagDeferred, Dep::Pip,
-          "HOW SOLID THE SMALL SCREEN IS AT REST"),
-  number("video.pip_touch_hold", "PIP TOUCH HOLD", 10, 300, 10, "60", FlagLive, Dep::PipTouchHold,
-         "FRAMES THE SMALL SCREEN STAYS SOLID AFTER IT IS TOUCHED", "0", "NEVER FADE"),
-  percent("video.dominant_ratio", "DOMINANT RATIO", 10, 90, 5, "auto", FlagDeferred, Dep::Dominant,
-          "THE SMALLER SCREEN'S SIZE. AUTO FITS WHOLE PIXELS", "auto", "AUTO"),
-  percent("video.dominant_threshold", "DOMINANT THRESHOLD", 10, 99, 5, "0.25", FlagDeferred, Dep::DominantThreshold,
-          "THE SMALLEST SECONDARY AUTO WILL ACCEPT"),
-  check("video.layout_cycle.vertical", "CYCLE VERTICAL", "true", FlagLive, Dep::OneWindow,
-        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
-  check("video.layout_cycle.horizontal", "CYCLE HORIZONTAL", "true", FlagLive, Dep::OneWindow,
-        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
-  check("video.layout_cycle.single", "CYCLE SINGLE", "true", FlagLive, Dep::OneWindow,
-        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
-  check("video.layout_cycle.pip", "CYCLE PIP", "true", FlagLive, Dep::OneWindow,
-        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
-  check("video.layout_cycle.dominant_v", "CYCLE DOMINANT V", "true", FlagLive, Dep::OneWindow,
-        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"),
-  check("video.layout_cycle.dominant_h", "CYCLE DOMINANT H", "true", FlagLive, Dep::OneWindow,
-        "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS. ONE ALWAYS STAYS"),
+  pick("video.layout", N_("LAYOUT"), kLayout, 6, "vertical", FlagDeferred, Dep::OneWindow,
+       N_("HOW THE TWO SCREENS SHARE THE WINDOW")),
+  pick("video.screen", N_("MAIN SCREEN"), kScreen, 2, "top", FlagDeferred, Dep::None,
+       N_("THE SCREEN SHOWN ALONE, LARGE OR FIRST")),
+  number("video.screen_gap", N_("SCREEN GAP"), 0, 128, 4, "0", FlagDeferred, Dep::OneWindow,
+         N_("PANEL PIXELS BETWEEN THE TWO SCREENS WHEN THEY ARE STACKED OR SIDE BY SIDE. AUTO PUSHES THEM TO THE EDGES"), "auto", N_("AUTO")),
+  pick("video.pip_corner", N_("PIP CORNER"), kCorner, 4, "br", FlagDeferred, Dep::Pip,
+       N_("WHERE THE SMALL SCREEN SITS")),
+  percent("video.pip_scale", N_("PIP SIZE"), 10, 90, 5, "0.33", FlagDeferred, Dep::Pip,
+          N_("HOW BIG THE SMALL SCREEN IS AGAINST THE LARGE ONE")),
+  percent("video.pip_alpha", N_("PIP OPACITY"), 0, 100, 10, "1", FlagDeferred, Dep::Pip,
+          N_("HOW SOLID THE SMALL SCREEN IS AT REST")),
+  number("video.pip_touch_hold", N_("PIP TOUCH HOLD"), 10, 300, 10, "60", FlagLive, Dep::PipTouchHold,
+         N_("FRAMES THE SMALL SCREEN STAYS SOLID AFTER IT IS TOUCHED"), "0", N_("NEVER FADE")),
+  percent("video.dominant_ratio", N_("DOMINANT RATIO"), 10, 90, 5, "auto", FlagDeferred, Dep::Dominant,
+          N_("THE SMALLER SCREEN'S SIZE. AUTO FITS WHOLE PIXELS"), "auto", N_("AUTO")),
+  percent("video.dominant_threshold", N_("DOMINANT THRESHOLD"), 10, 99, 5, "0.25", FlagDeferred, Dep::DominantThreshold,
+          N_("THE SMALLEST SECONDARY AUTO WILL ACCEPT")),
+  check("video.layout_cycle.vertical", N_("CYCLE VERTICAL"), "true", FlagLive, Dep::OneWindow,
+        N_("THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS")),
+  check("video.layout_cycle.horizontal", N_("CYCLE HORIZONTAL"), "true", FlagLive, Dep::OneWindow,
+        N_("THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS")),
+  check("video.layout_cycle.single", N_("CYCLE SINGLE"), "true", FlagLive, Dep::OneWindow,
+        N_("THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS")),
+  check("video.layout_cycle.pip", N_("CYCLE PIP"), "true", FlagLive, Dep::OneWindow,
+        N_("THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS")),
+  check("video.layout_cycle.dominant_v", N_("CYCLE DOMINANT V"), "true", FlagLive, Dep::OneWindow,
+        N_("THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS")),
+  check("video.layout_cycle.dominant_h", N_("CYCLE DOMINANT H"), "true", FlagLive, Dep::OneWindow,
+        N_("THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS. ONE ALWAYS STAYS")),
   end(),
 };
 
 // [user]: what a game sees as the console's owner. Restart-only: baked into
 // generated firmware at boot; unused with a real dump.
 const Setting kUserSettings[] = {
-  text("user.nickname", "NICKNAME", 10, "DSperate", FlagRestart,
-       "WHAT GAMES CALL YOU"),
-  text("user.message", "MESSAGE", 26, "", FlagRestart,
-       "THE GREETING THE DS MENU SHOWS"),
-  pick("user.colour", "FAVOURITE COLOUR", kColour, 16, "0", FlagRestart, Dep::None,
-       "SOME GAMES COLOUR THEMSELVES WITH IT"),
-  pick("user.birthday_month", "BIRTHDAY MONTH", kMonth, 12, "1", FlagRestart, Dep::None,
-       "GAMES THAT WISH YOU A HAPPY BIRTHDAY USE THIS"),
-  number("user.birthday_day", "BIRTHDAY DAY", 1, 31, 1, "1", FlagRestart, Dep::None,
-         "NOT CHECKED AGAINST THE MONTH, AS THE CONSOLE DOES NOT EITHER"),
-  pick("user.language", "LANGUAGE", kLanguage, 6, "1", FlagRestart, Dep::None,
-       "THE LANGUAGE MULTI-LANGUAGE GAMES START IN"),
+  text("user.nickname", N_("NICKNAME"), 10, "DSperate", FlagRestart,
+       N_("WHAT GAMES CALL YOU")),
+  text("user.message", N_("MESSAGE"), 26, "", FlagRestart,
+       N_("THE GREETING THE DS MENU SHOWS")),
+  pick("user.colour", N_("FAVOURITE COLOUR"), kColour, 16, "0", FlagRestart, Dep::None,
+       N_("SOME GAMES COLOUR THEMSELVES WITH IT")),
+  pick("user.birthday_month", N_("BIRTHDAY MONTH"), kMonth, 12, "1", FlagRestart, Dep::None,
+       N_("GAMES THAT WISH YOU A HAPPY BIRTHDAY USE THIS")),
+  number("user.birthday_day", N_("BIRTHDAY DAY"), 1, 31, 1, "1", FlagRestart, Dep::None,
+         N_("NOT CHECKED AGAINST THE MONTH, AS THE CONSOLE DOES NOT EITHER")),
+  pick("user.language", N_("LANGUAGE"), kLanguage, 6, "1", FlagRestart, Dep::None,
+       N_("THE LANGUAGE MULTI-LANGUAGE GAMES START IN")),
   end(),
 };
 
@@ -299,13 +302,19 @@ std::string display_value(const Setting& s, const std::string& value) {
   case T::Bool:
   case T::Pick: {
     const int i = choice_index(s, v);
-    return i >= 0 ? s.choices[i].label : v;   // unknown value: show as-is, not silently remapped
+    if (i < 0) return v;   // unknown value: show as-is, not silently remapped
+    const char* label = s.choices[i].label;
+    // Language names are their own; only the language row's AUTO is translated.
+    if ((s.flags & FlagVerbatim) && v != "auto") return label;
+    // A choice marked NC_(key, ...) has the setting's key as its context.
+    const char* in_context = i18n::trc(s.key, label);
+    return in_context != label ? in_context : i18n::tr(label);
   }
   case T::Int:
-    if (s.sentinel_value && v == s.sentinel_value) return s.sentinel_label;
+    if (s.sentinel_value && v == s.sentinel_value) return i18n::tr(s.sentinel_label);
     return s.suffix ? v + s.suffix : v;
   case T::Percent: {
-    if (s.sentinel_value && v == s.sentinel_value) return s.sentinel_label;
+    if (s.sentinel_value && v == s.sentinel_value) return i18n::tr(s.sentinel_label);
     return std::to_string(percent_of(v)) + "%";
   }
   }
