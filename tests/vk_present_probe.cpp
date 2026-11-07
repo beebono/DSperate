@@ -221,8 +221,29 @@ int main(int argc, char** argv) {
     if (a->vkAllocateMemory(vk->dev, &ai, nullptr, &smem) != VK_SUCCESS || a->vkBindImageMemory(vk->dev, simg, smem, 0) != VK_SUCCESS) { std::printf("source memory failed\n"); return 1; }
   }
 
-  // The fragment present: a render pass on each import, one triangle over it.
-  VkRenderPass rp; VkFramebuffer fbs[2]; VkPipelineLayout gpl; VkPipeline gpipe; VkDescriptorSetLayout gdsl; VkDescriptorSet gset;
+  // The filters' image (gpu_present.cpp): the two frames as layers, UNORM and sRGB views, a linear sampler.
+  VkImage fimg = VK_NULL_HANDLE; VkDeviceMemory fmem = VK_NULL_HANDLE; VkImageView fview = VK_NULL_HANDLE, fview_srgb = VK_NULL_HANDLE; VkSampler fsamp = VK_NULL_HANDLE;
+  {
+    VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; ii.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; ii.imageType = VK_IMAGE_TYPE_2D; ii.format = kFmt;
+    ii.extent = {SW, SH, 1}; ii.mipLevels = 1; ii.arrayLayers = 2; ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (a->vkCreateImage(vk->dev, &ii, nullptr, &fimg) != VK_SUCCESS) { std::printf("filter image failed\n"); return 1; }
+    VkMemoryRequirements mr{}; a->vkGetImageMemoryRequirements(vk->dev, fimg, &mr);
+    VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (a->vkAllocateMemory(vk->dev, &ai, nullptr, &fmem) != VK_SUCCESS || a->vkBindImageMemory(vk->dev, fimg, fmem, 0) != VK_SUCCESS) { std::printf("filter image memory failed\n"); return 1; }
+    VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = fimg; vi.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    vi.format = kFmt; vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 2};
+    a->vkCreateImageView(vk->dev, &vi, nullptr, &fview);
+    vi.format = VK_FORMAT_B8G8R8A8_SRGB;
+    a->vkCreateImageView(vk->dev, &vi, nullptr, &fview_srgb);
+    VkSamplerCreateInfo sci{}; sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO; sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    a->vkCreateSampler(vk->dev, &sci, nullptr, &fsamp);
+  }
+
+  // The fragment present: a render pass on each import, one triangle over it; a pipeline per filter (FILTER).
+  VkRenderPass rp; VkFramebuffer fbs[2]; VkPipelineLayout gpl; VkPipeline gpipes[4]; VkDescriptorSetLayout gdsl; VkDescriptorSet gset;
   {
     VkAttachmentDescription at{}; at.format = kFmt; at.samples = VK_SAMPLE_COUNT_1_BIT;
     at.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at.storeOp = VK_ATTACHMENT_STORE_OP_STORE;   // the letterbox
@@ -241,20 +262,23 @@ int main(int argc, char** argv) {
       fci.pAttachments = &imp[i].view; fci.width = W; fci.height = H; fci.layers = 1;
       if (a->vkCreateFramebuffer(vk->dev, &fci, nullptr, &fbs[i]) != VK_SUCCESS) { std::printf("framebuffer on the import failed\n"); return 1; }
     }
-    VkDescriptorSetLayoutBinding b[3]{};
-    for (u32 i = 0; i < 3; ++i) { b[i].binding = i + 1; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; }
-    VkDescriptorSetLayoutCreateInfo dl{}; dl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; dl.bindingCount = 3; dl.pBindings = b;
+    VkDescriptorSetLayoutBinding b[5]{};
+    for (u32 i = 0; i < 5; ++i) { b[i].binding = i + 1; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+      b[i].descriptorType = i < 3 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; }
+    VkDescriptorSetLayoutCreateInfo dl{}; dl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; dl.bindingCount = 5; dl.pBindings = b;
     a->vkCreateDescriptorSetLayout(vk->dev, &dl, nullptr, &gdsl);
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};
-    VkDescriptorPoolCreateInfo dp{}; dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dp.maxSets = 1; dp.poolSizeCount = 1; dp.pPoolSizes = &ps;
+    const VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2}};
+    VkDescriptorPoolCreateInfo dp{}; dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dp.maxSets = 1; dp.poolSizeCount = 2; dp.pPoolSizes = ps;
     VkDescriptorPool gpool; a->vkCreateDescriptorPool(vk->dev, &dp, nullptr, &gpool);
     VkDescriptorSetAllocateInfo da{}; da.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; da.descriptorPool = gpool; da.descriptorSetCount = 1; da.pSetLayouts = &gdsl;
     a->vkAllocateDescriptorSets(vk->dev, &da, &gset);
     VkDescriptorBufferInfo bi[3] = {{vk_buf(ssbo), 0, VK_WHOLE_SIZE}, {vk_buf(over), 0, VK_WHOLE_SIZE}, {vk_buf(tab), 0, VK_WHOLE_SIZE}};
-    VkWriteDescriptorSet w[3]{};
-    for (u32 j = 0; j < 3; ++j) { w[j].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[j].dstSet = gset; w[j].dstBinding = j + 1; w[j].descriptorCount = 1;
-      w[j].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[j].pBufferInfo = &bi[j]; }
-    a->vkUpdateDescriptorSets(vk->dev, 3, w, 0, nullptr);
+    const VkDescriptorImageInfo ii[2] = {{fsamp, fview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {fsamp, fview_srgb, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet w[5]{};
+    for (u32 j = 0; j < 5; ++j) { w[j].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[j].dstSet = gset; w[j].dstBinding = j + 1; w[j].descriptorCount = 1;
+      if (j < 3) { w[j].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[j].pBufferInfo = &bi[j]; }
+      else { w[j].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[j].pImageInfo = &ii[j - 3]; } }
+    a->vkUpdateDescriptorSets(vk->dev, 5, w, 0, nullptr);
     VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push)};
     VkPipelineLayoutCreateInfo pli{}; pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pli.setLayoutCount = 1; pli.pSetLayouts = &gdsl;
     pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pcr;
@@ -281,7 +305,12 @@ int main(int argc, char** argv) {
     VkGraphicsPipelineCreateInfo gp{}; gp.pDynamicState = &dys; gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gp.stageCount = 2; gp.pStages = st;
     gp.pVertexInputState = &vin; gp.pInputAssemblyState = &ia; gp.pViewportState = &vs; gp.pRasterizationState = &rs; gp.pMultisampleState = &ms;
     gp.pColorBlendState = &cbs; gp.layout = gpl; gp.renderPass = rp;
-    if (a->vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &gpipe) != VK_SUCCESS) { std::printf("present.frag pipeline failed\n"); return 1; }
+    for (u32 f = 0; f < 4; ++f) {
+      const VkSpecializationMapEntry me{0, 0, sizeof(u32)};
+      const VkSpecializationInfo spec{1, &me, sizeof(u32), &f};
+      st[1].pSpecializationInfo = &spec;
+      if (a->vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &gpipes[f]) != VK_SUCCESS) { std::printf("present.frag pipeline %u failed\n", f); return 1; }
+    }
   }
 
   VkCommandPool cpool; VkCommandBuffer cb; VkFence fence; VkQueryPool qp;
@@ -322,6 +351,7 @@ int main(int argc, char** argv) {
   const Case cases[] = {
     {"4x at 0,0", {0, 0, 4 * static_cast<int>(SW), 4 * static_cast<int>(SH)}},
     {"3x at 129,97", {129, 97, 3 * static_cast<int>(SW), 3 * static_cast<int>(SH)}},
+    {"2.5x at 0,0", {0, 0, 640, 480}},
   };
   bool pass = true;
   for (const Case& c : cases) {
@@ -384,10 +414,12 @@ int main(int argc, char** argv) {
       }
       std::printf("  B nearest blit%s GPU median %.3f ms p90 %.3f max %.3f (frame copy %.3f) | submit-to-fence median %.3f p90 %.3f | CPU upload %.3f\n",
                   clear_each ? " + clear      " : "              ", gpu.pct(0.5), gpu.pct(0.9), gpu.pct(1.0), cpy.pct(0.5), wall.pct(0.5), wall.pct(0.9), up.pct(0.5));
-      for (int v = 0; v < 2; ++v) pass &= check(dbuf[v], W, H, pattern.data() + v * kFrameWords, c.r);
+      // vkCmdBlitImage's nearest rounds its own way at fractional scales: checked at whole ones only.
+      if (c.r.w % static_cast<int>(SW) == 0 && c.r.h % static_cast<int>(SH) == 0) for (int v = 0; v < 2; ++v) pass &= check(dbuf[v], W, H, pattern.data() + v * kFrameWords, c.r);
     }
-    // C: the fragment present, as gpu_present.cpp records it.
-    {
+    // C: the fragment present, as gpu_present.cpp records it, per filter (GpuPresent::Filter).
+    static const char* const kFilterName[4] = {"        ", " +bilin ", " +seams ", " +seamsL"};
+    for (u32 filter = 0; filter < 4; ++filter) {
       Stats up, gpu, wall;
       for (int it = 0; it < kRuns; ++it) {
         const double u0 = now_ms();
@@ -403,11 +435,28 @@ int main(int argc, char** argv) {
           double ga, gb, wl;
           if (!run([&] {
                 a->vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qp, 1);
+                // Every frame (both views share the image here; gpu_present.cpp copies its slot's layers once a frame).
+                static const bool copy_always = std::getenv("PROBE_COPY_ALWAYS") != nullptr;   // the copy's own cost, under the nearest pipeline
+                const bool copy = filter || copy_always;
+                {
+                  VkImageMemoryBarrier ib = img_barrier(fimg, VK_IMAGE_LAYOUT_UNDEFINED, copy ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0,
+                                                        filter ? VK_ACCESS_TRANSFER_WRITE_BIT : VK_ACCESS_SHADER_READ_BIT);
+                  ib.subresourceRange.layerCount = 2;
+                  a->vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, copy ? VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+                  if (copy) {
+                    VkBufferImageCopy rg[2]{};
+                    for (u32 k = 0; k < 2; ++k) { rg[k].bufferOffset = sizeof(u32) * k * kFrameWords; rg[k].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, k, 1}; rg[k].imageExtent = {SW, SH, 1}; }
+                    a->vkCmdCopyBufferToImage(cb, vk_buf(ssbo), fimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 2, rg);
+                    ib = img_barrier(fimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+                    ib.subresourceRange.layerCount = 2;
+                    a->vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+                  }
+                }
                 VkClearValue black{};
                 VkRenderPassBeginInfo rb{}; rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rb.renderPass = rp; rb.framebuffer = fbs[v]; rb.renderArea = {{0, 0}, {W, H}};
                 rb.clearValueCount = 1; rb.pClearValues = &black;
                 a->vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
-                a->vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, gpipe);
+                a->vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, gpipes[filter]);
                 a->vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, gpl, 0, 1, &gset, 0, nullptr);
                 const float bc[4] = {1, 1, 1, 1};
                 a->vkCmdSetBlendConstants(cb, bc);
@@ -419,9 +468,9 @@ int main(int argc, char** argv) {
         }
         gpu.add(g); wall.add(w);
       }
-      std::printf("  C fragment (present.frag)    GPU median %.3f ms p90 %.3f max %.3f | submit-to-fence median %.3f p90 %.3f | CPU upload %.3f\n",
-                  gpu.pct(0.5), gpu.pct(0.9), gpu.pct(1.0), wall.pct(0.5), wall.pct(0.9), up.pct(0.5));
-      for (int v = 0; v < 2; ++v) pass &= check(dbuf[v], W, H, pattern.data() + v * kFrameWords, c.r);
+      std::printf("  C fragment (present.frag)%s GPU median %.3f ms p90 %.3f max %.3f | submit-to-fence median %.3f p90 %.3f | CPU upload %.3f\n",
+                  kFilterName[filter], gpu.pct(0.5), gpu.pct(0.9), gpu.pct(1.0), wall.pct(0.5), wall.pct(0.9), up.pct(0.5));
+      if (filter == 0) for (int v = 0; v < 2; ++v) pass &= check(dbuf[v], W, H, pattern.data() + v * kFrameWords, c.r);   // (filters: gpu_present_probe)
     }
   }
   a->vkDeviceWaitIdle(vk->dev);

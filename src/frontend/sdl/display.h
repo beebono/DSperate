@@ -109,7 +109,15 @@ public:
   void set_page(bool on);
   // On the display-engine tier, chunky is applied by the scanline scaler at
   // 1:1 then rotated; grid/seams/bilinear need panel pixels and are off there.
-  bool effects_at_source() const { return disp_ != nullptr && scaled_; }
+  // The GPU presenters (Vulkan, RGA) take chunky the same way: the core draws
+  // the cells at 1:1 into src_side_ (source_targets), presented in place of
+  // the core's frame (source_frame); their grid, seams and bilinear are their own.
+  bool effects_at_source() const { return (disp_ != nullptr && scaled_) || src_gpu_; }
+  bool source_targets(Target out[SCREENS]);   // false: no chunky source on this window
+  const u32* source_frame(int screen) const { return src_side_[screen].data(); }
+  bool source_chunky() const { return src_gpu_; }
+  // video.seam for the Vulkan present: 0 dark (the grid), 1 blend, 2 blend in linear light.
+  void set_seam_blend(u8 mode) { seam_blend_ = mode; }
   // Chunky is left plain on a view shown smaller than the screen (PiP inset, dominant secondary).
   bool chunky_on(int screen) const { return src_chunky_[screen]; }
   void set_grid_strength(double s) { grid_strength_ = s; }   // 0..1; dimmed grid is an overlay, needs no seam-adjacent room
@@ -213,7 +221,9 @@ private:
   bool open_surface(int rot);
   bool open_surface_scaling(int rot);   // Dmabuf and Surface's shared setup
   bool open_renderer(bool linear, bool vsync, int rot);
-  void layout();
+  void layout();         // layout_views(), then the GPU presenters' chunky source (refresh_source)
+  void layout_views();
+  void refresh_source();
   void build_source_scale();   // display-engine tier w/ chunky: 1:1 run tables and source-side cell maps
   void build_scale();          // pick up the window surface and rebuild the x-map
   bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode (logical under rotation)
@@ -237,6 +247,8 @@ private:
   int           display_index_ = 0;
   bool          fullscreen_ = false;
   bool          linear_ = false;      // as opened: the GPU presenters filter by it
+  u8            seam_blend_ = 0;      // set_seam_blend
+  bool          src_gpu_ = false;     // a GPU presenter shows chunky cells the core draws into src_side_
   int           open_w_ = 0, open_h_ = 0;   // window size when the scanout sink opened (settle_step)
   Layout        layout_;
   u8            inset_alpha_ = 255;

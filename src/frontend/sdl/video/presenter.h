@@ -55,6 +55,7 @@ public:
     frontend::Rect drawn;        // where the frontend drew on overlay() this frame
     u32 grid = 256;              // LCD grid brightness on a seam, 0..256 (256 = off)
     bool linear = false;         // video.linear; off: the RGA draws whole-number scales exactly
+    u8 seam_blend = 0;           // video.seam: 1 blend, 2 blend in linear light (Vulkan only; the RGA draws dark seams)
     EdgePlanes edges;            // the edge cut (Vulkan only; the RGA cannot cut)
     // Colour correction to apply to the frames as they are uploaded (Vulkan
     // only, kern::colour_correct on the present thread); null: the frames

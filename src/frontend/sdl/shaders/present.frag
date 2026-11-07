@@ -107,6 +107,44 @@ vec3 edge_cut(uint base, int sx, int sy, float u, float v, uint s, float bw) {
   return mix(unpack(o), unpack(own), clamp(0.5 + (neg ? t - line : line - t) / bw, 0.0, 1.0));
 }
 
+// The CPU scanline scaler's filters (core/gpu/gpu.cpp emit_bilinear,
+// emit_row_straddle) through the texture unit: the frames again as an image
+// (a layer per screen per slot, gpu_present.cpp), filtered by the sampler,
+// which blends for free where the same integer blends from `src` cost the
+// Mali-G52 2-3x the nearest pass. Its weights are 8-bit, so a blend can land
+// a step from the CPU's. FILTER is a specialisation constant: each pipeline
+// carries only its own path.
+layout(constant_id = 0) const uint FILTER = 0u;   // GpuPresent::Filter: 0 nearest, 1 bilinear, 2 seams, 3 seams in linear light
+layout(binding = 4) uniform sampler2DArray frame;
+layout(binding = 5) uniform sampler2DArray frame_srgb;   // the same, decoded to linear before filtering
+
+float frame_layer() { uint q = pc.b.z / 49152u; return float((q >> 2) * 2u + (q & 3u)); }   // slot * 2 + screen
+uint pack8(vec3 c) { uvec3 b = uvec3(round(clamp(c, 0.0, 1.0) * 255.0)); return 0xFF000000u | (b.r << 16) | (b.g << 8) | b.b; }
+vec3 encode_srgb(vec3 l) { return mix(l * 12.92, 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), l)); }
+
+// Box-filter seams: nearest, except the panel column / row that straddles
+// the boundary after source pixel sx / line sy, which takes the two sides by
+// coverage. One sample a pixel either way, as bilinear: at the texel's centre
+// (exactly the texel), or that far past it on a straddle, where the sampler
+// weighs the two sides so (a corner, both ways). A branch around the sample
+// (or the storage-buffer texel beside it) cost the Mali ~1.3 ms a frame at 4x.
+// In float: every product here is an integer below 2^24, so exact.
+uint seam_px(ivec2 o, int sx, int sy) {
+  // The boundary after line sy, in 1/192 panel rows from this row's top; inside the row (< 192): a straddle.
+  float vf = float(sy + 1) * float(pc.rect.w) - 192.0 * float(o.y);
+  bool vrow = sy < 191 && vf < 192.0;
+  float hf = float(sx + 1) * float(pc.rect.z) - 256.0 * float(o.x);   // likewise in 1/256 columns
+  bool hcol = sx < 255 && hf < 256.0;
+  // Weights as the CPU's: the next column's (256 - hf)/256, the next line's
+  // floor((192 - vf) * 256 / 192)/256 (a non-integer quotient sits at least
+  // 1/192 from the next integer, so the nudge only guards an exact one).
+  vec2 t = vec2(float(sx) + 0.5 + (hcol ? (256.0 - hf) / 256.0 : 0.0),
+                float(sy) + 0.5 + (vrow ? floor((192.0 - vf) * (256.0 / 192.0) + 0.001) / 256.0 : 0.0));
+  vec3 uvl = vec3(t / vec2(256.0, 192.0), frame_layer());
+  if (FILTER == 3u && (vrow || hcol)) return pack8(encode_srgb(textureLod(frame_srgb, uvl, 0.0).rgb));   // blended in linear light
+  return pack8(textureLod(frame, uvl, 0.0).rgb);
+}
+
 void main() {
   ivec2 o = ivec2(d);
   if (pc.b.y == 1u) {
@@ -118,9 +156,15 @@ void main() {
   // floor(o * 256 / w) exactly: the fraction is a multiple of 1/w, so half of that absorbs the float error.
   float fx = float(o.x) * pc.s.x + pc.s.z, fy = float(o.y) * pc.s.y + pc.s.w;
   int sx = min(int(fx), 255), sy = min(int(fy), 191);
-  uint s = src[pc.b.z + uint(sy) * 256u + uint(sx)];
-  vec3 col = (pc.b.w & 0x200u) != 0u ? edge_cut(pc.b.z, sx, sy, clamp(fx - float(sx), 0.0, 1.0), clamp(fy - float(sy), 0.0, 1.0), s, float((pc.b.w >> 10) & 63u) / 16.0) : unpack(s);
-  uint gf = pc.b.w >> 16;
-  if ((pc.b.w & 0x100u) != 0u && gf < 256u && (grid_seam(pc.b.w & 0xFFu, o.x, 0) || grid_seam(pc.b.w & 0xFFu, o.y, 1))) col = floor(col * (float(gf) / 256.0));
+  const uint filt = FILTER;
+  if (filt == 1u) { dst = vec4(textureLod(frame, vec3(d / vec2(pc.rect.zw), frame_layer()), 0.0).rgb, 1.0); return; }
+  // Seams stand in for the grid on an upscaled view; smaller, it is plain nearest (as the CPU's).
+  bool seams = filt >= 2u && pc.rect.w >= 192;
+  vec3 col;
+  if ((pc.b.w & 0x200u) != 0u && (!seams || src[pc.b.z + 2u * 49152u + uint(sy) * 256u + uint(sx)] != 0u))
+    col = edge_cut(pc.b.z, sx, sy, clamp(fx - float(sx), 0.0, 1.0), clamp(fy - float(sy), 0.0, 1.0), src[pc.b.z + uint(sy) * 256u + uint(sx)], float((pc.b.w >> 10) & 63u) / 16.0);
+  else col = unpack(seams ? seam_px(o, sx, sy) : src[pc.b.z + uint(sy) * 256u + uint(sx)]);
+  uint gf = (pc.b.w >> 16) & 0x1FFu;
+  if (filt == 0u && (pc.b.w & 0x100u) != 0u && gf < 256u && (grid_seam(pc.b.w & 0xFFu, o.x, 0) || grid_seam(pc.b.w & 0xFFu, o.y, 1))) col = floor(col * (float(gf) / 256.0));
   dst = vec4(col / 255.0, 1.0);
 }

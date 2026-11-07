@@ -86,7 +86,48 @@ struct Case {
   u32 grid = 256;
   SDL_Rect over{0, 0, 0, 0};   // the overlay's drawn rectangle (filled with a pattern)
   ds::gpu::ColourProfile colour = ds::gpu::ColourProfile::Off;   // corrected on the GPU, modelled by kern::colour_pixel
+  u32 filter = GpuPresent::kNearest;
 };
+
+// The CPU scanline scaler's filters (core/gpu/gpu.cpp), restated per panel pixel.
+u32 lerp8(u32 a, u32 b, u32 f) {
+  u32 r = 0;
+  for (u32 sh = 0; sh < 32; sh += 8) r |= ((((a >> sh) & 255) * (256 - f) + ((b >> sh) & 255) * f + 128) >> 8) << sh;
+  return r;
+}
+u32 lerp_linear(u32 a, u32 b, u32 f) {   // Gpu's GammaLut
+  if (!f) return a;
+  auto to_lin = [](u32 c) { const double v = c / 255.0; return static_cast<u32>(std::lround((v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4)) * 4095.0)); };
+  auto from_lin = [](u32 l) { const double v = l / 4095.0; return static_cast<u32>(std::lround((v <= 0.0031308 ? v * 12.92 : 1.055 * std::pow(v, 1.0 / 2.4) - 0.055) * 255.0)); };
+  u32 r = 0xFF000000u;
+  for (u32 sh = 0; sh < 24; sh += 8) r |= from_lin((to_lin((a >> sh) & 255) * (256 - f) + to_lin((b >> sh) & 255) * f + 128) >> 8) << sh;
+  return r;
+}
+// Display::build_scale's lin_sx/lin_wx and Gpu::emit_bilinear's rows.
+template <typename Px> u32 m_bilinear(Px px, int x, int y, int w, int h) {
+  const s32 u = static_cast<s32>(((2 * x + 1) * SW * 128) / w) - 128;
+  u32 sx = 0, fx = 0;
+  if (u > 0) { sx = static_cast<u32>(u) >> 8; fx = static_cast<u32>(u) & 255; if (sx >= SW - 1) { sx = SW - 2; fx = 255; } }
+  const s32 v = static_cast<s32>(((2 * y + 1) * SH * 128) / h) - 128;
+  u32 sy = 0, fy = 0;
+  if (v > 0) { sy = static_cast<u32>(v) >> 8; fy = static_cast<u32>(v) & 255; if (sy >= SH - 1) { sy = SH - 1; fy = 0; } }
+  const u32 r0 = lerp8(px(sx, sy), px(sx + 1, sy), fx);
+  return fy ? lerp8(r0, lerp8(px(sx, sy + 1), px(sx + 1, sy + 1), fx), fy) : r0;
+}
+// Gpu::emit_scaled's box-filter seams: seam_w, the straddling row (blend_rows), then emit_row_straddle.
+template <typename Px> u32 m_seam(Px px, int x, int y, int w, int h, bool lin) {
+  const u32 sx = static_cast<u32>(x * SW / w), sy = static_cast<u32>(y * SH / h);
+  auto bl = [&](u32 a, u32 b, u32 f) { return lin ? lerp_linear(a, b, f) : lerp8(a, b, f); };
+  const u32 tb = (sy + 1) * static_cast<u32>(h), vf = tb % SH;
+  const bool vrow = sy + 1 < SH && vf && static_cast<u32>(y) == tb / SH;
+  const u32 wl = ((SH - vf) * 256) / SH;
+  const u32 hb = (sx + 1) * static_cast<u32>(w), hf = hb % SW;
+  const bool hcol = sx + 1 < SW && hf && static_cast<u32>(x) == hb / SW;
+  u32 c = px(sx, sy);
+  if (vrow) c = bl(c, px(sx, sy + 1), wl);
+  if (hcol) { u32 n = px(sx + 1, sy); if (vrow) n = bl(n, px(sx + 1, sy + 1), wl); c = bl(c, n, 256 - (hf * 256) / SW); }
+  return c;
+}
 
 // gpu_present.cpp's LCD grid seam table (kern::scale_row_grid's placement).
 void seams(const Case& c, u32 t[128]) {
@@ -124,10 +165,15 @@ std::vector<u32> model(const Case& c, int pw, int ph, const u32* const fb[2], co
         const SDL_Rect& rc = c.v[v].rect;
         if (!c.v[v].shown || lx < rc.x || ly < rc.y || lx >= rc.x + rc.w || ly >= rc.y + rc.h) continue;
         const int sx = (lx - rc.x) * SW / rc.w, sy = (ly - rc.y) * SH / rc.h;
-        u32 s = fb[c.v[v].screen][sy * SW + sx];
-        if (lut) s = ds::gpu::kern::colour_pixel(*lut, s);   // before the grid, as the core corrects
+        // Colour first (the present corrects as it uploads), then the filter.
+        const u32* const f = fb[c.v[v].screen];
+        auto px = [&](u32 x, u32 y) { const u32 p = f[y * SW + x]; return lut ? ds::gpu::kern::colour_pixel(*lut, p) : p; };
+        const int ox = lx - rc.x, oy = ly - rc.y;
+        const bool seams = c.filter >= GpuPresent::kSeamBlend && rc.h >= SH;
+        const u32 s = c.filter == GpuPresent::kBilinear ? m_bilinear(px, ox, oy, rc.w, rc.h)
+                    : seams ? m_seam(px, ox, oy, rc.w, rc.h, c.filter == GpuPresent::kSeamLinear) : px(sx, sy);
         float cr = static_cast<float>((s >> 16) & 255), cg = static_cast<float>((s >> 8) & 255), cb = static_cast<float>(s & 255);
-        if (c.grid < 256 && c.v[v].grid && (seam(v, lx - rc.x, 0) || seam(v, ly - rc.y, 1))) {
+        if (c.filter == GpuPresent::kNearest && c.grid < 256 && c.v[v].grid && (seam(v, lx - rc.x, 0) || seam(v, ly - rc.y, 1))) {
           const float f = static_cast<float>(c.grid) / 256.0f;
           cr = std::floor(cr * f); cg = std::floor(cg * f); cb = std::floor(cb * f);
         }
@@ -180,6 +226,13 @@ int main() {
   { Case c{"colour nds_lite, rot 90", 90, 1024, 768, {two[0], two[1]}, 2}; c.colour = ds::gpu::ColourProfile::NdsLite; cases.push_back(c); }
   { Case c{"colour nds_lite + grid", 0, 1024, 768, {{0, {0, 0, 768, 576}, true, false, true}, {1, {768, 576, 256, 192}, true, false, true}}, 2};
     c.grid = 128; c.colour = ds::gpu::ColourProfile::NdsLite; cases.push_back(c); }
+  // Fractional scales (2.5x as the RG DS Plus' 640x480 halves, 3.7x, 1.3x), so every seam weight shows; the grid must not.
+  const GpuPresent::View frac[2] = {{0, {0, 0, 640, 480}, true, false, true}, {1, {640, 0, 384, 250}, true, false, true}};
+  { Case c{"bilinear", 0, 1024, 768, {frac[0], frac[1]}, 2}; c.filter = GpuPresent::kBilinear; c.grid = 128; cases.push_back(c); }
+  { Case c{"bilinear 3.7x, rot 90", 90, 1024, 768, {{0, {30, 20, 947, 710}, true, false, false}, frac[1]}, 2}; c.filter = GpuPresent::kBilinear; cases.push_back(c); }
+  { Case c{"seam blend", 0, 1024, 768, {frac[0], frac[1]}, 2}; c.filter = GpuPresent::kSeamBlend; c.grid = 128; cases.push_back(c); }
+  { Case c{"seam blend 3.7x + colour", 0, 1024, 768, {{0, {30, 20, 947, 710}, true, false, false}, frac[1]}, 2}; c.filter = GpuPresent::kSeamBlend; c.colour = ds::gpu::ColourProfile::Nds; cases.push_back(c); }
+  { Case c{"seam blend, linear light", 0, 1024, 768, {frac[0], frac[1]}, 2}; c.filter = GpuPresent::kSeamLinear; cases.push_back(c); }
 
   bool pass = true;
   for (const Case& c : cases) {
@@ -203,7 +256,7 @@ int main() {
     }
     std::unique_ptr<ds::gpu::kern::ColourLut> lut;
     if (c.colour != ds::gpu::ColourProfile::Off) { lut = std::make_unique<ds::gpu::kern::ColourLut>(); ds::gpu::build_colour_lut(c.colour, *lut); }
-    if (!gp->present(out, fb, c.v, c.nviews, c.rot, c.lw, c.lh, c.alpha, c.over, c.grid, nullptr, lut.get())) { std::printf("%s: present failed\n", c.name); pass = false; continue; }
+    if (!gp->present(out, fb, c.v, c.nviews, c.rot, c.lw, c.lh, c.alpha, c.over, c.grid, nullptr, lut.get(), c.filter)) { std::printf("%s: present failed\n", c.name); pass = false; continue; }
     gp->flush(out);
     const std::vector<u32> got = out.shown(), want = model(c, pw, ph, fb, over, lut.get());
     u32 off1 = 0, bad = 0, fx = 0, fy = 0, fg = 0, fw = 0;
@@ -213,14 +266,14 @@ int main() {
         if (g == w) continue;
         int d = 0;
         for (int sh : {0, 8, 16}) d = std::max(d, std::abs(static_cast<int>((g >> sh) & 255) - static_cast<int>((w >> sh) & 255)));
-        if (d <= 1) { ++off1; continue; }
+        if (d <= 1 || (c.filter != GpuPresent::kNearest && d <= 3)) { ++off1; continue; }   // filters: the sampler's 8-bit weights (and sRGB decode), a few steps at worst
         if (!bad++) { fx = static_cast<u32>(x); fy = static_cast<u32>(y); fg = g; fw = w; }
       }
-    const bool blends = c.over.w > 0 || c.alpha < 255;
+    const bool blends = c.over.w > 0 || c.alpha < 255 || c.filter != GpuPresent::kNearest;   // filters: the sampler's 8-bit weights vs the CPU's integer steps
     const bool ok = bad == 0 && (blends || off1 == 0);
     pass &= ok;
     std::printf("%-24s %4dx%-4d %s", c.name, pw, ph, ok ? "ok" : "MISMATCH");
-    if (off1) std::printf(", %u pixels one step off%s", off1, blends ? " (blend rounding)" : "");
+    if (off1) std::printf(", %u pixels %s off%s", off1, c.filter != GpuPresent::kNearest ? "1-3 steps" : "one step", blends ? " (blend rounding)" : "");
     if (bad) std::printf(", %u pixels wrong, first at %u,%u: got %06x want %06x", bad, fx, fy, fg, fw);
     std::printf("\n");
   }

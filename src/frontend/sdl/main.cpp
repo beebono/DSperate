@@ -1066,6 +1066,7 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
     display.set_sinks(ds::frontend::Sink::Count, vs.want_sink); display2.set_sinks(ds::frontend::Sink::Count, vs.want_sink);
     display.set_chunky(vs.chunky != 0, vs.chunky_cell); display2.set_chunky(vs.chunky != 0, vs.chunky_cell);
     display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s); display2.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
+    display.set_seam_blend(vs.seam_blend); display2.set_seam_blend(vs.seam_blend);
     display.set_integer_scale(vs.int_scale); display2.set_integer_scale(vs.int_scale);
     if (!display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout, 0, vs.upper_display) ||
         !display2.open("DSperate (Bottom)", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout, 1, vs.lower_display)) return false;
@@ -1079,6 +1080,7 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
   display.set_sinks(vs.panel_sink, vs.want_sink);
   display.set_integer_scale(vs.int_scale);
   display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
+  display.set_seam_blend(vs.seam_blend);
   if (!vs.linear) display.set_disp_grid(static_cast<u8>(((256 - vs.grid) * 255) / 256));
   return display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout);
 }
@@ -2848,10 +2850,8 @@ sdl_ready:
         if (!panel_effects()) return tr("THIS SCREEN SCALES IN HARDWARE");
         return flag("video.linear", false) ? tr("BILINEAR IS ON") : "";
       case ds::sdl::Dep::Chunky:
-        if (display.rga_present()) return tr("NOT ON THE RGA PRESENT");
         return flag("video.linear", false) ? tr("BILINEAR IS ON") : "";
       case ds::sdl::Dep::ChunkyCell:
-        if (display.rga_present()) return tr("NOT ON THE RGA PRESENT");
         if (flag("video.linear", false)) return tr("BILINEAR IS ON");
         return cfg.str("video.chunky", "false") == "false" ? tr("ONLY WITH CHUNKY ON") : "";
       case ds::sdl::Dep::Windowed:
@@ -3995,16 +3995,22 @@ sdl_ready:
     }
     ds::sdl::Display::Target target[2] = {};
     bool scaled = false;
+    bool at_src = false;   // a GPU presenter's chunky: the core draws the cells into the windows' source frames
     if (present && !pause_pending && !shot_pending) {
       // Scanout tiers block here until a buffer is free (DS_FPS "wait").
       const Uint64 tw = SDL_GetPerformanceCounter();
       if (dual_window) sync_dual_modes(display, display2);
       scaled = display.begin_frame(target);
       if (dual_window) scaled = display2.begin_frame(target) && scaled;
+      if (!scaled) {
+        at_src = display.source_targets(target);
+        if (dual_window) at_src = display2.source_targets(target) && at_src;
+        if (!at_src) for (auto& t : target) t = {};
+      }
       wait_ticks += SDL_GetPerformanceCounter() - tw;
     }
-    set_scale_targets(target, scaled);
-    fb_current = present && !scaled;   // a skipped frame renders nothing
+    set_scale_targets(target, scaled || at_src);
+    fb_current = present && !scaled && !at_src;   // a skipped frame renders nothing
 
     const Uint64 t0 = SDL_GetPerformanceCounter();
 #if DSPERATE_NET
@@ -4185,11 +4191,14 @@ sdl_ready:
         // DS_EDGE_CUT=1 cuts with plain video.aa too, and the CPU raster's
         // edges (the reference the GPU's are checked against). Takes effect
         // from the next frame.
-        nds.gpu.set_edge_export(edge_cut_wanted(nds, display, display2, dual_window, nds.gpu3d.renderer().gpu_active()));
+        // Chunky cells are no edges to cut: no edge plane while they are drawn.
+        nds.gpu.set_edge_export(!display.source_chunky() && edge_cut_wanted(nds, display, display2, dual_window, nds.gpu3d.renderer().gpu_active()));
         ds::sdl::EdgePlanes edges;
-        if (nds.gpu.edge_export())
+        if (nds.gpu.edge_export() && !at_src)
           for (int s = 0; s < 2; ++s) { edges.plane[s] = nds.gpu.edge_plane(s); edges.rows[s] = nds.gpu.edge_rows(s); edges.frame[s] = nds.gpu.framebuffer(s); }
         const u32* fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
+        if (at_src)   // each screen from the window that shows it
+          for (int s = 0; s < 2; ++s) fb[s] = (dual_window && display2.only_screen() == s ? display2 : display).source_frame(s);
         if (cursor) {
           std::memcpy(cursor_fb.data(), fb[1], cursor_fb.size() * 4);
           draw_cursor(CursorDst{cursor_fb.data(), ds::SCREEN_W, ds::SCREEN_H, nullptr}, input.stylus_x(), input.stylus_y(), cursor_size);

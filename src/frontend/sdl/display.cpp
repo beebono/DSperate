@@ -334,6 +334,30 @@ void Display::close() {
 
 // Screen rects for the current mode: aspect preserved, centred.
 void Display::layout() {
+  layout_views();
+  refresh_source();
+}
+
+// A GPU presenter with chunky on (and bilinear off, which takes precedence):
+// the cells at 1:1 into src_side_, as on the display-engine tier.
+void Display::refresh_source() {
+  src_gpu_ = gpu_ && chunky_ && !linear_;
+  if (!src_gpu_) return;
+  build_source_scale();
+  scaled_ = false;   // the presenter scales; begin_frame() stays out of it
+}
+
+bool Display::source_targets(Target out[SCREENS]) {
+  if (!src_gpu_) return false;
+  sync();
+  for (int i = 0; i < nviews_; ++i) {
+    const View& v = views_[i];
+    out[v.screen] = Target{src_side_[v.screen].data(), SCREEN_W, SCREEN_H, xrun_[v.screen].data(), seam_w_[v.screen].data(), nullptr, nullptr, false, xrun_plain_[v.screen].data()};
+  }
+  return true;
+}
+
+void Display::layout_views() {
   if (disp_) { int cw = 0, ch = 0; natural_size(layout_, 1.0, cw, ch); disp_->set_canvas(cw, ch); }
   int w = 0, h = 0;
   if (!out_size(w, h)) return;
@@ -394,6 +418,7 @@ bool Display::drop_gpu_present(const char* why) {
   if (!gpu_) return false;
   std::fprintf(stderr, "video: GPU present %s; scanline scaling from here\n", why);
   gpu_.reset();
+  src_gpu_ = false;
   scaled_ = true;
   margins_dirty_ = true;
   layout();
@@ -424,6 +449,7 @@ bool Display::prepare_gpu(GpuFrame& f) {
   for (int i = 0; i < nviews_; ++i) f.v[i] = FramePresenter::View{views_[i].screen, views_[i].rect, views_[i].shown, !views_[i].direct, grid_on(views_[i].screen)};
   f.n = nviews_;
   p.rot = rot_; p.inset_alpha = inset_alpha_; p.linear = linear_;
+  p.seam_blend = src_gpu_ ? 0 : seam_blend_;   // cells at source: their seams were the core's to draw
   p.colour = gpu_->kind() == FramePresenter::Kind::Vulkan ? colour_ : nullptr;
   p.drawn = frontend::Rect{canvas_drawn_.x, canvas_drawn_.y, canvas_drawn_.w, canvas_drawn_.h};
   p.grid = grid_strength_ > 0.0 ? static_cast<u32>(std::lround((1.0 - grid_strength_) * 256.0)) : 256u;
@@ -603,7 +629,7 @@ bool Display::out_size(int& w, int& h) const {
 // 1:1 into src_side_, which end_frame hands to the layer instead of the
 // core's framebuffer.
 void Display::build_source_scale() {
-  const double s = disp_ ? disp_->fit_scale() : 0.0;
+  const double s = disp_ ? disp_->fit_scale() : 1.0;   // a GPU presenter: views are in panel pixels
   // First the cell each view would get, and whether the scaler can draw them.
   u32 D_hw = 0;
   bool hw = disp_ != nullptr && chunky_cell_ != 0 && s > 0.0;

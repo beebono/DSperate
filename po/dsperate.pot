@@ -94,8 +94,8 @@ msgstr ""
 msgid "FPS"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:838 src/frontend/sdl/main.cpp:1117 src/frontend/sdl/main.cpp:2637
-#: src/frontend/sdl/main.cpp:2638 src/frontend/sdl/main.cpp:2674
+#: src/frontend/sdl/input.cpp:838 src/frontend/sdl/main.cpp:1119 src/frontend/sdl/main.cpp:2639
+#: src/frontend/sdl/main.cpp:2640 src/frontend/sdl/main.cpp:2676
 msgid "NONE"
 msgstr ""
 
@@ -131,245 +131,241 @@ msgstr ""
 msgid "REJECTED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1089
+#: src/frontend/sdl/main.cpp:1091
 msgid "MODIFIER"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1090
+#: src/frontend/sdl/main.cpp:1092
 msgid "STYLUS TAP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1091
+#: src/frontend/sdl/main.cpp:1093
 msgid "STYLUS TAP (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1092
+#: src/frontend/sdl/main.cpp:1094
 msgid "STYLUS STICK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1093
+#: src/frontend/sdl/main.cpp:1095
 msgid "STYLUS HOLD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1094
+#: src/frontend/sdl/main.cpp:1096
 msgid "STICK DPAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1095
+#: src/frontend/sdl/main.cpp:1097
 msgid "STICK ABXY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1097
+#: src/frontend/sdl/main.cpp:1099
 msgid "GRIP GREEN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1098
+#: src/frontend/sdl/main.cpp:1100
 msgid "GRIP RED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1099
+#: src/frontend/sdl/main.cpp:1101
 msgid "GRIP YELLOW"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1100
+#: src/frontend/sdl/main.cpp:1102
 msgid "GRIP BLUE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1101
+#: src/frontend/sdl/main.cpp:1103
 msgid "GRIP STRUM"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1102
+#: src/frontend/sdl/main.cpp:1104
 msgid "GRIP STRUM (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1105
+#: src/frontend/sdl/main.cpp:1107
 msgid "L STICK RIGHT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1106
+#: src/frontend/sdl/main.cpp:1108
 msgid "L STICK DOWN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1107
+#: src/frontend/sdl/main.cpp:1109
 msgid "R STICK RIGHT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1108
+#: src/frontend/sdl/main.cpp:1110
 msgid "R STICK DOWN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1109
+#: src/frontend/sdl/main.cpp:1111
 msgid "L2 AXIS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1110
+#: src/frontend/sdl/main.cpp:1112
 msgid "R2 AXIS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1120
+#: src/frontend/sdl/main.cpp:1122
 msgid "L STICK X"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1120
+#: src/frontend/sdl/main.cpp:1122
 msgid "L STICK Y"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1120
+#: src/frontend/sdl/main.cpp:1122
 msgid "R STICK X"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1120
+#: src/frontend/sdl/main.cpp:1122
 msgid "R STICK Y"
 msgstr ""
 
 #. an inverted axis: {1} is the stick axis, e.g. L STICK X.
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:1124
+#: src/frontend/sdl/main.cpp:1126
 msgid "{1} INV"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1923
+#: src/frontend/sdl/main.cpp:1925
 msgid "STOPPING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1924
+#: src/frontend/sdl/main.cpp:1926
 msgid "WAITING ON THE CARD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1925
+#: src/frontend/sdl/main.cpp:1927
 msgid "UNPACKING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1926
+#: src/frontend/sdl/main.cpp:1928
 msgid "FIRST LAUNCH ONLY    B CANCELS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1951
+#: src/frontend/sdl/main.cpp:1953
 msgid "ANY BUTTON RETURNS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1959
+#: src/frontend/sdl/main.cpp:1961
 msgid "FILE CANNOT BE READ"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1960
+#: src/frontend/sdl/main.cpp:1962
 msgid "THE ZIP IS DAMAGED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1961
+#: src/frontend/sdl/main.cpp:1963
 msgid "NO GAME IN THE ZIP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1963
+#: src/frontend/sdl/main.cpp:1965
 msgid "ZIP NOT SUPPORTED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1964
+#: src/frontend/sdl/main.cpp:1966
 msgid "NOT A DS GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1982
+#: src/frontend/sdl/main.cpp:1984
 msgid "FIRMWARE IS BAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1982
+#: src/frontend/sdl/main.cpp:1984
 msgid "DS BIOS IS BAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2104
+#: src/frontend/sdl/main.cpp:2106
 msgid "NO GBA GAME (RUMBLE PAK)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2104
+#: src/frontend/sdl/main.cpp:2106
 msgid "NO GBA GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2135
+#: src/frontend/sdl/main.cpp:2137
 msgid "GBA CARTRIDGE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2135
+#: src/frontend/sdl/main.cpp:2137
 msgid "THIS GAME SUPPORTS THESE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2135
+#: src/frontend/sdl/main.cpp:2137
 msgid "DON'T ASK AGAIN FOR THIS GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2136
+#: src/frontend/sdl/main.cpp:2138
 msgid "A INSERT   B NO GBA GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2181
+#: src/frontend/sdl/main.cpp:2183
 msgid "STATE NOT LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2357
+#: src/frontend/sdl/main.cpp:2359
 msgid "NO SHORTCUT FOLDER"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2361
+#: src/frontend/sdl/main.cpp:2363
 msgid "NO DSI NAND (PATHS.DSI_NAND)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2362
+#: src/frontend/sdl/main.cpp:2364
 msgid "NO DSI BIOS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2363
+#: src/frontend/sdl/main.cpp:2365
 msgid "THE DSI NAND CANNOT BE READ"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2366
+#: src/frontend/sdl/main.cpp:2368
 msgid "THE DSI BIOS CANNOT BE READ"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:2371
+#: src/frontend/sdl/main.cpp:2373
 msgid "{1} ADDED, {2} REMOVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2637 src/frontend/sdl/settings.cpp:50
+#: src/frontend/sdl/main.cpp:2639 src/frontend/sdl/settings.cpp:50
 msgid "LEFT STICK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2637 src/frontend/sdl/settings.cpp:50
+#: src/frontend/sdl/main.cpp:2639 src/frontend/sdl/settings.cpp:50
 msgid "RIGHT STICK"
 msgstr ""
 
 #. a hotkey's second binding: {1} is the hotkey, e.g. SAVE STATE.
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:2669
+#: src/frontend/sdl/main.cpp:2671
 msgid "{1} (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2755
+#: src/frontend/sdl/main.cpp:2757
 msgid "IN THE FIRMWARE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2841 src/frontend/sdl/main.cpp:2882
+#: src/frontend/sdl/main.cpp:2843 src/frontend/sdl/main.cpp:2882
 msgid "NOT DURING A NETWORK SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2842
+#: src/frontend/sdl/main.cpp:2844
 msgid "ONLY WITH FRAMESKIP ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2845 src/frontend/sdl/main.cpp:2848
+#: src/frontend/sdl/main.cpp:2847 src/frontend/sdl/main.cpp:2850
 msgid "THIS SCREEN SCALES IN HARDWARE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2847
+#: src/frontend/sdl/main.cpp:2849
 msgid "THE RGA DRAWS THE DARK GRID ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2849 src/frontend/sdl/main.cpp:2852 src/frontend/sdl/main.cpp:2855
+#: src/frontend/sdl/main.cpp:2851 src/frontend/sdl/main.cpp:2853 src/frontend/sdl/main.cpp:2855
 msgid "BILINEAR IS ON"
-msgstr ""
-
-#: src/frontend/sdl/main.cpp:2851 src/frontend/sdl/main.cpp:2854
-msgid "NOT ON THE RGA PRESENT"
 msgstr ""
 
 #: src/frontend/sdl/main.cpp:2856
@@ -534,19 +530,19 @@ msgstr ""
 msgid "STATE {1} LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4054
+#: src/frontend/sdl/main.cpp:4060
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4066
+#: src/frontend/sdl/main.cpp:4072
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4067
+#: src/frontend/sdl/main.cpp:4073
 msgid "GAME LIKELY WON'T WORK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4068
+#: src/frontend/sdl/main.cpp:4074
 msgid "DSP IS NOT EMULATED"
 msgstr ""
 

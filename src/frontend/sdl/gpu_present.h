@@ -44,9 +44,13 @@ public:
   // `edges`: the edge cut's planes (core/gpu/edge_cut.h), or null: no cut.
   // `colour`: colour correction applied to the frames (and the edge
   // planes' colours) as they are uploaded, by the core's own kernel; null: none.
+  // `filter`: how a view samples its frame, as the CPU scanline scaler does
+  // (core/gpu/gpu.cpp emit_scaled): nearest (with the grid), bilinear (no
+  // grid, no edge cut), or box-filter seams that stand in for the grid.
+  enum Filter : u32 { kNearest = 0, kBilinear = 1, kSeamBlend = 2, kSeamLinear = 3 };
   bool present(ScanoutOut& out, const u32* const fb[2], const View* views, int nviews, int rot, int lw, int lh, u8 inset_alpha,
                SDL_Rect drawn = SDL_Rect{0, 0, 0, 0}, u32 grid = 256, const EdgePlanes* edges = nullptr,
-               const gpu::kern::ColourLut* colour = nullptr);
+               const gpu::kern::ColourLut* colour = nullptr, u32 filter = kNearest);
   // Canvas for the frontend's overlays (OSD, pause menu, notices) for the
   // coming frame: `lw`x`lh`, pitch `lw`, 0xAARRGGBB, alpha honoured,
   // host-cached. Pre-cleared where the frame before last drew.
