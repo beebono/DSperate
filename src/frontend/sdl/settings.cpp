@@ -25,6 +25,7 @@ const Choice kSeam[]     = {{"dark", N_("DARK")}, {"blend", N_("BLEND")}, {"blen
 const Choice kChunky[]   = {{"false", N_("OFF")}, {"mean", N_("DEFAULT")}, {"extreme", N_("ADAPTIVE")},
                             {"mode", N_("COMMON")}, {"tl", N_("FIRST")}, {"min", N_("DARKEST")}, {"max", N_("LIGHTEST")}};
 const Choice kAa[]       = {{"false", N_("OFF")}, {"true", N_("ON")}, {"enhanced", N_("ENHANCED")}};
+const Choice kColourProfile[] = {{"off", N_("OFF")}, {"nds", N_("DS")}, {"nds_lite", N_("DS LITE")}};
 const Choice kScreen[]   = {{"top", N_("TOP")}, {"bottom", N_("BOTTOM")}};
 // GBATEK's order, matching the firmware.
 const Choice kColour[]   = {{"0", N_("GREY")}, {"1", N_("BROWN")}, {"2", N_("RED")}, {"3", N_("PINK")},
@@ -166,6 +167,8 @@ const Setting kVideoSettings[] = {
        N_("DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES")),
   number("video.chunky_cell", N_("CHUNKY CELL"), 2, 8, 1, "auto", FlagDeferred, Dep::ChunkyCell,
          N_("PANEL PIXELS PER CELL"), "auto", N_("AUTO")),
+  pick("video.colour", N_("COLOUR"), kColourProfile, 3, "off", FlagLive, Dep::None,
+       N_("ANOTHER SCREEN'S COLOURS: THE ORIGINAL DS, OR THE BRIGHTER DS LITE")),
   pick("video.aa", N_("ANTI-ALIASING"), kAa, 3, "false", FlagLive, Dep::None,
        N_("DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)")),
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,

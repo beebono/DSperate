@@ -3,6 +3,7 @@
 //
 // Headless frontend: boots the BIOS/firmware (and optionally a ROM), runs N
 // frames, optionally tracing instructions or dumping frames/audio.
+#include "core/gpu/colour.h"
 #include "core/gpu/edge_cut.h"
 #include "core/nds.h"
 #include "core/cpu/timing_mode.h"
@@ -264,6 +265,7 @@ int main(int argc, char** argv) {
   bool rtc_host = false;              // --rtc-host: free-running clock seeded from the wall
   const char* fw_override = nullptr;  // --firmware-override: sidecar of changed firmware pages
   bool no_aa = false;
+  const char* colour = nullptr;   // --colour
   bool frames_given = false;
   const char* cheat_db = nullptr;      // a usrcheat.dat to load this ROM's codes from
   const char* analog_db = nullptr;     // the analog controls database; null: the built-in one
@@ -356,6 +358,7 @@ int main(int argc, char** argv) {
 
     else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
+    else if (arg("--colour")) colour = argv[++i];                            // colour correction (video.colour): off | nds | nds_lite; shows in --dump-frames / --hash
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
     else if (flag("--aa-enhanced")) aa_enhanced = true;
     else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, gpu_raster.h: Vulkan, else OpenGL ES); declines to the CPU without a driver
@@ -526,6 +529,11 @@ int main(int argc, char** argv) {
     }
   }
   nds.gpu3d.renderer().set_aa(!no_aa);
+  if (colour) {
+    ds::gpu::ColourProfile cp;
+    if (!ds::gpu::parse_colour_profile(colour, cp)) { std::fprintf(stderr, "--colour: unknown profile %s (off | nds | nds_lite)\n", colour); return 2; }
+    nds.gpu.set_colour_profile(cp);
+  }
   nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced);
   std::vector<ds::u32> scaled_px[2]; std::vector<ds::u16> scaled_xrun; FILE* scaled_out = nullptr;
   if (scaled_n > 0 && scaled_path) {

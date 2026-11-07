@@ -74,7 +74,7 @@ msgstr ""
 msgid "PIP CORNER NEXT"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/settings.cpp:175
+#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/settings.cpp:178
 msgid "FULLSCREEN"
 msgstr ""
 
@@ -94,8 +94,8 @@ msgstr ""
 msgid "FPS"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:838 src/frontend/sdl/main.cpp:1109 src/frontend/sdl/main.cpp:2626
-#: src/frontend/sdl/main.cpp:2627 src/frontend/sdl/main.cpp:2663
+#: src/frontend/sdl/input.cpp:838 src/frontend/sdl/main.cpp:1117 src/frontend/sdl/main.cpp:2637
+#: src/frontend/sdl/main.cpp:2638 src/frontend/sdl/main.cpp:2674
 msgid "NONE"
 msgstr ""
 
@@ -127,426 +127,426 @@ msgstr ""
 msgid "{1} HIDES KEY {2}"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:603
+#: src/frontend/sdl/main.cpp:611
 msgid "REJECTED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1081
+#: src/frontend/sdl/main.cpp:1089
 msgid "MODIFIER"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1082
+#: src/frontend/sdl/main.cpp:1090
 msgid "STYLUS TAP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1083
+#: src/frontend/sdl/main.cpp:1091
 msgid "STYLUS TAP (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1084
+#: src/frontend/sdl/main.cpp:1092
 msgid "STYLUS STICK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1085
+#: src/frontend/sdl/main.cpp:1093
 msgid "STYLUS HOLD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1086
+#: src/frontend/sdl/main.cpp:1094
 msgid "STICK DPAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1087
+#: src/frontend/sdl/main.cpp:1095
 msgid "STICK ABXY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1089
+#: src/frontend/sdl/main.cpp:1097
 msgid "GRIP GREEN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1090
+#: src/frontend/sdl/main.cpp:1098
 msgid "GRIP RED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1091
+#: src/frontend/sdl/main.cpp:1099
 msgid "GRIP YELLOW"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1092
+#: src/frontend/sdl/main.cpp:1100
 msgid "GRIP BLUE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1093
+#: src/frontend/sdl/main.cpp:1101
 msgid "GRIP STRUM"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1094
+#: src/frontend/sdl/main.cpp:1102
 msgid "GRIP STRUM (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1097
+#: src/frontend/sdl/main.cpp:1105
 msgid "L STICK RIGHT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1098
+#: src/frontend/sdl/main.cpp:1106
 msgid "L STICK DOWN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1099
+#: src/frontend/sdl/main.cpp:1107
 msgid "R STICK RIGHT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1100
+#: src/frontend/sdl/main.cpp:1108
 msgid "R STICK DOWN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1101
+#: src/frontend/sdl/main.cpp:1109
 msgid "L2 AXIS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1102
+#: src/frontend/sdl/main.cpp:1110
 msgid "R2 AXIS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1112
+#: src/frontend/sdl/main.cpp:1120
 msgid "L STICK X"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1112
+#: src/frontend/sdl/main.cpp:1120
 msgid "L STICK Y"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1112
+#: src/frontend/sdl/main.cpp:1120
 msgid "R STICK X"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1112
+#: src/frontend/sdl/main.cpp:1120
 msgid "R STICK Y"
 msgstr ""
 
 #. an inverted axis: {1} is the stick axis, e.g. L STICK X.
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:1116
+#: src/frontend/sdl/main.cpp:1124
 msgid "{1} INV"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1914
+#: src/frontend/sdl/main.cpp:1923
 msgid "STOPPING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1915
+#: src/frontend/sdl/main.cpp:1924
 msgid "WAITING ON THE CARD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1916
+#: src/frontend/sdl/main.cpp:1925
 msgid "UNPACKING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1917
+#: src/frontend/sdl/main.cpp:1926
 msgid "FIRST LAUNCH ONLY    B CANCELS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1942
+#: src/frontend/sdl/main.cpp:1951
 msgid "ANY BUTTON RETURNS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1950
+#: src/frontend/sdl/main.cpp:1959
 msgid "FILE CANNOT BE READ"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1951
+#: src/frontend/sdl/main.cpp:1960
 msgid "THE ZIP IS DAMAGED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1952
+#: src/frontend/sdl/main.cpp:1961
 msgid "NO GAME IN THE ZIP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1954
+#: src/frontend/sdl/main.cpp:1963
 msgid "ZIP NOT SUPPORTED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1955
+#: src/frontend/sdl/main.cpp:1964
 msgid "NOT A DS GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1973
+#: src/frontend/sdl/main.cpp:1982
 msgid "FIRMWARE IS BAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1973
+#: src/frontend/sdl/main.cpp:1982
 msgid "DS BIOS IS BAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2094
+#: src/frontend/sdl/main.cpp:2104
 msgid "NO GBA GAME (RUMBLE PAK)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2094
+#: src/frontend/sdl/main.cpp:2104
 msgid "NO GBA GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2125
+#: src/frontend/sdl/main.cpp:2135
 msgid "GBA CARTRIDGE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2125
+#: src/frontend/sdl/main.cpp:2135
 msgid "THIS GAME SUPPORTS THESE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2125
+#: src/frontend/sdl/main.cpp:2135
 msgid "DON'T ASK AGAIN FOR THIS GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2126
+#: src/frontend/sdl/main.cpp:2136
 msgid "A INSERT   B NO GBA GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2171
+#: src/frontend/sdl/main.cpp:2181
 msgid "STATE NOT LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2347
+#: src/frontend/sdl/main.cpp:2357
 msgid "NO SHORTCUT FOLDER"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2351
+#: src/frontend/sdl/main.cpp:2361
 msgid "NO DSI NAND (PATHS.DSI_NAND)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2352
+#: src/frontend/sdl/main.cpp:2362
 msgid "NO DSI BIOS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2353
+#: src/frontend/sdl/main.cpp:2363
 msgid "THE DSI NAND CANNOT BE READ"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2356
+#: src/frontend/sdl/main.cpp:2366
 msgid "THE DSI BIOS CANNOT BE READ"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:2361
+#: src/frontend/sdl/main.cpp:2371
 msgid "{1} ADDED, {2} REMOVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2626 src/frontend/sdl/settings.cpp:49
+#: src/frontend/sdl/main.cpp:2637 src/frontend/sdl/settings.cpp:50
 msgid "LEFT STICK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2626 src/frontend/sdl/settings.cpp:49
+#: src/frontend/sdl/main.cpp:2637 src/frontend/sdl/settings.cpp:50
 msgid "RIGHT STICK"
 msgstr ""
 
 #. a hotkey's second binding: {1} is the hotkey, e.g. SAVE STATE.
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:2658
+#: src/frontend/sdl/main.cpp:2669
 msgid "{1} (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2744
+#: src/frontend/sdl/main.cpp:2755
 msgid "IN THE FIRMWARE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2830 src/frontend/sdl/main.cpp:2871
+#: src/frontend/sdl/main.cpp:2841 src/frontend/sdl/main.cpp:2882
 msgid "NOT DURING A NETWORK SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2831
+#: src/frontend/sdl/main.cpp:2842
 msgid "ONLY WITH FRAMESKIP ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2834 src/frontend/sdl/main.cpp:2837
+#: src/frontend/sdl/main.cpp:2845 src/frontend/sdl/main.cpp:2848
 msgid "THIS SCREEN SCALES IN HARDWARE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2836
+#: src/frontend/sdl/main.cpp:2847
 msgid "THE RGA DRAWS THE DARK GRID ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2838 src/frontend/sdl/main.cpp:2841 src/frontend/sdl/main.cpp:2844
+#: src/frontend/sdl/main.cpp:2849 src/frontend/sdl/main.cpp:2852 src/frontend/sdl/main.cpp:2855
 msgid "BILINEAR IS ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2840 src/frontend/sdl/main.cpp:2843
+#: src/frontend/sdl/main.cpp:2851 src/frontend/sdl/main.cpp:2854
 msgid "NOT ON THE RGA PRESENT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2845
+#: src/frontend/sdl/main.cpp:2856
 msgid "ONLY WITH CHUNKY ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2848
+#: src/frontend/sdl/main.cpp:2859
 msgid "THIS SCREEN IS ALWAYS FULL"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2850
+#: src/frontend/sdl/main.cpp:2861
 msgid "NOT WITH TWO WINDOWS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2852 src/frontend/sdl/main.cpp:2854
+#: src/frontend/sdl/main.cpp:2863 src/frontend/sdl/main.cpp:2865
 msgid "PIP LAYOUT ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2855
+#: src/frontend/sdl/main.cpp:2866
 msgid "ONLY WHEN THE PIP FADES"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2857 src/frontend/sdl/main.cpp:2859
+#: src/frontend/sdl/main.cpp:2868 src/frontend/sdl/main.cpp:2870
 msgid "DOMINANT LAYOUTS ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2860
+#: src/frontend/sdl/main.cpp:2871
 msgid "ONLY WHEN THE RATIO IS AUTO"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2865
+#: src/frontend/sdl/main.cpp:2876
 msgid "THIS BUILD HAS NO NETWORKING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2869
+#: src/frontend/sdl/main.cpp:2880
 msgid "ONLY WITH NETWORK FEATURES ON INTERNET"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2873
+#: src/frontend/sdl/main.cpp:2884
 msgid "NEEDS PATHS.DSI_GAMES OR PATHS.GAMES"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2875
+#: src/frontend/sdl/main.cpp:2886
 msgid "A DSI HAS NO GBA SLOT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2876
+#: src/frontend/sdl/main.cpp:2887
 msgid "THIS GAME READS NO GBA GAMES"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2877
+#: src/frontend/sdl/main.cpp:2888
 msgid "NEEDS PATHS.GBA_GAMES"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2879
+#: src/frontend/sdl/main.cpp:2890
 msgid "NO RUMBLE PAK IN SLOT 2"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2881
+#: src/frontend/sdl/main.cpp:2892
 msgid "NO BOKTAI CARTRIDGE IN SLOT 2"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3000
+#: src/frontend/sdl/main.cpp:3012
 msgid "SD CARD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3001
+#: src/frontend/sdl/main.cpp:3013
 msgid "LEFT OUT OF THE STATE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3002
+#: src/frontend/sdl/main.cpp:3014
 msgid "THE STATE HAD NO CARD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3002
+#: src/frontend/sdl/main.cpp:3014
 msgid "ITS FOLDER HAS CHANGED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3153
+#: src/frontend/sdl/main.cpp:3165
 msgid "LOCAL WIRELESS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3165
+#: src/frontend/sdl/main.cpp:3177
 msgid "SCAN FAILED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3165
+#: src/frontend/sdl/main.cpp:3177
 msgid "THE NETWORK REFUSED IT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3171
+#: src/frontend/sdl/main.cpp:3183
 msgid "LOOKING FOR A SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3179
+#: src/frontend/sdl/main.cpp:3191
 msgid "NO SESSION FOUND"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3179
+#: src/frontend/sdl/main.cpp:3191
 msgid "NOBODY IS HOSTING HERE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3187
+#: src/frontend/sdl/main.cpp:3199
 msgid "JOINED A SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3223
+#: src/frontend/sdl/main.cpp:3235
 msgid "ACHIEVEMENT UNLOCKED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3243
+#: src/frontend/sdl/main.cpp:3255
 msgid "NOT AVAILABLE IN THIS BUILD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3246
+#: src/frontend/sdl/main.cpp:3258
 msgid "TURNED OFF"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3247
+#: src/frontend/sdl/main.cpp:3259
 msgid "NOT SIGNED IN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3248
+#: src/frontend/sdl/main.cpp:3260
 msgid "SIGNING IN..."
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3249 src/frontend/sdl/main.cpp:3251
+#: src/frontend/sdl/main.cpp:3261 src/frontend/sdl/main.cpp:3263
 msgid "SIGNED IN AS {1}"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3250
+#: src/frontend/sdl/main.cpp:3262
 msgid "LOADING ACHIEVEMENTS..."
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3253
+#: src/frontend/sdl/main.cpp:3265
 msgid "NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3255
+#: src/frontend/sdl/main.cpp:3267
 msgid "NO ACHIEVEMENTS FOR THIS ROM - HASH {1}"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3264
+#: src/frontend/sdl/main.cpp:3276
 msgid "{1}/{2} EARNED  {3}/{4} POINTS  (ENCORE)"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3264
+#: src/frontend/sdl/main.cpp:3276
 msgid "{1}/{2} EARNED  {3}/{4} POINTS"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3739
+#: src/frontend/sdl/main.cpp:3751
 msgid "STATE {1} SAVED"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3753
+#: src/frontend/sdl/main.cpp:3765
 msgid "STATE {1} LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4027
+#: src/frontend/sdl/main.cpp:4042
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4039
+#: src/frontend/sdl/main.cpp:4054
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4040
+#: src/frontend/sdl/main.cpp:4055
 msgid "GAME LIKELY WON'T WORK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4041
+#: src/frontend/sdl/main.cpp:4056
 msgid "DSP IS NOT EMULATED"
 msgstr ""
 
@@ -631,13 +631,13 @@ msgid "ENCORE (NEXT LAUNCH)"
 msgstr ""
 
 #: src/frontend/sdl/menu.cpp:1079 src/frontend/sdl/settings.cpp:18 src/frontend/sdl/settings.cpp:27
-#: src/frontend/sdl/settings.cpp:48
+#: src/frontend/sdl/settings.cpp:49
 msgid "ON"
 msgstr ""
 
 #: src/frontend/sdl/menu.cpp:1079 src/frontend/sdl/settings.cpp:18 src/frontend/sdl/settings.cpp:23
-#: src/frontend/sdl/settings.cpp:25 src/frontend/sdl/settings.cpp:27 src/frontend/sdl/settings.cpp:39
-#: src/frontend/sdl/settings.cpp:48 src/frontend/sdl/settings.cpp:49
+#: src/frontend/sdl/settings.cpp:25 src/frontend/sdl/settings.cpp:27 src/frontend/sdl/settings.cpp:28
+#: src/frontend/sdl/settings.cpp:40 src/frontend/sdl/settings.cpp:49 src/frontend/sdl/settings.cpp:50
 msgid "OFF"
 msgstr ""
 
@@ -649,7 +649,7 @@ msgstr ""
 msgid "VISUAL FX"
 msgstr ""
 
-#: src/frontend/sdl/menu.cpp:1225 src/frontend/sdl/menu.cpp:1262 src/frontend/sdl/settings.cpp:180
+#: src/frontend/sdl/menu.cpp:1225 src/frontend/sdl/menu.cpp:1262 src/frontend/sdl/settings.cpp:183
 msgid "LAYOUT"
 msgstr ""
 
@@ -849,7 +849,7 @@ msgstr ""
 msgid "CONSOLE (59.8)"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:22 src/frontend/sdl/settings.cpp:105
+#: src/frontend/sdl/settings.cpp:22 src/frontend/sdl/settings.cpp:106
 msgid "UNLIMITED"
 msgstr ""
 
@@ -898,629 +898,645 @@ msgid "ENHANCED"
 msgstr ""
 
 #: src/frontend/sdl/settings.cpp:28
-msgid "TOP"
+msgid "DS"
 msgstr ""
 
 #: src/frontend/sdl/settings.cpp:28
+msgid "DS LITE"
+msgstr ""
+
+#: src/frontend/sdl/settings.cpp:29
+msgid "TOP"
+msgstr ""
+
+#: src/frontend/sdl/settings.cpp:29
 msgid "BOTTOM"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:30
+#: src/frontend/sdl/settings.cpp:31
 msgid "GREY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:30
+#: src/frontend/sdl/settings.cpp:31
 msgid "BROWN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:30
+#: src/frontend/sdl/settings.cpp:31
 msgid "RED"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:30
+#: src/frontend/sdl/settings.cpp:31
 msgid "PINK"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:31
+#: src/frontend/sdl/settings.cpp:32
 msgid "ORANGE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:31
+#: src/frontend/sdl/settings.cpp:32
 msgid "YELLOW"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:31
+#: src/frontend/sdl/settings.cpp:32
 msgid "LIME"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:31
+#: src/frontend/sdl/settings.cpp:32
 msgid "GREEN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:32
+#: src/frontend/sdl/settings.cpp:33
 msgid "DARK GREEN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:32
+#: src/frontend/sdl/settings.cpp:33
 msgid "TURQUOISE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:32
+#: src/frontend/sdl/settings.cpp:33
 msgid "BLUE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:32
+#: src/frontend/sdl/settings.cpp:33
 msgid "DARK BLUE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:33
+#: src/frontend/sdl/settings.cpp:34
 msgid "PURPLE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:33
+#: src/frontend/sdl/settings.cpp:34
 msgid "VIOLET"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:33
+#: src/frontend/sdl/settings.cpp:34
 msgid "MAGENTA"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:33
+#: src/frontend/sdl/settings.cpp:34
 msgid "DARK PINK"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:34
+#: src/frontend/sdl/settings.cpp:35
 msgid "JANUARY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:34
+#: src/frontend/sdl/settings.cpp:35
 msgid "FEBRUARY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:34
+#: src/frontend/sdl/settings.cpp:35
 msgid "MARCH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:34
+#: src/frontend/sdl/settings.cpp:35
 msgid "APRIL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:35
+#: src/frontend/sdl/settings.cpp:36
 msgid "MAY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:35
+#: src/frontend/sdl/settings.cpp:36
 msgid "JUNE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:35
+#: src/frontend/sdl/settings.cpp:36
 msgid "JULY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:35
+#: src/frontend/sdl/settings.cpp:36
 msgid "AUGUST"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:36
+#: src/frontend/sdl/settings.cpp:37
 msgid "SEPTEMBER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:36
+#: src/frontend/sdl/settings.cpp:37
 msgid "OCTOBER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:36
+#: src/frontend/sdl/settings.cpp:37
 msgid "NOVEMBER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:36
+#: src/frontend/sdl/settings.cpp:37
 msgid "DECEMBER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:39 src/frontend/sdl/settings.cpp:48 src/frontend/sdl/settings.cpp:49
-#: src/frontend/sdl/settings.cpp:50 src/frontend/sdl/settings.cpp:59 src/frontend/sdl/settings.cpp:112
-#: src/frontend/sdl/settings.cpp:168 src/frontend/sdl/settings.cpp:185 src/frontend/sdl/settings.cpp:195
+#: src/frontend/sdl/settings.cpp:40 src/frontend/sdl/settings.cpp:49 src/frontend/sdl/settings.cpp:50
+#: src/frontend/sdl/settings.cpp:51 src/frontend/sdl/settings.cpp:60 src/frontend/sdl/settings.cpp:113
+#: src/frontend/sdl/settings.cpp:169 src/frontend/sdl/settings.cpp:188 src/frontend/sdl/settings.cpp:198
 msgid "AUTO"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:39
+#: src/frontend/sdl/settings.cpp:40
 msgid "HOST"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:39
+#: src/frontend/sdl/settings.cpp:40
 msgid "GUEST"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:40
+#: src/frontend/sdl/settings.cpp:41
 msgid "INTERNET"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:44
+#: src/frontend/sdl/settings.cpp:45
 msgctxt "wifi.dns"
 msgid "HOST"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:45
+#: src/frontend/sdl/settings.cpp:46
 msgid "JAPANESE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:45
+#: src/frontend/sdl/settings.cpp:46
 msgid "ENGLISH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:45
+#: src/frontend/sdl/settings.cpp:46
 msgid "FRENCH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:46
+#: src/frontend/sdl/settings.cpp:47
 msgid "GERMAN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:46
+#: src/frontend/sdl/settings.cpp:47
 msgid "ITALIAN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:46
+#: src/frontend/sdl/settings.cpp:47
 msgid "SPANISH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:49
+#: src/frontend/sdl/settings.cpp:50
 msgid "TWO STICKS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:50
+#: src/frontend/sdl/settings.cpp:51
 msgid "PACKED"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:50
+#: src/frontend/sdl/settings.cpp:51
 msgid "EXTENDED"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:51
+#: src/frontend/sdl/settings.cpp:52
 msgid "VERTICAL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:51
+#: src/frontend/sdl/settings.cpp:52
 msgid "HORIZONTAL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:51
+#: src/frontend/sdl/settings.cpp:52
 msgid "SINGLE"
 msgstr ""
 
 #. PIP is picture in picture (the small screen over the large one); DOMINANT V and H, a large screen with a small one under or beside it. Match the CYCLE rows and PIP rows.
-#: src/frontend/sdl/settings.cpp:53
+#: src/frontend/sdl/settings.cpp:54
 msgid "PIP"
 msgstr ""
 
 #. PIP is picture in picture (the small screen over the large one); DOMINANT V and H, a large screen with a small one under or beside it. Match the CYCLE rows and PIP rows.
-#: src/frontend/sdl/settings.cpp:53
+#: src/frontend/sdl/settings.cpp:54
 msgid "DOMINANT V"
 msgstr ""
 
 #. PIP is picture in picture (the small screen over the large one); DOMINANT V and H, a large screen with a small one under or beside it. Match the CYCLE rows and PIP rows.
-#: src/frontend/sdl/settings.cpp:53
+#: src/frontend/sdl/settings.cpp:54
 msgid "DOMINANT H"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:62
+#: src/frontend/sdl/settings.cpp:63
 msgid "TOP LEFT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:62
+#: src/frontend/sdl/settings.cpp:63
 msgid "TOP RIGHT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:62
+#: src/frontend/sdl/settings.cpp:63
 msgid "BOTTOM LEFT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:62
+#: src/frontend/sdl/settings.cpp:63
 msgid "BOTTOM RIGHT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:91
+#: src/frontend/sdl/settings.cpp:92
 msgid "MENU LANGUAGE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:92
+#: src/frontend/sdl/settings.cpp:93
 msgid "THE LANGUAGE OF THESE MENUS. AUTO FOLLOWS THE SYSTEM'S"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:93
+#: src/frontend/sdl/settings.cpp:94
 msgid "FRAMESKIP"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:94
+#: src/frontend/sdl/settings.cpp:95
 msgid "DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:95
+#: src/frontend/sdl/settings.cpp:96
 msgid "FRAMESKIP MODE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:96
+#: src/frontend/sdl/settings.cpp:97
 msgid "ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:97
+#: src/frontend/sdl/settings.cpp:98
 msgid "FRAME LIMITER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:98
+#: src/frontend/sdl/settings.cpp:99
 msgid "THE RATE THE GAME IS HELD TO. CONSOLE IS THE ONE THE GAME WAS WRITTEN FOR"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:100
+#: src/frontend/sdl/settings.cpp:101
 msgid "GAME SPEED"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:101
+#: src/frontend/sdl/settings.cpp:102
 msgid "HOW FAST THE GAME RUNS AGAINST THE LIMITER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:104
+#: src/frontend/sdl/settings.cpp:105
 msgid "FAST FORWARD SPEED"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:105
+#: src/frontend/sdl/settings.cpp:106
 msgid "AT LEAST THIS MANY TIMES REAL TIME WHILE FAST FORWARD IS HELD"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:106
+#: src/frontend/sdl/settings.cpp:107
 msgid "FAST FORWARD SKIP"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:107
+#: src/frontend/sdl/settings.cpp:108
 msgid "WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:110
+#: src/frontend/sdl/settings.cpp:111
 msgid "AUDIO BUFFER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:111
+#: src/frontend/sdl/settings.cpp:112
 msgid "SOUND HELD AHEAD. LOWER IS LESS DELAY, LESS SLACK BEFORE A LATE FRAME IS HEARD"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:113
+#: src/frontend/sdl/settings.cpp:114
 msgid "AUTOSAVE ON QUIT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:114
+#: src/frontend/sdl/settings.cpp:115
 msgid "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:115
+#: src/frontend/sdl/settings.cpp:116
 msgid "AUTOLOAD ON START"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:116
+#: src/frontend/sdl/settings.cpp:117
 msgid "WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:117
+#: src/frontend/sdl/settings.cpp:118
 msgid "HIDE NAND DSIWARE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:118
+#: src/frontend/sdl/settings.cpp:119
 msgid "DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:119
+#: src/frontend/sdl/settings.cpp:120
 msgid "DSI NAND LINKS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:120
+#: src/frontend/sdl/settings.cpp:121
 msgid "GAME LIST ENTRIES THAT START THE NAND'S DSIWARE WITHOUT THE DSI MENU"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:122
+#: src/frontend/sdl/settings.cpp:123
 msgid "ASK FOR GBA GAME"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:123
+#: src/frontend/sdl/settings.cpp:124
 msgid "BEFORE THIS GAME STARTS, OFFER THE GBA GAMES IT READS. KEPT FOR THIS GAME"
 msgstr ""
 
 #. Nintendo's slot-2 accessory: its official name in your language where it has one.
-#: src/frontend/sdl/settings.cpp:125
+#: src/frontend/sdl/settings.cpp:126
 msgid "RUMBLE PAK"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:126
+#: src/frontend/sdl/settings.cpp:127
 msgid "IN SLOT 2 WHEN NO GBA GAME IS. AUTO: WHEN THE CONTROLLER CAN RUMBLE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:127
+#: src/frontend/sdl/settings.cpp:128
 msgid "RUMBLE STRENGTH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:128
+#: src/frontend/sdl/settings.cpp:129
 msgid "HOW HARD THE MOTOR RUNS WHEN THE GAME RUMBLES"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:129
+#: src/frontend/sdl/settings.cpp:130
 msgid "SOLAR SENSOR"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:130
+#: src/frontend/sdl/settings.cpp:131
 msgid "THE SUNLIGHT A BOKTAI CARTRIDGE SEES: 0 DARK, 10 FULL SUN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:131
+#: src/frontend/sdl/settings.cpp:132
 msgid "NETWORK FEATURES"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:132
+#: src/frontend/sdl/settings.cpp:133
 msgid "LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:134
+#: src/frontend/sdl/settings.cpp:135
 msgid "WHERE THE GAME LOOKS UP ITS SERVERS. NINTENDO'S ARE GONE; WIIMMFI REPLACES THEM"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:139
+#: src/frontend/sdl/settings.cpp:140
 msgid "ANALOG PATCH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:140
+#: src/frontend/sdl/settings.cpp:141
 msgid "NEEDS A CPAD CHEAT ON. AUTO USES CONTROLS AS AVAILABLE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:141
+#: src/frontend/sdl/settings.cpp:142
 msgid "ANALOG DEADZONE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:142
+#: src/frontend/sdl/settings.cpp:143
 msgid "HOW FAR A STICK MUST MOVE BEFORE AN ANALOG PATCH SEES IT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:143
+#: src/frontend/sdl/settings.cpp:144
 msgid "LEFT SENSITIVITY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:144 src/frontend/sdl/settings.cpp:147
+#: src/frontend/sdl/settings.cpp:145 src/frontend/sdl/settings.cpp:148
 msgid "UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:146
+#: src/frontend/sdl/settings.cpp:147
 msgid "RIGHT SENSITIVITY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:149
+#: src/frontend/sdl/settings.cpp:150
 msgid "ANALOG INVERT Y"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:150
+#: src/frontend/sdl/settings.cpp:151
 msgid "FLIP THE STICKS' UP AND DOWN FOR AN ANALOG PATCH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:151
+#: src/frontend/sdl/settings.cpp:152
 msgid "ANALOG LAYOUT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:152
+#: src/frontend/sdl/settings.cpp:153
 msgid "HOW THE PATCH WANTS STICK DATA ARRANGED. AUTO READS THE PATCH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:157
+#: src/frontend/sdl/settings.cpp:158
 msgid "INTEGER SCALE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:158
+#: src/frontend/sdl/settings.cpp:159
 msgid "WHOLE PANEL PIXELS PER DS PIXEL. UNDER LETTERBOXES, OVER CROPS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:159
+#: src/frontend/sdl/settings.cpp:160
 msgid "BILINEAR"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:160
+#: src/frontend/sdl/settings.cpp:161
 msgid "SMOOTH SCALING. OVERRIDES THE GRID, SEAMS AND CHUNKY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:161
+#: src/frontend/sdl/settings.cpp:162
 msgid "LCD GRID"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:162
+#: src/frontend/sdl/settings.cpp:163
 msgid "A DARK SEAM AROUND EVERY DS PIXEL, LIKE THE ORIGINAL SCREEN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:163
+#: src/frontend/sdl/settings.cpp:164
 msgid "SEAM"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:164
+#: src/frontend/sdl/settings.cpp:165
 msgid "DARK DRAWS THE GRID. BLEND SOFTENS ONLY THE STRADDLING PIXEL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:165
+#: src/frontend/sdl/settings.cpp:166
 msgid "CHUNKY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:166
+#: src/frontend/sdl/settings.cpp:167
 msgid "DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:167
+#: src/frontend/sdl/settings.cpp:168
 msgid "CHUNKY CELL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:168
+#: src/frontend/sdl/settings.cpp:169
 msgid "PANEL PIXELS PER CELL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:169
-msgid "ANTI-ALIASING"
+#: src/frontend/sdl/settings.cpp:170
+msgid "COLOUR"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:170
-msgid "DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)"
+#: src/frontend/sdl/settings.cpp:171
+msgid "ANOTHER SCREEN'S COLOURS: THE ORIGINAL DS, OR THE BRIGHTER DS LITE"
 msgstr ""
 
 #: src/frontend/sdl/settings.cpp:172
-msgid "DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED"
+msgid "ANTI-ALIASING"
 msgstr ""
 
 #: src/frontend/sdl/settings.cpp:173
+msgid "DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)"
+msgstr ""
+
+#: src/frontend/sdl/settings.cpp:175
+msgid "DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED"
+msgstr ""
+
+#: src/frontend/sdl/settings.cpp:176
 msgid "FPS COUNTER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:174
+#: src/frontend/sdl/settings.cpp:177
 msgid "FRAMES PER SECOND IN THE CORNER OF THE SCREEN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:181
+#: src/frontend/sdl/settings.cpp:184
 msgid "HOW THE TWO SCREENS SHARE THE WINDOW"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:182
+#: src/frontend/sdl/settings.cpp:185
 msgid "MAIN SCREEN"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:183
+#: src/frontend/sdl/settings.cpp:186
 msgid "THE SCREEN SHOWN ALONE, LARGE OR FIRST"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:184
+#: src/frontend/sdl/settings.cpp:187
 msgid "SCREEN GAP"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:185
+#: src/frontend/sdl/settings.cpp:188
 msgid "PANEL PIXELS BETWEEN THE TWO SCREENS WHEN THEY ARE STACKED OR SIDE BY SIDE. AUTO PUSHES THEM TO THE EDGES"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:186
+#: src/frontend/sdl/settings.cpp:189
 msgid "PIP CORNER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:187
+#: src/frontend/sdl/settings.cpp:190
 msgid "WHERE THE SMALL SCREEN SITS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:188
+#: src/frontend/sdl/settings.cpp:191
 msgid "PIP SIZE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:189
+#: src/frontend/sdl/settings.cpp:192
 msgid "HOW BIG THE SMALL SCREEN IS AGAINST THE LARGE ONE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:190
+#: src/frontend/sdl/settings.cpp:193
 msgid "PIP OPACITY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:191
+#: src/frontend/sdl/settings.cpp:194
 msgid "HOW SOLID THE SMALL SCREEN IS AT REST"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:192
+#: src/frontend/sdl/settings.cpp:195
 msgid "PIP TOUCH HOLD"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:193
+#: src/frontend/sdl/settings.cpp:196
 msgid "FRAMES THE SMALL SCREEN STAYS SOLID AFTER IT IS TOUCHED"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:193
+#: src/frontend/sdl/settings.cpp:196
 msgid "NEVER FADE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:194
+#: src/frontend/sdl/settings.cpp:197
 msgid "DOMINANT RATIO"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:195
+#: src/frontend/sdl/settings.cpp:198
 msgid "THE SMALLER SCREEN'S SIZE. AUTO FITS WHOLE PIXELS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:196
+#: src/frontend/sdl/settings.cpp:199
 msgid "DOMINANT THRESHOLD"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:197
+#: src/frontend/sdl/settings.cpp:200
 msgid "THE SMALLEST SECONDARY AUTO WILL ACCEPT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:198
+#: src/frontend/sdl/settings.cpp:201
 msgid "CYCLE VERTICAL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:199 src/frontend/sdl/settings.cpp:201 src/frontend/sdl/settings.cpp:203
-#: src/frontend/sdl/settings.cpp:205 src/frontend/sdl/settings.cpp:207
+#: src/frontend/sdl/settings.cpp:202 src/frontend/sdl/settings.cpp:204 src/frontend/sdl/settings.cpp:206
+#: src/frontend/sdl/settings.cpp:208 src/frontend/sdl/settings.cpp:210
 msgid "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:200
+#: src/frontend/sdl/settings.cpp:203
 msgid "CYCLE HORIZONTAL"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:202
+#: src/frontend/sdl/settings.cpp:205
 msgid "CYCLE SINGLE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:204
+#: src/frontend/sdl/settings.cpp:207
 msgid "CYCLE PIP"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:206
+#: src/frontend/sdl/settings.cpp:209
 msgid "CYCLE DOMINANT V"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:208
+#: src/frontend/sdl/settings.cpp:211
 msgid "CYCLE DOMINANT H"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:209
+#: src/frontend/sdl/settings.cpp:212
 msgid "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS. ONE ALWAYS STAYS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:216
+#: src/frontend/sdl/settings.cpp:219
 msgid "NICKNAME"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:217
+#: src/frontend/sdl/settings.cpp:220
 msgid "WHAT GAMES CALL YOU"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:218
+#: src/frontend/sdl/settings.cpp:221
 msgid "MESSAGE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:219
+#: src/frontend/sdl/settings.cpp:222
 msgid "THE GREETING THE DS MENU SHOWS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:220
+#: src/frontend/sdl/settings.cpp:223
 msgid "FAVOURITE COLOUR"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:221
+#: src/frontend/sdl/settings.cpp:224
 msgid "SOME GAMES COLOUR THEMSELVES WITH IT"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:222
+#: src/frontend/sdl/settings.cpp:225
 msgid "BIRTHDAY MONTH"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:223
+#: src/frontend/sdl/settings.cpp:226
 msgid "GAMES THAT WISH YOU A HAPPY BIRTHDAY USE THIS"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:224
+#: src/frontend/sdl/settings.cpp:227
 msgid "BIRTHDAY DAY"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:225
+#: src/frontend/sdl/settings.cpp:228
 msgid "NOT CHECKED AGAINST THE MONTH, AS THE CONSOLE DOES NOT EITHER"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:226
+#: src/frontend/sdl/settings.cpp:229
 msgid "LANGUAGE"
 msgstr ""
 
-#: src/frontend/sdl/settings.cpp:227
+#: src/frontend/sdl/settings.cpp:230
 msgid "THE LANGUAGE MULTI-LANGUAGE GAMES START IN"
 msgstr ""

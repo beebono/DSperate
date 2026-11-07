@@ -846,7 +846,10 @@ void Gpu::output_edges(const Engine2D& en, int screen, u32 line, const u32* show
     if (mode == 1 && en.edge_compose(own, bytes)) {
       alignas(16) u32 out[256];
       kern::active::output_line(own, en.master_bright(), out);
-      for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (out[x] & 0x00FFFFFF) : 0;
+      if (colour_lut_) {   // as the shown line; only the (few) edge pixels
+        for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (kern::colour_pixel(*colour_lut_, out[x]) & 0x00FFFFFF) : 0;
+      } else
+        for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (out[x] & 0x00FFFFFF) : 0;
       any = true;
     } else if (mode == 2) {
       const u32 bank = (en.dispcnt() >> 18) & 3;
@@ -911,6 +914,11 @@ void Gpu::output_engine(int e, u32 line) {
       else { output_b(dst); expand_colours(dst); }
     }
   } else { for (u32 i = 0; i < 256; ++i) dst[i] = 0xFF000000; }
+  if (raw_active_ && raw_lines_[e] < SCREEN_H && (raw_lines_[e] != 0 || line == 0)) {
+    std::memcpy(raw_fb_[screen].data() + line * SCREEN_W, dst, SCREEN_W * sizeof(u32));
+    ++raw_lines_[e];
+  }
+  if (colour_lut_ && screens_on_) kern::active::colour_correct(*colour_lut_, dst);   // the panel's black stays black when the LCDs are off
   if (edge_export_ && !scaled) output_edges(en, screen, line, dst);
   if (scaled) {
     if (e == 1 && bscale_defer_ && bscale_n_ < SCREEN_H) {
@@ -1328,6 +1336,25 @@ void Gpu::capture(u32 line) {
   }
 }
 
+
+void Gpu::set_colour_profile(ColourProfile p) {
+  if (p == colour_) return;
+  quiesce();   // the worker reads the tables
+  if (p == ColourProfile::Off) colour_lut_.reset();
+  else {
+    auto lut = std::make_unique<kern::ColourLut>();
+    build_colour_lut(p, *lut);
+    colour_lut_ = std::move(lut);
+  }
+  colour_ = p;
+}
+
+void Gpu::request_raw_frame() {
+  quiesce();   // no line of the frame before may land after this
+  for (auto& f : raw_fb_) f.assign(SCREEN_W * SCREEN_H, 0xFF000000);
+  raw_lines_[0] = raw_lines_[1] = 0;
+  raw_active_ = true;
+}
 
 void Gpu::apply_master_brightness(u16 reg, u32* dst) { kern::active::master_brightness(reg, dst); }
 

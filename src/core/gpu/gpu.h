@@ -9,9 +9,11 @@
 #include "core/gpu/vram_map.h"
 #include "core/gpu/line_worker.h"
 #include "core/gpu/render3d.h"
+#include "core/gpu/colour.h"
 #include "core/profile.h"
 
 #include <array>
+#include <memory>
 
 namespace ds { struct NDS; }
 
@@ -86,6 +88,19 @@ public:
   void set_lazy(bool on) { lazy_enabled_ = on; }   // off: per-line rendering (tests)
 
   const u32* framebuffer(int screen) const { return fb_[screen].data(); }   // 0 = top, 1 = bottom
+  // Colour correction of every shown line (core/gpu/colour.h), after the
+  // output stage and before the scaler or framebuffer, so fb_ holds the
+  // corrected colours. Joins any lines in flight; set between frames.
+  void set_colour_profile(ColourProfile p);
+  ColourProfile colour_profile() const { return colour_; }
+  // The next drawn frame as the output stage gave it before colour
+  // correction, for screenshots: request between frames, then after each
+  // frame poll raw_frame_ready(). raw_frame() holds until the next request;
+  // release_raw_frame() stops the copy if the caller gives up waiting.
+  void request_raw_frame();
+  bool raw_frame_ready() const { return raw_active_ && raw_lines_[0] >= SCREEN_H && raw_lines_[1] >= SCREEN_H && !lines_in_flight(); }
+  const u32* raw_frame(int screen) const { return raw_fb_[screen].data(); }
+  void release_raw_frame() { raw_active_ = false; }
   // The edge cut (core/gpu/edge_cut.h): beside each screen's frame, a plane
   // of the 3D edge pixels that show on it, 0xEERRGGBB: the edge byte
   // (Renderer3D::set_edge_export) over the pixel's unblended colour as the
@@ -229,6 +244,12 @@ private:
   u64 prev_rows_[2][3] = {};
   void output_edges(const Engine2D& en, int screen, u32 line, const u32* shown);
   void capture_edges(u32 cnt, u32 line, u32 width, u32 dst_bank, u32 lcdc);
+  std::unique_ptr<kern::ColourLut> colour_lut_;   // null: off
+  ColourProfile colour_ = ColourProfile::Off;
+  // request_raw_frame: each engine's lines 0..191 copied once, from its first line 0 on.
+  bool raw_active_ = false;
+  u32 raw_lines_[2] = {};
+  std::vector<u32> raw_fb_[2];
   ScaleTarget scale_[2];
   static constexpr u32 SCALED_ROW_MAX = 4096;
   alignas(16) u32 chunk_even_[2][SCREEN_W];   // chunky: the even line, held until the odd one completes the block

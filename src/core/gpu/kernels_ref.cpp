@@ -329,6 +329,10 @@ void output_vram_line(const u16* src, u16 reg, u32* dst) {
   expand_colours(dst);
 }
 
+void colour_correct(const ColourLut& t, u32* dst) {
+  for (u32 i = 0; i < 256; ++i) dst[i] = colour_pixel(t, dst[i]);
+}
+
 void capture_a15(const Pixel* src, u32 n, u16* dst) {
   for (u32 i = 0; i < n; ++i) {
     const u32 v = src[i];

@@ -13,6 +13,7 @@
 #include "core/host_cores.h"
 #include "core/cart/zip.h"
 #include "core/cart/zip_cache.h"
+#include "core/gpu/colour.h"
 #include "core/gpu/vk/vk_device.h"
 #include "core/profile.h"
 #include "core/frame_report.h"
@@ -157,6 +158,7 @@ const char* kUsage =
     "                  and chunky)\n"
     "  --lcd-grid S    LCD pixel grid: one dark seam per DS pixel, strength 0 (off, default) .. 1\n"
     "                  (black)\n"
+    "  --colour P      colour correction (video.colour): off (default) | nds (DS Phat) | nds_lite\n"
     "  --seam S        dark (default): the LCD grid, dimmed by --lcd-grid | blend: box-filter seams\n"
     "                  (sharp-shimmerless): the one panel pixel/row that straddles two DS pixels is their\n"
     "                  area-weighted blend, all others crisp | blend_linear: the same in linear light\n"
@@ -318,6 +320,11 @@ bool aa_on(const std::string& v) {
 }
 bool aa_enhanced(const std::string& v) { return v == "enhanced"; }
 void apply_aa(NDS& nds, const std::string& v) { nds.gpu3d.renderer().set_aa(aa_on(v)); nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced(v)); }
+void apply_colour(NDS& nds, const std::string& v) {
+  ds::gpu::ColourProfile p;
+  if (!ds::gpu::parse_colour_profile(v, p)) std::fprintf(stderr, "video.colour: unknown profile '%s' (off | nds | nds_lite), off\n", v.c_str());
+  nds.gpu.set_colour_profile(p);
+}
 // Whether the edge cut runs (the frame loop has why): video.aa = enhanced on
 // the GPU raster (`gpu_on`: it is, or is about to be, the GPU's) through the
 // Vulkan present on every window. DS_EDGE_CUT=0 never, =1 with plain
@@ -413,8 +420,9 @@ void write_gba_save(NDS& nds, const std::string& path) {
 }
 
 // Both screens into one PNG at the layout's natural size. Reads the
-// framebuffers directly, so grid/chunky/seams/scaler layer are excluded.
-bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& shown) {
+// framebuffers directly (or `frames`, e.g. Gpu::raw_frame), so
+// grid/chunky/seams/scaler layer are excluded.
+bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout& shown, const u32* const* frames = nullptr) {
   using Disp = ds::sdl::Display;
   int w = 0, h = 0;
   Disp::Layout layout = shown;
@@ -426,7 +434,7 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
   for (int i = 0; i < Disp::SCREENS; ++i) {
     const Disp::View& v = views[i];
     if (!v.shown || v.rect.w <= 0 || v.rect.h <= 0) continue;
-    const u32* fb = nds.gpu.framebuffer(v.screen);
+    const u32* fb = frames ? frames[v.screen] : nds.gpu.framebuffer(v.screen);
     // Inset at its resting opacity (the touch ramp is live-only).
     const u32 alpha = v.direct ? 255 : static_cast<u32>(std::clamp(layout.pip_alpha, 0.0, 1.0) * 255.0 + 0.5);
     for (int y = 0; y < v.rect.h; ++y) {
@@ -464,14 +472,14 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
 }
 
 // <GAMECODE>-<timestamp>.png in paths.screenshots (states dir unless set).
-void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout) {
+void screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout, const u32* const* frames = nullptr) {
   ::mkdir(dir.c_str(), 0755);
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
   std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
   const std::string path = dir + "/" + code + "-" + stamp + ".png";
-  if (write_png(nds, path, layout)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
+  if (write_png(nds, path, layout, frames)) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
 }
 
 std::string state_path(NDS& nds, const std::string& dir, int slot) {
@@ -1261,6 +1269,7 @@ static int run(int argc, char** argv) {
     else if (flag("--fullscreen")) cli.set("video.fullscreen", "true");
     else if (flag("--linear")) cli.set("video.linear", "true");
     else if (arg("--lcd-grid")) cli.set("video.lcd_grid", argv[++i]);
+    else if (arg("--colour")) cli.set("video.colour", argv[++i]);
     else if (flag("--chunky")) cli.set("video.chunky", optional("mean"));
     else if (arg("--chunky-threshold")) cli.set("video.chunky_threshold", argv[++i]);
     else if (arg("--chunky-cell")) cli.set("video.chunky_cell", argv[++i]);
@@ -1343,7 +1352,7 @@ static int run(int argc, char** argv) {
     if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
-                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
+                                              "video.fullscreen", "video.linear", "video.lcd_grid", "video.colour", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
@@ -2021,6 +2030,7 @@ sdl_ready:
 
   cfg.set("video.aa", aa_enhanced(cfg.str("video.aa", "false")) ? "enhanced" : aa_on(cfg.str("video.aa", "false")) ? "true" : "false");
   apply_aa(nds, cfg.str("video.aa", "false"));
+  apply_colour(nds, cfg.str("video.colour", "off"));
   if (!boot_firmware || nds.dsi) nds.setup_direct_boot();   // on a DSi this is the NAND boot
   if (nds.dsi && dsi_title_lo && !dsi_menu) nds.dsi_autoload(dsi_title_lo);
   // Off in the core by default for reproducibility. Not under --replay: a
@@ -2384,6 +2394,7 @@ sdl_ready:
   // Same deferral, opposite reason: a screenshot wants the unadorned
   // picture, taken from fb_ after one deliberately unscaled frame.
   bool shot_pending = false;
+  bool shot_raw = false;   // shot_pending under colour correction: waiting on Gpu::raw_frame
   // Slot kAutoSlot is the auto state, which the slot page lists for deletion.
   auto slot_path = [&](int i) { return i == Menu::kAutoSlot ? auto_state_path(nds, session.states_dir) : state_path(nds, session.states_dir, i); };
   auto refresh_slots = [&] { for (int i = 0; i <= Menu::kAutoSlot; ++i) {
@@ -2955,6 +2966,7 @@ sdl_ready:
       return;
     }
     if (is("video.aa")) { apply_aa(nds, v); return; }
+    if (is("video.colour")) { apply_colour(nds, v); return; }
     if (is("video.gpu3d")) { std::string why; if (!nds.gpu3d.renderer().set_gpu(on, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); return; }
     if (is("video.gpu_present")) { host.reopen_wanted = true; return; }
     if (is("video.fps")) { fps_osd = on; if (on && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; } return; }
@@ -3937,6 +3949,9 @@ sdl_ready:
       fs_in_skip = false; fs_left = 0; fs_blocks = 0;
       nds.gpu.set_frame_skip(false);
     }
+    // A screenshot keeps the game's own colours: under colour correction it
+    // waits for the next drawn frame, copied before the correction.
+    if (shot_pending && !shot_raw && nds.gpu.colour_profile() != ds::gpu::ColourProfile::Off) { nds.gpu.request_raw_frame(); shot_raw = true; }
     const bool skipped = nds.gpu.will_skip_frame();
     // Games that render one screen per frame (the other via capture) show one
     // stale screen right after a skip; draw the block through and present its last frame.
@@ -4223,9 +4238,14 @@ sdl_ready:
     }
     // Unlimited limiter outruns the speakers like fast forward: sheds audio the same way.
     audio.push(nds, fast || limiter_off);
-    if (shot_pending && present) {
+    if (shot_pending && present && (!shot_raw || nds.gpu.raw_frame_ready())) {
       shot_pending = false;
-      screenshot(nds, session.shots_dir, display.current_layout());
+      if (shot_raw) {
+        const u32* raw[2] = {nds.gpu.raw_frame(0), nds.gpu.raw_frame(1)};
+        screenshot(nds, session.shots_dir, display.current_layout(), raw);
+        nds.gpu.release_raw_frame();
+        shot_raw = false;
+      } else screenshot(nds, session.shots_dir, display.current_layout());
       flash_left = FLASH_FRAMES;   // from the next frame: this one is already on the panel and in the file
     }
     if (pause_pending && present) {

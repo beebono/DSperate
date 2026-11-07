@@ -170,6 +170,12 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   edge line from the polygons' sub-pixel geometry and the present blends
   across it, a band one DS pixel wide, texture cut-outs included. It is
   sharper than 4x but costs more CPU per frame.
+- **Colour correction** (`video.colour`, `--colour`, the COLOUR menu row):
+  `nds` gives the picture the original DS's colours (hunterk and Pokefan531's
+  nds-color, as ROCKNIX's `lcd1x-nds-color` shader has it), `nds_lite` the
+  DS Lite's brighter ones (after the minui DSperate pak's `ds_lite` tone). It
+  is applied to each shown line at DS resolution, so it reaches every route to
+  the panel. Screenshots keep the game's own colours.
 - **Screen gap** (`video.screen_gap`, `--screen-gap`): a distance in panel
   pixels between the two screens of a stacked, side-by-side or dominant pair,
   or `auto`, which pushes them to the panel's edges when the fit leaves room.

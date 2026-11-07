@@ -676,6 +676,52 @@ void output_vram_line(const u16* src, u16 reg, u32* dst) {
   }
 }
 
+// Sixteen pixels a step: the input curve is two 64-byte tbl lookups a
+// channel (low and high byte of the linear value), the matrix vqrdmulh in
+// eight 16-bit lanes, the output curve's index likewise. The curve itself is
+// a gather: the indices leave the vector unit as 64-bit lanes (four a move)
+// rather than through a stack buffer, whose narrow scalar reloads of wide
+// vector stores miss store forwarding on the in-order cores.
+void colour_correct(const ColourLut& t, u32* dst) {
+  const uint8x16x4_t tlo = {{vld1q_u8(t.lin_lo), vld1q_u8(t.lin_lo + 16), vld1q_u8(t.lin_lo + 32), vld1q_u8(t.lin_lo + 48)}};
+  const uint8x16x4_t thi = {{vld1q_u8(t.lin_hi), vld1q_u8(t.lin_hi + 16), vld1q_u8(t.lin_hi + 32), vld1q_u8(t.lin_hi + 48)}};
+  int16x8_t m[9];
+  for (u32 k = 0; k < 9; ++k) m[k] = vdupq_n_s16(t.m[k]);
+  const int16x8_t zero = vdupq_n_s16(0);
+  const uint16x8_t fine = vdupq_n_u16(ColourLut::FINE), coarse_base = vdupq_n_u16(ColourLut::FINE - ColourLut::FINE / 8);
+  const u8* const c0 = t.curve[0];
+  const u8* const c1 = t.curve[1];
+  const u8* const c2 = t.curve[2];
+  for (u32 i = 0; i < 256; i += 16) {
+    const uint8x16x4_t p = vld4q_u8(reinterpret_cast<const u8*>(dst + i));   // val[0] B, [1] G, [2] R, [3] A
+    int16x8_t l[3][2];
+    for (u32 c = 0; c < 3; ++c) {
+      const uint8x16_t idx = vshrq_n_u8(p.val[2 - c], 2);
+      const uint8x16x2_t z = vzipq_u8(compat::tbl4q_u8(tlo, idx), compat::tbl4q_u8(thi, idx));
+      l[c][0] = vreinterpretq_s16_u8(z.val[0]);
+      l[c][1] = vreinterpretq_s16_u8(z.val[1]);
+    }
+    u64 w[3][4];   // per out channel, four u16 curve indices a word
+    for (u32 k = 0; k < 3; ++k)
+      for (u32 h = 0; h < 2; ++h) {
+        int16x8_t s = vaddq_s16(vqrdmulhq_s16(l[0][h], m[3 * k]), vqrdmulhq_s16(l[2][h], m[3 * k + 2]));
+        s = vqaddq_s16(s, vqrdmulhq_s16(l[1][h], m[3 * k + 1]));
+        const uint16x8_t u = vreinterpretq_u16_s16(vmaxq_s16(s, zero));
+        const uint64x2_t ix = vreinterpretq_u64_u16(vbslq_u16(vcltq_u16(u, fine), u, vaddq_u16(vshrq_n_u16(u, 3), coarse_base)));
+        w[k][2 * h] = vgetq_lane_u64(ix, 0);
+        w[k][2 * h + 1] = vgetq_lane_u64(ix, 1);
+      }
+    for (u32 q = 0; q < 4; ++q) {
+      const u64 r = w[0][q], g = w[1][q], b = w[2][q];
+      u32* const o = dst + i + 4 * q;
+#define DS_CC_PX(j) o[j] = (o[j] & 0xFF000000) | static_cast<u32>(c0[(r >> (16 * j)) & 0xFFFF]) << 16 | \
+                           static_cast<u32>(c1[(g >> (16 * j)) & 0xFFFF]) << 8 | c2[(b >> (16 * j)) & 0xFFFF]
+      DS_CC_PX(0); DS_CC_PX(1); DS_CC_PX(2); DS_CC_PX(3);
+#undef DS_CC_PX
+    }
+  }
+}
+
 // Runs are short (2-3 pixels at the scales the handhelds use, more on a wide
 // panel), so this stores a quad when one fits and falls back to scalar for the
 // tail rather than setting up a vector loop that rarely runs.

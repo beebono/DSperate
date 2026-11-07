@@ -5,10 +5,12 @@
 // reference produces, on random planes covering every branch. On hosts
 // without NEON only the reference runs (as a smoke test).
 #include "core/gpu/kernels.h"
+#include "core/gpu/colour.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <vector>
 #include <random>
 
@@ -242,6 +244,47 @@ static void test_output() {
     alignas(16) u16 v15[256]; fill(v15, 256, 0xFFFF);
     kern::ref::output_vram_line(v15, reg, a.dst); N::output_vram_line(v15, reg, b.dst);
     CHECK_SAME("output_vram_line", a.dst, b.dst, sizeof a.dst);
+  }
+}
+
+// Colour correction: the twins agree bit for bit on random lines (any
+// alpha, any low bits), and the tables stay within 3/255 of the
+// double-precision model over every colour the DS shows. The worst is near
+// black, where the output curve (x^(1/2.3)) is steepest and a faint channel
+// bleed rounds to nothing in Q15.
+static void test_colour() {
+  for (u8 pi = 1; pi < static_cast<u8>(ColourProfile::Count); ++pi) {
+    const ColourProfile p = static_cast<ColourProfile>(pi);
+    auto lut = std::make_unique<kern::ColourLut>();
+    build_colour_lut(p, *lut);
+    for (u32 it = 0; it < 200; ++it) {
+      alignas(16) u32 a[256], b[256];
+      fill(a, 256, 0xFFFFFFFF);
+      if (it & 1) for (u32 i = 0; i < 256; ++i) a[i] = (rng() & 1) ? 0xFF000000 : (a[i] | 0xFF000000);
+      std::memcpy(b, a, sizeof a);
+      kern::ref::colour_correct(*lut, a); N::colour_correct(*lut, b);
+      CHECK_SAME("colour_correct", a, b, sizeof a);
+    }
+    u32 worst = 0;
+    for (u32 c = 0; c < (1u << 18); c += 256) {
+      alignas(16) u32 line[256];
+      for (u32 i = 0; i < 256; ++i) {
+        const u32 r = (c + i) >> 12, g = ((c + i) >> 6) & 63, bl = (c + i) & 63;
+        line[i] = 0xFF000000 | ((r << 2 | r >> 4) << 16) | ((g << 2 | g >> 4) << 8) | (bl << 2 | bl >> 4);
+      }
+      kern::ref::colour_correct(*lut, line);
+      for (u32 i = 0; i < 256; ++i) {
+        const u32 in6[3] = {(c + i) >> 12, ((c + i) >> 6) & 63, (c + i) & 63};
+        u8 want[3];
+        colour_model(p, in6, want);
+        for (u32 k = 0; k < 3; ++k) {
+          const u32 got = (line[i] >> (16 - 8 * k)) & 0xFF;
+          worst = std::max(worst, got > want[k] ? got - want[k] : want[k] - got);
+        }
+      }
+    }
+    const u32 it = 0;
+    if (worst > 3) { std::fprintf(stderr, "FAIL %s: %s off the model by %u (iteration %u)\n", __func__, colour_profile_name(p), worst, it); ++failures; }
   }
 }
 
@@ -627,6 +670,7 @@ int main() {
   test_translucent_3d();
   test_composite();
   test_output();
+  test_colour();
   test_bmp_rows();
   test_capture();
   test_scale_row();
