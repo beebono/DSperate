@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <cstring>
+#include <vector>
 #include <sys/mman.h>
 
 namespace ds::mem {
@@ -16,6 +17,19 @@ CodeStoreStats code_store_stats;
 bool (*PageTable::code_query)(const u8* host_page) = nullptr;
 
 static constexpr size_t TABLE_BYTES = size_t{PAGE_COUNT} * sizeof(Entry);
+
+static const u8* code_bits_base = nullptr;
+static size_t code_bits_pages = 0;
+static std::vector<u64> code_bits;
+void PageTable::code_bits_range(const u8* base, size_t bytes) {
+  code_bits_base = base; code_bits_pages = bytes >> PAGE_SHIFT;
+  code_bits.assign((code_bits_pages + 63) / 64, 0);
+}
+static inline bool host_is_code(const u8* host) {
+  const size_t i = static_cast<size_t>(host - code_bits_base) >> PAGE_SHIFT;
+  if (code_bits_base && host >= code_bits_base && i < code_bits_pages) return (code_bits[i / 64] >> (i & 63)) & 1;
+  return PageTable::code_query && PageTable::code_query(host);
+}
 
 struct PageTable::HostIndex {
   static constexpr u32 SLOT_BITS = 15, SLOTS = 1u << SLOT_BITS, NONE = 0xFFFFFFFFu;
@@ -48,7 +62,7 @@ static Entry make_entry(u32 guest_page_addr, u8* host, u32 flags) {
   assert(((biased >> 2) & ~BASE_MASK) == 0 && "host pointer does not fit below the tag bits");
   Entry e = biased >> 2;
   if (!(flags & PAGE_WRITABLE)) e |= TAG_SPECIAL;
-  if (PageTable::code_query && PageTable::code_query(host)) e |= TAG_CODE;
+  if (host_is_code(host)) e |= TAG_CODE;
   return e;
 }
 
@@ -155,6 +169,10 @@ void PageTable::index_remove(u32 p, Entry e) {
 }
 
 void PageTable::set_code_host(const u8* host_page, bool is_code) {
+  if (code_bits_base && host_page >= code_bits_base) {
+    const size_t i = static_cast<size_t>(host_page - code_bits_base) >> PAGE_SHIFT;
+    if (i < code_bits_pages) { if (is_code) code_bits[i / 64] |= u64{1} << (i & 63); else code_bits[i / 64] &= ~(u64{1} << (i & 63)); }
+  }
   const Entry want = reinterpret_cast<uintptr_t>(host_page) >> PAGE_SHIFT;
   const HostIndex& ix = *index_;
   const u32 s = ix.slot(want);

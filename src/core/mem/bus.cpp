@@ -45,6 +45,7 @@ Bus::Bus(NDS& nds)
       nwram{take_buf(NWRAM_BANK_SIZE), take_buf(NWRAM_BANK_SIZE), take_buf(NWRAM_BANK_SIZE)},
       bios9i(take_buf(BIOS9I_SIZE)), bios7i(take_buf(BIOS7I_SIZE)), nds_(nds) {
   if (fastmem_requested() && !arena_) std::fprintf(stderr, "fastmem: no shared-memory backing (memfd or tmpfs); off\n");
+  PageTable::code_bits_range(vram.get(), VRAM_TOTAL);
   std::memset(bios9.get(), 0, BIOS9_SIZE);
   std::memset(bios7.get(), 0, BIOS7_SIZE);
 }
@@ -398,24 +399,57 @@ void Bus::update_vram() {
   // A remap mid-frame changes what the deferred 2D render reads: lines past
   // HBlank are rendered now against the old views, and the write trap
   // (which the remap drops) is re-armed after. Which engine's views moved,
-  // per engine's four fetch views plus extended palettes; LCDC counts for
-  // engine A. Census only for now: gpu's catch-up stays unconditional.
+  // per engine's four fetch views plus extended palettes; bit 2 for LCDC,
+  // which the gpu counts for engine A only while something reads it.
   const auto view_moved = [&](const gpu::VramView& a, const gpu::VramView& b) { return differs(a, b); };
   const u32 moved_2d =
       ((view_moved(next.abg, vram_map_.abg) || view_moved(next.aobj, vram_map_.aobj) ||
-        view_moved(next.abg_extpal, vram_map_.abg_extpal) || view_moved(next.aobj_extpal, vram_map_.aobj_extpal) ||
-        next.lcdc_mask != vram_map_.lcdc_mask) ? 1u : 0u) |
+        view_moved(next.abg_extpal, vram_map_.abg_extpal) || view_moved(next.aobj_extpal, vram_map_.aobj_extpal)) ? 1u : 0u) |
       ((view_moved(next.bbg, vram_map_.bbg) || view_moved(next.bobj, vram_map_.bobj) ||
-        view_moved(next.bbg_extpal, vram_map_.bbg_extpal) || view_moved(next.bobj_extpal, vram_map_.bobj_extpal)) ? 2u : 0u);
+        view_moved(next.bbg_extpal, vram_map_.bbg_extpal) || view_moved(next.bobj_extpal, vram_map_.bobj_extpal)) ? 2u : 0u) |
+      (next.lcdc_mask != vram_map_.lcdc_mask ? 4u : 0u);
+  // Only the guest ranges whose hosts can have changed are rebuilt and
+  // diffed: an engine window whose view moved (its 2 MB of mirrors), the
+  // ARM7 window likewise, and of LCDC the banks that entered or left it.
+  // Every other entry keeps its page -- and its trap bits. Dragon Quest IX flips banks A-D between LCDC and texture
+  // slots up to 800 times a frame while streaming textures; the whole-region
+  // rebuild (two 64 KB tables filled, compared and re-armed per store) cost
+  // 200 us a flip on the A55, 100-180 ms frames.
+  static const u32 lcdc_base[9] = {0x00000, 0x20000, 0x40000, 0x60000, 0x80000, 0x90000, 0x94000, 0x98000, 0xA0000};
+  // LCDC's 1 MB mirrors: only the first is laid into the page table. The
+  // slow path resolves the others by the low 20 bits (vram_view_for), and a
+  // flip of a 128 KB bank then costs 64 entries, not 512. DS_LCDC_MIRRORS
+  // maps more (up to 8) for an A/B.
+  static const u32 lcdc_mirrors = [] { const char* e = std::getenv("DS_LCDC_MIRRORS"); const int v = e ? std::atoi(e) : 1; return static_cast<u32>(v < 1 ? 1 : v > 8 ? 8 : v); }();
+  const u32 lcdc_end = 0x06800000 + lcdc_mirrors * 0x100000;
+  struct Range { u32 addr, size; };
+  Range r9[12], r7[1];
+  u32 n9 = 0, n7 = 0;
+  const bool full = !vram_hosts_valid_;
+  if (full) { r9[n9++] = {0x06000000, 0x01000000}; r7[n7++] = {0x06000000, 0x01000000}; }
+  else {
+    if (view_moved(next.abg,  vram_map_.abg))  r9[n9++] = {0x06000000, 0x00200000};
+    if (view_moved(next.bbg,  vram_map_.bbg))  r9[n9++] = {0x06200000, 0x00200000};
+    if (view_moved(next.aobj, vram_map_.aobj)) r9[n9++] = {0x06400000, 0x00200000};
+    if (view_moved(next.bobj, vram_map_.bobj)) r9[n9++] = {0x06600000, 0x00200000};
+    if (view_moved(next.arm7, vram_map_.arm7)) r7[n7++] = {0x06000000, 0x01000000};
+    if (const u32 d = next.lcdc_mask ^ vram_map_.lcdc_mask) {
+      u32 lo = 0x100000, hi = 0;
+      for (int i = 0; i < 9; ++i)
+        if (d & (1u << i)) { lo = std::min(lo, lcdc_base[i]); hi = std::max(hi, lcdc_base[i] + VRAM_BANK_SIZES[i]); }
+      for (u32 mirror = 0x06800000; mirror < lcdc_end; mirror += 0x100000) r9[n9++] = {mirror + lo, hi - lo};
+    }
+  }
   const bool trapped = nds_.gpu.vram_remap_begin(moved_2d, &next);
   vram_map_ = next;
-  // Whole 16 MB region described as one host pointer per page, applied as a
-  // diff. Blocks backed by one bank map into the page table; blocks with
-  // overlapping banks stay unmapped so the slow path can OR them together.
+  // Each range: the new host per page into the scratch table, diffed in
+  // runs against what the page table holds, changed runs remapped. Blocks
+  // backed by one bank map; blocks with overlapping banks stay unmapped so
+  // the slow path can OR them together.
   u8** const h9 = vram_hosts_[0].get();
   u8** const h7 = vram_hosts_[1].get();
-  std::memset(h9, 0, VRAM_PAGES * sizeof(u8*));
-  std::memset(h7, 0, VRAM_PAGES * sizeof(u8*));
+  u8** const p9 = vram_hosts_prev_[0].get();   // what the tables hold now
+  u8** const p7 = vram_hosts_prev_[1].get();
   auto set_pages = [](u8** hosts, u32 addr, u32 size, u8* host) {
     u8** pg = hosts + ((addr - 0x06000000) >> PAGE_SHIFT);
     for (u32 i = 0; i < size / PAGE_SIZE; ++i) pg[i] = host + i * PAGE_SIZE;
@@ -425,35 +459,65 @@ void Bus::update_vram() {
       for (u32 b = 0; b < v.blocks(); ++b)
         if (v.ptr[b]) set_pages(hosts, mirror + b * gpu::VramView::BLOCK, gpu::VramView::BLOCK, v.ptr[b]);
   };
-  map_view(h9, vram_map_.abg,  0x06000000, 0x06200000);
-  map_view(h9, vram_map_.bbg,  0x06200000, 0x06400000);
-  map_view(h9, vram_map_.aobj, 0x06400000, 0x06600000);
-  map_view(h9, vram_map_.bobj, 0x06600000, 0x06800000);
-  map_view(h7, vram_map_.arm7, 0x06000000, 0x07000000);
-  static const u32 lcdc_base[9] = {0x00000, 0x20000, 0x40000, 0x60000, 0x80000, 0x90000, 0x94000, 0x98000, 0xA0000};
-  for (int i = 0; i < 9; ++i) {
-    if (!(vram_map_.lcdc_mask & (1u << i))) continue;
-    for (u32 mirror = 0x06800000; mirror < 0x07000000; mirror += 0x100000) set_pages(h9, mirror + lcdc_base[i], VRAM_BANK_SIZES[i], banks[i]);
-  }
-  // Only runs of pages whose host changed go through the page table.
-  auto apply = [&](PageTable& pt, u8** cur, u8** prev) {
-    constexpr u32 CHUNK = 256;   // entries (512 KB of guest space)
-    u32 run = 0; bool in_run = false;
-    for (u32 i = 0; i <= VRAM_PAGES; i += CHUNK) {
-      const bool d = i < VRAM_PAGES && std::memcmp(cur + i, prev + i, CHUNK * sizeof(u8*)) != 0;
-      if (d) { if (!in_run) { run = i; in_run = true; } }
-      else if (in_run) { pt.remap(0x06000000 + (run << PAGE_SHIFT), (i - run) << PAGE_SHIFT, cur + run, RW); in_run = false; }
+  auto fill9 = [&](const Range& r) {
+    const u32 end = r.addr + r.size;
+    std::memset(h9 + ((r.addr - 0x06000000) >> PAGE_SHIFT), 0, (r.size >> PAGE_SHIFT) * sizeof(u8*));
+    auto window = [&](const gpu::VramView& v, u32 base, u32 bend) { if (r.addr < bend && end > base) map_view(h9, v, base, bend); };
+    window(vram_map_.abg,  0x06000000, 0x06200000);
+    window(vram_map_.bbg,  0x06200000, 0x06400000);
+    window(vram_map_.aobj, 0x06400000, 0x06600000);
+    window(vram_map_.bobj, 0x06600000, 0x06800000);
+    if (end <= 0x06800000) return;
+    for (int i = 0; i < 9; ++i) {
+      if (!(vram_map_.lcdc_mask & (1u << i))) continue;
+      for (u32 mirror = 0x06800000; mirror < lcdc_end; mirror += 0x100000) {
+        const u32 a = mirror + lcdc_base[i];
+        if (a < end && a + VRAM_BANK_SIZES[i] > r.addr) set_pages(h9, a, VRAM_BANK_SIZES[i], banks[i]);
+      }
     }
   };
-  for (u32 w = 0; w < VRAM_PAGES / 64; ++w) {
-    u64 m = 0;
-    for (u32 b = 0; b < 64; ++b) if (h9[w * 64 + b]) m |= u64{1} << b;
-    vram_mapped9_[w] = m;
+  auto fill7 = [&](const Range& r) {
+    std::memset(h7 + ((r.addr - 0x06000000) >> PAGE_SHIFT), 0, (r.size >> PAGE_SHIFT) * sizeof(u8*));
+    map_view(h7, vram_map_.arm7, 0x06000000, 0x07000000);
+  };
+  auto apply = [&](PageTable& pt, u8** cur, u8** prev, const Range& r) {
+    const u32 p0 = (r.addr - 0x06000000) >> PAGE_SHIFT, p1 = p0 + (r.size >> PAGE_SHIFT);
+    if (full) pt.remap(r.addr, r.size, cur + p0, RW);
+    else {
+      constexpr u32 CHUNK = 32;   // entries (64 KB of guest space)
+      u32 run = 0; bool in_run = false;
+      for (u32 i = p0;; i += CHUNK) {
+        const u32 n = i < p1 ? std::min(CHUNK, p1 - i) : 0;
+        const bool d = n && std::memcmp(cur + i, prev + i, n * sizeof(u8*)) != 0;
+        if (d) { if (!in_run) { run = i; in_run = true; } }
+        else if (in_run) { pt.remap(0x06000000 + (run << PAGE_SHIFT), (std::min(i, p1) - run) << PAGE_SHIFT, cur + run, RW); in_run = false; }
+        if (!n) break;
+      }
+    }
+    std::memcpy(prev + p0, cur + p0, (p1 - p0) * sizeof(u8*));
+  };
+  for (u32 k = 0; k < n9; ++k) { fill9(r9[k]); apply(pt9, h9, p9, r9[k]); }
+  for (u32 k = 0; k < n7; ++k) { fill7(r7[k]); apply(pt7, h7, p7, r7[k]); }
+  vram_hosts_valid_ = true;
+  // The mapped-page bits of the touched words, then the write trap back over
+  // them where it is armed: the remap drops it from every entry it rewrites.
+  for (u32 k = 0; k < n9; ++k) {
+    const u32 p0 = (r9[k].addr - 0x06000000) >> PAGE_SHIFT, p1 = p0 + (r9[k].size >> PAGE_SHIFT);
+    for (u32 w = p0 / 64; w < (p1 + 63) / 64; ++w) {
+      u64 m = 0;
+      for (u32 b = 0; b < 64; ++b) if (p9[w * 64 + b]) m |= u64{1} << b;
+      vram_mapped9_[w] = m;
+    }
+    if (!vram_trap_on_) continue;
+    const u32 a = r9[k].addr & ~u32{64 * PAGE_SIZE - 1}, e = (r9[k].addr + r9[k].size + 64 * PAGE_SIZE - 1) & ~u32{64 * PAGE_SIZE - 1};
+    bool armed;
+    if (a >= 0x06800000) armed = vram_trap_lcdc_;
+    else if (full) armed = vram_trap_windows_ != 0 || vram_trap_lcdc_;   // the whole region: set_vram_trap below sorts the windows
+    else armed = (vram_trap_windows_ >> (((a >> 21) & 1))) & 1;   // 0x06000000/0x06400000 engine A, 0x06200000/0x06600000 engine B
+    if (!armed) continue;
+    if (full) { set_vram_trap(true, vram_trap_lcdc_, vram_trap_windows_); break; }
+    pt9.set_write_trap_bits(a >> PAGE_SHIFT, (e - a) >> PAGE_SHIFT, vram_mapped9_ + ((a - 0x06000000) >> PAGE_SHIFT) / 64, true);
   }
-  if (!vram_hosts_valid_) { pt9.remap(0x06000000, 0x01000000, h9, RW); pt7.remap(0x06000000, 0x01000000, h7, RW); vram_hosts_valid_ = true; }
-  else { apply(pt9, h9, vram_hosts_prev_[0].get()); apply(pt7, h7, vram_hosts_prev_[1].get()); }
-  std::swap(vram_hosts_[0], vram_hosts_prev_[0]);
-  std::swap(vram_hosts_[1], vram_hosts_prev_[1]);
   nds_.gpu.vram_remap_end(trapped);
   if (watch_on && (watch_addr >> 24) == 0x06) { pt9.map_mmio(watch_addr & ~0x7FFu, 0x800); pt7.map_mmio(watch_addr & ~0x7FFu, 0x800); }
 }
@@ -673,6 +737,7 @@ void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
 
 void Bus::set_vram_trap(bool on, bool lcdc, u32 windows) {
   PageTable& pt9 = nds_.cpu(Cpu::ARM9).page_table;
+  vram_trap_on_ = on; vram_trap_lcdc_ = lcdc; vram_trap_windows_ = windows;
   // Only over mapped pages (~330 of the 8K in the engine windows).
   auto range = [&](u32 addr, u32 size) {
     const u32 first = (addr - 0x06000000) >> PAGE_SHIFT;

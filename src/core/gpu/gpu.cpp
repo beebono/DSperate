@@ -223,6 +223,17 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
 // `moved_2d`: engines whose read views this remap actually moves. CENSUS
 // ONLY for now -- the catch-up below is still unconditional.
 bool Gpu::vram_remap_begin(u32 moved_2d, const VramMap* next) {
+  // LCDC (bit 2) is an engine A view only while A displays a VRAM bank or
+  // a capture writes one; otherwise a bank entering or leaving it changes
+  // nothing the 2D render reads, and the remap needs no catch-up or join
+  // (the trap, if armed, is re-applied by the bus over the remapped pages).
+  // Dragon Quest IX streams textures by flipping banks through LCDC hundreds
+  // of times a frame.
+  if (moved_2d & 4) {
+    const bool lcdc_read = ((engine[0].dispcnt() >> 16) & 3) == 2 || capture_on_ || capture_render_;
+    moved_2d = (moved_2d & 3) | (lcdc_read ? 1u : 0u);
+  }
+  if (!moved_2d) { prof::add(prof::C_VRAM_REMAP_2D_STILL, 1); return trap_armed_; }
   // A job in flight keeps rendering against its snapshot; the live map may
   // change under it as long as the write trap still covers every bank it
   // reads at the bank's new address: an engine window that is trapped, or
@@ -295,17 +306,17 @@ bool Gpu::vram_remap_begin(u32 moved_2d, const VramMap* next) {
   catch_up(3);
   join_worker(JoinSite::Remap);
   engine[0].vram_remapped(); engine[1].vram_remapped();
-  const bool was = trap_armed_;
-  if (was) disarm_trap();
-  return was;
+  // The trap stays armed across the remap: the bus re-applies it over the
+  // pages it rewrites (the rest keep theirs), and vram_remap_end's arm_trap
+  // only redoes the windows if the arming itself changed.
+  return trap_armed_;
 }
 void Gpu::vram_remap_end(bool trapped) {
   if (trapped) { arm_trap(); return; }
-  // Kept armed across the remap (a job in flight on its snapshot): the page
-  // table just rebuilt dropped the trap bits of every page it touched. The
-  // capture read trap comes back in its generic form, over every page the
-  // bank backs now -- the guest reads it through the new mapping otherwise.
-  if (trap_armed_) nds_.bus.set_vram_trap(true, trap_lcdc_, trap_mask_);
+  // Kept armed across the remap (a job in flight on its snapshot); the bus
+  // re-applied the trap over the pages it rewrote. The capture read trap
+  // comes back in its generic form, over every page the bank backs now --
+  // the guest reads it through the new mapping otherwise.
   if (read_trap_reapply_) {
     read_trap_reapply_ = false;
     if (read_trap_bank_ >= 0) { nds_.bus.set_bank_read_trap(read_trap_bank_, true); read_trap_generic_ = true; }

@@ -146,6 +146,9 @@ public:
   // Pages of the ARM9 0x06000000 window with a host (rebuilt by update_vram):
   // the write trap toggles visit these, not all 8 K entries.
   u64 vram_mapped9_[VRAM_PAGES / 64] = {};
+  // The last set_vram_trap: update_vram re-applies it over the pages it remaps.
+  bool vram_trap_on_ = false, vram_trap_lcdc_ = false;
+  u32 vram_trap_windows_ = 0;
   static constexpr u32 VRAM_BANK_SIZES[9] = {0x20000, 0x20000, 0x20000, 0x20000, 0x10000, 0x4000, 0x4000, 0x8000, 0x4000};
   static constexpr u32 VRAM_TOTAL = 0x20000 * 4 + 0x10000 + 0x4000 * 2 + 0x8000 + 0x4000;
 

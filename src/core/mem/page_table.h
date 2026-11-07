@@ -100,6 +100,10 @@ public:
   // see the same tag; `map` re-applies tags through `code_query`.
   void set_code_host(const u8* host_page, bool is_code);
   static bool (*code_query)(const u8* host_page);
+  // A bitmap of the code pages within one host range, kept by set_code_host,
+  // read by make_entry instead of code_query for hosts inside it: VRAM, whose
+  // pages a VRAMCNT remap lays by the hundreds a frame in some games.
+  static void code_bits_range(const u8* base, size_t bytes);
 
   // Return nullptr when the access must take the slow path.
   inline u8* read_ptr(u32 addr) const {
