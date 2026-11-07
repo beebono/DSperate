@@ -24,10 +24,16 @@ extern "C" const ds::u8 dsperate_dsi_font_kr_begin[], dsperate_dsi_font_kr_end[]
 
 namespace ds::io {
 
+FontBlob builtin_dsi_font_view(u8 region) {
+  const u8 *b = dsperate_dsi_font_begin, *e = dsperate_dsi_font_end;
+  if (region == 4) { b = dsperate_dsi_font_cn_begin; e = dsperate_dsi_font_cn_end; }
+  if (region == 5) { b = dsperate_dsi_font_kr_begin; e = dsperate_dsi_font_kr_end; }
+  return FontBlob{b, static_cast<size_t>(e - b)};
+}
+
 std::vector<u8> builtin_dsi_font(u8 region) {
-  if (region == 4) return std::vector<u8>(dsperate_dsi_font_cn_begin, dsperate_dsi_font_cn_end);
-  if (region == 5) return std::vector<u8>(dsperate_dsi_font_kr_begin, dsperate_dsi_font_kr_end);
-  return std::vector<u8>(dsperate_dsi_font_begin, dsperate_dsi_font_end);
+  const FontBlob f = builtin_dsi_font_view(region);
+  return std::vector<u8>(f.data, f.data + f.size);
 }
 
 bool is_builtin_font_signature(const u8 sig[0x80]) {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/menu.h"
+#include "frontend/sdl/ui_font.h"
 #include "core/io/io.h"
 
 #include <algorithm>
@@ -109,18 +110,34 @@ int glyph_cased(char c) {
   return glyph(c);
 }
 
-// Text arrives as UTF-8 but the font is ASCII: a Latin letter with a mark
-// folds onto the letter it decorates ("Ōkamiden"); anything else draws '?'.
-// Returns the next glyph's ASCII code and advances `p` past its bytes.
-char next_char(const char*& p) {
+// Text arrives as UTF-8. A Latin letter with a mark folds onto the 5x7
+// letter it decorates ("Ōkamiden"), keeping the menu's capitals; anything
+// else the 5x7 font lacks (kana, CJK, Hangul, Greek, Cyrillic, symbols) is a
+// fallback glyph from the built-in DSi fonts (ui_font.h), and '?' when they
+// lack it too. One drawable unit: `ascii` for the 5x7 font, else `cp`.
+struct Ch { char ascii; u32 cp; };
+
+// Greek and Cyrillic small letters onto their capitals, as the 5x7 font folds
+// a-z, so a translated menu keeps one case.
+u32 fold_case(u32 cp) {
+  if (cp >= 0x3B1 && cp <= 0x3C9) return cp == 0x3C2 ? 0x3A3 : cp - 0x20;   // final sigma
+  if (cp >= 0x3AC && cp <= 0x3AF) return cp == 0x3AC ? 0x386 : cp - 0x25;   // tonos: ά έ ή ί
+  if (cp == 0x3CC) return 0x38C;
+  if (cp == 0x3CD || cp == 0x3CE) return cp - 0x3F;
+  if (cp >= 0x430 && cp <= 0x44F) return cp - 0x20;
+  if (cp >= 0x450 && cp <= 0x45F) return cp - 0x50;
+  return cp;
+}
+
+Ch next_char(const char*& p, bool keep_case = false) {
   const unsigned char b0 = static_cast<unsigned char>(*p++);
-  if (b0 < 0x80) return static_cast<char>(b0);
+  if (b0 < 0x80) return {static_cast<char>(b0), b0};
   int len = b0 >= 0xF0 ? 4 : b0 >= 0xE0 ? 3 : b0 >= 0xC0 ? 2 : 0;
-  if (len == 0) return '?';                        // stray continuation byte
+  if (len == 0) return {'?', '?'};                 // stray continuation byte
   u32 cp = b0 & (0x7F >> len);
   for (int i = 1; i < len; ++i, ++p) {
     const unsigned char b = static_cast<unsigned char>(*p);
-    if ((b & 0xC0) != 0x80) return '?';            // truncated sequence: leave the tail for the next glyph
+    if ((b & 0xC0) != 0x80) return {'?', '?'};     // truncated sequence: leave the tail for the next glyph
     cp = (cp << 6) | (b & 0x3F);
   }
   // Latin-1 Supplement, U+00C0..U+00FF.
@@ -131,9 +148,33 @@ char next_char(const char*& p) {
   static constexpr char kLatinA[128 + 1] =
       "AaAaAaCcCcCcCcDd" "DdEeEeEeEeEeGgGg" "GgGgHhHhIiIiIiIi" "IiIiJjKkkLlLlLlL"
       "lLlNnNnNnnNnOoOo" "OoOoRrRrRrSsSsSs" "SsTtTtTtUuUuUuUu" "UuUuWwYyYZzZzZzs";
-  if (cp >= 0xC0 && cp <= 0xFF) return kLatin1[cp - 0xC0];
-  if (cp >= 0x100 && cp <= 0x17F) return kLatinA[cp - 0x100];
-  return '?';
+  if (cp >= 0xC0 && cp <= 0xFF) return {kLatin1[cp - 0xC0], cp};
+  if (cp >= 0x100 && cp <= 0x17F) return {kLatinA[cp - 0x100], cp};
+  return {0, keep_case ? cp : fold_case(cp)};
+}
+
+// How a fallback glyph scales against the 5x7 font at `scale`: font pixels
+// are num/den panel pixels. From scale 2 the 16x21 font at scale/2 puts a
+// kanji (14 font pixels) exactly as tall as a 5x7 capital (7 * scale); at
+// scale 1 the small font, unscaled, is the least bad.
+struct Fallback { uifont::Size size; int num, den; };
+Fallback fallback_for(int scale) {
+  return scale >= 2 ? Fallback{uifont::Size::Large, scale, 2} : Fallback{uifont::Size::Small, 1, 1};
+}
+int fdiv(int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }   // floor
+
+// A glyph's footprint: its advance and the blank after its ink (which
+// text_width leaves off the end, as it does the 5x7 font's one-pixel gap).
+struct Span { int adv, trail; };
+Span span_of(const Ch& c, int scale, uifont::Glyph* g = nullptr) {
+  if (c.ascii) return {kAdvance * scale, scale};
+  const Fallback f = fallback_for(scale);
+  uifont::Glyph tmp;
+  uifont::Glyph& gl = g ? *g : tmp;
+  if (!uifont::find(c.cp, f.size, gl)) { gl.tile = nullptr; return {kAdvance * scale, scale}; }   // drawn as '?'
+  const int adv = fdiv(gl.adv * f.num, f.den);
+  const int ink_end = fdiv((gl.left + gl.ink) * f.num, f.den);
+  return {adv, std::max(0, adv - ink_end)};
 }
 
 // Drops the last code point, so trimming for width never leaves a lead byte behind.
@@ -156,6 +197,25 @@ void fill_rect(const Canvas& d, int x, int y, int w, int h, u32 colour) {
   for (int yy = y0; yy < y1; ++yy) {
     u32* row = d.px + static_cast<size_t>(yy) * d.pitch;
     for (int xx = x0; xx < x1; ++xx) row[xx] = colour;
+  }
+}
+
+// One fallback glyph with its pen at x, the 5x7 font's top at y: the font's
+// baseline row lands on the row under a 5x7 capital. Drawn hard-edged, as the
+// 5x7 font is: the font's two darker levels are ink, the faintest is dropped
+// (blended grey edges looked soft beside the pixel font).
+void draw_fallback(const Canvas& d, int x, int y, int scale, u32 colour, const uifont::Glyph& g) {
+  const Fallback f = fallback_for(scale);
+  const int ox = x + fdiv(g.left * f.num, f.den), oy = y + kGlyphH * scale - fdiv(g.base * f.num, f.den);
+  const int w = std::min(g.ink, g.cell_w);
+  for (int r = 0; r < g.cell_h; ++r) {
+    const int y0 = oy + fdiv(r * f.num, f.den), y1 = oy + fdiv((r + 1) * f.num, f.den);
+    if (y1 <= y0) continue;
+    for (int c = 0; c < w; ++c) {
+      if (g.px(c, r) < 2) continue;
+      const int x0 = ox + fdiv(c * f.num, f.den), x1 = ox + fdiv((c + 1) * f.num, f.den);
+      if (x1 > x0) fill_rect(d, x0, y0, x1 - x0, y1 - y0, colour);
+    }
   }
 }
 
@@ -216,22 +276,32 @@ static_assert(kRoot[kCheevosRow].result == Menu::Result::None, "kCheevosRow must
 } // namespace
 
 int text_width(int scale, const char* s) {
-  int n = 0;
-  for (const char* p = s; *p;) { next_char(p); ++n; }   // glyphs, not bytes
-  return n > 0 ? n * kAdvance * scale - scale : 0;   // no gap after the last glyph
+  int w = 0, trail = 0;
+  for (const char* p = s; *p;) {   // glyphs, not bytes
+    const Span sp = span_of(next_char(p), scale);
+    w += sp.adv; trail = sp.trail;
+  }
+  return w - trail;   // no gap after the last glyph
 }
 
 int draw_text(const Canvas& d, int x, int y, int scale, u32 colour, const char* s, bool keep_case) {
+  int trail = 0;
   for (const char* p = s; *p;) {
-    const char ch = next_char(p);
-    const u8* g = kFont[keep_case ? glyph_cased(ch) : glyph(ch)];
-    for (int r = 0; r < kGlyphH; ++r)
-      for (int c = 0; c < kGlyphW; ++c)
-        if ((g[r] >> (kGlyphW - 1 - c)) & 1)
-          fill_rect(d, x + c * scale, y + r * scale, scale, scale, colour);
-    x += kAdvance * scale;
+    Ch ch = next_char(p, keep_case);
+    uifont::Glyph g;
+    const Span sp = span_of(ch, scale, &g);
+    if (!ch.ascii && g.tile) {
+      draw_fallback(d, x, y, scale, colour, g);
+    } else {
+      const u8* gl = kFont[ch.ascii ? (keep_case ? glyph_cased(ch.ascii) : glyph(ch.ascii)) : glyph('?')];
+      for (int r = 0; r < kGlyphH; ++r)
+        for (int c = 0; c < kGlyphW; ++c)
+          if ((gl[r] >> (kGlyphW - 1 - c)) & 1)
+            fill_rect(d, x + c * scale, y + r * scale, scale, scale, colour);
+    }
+    x += sp.adv; trail = sp.trail;
   }
-  return x - scale;
+  return x - trail;
 }
 
 int ui_scale(const Canvas& d) {

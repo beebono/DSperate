@@ -50,6 +50,9 @@ DsiConsoleFiles make_dsi_console_files(const bios::UserSettings& user, const Dsi
 // normal three. First 0x80 bytes are a marker where Nintendo's RSA signature would be, checked
 // through DSi BIOS SWI 22h, which NDS::dsi_hle_swi answers for the marker.
 std::vector<u8> builtin_dsi_font(u8 region = 1);
+// The same table in place, no copy (the frontend's menu draws from its glyphs, ui_font.h).
+struct FontBlob { const u8* data; size_t size; };
+FontBlob builtin_dsi_font_view(u8 region = 1);
 bool is_builtin_font_signature(const u8 sig[0x80]);
 // Which console a TWLFontTable.dat is for: 0 normal, 4 China, 5 Korea, -1 neither.
 int font_table_region(const std::vector<u8>& table);

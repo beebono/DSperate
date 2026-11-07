@@ -171,12 +171,62 @@ void test_utf8_folds_to_ascii_glyphs() {
   const Canvas ca{a.data(), 200, 200, 20}, cb{b.data(), 200, 200, 20};
   CHECK(draw_text(ca, 0, 0, 2, 0xFFFFFFFF, accented) == draw_text(cb, 0, 0, 2, 0xFFFFFFFF, plain));
   CHECK(a == b);   // pixel for pixel the same word
-  // Something with no Latin base draws as '?' rather than nothing.
+  // A character no font has draws as '?' rather than nothing (U+0E01, Thai).
   std::vector<u32> q(200 * 20, 0), z(200 * 20, 0);
-  draw_text(Canvas{q.data(), 200, 200, 20}, 0, 0, 2, 0xFFFFFFFF, "\xE3\x81\x82");   // あ
+  draw_text(Canvas{q.data(), 200, 200, 20}, 0, 0, 2, 0xFFFFFFFF, "\xE0\xB8\x81");
   draw_text(Canvas{z.data(), 200, 200, 20}, 0, 0, 2, 0xFFFFFFFF, "?");
   CHECK(q == z);
-  CHECK(text_width(2, "\xE3\x81\x82") == text_width(2, "?"));
+  CHECK(text_width(2, "\xE0\xB8\x81") == text_width(2, "?"));
+}
+
+// What the 5x7 font lacks comes from the built-in DSi fonts (ui_font.h):
+// kana, simplified Chinese (GB 2312, only in the China table), Hangul and
+// Cyrillic all draw ink of their own, not the '?', and text_width agrees
+// with where draw_text leaves the pen, at every scale.
+void test_fallback_glyphs() {
+  using ds::sdl::Canvas; using ds::sdl::text_width; using ds::sdl::draw_text;
+  const char* samples[] = {
+    "\xE3\x81\x82",                       // あ
+    "\xE8\xAE\xBE\xE7\xBD\xAE",           // 设置 (simplified; not in JIS X 0208)
+    "\xED\x95\x9C",                       // 한
+    "\xD0\x96",                           // Ж
+  };
+  for (const char* t : samples) {
+    for (int scale = 1; scale <= 8; ++scale) {
+      const int W = 64 * scale, H = 16 * scale;
+      std::vector<u32> a(static_cast<size_t>(W) * H, 0), qm(static_cast<size_t>(W) * H, 0);
+      const int end = draw_text(Canvas{a.data(), static_cast<u32>(W), W, H}, 0, 4 * scale, scale, 0xFFFFFFFF, t);
+      draw_text(Canvas{qm.data(), static_cast<u32>(W), W, H}, 0, 4 * scale, scale, 0xFFFFFFFF, "?");
+      CHECK(end == text_width(scale, t));
+      CHECK(a != qm);
+      CHECK(std::any_of(a.begin(), a.end(), [](u32 p) { return p != 0; }));
+      // Hard-edged like the 5x7 font: ink or nothing, no grey edge.
+      CHECK(std::all_of(a.begin(), a.end(), [](u32 p) { return p == 0 || p == 0xFFFFFFFF; }));
+    }
+  }
+  // Mixed with ASCII, the widths still add up.
+  const char* mixed = "SLOT \xE8\xAE\xBE 3";
+  std::vector<u32> m(400 * 40, 0);
+  CHECK(draw_text(Canvas{m.data(), 400, 400, 40}, 0, 0, 2, 0xFFFFFFFF, mixed) == text_width(2, mixed));
+  // At scale 2 and up, a CJK glyph's ink is as tall as a 5x7 capital, give or take its own bearing.
+  for (int scale = 2; scale <= 8; scale += 2) {
+    const int W = 64 * scale, H = 20 * scale, top = 4 * scale;
+    std::vector<u32> a(static_cast<size_t>(W) * H, 0);
+    draw_text(Canvas{a.data(), static_cast<u32>(W), W, H}, 0, top, scale, 0xFFFFFFFF, "\xE5\x8F\xA3");   // 口
+    int y0 = H, y1 = -1;
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x)
+        if (a[static_cast<size_t>(y) * W + x]) { y0 = std::min(y0, y); y1 = std::max(y1, y); }
+    CHECK(y1 >= y0);
+    const int h = y1 - y0 + 1;
+    CHECK(h >= 5 * scale && h <= 8 * scale);
+    CHECK(y0 >= top - scale && y1 <= top + 8 * scale);
+  }
+  // The name editor keeps case; the menu folds Cyrillic onto capitals like a-z.
+  std::vector<u32> lo(200 * 40, 0), up(200 * 40, 0);
+  draw_text(Canvas{lo.data(), 200, 200, 40}, 0, 0, 2, 0xFFFFFFFF, "\xD0\xB6");   // ж
+  draw_text(Canvas{up.data(), 200, 200, 40}, 0, 0, 2, 0xFFFFFFFF, "\xD0\x96");   // Ж
+  CHECK(lo == up);
 }
 
 void test_cheevos_row_hidden_without_a_host() {
@@ -1672,6 +1722,7 @@ int main() {
   test_list_scrolls_within_bounds();
   test_cheevos_draw_bounds();
   test_utf8_folds_to_ascii_glyphs();
+  test_fallback_glyphs();
   test_toast_draw_bounds();
   test_marquee_resets_on_move();
   test_page_stack();

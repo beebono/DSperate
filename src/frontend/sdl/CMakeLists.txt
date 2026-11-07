@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp pad_faces.cpp menu.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
+add_executable(dsperate main.cpp config.cpp display.cpp audio.cpp input.cpp pad_faces.cpp menu.cpp ui_font.cpp settings.cpp lid.cpp mic_alsa.cpp loader_cart.cpp dmaheap.cpp
   display_drm.cpp display_disp.cpp display_fbdev.cpp)
 # Required on older glibc toolchains where pthread symbols are not in libc.
 set(THREADS_PREFER_PTHREAD_FLAG ON)
