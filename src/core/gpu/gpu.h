@@ -93,6 +93,12 @@ public:
   // corrected colours. Joins any lines in flight; set between frames.
   void set_colour_profile(ColourProfile p);
   ColourProfile colour_profile() const { return colour_; }
+  // The profile's tables, null when off. A presenter that corrects the
+  // frames itself (the Vulkan present, on its own thread) turns the
+  // output stage's pass off, so fb_ keeps the game's colours. Joins on a change.
+  const std::shared_ptr<const kern::ColourLut>& colour_lut() const { return colour_lut_; }
+  void set_colour_on_cpu(bool on);
+  bool colour_on_cpu() const { return colour_lut_ && colour_cpu_; }
   // The next drawn frame as the output stage gave it before colour
   // correction, for screenshots: request between frames, then after each
   // frame poll raw_frame_ready(). raw_frame() holds until the next request;
@@ -244,8 +250,9 @@ private:
   u64 prev_rows_[2][3] = {};
   void output_edges(const Engine2D& en, int screen, u32 line, const u32* shown);
   void capture_edges(u32 cnt, u32 line, u32 width, u32 dst_bank, u32 lcdc);
-  std::unique_ptr<kern::ColourLut> colour_lut_;   // null: off
+  std::shared_ptr<const kern::ColourLut> colour_lut_;   // null: off
   ColourProfile colour_ = ColourProfile::Off;
+  bool colour_cpu_ = true;
   // request_raw_frame: each engine's lines 0..191 copied once, from its first line 0 on.
   bool raw_active_ = false;
   u32 raw_lines_[2] = {};

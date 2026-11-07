@@ -2,6 +2,7 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #include "frontend/sdl/gpu_present.h"
 #include "frontend/sdl/video/presenter.h"
+#include "core/gpu/kernels.h"
 
 #include <cstdio>
 #include <algorithm>
@@ -382,7 +383,7 @@ bool GpuPresent::reimport(ScanoutOut& out) {
 void GpuPresent::flush(ScanoutOut& out) { d_->retire(out); }
 
 bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* views, int nviews, int rot, int lw, int lh, u8 inset_alpha,
-                         SDL_Rect drawn, u32 grid, const EdgePlanes* edges) {
+                         SDL_Rect drawn, u32 grid, const EdgePlanes* edges, const gpu::kern::ColourLut* colour) {
   Impl& d = *d_;
   const Api& a = *d.a;
   // The previous frame first: its fence, then its buffer to the tier. Only
@@ -400,7 +401,24 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
   if (d.fence_live[slot]) { a.vkWaitForFences(d.vk->dev, 1, &d.fence[slot], VK_TRUE, ~0ull); d.fence_live[slot] = false; }
 
   u32* dst = static_cast<u32*>(d.src.ptr) + static_cast<size_t>(slot) * kSlotWords;
-  for (int s = 0; s < 2; ++s) std::memcpy(dst + static_cast<size_t>(s) * kFrameWords, fb[s], sizeof(u32) * kFrameWords);
+  // Colour correction rides this copy, on the present thread: the core's
+  // kernel line by line through a stack line (the buffer may be
+  // write-combined: never read back), only for the screens this present
+  // shows (one each under --dual-window). Per fragment in present.frag it
+  // cost the Mali-G52 1.3-7 ms of GPU a frame, which the GPU 3D raster's
+  // heavy frames could not spare.
+  alignas(16) u32 line[256];
+  bool shows[2] = {false, false};
+  for (int v = 0; v < std::min(nviews, 2); ++v) if (views[v].shown) shows[views[v].screen & 1] = true;
+  for (int s = 0; s < 2; ++s) {
+    u32* const o = dst + static_cast<size_t>(s) * kFrameWords;
+    if (!colour || !shows[s]) { std::memcpy(o, fb[s], sizeof(u32) * kFrameWords); continue; }
+    for (u32 y = 0; y < 192; ++y) {
+      std::memcpy(line, fb[s] + y * 256, sizeof line);
+      gpu::kern::active::colour_correct(*colour, line);
+      std::memcpy(o + y * 256, line, sizeof line);
+    }
+  }
   // The edge planes: the marked lines copied, lines left over from this
   // slot's last frame cleared, the rest already zero.
   // The cut's two colours are mixed by distance from the line over a band one DS pixel wide
@@ -414,7 +432,14 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     const u64 now_rows[3] = {on ? edges->rows[s][0] : 0, on ? edges->rows[s][1] : 0, on ? edges->rows[s][2] : 0};
     for (u32 y = 0; y < 192; ++y)
       if (((had[y >> 6] & ~now_rows[y >> 6]) >> (y & 63)) & 1) std::memset(ep + y * 256, 0, 256 * sizeof(u32));
-    if (on) copy_edge_rows(ep, *edges, s, fb[s]);
+    if (on && !colour) copy_edge_rows(ep, *edges, s, fb[s]);
+    else if (on)   // the edge pixels' own colours, as the core corrects them (kern::colour_pixel)
+      for (u32 y = 0; y < 192; ++y) {
+        if (!((now_rows[y >> 6] >> (y & 63)) & 1)) continue;
+        copy_edge_row(line, *edges, s, fb[s], y);
+        for (u32 x = 0; x < 256; ++x) if (line[x] & 0x80000000u) line[x] = (line[x] & 0xFF000000u) | (gpu::kern::colour_pixel(*colour, line[x]) & 0x00FFFFFFu);
+        std::memcpy(ep + y * 256, line, sizeof line);
+      }
     for (int k = 0; k < 3; ++k) had[k] = now_rows[k];
     cut[s] = now_rows[0] | now_rows[1] | now_rows[2];
   }
@@ -519,7 +544,7 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut&, std::string* why) { if
 GpuPresent::~GpuPresent() = default;
 bool GpuPresent::reimport(ScanoutOut&) { return false; }
 void GpuPresent::flush(ScanoutOut&) {}
-bool GpuPresent::present(ScanoutOut&, const u32* const*, const View*, int, int, int, int, u8, SDL_Rect, u32, const EdgePlanes*) { return false; }
+bool GpuPresent::present(ScanoutOut&, const u32* const*, const View*, int, int, int, int, u8, SDL_Rect, u32, const EdgePlanes*, const gpu::kern::ColourLut*) { return false; }
 u32* GpuPresent::overlay(int, int) { return nullptr; }
 const std::string& GpuPresent::device_name() const { static const std::string none; return none; }
 } // namespace ds::sdl

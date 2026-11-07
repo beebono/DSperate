@@ -10,6 +10,8 @@
 
 struct SDL_Window;
 
+namespace ds::gpu::kern { struct ColourLut; }
+
 namespace ds::sdl {
 
 class ScanoutOut;
@@ -22,16 +24,19 @@ struct EdgePlanes {
   const u64* rows[2] = {nullptr, nullptr};
   const u32* frame[2] = {nullptr, nullptr};
 };
+// Line y of screen s's edge plane into `line` (256 words): an edge pixel
+// the frontend drew over (shown differs from the core's frame) is no edge.
+inline void copy_edge_row(u32* line, const EdgePlanes& e, int s, const u32* shown, u32 y) {
+  const u32* const src = e.plane[s] + y * 256;
+  const u32* const core = e.frame[s] && e.frame[s] != shown ? e.frame[s] + y * 256 : nullptr;
+  std::memcpy(line, src, 256 * sizeof(u32));
+  if (core) for (u32 x = 0; x < 256; ++x) if (src[x] && shown[y * 256 + x] != core[x]) line[x] = 0;
+}
 // The lines `rows` marks of screen s's edge plane into dst (the same
 // layout); the other lines are left as they are, never read.
 inline void copy_edge_rows(u32* dst, const EdgePlanes& e, int s, const u32* shown) {
-  const u32* const src = e.plane[s];
-  const u32* const core = e.frame[s] && e.frame[s] != shown ? e.frame[s] : nullptr;
-  for (u32 y = 0; y < 192; ++y) {
-    if (!((e.rows[s][y >> 6] >> (y & 63)) & 1)) continue;
-    std::memcpy(dst + y * 256, src + y * 256, 256 * sizeof(u32));
-    if (core) for (u32 i = y * 256; i < y * 256 + 256; ++i) if (src[i] && shown[i] != core[i]) dst[i] = 0;
-  }
+  for (u32 y = 0; y < 192; ++y)
+    if ((e.rows[s][y >> 6] >> (y & 63)) & 1) copy_edge_row(dst + y * 256, e, s, shown, y);
 }
 
 // A presenter that takes the core's whole 256x192 frames and composes the
@@ -51,6 +56,10 @@ public:
     u32 grid = 256;              // LCD grid brightness on a seam, 0..256 (256 = off)
     bool linear = false;         // video.linear; off: the RGA draws whole-number scales exactly
     EdgePlanes edges;            // the edge cut (Vulkan only; the RGA cannot cut)
+    // Colour correction to apply to the frames as they are uploaded (Vulkan
+    // only, kern::colour_correct on the present thread); null: the frames
+    // are shown as they are, corrected by the core or not at all.
+    std::shared_ptr<const gpu::kern::ColourLut> colour;
   };
 
   const std::string& name() const { return name_; }   // for the log: what presents, on which device

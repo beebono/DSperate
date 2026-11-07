@@ -3949,9 +3949,21 @@ sdl_ready:
       fs_in_skip = false; fs_left = 0; fs_blocks = 0;
       nds.gpu.set_frame_skip(false);
     }
-    // A screenshot keeps the game's own colours: under colour correction it
+    // Colour correction rides the Vulkan present when every window has one:
+    // the frames stay the game's and the present thread corrects them as it
+    // uploads them, off the emulation's critical path (~0.6 ms a frame in
+    // GS:DD on the RG DS Plus). Anywhere else the core's output stage does.
+    // DS_COLOUR_CPU=1 keeps it in the core (A/B).
+    {
+      static const bool colour_cpu_forced = [] { const char* e = std::getenv("DS_COLOUR_CPU"); return e && std::atoi(e) != 0; }();
+      const bool on_gpu = nds.gpu.colour_lut() && !colour_cpu_forced && display.vk_present() && (!dual_window || display2.vk_present());
+      nds.gpu.set_colour_on_cpu(!on_gpu);
+      display.set_colour(on_gpu ? nds.gpu.colour_lut() : nullptr);
+      display2.set_colour(on_gpu ? nds.gpu.colour_lut() : nullptr);
+    }
+    // A screenshot keeps the game's own colours: when the core corrects, it
     // waits for the next drawn frame, copied before the correction.
-    if (shot_pending && !shot_raw && nds.gpu.colour_profile() != ds::gpu::ColourProfile::Off) { nds.gpu.request_raw_frame(); shot_raw = true; }
+    if (shot_pending && !shot_raw && nds.gpu.colour_on_cpu()) { nds.gpu.request_raw_frame(); shot_raw = true; }
     const bool skipped = nds.gpu.will_skip_frame();
     // Games that render one screen per frame (the other via capture) show one
     // stale screen right after a skip; draw the block through and present its last frame.

@@ -8,6 +8,7 @@
 // hidden view, the LCD grid, a fading PiP inset and the frontend overlay.
 // Blends may differ by one step (fixed-function vs float mix); the rest must
 // match exactly. Device-only (Vulkan + /dev/dma_heap), not a test.
+#include "core/gpu/colour.h"
 #include "frontend/sdl/gpu_present.h"
 #include "frontend/sdl/dmaheap.h"
 
@@ -84,6 +85,7 @@ struct Case {
   u8 alpha = 255;
   u32 grid = 256;
   SDL_Rect over{0, 0, 0, 0};   // the overlay's drawn rectangle (filled with a pattern)
+  ds::gpu::ColourProfile colour = ds::gpu::ColourProfile::Off;   // corrected on the GPU, modelled by kern::colour_pixel
 };
 
 // gpu_present.cpp's LCD grid seam table (kern::scale_row_grid's placement).
@@ -106,7 +108,7 @@ void seams(const Case& c, u32 t[128]) {
 }
 
 // present.comp, per panel pixel, in float as the shader did it.
-std::vector<u32> model(const Case& c, int pw, int ph, const u32* const fb[2], const std::vector<u32>& over) {
+std::vector<u32> model(const Case& c, int pw, int ph, const u32* const fb[2], const std::vector<u32>& over, const ds::gpu::kern::ColourLut* lut) {
   u32 tab[128]; seams(c, tab);
   auto seam = [&](int v, int d, int axis) { return d >= 0 && d < 1024 && ((tab[v * 64 + axis * 32 + (d >> 5)] >> (d & 31)) & 1u) != 0; };
   std::vector<u32> out(static_cast<size_t>(pw) * ph);
@@ -122,7 +124,8 @@ std::vector<u32> model(const Case& c, int pw, int ph, const u32* const fb[2], co
         const SDL_Rect& rc = c.v[v].rect;
         if (!c.v[v].shown || lx < rc.x || ly < rc.y || lx >= rc.x + rc.w || ly >= rc.y + rc.h) continue;
         const int sx = (lx - rc.x) * SW / rc.w, sy = (ly - rc.y) * SH / rc.h;
-        const u32 s = fb[c.v[v].screen][sy * SW + sx];
+        u32 s = fb[c.v[v].screen][sy * SW + sx];
+        if (lut) s = ds::gpu::kern::colour_pixel(*lut, s);   // before the grid, as the core corrects
         float cr = static_cast<float>((s >> 16) & 255), cg = static_cast<float>((s >> 8) & 255), cb = static_cast<float>(s & 255);
         if (c.grid < 256 && c.v[v].grid && (seam(v, lx - rc.x, 0) || seam(v, ly - rc.y, 1))) {
           const float f = static_cast<float>(c.grid) / 256.0f;
@@ -173,6 +176,10 @@ int main() {
   { Case c{"fading inset, rot 270", 270, 1024, 768, {{0, {0, 0, 1024, 768}, true, false, false}, {1, {700, 500, 256, 192}, true, true, false}}, 2}; c.alpha = 200; cases.push_back(c); }
   { Case c{"overlay", 0, 1024, 768, {two[0], two[1]}, 2}; c.over = {100, 250, 600, 200}; cases.push_back(c); }
   { Case c{"overlay, rot 90", 90, 1024, 768, {two[0], two[1]}, 2}; c.over = {900, 700, 300, 200}; cases.push_back(c); }   // clipped at the frame's edge
+  { Case c{"colour nds, two views", 0, 1024, 768, {two[0], two[1]}, 2}; c.colour = ds::gpu::ColourProfile::Nds; cases.push_back(c); }
+  { Case c{"colour nds_lite, rot 90", 90, 1024, 768, {two[0], two[1]}, 2}; c.colour = ds::gpu::ColourProfile::NdsLite; cases.push_back(c); }
+  { Case c{"colour nds_lite + grid", 0, 1024, 768, {{0, {0, 0, 768, 576}, true, false, true}, {1, {768, 576, 256, 192}, true, false, true}}, 2};
+    c.grid = 128; c.colour = ds::gpu::ColourProfile::NdsLite; cases.push_back(c); }
 
   bool pass = true;
   for (const Case& c : cases) {
@@ -194,9 +201,11 @@ int main() {
         }
       std::memcpy(canvas, over.data(), over.size() * 4);
     }
-    if (!gp->present(out, fb, c.v, c.nviews, c.rot, c.lw, c.lh, c.alpha, c.over, c.grid)) { std::printf("%s: present failed\n", c.name); pass = false; continue; }
+    std::unique_ptr<ds::gpu::kern::ColourLut> lut;
+    if (c.colour != ds::gpu::ColourProfile::Off) { lut = std::make_unique<ds::gpu::kern::ColourLut>(); ds::gpu::build_colour_lut(c.colour, *lut); }
+    if (!gp->present(out, fb, c.v, c.nviews, c.rot, c.lw, c.lh, c.alpha, c.over, c.grid, nullptr, lut.get())) { std::printf("%s: present failed\n", c.name); pass = false; continue; }
     gp->flush(out);
-    const std::vector<u32> got = out.shown(), want = model(c, pw, ph, fb, over);
+    const std::vector<u32> got = out.shown(), want = model(c, pw, ph, fb, over, lut.get());
     u32 off1 = 0, bad = 0, fx = 0, fy = 0, fg = 0, fw = 0;
     for (int y = 0; y < ph; ++y)
       for (int x = 0; x < pw; ++x) {

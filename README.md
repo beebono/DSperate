@@ -174,8 +174,9 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   `nds` gives the picture the original DS's colours (hunterk and Pokefan531's
   nds-color, as ROCKNIX's `lcd1x-nds-color` shader has it), `nds_lite` the
   DS Lite's brighter ones (after the minui DSperate pak's `ds_lite` tone). It
-  is applied to each shown line at DS resolution, so it reaches every route to
-  the panel. Screenshots keep the game's own colours.
+  works at DS resolution on every route to the panel: with the Vulkan present
+  on the present thread as the frames are uploaded (free for the emulation),
+  elsewhere in the core's output stage. Screenshots keep the game's own colours.
 - **Screen gap** (`video.screen_gap`, `--screen-gap`): a distance in panel
   pixels between the two screens of a stacked, side-by-side or dominant pair,
   or `auto`, which pushes them to the panel's edges when the fit leaves room.

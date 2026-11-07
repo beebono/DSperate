@@ -424,6 +424,7 @@ bool Display::prepare_gpu(GpuFrame& f) {
   for (int i = 0; i < nviews_; ++i) f.v[i] = FramePresenter::View{views_[i].screen, views_[i].rect, views_[i].shown, !views_[i].direct, grid_on(views_[i].screen)};
   f.n = nviews_;
   p.rot = rot_; p.inset_alpha = inset_alpha_; p.linear = linear_;
+  p.colour = gpu_->kind() == FramePresenter::Kind::Vulkan ? colour_ : nullptr;
   p.drawn = frontend::Rect{canvas_drawn_.x, canvas_drawn_.y, canvas_drawn_.w, canvas_drawn_.h};
   p.grid = grid_strength_ > 0.0 ? static_cast<u32>(std::lround((1.0 - grid_strength_) * 256.0)) : 256u;
   canvas_drawn_ = SDL_Rect{0, 0, 0, 0};

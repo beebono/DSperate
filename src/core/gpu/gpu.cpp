@@ -846,7 +846,7 @@ void Gpu::output_edges(const Engine2D& en, int screen, u32 line, const u32* show
     if (mode == 1 && en.edge_compose(own, bytes)) {
       alignas(16) u32 out[256];
       kern::active::output_line(own, en.master_bright(), out);
-      if (colour_lut_) {   // as the shown line; only the (few) edge pixels
+      if (colour_lut_ && colour_cpu_) {   // as the shown line; only the (few) edge pixels
         for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (kern::colour_pixel(*colour_lut_, out[x]) & 0x00FFFFFF) : 0;
       } else
         for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (out[x] & 0x00FFFFFF) : 0;
@@ -918,7 +918,7 @@ void Gpu::output_engine(int e, u32 line) {
     std::memcpy(raw_fb_[screen].data() + line * SCREEN_W, dst, SCREEN_W * sizeof(u32));
     ++raw_lines_[e];
   }
-  if (colour_lut_ && screens_on_) kern::active::colour_correct(*colour_lut_, dst);   // the panel's black stays black when the LCDs are off
+  if (colour_lut_ && colour_cpu_ && screens_on_) kern::active::colour_correct(*colour_lut_, dst);   // the panel's black stays black when the LCDs are off
   if (edge_export_ && !scaled) output_edges(en, screen, line, dst);
   if (scaled) {
     if (e == 1 && bscale_defer_ && bscale_n_ < SCREEN_H) {
@@ -1342,11 +1342,17 @@ void Gpu::set_colour_profile(ColourProfile p) {
   quiesce();   // the worker reads the tables
   if (p == ColourProfile::Off) colour_lut_.reset();
   else {
-    auto lut = std::make_unique<kern::ColourLut>();
+    auto lut = std::make_shared<kern::ColourLut>();
     build_colour_lut(p, *lut);
     colour_lut_ = std::move(lut);
   }
   colour_ = p;
+}
+
+void Gpu::set_colour_on_cpu(bool on) {
+  if (on == colour_cpu_) return;
+  quiesce();   // every line of a frame one way or the other
+  colour_cpu_ = on;
 }
 
 void Gpu::request_raw_frame() {

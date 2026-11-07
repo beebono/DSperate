@@ -130,6 +130,11 @@ public:
   void set_gpu_present(bool on, GpuPresentMode mode = GpuPresentMode::Auto) { gpu_wanted_ = on; gpu_mode_ = mode; }
   bool gpu_present() const { return gpu_ != nullptr; }
   bool rga_present() const { return gpu_ && gpu_->kind() == FramePresenter::Kind::Rga; }   // no seams or chunky
+  bool vk_present() const { return gpu_ && gpu_->kind() == FramePresenter::Kind::Vulkan; }
+  // Colour correction for the Vulkan present to apply as it uploads the
+  // frames (Gpu::colour_lut), or null; ignored by every other route, where
+  // the core corrects.
+  void set_colour(std::shared_ptr<const gpu::kern::ColourLut> lut) { colour_ = std::move(lut); }
   const void* cell_map(int screen) const { return cells_[screen].x.cells ? &cells_[screen] : nullptr; }
   // Locks the panel-sized texture and fills in one target per screen. False
   // if the lock failed, in which case the caller must fall back to draw().
@@ -249,6 +254,7 @@ private:
   std::unique_ptr<DispOut> disp_;       // display-engine tier; null otherwise
   bool              chunky_ = false;
   double            grid_strength_ = 0.0;
+  std::shared_ptr<const gpu::kern::ColourLut> colour_;   // set_colour
   int               chunky_cell_ = 0;
   int               disp_divisor_ = 1;   // the divisor build_source_scale chose, restored after a page
   bool              page_ = false;

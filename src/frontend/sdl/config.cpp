@@ -309,9 +309,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # there is no GPU driver. aa above for its anti-aliasing
 # colour = off                  # colour correction: another screen's colours, on every route to the
                                 # panel. off | nds (the DS Phat, as ROCKNIX's lcd1x-nds-color) |
-                                # nds_lite (the DS Lite: brighter, a lighter channel bleed). The game's
-                                # own pixels are untouched: screenshots wait for the next frame and
-                                # keep the game's colours
+                                # nds_lite (the DS Lite: brighter, a lighter channel bleed). With the
+                                # Vulkan present (gpu_present) it runs on the present thread, off the
+                                # emulation's; elsewhere in the core's output stage. Screenshots keep
+                                # the game's colours
 # sink = auto                   # where frames go. auto picks per device: the display engine's hardware
                                 # scaler where /dev/disp answers (Miyoo A30 and other Allwinner boards),
                                 # /dev/fb0 on the H700 handhelds' mali-only SDL2, KMS page flips on a bare

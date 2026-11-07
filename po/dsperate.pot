@@ -534,19 +534,19 @@ msgstr ""
 msgid "STATE {1} LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4042
+#: src/frontend/sdl/main.cpp:4054
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4054
+#: src/frontend/sdl/main.cpp:4066
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4055
+#: src/frontend/sdl/main.cpp:4067
 msgid "GAME LIKELY WON'T WORK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4056
+#: src/frontend/sdl/main.cpp:4068
 msgid "DSP IS NOT EMULATED"
 msgstr ""
 
