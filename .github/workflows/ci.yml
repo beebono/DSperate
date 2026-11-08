@@ -47,7 +47,9 @@ jobs:
       # current libstdc++ wants (ROCKNIX packages it as a binary): dynamically
       # linked and stripped. The -static one carries libstdc++/libgcc inside
       # and its debug symbols, for a device whose runtime may be older than
-      # the runner's or for a backtrace; the reconfigure only relinks.
+      # the runner's or for a backtrace. Release carries no symbols, so that one
+      # is rebuilt as RelWithDebInfo: -g is outside the PGO fingerprint, so the
+      # same profile applies.
       - name: Package
         run: |
           d=dsperate-${GITHUB_REF_NAME}-linux-aarch64
@@ -56,7 +58,7 @@ jobs:
           strip dist/$d/dsperate dist/$d/dsperate-headless
           cp LICENSE README.md dist/$d/
           tar -C dist -czf $d.tar.gz $d
-          cmake --preset host -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --preset host -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
           cmake --build --preset host
           cp build/host/src/frontend/sdl/dsperate build/host/src/frontend/headless/dsperate-headless \
              LICENSE README.md dist/$d-static/

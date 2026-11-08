@@ -107,7 +107,7 @@ esac
 # profile keeps the plain pgo/<arch>.
 PROFILE="$HERE/pgo/$ARCH"
 [ -z "$GCC" ] || PROFILE="$PROFILE-gcc$("$PGO_CXX" -dumpfullversion)"
-CONF=(-G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_TESTS=OFF -DDSPERATE_PGO_DIR="$PROFILE")
+CONF=(-G Ninja -DCMAKE_BUILD_TYPE=Release -DDSPERATE_TESTS=OFF -DDSPERATE_PGO_DIR="$PROFILE")
 if [ -n "$TOOLCHAIN" ]; then
   CONF+=(-DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" ${GCC:+-DDS_CROSS_GCC=$GCC})
 else

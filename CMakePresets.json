@@ -6,7 +6,7 @@
       "displayName": "Native host build (JIT/NEON only if host is AArch64)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/host",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     },
     {
       "name": "arm32-cross",
@@ -14,7 +14,7 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/arm32",
       "toolchainFile": "${sourceDir}/cmake/arm-linux-gnueabihf.cmake",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     },
     {
       "name": "aarch64-cross",
@@ -22,7 +22,7 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/aarch64",
       "toolchainFile": "${sourceDir}/cmake/aarch64-linux-gnu.cmake",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     }
   ],
   "buildPresets": [

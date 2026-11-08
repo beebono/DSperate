@@ -13,7 +13,9 @@ DSperate with GCC 12.4; CI builds with 13.3). Make one with `--gcc N`, and
 refresh it in the same pass as the default profile.
 
 The profile is valid for one compiler version and one set of compile flags
-(`MANIFEST` records a fingerprint; the configure step refuses a mismatch) and
+(`MANIFEST` records a fingerprint; the configure step refuses a mismatch).
+Debug-info flags (`-g*`) are not part of it, so a Release and a RelWithDebInfo
+build take the same profile. The profile
 decays gracefully with source changes: a function whose body changed loses its
 profile, the rest keep theirs. Refresh before a release, or whenever
 `tools/pgo_refresh.sh --check` reports drift in hot files:

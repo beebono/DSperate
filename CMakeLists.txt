@@ -8,7 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
 option(DSPERATE_JIT      "Build the recompiler (AArch64 and ARMv7 hosts)"          ON)
@@ -94,9 +94,16 @@ endif()
 set(DSPERATE_PGO_DIR "${_ds_pgo_default}" CACHE PATH "Where the PGO profile (.gcda files and MANIFEST) lives")
 option(DSPERATE_PGO_STRICT "PGO use: warn about every function without a matching profile" OFF)
 # Flags every object sees; a flag added per target must be added here too.
+# Debug-info flags (-g*) are left out: GCC guarantees they change neither the
+# generated code nor the CFG checksums a .gcda is matched by, so Release and
+# RelWithDebInfo share one profile. The build type's name is left out for the
+# same reason; its flags are what count.
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _ds_build_type_uc)
+separate_arguments(_ds_pgo_flags UNIX_COMMAND "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_ds_build_type_uc}}")
+list(FILTER _ds_pgo_flags EXCLUDE REGEX "^-g")
+list(JOIN _ds_pgo_flags " " _ds_pgo_flags)
 string(SHA1 _ds_pgo_fingerprint
-  "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR} ${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_ds_build_type_uc}} harden=${DSPERATE_HARDEN} tune=${DSPERATE_TUNE} jit=${DSPERATE_JIT} neon=${DSPERATE_NEON}")
+  "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR} ${_ds_pgo_flags} harden=${DSPERATE_HARDEN} tune=${DSPERATE_TUNE} jit=${DSPERATE_JIT} neon=${DSPERATE_NEON}")
 set(DSPERATE_PGO_FINGERPRINT "${_ds_pgo_fingerprint}" CACHE INTERNAL "")
 file(WRITE "${CMAKE_BINARY_DIR}/pgo-fingerprint" "${_ds_pgo_fingerprint}\n")
 # A different checkout path only trips GCC's location checksum (a warning);
