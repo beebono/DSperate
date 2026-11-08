@@ -1,0 +1,1542 @@
+# Simplified Chinese translation of DSperate's frontend strings.
+# docs/translating.md is the guide; po/dsperate.pot is the template.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: DSperate\n"
+"PO-Revision-Date: 2026-11-08 11:00+0800\n"
+"Last-Translator: YinHeng <k332159915@gmail.com>\n"
+"Language-Team: Chinese (Simplified)\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#. The language's own name, as its speakers write it: what the language
+#. setting lists it as (frontend/i18n/i18n.h).
+msgctxt "language name"
+msgid "ENGLISH"
+msgstr "简体中文"
+
+#: src/frontend/sdl/input.cpp:112 src/frontend/sdl/menu.cpp:286
+msgid "QUIT"
+msgstr "退出"
+
+#: src/frontend/sdl/input.cpp:112
+msgid "PAUSE"
+msgstr "暂停游戏"
+
+#: src/frontend/sdl/input.cpp:112
+msgid "FAST FORWARD"
+msgstr "快进"
+
+#: src/frontend/sdl/input.cpp:113
+msgid "FF TOGGLE"
+msgstr "快进开关"
+
+#: src/frontend/sdl/input.cpp:114 src/frontend/sdl/menu.cpp:278
+msgid "SAVE STATE"
+msgstr "即时存档"
+
+#: src/frontend/sdl/input.cpp:114 src/frontend/sdl/menu.cpp:279
+msgid "LOAD STATE"
+msgstr "即时读档"
+
+#: src/frontend/sdl/input.cpp:114
+msgid "SLOT NEXT"
+msgstr "下个槽位"
+
+#: src/frontend/sdl/input.cpp:114
+msgid "SLOT PREV"
+msgstr "上个槽位"
+
+#: src/frontend/sdl/input.cpp:115
+msgid "VOLUME UP"
+msgstr "音量+"
+
+#: src/frontend/sdl/input.cpp:115
+msgid "VOLUME DOWN"
+msgstr "音量-"
+
+#: src/frontend/sdl/input.cpp:115
+msgid "MUTE"
+msgstr "静音"
+
+#: src/frontend/sdl/input.cpp:115
+msgid "LAYOUT NEXT"
+msgstr "下个布局"
+
+#: src/frontend/sdl/input.cpp:115
+msgid "LAYOUT PREV"
+msgstr "上个布局"
+
+#: src/frontend/sdl/input.cpp:115
+msgid "SCREEN SWAP"
+msgstr "交换屏幕"
+
+#: src/frontend/sdl/input.cpp:116
+msgid "PIP CORNER NEXT"
+msgstr "下个画中画位置"
+
+#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/settings.cpp:178
+msgid "FULLSCREEN"
+msgstr "全屏"
+
+#: src/frontend/sdl/input.cpp:116
+msgid "SCREENSHOT"
+msgstr "截图"
+
+#: src/frontend/sdl/input.cpp:116
+msgid "LID"
+msgstr "合盖"
+
+#: src/frontend/sdl/input.cpp:116
+msgid "MIC"
+msgstr "麦克风"
+
+#: src/frontend/sdl/input.cpp:116
+msgid "FPS"
+msgstr "帧数"
+
+#: src/frontend/sdl/input.cpp:838 src/frontend/sdl/main.cpp:1119 src/frontend/sdl/main.cpp:2639
+#: src/frontend/sdl/main.cpp:2640 src/frontend/sdl/main.cpp:2676
+msgid "NONE"
+msgstr "无"
+
+#. {1} is a DS button (A or B), {2} the button that resets the bindings.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/input.cpp:1081
+msgid "{1} IS UNREACHABLE; {2} TWICE RESETS"
+msgstr "{1} 无法触发；连按两次 {2} 重置"
+
+#. {1} and {2} are DS buttons (A, B, SELECT...).
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/input.cpp:1090
+msgid "{1} AND {2} SHARE A KEY"
+msgstr "{1} 与 {2} 共用同一键盘键"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/input.cpp:1091
+msgid "{1} AND {2} SHARE A BUTTON"
+msgstr "{1} 与 {2} 共用同一手柄键"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/input.cpp:1094 src/frontend/sdl/input.cpp:1101
+msgid "{1} HIDES PAD {2}"
+msgstr "{1} 占用手柄键 {2}"
+
+#. {1} is a hotkey (SAVE STATE...), {2} a DS button (A, B, SELECT...).
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/input.cpp:1100
+msgid "{1} HIDES KEY {2}"
+msgstr "{1} 占用键盘键 {2}"
+
+#: src/frontend/sdl/main.cpp:611
+msgid "REJECTED"
+msgstr "已拒绝"
+
+#: src/frontend/sdl/main.cpp:1091
+msgid "MODIFIER"
+msgstr "修饰键"
+
+#: src/frontend/sdl/main.cpp:1092
+msgid "STYLUS TAP"
+msgstr "触摸笔点击"
+
+#: src/frontend/sdl/main.cpp:1093
+msgid "STYLUS TAP (2)"
+msgstr "触摸笔点击（2）"
+
+#: src/frontend/sdl/main.cpp:1094
+msgid "STYLUS STICK"
+msgstr "触摸笔摇杆"
+
+#: src/frontend/sdl/main.cpp:1095
+msgid "STYLUS HOLD"
+msgstr "触摸笔按住"
+
+#: src/frontend/sdl/main.cpp:1096
+msgid "STICK DPAD"
+msgstr "摇杆方向键"
+
+#: src/frontend/sdl/main.cpp:1097
+msgid "STICK ABXY"
+msgstr "摇杆 ABXY"
+
+#: src/frontend/sdl/main.cpp:1099
+msgid "GRIP GREEN"
+msgstr "Grip 绿键"
+
+#: src/frontend/sdl/main.cpp:1100
+msgid "GRIP RED"
+msgstr "Grip 红键"
+
+#: src/frontend/sdl/main.cpp:1101
+msgid "GRIP YELLOW"
+msgstr "Grip 黄键"
+
+#: src/frontend/sdl/main.cpp:1102
+msgid "GRIP BLUE"
+msgstr "Grip 蓝键"
+
+#: src/frontend/sdl/main.cpp:1103
+msgid "GRIP STRUM"
+msgstr "Grip 拨弦"
+
+#: src/frontend/sdl/main.cpp:1104
+msgid "GRIP STRUM (2)"
+msgstr "Grip 拨弦（2）"
+
+#: src/frontend/sdl/main.cpp:1107
+msgid "L STICK RIGHT"
+msgstr "左摇杆 右"
+
+#: src/frontend/sdl/main.cpp:1108
+msgid "L STICK DOWN"
+msgstr "左摇杆 下"
+
+#: src/frontend/sdl/main.cpp:1109
+msgid "R STICK RIGHT"
+msgstr "右摇杆 右"
+
+#: src/frontend/sdl/main.cpp:1110
+msgid "R STICK DOWN"
+msgstr "右摇杆 下"
+
+#: src/frontend/sdl/main.cpp:1111
+msgid "L2 AXIS"
+msgstr "L2 轴"
+
+#: src/frontend/sdl/main.cpp:1112
+msgid "R2 AXIS"
+msgstr "R2 轴"
+
+#: src/frontend/sdl/main.cpp:1122
+msgid "L STICK X"
+msgstr "左摇杆 X"
+
+#: src/frontend/sdl/main.cpp:1122
+msgid "L STICK Y"
+msgstr "左摇杆 Y"
+
+#: src/frontend/sdl/main.cpp:1122
+msgid "R STICK X"
+msgstr "右摇杆 X"
+
+#: src/frontend/sdl/main.cpp:1122
+msgid "R STICK Y"
+msgstr "右摇杆 Y"
+
+#. an inverted axis: {1} is the stick axis, e.g. L STICK X.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:1126
+msgid "{1} INV"
+msgstr "{1} 反向"
+
+#: src/frontend/sdl/main.cpp:1925
+msgid "STOPPING"
+msgstr "正在停止"
+
+#: src/frontend/sdl/main.cpp:1926
+msgid "WAITING ON THE CARD"
+msgstr "等待存储卡"
+
+#: src/frontend/sdl/main.cpp:1927
+msgid "UNPACKING"
+msgstr "解压中"
+
+#: src/frontend/sdl/main.cpp:1928
+msgid "FIRST LAUNCH ONLY    B CANCELS"
+msgstr "仅首次启动    按 B 取消"
+
+#: src/frontend/sdl/main.cpp:1953
+msgid "ANY BUTTON RETURNS"
+msgstr "按任意键返回"
+
+#: src/frontend/sdl/main.cpp:1961
+msgid "FILE CANNOT BE READ"
+msgstr "文件无法读取"
+
+#: src/frontend/sdl/main.cpp:1962
+msgid "THE ZIP IS DAMAGED"
+msgstr "压缩包已损坏"
+
+#: src/frontend/sdl/main.cpp:1963
+msgid "NO GAME IN THE ZIP"
+msgstr "压缩包内无游戏"
+
+#: src/frontend/sdl/main.cpp:1965
+msgid "ZIP NOT SUPPORTED"
+msgstr "不支持的压缩包"
+
+#: src/frontend/sdl/main.cpp:1966
+msgid "NOT A DS GAME"
+msgstr "不是 DS 游戏"
+
+#: src/frontend/sdl/main.cpp:1984
+msgid "FIRMWARE IS BAD"
+msgstr "固件损坏"
+
+#: src/frontend/sdl/main.cpp:1984
+msgid "DS BIOS IS BAD"
+msgstr "DS BIOS 损坏"
+
+#: src/frontend/sdl/main.cpp:2106
+msgid "NO GBA GAME (RUMBLE PAK)"
+msgstr "无 GBA 游戏（震动包）"
+
+#: src/frontend/sdl/main.cpp:2106
+msgid "NO GBA GAME"
+msgstr "无 GBA 游戏"
+
+#: src/frontend/sdl/main.cpp:2137
+msgid "GBA CARTRIDGE"
+msgstr "GBA 卡带"
+
+#: src/frontend/sdl/main.cpp:2137
+msgid "THIS GAME SUPPORTS THESE"
+msgstr "本游戏支持以下"
+
+#: src/frontend/sdl/main.cpp:2137
+msgid "DON'T ASK AGAIN FOR THIS GAME"
+msgstr "本游戏不再询问"
+
+#: src/frontend/sdl/main.cpp:2138
+msgid "A INSERT   B NO GBA GAME"
+msgstr "A 插入   B 无 GBA 游戏"
+
+#: src/frontend/sdl/main.cpp:2183
+msgid "STATE NOT LOADED"
+msgstr "即时存档未读取"
+
+#: src/frontend/sdl/main.cpp:2359
+msgid "NO SHORTCUT FOLDER"
+msgstr "没有快捷方式文件夹"
+
+#: src/frontend/sdl/main.cpp:2363
+msgid "NO DSI NAND (PATHS.DSI_NAND)"
+msgstr "无 DSi NAND（PATHS.DSI_NAND）"
+
+#: src/frontend/sdl/main.cpp:2364
+msgid "NO DSI BIOS"
+msgstr "无 DSi BIOS"
+
+#: src/frontend/sdl/main.cpp:2365
+msgid "THE DSI NAND CANNOT BE READ"
+msgstr "无法读取 DSi NAND"
+
+#: src/frontend/sdl/main.cpp:2368
+msgid "THE DSI BIOS CANNOT BE READ"
+msgstr "无法读取 DSi BIOS"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:2373
+msgid "{1} ADDED, {2} REMOVED"
+msgstr "新增 {1} 个，移除 {2} 个"
+
+#: src/frontend/sdl/main.cpp:2639 src/frontend/sdl/settings.cpp:50
+msgid "LEFT STICK"
+msgstr "左摇杆"
+
+#: src/frontend/sdl/main.cpp:2639 src/frontend/sdl/settings.cpp:50
+msgid "RIGHT STICK"
+msgstr "右摇杆"
+
+#. a hotkey's second binding: {1} is the hotkey, e.g. SAVE STATE.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:2671
+msgid "{1} (2)"
+msgstr "{1}（2）"
+
+#: src/frontend/sdl/main.cpp:2757
+msgid "IN THE FIRMWARE"
+msgstr "保存在固件中"
+
+#: src/frontend/sdl/main.cpp:2843 src/frontend/sdl/main.cpp:2882
+msgid "NOT DURING A NETWORK SESSION"
+msgstr "联网会话中不可用"
+
+#: src/frontend/sdl/main.cpp:2844
+msgid "ONLY WITH FRAMESKIP ON"
+msgstr "仅在开启跳帧后"
+
+#: src/frontend/sdl/main.cpp:2847 src/frontend/sdl/main.cpp:2850
+msgid "THIS SCREEN SCALES IN HARDWARE"
+msgstr "此屏幕由硬件缩放"
+
+#: src/frontend/sdl/main.cpp:2849
+msgid "THE RGA DRAWS THE DARK GRID ONLY"
+msgstr "RGA 只绘制暗色网格"
+
+#: src/frontend/sdl/main.cpp:2851 src/frontend/sdl/main.cpp:2853 src/frontend/sdl/main.cpp:2855
+msgid "BILINEAR IS ON"
+msgstr "线性过滤已开启"
+
+#: src/frontend/sdl/main.cpp:2856
+msgid "ONLY WITH CHUNKY ON"
+msgstr "仅在开启像素块后"
+
+#: src/frontend/sdl/main.cpp:2859
+msgid "THIS SCREEN IS ALWAYS FULL"
+msgstr "此屏幕始终全屏"
+
+#: src/frontend/sdl/main.cpp:2861
+msgid "NOT WITH TWO WINDOWS"
+msgstr "双窗口下不可用"
+
+#: src/frontend/sdl/main.cpp:2863 src/frontend/sdl/main.cpp:2865
+msgid "PIP LAYOUT ONLY"
+msgstr "仅画中画布局"
+
+#: src/frontend/sdl/main.cpp:2866
+msgid "ONLY WHEN THE PIP FADES"
+msgstr "仅在画中画会淡出时"
+
+#: src/frontend/sdl/main.cpp:2868 src/frontend/sdl/main.cpp:2870
+msgid "DOMINANT LAYOUTS ONLY"
+msgstr "仅主次布局"
+
+#: src/frontend/sdl/main.cpp:2871
+msgid "ONLY WHEN THE RATIO IS AUTO"
+msgstr "仅比例为自动时"
+
+#: src/frontend/sdl/main.cpp:2876
+msgid "THIS BUILD HAS NO NETWORKING"
+msgstr "此构建未含网络功能"
+
+#: src/frontend/sdl/main.cpp:2880
+msgid "ONLY WITH NETWORK FEATURES ON INTERNET"
+msgstr "仅网络功能为互联网时"
+
+#: src/frontend/sdl/main.cpp:2884
+msgid "NEEDS PATHS.DSI_GAMES OR PATHS.GAMES"
+msgstr "需要 PATHS.DSI_GAMES 或 PATHS.GAMES"
+
+#: src/frontend/sdl/main.cpp:2886
+msgid "A DSI HAS NO GBA SLOT"
+msgstr "DSi 没有 GBA 插槽"
+
+#: src/frontend/sdl/main.cpp:2887
+msgid "THIS GAME READS NO GBA GAMES"
+msgstr "本游戏不读取 GBA 游戏"
+
+#: src/frontend/sdl/main.cpp:2888
+msgid "NEEDS PATHS.GBA_GAMES"
+msgstr "需要设置 PATHS.GBA_GAMES"
+
+#: src/frontend/sdl/main.cpp:2890
+msgid "NO RUMBLE PAK IN SLOT 2"
+msgstr "插槽 2 中没有震动包"
+
+#: src/frontend/sdl/main.cpp:2892
+msgid "NO BOKTAI CARTRIDGE IN SLOT 2"
+msgstr "插槽 2 中没有 Boktai 卡带"
+
+#: src/frontend/sdl/main.cpp:3012
+msgid "SD CARD"
+msgstr "SD 卡"
+
+#: src/frontend/sdl/main.cpp:3013
+msgid "LEFT OUT OF THE STATE"
+msgstr "未包含在即时存档中"
+
+#: src/frontend/sdl/main.cpp:3014
+msgid "THE STATE HAD NO CARD"
+msgstr "即时存档中没有 SD 卡"
+
+#: src/frontend/sdl/main.cpp:3014
+msgid "ITS FOLDER HAS CHANGED"
+msgstr "其文件夹已变更"
+
+#: src/frontend/sdl/main.cpp:3165
+msgid "LOCAL WIRELESS"
+msgstr "本地无线"
+
+#: src/frontend/sdl/main.cpp:3177
+msgid "SCAN FAILED"
+msgstr "扫描失败"
+
+#: src/frontend/sdl/main.cpp:3177
+msgid "THE NETWORK REFUSED IT"
+msgstr "网络拒绝了请求"
+
+#: src/frontend/sdl/main.cpp:3183
+msgid "LOOKING FOR A SESSION"
+msgstr "正在查找会话"
+
+#: src/frontend/sdl/main.cpp:3191
+msgid "NO SESSION FOUND"
+msgstr "未找到会话"
+
+#: src/frontend/sdl/main.cpp:3191
+msgid "NOBODY IS HOSTING HERE"
+msgstr "这里没有主机"
+
+#: src/frontend/sdl/main.cpp:3199
+msgid "JOINED A SESSION"
+msgstr "已加入会话"
+
+#: src/frontend/sdl/main.cpp:3235
+msgid "ACHIEVEMENT UNLOCKED"
+msgstr "成就已解锁"
+
+#: src/frontend/sdl/main.cpp:3255
+msgid "NOT AVAILABLE IN THIS BUILD"
+msgstr "此构建不支持"
+
+#: src/frontend/sdl/main.cpp:3258
+msgid "TURNED OFF"
+msgstr "已关闭"
+
+#: src/frontend/sdl/main.cpp:3259
+msgid "NOT SIGNED IN"
+msgstr "未登录"
+
+#: src/frontend/sdl/main.cpp:3260
+msgid "SIGNING IN..."
+msgstr "正在登录..."
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:3261 src/frontend/sdl/main.cpp:3263
+msgid "SIGNED IN AS {1}"
+msgstr "已登录为 {1}"
+
+#: src/frontend/sdl/main.cpp:3262
+msgid "LOADING ACHIEVEMENTS..."
+msgstr "正在加载成就..."
+
+#: src/frontend/sdl/main.cpp:3265
+msgid "NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET"
+msgstr "此游戏尚未发布成就"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:3267
+msgid "NO ACHIEVEMENTS FOR THIS ROM - HASH {1}"
+msgstr "此 ROM 没有成就 - HASH {1}"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:3276
+msgid "{1}/{2} EARNED  {3}/{4} POINTS  (ENCORE)"
+msgstr "已获得 {1}/{2}  {3}/{4} 分  （再挑战）"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:3276
+msgid "{1}/{2} EARNED  {3}/{4} POINTS"
+msgstr "已获得 {1}/{2}  {3}/{4} 分"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:3751
+msgid "STATE {1} SAVED"
+msgstr "即时存档 {1} 已保存"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/main.cpp:3765
+msgid "STATE {1} LOADED"
+msgstr "即时存档 {1} 已读取"
+
+#: src/frontend/sdl/main.cpp:4060
+msgid "NAND SHORTCUTS"
+msgstr "NAND 快捷方式"
+
+#: src/frontend/sdl/main.cpp:4072
+msgid "DSI DSP"
+msgstr "DSi DSP"
+
+#: src/frontend/sdl/main.cpp:4073
+msgid "GAME LIKELY WON'T WORK"
+msgstr "游戏可能无法运行"
+
+#: src/frontend/sdl/main.cpp:4074
+msgid "DSP IS NOT EMULATED"
+msgstr "未模拟 DSP"
+
+#: src/frontend/sdl/menu.cpp:281
+msgid "CHEATS"
+msgstr "金手指"
+
+#: src/frontend/sdl/menu.cpp:282 src/frontend/sdl/menu.cpp:1248 src/frontend/sdl/menu.cpp:1248
+msgid "OPTIONS"
+msgstr "选项"
+
+#: src/frontend/sdl/menu.cpp:283 src/frontend/sdl/menu.cpp:934
+msgid "ACHIEVEMENTS"
+msgstr "成就"
+
+#: src/frontend/sdl/menu.cpp:284
+msgid "RESUME"
+msgstr "继续游戏"
+
+#: src/frontend/sdl/menu.cpp:285
+msgid "RESET"
+msgstr "重置"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:829
+msgid "ANALOG CHEATS  {1} ON"
+msgstr "摇杆金手指  已启用 {1} 条"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:829
+msgid "CHEATS  {1} ON"
+msgstr "金手指  已启用 {1} 条"
+
+#: src/frontend/sdl/menu.cpp:835
+msgid "NO CHEATS FOR THIS GAME"
+msgstr "本游戏没有可用金手指"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:890
+msgid "GAMES  {1}"
+msgstr "游戏  {1}"
+
+#: src/frontend/sdl/menu.cpp:897
+msgid "NO GAMES FOUND -- SET [PATHS] GAMES IN THE CONFIG FILE"
+msgstr "没有找到游戏 -- 请在配置文件设置 [PATHS] GAMES"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:938
+msgid "ACHIEVEMENTS  {1}/{2}"
+msgstr "成就  {1}/{2}"
+
+#: src/frontend/sdl/menu.cpp:949
+msgid "NO ACHIEVEMENTS LOADED"
+msgstr "没有载入成就"
+
+#: src/frontend/sdl/menu.cpp:971
+msgid "NOT SUPPORTED BY THIS EMULATOR YET"
+msgstr "本模拟器暂不支持"
+
+#: src/frontend/sdl/menu.cpp:1039
+msgid "SIGN OUT"
+msgstr "退出登录"
+
+#: src/frontend/sdl/menu.cpp:1040
+msgid "SIGN IN"
+msgstr "登录"
+
+#: src/frontend/sdl/menu.cpp:1041
+msgid "VIEW ACHIEVEMENTS"
+msgstr "查看成就"
+
+#: src/frontend/sdl/menu.cpp:1042
+msgid "UNLOCK NOTICES"
+msgstr "解锁提示"
+
+#: src/frontend/sdl/menu.cpp:1043
+msgid "SCREENSHOT ON UNLOCK"
+msgstr "解锁时截图"
+
+#: src/frontend/sdl/menu.cpp:1045
+msgid "ENCORE (NEXT LAUNCH)"
+msgstr "再挑战（下次启动）"
+
+#: src/frontend/sdl/menu.cpp:1079 src/frontend/sdl/settings.cpp:18 src/frontend/sdl/settings.cpp:27
+#: src/frontend/sdl/settings.cpp:49
+msgid "ON"
+msgstr "开"
+
+#: src/frontend/sdl/menu.cpp:1079 src/frontend/sdl/settings.cpp:18 src/frontend/sdl/settings.cpp:23
+#: src/frontend/sdl/settings.cpp:25 src/frontend/sdl/settings.cpp:27 src/frontend/sdl/settings.cpp:28
+#: src/frontend/sdl/settings.cpp:40 src/frontend/sdl/settings.cpp:49 src/frontend/sdl/settings.cpp:50
+msgid "OFF"
+msgstr "关"
+
+#: src/frontend/sdl/menu.cpp:1225 src/frontend/sdl/menu.cpp:1262
+msgid "EMULATION"
+msgstr "模拟"
+
+#: src/frontend/sdl/menu.cpp:1225 src/frontend/sdl/menu.cpp:1262
+msgid "VISUAL FX"
+msgstr "画面特效"
+
+#: src/frontend/sdl/menu.cpp:1225 src/frontend/sdl/menu.cpp:1262 src/frontend/sdl/settings.cpp:183
+msgid "LAYOUT"
+msgstr "布局"
+
+#: src/frontend/sdl/menu.cpp:1225
+msgid "CONTROLS"
+msgstr "控制"
+
+#: src/frontend/sdl/menu.cpp:1225 src/frontend/sdl/menu.cpp:1262
+msgid "ANALOG"
+msgstr "摇杆"
+
+#: src/frontend/sdl/menu.cpp:1225 src/frontend/sdl/menu.cpp:1262
+msgid "DS OPTIONS"
+msgstr "DS 设置"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1229 src/frontend/sdl/menu.cpp:1230
+msgid "SAVE TO < {1} >"
+msgstr "保存到 < {1} >"
+
+#: src/frontend/sdl/menu.cpp:1229
+msgid "THIS GAME"
+msgstr "本游戏"
+
+#: src/frontend/sdl/menu.cpp:1230
+msgid "GLOBAL"
+msgstr "全局"
+
+#: src/frontend/sdl/menu.cpp:1285
+msgid "COMPATIBLE CHEATS"
+msgstr "兼容的金手指"
+
+#: src/frontend/sdl/menu.cpp:1306
+msgid "ENABLE ONE OF THIS ROM'S PATCHES, THEN SET ANALOG PATCH BELOW"
+msgstr "先启用本 ROM 的一个补丁，再在下方设置摇杆补丁"
+
+#: src/frontend/sdl/menu.cpp:1310
+msgid "RESTART REQUIRED"
+msgstr "需要重启"
+
+#: src/frontend/sdl/menu.cpp:1311
+msgid "APPLIED WHEN THE MENU CLOSES"
+msgstr "关闭菜单后生效"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1415
+msgid "CONTROLS  {1}"
+msgstr "控制  {1}"
+
+#: src/frontend/sdl/menu.cpp:1415
+msgid "PAD"
+msgstr "手柄"
+
+#: src/frontend/sdl/menu.cpp:1415
+msgid "KEYBOARD"
+msgstr "键盘"
+
+#: src/frontend/sdl/menu.cpp:1443
+msgid "STYLUS SPEED"
+msgstr "触摸笔速度"
+
+#: src/frontend/sdl/menu.cpp:1446
+msgid "PRESS ANY..."
+msgstr "请按下按键..."
+
+#: src/frontend/sdl/menu.cpp:1462
+msgid "LEFT/RIGHT CHANGE SPEED"
+msgstr "左右键调整速度"
+
+#: src/frontend/sdl/menu.cpp:1463
+msgid "PRESS THE CONTROL TO BIND,"
+msgstr "按下要绑定的按键，"
+
+#. {1} is a button.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1465
+msgid "{1} AGAIN: RESET ALL"
+msgstr "{1} 再按一次：全部重置"
+
+#. {1}, {2}, {3} are buttons; keep each beside the word it labels.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1467
+msgid "{1} BIND   {2} CLEAR   {3} DEFAULTS"
+msgstr "{1} 绑定   {2} 清除   {3} 恢复默认"
+
+#: src/frontend/sdl/menu.cpp:1468
+msgid "UP/DOWN SELECT  L/R COLUMN"
+msgstr "上下选择  L/R 换列"
+
+#: src/frontend/sdl/menu.cpp:1469
+msgid "OR ESCAPE TO CANCEL"
+msgstr "或按 ESC 取消"
+
+#: src/frontend/sdl/menu.cpp:1470
+msgid "L/R KEYBOARD OR PAD"
+msgstr "L/R 切换键盘或手柄"
+
+#: src/frontend/sdl/menu.cpp:1470
+msgid "L/R SWAP COLUMN"
+msgstr "L/R 切换列"
+
+#: src/frontend/sdl/menu.cpp:1487
+msgid "CAPITALS"
+msgstr "大写字母"
+
+#: src/frontend/sdl/menu.cpp:1487
+msgid "LOWERCASE"
+msgstr "小写字母"
+
+#: src/frontend/sdl/menu.cpp:1487
+msgid "NUM+SYM"
+msgstr "数字与符号"
+
+#: src/frontend/sdl/menu.cpp:1520
+msgid "RA USERNAME"
+msgstr "RA 用户名"
+
+#: src/frontend/sdl/menu.cpp:1520
+msgid "RA PASSWORD"
+msgstr "RA 密码"
+
+#: src/frontend/sdl/menu.cpp:1604
+msgid "UP/DOWN LETTER   L/R TABLE"
+msgstr "上下 选字符   L/R 换字表"
+
+#. {1} and {2} are face-button icons; keep each beside the word it labels.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1606
+msgid "{1} DONE   {2} CANCEL"
+msgstr "{1} 完成   {2} 取消"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1651
+msgid "SLOT < {1} >"
+msgstr "存档槽 < {1} >"
+
+#: src/frontend/sdl/menu.cpp:1690
+msgid "DELETE STATE"
+msgstr "删除即时存档"
+
+#: src/frontend/sdl/menu.cpp:1690
+msgid "STATE SLOT"
+msgstr "存档槽"
+
+#: src/frontend/sdl/menu.cpp:1690
+msgid "MENU"
+msgstr "菜单"
+
+#: src/frontend/sdl/menu.cpp:1690
+msgid "PAUSED"
+msgstr "暂停"
+
+#. {1} is a face-button icon.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1694
+msgid "{1} DONE"
+msgstr "{1} 完成"
+
+#. {1} is a face-button icon.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1694
+msgid "{1} DELETE"
+msgstr "{1} 删除"
+
+#: src/frontend/sdl/menu.cpp:1710
+msgid "SURE?"
+msgstr "确认？"
+
+#: src/frontend/sdl/menu.cpp:1710
+msgid "USED"
+msgstr "已用"
+
+#: src/frontend/sdl/menu.cpp:1710
+msgid "EMPTY"
+msgstr "空"
+
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1711
+msgid "AUTO {1}"
+msgstr "自动 {1}"
+
+#. a state slot's row: {1} is its number, {2} USED, EMPTY or SURE?.
+#. {1}, {2}... are filled in by the program; keep each one, in any order.
+#: src/frontend/sdl/menu.cpp:1713
+msgid "{1} {2}"
+msgstr "{1} {2}"
+
+#: src/frontend/sdl/settings.cpp:19 src/frontend/sdl/settings.cpp:25
+msgid "ADAPTIVE"
+msgstr "自适应"
+
+#: src/frontend/sdl/settings.cpp:19
+msgid "FIXED"
+msgstr "固定"
+
+#: src/frontend/sdl/settings.cpp:21
+msgid "CONSOLE (59.8)"
+msgstr "实机（59.8）"
+
+#: src/frontend/sdl/settings.cpp:22 src/frontend/sdl/settings.cpp:106
+msgid "UNLIMITED"
+msgstr "无限制"
+
+#: src/frontend/sdl/settings.cpp:23
+msgid "UNDER"
+msgstr "留黑边"
+
+#: src/frontend/sdl/settings.cpp:23
+msgid "OVER"
+msgstr "裁切"
+
+#: src/frontend/sdl/settings.cpp:24
+msgid "DARK"
+msgstr "暗色"
+
+#: src/frontend/sdl/settings.cpp:24
+msgid "BLEND"
+msgstr "混合"
+
+#: src/frontend/sdl/settings.cpp:24
+msgid "BLEND LINEAR"
+msgstr "线性混合"
+
+#: src/frontend/sdl/settings.cpp:25
+msgid "DEFAULT"
+msgstr "默认"
+
+#: src/frontend/sdl/settings.cpp:26
+msgid "COMMON"
+msgstr "众数"
+
+#: src/frontend/sdl/settings.cpp:26
+msgid "FIRST"
+msgstr "首个"
+
+#: src/frontend/sdl/settings.cpp:26
+msgid "DARKEST"
+msgstr "最暗"
+
+#: src/frontend/sdl/settings.cpp:26
+msgid "LIGHTEST"
+msgstr "最亮"
+
+#: src/frontend/sdl/settings.cpp:27
+msgid "ENHANCED"
+msgstr "增强"
+
+#: src/frontend/sdl/settings.cpp:28
+msgid "DS"
+msgstr "原版 DS"
+
+#: src/frontend/sdl/settings.cpp:28
+msgid "DS LITE"
+msgstr "DS Lite"
+
+#: src/frontend/sdl/settings.cpp:29
+msgid "TOP"
+msgstr "上屏"
+
+#: src/frontend/sdl/settings.cpp:29
+msgid "BOTTOM"
+msgstr "下屏"
+
+#: src/frontend/sdl/settings.cpp:31
+msgid "GREY"
+msgstr "灰"
+
+#: src/frontend/sdl/settings.cpp:31
+msgid "BROWN"
+msgstr "棕"
+
+#: src/frontend/sdl/settings.cpp:31
+msgid "RED"
+msgstr "红"
+
+#: src/frontend/sdl/settings.cpp:31
+msgid "PINK"
+msgstr "粉"
+
+#: src/frontend/sdl/settings.cpp:32
+msgid "ORANGE"
+msgstr "橙"
+
+#: src/frontend/sdl/settings.cpp:32
+msgid "YELLOW"
+msgstr "黄"
+
+#: src/frontend/sdl/settings.cpp:32
+msgid "LIME"
+msgstr "青柠"
+
+#: src/frontend/sdl/settings.cpp:32
+msgid "GREEN"
+msgstr "绿"
+
+#: src/frontend/sdl/settings.cpp:33
+msgid "DARK GREEN"
+msgstr "深绿"
+
+#: src/frontend/sdl/settings.cpp:33
+msgid "TURQUOISE"
+msgstr "青绿"
+
+#: src/frontend/sdl/settings.cpp:33
+msgid "BLUE"
+msgstr "蓝"
+
+#: src/frontend/sdl/settings.cpp:33
+msgid "DARK BLUE"
+msgstr "深蓝"
+
+#: src/frontend/sdl/settings.cpp:34
+msgid "PURPLE"
+msgstr "紫"
+
+#: src/frontend/sdl/settings.cpp:34
+msgid "VIOLET"
+msgstr "紫罗兰"
+
+#: src/frontend/sdl/settings.cpp:34
+msgid "MAGENTA"
+msgstr "洋红"
+
+#: src/frontend/sdl/settings.cpp:34
+msgid "DARK PINK"
+msgstr "暗粉"
+
+#: src/frontend/sdl/settings.cpp:35
+msgid "JANUARY"
+msgstr "一月"
+
+#: src/frontend/sdl/settings.cpp:35
+msgid "FEBRUARY"
+msgstr "二月"
+
+#: src/frontend/sdl/settings.cpp:35
+msgid "MARCH"
+msgstr "三月"
+
+#: src/frontend/sdl/settings.cpp:35
+msgid "APRIL"
+msgstr "四月"
+
+#: src/frontend/sdl/settings.cpp:36
+msgid "MAY"
+msgstr "五月"
+
+#: src/frontend/sdl/settings.cpp:36
+msgid "JUNE"
+msgstr "六月"
+
+#: src/frontend/sdl/settings.cpp:36
+msgid "JULY"
+msgstr "七月"
+
+#: src/frontend/sdl/settings.cpp:36
+msgid "AUGUST"
+msgstr "八月"
+
+#: src/frontend/sdl/settings.cpp:37
+msgid "SEPTEMBER"
+msgstr "九月"
+
+#: src/frontend/sdl/settings.cpp:37
+msgid "OCTOBER"
+msgstr "十月"
+
+#: src/frontend/sdl/settings.cpp:37
+msgid "NOVEMBER"
+msgstr "十一月"
+
+#: src/frontend/sdl/settings.cpp:37
+msgid "DECEMBER"
+msgstr "十二月"
+
+#: src/frontend/sdl/settings.cpp:40 src/frontend/sdl/settings.cpp:49 src/frontend/sdl/settings.cpp:50
+#: src/frontend/sdl/settings.cpp:51 src/frontend/sdl/settings.cpp:60 src/frontend/sdl/settings.cpp:113
+#: src/frontend/sdl/settings.cpp:169 src/frontend/sdl/settings.cpp:188 src/frontend/sdl/settings.cpp:198
+msgid "AUTO"
+msgstr "自动"
+
+#: src/frontend/sdl/settings.cpp:40
+msgid "HOST"
+msgstr "主机"
+
+#: src/frontend/sdl/settings.cpp:40
+msgid "GUEST"
+msgstr "客机"
+
+#: src/frontend/sdl/settings.cpp:41
+msgid "INTERNET"
+msgstr "互联网"
+
+#: src/frontend/sdl/settings.cpp:45
+msgctxt "wifi.dns"
+msgid "HOST"
+msgstr "本机"
+
+#: src/frontend/sdl/settings.cpp:46
+msgid "JAPANESE"
+msgstr "日语"
+
+#: src/frontend/sdl/settings.cpp:46
+msgid "ENGLISH"
+msgstr "英语"
+
+#: src/frontend/sdl/settings.cpp:46
+msgid "FRENCH"
+msgstr "法语"
+
+#: src/frontend/sdl/settings.cpp:47
+msgid "GERMAN"
+msgstr "德语"
+
+#: src/frontend/sdl/settings.cpp:47
+msgid "ITALIAN"
+msgstr "意大利语"
+
+#: src/frontend/sdl/settings.cpp:47
+msgid "SPANISH"
+msgstr "西班牙语"
+
+#: src/frontend/sdl/settings.cpp:50
+msgid "TWO STICKS"
+msgstr "双摇杆"
+
+#: src/frontend/sdl/settings.cpp:51
+msgid "PACKED"
+msgstr "紧凑"
+
+#: src/frontend/sdl/settings.cpp:51
+msgid "EXTENDED"
+msgstr "扩展"
+
+#: src/frontend/sdl/settings.cpp:52
+msgid "VERTICAL"
+msgstr "纵向"
+
+#: src/frontend/sdl/settings.cpp:52
+msgid "HORIZONTAL"
+msgstr "横向"
+
+#: src/frontend/sdl/settings.cpp:52
+msgid "SINGLE"
+msgstr "单屏"
+
+#. PIP is picture in picture (the small screen over the large one); DOMINANT V and H, a large screen with a small one under or beside it. Match the CYCLE rows and PIP rows.
+#: src/frontend/sdl/settings.cpp:54
+msgid "PIP"
+msgstr "画中画"
+
+#. PIP is picture in picture (the small screen over the large one); DOMINANT V and H, a large screen with a small one under or beside it. Match the CYCLE rows and PIP rows.
+#: src/frontend/sdl/settings.cpp:54
+msgid "DOMINANT V"
+msgstr "主次纵向"
+
+#. PIP is picture in picture (the small screen over the large one); DOMINANT V and H, a large screen with a small one under or beside it. Match the CYCLE rows and PIP rows.
+#: src/frontend/sdl/settings.cpp:54
+msgid "DOMINANT H"
+msgstr "主次横向"
+
+#: src/frontend/sdl/settings.cpp:63
+msgid "TOP LEFT"
+msgstr "左上角"
+
+#: src/frontend/sdl/settings.cpp:63
+msgid "TOP RIGHT"
+msgstr "右上角"
+
+#: src/frontend/sdl/settings.cpp:63
+msgid "BOTTOM LEFT"
+msgstr "左下角"
+
+#: src/frontend/sdl/settings.cpp:63
+msgid "BOTTOM RIGHT"
+msgstr "右下角"
+
+#: src/frontend/sdl/settings.cpp:92
+msgid "MENU LANGUAGE"
+msgstr "菜单语言"
+
+#: src/frontend/sdl/settings.cpp:93
+msgid "THE LANGUAGE OF THESE MENUS. AUTO FOLLOWS THE SYSTEM'S"
+msgstr "这些菜单使用的语言。自动：跟随系统"
+
+#: src/frontend/sdl/settings.cpp:94
+msgid "FRAMESKIP"
+msgstr "跳帧"
+
+#: src/frontend/sdl/settings.cpp:95
+msgid "DRAW FEWER FRAMES. THE GAME STILL RUNS IN FULL"
+msgstr "减少绘制的帧数，游戏仍全速运行"
+
+#: src/frontend/sdl/settings.cpp:96
+msgid "FRAMESKIP MODE"
+msgstr "跳帧模式"
+
+#: src/frontend/sdl/settings.cpp:97
+msgid "ADAPTIVE SKIPS ONLY WHILE BEHIND REAL TIME"
+msgstr "自适应只在落后实机速度时才跳帧"
+
+#: src/frontend/sdl/settings.cpp:98
+msgid "FRAME LIMITER"
+msgstr "帧率上限"
+
+#: src/frontend/sdl/settings.cpp:99
+msgid "THE RATE THE GAME IS HELD TO. CONSOLE IS THE ONE THE GAME WAS WRITTEN FOR"
+msgstr "游戏被限制到的帧率，实机即原目标帧率"
+
+#: src/frontend/sdl/settings.cpp:101
+msgid "GAME SPEED"
+msgstr "游戏速度"
+
+#: src/frontend/sdl/settings.cpp:102
+msgid "HOW FAST THE GAME RUNS AGAINST THE LIMITER"
+msgstr "相对帧率上限的运行速度"
+
+#: src/frontend/sdl/settings.cpp:105
+msgid "FAST FORWARD SPEED"
+msgstr "快进速度"
+
+#: src/frontend/sdl/settings.cpp:106
+msgid "AT LEAST THIS MANY TIMES REAL TIME WHILE FAST FORWARD IS HELD"
+msgstr "按住快进时至少达到此倍实时速度"
+
+#: src/frontend/sdl/settings.cpp:107
+msgid "FAST FORWARD SKIP"
+msgstr "快进跳帧"
+
+#: src/frontend/sdl/settings.cpp:108
+msgid "WHILE FAST FORWARDING, SHOW ONE FRAME IN THIS MANY PLUS ONE"
+msgstr "快进时每 N+1 帧只显示一帧"
+
+#: src/frontend/sdl/settings.cpp:111
+msgid "AUDIO BUFFER"
+msgstr "音频缓冲"
+
+#: src/frontend/sdl/settings.cpp:112
+msgid "SOUND HELD AHEAD. LOWER IS LESS DELAY, LESS SLACK BEFORE A LATE FRAME IS HEARD"
+msgstr "提前缓冲的声音，越低延迟越小，也更容易听到卡顿"
+
+#: src/frontend/sdl/settings.cpp:114
+msgid "AUTOSAVE ON QUIT"
+msgstr "退出时即时存档"
+
+#: src/frontend/sdl/settings.cpp:115
+msgid "SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM"
+msgstr "退出模拟器时保存即时存档以便续玩"
+
+#: src/frontend/sdl/settings.cpp:116
+msgid "AUTOLOAD ON START"
+msgstr "启动时即时读档"
+
+#: src/frontend/sdl/settings.cpp:117
+msgid "WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE"
+msgstr "启动游戏时若有自动即时存档则从中继续"
+
+#: src/frontend/sdl/settings.cpp:118
+msgid "HIDE NAND DSIWARE"
+msgstr "隐藏 NAND 的 DSiWare"
+
+#: src/frontend/sdl/settings.cpp:119
+msgid "DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED"
+msgstr "在 DSi 菜单隐藏 NAND 自带软件，镜像本身不变"
+
+#: src/frontend/sdl/settings.cpp:120
+msgid "DSI NAND LINKS"
+msgstr "DSi NAND 链接"
+
+#: src/frontend/sdl/settings.cpp:121
+msgid "GAME LIST ENTRIES THAT START THE NAND'S DSIWARE WITHOUT THE DSI MENU"
+msgstr "在游戏列表中直接启动 NAND 内的 DSiWare"
+
+#: src/frontend/sdl/settings.cpp:123
+msgid "ASK FOR GBA GAME"
+msgstr "询问 GBA 游戏"
+
+#: src/frontend/sdl/settings.cpp:124
+msgid "BEFORE THIS GAME STARTS, OFFER THE GBA GAMES IT READS. KEPT FOR THIS GAME"
+msgstr "游戏启动前列出它可读取的 GBA 游戏。仅对本游戏生效"
+
+#. Nintendo's slot-2 accessory: its official name in your language where it has one.
+#: src/frontend/sdl/settings.cpp:126
+msgid "RUMBLE PAK"
+msgstr "震动包"
+
+#: src/frontend/sdl/settings.cpp:127
+msgid "IN SLOT 2 WHEN NO GBA GAME IS. AUTO: WHEN THE CONTROLLER CAN RUMBLE"
+msgstr "插槽 2 未插 GBA 游戏时生效。自动：手柄支持震动时启用"
+
+#: src/frontend/sdl/settings.cpp:128
+msgid "RUMBLE STRENGTH"
+msgstr "震动强度"
+
+#: src/frontend/sdl/settings.cpp:129
+msgid "HOW HARD THE MOTOR RUNS WHEN THE GAME RUMBLES"
+msgstr "游戏震动时马达的强度"
+
+#: src/frontend/sdl/settings.cpp:130
+msgid "SOLAR SENSOR"
+msgstr "日照传感器"
+
+#: src/frontend/sdl/settings.cpp:131
+msgid "THE SUNLIGHT A BOKTAI CARTRIDGE SEES: 0 DARK, 10 FULL SUN"
+msgstr "Boktai 卡带感受的日照：0 全暗，10 全日照"
+
+#: src/frontend/sdl/settings.cpp:132
+msgid "NETWORK FEATURES"
+msgstr "网络功能"
+
+#: src/frontend/sdl/settings.cpp:133
+msgid "LOCAL WIRELESS, OR INTERNET. AUTO JOINS A SESSION, ELSE HOSTS ONE"
+msgstr "本地无线通信或联网。自动：先尝试加入会话，否则创建会话"
+
+#: src/frontend/sdl/settings.cpp:135
+msgid "WHERE THE GAME LOOKS UP ITS SERVERS. NINTENDO'S ARE GONE; WIIMMFI REPLACES THEM"
+msgstr "游戏查询服务器的方式。任天堂的已关停，改用 Wiimmfi"
+
+#: src/frontend/sdl/settings.cpp:140
+msgid "ANALOG PATCH"
+msgstr "摇杆补丁"
+
+#: src/frontend/sdl/settings.cpp:141
+msgid "NEEDS A CPAD CHEAT ON. AUTO USES CONTROLS AS AVAILABLE"
+msgstr "需要开启 CPad 金手指。自动：按可用控制方式选择"
+
+#: src/frontend/sdl/settings.cpp:142
+msgid "ANALOG DEADZONE"
+msgstr "摇杆死区"
+
+#: src/frontend/sdl/settings.cpp:143
+msgid "HOW FAR A STICK MUST MOVE BEFORE AN ANALOG PATCH SEES IT"
+msgstr "摇杆移动多少才被摇杆补丁识别"
+
+#: src/frontend/sdl/settings.cpp:144
+msgid "LEFT SENSITIVITY"
+msgstr "左摇杆灵敏度"
+
+#: src/frontend/sdl/settings.cpp:145 src/frontend/sdl/settings.cpp:148
+msgid "UNDER 100 CAPS THE TOP SPEED; OVER 100 GETS THERE WITH LESS TRAVEL"
+msgstr "低于 100 会限制最高速度；高于 100 用更小行程即可达到"
+
+#: src/frontend/sdl/settings.cpp:147
+msgid "RIGHT SENSITIVITY"
+msgstr "右摇杆灵敏度"
+
+#: src/frontend/sdl/settings.cpp:150
+msgid "ANALOG INVERT Y"
+msgstr "摇杆 Y 轴反转"
+
+#: src/frontend/sdl/settings.cpp:151
+msgid "FLIP THE STICKS' UP AND DOWN FOR AN ANALOG PATCH"
+msgstr "为摇杆补丁翻转摇杆的上下方向"
+
+#: src/frontend/sdl/settings.cpp:152
+msgid "ANALOG LAYOUT"
+msgstr "摇杆布局"
+
+#: src/frontend/sdl/settings.cpp:153
+msgid "HOW THE PATCH WANTS STICK DATA ARRANGED. AUTO READS THE PATCH"
+msgstr "补丁期望的摇杆数据排列方式。自动：按补丁设定"
+
+#: src/frontend/sdl/settings.cpp:158
+msgid "INTEGER SCALE"
+msgstr "整数缩放"
+
+#: src/frontend/sdl/settings.cpp:159
+msgid "WHOLE PANEL PIXELS PER DS PIXEL. UNDER LETTERBOXES, OVER CROPS"
+msgstr "每个 DS 像素占用的整数面板像素，不足留黑边，超出会裁切"
+
+#: src/frontend/sdl/settings.cpp:160
+msgid "BILINEAR"
+msgstr "线性过滤"
+
+#: src/frontend/sdl/settings.cpp:161
+msgid "SMOOTH SCALING. OVERRIDES THE GRID, SEAMS AND CHUNKY"
+msgstr "平滑缩放，会覆盖网格、接缝与像素块"
+
+#: src/frontend/sdl/settings.cpp:162
+msgid "LCD GRID"
+msgstr "液晶网格"
+
+#: src/frontend/sdl/settings.cpp:163
+msgid "A DARK SEAM AROUND EVERY DS PIXEL, LIKE THE ORIGINAL SCREEN"
+msgstr "在每个 DS 像素周围画暗缝，模拟原生屏幕"
+
+#: src/frontend/sdl/settings.cpp:164
+msgid "SEAM"
+msgstr "接缝"
+
+#: src/frontend/sdl/settings.cpp:165
+msgid "DARK DRAWS THE GRID. BLEND SOFTENS ONLY THE STRADDLING PIXEL"
+msgstr "暗色会绘制网格，混合只柔化跨界的那一像素"
+
+#: src/frontend/sdl/settings.cpp:166
+msgid "CHUNKY"
+msgstr "像素块"
+
+#: src/frontend/sdl/settings.cpp:167
+msgid "DRAW BLOCKS OF DS PIXELS AS ONE FLAT CELL, FOR PANELS AT ODD SCALES"
+msgstr "把相邻 DS 像素合并为一个色块，适合非整数缩放"
+
+#: src/frontend/sdl/settings.cpp:168
+msgid "CHUNKY CELL"
+msgstr "色块尺寸"
+
+#: src/frontend/sdl/settings.cpp:169
+msgid "PANEL PIXELS PER CELL"
+msgstr "每个色块占用的面板像素数"
+
+#: src/frontend/sdl/settings.cpp:170
+msgid "COLOUR"
+msgstr "色彩"
+
+#: src/frontend/sdl/settings.cpp:171
+msgid "ANOTHER SCREEN'S COLOURS: THE ORIGINAL DS, OR THE BRIGHTER DS LITE"
+msgstr "改用另一种屏幕色彩：原版 DS，或更亮的 DS Lite"
+
+#: src/frontend/sdl/settings.cpp:172
+msgid "ANTI-ALIASING"
+msgstr "抗锯齿"
+
+#: src/frontend/sdl/settings.cpp:173
+msgid "DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)"
+msgstr "CPU 渲染时按 DS 原样，GPU 渲染时用 4 倍多重采样（仅 Vulkan）"
+
+#: src/frontend/sdl/settings.cpp:175
+msgid "DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED"
+msgstr "尽可能在 GPU 上绘制 3D 图层，否则由 CPU 绘制"
+
+#: src/frontend/sdl/settings.cpp:176
+msgid "FPS COUNTER"
+msgstr "帧数显示"
+
+#: src/frontend/sdl/settings.cpp:177
+msgid "FRAMES PER SECOND IN THE CORNER OF THE SCREEN"
+msgstr "在屏幕角落显示每秒帧数"
+
+#: src/frontend/sdl/settings.cpp:184
+msgid "HOW THE TWO SCREENS SHARE THE WINDOW"
+msgstr "两个屏幕在窗口中的排列方式"
+
+#: src/frontend/sdl/settings.cpp:185
+msgid "MAIN SCREEN"
+msgstr "主屏幕"
+
+#: src/frontend/sdl/settings.cpp:186
+msgid "THE SCREEN SHOWN ALONE, LARGE OR FIRST"
+msgstr "单独显示、放大显示或排在前面的屏幕"
+
+#: src/frontend/sdl/settings.cpp:187
+msgid "SCREEN GAP"
+msgstr "屏幕间距"
+
+#: src/frontend/sdl/settings.cpp:188
+msgid "PANEL PIXELS BETWEEN THE TWO SCREENS WHEN THEY ARE STACKED OR SIDE BY SIDE. AUTO PUSHES THEM TO THE EDGES"
+msgstr "上下叠放或左右并排时两块屏幕之间的面板像素间距。自动会把间距推到屏幕边缘"
+
+#: src/frontend/sdl/settings.cpp:189
+msgid "PIP CORNER"
+msgstr "画中画位置"
+
+#: src/frontend/sdl/settings.cpp:190
+msgid "WHERE THE SMALL SCREEN SITS"
+msgstr "小屏幕所处的位置"
+
+#: src/frontend/sdl/settings.cpp:191
+msgid "PIP SIZE"
+msgstr "画中画大小"
+
+#: src/frontend/sdl/settings.cpp:192
+msgid "HOW BIG THE SMALL SCREEN IS AGAINST THE LARGE ONE"
+msgstr "小屏幕相对大屏幕的尺寸比例"
+
+#: src/frontend/sdl/settings.cpp:193
+msgid "PIP OPACITY"
+msgstr "画中画不透明度"
+
+#: src/frontend/sdl/settings.cpp:194
+msgid "HOW SOLID THE SMALL SCREEN IS AT REST"
+msgstr "静止时小屏幕的不透明度"
+
+#: src/frontend/sdl/settings.cpp:195
+msgid "PIP TOUCH HOLD"
+msgstr "画中画触摸保持"
+
+#: src/frontend/sdl/settings.cpp:196
+msgid "FRAMES THE SMALL SCREEN STAYS SOLID AFTER IT IS TOUCHED"
+msgstr "被触摸后小屏幕保持不透明的帧数"
+
+#: src/frontend/sdl/settings.cpp:196
+msgid "NEVER FADE"
+msgstr "永不淡出"
+
+#: src/frontend/sdl/settings.cpp:197
+msgid "DOMINANT RATIO"
+msgstr "主次比例"
+
+#: src/frontend/sdl/settings.cpp:198
+msgid "THE SMALLER SCREEN'S SIZE. AUTO FITS WHOLE PIXELS"
+msgstr "副屏的尺寸占比，自动按整像素适配"
+
+#: src/frontend/sdl/settings.cpp:199
+msgid "DOMINANT THRESHOLD"
+msgstr "主次阈值"
+
+#: src/frontend/sdl/settings.cpp:200
+msgid "THE SMALLEST SECONDARY AUTO WILL ACCEPT"
+msgstr "自动模式下可接受的最小副屏尺寸"
+
+#: src/frontend/sdl/settings.cpp:201
+msgid "CYCLE VERTICAL"
+msgstr "循环 纵向"
+
+#: src/frontend/sdl/settings.cpp:202 src/frontend/sdl/settings.cpp:204 src/frontend/sdl/settings.cpp:206
+#: src/frontend/sdl/settings.cpp:208 src/frontend/sdl/settings.cpp:210
+msgid "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS"
+msgstr "布局快捷键会在勾选的布局之间循环"
+
+#: src/frontend/sdl/settings.cpp:203
+msgid "CYCLE HORIZONTAL"
+msgstr "循环 横向"
+
+#: src/frontend/sdl/settings.cpp:205
+msgid "CYCLE SINGLE"
+msgstr "循环 单屏"
+
+#: src/frontend/sdl/settings.cpp:207
+msgid "CYCLE PIP"
+msgstr "循环 画中画"
+
+#: src/frontend/sdl/settings.cpp:209
+msgid "CYCLE DOMINANT V"
+msgstr "循环 主次纵向"
+
+#: src/frontend/sdl/settings.cpp:211
+msgid "CYCLE DOMINANT H"
+msgstr "循环 主次横向"
+
+#: src/frontend/sdl/settings.cpp:212
+msgid "THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS. ONE ALWAYS STAYS"
+msgstr "布局快捷键在勾选的布局间循环，始终保留一个"
+
+#: src/frontend/sdl/settings.cpp:219
+msgid "NICKNAME"
+msgstr "昵称"
+
+#: src/frontend/sdl/settings.cpp:220
+msgid "WHAT GAMES CALL YOU"
+msgstr "游戏中显示的名字"
+
+#: src/frontend/sdl/settings.cpp:221
+msgid "MESSAGE"
+msgstr "留言"
+
+#: src/frontend/sdl/settings.cpp:222
+msgid "THE GREETING THE DS MENU SHOWS"
+msgstr "DS 菜单上显示的问候语"
+
+#: src/frontend/sdl/settings.cpp:223
+msgid "FAVOURITE COLOUR"
+msgstr "喜欢的颜色"
+
+#: src/frontend/sdl/settings.cpp:224
+msgid "SOME GAMES COLOUR THEMSELVES WITH IT"
+msgstr "部分游戏会用它做自己的配色"
+
+#: src/frontend/sdl/settings.cpp:225
+msgid "BIRTHDAY MONTH"
+msgstr "生日月份"
+
+#: src/frontend/sdl/settings.cpp:226
+msgid "GAMES THAT WISH YOU A HAPPY BIRTHDAY USE THIS"
+msgstr "部分游戏会在这个月祝你生日快乐"
+
+#: src/frontend/sdl/settings.cpp:227
+msgid "BIRTHDAY DAY"
+msgstr "生日日期"
+
+#: src/frontend/sdl/settings.cpp:228
+msgid "NOT CHECKED AGAINST THE MONTH, AS THE CONSOLE DOES NOT EITHER"
+msgstr "不与月份校验，与实机行为一致"
+
+#: src/frontend/sdl/settings.cpp:229
+msgid "LANGUAGE"
+msgstr "DS 语言"
+
+#: src/frontend/sdl/settings.cpp:230
+msgid "THE LANGUAGE MULTI-LANGUAGE GAMES START IN"
+msgstr "多语言游戏的初始语言"
