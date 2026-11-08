@@ -33,7 +33,7 @@ void Spu::reset() {
   for (auto& c : ch_) c = Channel{};
   for (auto& cp : cap_) cp = Capture{};
   cnt_ = 0; bias_ = 0; master_ = 0; muted_ = true;
-  rd_ = wr_ = 0;
+  rd_ = wr_ = 0; silence_cycles_ = 0;
   mix_period_ = MIX_PERIOD; timer_step_ = TIMER_STEP;
   batch_ = nds_.dsi ? 1 : 16;   // DSi: slice-aligned mix events
   mix_at_ = nds_.sched.now() + mix_period_;
@@ -333,6 +333,14 @@ void Spu::write_sndexcnt(u16 value, u16 mask) {
   cur = value & 0xE00F;   // bits 15, 14 and 0-3 are applied per sample in mix()
 }
 
+void Spu::silence(u64 cycles) {
+  silence_cycles_ += cycles;
+  while (silence_cycles_ >= mix_period_) {
+    push(0, 0);
+    silence_cycles_ -= mix_period_;
+  }
+}
+
 void Spu::push(s16 l, s16 r) {
   ring_[wr_ * 2] = l; ring_[wr_ * 2 + 1] = r;
   wr_ = (wr_ + 1) & (RING_FRAMES - 1);
@@ -422,7 +430,7 @@ template <class S> void Spu::sync_state(S& s) {
   s.fields(mix_period_, apply_bias_);   // appended: DS states leave the defaults
   s.end();
   if constexpr (S::reading) timer_step_ = mix_period_ / 4;
-  if constexpr (S::reading) { rd_ = wr_ = 0; nds_.sched.rebind(EventId::Spu, ev_mix); }
+  if constexpr (S::reading) { rd_ = wr_ = 0; silence_cycles_ = 0; nds_.sched.rebind(EventId::Spu, ev_mix); }
 }
 template void Spu::sync_state<state::Writer>(state::Writer&);
 template void Spu::sync_state<state::Reader>(state::Reader&);
