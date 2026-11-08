@@ -4128,6 +4128,9 @@ sdl_ready:
         nds.reset();          // clears power_off, and re-seeds the clock
         if (nds.dsi) nds.setup_direct_boot();   // the DSi boots from its NAND again
         mp_ever = false;
+#if DSPERATE_CHEEVOS
+        if (cheevos_on) cheevos.reset();   // or rcheevos keeps counting the session the reset discarded
+#endif
       } else {
         nds.power_off = false;
       }
