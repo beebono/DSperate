@@ -29,14 +29,6 @@ namespace ds {
 struct FastTiming { u32 d9s = 0, d9 = 5, d7 = 2, r9 = 4, r7 = 2; };
 extern bool g_fast_timing;
 extern FastTiming g_fast;
-// The ARMv7 recompiler implements the exact model only: with it the fast
-// model is unavailable, and a frontend that is asked for it keeps exact
-// (the recompiled code and the interpreter's fallbacks must charge alike).
-#if DSPERATE_JIT && !defined(__aarch64__)
-constexpr bool kFastTimingAvailable = false;
-#else
-constexpr bool kFastTimingAvailable = true;
-#endif
 
 // Whether a load/store addresses through SP. ARM: every load/store encoding
 // has its base in bits 19-16 (and the cost is only read by those). Thumb: only

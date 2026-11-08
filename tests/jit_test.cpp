@@ -668,7 +668,6 @@ int main(int argc, char** argv) {
   // Both timing models (timing_mode.h): the interpreter and the recompiler
   // must agree under each; the runtime re-emits its stubs between the two.
   for (const bool fast : {false, true}) {
-    if (fast && !ds::kFastTimingAvailable) { std::printf("jit: fast timing not implemented by this backend, skipped\n"); break; }
     ds::g_fast_timing = fast;
     std::printf("jit: %s timing\n", fast ? "fast" : "exact");
     directed();

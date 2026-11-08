@@ -146,6 +146,9 @@ refill one `movz`. numC stays exact: it is resolved at translation time anyway.
 The interpreter implements the same model (`cpu_cycles.h`), so strict mode
 still makes the two engines byte-equal; `test_jit` runs every trial under both
 models, and the stubs are re-emitted when the model changes between attaches.
+Both backends implement it. On the ARMv7 one it also inlines the ARM7 accesses
+whose numC the exact model's cost table cannot express (`needs_fallback_cost7`);
+SWP is inlined under fast on AArch64 only and stays interpreted on ARMv7.
 The ARM9's data constant depends on the base register, known at translation:
 SP-based accesses (the stack, in DTCM) cost 0, all others 5; the ARM7's cost
 2; refills 4 / 2 (`DS_FAST=d9s,d9,d7,r9,r7` overrides them). The interpreter

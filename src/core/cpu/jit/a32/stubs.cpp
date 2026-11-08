@@ -9,6 +9,7 @@
 #include "core/cpu/jit/jit_internal.h"
 #include "core/cpu/jit/a32/convention.h"
 #include "core/cpu/jit/a32/emit.h"
+#include "core/cpu/timing_mode.h"
 #include "core/sched/scheduler.h"
 
 #include <cstring>
@@ -390,7 +391,8 @@ void emit_stubs(Runtime& rt) {
     e.bfi(1, 0, 5, 1);
     e.str(1, R_CTX, OFF_CPSR);
     e.and_imm(2, 0, ~1u);                       // a
-    if (c == 0) {
+    if (g_fast_timing) e.mov_imm(1, c == 0 ? g_fast.r9 : g_fast.r7);   // fast timing: a constant refill
+    else if (c == 0) {
       // ARM9 refill: ARM cost(a,B)+cost(a+4,S); Thumb odd cost(a-2,B)+cost(a+2,S), even cost(a,B).
       // first = a - 2*odd (B fetch), second = a + 4 - 2*T (S fetch, dropped when T && !odd).
       e.ldr(R_LR, R_CTX, OFF_TIMING9);

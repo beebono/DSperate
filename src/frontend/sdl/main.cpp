@@ -1439,7 +1439,6 @@ static int run(int argc, char** argv) {
   // CPU timing model (core/cpu/timing_mode.h), fixed before anything runs or
   // the recompiler emits its stubs. DS_TIMING wins.
   if (cfg.has("emu.timing") && !std::getenv("DS_TIMING")) ds::g_fast_timing = cfg.str("emu.timing") != "exact";
-  if (ds::g_fast_timing && !ds::kFastTimingAvailable) { ds::g_fast_timing = false; std::fprintf(stderr, "cpu timing: exact (the ARMv7 recompiler implements the exact model only)\n"); }
   VLOG("cpu timing: %s\n", ds::g_fast_timing ? "fast" : "exact");
   if (cfg.num("emu.host_cores", 0) > 0) ds::set_host_cores(static_cast<ds::u32>(cfg.num("emu.host_cores", 0)));   // DS_HOST_CORES still wins
   VLOG("host: %u cores\n", ds::host_cores());

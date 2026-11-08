@@ -11,8 +11,7 @@
 
 namespace ds {
 
-// Fast unless DS_TIMING=exact; exact by default where the recompiler is the
-// ARMv7 one, which implements only the exact model.
+// Fast unless DS_TIMING=exact.
 // DS_FAST="d9s,d9,d7,r9,r7" overrides the fast model's constants (tuning only).
 FastTiming g_fast = [] {
   FastTiming f;
@@ -20,8 +19,8 @@ FastTiming g_fast = [] {
   return f;
 }();
 bool g_fast_timing = [] {
-  if (const char* e = std::getenv("DS_TIMING")) return std::strcmp(e, "exact") != 0 && kFastTimingAvailable;
-  return kFastTimingAvailable;
+  if (const char* e = std::getenv("DS_TIMING")) return std::strcmp(e, "exact") != 0;
+  return true;
 }();
 
 namespace {
