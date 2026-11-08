@@ -281,6 +281,13 @@ bool Client::start(std::string& err) {
   if (verbose()) rc_client_enable_logging(c, RC_CLIENT_LOG_LEVEL_VERBOSE, &rc_log);
   rc_client_set_event_handler(c, &rc_event_handler);
 
+  // DS_CHEEVOS_HOST: send requests to another server ("host:port" or a full
+  // http(s):// URL; no scheme means http). spruce points it at its local
+  // RAOfflineProxy. After enable_logging so the verbose log shows the host.
+  if (const char* h = std::getenv("DS_CHEEVOS_HOST")) {
+    if (*h) rc_client_set_host(c, h);
+  }
+
   worker_ = std::thread([this] { worker_loop(); });
   state_ = State::SignedOut;
   CLOG("session up, transport %s, user agent %s\n", transport_name(), user_agent());
