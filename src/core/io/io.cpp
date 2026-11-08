@@ -50,6 +50,7 @@ void Io::reset() {
   dispstat[0] = dispstat[1] = 0; vcount = 0;
   wramcnt = 0; std::memset(vramcnt, 0, sizeof vramcnt);
   powcnt1 = 0; powcnt2 = 0; math = MathUnit{};
+  sleeping = false; sleep_frame_cycles = 0;
   keyinput = 0x03FF; extkeyin = 0x007F; keycnt[0] = keycnt[1] = 0;
   exmemcnt = 0x6000; rcnt = 0; wifiwaitcnt = 0;   // boot2's ARM7 spins on these bits
   spicnt = 0; spidata = 0; spi_ready_at = 0; spi_busy_ = false; spi_flag_mode_ = false;
@@ -75,6 +76,7 @@ void Io::update_irq(Cpu cpu) {
   // if halted). A CPU stopped by its own DMA counts as off-slice too.
   if (nds_.dsi && pending && !ctx.hot.irq_pending && (nds_.sched.running() != &ctx || nds_.sched.in_dma()) && !ctx.halted) ctx.irq_offline = true;
   ctx.hot.irq_pending = pending;
+  if (cpu == Cpu::ARM7 && any) sleeping = false;
   // Halt exits on IE&IF; the ARM9 additionally needs IME.
   if (any && ctx.halted && (cpu == Cpu::ARM7 || (c.ime & 1))) ctx.halted = false;
 }
@@ -664,6 +666,26 @@ void Io::rtc_event() {
     r.next_tick += ARM9_CLOCK_HZ;
   } while (r.next_tick <= nds_.sched.now());
   nds_.sched.schedule(EventId::Rtc, r.next_tick, rtc_ev, 0);
+}
+
+// Main clocks stop in STOP mode; the RTC and silent host audio keep time.
+// Rebase only the RTC deadline, leaving other devices exactly where they stopped.
+bool Io::run_sleep(u64 cycles) {
+  if (rtc.ticking) {
+    const u64 now = nds_.sched.now();
+    u64 remaining = rtc.next_tick > now ? rtc.next_tick - now : 0;
+    while (cycles >= remaining) {
+      rtc_tick();
+      remaining += ARM9_CLOCK_HZ;
+    }
+    rtc.next_tick = now + remaining - cycles;
+    nds_.sched.schedule(EventId::Rtc, rtc.next_tick, rtc_ev, 0);
+  }
+  nds_.spu.silence(cycles);
+  sleep_frame_cycles += cycles;
+  if (sleep_frame_cycles < CYCLES_PER_FRAME) return false;
+  sleep_frame_cycles %= CYCLES_PER_FRAME;
+  return true;
 }
 
 // Protocol per GBATEK.
@@ -1264,7 +1286,12 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
       CpuIo& c7 = cpu_io[ci(Cpu::ARM7)];
       bool pending = (c7.ie & c7.if_) != 0;
       if (nds_.dsi && (dsi.ie2 & dsi.if2)) pending = true;
-      if (!pending) nds_.cpu(Cpu::ARM7).halted = true;   // the run loop ends the slice
+      if (!pending) {
+        nds_.cpu(Cpu::ARM7).halted = true;
+        // STOP suspends the whole machine. Letting ARM9 keep running while
+        // ARM7 sleeps makes SDK power-management requests time out.
+        if (v == 0xC0) { sleeping = true; sleep_frame_cycles = 0; }
+      }   // the run loop ends the slice
     }
     else if (v == 0x40) std::fprintf(stderr, "[io] GBA mode requested; not supported\n");
     return;
@@ -1821,6 +1848,8 @@ template <class S> void Io::sync_state(S& s) {
   s.fields(wifiwaitcnt);   // appended
   wifi.sync_state_timer(s);   // appended (DSi)
   wifi.sync_state_engine(s);  // appended (frames)
+  if constexpr (S::reading) { sleeping = false; sleep_frame_cycles = 0; }
+  s.fields(sleeping, sleep_frame_cycles);   // appended: older states are awake
   if constexpr (S::reading) nds_.bus.update_wifi_timings();
   s.end();
   if (nds_.dsi) {

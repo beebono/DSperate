@@ -211,6 +211,9 @@ public:
   void set_buttons(u32 pressed);
   void set_touch(int x, int y, bool down);
   void set_lid(bool closed);   // opening raises ARM7 IRQ 22, ending firmware sleep
+  bool sleeping = false;
+  u64 sleep_frame_cycles = 0;
+  bool run_sleep(u64 cycles);
   bool lid_closed() const { return extkeyin & 0x80; }
   // One frame of s16 mono mic samples, any rate, mapped across the frame by
   // time. Pointer must stay valid until the next call.

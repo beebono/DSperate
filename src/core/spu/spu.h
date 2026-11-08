@@ -41,6 +41,7 @@ public:
 
   // Output ring (stereo frames). `take` copies up to `max_frames` into `dst`
   // (2 * frames s16) and returns the count.
+  void silence(u64 cycles);
   size_t available() const { return (wr_ - rd_) & (RING_FRAMES - 1); }
   size_t take(s16* dst, size_t max_frames);
   void   drain() { rd_ = wr_; }
@@ -99,6 +100,7 @@ private:
 
   static void ev_mix(NDS& nds, u32);
   void mix();
+  u64 silence_cycles_ = 0;   // output pacing only; not emulated channel state
   void push(s16 l, s16 r);
 
   NDS& nds_;
