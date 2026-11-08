@@ -240,6 +240,9 @@ void DispOut::close() {
   if (disp_ >= 0) {
     if (layer_ >= 0) layer_ioctl(disp_, CMD_LAYER_DISABLE, static_cast<unsigned>(layer_), nullptr);
     if (grid_layer_ >= 0 && grid_enabled_) layer_ioctl(disp_, CMD_LAYER_DISABLE, static_cast<unsigned>(grid_layer_), nullptr);
+    // Our composites live in fb0's memory, which the UI layer scans out: back
+    // on, it would show our last frames until the UI draws again. Black first.
+    if (map_) { u32* p = reinterpret_cast<u32*>(map_); for (size_t i = 0, n = map_len_ / sizeof(u32); i < n; ++i) p[i] = 0xFF000000u; }
     if (ui_layer_ >= 0 && ui_was_enabled_) layer_ioctl(disp_, CMD_LAYER_ENABLE, static_cast<unsigned>(ui_layer_), nullptr);
     ::close(disp_);
   }
