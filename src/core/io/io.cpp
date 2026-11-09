@@ -1159,6 +1159,11 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   if (!a9 && addr >= 0x04800000 && addr < 0x04810000) { if (powcnt2 & 2) wifi.write16(addr, value); return; }
   switch ((addr - 0x04000000u) >> 1) {   // dense index: GCC emits a jump table
   case 0x2: dispstat[ci(cpu)] = (dispstat[ci(cpu)] & 0x0047) | (value & 0xFFB8); return;   // bit 6 (DSi LCD init flag) is read-only, never set on a DS
+  case 0x3: {   // VCOUNT: honoured only while the current line is 202..212 (GBATEK), from the next scanline
+    const u16 line = static_cast<u16>(value & 0x1FF);
+    if (nds_.gpu.line() >= 202 && nds_.gpu.line() <= 212 && line < 263) nds_.gpu.request_vcount(line);
+    return;
+  }
   case 0x80: case 0x82: case 0x84: case 0x86: c.timers[(addr - 0x04000100) / 4].reload = value; return;
   case 0x81: case 0x83: case 0x85: case 0x87: timer_write_control(cpu, (addr - 0x04000102) / 4, value); return;
   case 0x99: keycnt[ci(cpu)] = value; update_key_irq(); return;

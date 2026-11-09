@@ -55,7 +55,7 @@ Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
 void Gpu::reset() {
   join_worker();
   disarm_trap();
-  line_ = 0; hblank_done_ = false;
+  line_ = 0; next_vcount_ = 0xFFFF; hblank_done_ = false;
   lazy_frame_ = false; per_line_[0] = per_line_[1] = false;
   render_next_[0] = render_next_[1] = SCREEN_H; frame_finished_ = false;
   frame_begun_ = false; screens_on_ = false;
@@ -489,7 +489,8 @@ void Gpu::async_probe_check(bool at_line0) {
 void Gpu::on_scanline_start() {
   prof::Scope hook(prof::GPU_LINE);
   nds_.io.set_hblank(false);
-  line_ = static_cast<u16>((line_ + 1) % SCANLINES_PER_FRAME);
+  if (next_vcount_ != 0xFFFF) { line_ = next_vcount_; next_vcount_ = 0xFFFF; }
+  else line_ = static_cast<u16>((line_ + 1) % SCANLINES_PER_FRAME);
   hblank_done_ = false;
 
   // Display lines evaluate window edges in step_engine; the rest go through the latch.
