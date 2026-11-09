@@ -444,105 +444,109 @@ msgstr ""
 msgid "ITS FOLDER HAS CHANGED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3191
+#: src/frontend/sdl/main.cpp:3122
 msgid "LOCAL WIRELESS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3203
+#: src/frontend/sdl/main.cpp:3187
+msgid "WAITING FOR HOST"
+msgstr ""
+
+#: src/frontend/sdl/main.cpp:3227
 msgid "SCAN FAILED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3203
+#: src/frontend/sdl/main.cpp:3227
 msgid "THE NETWORK REFUSED IT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3209
+#: src/frontend/sdl/main.cpp:3233
 msgid "LOOKING FOR A SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3217
+#: src/frontend/sdl/main.cpp:3241
 msgid "NO SESSION FOUND"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3217
+#: src/frontend/sdl/main.cpp:3241
 msgid "NOBODY IS HOSTING HERE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3225
+#: src/frontend/sdl/main.cpp:3249 src/frontend/sdl/main.cpp:4099
 msgid "JOINED A SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3261
+#: src/frontend/sdl/main.cpp:3285
 msgid "ACHIEVEMENT UNLOCKED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3281
+#: src/frontend/sdl/main.cpp:3305
 msgid "NOT AVAILABLE IN THIS BUILD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3284
+#: src/frontend/sdl/main.cpp:3308
 msgid "TURNED OFF"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3285
+#: src/frontend/sdl/main.cpp:3309
 msgid "NOT SIGNED IN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3286
+#: src/frontend/sdl/main.cpp:3310
 msgid "SIGNING IN..."
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3287 src/frontend/sdl/main.cpp:3289
+#: src/frontend/sdl/main.cpp:3311 src/frontend/sdl/main.cpp:3313
 msgid "SIGNED IN AS {1}"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3288
+#: src/frontend/sdl/main.cpp:3312
 msgid "LOADING ACHIEVEMENTS..."
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3291
+#: src/frontend/sdl/main.cpp:3315
 msgid "NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3293
+#: src/frontend/sdl/main.cpp:3317
 msgid "NO ACHIEVEMENTS FOR THIS ROM - HASH {1}"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3302
+#: src/frontend/sdl/main.cpp:3326
 msgid "{1}/{2} EARNED  {3}/{4} POINTS  (ENCORE)"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3302
+#: src/frontend/sdl/main.cpp:3326
 msgid "{1}/{2} EARNED  {3}/{4} POINTS"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3777
+#: src/frontend/sdl/main.cpp:3801
 msgid "STATE {1} SAVED"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3791
+#: src/frontend/sdl/main.cpp:3815
 msgid "STATE {1} LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4086
+#: src/frontend/sdl/main.cpp:4140
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4098
+#: src/frontend/sdl/main.cpp:4152
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4099
+#: src/frontend/sdl/main.cpp:4153
 msgid "GAME LIKELY WON'T WORK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4100
+#: src/frontend/sdl/main.cpp:4154
 msgid "DSP IS NOT EMULATED"
 msgstr ""
 
