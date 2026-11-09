@@ -3125,6 +3125,15 @@ sdl_ready:
     t.frames = frames;
     toast_queue.push_back(std::move(t));
   };
+  // net.lan_timeout_ms (DS_LAN_TIMEOUT_MS wins): how long one MP wait may
+  // hold the frame. Over a Wi-Fi access point, raise it before the games give up.
+  auto make_lan = [&] {
+    auto l = std::make_unique<ds::net::LanMp>();
+    const char* env = std::getenv("DS_LAN_TIMEOUT_MS");
+    l->set_recv_timeout_ms(env ? std::atoi(env) : static_cast<int>(cfg.num("net.lan_timeout_ms", ds::net::LanMp::kDefaultRecvTimeoutMs)));
+    if (l->recv_timeout_ms() != ds::net::LanMp::kDefaultRecvTimeoutMs) VLOG("lan: MP waits bounded at %d ms\n", l->recv_timeout_ms());
+    return l;
+  };
   set_net_mode = [&](const std::string& mode) {
     // Down first: a guest says goodbye rather than going silent.
     join_pending = false;
@@ -3159,7 +3168,7 @@ sdl_ready:
         VLOG("internet: up, DNS %s\n", where.c_str());
       }
     } else if (mode == "auto" || mode == "guest" || mode == "host" || mode == "join") {
-      lan = std::make_unique<ds::net::LanMp>();
+      lan = make_lan();
       bool up = lan->ok();
       if (up && (mode == "auto" || mode == "guest")) {
         // Same scan either way; auto may fall back to hosting, guest may not.
@@ -3211,7 +3220,7 @@ sdl_ready:
   constexpr Uint32 kScanMs = 2500;   // as start_auto: a host beacons once a second
   auto begin_guest_scan = [&] {
     guest_retry_armed = false;
-    if (!lan) lan = std::make_unique<ds::net::LanMp>();
+    if (!lan) lan = make_lan();
     if (!lan->ok() || !lan->start_discovery()) {
       std::fprintf(stderr, "lan: %s\n", lan->error().c_str());
       lan.reset();
@@ -4056,6 +4065,14 @@ sdl_ready:
     const Uint64 t0 = SDL_GetPerformanceCounter();
 #if DSPERATE_NET
     if (lan) lan->process();   // ENet and discovery, once per frame, on this thread
+    // Under DS_VERBOSE, the MP waits every ten seconds of a live session: the
+    // first thing to look at when a game reports a communication error.
+    if (lan && lan->active() && verbose() && nds.frame_count % 600 == 0) {
+      static unsigned last_n = 0, last_to = 0; static double last_ms = 0;
+      VLOG("lan: last 10 s: %u waits, %.1f ms waiting, %u timeouts (max %.1f ms so far)\n",
+           lan->wait_count() - last_n, lan->wait_total_ms() - last_ms, lan->wait_timeouts() - last_to, lan->wait_max_ms());
+      last_n = lan->wait_count(); last_ms = lan->wait_total_ms(); last_to = lan->wait_timeouts();
+    }
     if (slirp) slirp->process();
     // Edge-triggered: the game switching its radio on is when we look too.
     {

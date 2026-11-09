@@ -87,6 +87,10 @@ public:
   double wait_total_ms() const { return wait_total_ms_; }
   double wait_max_ms() const { return wait_max_ms_; }
   unsigned wait_timeouts() const { return wait_timeouts_; }   // waits that ran the whole recv timeout
+  // The bound on one reply/host-packet wait, in milliseconds (clamped to 5..250).
+  static constexpr int kDefaultRecvTimeoutMs = 25;
+  void set_recv_timeout_ms(int ms);
+  int recv_timeout_ms() const { return recv_timeout_ms_; }
 
   // MpTransport
   void begin() override;
@@ -125,7 +129,10 @@ private:
   Player me_;
   u32 host_address_ = 0;
   u16 connected_mask_ = 0;
-  static constexpr int RECV_TIMEOUT_MS = 25;
+  // How long a reply/host-packet wait may block the emulation thread. 25 ms
+  // suits a wired LAN; a Wi-Fi access point's jitter can exceed it often, and
+  // every miss is a dropped MP exchange the game may give up on.
+  int recv_timeout_ms_ = kDefaultRecvTimeoutMs;
   static constexpr u32 STALE_MS = 128;   // stale-packet window; melonDS uses 16
   int last_host_id_ = -1;
   _ENetPeer* last_host_peer_ = nullptr;

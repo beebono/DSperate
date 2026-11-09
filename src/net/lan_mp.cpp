@@ -57,6 +57,8 @@ LanMp::LanMp() {
   if (enet_initialize() != 0) { err_ = "enet_initialize failed"; return; }
   inited_ = true;
 }
+void LanMp::set_recv_timeout_ms(int ms) { recv_timeout_ms_ = std::clamp(ms, 5, 250); }
+
 LanMp::~LanMp() {
   cancel_join();
   end_session();
@@ -414,7 +416,7 @@ void LanMp::process_lan(int type) {
   if (!host_) return;
   struct WaitClock {
     LanMp& l; int type; std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    ~WaitClock() { if (type != 2) return; const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); l.wait_count_++; l.wait_total_ms_ += ms; if (ms > l.wait_max_ms_) l.wait_max_ms_ = ms; if (ms >= RECV_TIMEOUT_MS - 1) l.wait_timeouts_++; }
+    ~WaitClock() { if (type != 2) return; const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); l.wait_count_++; l.wait_total_ms_ += ms; if (ms > l.wait_max_ms_) l.wait_max_ms_ = ms; if (ms >= l.recv_timeout_ms_ - 1) l.wait_timeouts_++; }
   } wait_clock{*this, type};
   u32 time_last = ms_now();
   while (!rx_.empty()) {
@@ -430,7 +432,7 @@ void LanMp::process_lan(int type) {
     }
     break;
   }
-  int timeout = type == 2 ? RECV_TIMEOUT_MS : 0;
+  int timeout = type == 2 ? recv_timeout_ms_ : 0;
   time_last = ms_now();
   ENetEvent ev;
   while (enet_host_service(host_, &ev, static_cast<u32>(timeout)) > 0) {
