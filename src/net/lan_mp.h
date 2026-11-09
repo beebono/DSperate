@@ -91,6 +91,7 @@ public:
   static constexpr int kDefaultRecvTimeoutMs = 25;
   void set_recv_timeout_ms(int ms);
   int recv_timeout_ms() const { return recv_timeout_ms_; }
+  u16 connected_mask() const { return connected_mask_; }   // players whose radio is on, by id
 
   // MpTransport
   void begin() override;

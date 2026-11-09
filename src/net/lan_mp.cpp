@@ -47,7 +47,7 @@ u32 ms_now() {
   using namespace std::chrono;
   return static_cast<u32>(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
-bool lan_log() { static const bool on = std::getenv("DS_WIFI_LOG") != nullptr; return on; }
+bool lan_log() { static const bool on = std::getenv("DS_WIFI_LOG") != nullptr || std::getenv("DS_LAN_LOG") != nullptr; return on; }
 #define LAN_LOG(...) do { if (lan_log()) std::fprintf(stderr, "[lan] " __VA_ARGS__); } while (0)
 void put32(u8* p, u32 v) { p[0] = u8(v); p[1] = u8(v >> 8); p[2] = u8(v >> 16); p[3] = u8(v >> 24); }
 u32 get32(const u8* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (u32(p[3]) << 24); }
@@ -348,8 +348,8 @@ void LanMp::process_host_event(ENetEvent& ev) {
       if (connected_mask_ & (1 << me_.id)) { const u8 c = Cmd_PlayerConnect; enet_peer_send(ev.peer, Chan_Cmd, enet_packet_create(&c, 1, ENET_PACKET_FLAG_RELIABLE)); }
       break;
     }
-    case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) connected_mask_ |= static_cast<u16>(1 << p->id); break;
-    case Cmd_PlayerDisconnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) connected_mask_ &= static_cast<u16>(~(1 << p->id)); break;
+    case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ |= static_cast<u16>(1 << p->id); LAN_LOG("player %d radio on (mask %04x)\n", p->id, connected_mask_); } break;
+    case Cmd_PlayerDisconnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ &= static_cast<u16>(~(1 << p->id)); LAN_LOG("player %d radio off (mask %04x)\n", p->id, connected_mask_); } break;
     default: break;
     }
     enet_packet_destroy(ev.packet);
@@ -401,8 +401,8 @@ void LanMp::process_client_event(ENetEvent& ev) {
       }
       break;
     }
-    case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) connected_mask_ |= static_cast<u16>(1 << p->id); break;
-    case Cmd_PlayerDisconnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) connected_mask_ &= static_cast<u16>(~(1 << p->id)); break;
+    case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ |= static_cast<u16>(1 << p->id); LAN_LOG("player %d radio on (mask %04x)\n", p->id, connected_mask_); } break;
+    case Cmd_PlayerDisconnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ &= static_cast<u16>(~(1 << p->id)); LAN_LOG("player %d radio off (mask %04x)\n", p->id, connected_mask_); } break;
     default: break;
     }
     enet_packet_destroy(ev.packet);
@@ -500,6 +500,7 @@ void LanMp::process() {
 void LanMp::begin() {
   if (!host_) return;
   connected_mask_ |= static_cast<u16>(1 << me_.id);
+  LAN_LOG("radio on: telling the session (mask %04x)\n", connected_mask_);
   last_host_id_ = -1; last_host_peer_ = nullptr;
   const u8 cmd = Cmd_PlayerConnect;
   enet_host_broadcast(host_, Chan_Cmd, enet_packet_create(&cmd, 1, ENET_PACKET_FLAG_RELIABLE));
@@ -507,6 +508,7 @@ void LanMp::begin() {
 void LanMp::end() {
   if (!host_) return;
   connected_mask_ &= static_cast<u16>(~(1 << me_.id));
+  LAN_LOG("radio off: telling the session (mask %04x)\n", connected_mask_);
   const u8 cmd = Cmd_PlayerDisconnect;
   enet_host_broadcast(host_, Chan_Cmd, enet_packet_create(&cmd, 1, ENET_PACKET_FLAG_RELIABLE));
 }

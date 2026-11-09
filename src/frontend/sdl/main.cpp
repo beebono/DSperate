@@ -4065,12 +4065,18 @@ sdl_ready:
     const Uint64 t0 = SDL_GetPerformanceCounter();
 #if DSPERATE_NET
     if (lan) lan->process();   // ENet and discovery, once per frame, on this thread
-    // Under DS_VERBOSE, the MP waits every ten seconds of a live session: the
+    // Under DS_VERBOSE, the MP waits every 600 frames of a live session: the
     // first thing to look at when a game reports a communication error.
     if (lan && lan->active() && verbose() && nds.frame_count % 600 == 0) {
-      static unsigned last_n = 0, last_to = 0; static double last_ms = 0;
-      VLOG("lan: last 10 s: %u waits, %.1f ms waiting, %u timeouts (max %.1f ms so far)\n",
-           lan->wait_count() - last_n, lan->wait_total_ms() - last_ms, lan->wait_timeouts() - last_to, lan->wait_max_ms());
+      static unsigned last_n = 0, last_to = 0; static double last_ms = 0; static Uint32 last_tick = 0;
+      const Uint32 now_tick = SDL_GetTicks();
+      if (last_tick) {
+        const Uint32 wall = now_tick - last_tick;
+        VLOG("lan pacing: 600 frames in %ums (%.1f fps), %u waits, %.1f ms waiting, %u timeouts (max %.1f ms so far), radios %04x\n",
+             wall, wall ? 600000.0 / wall : 0.0, lan->wait_count() - last_n, lan->wait_total_ms() - last_ms,
+             lan->wait_timeouts() - last_to, lan->wait_max_ms(), lan->connected_mask());
+      }
+      last_tick = now_tick;
       last_n = lan->wait_count(); last_ms = lan->wait_total_ms(); last_to = lan->wait_timeouts();
     }
     if (slirp) slirp->process();

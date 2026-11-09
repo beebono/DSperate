@@ -34,7 +34,16 @@ public:
   void us_timer();
 
   // Outside world. Null means nobody is listening.
-  void set_transport(MpTransport* mp) { mp_ = mp; }
+  // A transport attached while the radio is already on joins the conversation
+  // now: begin() is otherwise only said at power-on, and a session that comes
+  // up later (a guest joining once the game is on the air) would never tell
+  // its peers it is listening, so the host would never wait for its replies.
+  void set_transport(MpTransport* mp) {
+    if (mp == mp_) return;
+    if (mp_ && on_) mp_->end();
+    mp_ = mp;
+    if (mp_ && on_) mp_->begin();
+  }
   void set_net_driver(NetDriver* net) { net_ = net; }
   // Frames actually put on the air, not just radio power-on. Diagnostic
   // only; not in save state.
