@@ -3072,6 +3072,9 @@ sdl_ready:
   // --lan-join. What a session takes away, it gives back on the way out.
   // Set when a guest heard nobody: see begin_guest_scan below.
   bool guest_retry_armed = false, radio_was_on = false, scanning = false;
+  // net.mode = join with no answer yet: keep trying from the frame loop.
+  bool join_pending = false;
+  Uint32 next_join_ms = 0;
   bool knobs_held = false;
   int held_speed = 100; std::string held_limiter = "auto";
   int  held_fs_limit = 0;
@@ -3112,9 +3115,20 @@ sdl_ready:
       std::fprintf(stderr, "net: the frame limiter is back where it was -- the session is over\n");
     }
   };
+  // Keep each line to about 24 characters: toast_box truncates past two
+  // thirds of the DS screen width.
+  auto net_toast = [&](const char* title, const char* detail, int frames) {
+    Toast t;
+    t.header = tr("LOCAL WIRELESS");
+    t.title = title;
+    if (detail) t.detail = detail;
+    t.frames = frames;
+    toast_queue.push_back(std::move(t));
+  };
   set_net_mode = [&](const std::string& mode) {
     // Down first: a guest says goodbye rather than going silent.
-    if (lan) { lan->end_session(); nds.io.wifi.set_transport(nullptr); lan.reset(); }
+    join_pending = false;
+    if (lan) { lan->cancel_join(); lan->end_session(); nds.io.wifi.set_transport(nullptr); lan.reset(); }
     if (slirp) { nds.io.set_net_driver(nullptr); slirp->stop(); slirp.reset(); }
     const bool was_live = net_live;
     net_live = false;
@@ -3152,9 +3166,20 @@ sdl_ready:
         const auto role = lan->start_auto(lan_name, 2500, 16, mode == "auto");
         up = role != ds::net::LanMp::Role::None;
         if (up) VLOG("netplay: %s\n", role == ds::net::LanMp::Role::Host ? "no session heard, hosting" : ("joined " + lan->peer_name()).c_str());
+      } else if (up && mode == "join") {
+        // Not start_client: a guest launched before its host would give up
+        // after one try. Wait a moment for a host that is already up, then
+        // keep the attempt running from the frame loop (join_pending).
+        up = lan->begin_join(lan_name, lan_join) && lan->step_join(2000) == 1;
+        if (!up && lan->ok()) {
+          join_pending = true;
+          next_join_ms = SDL_GetTicks() + 1000;
+          std::fprintf(stderr, "lan: %s not answering yet (%s); still trying\n", lan_join, lan->error().c_str());
+          net_toast(tr("WAITING FOR HOST"), lan_join, TOAST_INFO_FRAMES);
+          return;
+        }
       } else if (up) {
-        up = mode == "join" ? lan->start_client(lan_name, lan_join)
-                            : lan->start_host(lan_host ? lan_host : lan_name, 16);
+        up = lan->start_host(lan_host ? lan_host : lan_name, 16);
       }
       if (!up) {
         std::fprintf(stderr, "lan: %s\n", lan->error().c_str());
@@ -3184,16 +3209,6 @@ sdl_ready:
   // early). Spread across frames, unlike start_auto's blocking scan.
   Uint32 scan_began_ms = 0;
   constexpr Uint32 kScanMs = 2500;   // as start_auto: a host beacons once a second
-  // Keep each line to about 24 characters: toast_box truncates past two
-  // thirds of the DS screen width.
-  auto net_toast = [&](const char* title, const char* detail, int frames) {
-    Toast t;
-    t.header = tr("LOCAL WIRELESS");
-    t.title = title;
-    if (detail) t.detail = detail;
-    t.frames = frames;
-    toast_queue.push_back(std::move(t));
-  };
   auto begin_guest_scan = [&] {
     guest_retry_armed = false;
     if (!lan) lan = std::make_unique<ds::net::LanMp>();
@@ -4047,6 +4062,22 @@ sdl_ready:
       const bool on_air = nds.io.wifi.tx_frames() > 0;
       if (on_air && !radio_was_on && guest_retry_armed && !scanning) begin_guest_scan();
       radio_was_on = on_air;
+      if (join_pending && lan) {
+        if (!lan->joining()) {
+          if (static_cast<Sint32>(SDL_GetTicks() - next_join_ms) >= 0 && !lan->begin_join(lan_name, lan_join))
+            next_join_ms = SDL_GetTicks() + 1000;
+        } else if (const int r = lan->step_join(0); r > 0) {
+          join_pending = false;
+          nds.io.wifi.set_transport(lan.get());
+          net_live = true;
+          take_away_for_session();
+          menu.set_network_session(true);
+          VLOG("lan: joined %s as player %d\n", lan_join, lan->my_id());
+          net_toast(tr("JOINED A SESSION"), lan_join, TOAST_INFO_FRAMES);
+        } else if (r < 0) {
+          next_join_ms = SDL_GetTicks() + 1000;
+        }
+      }
       if (scanning) {
         lan->scan_step();
         if (SDL_GetTicks() - scan_began_ms >= kScanMs) finish_guest_scan();

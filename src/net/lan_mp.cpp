@@ -4,6 +4,8 @@
 // Port of melonDS's net/LAN.cpp (GPL-3.0-or-later, melonDS team); wire
 // format must stay byte-identical to interoperate with a real melonDS.
 #include "net/lan_mp.h"
+
+#include <algorithm>
 #include <enet/enet.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -56,6 +58,7 @@ LanMp::LanMp() {
   inited_ = true;
 }
 LanMp::~LanMp() {
+  cancel_join();
   end_session();
   if (inited_) enet_deinitialize();
 }
@@ -187,30 +190,55 @@ bool LanMp::start_host(const std::string& player_name, int max_players) {
 }
 
 bool LanMp::start_client(const std::string& player_name, const std::string& hostname) {
-  if (!inited_) return false;
+  if (!begin_join(player_name, hostname)) return false;
+  for (;;) {
+    const int r = step_join(5000);
+    if (r != 0) return r > 0;
+  }
+}
+
+// The join, split so a frontend can keep it running across frames: begin_join
+// sends the connect, step_join services it (blocking up to wait_ms) and says
+// whether it finished. A guest that starts before its host keeps calling
+// step_join(0) every frame and restarting on failure, with no hitch.
+bool LanMp::begin_join(const std::string& player_name, const std::string& hostname) {
+  if (!inited_ || active_ || host_) return false;
   host_ = enet_host_create(nullptr, 16, 2, 0, 0);
   if (!host_) { err_ = "enet_host_create"; return false; }
   ENetAddress addr;
   if (enet_address_set_host(&addr, hostname.c_str()) != 0) { err_ = "unknown host " + hostname; enet_host_destroy(host_); host_ = nullptr; return false; }
   addr.port = kLanPort;
-  ENetPeer* peer = enet_host_connect(host_, &addr, 2, 0);
-  if (!peer) { err_ = "enet_host_connect"; enet_host_destroy(host_); host_ = nullptr; return false; }
+  join_peer_ = enet_host_connect(host_, &addr, 2, 0);
+  if (!join_peer_) { err_ = "enet_host_connect"; enet_host_destroy(host_); host_ = nullptr; return false; }
   {
     std::lock_guard<std::mutex> l(players_mutex_);
     me_ = Player{};
     std::strncpy(me_.name, player_name.c_str(), 31); me_.status = PlayerStatus::Connecting;
   }
+  join_host_ = hostname;
+  join_addr_ = addr.host;
+  join_state_ = 0;
+  join_start_ms_ = ms_now();
+  return true;
+}
+
+int LanMp::step_join(int wait_ms) {
+  if (!host_ || !join_peer_) return -1;
+  constexpr int kConnTimeoutMs = 5000;
   ENetEvent ev;
-  int conn = 0;
-  const u32 start = ms_now();
-  const int conn_timeout = 5000;
+  const u32 call_start = ms_now();
   for (;;) {
-    const u32 cur = ms_now();
-    const int timeout = conn_timeout - static_cast<int>(cur - start);
-    if (timeout < 0) break;
-    if (enet_host_service(host_, &ev, static_cast<u32>(timeout)) <= 0) break;
-    if (conn == 0 && ev.type == ENET_EVENT_TYPE_CONNECT) { conn = 1; continue; }
-    if (conn == 1 && ev.type == ENET_EVENT_TYPE_RECEIVE) {
+    const u32 now = ms_now();
+    const int left = kConnTimeoutMs - static_cast<int>(now - join_start_ms_);
+    if (left < 0) break;
+    const int wait = std::min(wait_ms - static_cast<int>(now - call_start), left);
+    if (wait < 0) return 0;   // this call's budget is spent; the attempt goes on
+    if (enet_host_service(host_, &ev, static_cast<u32>(wait)) <= 0) {
+      if (static_cast<int>(ms_now() - join_start_ms_) < kConnTimeoutMs) return 0;
+      break;
+    }
+    if (join_state_ == 0 && ev.type == ENET_EVENT_TYPE_CONNECT) { join_state_ = 1; continue; }
+    if (join_state_ == 1 && ev.type == ENET_EVENT_TYPE_RECEIVE) {
       const u8* d = ev.packet->data;
       const bool init = ev.channelID == Chan_Cmd && d[0] == Cmd_ClientInit && ev.packet->dataLength == 11 &&
                         get32(d + 1) == kLanMagic && get32(d + 5) == kProtocolVersion && d[10] <= 16;
@@ -222,24 +250,26 @@ bool LanMp::start_client(const std::string& player_name, const std::string& host
       cmd[0] = Cmd_PlayerInfo; put32(cmd + 1, kLanMagic); put32(cmd + 5, kProtocolVersion);
       std::memcpy(cmd + 9, &me_, sizeof(Player));
       enet_peer_send(ev.peer, Chan_Cmd, enet_packet_create(cmd, sizeof cmd, ENET_PACKET_FLAG_RELIABLE));
-      conn = 2;
-      break;
+      host_address_ = join_addr_;
+      last_host_id_ = -1; last_host_peer_ = nullptr;
+      peers_[0] = join_peer_;
+      join_peer_->data = &players_[0];
+      join_peer_ = nullptr;
+      active_ = true; is_host_ = false;
+      LAN_LOG("joined %s as player %d \"%s\"\n", join_host_.c_str(), me_.id, me_.name);
+      return 1;
     }
-    if (ev.type == ENET_EVENT_TYPE_DISCONNECT) { conn = 0; break; }
+    if (ev.type == ENET_EVENT_TYPE_DISCONNECT) { join_state_ = 0; break; }
     if (ev.type == ENET_EVENT_TYPE_RECEIVE) enet_packet_destroy(ev.packet);
   }
-  if (conn != 2) {
-    err_ = conn == 0 ? "no answer from " + hostname : "host refused";
-    enet_peer_reset(peer); enet_host_destroy(host_); host_ = nullptr;
-    return false;
-  }
-  host_address_ = addr.host;
-  last_host_id_ = -1; last_host_peer_ = nullptr;
-  peers_[0] = peer;
-  peer->data = &players_[0];
-  active_ = true; is_host_ = false;
-  LAN_LOG("joined %s as player %d \"%s\"\n", hostname.c_str(), me_.id, me_.name);
-  return true;
+  err_ = join_state_ == 0 ? "no answer from " + join_host_ : "host refused";
+  cancel_join();
+  return -1;
+}
+
+void LanMp::cancel_join() {
+  if (join_peer_) { enet_peer_reset(join_peer_); join_peer_ = nullptr; }
+  if (host_ && !active_) { enet_host_destroy(host_); host_ = nullptr; }
 }
 
 void LanMp::end_session() {

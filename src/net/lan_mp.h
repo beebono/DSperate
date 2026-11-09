@@ -63,6 +63,13 @@ public:
                   bool host_fallback = true);
   std::string peer_name() const { return peer_name_; }   // the session joined by start_auto
   bool start_client(const std::string& player_name, const std::string& host);
+  // start_client without the wait: begin_join sends the connect, step_join
+  // services it for up to wait_ms and returns 1 joined, 0 still trying, -1
+  // failed (the attempt is torn down; begin_join again to retry).
+  bool begin_join(const std::string& player_name, const std::string& host);
+  int  step_join(int wait_ms);
+  bool joining() const { return join_peer_ != nullptr; }
+  void cancel_join();
   void end_session();
   std::map<u32, Session> sessions();      // keyed by host IPv4 (host order)
   std::vector<Player> players();
@@ -125,6 +132,10 @@ private:
   std::queue<_ENetPacket*> rx_;
   u32 frame_count_ = 0;
   std::string peer_name_;
+  _ENetPeer* join_peer_ = nullptr;   // a begin_join in flight
+  std::string join_host_;
+  u32 join_addr_ = 0, join_start_ms_ = 0;
+  int join_state_ = 0;               // 0 connecting, 1 connected, awaiting ClientInit
   unsigned wait_count_ = 0, wait_timeouts_ = 0;
   double wait_total_ms_ = 0, wait_max_ms_ = 0;
 };
