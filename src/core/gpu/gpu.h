@@ -194,6 +194,10 @@ public:
   void scale_image(int screen, const u32* src);
   bool scaling() const { return scale_[0].px && scale_[1].px; }
   u16 line() const { return line_; }
+  // A VCOUNT write (GBATEK: only during lines 202..212): the next scanline is
+  // `v` instead of line_ + 1. Wireless games use it to line their frames up
+  // with the host's. Never pending at line 0, where states are taken.
+  void request_vcount(u16 v) { next_vcount_ = v; }
 
   Engine2D engine[2];
 
@@ -208,6 +212,7 @@ public:
 private:
   NDS& nds_;
   u16 line_ = 0;
+  u16 next_vcount_ = 0xFFFF;   // a VCOUNT write waiting for the next scanline
   bool hblank_done_ = false;  // this line's HBlank event has run (its render, if any, is behind us)
   bool frame_begun_ = false;
   bool screens_on_ = false;   // POWCNT1 bit 0, latched at frame start
