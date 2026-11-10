@@ -175,7 +175,13 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
   // the frame and lifting the trap. B's windows only when B is deferred too.
   const u32 stale = snapshot_stale_ ? 3u : 0u;
   if (a_deferred_) {
-    if ((reach_engines(addr) | stale) & (b_deferred_ ? 3u : 1u)) { prof::add(prof::C_2D_A_JOIN_STORES, 1); join_worker(JoinSite::Trap); }
+    if ((reach_engines(addr) | stale) & (b_deferred_ ? 3u : 1u)) {
+      const bool busy = !worker_.done() || (b_deferred_ && !worker_b_.done());
+      if (busy) snap_hit_ = true;
+      // On a snapshot the batch cannot see the store: the trap has nothing left to guard.
+      if (snap_live_ && busy) { disarm_trap(); return; }
+      prof::add(prof::C_2D_A_JOIN_STORES, 1); join_worker(JoinSite::Trap);
+    }
     return;
   }
   // Charged to the engine its address reaches (both for anything unattributed).
@@ -337,8 +343,27 @@ void Gpu::release_read_trap() {
   read_trap_bank_ = -1; read_trap_generic_ = false; read_trap_reapply_ = false;
 }
 
+void Gpu::take_snapshot(u32 engines) {
+  const VramMap& live = nds_.bus.vram_map();
+  if (!snap_mem_) {
+    u32 total = 0; for (u32 sz : mem::Bus::VRAM_BANK_SIZES) total += sz;
+    snap_mem_.reset(new u8[total]);
+  }
+  auto banks_of = [](const VramView& v) { u32 m = 0; const u32 n = v.blocks() ? v.blocks() : 1; for (u32 b = 0; b < n; ++b) m |= v.mask[b]; return m; };
+  u32 m = 0;
+  if (engines & 1) m |= banks_of(live.abg) | banks_of(live.aobj) | banks_of(live.abg_extpal) | banks_of(live.aobj_extpal);
+  if (engines & 2) m |= banks_of(live.bbg) | banks_of(live.bobj) | banks_of(live.bbg_extpal) | banks_of(live.bobj_extpal);
+  u8* p = snap_mem_.get();
+  for (int i = 0; i < 9; ++i) {
+    const u32 sz = mem::Bus::VRAM_BANK_SIZES[i];
+    if (m & (1u << i)) { std::memcpy(p, live.bank(i), sz); snap_bank_[i] = p; } else snap_bank_[i] = live.bank(i);
+    p += sz;
+  }
+}
+
 void Gpu::snapshot_map(int k) {
   const VramMap& live = nds_.bus.vram_map();
+  if (snap_live_) { job_map_[k] = live; job_map_[k].rebase(snap_bank_); job_map_gen_[k] = ~0u; return; }
   if (job_map_gen_[k] == live.generation()) return;
   job_map_[k] = live;
   job_map_gen_[k] = live.generation();
@@ -596,6 +621,8 @@ void Gpu::begin_frame() {
   lazy_tried_ = lazy_frame_ || (lazy_enabled_ && !g_no_lazy && !run_fifo_);
   lag_frame_ = !run_fifo_ && !g_no_lag;
   lag_trap_hits_ = 0; lag_trap_stores_ = 0;
+  if (snap_hit_) snap_want_ = SNAP_HOLD; else if (snap_want_) --snap_want_;
+  snap_hit_ = false;
   arm_trap();
   if (lazy_frame_) prof::add(prof::C_2D_LAZY_FRAMES, 1);
   if (lag_frame_ && !lazy_frame_) prof::add(prof::C_2D_LAG_FRAMES, 1);
@@ -664,7 +691,7 @@ void Gpu::join_worker(JoinSite site) {
     engine[e].set_vram_override(nullptr);
     if (remap_pending_[e]) { engine[e].vram_remapped(); remap_pending_[e] = false; }
   }
-  snapshot_stale_ = false;
+  snapshot_stale_ = false; snap_live_ = false;
   if (b_deferred_) {   // as finish_a: writes the guest made meanwhile were journaled past the frame
     b_deferred_ = false;
     if (line_ == 0 || (line_ == 262 && hblank_done_)) skipped_[1] = false;
@@ -734,9 +761,12 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
     // VBlank, when games stream VRAM. A per-line engine A outside a lag frame
     // (lag dropped mid-frame) has none, so its last line is drawn and joined now.
     prof::add(prof::C_RR_DEFER_A, 1);
+    const bool b_split = split_ && b_has && bl == SCREEN_H - 1 && b_len >= 24 && trap_armed_ && (trap_mask_ & 2);
+    static const bool snap_on = !(std::getenv("DS_2D_SNAP") && std::getenv("DS_2D_SNAP")[0] == '0');
+    if (snap_on && snap_want_ && !capture_render_ && !trap_lcdc_) { take_snapshot(b_split ? 3u : 1u); snap_live_ = true; }
     hand(true, false);
     a_handed = true; a_deferred_ = true;
-    if (split_ && b_has && bl == SCREEN_H - 1 && b_len >= 24 && trap_armed_ && (trap_mask_ & 2)) {
+    if (b_split) {
       // Engine B's batch to its own worker, deferred to the same join: only a
       // batch run to the last line (everything journaled meanwhile is past the
       // frame) with the trap over the whole VRAM window (a lag frame's guards

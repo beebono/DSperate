@@ -49,6 +49,8 @@ public:
   void write32(const VramView& v, u32 addr, u32 val) const;
 
   u8* bank(int i) const { return banks_[i]; }
+  // Point the views at other storage for the banks (a copy of this map reading a copy of the banks).
+  void rebase(u8* const banks[9]);
   static constexpr u32 BANK_MASK[9] = {0x1FFFF, 0x1FFFF, 0x1FFFF, 0x1FFFF, 0xFFFF, 0x3FFF, 0x3FFF, 0x7FFF, 0x3FFF};
 
   // Change tracking for CPU-unmapped views: `generation` counts rebuilds; `bank_writable_gen(b)`

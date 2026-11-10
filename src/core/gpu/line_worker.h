@@ -49,6 +49,7 @@ public:
 
   bool running() const { return thread_.joinable(); }
   bool parked() const { return parked_.load(std::memory_order_relaxed); }
+  bool done() const { return ack_.load(std::memory_order_acquire) == req_.load(std::memory_order_relaxed); }   // nothing dispatched is still running
   // For a stalled-frame watchdog (DS_WATCHDOG).
   void debug_dump(FILE* f) const {
     std::fprintf(f, "  line worker: running %d req %u ack %u parked %d\n", running() ? 1 : 0,

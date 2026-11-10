@@ -29,6 +29,11 @@ void VramMap::finish(VramView& v) {
   }
 }
 
+void VramMap::rebase(u8* const banks[9]) {
+  for (int i = 0; i < 9; ++i) banks_[i] = banks[i];
+  for (VramView* v : {&abg, &aobj, &bbg, &bobj, &abg_extpal, &bbg_extpal, &aobj_extpal, &bobj_extpal, &texture, &texpal, &arm7}) finish(*v);
+}
+
 void VramMap::rebuild(const u8 vramcnt[9], u8* const banks[9]) {
   for (int i = 0; i < 9; ++i) banks_[i] = banks[i];
   auto clear = [](VramView& v, u32 size) { v.size = size; v.mask.fill(0); v.ptr.fill(nullptr); };

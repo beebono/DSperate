@@ -311,6 +311,19 @@ private:
   // (reach_engines answers for the live map's windows). Cleared at the join.
   bool snapshot_stale_ = false;
   void snapshot_map(int k);
+  // Bank snapshot for a deferred batch (DS_2D_SNAP=0 turns it off). Games that
+  // stream VRAM in VBlank store into what the batch is still reading, and the
+  // store used to wait for the whole batch. While that keeps happening the
+  // batch is handed a copy of the banks its engines read, so the store only
+  // lifts the trap and lands. Not for a frame that captures or displays an
+  // LCDC bank (those write or read the live bank from the job).
+  static constexpr u32 SNAP_HOLD = 8;        // frames a snapshot is kept up after a store last met a busy batch
+  u32  snap_want_ = 0;
+  bool snap_hit_ = false;                    // this frame: a store reached a deferred batch still drawing
+  bool snap_live_ = false;                   // the deferred jobs in flight read the snapshot
+  std::unique_ptr<u8[]> snap_mem_;
+  u8*  snap_bank_[9] = {};
+  void take_snapshot(u32 engines);
   // Engines an address can change: bit 0 A, bit 1 B; LCDC only A (and only when trapped); else both.
   u32 reach_engines(u32 addr) const {
     if ((addr >> 24) != 0x06) return 3;
