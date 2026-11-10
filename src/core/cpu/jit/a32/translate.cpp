@@ -1340,8 +1340,12 @@ void Translator::translate_arm(u32 instr, bool fb) {
   if (op == AOp::Bx || op == AOp::BlxReg) {
     const u32 rm = instr & 0xF;
     auto taken = [&] {
-      const u32 t = reg_read(rm, pc_ + 8);
-      if (op == AOp::BlxReg) e().mov_imm(cache_.write(14, false), pc_ + 4);
+      u32 t = reg_read(rm, pc_ + 8);
+      if (op == AOp::BlxReg) {
+        // blx lr: the target is lr's old value, and lr's slot is about to take the return address.
+        if (rm == 14) { const u32 old = t; t = cache_.temp(); e().mov(t, old); }
+        e().mov_imm(cache_.write(14, false), pc_ + 4);
+      }
       emit_branch_indirect(t, true);
     };
     if (cond != 0xE) emit_branch_cond(cond, taken); else taken();
@@ -1563,8 +1567,11 @@ void Translator::translate_thumb(u16 instr, bool fb) {
   }
   case TOp::BxBlx: {
     const u32 rs = (instr >> 3) & 0xF;
-    const u32 t = reg_read(rs, pc_ + 4);
-    if (instr & (1 << 7)) e().mov_imm(cache_.write(14, false), (pc_ + 2) | 1);
+    u32 t = reg_read(rs, pc_ + 4);
+    if (instr & (1 << 7)) {
+      if (rs == 14) { const u32 old = t; t = cache_.temp(); e().mov(t, old); }   // blx lr, as in the ARM form
+      e().mov_imm(cache_.write(14, false), (pc_ + 2) | 1);
+    }
     emit_branch_indirect(t, true);
     return;
   }

@@ -441,6 +441,9 @@ void directed() {
     {Cpu::ARM9, false, {0xE12FFF11, 0x480146C0, 0x46C04700, HALT_STUB}, {0, CODE_BASE + 6 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM7, false, {0xE12FFF11, 0x480146C0, 0x46C04700, HALT_STUB}, {0, CODE_BASE + 6 + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM9, false, {0xE12FFF31, 0xE2800001}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // blx lr (ARM, then Thumb `blx lr; nop`): the target is lr's value before the link.
+    {Cpu::ARM9, false, {0xE12FFF3E, 0xE2800001}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, HALT_STUB}},
+    {Cpu::ARM9, true, {0x47F0, 0x46C0}, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, HALT_STUB}},
     // Conditional bx, taken and not taken.
     {Cpu::ARM9, false, {0xE1500000, 0x012FFF11, 0xE2800001}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM9, false, {0xE1500000, 0x112FFF11, 0xE2800001}, {0, HALT_STUB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
