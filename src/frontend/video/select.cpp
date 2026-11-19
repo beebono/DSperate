@@ -96,7 +96,11 @@ WindowPlan plan_window(const WindowProbe& p) {
       // there *succeeds* by quietly building a GLES renderer, the cost Kms avoids.
       if (kms && !dm_forbidden) w.order.push_back(Sink::Kms);
       if (wayland && !dm_forbidden) w.order.push_back(Sink::Dmabuf);
-      w.order.push_back(Sink::Surface);
+      // Wayland's shm surface is the slowest route measured (the compositor
+      // uploads it while emulation wants every core): the renderer is the
+      // fallback there, unless the picture is rotated, which only the
+      // scanline sinks apply. video.sink = surface still asks for it.
+      if (!wayland || p.rotated || !p.scanline_env.empty()) w.order.push_back(Sink::Surface);
     }
   }
   w.order.push_back(Sink::Renderer);

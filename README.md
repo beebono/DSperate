@@ -186,12 +186,8 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   flips under KMSDRM, and SDL's renderer only where nothing else applies.
 - **Scaling off the CPU** (`video.gpu_present`, on by default where it works):
   the DS-resolution frames are scaled and laid out into the scanout buffer by
-  a Vulkan render pass, or by the Rockchip RGA (the RK3566's 2D accelerator,
-  through V4L2) where Vulkan does not work. Both draw the LCD grid and a
-  fading PiP inset. On the RGA, with bilinear off, whole-number scales are
-  exact nearest neighbour and fractional ones stay bilinear
-  (`video.integer_scale` makes any panel whole), and the menu greys out what
-  it cannot draw (seams, chunky cells). Where neither works, the scanline
+  a Vulkan render pass, which also draws the LCD grid and a fading PiP inset.
+  Where that does not work, the scanline
   scaler does the job on the CPU.
 - **Dual-window mode** for dual-panel handhelds: one fullscreen window per
   display, one DS screen each.

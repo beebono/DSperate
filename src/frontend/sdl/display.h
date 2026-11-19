@@ -109,7 +109,7 @@ public:
   void set_page(bool on);
   // On the display-engine tier, chunky is applied by the scanline scaler at
   // 1:1 then rotated; grid/seams/bilinear need panel pixels and are off there.
-  // The GPU presenters (Vulkan, RGA) take chunky the same way: the core draws
+  // The GPU presenter takes chunky the same way: the core draws
   // the cells at 1:1 into src_side_ (source_targets), presented in place of
   // the core's frame (source_frame); their grid, seams and bilinear are their own.
   bool effects_at_source() const { return (disp_ != nullptr && scaled_) || src_gpu_; }
@@ -132,12 +132,11 @@ public:
   // GPU present stage (gpu_present.h): on a dma-buf scanout tier, a compute
   // dispatch lays 256x192 frames into the tier's buffer via Vulkan, replacing
   // the scanline scaler where the import works. Set before open().
-  // video.gpu_present: Auto tries the RGA (the Rockchip 2D accelerator, which
-  // leaves the GPU to the 3D layer) and then Vulkan; Rga and Vulkan are that one only.
-  enum class GpuPresentMode : u8 { Auto, Rga, Vulkan };
-  void set_gpu_present(bool on, GpuPresentMode mode = GpuPresentMode::Auto) { gpu_wanted_ = on; gpu_mode_ = mode; }
+  void set_gpu_present(bool on) { gpu_wanted_ = on; }
   bool gpu_present() const { return gpu_ != nullptr; }
-  bool rga_present() const { return gpu_ && gpu_->kind() == FramePresenter::Kind::Rga; }   // no seams or chunky
+  // A present the present thread can take: a GPU presenter, or the renderer
+  // with its GL context handed to that thread (open_renderer).
+  bool async_present() const { return gpu_ != nullptr || ren_threaded_; }
   bool vk_present() const { return gpu_ && gpu_->kind() == FramePresenter::Kind::Vulkan; }
   // Colour correction for the Vulkan present to apply as it uploads the
   // frames (Gpu::colour_lut), or null; ignored by every other route, where
@@ -238,6 +237,9 @@ private:
 
   SDL_Window*   win_ = nullptr;
   SDL_Renderer* ren_ = nullptr;
+  bool ren_threaded_ = false;           // every renderer call runs on the present thread
+  bool ren_fallback_ = false;           // the renderer stands in for a scanout sink that would not open
+  void draw_renderer(const u32* const fb[SCREENS]);
   SDL_Texture*  tex_[SCREENS] = {nullptr, nullptr};
   View          views_[SCREENS] = {};
   int           nviews_ = SCREENS;
@@ -272,7 +274,6 @@ private:
   bool              page_ = false;
   std::unique_ptr<ScanoutOut> out_;     // tier 1; null on the surface tier
   bool              gpu_wanted_ = false;
-  GpuPresentMode    gpu_mode_ = GpuPresentMode::Auto;
   std::unique_ptr<FramePresenter> gpu_; // a GPU presenter (on top of out_ for the import one); null: software
   bool try_gpu_present();               // after out_ opened: import its buffers, switch draw() over
   // One frame for gpu_, taken on this thread (the window's size, the views,

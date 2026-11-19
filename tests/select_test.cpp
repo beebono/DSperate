@@ -32,7 +32,9 @@ static void devices() {
     BootProbe p; p.dual_window = true; p.display_env = true; p.has_dri = true; p.fb0_ok = true;
     const BootPlan b = plan_boot(p);
     CHECK(b.panel == Sink::Count && !b.headless_driver && b.notes.empty());
-    CHECK(eq(plan_window({b.want, "wayland", "", ""}), "dmabuf,surface,renderer"));
+    CHECK(eq(plan_window({b.want, "wayland", "", ""}), "dmabuf,renderer"));
+    // Rotated, the shm surface stays ahead of the renderer, which cannot rotate.
+    CHECK(eq(plan_window({b.want, "wayland", "", "", true}), "dmabuf,surface,renderer"));
   }
   // Same device single-window: a Wayland desktop with an fb0 never takes fbdev.
   {
@@ -115,7 +117,8 @@ static void overrides() {
     CHECK(b.panel == Sink::Disp && b.notes.size() == 1);
   }
   // DS_DMABUF / DS_SCANLINE_SCALE.
-  CHECK(eq(plan_window({Sink::Count, "wayland", "0", ""}), "surface,renderer"));
+  CHECK(eq(plan_window({Sink::Count, "wayland", "0", ""}), "renderer"));
+  CHECK(eq(plan_window({Sink::Count, "wayland", "", "1"}), "dmabuf,surface,renderer"));
   CHECK(eq(plan_window({Sink::Count, "KMSDRM", "0", ""}), "surface,renderer"));
   CHECK(plan_window({Sink::Count, "wayland", "1", ""}).required);
   CHECK(!plan_window({Sink::Count, "x11", "1", ""}).required);

@@ -54,20 +54,18 @@ public:
     u8 inset_alpha = 255;
     frontend::Rect drawn;        // where the frontend drew on overlay() this frame
     u32 grid = 256;              // LCD grid brightness on a seam, 0..256 (256 = off)
-    bool linear = false;         // video.linear; off: the RGA draws whole-number scales exactly
-    u8 seam_blend = 0;           // video.seam: 1 blend, 2 blend in linear light (Vulkan only; the RGA draws dark seams)
-    EdgePlanes edges;            // the edge cut (Vulkan only; the RGA cannot cut)
-    // Colour correction to apply to the frames as they are uploaded (Vulkan
-    // only, kern::colour_correct on the present thread); null: the frames
+    bool linear = false;         // video.linear
+    u8 seam_blend = 0;           // video.seam: 1 blend, 2 blend in linear light
+    EdgePlanes edges;            // the edge cut
+    // Colour correction to apply to the frames as they are uploaded
+    // (kern::colour_correct on the present thread); null: the frames
     // are shown as they are, corrected by the core or not at all.
     std::shared_ptr<const gpu::kern::ColourLut> colour;
   };
 
   const std::string& name() const { return name_; }   // for the log: what presents, on which device
-  // Which hardware presents: the menu greys out what a presenter cannot do
-  // (the RGA is exact at whole-number scales and bilinear between them, and
-  // draws the dark grid but no seams or chunky cells).
-  enum class Kind : u8 { Vulkan, Rga };
+  // Which API presents: the menu greys out what a presenter cannot do.
+  enum class Kind : u8 { Vulkan };
   virtual Kind kind() const = 0;
 
   // The output is `w`x`h` presented pixels now. Same: nothing to do.
@@ -94,8 +92,5 @@ protected:
 // sink's own buffers (Wayland dma-buf or KMS), which the sink presents.
 // `sink` stays owned by the caller and must outlive the presenter.
 std::unique_ptr<FramePresenter> open_vk_import_presenter(ScanoutOut& sink, std::string* why);
-// The RGA presenter (present_rga.cpp): the Rockchip 2D accelerator scales the
-// frames into the sink's dma-buf through V4L2 mem2mem; no GPU involved.
-std::unique_ptr<FramePresenter> open_rga_presenter(ScanoutOut& sink, std::string* why);
 
 } // namespace ds::sdl

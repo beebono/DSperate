@@ -180,8 +180,7 @@ const char* kUsage =
     "                  surface (SDL's window surface) | renderer (SDL_Renderer). One that won't open\n"
     "                  falls back to the renderer. video.sink. --disp / --fbdev are --sink disp / fbdev\n"
     "  --gpu-present / --no-gpu-present  scale and lay out the picture off the CPU, into the\n"
-    "                  scanout buffer: a Vulkan render pass, else the Rockchip RGA where the\n"
-    "                  device has one (video.gpu_present = true | rga | vulkan | false; on by default)\n"
+    "                  scanout buffer, in a Vulkan render pass (video.gpu_present; on by default)\n"
     "  --preload-rom / --no-preload-rom  read the whole ROM into memory at load, or page it in as\n"
     "                  the game reads it (cart.preload = auto | true | false; auto preloads a ROM on a\n"
     "                  network share that fits in memory, where a page read mid-frame is a round trip)\n"
@@ -334,7 +333,7 @@ void apply_colour(NDS& nds, const std::string& v) {
 // video.aa and on the CPU raster too.
 bool edge_cut_wanted(NDS& nds, const ds::sdl::Display& d1, const ds::sdl::Display& d2, bool dual, bool gpu_on) {
   static const int cut_env = [] { const char* e = std::getenv("DS_EDGE_CUT"); return e && *e ? *e - '0' : -1; }();
-  auto vk_present = [](const ds::sdl::Display& d) { return d.gpu_present() && !d.rga_present(); };
+  auto vk_present = [](const ds::sdl::Display& d) { return d.vk_present(); };
   return cut_env != 0 && vk_present(d1) && (!dual || vk_present(d2)) &&
          nds.gpu3d.renderer().aa() && ((gpu_on && nds.gpu3d.renderer().aa_enhanced()) || cut_env == 1);
 }
@@ -971,7 +970,6 @@ struct VideoSetup {
   ds::sdl::Display::Layout layout;
   std::vector<ds::sdl::Display::Mode> layout_cycle;
   bool   gpu_present = false;
-  ds::sdl::Display::GpuPresentMode gpu_mode = ds::sdl::Display::GpuPresentMode::Auto;   // video.gpu_present: true (auto: Vulkan, else RGA) | rga | vulkan
   // Boot-only, see above.
   ds::frontend::Sink panel_sink = ds::frontend::Sink::Count;   // Disp/Fbdev when one owns the panel (frontend/video/select.h)
   ds::frontend::Sink want_sink = ds::frontend::Sink::Count;    // explicit video.sink among the window sinks
@@ -1014,7 +1012,7 @@ bool parse_video(const ds::sdl::Config& cfg, VideoSetup& vs) {
   // Read here, not at boot only, so reopening for a menu change keeps it.
   {
     const std::string g = cfg.str("video.gpu_present", "true");
-    vs.gpu_mode = g == "rga" ? Disp::GpuPresentMode::Rga : g == "vulkan" ? Disp::GpuPresentMode::Vulkan : Disp::GpuPresentMode::Auto;
+    // "vulkan" and "rga" are values older configs carry (the RGA present is gone): on.
     vs.gpu_present = g == "rga" || g == "vulkan" || g == "true" || g == "auto" || g == "on" || g == "1";
   }
   vs.vsync = cfg.flag("video.vsync", true);
@@ -1083,7 +1081,7 @@ bool sync_dual_modes(ds::sdl::Display& a, ds::sdl::Display& b) {
 // Split from parse_video so a settings change can close the windows and
 // come back through here with new values.
 bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Display& display2) {
-  display.set_gpu_present(vs.gpu_present, vs.gpu_mode); display2.set_gpu_present(vs.gpu_present, vs.gpu_mode);
+  display.set_gpu_present(vs.gpu_present); display2.set_gpu_present(vs.gpu_present);
   if (vs.dual_window) {
     display.set_sinks(ds::frontend::Sink::Count, vs.want_sink); display2.set_sinks(ds::frontend::Sink::Count, vs.want_sink);
     display.set_chunky(vs.chunky != 0, vs.chunky_cell); display2.set_chunky(vs.chunky != 0, vs.chunky_cell);
@@ -2863,10 +2861,8 @@ sdl_ready:
         if (net_live && *net_live) return tr("NOT DURING A NETWORK SESSION");
         return cfg.num("emu.frameskip", 0) > 0 ? "" : tr("ONLY WITH FRAMESKIP ON");
       case ds::sdl::Dep::PanelEffects:
-        if (display.rga_present()) return "";   // off: exact at whole-number scales, bilinear between
         return panel_effects() ? "" : tr("THIS SCREEN SCALES IN HARDWARE");
       case ds::sdl::Dep::GridSeam:
-        if (display.rga_present()) return std::strcmp(s.key, "video.seam") == 0 ? tr("THE RGA DRAWS THE DARK GRID ONLY") : "";
         if (!panel_effects()) return tr("THIS SCREEN SCALES IN HARDWARE");
         return flag("video.linear", false) ? tr("BILINEAR IS ON") : "";
       case ds::sdl::Dep::Chunky:
@@ -4265,8 +4261,7 @@ sdl_ready:
         if (dual_window) display2.present();
       } else {
         // The edge cut (core/gpu/edge_cut.h): video.aa = enhanced on the GPU
-        // raster cuts 3D edges at panel density in the Vulkan present (the RGA
-        // cannot) instead of drawing with 4x MSAA, which plain video.aa keeps:
+        // raster cuts 3D edges at panel density in the Vulkan present instead of drawing with 4x MSAA, which plain video.aa keeps:
         // the cut's GPU frame is cheaper, but its edge plane costs the
         // emulation thread (edge_line, the compositor's and capture's edge
         // words) ~5 ms a frame in Golden Sun: Dark Dawn. The CPU raster shows
@@ -4319,7 +4314,7 @@ sdl_ready:
         // (present_thread.h); DS_PRESENT_SYNC=1 keeps it here.
         static const bool present_sync = std::getenv("DS_PRESENT_SYNC") != nullptr;
 
-        if (!present_sync && display.gpu_present() && (!dual_window || display2.gpu_present())) {
+        if (!present_sync && display.async_present() && (!dual_window || display2.async_present())) {
           ds::sdl::Display* const ds_[2] = {&display, &display2};
           ds::sdl::Display::draw_async(ds_, dual_window ? 2 : 1, fb, &edges);
         } else {

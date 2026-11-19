@@ -358,7 +358,7 @@ int main(int argc, char** argv) {
     if (c.r.x + c.r.w > static_cast<int>(W) || c.r.y + c.r.h > static_cast<int>(H)) { std::printf("%s: does not fit %ux%u, skipped\n", c.name, W, H); continue; }
     std::printf("%s (%dx%d) on %ux%u, both views\n", c.name, c.r.w, c.r.h, W, H);
 
-    // B: nearest blit. The letterbox is cleared once (or every frame), as the RGA path clears it once per buffer.
+    // B: nearest blit. The letterbox is cleared once (or every frame).
     for (int v = 0; v < 2; ++v) {
       double ga, gb, wl;
       run([&] {

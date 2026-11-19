@@ -274,8 +274,8 @@ int alloc_from(const Source& s, size_t len) {
 // 1 GiB, a 32 MiB CMA pool) the five 1024x768 buffers of the second window
 // do not fit in CMA beside the first window's, the fallover to the system
 // heap mid-start cost a 1.3 s present stall, and the system heap's buffers
-// measured the same on the GPU present, the RGA and the CPU (tests/
-// dmabuf_probe.cpp, vk_present_probe, rga_probe). ROCKNIX is also moving
+// measured the same on the GPU present and the CPU (tests/
+// dmabuf_probe.cpp, vk_present_probe). ROCKNIX is also moving
 // its 1 GiB devices off CMA. Without an IOMMU, contiguous memory stays first.
 bool display_scans_system_pages(size_t len) {
   static int cached = -1;

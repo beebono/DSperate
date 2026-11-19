@@ -170,21 +170,13 @@ if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE)   # the headers may be missing o
   target_include_directories(vk_probe PRIVATE ${DSPERATE_VULKAN_INCLUDE})
 endif()
 
-# RGA probe (gpu-raster branch): times the Rockchip 2D scaler (V4L2 mem2mem) on a dma-buf frame. Device-only, not a test.
 include(CheckIncludeFileCXX)
 check_include_file_cxx(linux/dma-buf.h DSPERATE_HAVE_DMABUF_H)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  add_executable(rga_probe rga_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
-  target_include_directories(rga_probe PRIVATE ${PROJECT_SOURCE_DIR}/src)
   # Per-source costs of the scanout dma-bufs (every /dev/dma_heap/*, udmabuf, DRM dumb): allocation, CPU
   # writes, cache sync, KMS import. Device-only, not a test.
   add_executable(dmabuf_probe dmabuf_probe.cpp ${PROJECT_SOURCE_DIR}/src/frontend/sdl/dmaheap.cpp)
   target_include_directories(dmabuf_probe PRIVATE ${PROJECT_SOURCE_DIR}/src)
-  # Integer nearest scaling from 1:1 RGA jobs (stride and rotation tricks); --sim checks the geometry anywhere.
-  # Wants the dma-buf UAPI header, which the A30's sysroot (glibc 2.23) lacks: skipped there (the present probes too).
-  if(DSPERATE_HAVE_DMABUF_H)
-    add_executable(rga_nearest_probe rga_nearest_probe.cpp)
-  endif()
 endif()
 
 # GPU present probe: the fragment present against a nearest blit into imported dma-bufs. Device-only, not a test.

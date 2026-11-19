@@ -6,12 +6,12 @@
 // /dev/dma_heap/*, udmabuf, drm (dumb buffers of the KMS driver); each is a
 // DS_DMA_HEAP value and runs in its own child, since the allocator pins the
 // first source that works. Per source, for a W x H x 4 panel buffer (default
-// 1024x768, the RG DS Plus) and a 192 KB 1x frame (the RGA present's
+// 1024x768, the RG DS Plus) and a 192 KB 1x frame (the GPU present's
 // source):
 //   alloc      the allocation itself, mmap, and the first write (page
 //              faults, zeroing done by the kernel is already in alloc)
 //   write      a warm memcpy of the frame into the mapping (the scanline
-//              scaler's and RGA present's CPU writes)
+//              scaler's and GPU present's CPU writes)
 //   sync       the DMA_BUF_IOCTL_SYNC pair around it (the cache flush)
 //   read       the CPU reading the buffer back (PiP blend, overlay)
 //   kms        PRIME import + ADDFB2 on /dev/dri/card0: can the display

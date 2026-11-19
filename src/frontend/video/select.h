@@ -16,7 +16,7 @@ namespace ds::frontend {
 //   Fbdev     straight into /dev/fb0 (mali-fbdev SDL2; H700 handhelds)
 //   Kms       KMS page flips of dma-heap buffers (SDL's KMSDRM driver)
 //   Dmabuf    zero-copy dma-buf wl_buffers (Wayland)
-//   Surface   SDL's window surface (shm under a compositor)
+//   Surface   SDL's window surface (shm under a compositor; on Wayland only when asked for or rotated)
 //   Renderer  SDL_Renderer textures, the fallback that always opens
 //
 // Disp and Fbdev own the panel, so they are decided before SDL_Init (SDL is
@@ -54,6 +54,7 @@ struct WindowProbe {
   std::string video_driver;         // SDL_GetCurrentVideoDriver()
   std::string dmabuf_env;           // $DS_DMABUF: "0" forbids Kms/Dmabuf, "1" makes their failure fatal
   std::string scanline_env;         // $DS_SCANLINE_SCALE: "0" forces Renderer, anything else the scanline sinks
+  bool rotated = false;             // a rotation is asked for (the renderer applies none)
 };
 struct WindowPlan {
   std::vector<Sink> order;          // tried first to last; Renderer always ends it

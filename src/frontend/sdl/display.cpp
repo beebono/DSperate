@@ -160,9 +160,13 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
 
   const char* vd = SDL_GetCurrentVideoDriver();
   auto env = [](const char* k) { const char* e = std::getenv(k); return std::string(e ? e : ""); };
-  const frontend::WindowPlan plan = frontend::plan_window({want_, vd ? vd : "", env("DS_DMABUF"), env("DS_SCANLINE_SCALE")});
+  const frontend::WindowPlan plan = frontend::plan_window({want_, vd ? vd : "", env("DS_DMABUF"), env("DS_SCANLINE_SCALE"), rot != 0});
+  ren_fallback_ = false;
   for (const Sink s : plan.order) {
     bool ok = false;
+    // The renderer as the fallback: nothing asked for it, and this driver
+    // has scanout sinks that would not open (or DS_DMABUF=0 forbade them).
+    if (s == Sink::Renderer) ren_fallback_ = want_ == Sink::Count && vd && (!std::strcmp(vd, "wayland") || !std::strcmp(vd, "KMSDRM"));
     switch (s) {
       case Sink::Kms:      ok = open_kms(rot); break;
       case Sink::Dmabuf:   ok = open_dmabuf(rot); break;
@@ -317,6 +321,22 @@ bool Display::open_renderer(bool linear, bool vsync, int rot) {
     const unsigned char* ver  = gl_get_string(0x1F02);      // GL_VERSION
     if (rend) std::fprintf(stderr, "gl: %s | %s\n", rend, ver ? reinterpret_cast<const char*>(ver) : "?");
   }
+  // The renderer's GL context moves to the present thread, so the swap's
+  // block is off the emulation thread: on the RG DS Plus under Wayland that
+  // took work time below the dma-buf sink's (GS:DD 16.0 -> 14.1 ms median).
+  // SDL's GL renderers make their context current on whichever thread calls
+  // them; this thread lets go here. On where the renderer is the fallback
+  // for a sink that would not open; where it is the plan's first choice (an
+  // X11 desktop) or was asked for, only with DS_REN_THREAD=1, since a window
+  // resize there reaches SDL's renderer from this thread. On the mali-fbdev
+  // driver it gains nothing (the swap runs to the refresh on any thread).
+  // DS_REN_THREAD=0 keeps every call here.
+  const char* rt = std::getenv("DS_REN_THREAD");
+  ren_threaded_ = (rt ? *rt != '0' : ren_fallback_) && SDL_GL_GetCurrentContext() != nullptr;
+  if (ren_threaded_) {
+    SDL_GL_MakeCurrent(win_, nullptr);
+    std::fprintf(stderr, "video: renderer presents on the present thread\n");
+  }
   return true;
 }
 
@@ -328,6 +348,12 @@ void Display::close() {
   frame_px_ = nullptr;
   surf_ = nullptr;   // owned by SDL, freed with the window
   for (auto*& t : tex_) { if (t) SDL_DestroyTexture(t); t = nullptr; }
+  if (ren_ && ren_threaded_) {
+    PresentThread& pt = PresentThread::get();
+    SDL_Window* w = win_;
+    pt.wait(pt.post([w] { SDL_GL_MakeCurrent(w, nullptr); }));
+    ren_threaded_ = false;
+  }
   if (ren_) { SDL_DestroyRenderer(ren_); ren_ = nullptr; }
   if (win_) { SDL_DestroyWindow(win_); win_ = nullptr; }
 }
@@ -375,14 +401,7 @@ void Display::layout_views() {
 bool Display::try_gpu_present() {
   if (!gpu_wanted_ || !out_) return false;
   std::string why;
-  // Auto: Vulkan first (a render pass into the scanout buffer beats the
-  // RGA's ~1.1 GB/s, even beside the GPU 3D layer), the RGA where it fails.
-  if (gpu_mode_ != GpuPresentMode::Rga) gpu_ = open_vk_import_presenter(*out_, &why);
-  if (!gpu_ && gpu_mode_ != GpuPresentMode::Vulkan) {
-    std::string why2;
-    gpu_ = open_rga_presenter(*out_, &why2);
-    if (!gpu_) why = gpu_mode_ == GpuPresentMode::Rga ? why2 : why + "; " + why2;
-  }
+  gpu_ = open_vk_import_presenter(*out_, &why);
   if (!gpu_) { std::fprintf(stderr, "video.gpu_present: %s; scanline scaling instead\n", why.c_str()); return false; }
   scaled_ = false;
   layout();
@@ -450,7 +469,7 @@ bool Display::prepare_gpu(GpuFrame& f) {
   f.n = nviews_;
   p.rot = rot_; p.inset_alpha = inset_alpha_; p.linear = linear_;
   p.seam_blend = src_gpu_ ? 0 : seam_blend_;   // cells at source: their seams were the core's to draw
-  p.colour = gpu_->kind() == FramePresenter::Kind::Vulkan ? colour_ : nullptr;
+  p.colour = colour_;
   p.drawn = frontend::Rect{canvas_drawn_.x, canvas_drawn_.y, canvas_drawn_.w, canvas_drawn_.h};
   p.grid = grid_strength_ > 0.0 ? static_cast<u32>(std::lround((1.0 - grid_strength_) * 256.0)) : 256u;
   canvas_drawn_ = SDL_Rect{0, 0, 0, 0};
@@ -480,14 +499,16 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
   static const bool retire = std::getenv("DS_PRESENT_RETIRE") != nullptr;
   GpuFrame frames[2];
   Display* owners[2] = {};
-  int nf = 0;
+  Display* rens[2] = {};
+  int nf = 0, nr = 0;
   for (int i = 0; i < n && i < 2; ++i) {
     Display& d = *ds[i];
     d.sync();
+    if (d.ren_threaded_) { rens[nr++] = &d; continue; }
     if (!d.gpu_) { d.draw(fb, edges); continue; }
     if (d.prepare_gpu(frames[nf])) owners[nf++] = &d;
   }
-  if (!nf) return;
+  if (!nf && !nr) return;
   PresentThread& pt = PresentThread::get();
   pt.wait(stage_job);
   for (int s = 0; s < SCREENS; ++s) {
@@ -504,8 +525,9 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
       staged.plane[s] = estage[s].data(); staged.rows[s] = erows[s];
     }
   for (int k = 0; k < nf; ++k) frames[k].params.edges = staged;
-  stage_job = pt.post([frames, nf] {
+  stage_job = pt.post([frames, nf, rens, nr] {
     const u32* const sfb[SCREENS] = {stage[0].data(), stage[1].data()};
+    for (int k = 0; k < nr; ++k) rens[k]->draw_renderer(sfb);
     for (int k = 0; k < nf; ++k) {
       const GpuFrame& f = frames[k];
       f.p->present(sfb, f.v, f.n, f.params);
@@ -513,6 +535,7 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
     }
   });
   for (int k = 0; k < nf; ++k) owners[k]->job_ = stage_job;
+  for (int k = 0; k < nr; ++k) rens[k]->job_ = stage_job;
 }
 
 void Display::draw(const u32* const fb[SCREENS], const EdgePlanes* edges) {
@@ -527,6 +550,16 @@ void Display::draw(const u32* const fb[SCREENS], const EdgePlanes* edges) {
     return;
   }
   if (!ren_) return;   // renderer tier only; scanline tiers use begin_frame/end_frame
+  if (ren_threaded_) {
+    // Paused paths: same thread as the live frames, waited for.
+    PresentThread& pt = PresentThread::get();
+    pt.wait(pt.post([this, fb] { draw_renderer(fb); }));
+    return;
+  }
+  draw_renderer(fb);
+}
+
+void Display::draw_renderer(const u32* const fb[SCREENS]) {
   SDL_SetRenderDrawColor(ren_, 0, 0, 0, 255);
   SDL_RenderClear(ren_);
   for (int i = 0; i < nviews_; ++i) {

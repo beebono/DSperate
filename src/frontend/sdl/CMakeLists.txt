@@ -30,7 +30,7 @@ if(DSPERATE_NET)
   target_link_libraries(dsperate PRIVATE dsperate_net)
   target_compile_definitions(dsperate PRIVATE DSPERATE_NET=1)
 endif()
-target_sources(dsperate PRIVATE gpu_present.cpp video/present_vk_import.cpp video/present_rga.cpp)
+target_sources(dsperate PRIVATE gpu_present.cpp video/present_vk_import.cpp)
 if(DSPERATE_VULKAN AND DSPERATE_VULKAN_INCLUDE)
   target_include_directories(dsperate PRIVATE ${DSPERATE_VULKAN_INCLUDE})
   set_property(SOURCE gpu_present.cpp APPEND PROPERTY COMPILE_DEFINITIONS
