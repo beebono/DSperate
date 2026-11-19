@@ -9,12 +9,15 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #include <algorithm>
 
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -190,6 +193,15 @@ bool DrmOut::flip(int i) {
   pf.user_data = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(this));
   if (ioctl(fd_, drmu::IOCTL_MODE_PAGE_FLIP, &pf) < 0) { std::perror("drm: PAGE_FLIP"); bufs_[i].busy = false; return false; }
   pending_ = i;
+  // The flip is applied by a kernel worker queued on this core. Under a real-time thread that keeps the core
+  // for the whole frame (a title over budget) it does not run before the next vblank, and every flip then
+  // takes two refreshes: 30 fps for a frame of 17-33 ms. One yield as a normal task lets it write the flip now.
+  static const bool no_yield = std::getenv("DS_DRM_FLIP_YIELD") && std::atoi(std::getenv("DS_DRM_FLIP_YIELD")) == 0;
+  int pol = 0; sched_param sp{};
+  if (!no_yield && pthread_getschedparam(pthread_self(), &pol, &sp) == 0 && (pol == SCHED_RR || pol == SCHED_FIFO)) {
+    sched_param z{};
+    if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &z) == 0) { sched_yield(); pthread_setschedparam(pthread_self(), pol, &sp); }
+  }
   return true;
 }
 
