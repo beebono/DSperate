@@ -30,6 +30,13 @@ constexpr u8 OA_PRIO = 0x03, OA_SEMI = 0x04, OA_BITMAP = 0x08, OA_MOSAIC = 0x10,
 constexpr u16 LV_OPAQUE = 0x8000;
 enum TableId : u8 { T_BG0 = 0, T_BG1, T_BG2, T_BG3, T_OBJ_STD, T_OBJ_EXT, T_OBJ_DIRECT, T_BACKDROP, T_NONE, T_COUNT };   // T_NONE: nothing beneath (colour 0, no layer id)
 
+// The 3D split (core/gpu/split3d.h).
+// Off: BG0 is composed in one pass. Gpu: the output is U and split() the
+// words, for a compositor that has the 3D image. Cpu: split, then merged
+// here with the 3D line (the output is the finished line). Verify: both
+// ways, compared; the output is the one-pass line.
+enum class Split3D : u8 { Off, Gpu, Cpu, Verify };
+
 // 2D engine (A at 0x04000000, B at 0x04001000): the registers (Engine2DRegs)
 // and the software line renderer, which draws each line from the LineRegs
 // snapshot taken for it (cur_; sprites, drawn a line ahead, from spr_).
@@ -76,21 +83,29 @@ public:
 
   // Engine A: 256 RGB666 with 5-bit alpha in bits 24-28 (0 = transparent), or null.
   void set_3d_line(const Pixel* line) { line3d_ = line; }
-  // The edge cut: the 3D line's edge plane (Renderer3D::set_edge_export;
-  // null: none). After render_line, edge_compose gives each of the line's
-  // edge pixels that shows (the top layer there is the 3D layer) its
-  // unblended 3D colour taken through the same colour effects as the line,
-  // in `own`, and the edge byte in `bytes`; elsewhere `bytes` is zero. A
-  // transparent 3D pixel's word (the rear plane beside an edge) gives the
-  // pixel as shown, where the 3D layer would be in front of what shows.
-  // False when no edge pixel shows.
-  void set_3d_edges(const u32* e) { edge3d_ = e; }
-  // The edge bytes of captured pixels in VRAM banks A-D (Gpu::edge_vram_,
-  // one per 16-bit pixel; null: none): a direct-colour bitmap BG or bitmap
-  // sprite showing a captured image carries them, and edge_compose gives
-  // those edge pixels as shown.
-  void set_edge_vram(const u8* v) { edge_vram_ = v; }
-  bool edge_compose(Pixel* own, u8* bytes) const;
+  // Captured images shown again (the 3D split, Gpu::set_split3d_present): a
+  // direct-colour bitmap BG or bitmap sprite read straight from one of banks
+  // A-D carries which VRAM pixel each of its pixels is. cap_refs: after a
+  // line, per pixel the reference of the layer on top (CAP_REF | bank << 16
+  // | the 16-bit pixel's index in the bank), 0 where it carried none.
+  // Whether that pixel shows unchanged is the caller's to check (output()).
+  // False: none on this line.
+  static constexpr u32 CAP_REF = 0x80000000u;
+  // "Bank" in a reference is a slot: A-D, then H (engine B's small BG bank,
+  // where a game may feed a captured image back line by line).
+  static constexpr u32 CAP_SLOTS = 5;
+  static constexpr int cap_slot_bank(u32 slot) { return slot < 4 ? static_cast<int>(slot) : 7; }
+  static constexpr u32 cap_slot_size(u32 slot) { return slot < 4 ? 0x20000u : 0x8000u; }
+  void set_cap_track(bool on) { cap_track_ = on; }
+  bool cap_refs(u32* refs) const;
+
+  // The 3D split, engine A only. A line is split when BG0 is the 3D layer
+  // and enabled; split_on() says so.
+  void set_split3d(Split3D m) { split_mode_ = m; }
+  const u32* split() const { return split_.data(); }
+  bool split_on() const { return split_on_; }   // the line just rendered was split
+  u64 split_verified() const { return split_lines_; }   // Verify: lines compared
+  u64 split_mismatches() const { return split_bad_; }   // Verify: pixels where split + merge differed
 
   u32 bldcnt() const { return regs_.bldcnt(); }
   u32 eva() const { return regs_.eva(); }
@@ -154,13 +169,21 @@ private:
   alignas(16) std::array<u8, 256> top_id_{}, top_kind_{}, top_alpha_{}, second_id_{};
   alignas(16) std::array<Pixel, 256> out_{};
   const Pixel* line3d_ = nullptr;
-  const u32* edge3d_ = nullptr;
-  const u8* edge_vram_ = nullptr;
-  alignas(16) u8 bg_edge_[4][256]{};   // per BG, the edge bytes its bitmap row carried this line (bg_edge_any_)
-  bool bg_edge_any_[4] = {};
-  alignas(16) std::array<u8, 256> obj_edge_{};   // the OBJ layer's carried edge bytes (bitmap sprites showing a capture)
-  bool obj_edge_any_ = false;
-  // How render_line resolved the line, for edge_compose: which of the
+  Split3D split_mode_ = Split3D::Off;
+  bool split_bg0_ = false;       // this line composes without BG0
+  bool top_backdrop_ = false;    // the line resolved as backdrop only
+  bool split_on_ = false;
+  alignas(16) std::array<u32, 256> split_{};
+  u64 split_bad_ = 0, split_lines_ = 0;
+  void compose_line();
+  void build_split();
+  bool split_under_blend() const;
+  bool cap_track_ = false;
+  alignas(16) u32 bg_cap_[4][256]{};     // set_cap_track: per BG, the references its bitmap row carried this line (bg_cap_any_)
+  bool bg_cap_any_[4] = {};
+  alignas(16) std::array<u32, 256> obj_cap_{};
+  bool obj_cap_any_ = false;
+  // How render_line resolved the line, for cap_refs: which of the
   // per-pixel records above hold this line's values (TOP_ALL: one layer,
   // top_all_bg_, everywhere).
   enum : u8 { TOP_NONE, TOP_ALL, TOP_FLAT, TOP_FADE, TOP_FULL } top_mode_ = TOP_NONE;

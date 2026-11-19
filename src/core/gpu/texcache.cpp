@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "core/gpu/texcache.h"
+#include "core/gpu/alpha_grid.h"
 #include "core/profile.h"
 
 #include <algorithm>
@@ -74,7 +75,7 @@ const u32* TextureCache::lookup(const VramMap& vm, u32 fmt, u32 base, u32 width,
 TextureCache::Ref TextureCache::lookup_ref(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0) {
   if (fmt == 0) return {};
   const Entry& e = find_or_decode(vm, fmt, base, width, height, texpal, alpha0);
-  return { e.texels.data(), static_cast<u32>(e.texels.size()), e.id, e.version, e.transparent };
+  return { e.texels.data(), static_cast<u32>(e.texels.size()), e.id, e.version, e.transparent, e.alpha_grid, e.grid31, e.grid_part };
 }
 
 TextureCache::Entry& TextureCache::find_or_decode(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0) {
@@ -225,9 +226,10 @@ void TextureCache::decode(const VramMap& vm, Entry& e) {
     src(base, n * 2, false);
     break;
   }
-  bool transparent = false;
-  for (u32 i = 0; i < n && !transparent; ++i) transparent = ((out[i] >> 16) & 0x1Fu) == 0u;
-  e.transparent = transparent;
+  e.alpha_grid = alpha_grid_of(out, e.width, e.height);
+  e.transparent = e.alpha_grid != 0;
+  if (e.fmt == 1 || e.fmt == 6) { e.grid31 = alpha_grid_of(out, e.width, e.height, 31, 31); e.grid_part = alpha_grid_of(out, e.width, e.height, 1, 30); }
+  else { e.grid31 = ~u64{0}; e.grid_part = 0; }
 }
 
 } // namespace ds::gpu

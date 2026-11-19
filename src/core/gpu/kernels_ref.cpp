@@ -4,6 +4,7 @@
 // Portable reference kernels. These define the behaviour; the NEON twins in
 // kernels_neon.cpp must match them bit for bit.
 #include "core/gpu/kernels.h"
+#include "core/gpu/split3d.h"
 
 namespace ds::gpu::kern {
 const Pixel* direct_table() { static const Pixel sentinel[1] = {}; return sentinel; }
@@ -331,6 +332,10 @@ void output_vram_line(const u16* src, u16 reg, u32* dst) {
 
 void colour_correct(const ColourLut& t, u32* dst) {
   for (u32 i = 0; i < 256; ++i) dst[i] = colour_pixel(t, dst[i]);
+}
+
+void split_merge_line(const u32* words, const Pixel* u, const Pixel* line3d, Pixel* out) {
+  for (u32 i = 0; i < 256; ++i) out[i] = split3d::merge_pixel(words[i], u[i], line3d[i]);
 }
 
 void capture_a15(const Pixel* src, u32 n, u16* dst) {

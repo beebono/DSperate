@@ -146,7 +146,7 @@ if(DSPERATE_GLES)
                DSPERATE_VK_DIR="${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk")
   file(GLOB DSPERATE_GL_GLSL "${CMAKE_CURRENT_SOURCE_DIR}/gpu/gl/shaders/*")
   set_property(SOURCE gpu/gl/gl_shaders.cpp APPEND PROPERTY OBJECT_DEPENDS ${DSPERATE_GL_GLSL}
-               "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/vk_layout.h" "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/ds_shade.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/ds_spans.glsl")
+               "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/vk_layout.h" "${CMAKE_CURRENT_SOURCE_DIR}/gpu/vk/ds_shade.glsl")
   target_compile_definitions(dsperate_core PUBLIC DSPERATE_GLES=1)
   target_link_libraries(dsperate_core PUBLIC ${CMAKE_DL_LIBS})
 else()

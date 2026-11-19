@@ -44,8 +44,7 @@ struct ColourLut {
 };
 // Output-curve entry of a clamped sum s (0..ONE-1).
 inline u32 colour_index(u32 s) { return s < ColourLut::FINE ? s : ColourLut::FINE - ColourLut::FINE / 8 + (s >> 3); }
-// One pixel of kern::colour_correct (0xAARRGGBB, alpha kept): the reference
-// kernel, and the edge plane's few pixels.
+// One pixel of kern::colour_correct (0xAARRGGBB, alpha kept): the reference kernel.
 inline u32 colour_pixel(const ColourLut& t, u32 p) {
   s32 l[3];
   for (u32 c = 0; c < 3; ++c) {
@@ -131,6 +130,9 @@ inline u32 colour_pixel(const ColourLut& t, u32 p) {
   /* Capture blend: A as above, B a BGR555 line, alpha in bit 15. Per channel ((ca*aa*eva)+(cb*ab*evb)+8)>>4  \
      clamped to 31; alpha bit (eva?aa:0)|(evb?ab:0). eva/evb in 0..16. Missing B is a zeroed line. */         \
   void NS##capture_blend(const Pixel* srca, const u16* srcb, u32 n, u32 eva, u32 evb, u16* dst);             \
+  /* The 3D split's merge of one line (split3d.h, merge_pixel per pixel): words, the line without the 3D     \
+     layer, the 3D line; 256 pixels. */                                                                      \
+  void NS##split_merge_line(const u32* words, const Pixel* u, const Pixel* line3d, Pixel* out);              \
   /* Nearest-neighbour scale to xrun[256] destination pixels. xrun[257]: source pixel s covers destination   \
      [xrun[s], xrun[s+1]) -- inverse of dst_x -> src_x map, so no gather needed. Monotonic non-decreasing. */ \
   void NS##scale_row(const u32* src, const u16* xrun, u32* dst);                                             \
@@ -187,8 +189,7 @@ inline u32 colour_pixel(const ColourLut& t, u32 p) {
 
 namespace ref { DS_KERNEL_LIST() }
 namespace ref {
-// One pixel of composite_line / composite_line_fade, for the edge cut's
-// unblended colours (Engine2D::edge_compose): the same arithmetic, scalar.
+// One pixel of composite_line / composite_line_fade: the same arithmetic, scalar.
 Pixel composite_pixel(u32 bldcnt, u32 eva, u32 evb, u32 evy, Pixel a, Pixel b, u8 top_id, u8 kind, u8 top_alpha, u8 second_id, u8 win);
 Pixel fade_pixel(u32 bldcnt, u32 evy, Pixel a, u8 top_id, u8 win);
 }

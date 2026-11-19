@@ -1036,6 +1036,16 @@ void test_setting_steps() {
   const ds::sdl::Setting& fl = find("emu.autosave");
   CHECK(ds::sdl::step_value(fl, "false", +1, h) == "true");
   CHECK(ds::sdl::step_value(fl, "true", +1, h) == "false");
+  // ANTI-ALIASING is off / on; the old enhanced mode's word in a file shows as on.
+  const ds::sdl::Setting* aap = nullptr;
+  for (int i = 0; i < ds::sdl::settings_count(ds::sdl::kVideoSettings); ++i)
+    if (!std::strcmp(ds::sdl::kVideoSettings[i].key, "video.aa")) aap = &ds::sdl::kVideoSettings[i];
+  CHECK(aap != nullptr);
+  const ds::sdl::Setting& aa = aap ? *aap : fl;
+  CHECK(ds::sdl::display_value(aa, "enhanced") == ds::sdl::display_value(aa, "true"));
+  CHECK(ds::sdl::display_value(aa, "enhanced") != ds::sdl::display_value(aa, "false"));
+  CHECK(ds::sdl::step_value(aa, "enhanced", +1, h) == "false");
+  CHECK(ds::sdl::step_value(aa, "false", +1, h) == "true");
   // GAME SPEED is a whole percent in the file, as --speed and the frontend
   // read it. As a 0..1 percent row it showed 100 as 10000% and wrote 1.
   const ds::sdl::Setting& sp = find("emu.speed");

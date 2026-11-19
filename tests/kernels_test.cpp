@@ -5,6 +5,7 @@
 // reference produces, on random planes covering every branch. On hosts
 // without NEON only the reference runs (as a smoke test).
 #include "core/gpu/kernels.h"
+#include "core/gpu/split3d.h"
 #include "core/gpu/colour.h"
 
 #include <algorithm>
@@ -285,6 +286,22 @@ static void test_colour() {
     }
     const u32 it = 0;
     if (worst > 3) { std::fprintf(stderr, "FAIL %s: %s off the model by %u (iteration %u)\n", __func__, colour_profile_name(p), worst, it); ++failures; }
+  }
+}
+
+// The 3D split's merge: words of every op with weights as the split packs
+// them (0..16) and as a field can hold (0..31), 3D pixels of every alpha.
+static void test_split_merge() {
+  alignas(16) u32 words[256]; alignas(16) Pixel u[256], t[256], a[256], b[256];
+  for (u32 it = 0; it < 400; ++it) {
+    for (u32 x = 0; x < 256; ++x) {
+      const u32 lim = it % 4 == 3 ? 32 : 17;
+      words[x] = split3d::pack(rng() & 0x3F3F3F, static_cast<split3d::Op>(rng() & 3), rng() % lim, rng() % lim) | ((rng() & 7) ? 0 : split3d::Q15) | ((rng() & 15) ? 0 : split3d::XY);
+      u[x] = (rng() & 0x3F3F3F) | 0xFF000000;
+      t[x] = (rng() & 0x3F3F3F) | ((rng() & 3) ? (rng() % 32) << 24 : 0);
+    }
+    kern::ref::split_merge_line(words, u, t, a); N::split_merge_line(words, u, t, b);
+    CHECK_SAME("split_merge_line", a, b, sizeof a);
   }
 }
 
@@ -673,6 +690,7 @@ int main() {
   test_colour();
   test_bmp_rows();
   test_capture();
+  test_split_merge();
   test_scale_row();
   test_scale_row_grid();
   test_scale_row_straddle();

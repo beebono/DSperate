@@ -436,7 +436,80 @@ static void test_bilinear() {
   }
 }
 
+// The 3D split (core/gpu/split3d.h): random stacks of text BGs, sprites of
+// every kind, windows and colour effects over a random 3D line, composed
+// without BG0 and merged, against the one-pass composite of the same line.
+static void test_split3d() {
+  NDS nds;
+  nds.io.powcnt1 = 0x820F; nds.gpu.set_powcnt(0x820F);
+  nds.bus.dma_write16(Cpu::ARM9, 0x04000240, 0x8281);       // VRAMCNT_A = BG-A, B = OBJ-A
+  u32 seed = 12345;
+  auto rnd = [&](u32 n) { seed = seed * 1664525u + 1013904223u; return (seed >> 8) % n; };
+  // Tiles (char base 1): 1 solid, 2 checkered with transparent texels, 3 solid in another index.
+  for (u32 i = 0; i < 32; i += 4) {
+    write9(nds, 0x06004020 + i, 32, 0x11111111);
+    write9(nds, 0x06004040 + i, 32, (i & 4) ? 0x02020202 : 0x20202020);
+    write9(nds, 0x06004060 + i, 32, 0x33333333);
+    write9(nds, 0x06400020 + i, 32, 0x11111111);            // OBJ tile 1
+  }
+  for (u32 i = 0; i < 0x400; i += 2) w16(nds, 0x06400400 + i, static_cast<u16>(0x8000 | (i * 37)));   // bitmap sprite pixels
+  alignas(16) static gpu::Pixel line3d[256];
+  nds.gpu.engine[0].set_split3d(gpu::Split3D::Verify);
+  nds.gpu.engine[0].set_3d_line(line3d);
+  for (u32 l = 0; l <= 3; ++l) nds.gpu.engine[0].update_windows(l);
+  u32 above = 0, below = 0;
+  for (u32 it = 0; it < 4000; ++it) {
+    for (u32 i = 1; i < 4; ++i) { w16(nds, 0x05000000 + i * 2, static_cast<u16>(rnd(0x8000))); w16(nds, 0x05000200 + i * 2, static_cast<u16>(rnd(0x8000))); }
+    w16(nds, 0x05000000, static_cast<u16>(rnd(0x8000)));
+    for (u32 bg = 0; bg < 4; ++bg) {
+      w16(nds, 0x04000008 + bg * 2, static_cast<u16>(rnd(4) | (1 << 2) | (bg << 8)));
+      if (bg) for (u32 tx = 0; tx < 32; ++tx) w16(nds, 0x06000000 + bg * 0x800 + tx * 2, static_cast<u16>(rnd(3) ? rnd(4) : 0));
+    }
+    // Sprites: normal, semi-transparent, bitmap (alpha in attr2), a few disabled.
+    for (u32 n = 0; n < 128; ++n) {
+      const u32 a = 0x07000000 + n * 8;
+      if (n >= 6 || rnd(4) == 0) { w16(nds, a, 0x0200); continue; }
+      const u32 kind = rnd(3);
+      w16(nds, a, static_cast<u16>(kind == 1 ? 0x0400 : kind == 2 ? 0x0C00 : 0));
+      w16(nds, a + 2, static_cast<u16>(rnd(248)));
+      w16(nds, a + 4, static_cast<u16>(kind == 2 ? (0x20 | (rnd(4) << 10) | (rnd(16) << 12)) : (1 | (rnd(4) << 10))));
+    }
+    w16(nds, 0x04000050, static_cast<u16>(rnd(0x4000)));
+    w16(nds, 0x04000052, static_cast<u16>(rnd(18) | (rnd(18) << 8)));
+    w16(nds, 0x04000054, static_cast<u16>(rnd(4) ? rnd(18) : 0));
+    const bool win = rnd(3) == 0;
+    const u32 x1 = rnd(120);
+    w16(nds, 0x04000040, static_cast<u16>((x1 << 8) | (x1 + 1 + rnd(120))));
+    w16(nds, 0x04000044, 192);
+    w16(nds, 0x04000048, static_cast<u16>(rnd(0x40)));
+    w16(nds, 0x0400004A, static_cast<u16>(rnd(0x40)));
+    write9(nds, 0x04000000, 32, 0x00010008 | (rnd(32) << 8) | 0x0100 | (win ? 1u << 13 : 0) | (rnd(2) << 6));
+    // The 3D line: runs of empty, opaque and translucent pixels (some lines wholly opaque or empty).
+    const u32 style = rnd(5);
+    for (u32 x = 0; x < 256;) {
+      const u32 run = 1 + rnd(40), k = style == 0 ? 1 : style == 1 ? 0 : rnd(3);
+      for (u32 j = 0; j < run && x < 256; ++j, ++x)
+        line3d[x] = k == 0 ? 0 : (rnd(64) | (rnd(64) << 8) | (rnd(64) << 16) | ((k == 1 ? 31u : 1 + rnd(30)) << 24));
+    }
+    render_a(nds, 3);
+  }
+  CHECK_EQ(nds.gpu.engine[0].split_mismatches(), 0u);
+  // The split has to have met both blends (the 3D pixel over R, R over it) for the run to mean anything.
+  nds.gpu.engine[0].set_split3d(gpu::Split3D::Gpu);
+  for (u32 it = 0; it < 200; ++it) {
+    w16(nds, 0x04000008, static_cast<u16>(rnd(4)));
+    w16(nds, 0x04000050, static_cast<u16>(rnd(0x4000)));
+    render_a(nds, 3);
+    CHECK(nds.gpu.engine[0].split_on());
+    for (u32 x = 0; x < 256; ++x) { const u32 w = nds.gpu.engine[0].split()[x]; above += (w >> 28) == 2; below += (w >> 28) == 1 && ((w >> 18) & 31) != 16 && ((w >> 23) & 31) != 16; }
+  }
+  CHECK(above > 1000);
+  CHECK(below > 100);
+  nds.gpu.engine[0].set_split3d(gpu::Split3D::Off);
+}
+
 int main() {
+  test_split3d();
   test_vram_views();
   test_text_bg_and_backdrop();
   test_sprites_and_window();

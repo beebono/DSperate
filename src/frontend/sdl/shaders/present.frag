@@ -4,7 +4,7 @@
 // pass's clear; the PiP fade and the overlay are fixed-function blends.
 layout(location = 0) in vec2 d;
 layout(location = 0) out vec4 dst;
-layout(std430, binding = 1) readonly buffer Src { uint src[]; };   // slot base + screen * 49152 + y * 256 + x, 0xAARRGGBB; the edge planes 2 * 49152 further
+layout(std430, binding = 1) readonly buffer Src { uint src[]; };   // slot base + screen * 49152 + y * 256 + x, 0xAARRGGBB
 layout(std430, binding = 2) readonly buffer Over { uint over[]; };  // frontend overlay (OSD, menu), logical frame, pitch lw, 0xAARRGGBB
 layout(std430, binding = 3) readonly buffer Tab  { uint tab[]; };   // LCD grid seam bitmasks: per view, 32 words columns then 32 rows
 layout(push_constant) uniform P { ivec4 rect; uvec4 a; uvec4 b; vec4 s; } pc;   // present.vert's
@@ -16,96 +16,7 @@ bool grid_seam(uint v, int o, int axis) {
   return ((tab[v * 64u + uint(axis * 32 + (o >> 5))] >> uint(o & 31)) & 1u) != 0u;
 }
 
-// The panel-density edge cut (core/gpu/edge_cut.h is the reference). An
-// edge plane word is the edge byte over the pixel's own unblended colour:
-// bit 7 edge, bit 6 the outside is the negative neighbour (left / up), bit
-// 5 the run's axis is vertical, bits 0-4 the coverage. The source pixel's
-// block is cut along the edge line, its position across the axis from the
-// coverage, its tilt toward the next edge pixel along the run; each panel
-// pixel takes the pixel's own colour or the outside neighbour's.
-// Within one 6-bit step a channel (8-bit: 4): two polygons of one surface.
-bool same_colour(uint a, uint b) {
-  ivec3 d = abs(ivec3(int((a >> 16) & 255u), int((a >> 8) & 255u), int(a & 255u)) - ivec3(int((b >> 16) & 255u), int((b >> 8) & 255u), int(b & 255u)));
-  return max(d.x, max(d.y, d.z)) <= 4;
-}
-float cut_pos(uint e) {
-  float f = float((e & 31u) + 1u) / 32.0;
-  return (e & 64u) != 0u ? 1.0 - f : f;
-}
 vec3 unpack(uint s) { return vec3(float((s >> 16) & 255u), float((s >> 8) & 255u), float(s & 255u)); }
-
-// The edge line of edge byte `e` at source pixel (x, y), across the run's
-// axis, at `along` (-0.5..0.5) along it: tilted toward the next edge pixel
-// of the same kind on that side, else toward one whose outside faces back,
-// beside it or one step across the axis toward the outside (a shallow line
-// is held alternately by the polygon's pixel and the one just outside it).
-float edge_line(uint eb, uint e, int x, int y, float along) {
-  bool vert = (e & 32u) != 0u, neg = (e & 64u) != 0u;
-  int nx = x + (vert ? (along < 0.0 ? -1 : 1) : 0), ny = y + (vert ? 0 : (along < 0.0 ? -1 : 1));
-  float pos = cut_pos(e), pn = pos;
-  if (nx >= 0 && nx < 256 && ny >= 0 && ny < 192) {
-    uint n = src[eb + uint(ny) * 256u + uint(nx)] >> 24;
-    if ((n & 224u) == (e & 224u)) pn = cut_pos(n);
-    else if ((n & 224u) == ((e ^ 64u) & 224u)) pn = cut_pos(n);   // beside it on the same row, the line's other side
-    else {
-      int ox = nx + (vert ? 0 : (neg ? -1 : 1)), oy = ny + (vert ? (neg ? -1 : 1) : 0);
-      if (ox >= 0 && ox < 256 && oy >= 0 && oy < 192) {
-        uint o = src[eb + uint(oy) * 256u + uint(ox)] >> 24;
-        if ((o & 224u) == ((e ^ 64u) & 224u)) pn = cut_pos(o) + (neg ? -1.0 : 1.0);
-      }
-    }
-  }
-  return pos + (pn - pos) * abs(along);
-}
-
-// The cut of panel point (u, v) in source pixel (sx, sy): the two colours
-// mixed by the point's distance from the line, over a band `bw` DS pixels
-// wide (1 by default, DS_EDGE_BLEND; 0: the hard cut). A band wider than the
-// edge pixel's own part reaches the pixel beyond it (one with no edge of its
-// own: its neighbours' are looked up), which also smooths where the line
-// steps from one row of edge pixels to the next.
-vec3 edge_cut(uint base, int sx, int sy, float u, float v, uint s, float bw) {
-  uint eb = base + 2u * 49152u;
-  uint w = src[eb + uint(sy) * 256u + uint(sx)];
-  if ((w & 0x80000000u) == 0u) {   // no edge: 0, or the tag of a pixel beside an edge pixel (one neighbour lookup only for those)
-    vec3 c = unpack(s);
-    if (bw <= 0.0 || w == 0u) return c;
-    float best = 0.0;
-    const ivec2 nb[4] = ivec2[4](ivec2(0, -1), ivec2(0, 1), ivec2(-1, 0), ivec2(1, 0));
-    for (int k = 0; k < 4; ++k) {
-      int qx = sx + nb[k].x, qy = sy + nb[k].y;
-      if (qx < 0 || qx > 255 || qy < 0 || qy > 191) continue;
-      uint wn = src[eb + uint(qy) * 256u + uint(qx)];
-      if ((wn & 0x80000000u) == 0u) continue;
-      uint en = wn >> 24;
-      bool vn = (en & 32u) != 0u, gn = (en & 64u) != 0u;
-      // Only an edge whose outside is this pixel.
-      bool toward = vn ? (nb[k].x == 0 && (nb[k].y == -1 ? !gn : gn)) : (nb[k].y == 0 && (nb[k].x == -1 ? !gn : gn));
-      if (!toward) continue;
-      uint own = 0xFF000000u | (wn & 0xFFFFFFu);
-      if (same_colour(own, s)) continue;
-      float tn = vn ? v - float(nb[k].y) : u - float(nb[k].x);
-      float ln = edge_line(eb, en, qx, qy, (vn ? u : v) - 0.5);
-      float wgt = clamp(0.5 + (gn ? tn - ln : ln - tn) / bw, 0.0, 1.0);
-      if (wgt > best) { best = wgt; c = mix(unpack(s), unpack(own), wgt); }
-    }
-    return c;
-  }
-  uint e = w >> 24;
-  bool vert = (e & 32u) != 0u, neg = (e & 64u) != 0u;
-  float t = vert ? v : u;
-  float line = edge_line(eb, e, sx, sy, (vert ? u : v) - 0.5);
-  bool inside = neg ? (t >= line) : (t < line);
-  int px = vert ? sx : (neg ? sx - 1 : sx + 1), py = vert ? (neg ? sy - 1 : sy + 1) : sy;
-  uint own = 0xFF000000u | (w & 0xFFFFFFu);
-  if (px < 0 || px > 255 || py < 0 || py > 191) return unpack(own);
-  uint o = src[base + uint(py) * 256u + uint(px)];
-  if (same_colour(own, o)) return unpack(s);   // a seam inside one surface: nothing to cut
-  // Another line of the same axis in the outside pixel, its outside facing back: a strip between two edges that owns neither pixel (edge_cut.h); the pixel stays whole.
-  { uint n = src[eb + uint(py) * 256u + uint(px)] >> 24; if ((n & 128u) != 0u && ((n ^ e) & 96u) == 64u) return unpack(s); }
-  if (bw <= 0.0) return unpack(inside ? own : o);
-  return mix(unpack(o), unpack(own), clamp(0.5 + (neg ? t - line : line - t) / bw, 0.0, 1.0));
-}
 
 // The CPU scanline scaler's filters (core/gpu/gpu.cpp emit_bilinear,
 // emit_row_straddle) through the texture unit: the frames again as an image
@@ -115,6 +26,13 @@ vec3 edge_cut(uint base, int sx, int sy, float u, float v, uint s, float bw) {
 // a step from the CPU's. FILTER is a specialisation constant: each pipeline
 // carries only its own path.
 layout(constant_id = 0) const uint FILTER = 0u;   // GpuPresent::Filter: 0 nearest, 1 bilinear, 2 seams, 3 seams in linear light
+// What the pipeline's draws use (gpu_present.cpp picks the pipeline by it): 1 unused, 2 the LCD grid, 4 the
+// overlay, and in the merge 8 more than one texel to a panel pixel, 16 a captured image's coordinates, 32 BG0's
+// scroll, 64 a capture's 15-bit words, 128 master brightness; bits 8-10 the 3D layer's scale when it is known (0:
+// asked of the image); bit 11 the merge was made in a pass before this one, at the layer's scale, and is in `merged`.
+// The rest is compiled out: with all of it in, both builds ran out of registers on the
+// Mali-G52 and a 4x view cost 0.3 to 1.5 ms more.
+layout(constant_id = 1) const uint FEAT = 255u;
 layout(binding = 4) uniform sampler2DArray frame;
 layout(binding = 5) uniform sampler2DArray frame_srgb;   // the same, decoded to linear before filtering
 
@@ -145,9 +63,94 @@ uint seam_px(ivec2 o, int sx, int sy) {
   return pack8(textureLod(frame, uvl, 0.0).rgb);
 }
 
+#ifdef DS_MERGE
+// The 3D merge (core/gpu/split3d.h is the reference; this variant is
+// present_merge_frag.spv, built with -DDS_MERGE=1). The view's frame is a
+// screen composed without a 3D layer. pc.b.y holds, above the mode byte, the
+// plane of `src` with the split's word per pixel (bits 8-15: a colour C and
+// the weights of min((T * ka + C * kb + round) >> shift, 63) for a 3D pixel
+// T) and where the screen's line table starts, in units of 192 words (bits
+// 16-30: master brightness as o * m + n >> 4, m | n << 8, and in bits 20-28
+// BG0's X offset on that line, read only when bit 31 says some line has one). `layer3d` is the
+// 3D record at the raster's scale (RGB666 in bits 0-21, 5-bit alpha in
+// 24-28: the R32UI image through an RGBA8UI view, a byte each). A word of a
+// captured image shown again may have bit 31, T is elsewhere in the layer
+// (x | y << 8 in the plane two on), and bit 30, the result drops each
+// channel's low bit as the 15-bit capture did. In float, every product an
+// integer far below 2^24: exact, so at 1x it is the CPU composite.
+layout(binding = 6) uniform usampler2D layer3d;
+// The screen already merged, at the layer's scale (FEAT bit 11): gpu_present.cpp draws this shader once into an
+// image of the layer's size where the view is larger, and the view takes its texels. The merge then runs on a
+// texel of the layer and not on every panel pixel under it (a quarter of them for a 2x layer on a 4x view).
+layout(binding = 7) uniform sampler2D merged;
+
+// One 3D texel `p` put into the pixel: `w` its word, `s` the frame's pixel, `lt` its line's table word.
+vec3 merge_texel(uint w, uint op, uint s, uvec4 p, uint lt) {
+  uint a3 = p.a & 31u;
+  if (a3 == 0u) return unpack(s);
+  float q = ((FEAT & 64u) != 0u && (w & 0x40000000u) != 0u) ? 2.0 : 1.0;   // the capture's 5 bits a channel
+  if (op == 3u) {   // the 3D pixel as it is: most of a 3D scene
+    vec3 t = vec3(p.rgb);
+    if ((FEAT & 64u) != 0u) t = floor(t / q) * q;
+    return t * 4.0 + floor(t * 0.0625);
+  }
+  bool by_alpha = op == 2u;
+  float ka = float(by_alpha ? a3 + 1u : (w >> 18) & 31u), kb = float(by_alpha ? 31u - a3 : (w >> 23) & 31u);
+  vec3 t = vec3(p.rgb);
+  vec3 c = vec3(float(w & 63u), float((w >> 6) & 63u), float((w >> 12) & 63u));
+  vec3 o = min(floor((t * ka + c * kb + (by_alpha ? 16.0 : 8.0)) * (by_alpha ? 0.03125 : 0.0625)), 63.0);
+  if ((FEAT & 64u) != 0u) o = floor(o / q) * q;
+  if ((FEAT & 128u) != 0u) {
+    uint mb = src[lt];
+    o = floor((o * float(mb & 255u) + float((mb >> 8) & 4095u)) * 0.0625);
+  }
+  return o * 4.0 + floor(o * 0.0625);   // 6 to 8 bits, as kern::expand_colours
+}
+
+// `s`: the frame's pixel (shown where the 3D layer is hidden or empty); (fx, fy): the point in DS pixels.
+// Where the layer is finer than the view (more than one texel to a panel
+// pixel along an axis), the pixel is the mean of the merge at up to 4 x 4
+// points spread over its own area, as far as that lies in its DS pixel
+// (the frame's pixel and the word are that one's): whole ratios make it the
+// box filter, and nothing of the image is skipped. The record is merged
+// texel by texel, never filtered first (colour and alpha are packed).
+vec3 merge3d(uint s, int sx, int sy, float fx, float fy) {
+  uint mp = ((pc.b.y >> 8) & 255u) * 49152u;
+  uint at = uint(sy) * 256u + uint(sx);
+  uint w = src[mp + at];
+  uint op = (w >> 28) & 3u;
+  if (op == 0u) return unpack(s);
+  uint lt = ((pc.b.y >> 16) & 0x7FFFu) * 192u + uint(sy);
+  vec2 away = vec2(0.0);   // where the 3D pixel lies from here, in whole DS pixels
+  if ((FEAT & 16u) != 0u && (w & 0x80000000u) != 0u) { uint xy = src[mp + 2u * 49152u + at]; away = vec2(float(int(xy & 255u) - sx), float(int(xy >> 8) - sy)); }
+  else if ((FEAT & 32u) != 0u && (pc.b.y & 0x80000000u) != 0u) {   // some line has BG0 scrolled: the 3D pixel lies that far along (9 bits, signed), or off the layer
+    away.x = float(int(src[lt] << 3) >> 23);
+    if (fx + away.x < 0.0 || fx + away.x >= 256.0) return unpack(s);
+  }
+  const int lsc = int((FEAT >> 8) & 7u);
+  ivec2 ts = lsc != 0 ? ivec2(256, 192) * lsc : textureSize(layer3d, 0);
+  vec2 tpd = lsc != 0 ? vec2(float(lsc)) : vec2(ts) / vec2(256.0, 192.0);   // texels a DS pixel
+  ivec2 n = clamp((ts + pc.rect.zw - 1) / pc.rect.zw, ivec2(1), ivec2(4));   // texels a panel pixel, rounded up
+  if ((FEAT & 8u) == 0u || n.x * n.y == 1) return merge_texel(w, op, s, texelFetch(layer3d, clamp(ivec2((vec2(fx, fy) + away) * tpd), ivec2(0), ts - 1), 0), lt);
+  vec2 lo = max(vec2(fx, fy) - pc.s.zw, vec2(float(sx), float(sy)));   // the panel pixel's area within the DS pixel
+  vec2 hi = min(vec2(fx, fy) - pc.s.zw + pc.s.xy, vec2(float(sx + 1), float(sy + 1)));
+  vec3 sum = vec3(0.0);
+  for (int j = 0; j < n.y; ++j)
+    for (int i = 0; i < n.x; ++i) {
+      vec2 at2 = lo + (hi - lo) * (vec2(float(i), float(j)) + 0.5) / vec2(n) + away;
+      sum += merge_texel(w, op, s, texelFetch(layer3d, clamp(ivec2(at2 * tpd), ivec2(0), ts - 1), 0), lt);
+    }
+  return sum / float(n.x * n.y);
+}
+#endif
+
 void main() {
   ivec2 o = ivec2(d);
-  if (pc.b.y == 1u) {
+#ifdef DS_MERGE
+  if ((FEAT & 4u) != 0u && (pc.b.y & 255u) == 1u) {
+#else
+  if ((FEAT & 4u) != 0u && pc.b.y == 1u) {
+#endif
     uint lw = pc.a.z;
     uint ov = over[min(uint(pc.rect.y + o.y) * lw + uint(pc.rect.x + o.x), lw * pc.a.w - 1u)];
     dst = vec4(unpack(ov) / 255.0, float(ov >> 24) / 255.0);
@@ -161,10 +164,17 @@ void main() {
   // Seams stand in for the grid on an upscaled view; smaller, it is plain nearest (as the CPU's).
   bool seams = filt >= 2u && pc.rect.w >= 192;
   vec3 col;
-  if ((pc.b.w & 0x200u) != 0u && (!seams || src[pc.b.z + 2u * 49152u + uint(sy) * 256u + uint(sx)] != 0u))
-    col = edge_cut(pc.b.z, sx, sy, clamp(fx - float(sx), 0.0, 1.0), clamp(fy - float(sy), 0.0, 1.0), src[pc.b.z + uint(sy) * 256u + uint(sx)], float((pc.b.w >> 10) & 63u) / 16.0);
-  else col = unpack(seams ? seam_px(o, sx, sy) : src[pc.b.z + uint(sy) * 256u + uint(sx)]);
+#ifdef DS_MERGE
+  if (!seams && (pc.b.y >> 8) != 0u) {
+    if ((FEAT & 0x800u) != 0u) {
+      const int psc = int((FEAT >> 8) & 7u);   // the same texel merge3d would fetch
+      col = round(texelFetch(merged, min(ivec2(vec2(fx, fy) * float(psc)), ivec2(256, 192) * psc - 1), 0).rgb * 255.0);
+    } else col = merge3d(src[pc.b.z + uint(sy) * 256u + uint(sx)], sx, sy, fx, fy);
+  }
+  else
+#endif
+  col = unpack(seams ? seam_px(o, sx, sy) : src[pc.b.z + uint(sy) * 256u + uint(sx)]);
   uint gf = (pc.b.w >> 16) & 0x1FFu;
-  if (filt == 0u && (pc.b.w & 0x100u) != 0u && gf < 256u && (grid_seam(pc.b.w & 0xFFu, o.x, 0) || grid_seam(pc.b.w & 0xFFu, o.y, 1))) col = floor(col * (float(gf) / 256.0));
+  if ((FEAT & 2u) != 0u && filt == 0u && (pc.b.w & 0x100u) != 0u && gf < 256u && (grid_seam(pc.b.w & 0xFFu, o.x, 0) || grid_seam(pc.b.w & 0xFFu, o.y, 1))) col = floor(col * (float(gf) / 256.0));
   dst = vec4(col / 255.0, 1.0);
 }

@@ -22,13 +22,10 @@ DS_INCBIN(ds_gl_common, DSPERATE_GL_SHADER_DIR "/gl_common.glsl");
 DS_INCBIN(ds_gl_pull, DSPERATE_GL_SHADER_DIR "/gl_pull.glsl");
 DS_INCBIN(ds_gl_vk_layout, DSPERATE_VK_DIR "/vk_layout.h");
 DS_INCBIN(ds_gl_ds_shade, DSPERATE_VK_DIR "/ds_shade.glsl");
-DS_INCBIN(ds_gl_ds_spans, DSPERATE_VK_DIR "/ds_spans.glsl");
 DS_INCBIN(ds_gl_lean_vert, DSPERATE_GL_SHADER_DIR "/gl_lean.vert");
 DS_INCBIN(ds_gl_lean_frag, DSPERATE_GL_SHADER_DIR "/gl_lean.frag");
 DS_INCBIN(ds_gl_resolve_frag, DSPERATE_GL_SHADER_DIR "/gl_resolve.frag");
-DS_INCBIN(ds_gl_edge_vert, DSPERATE_GL_SHADER_DIR "/gl_edge.vert");
-DS_INCBIN(ds_gl_edge_frag, DSPERATE_GL_SHADER_DIR "/gl_edge.frag");
-DS_INCBIN(ds_gl_cutout_frag, DSPERATE_GL_SHADER_DIR "/gl_cutout.frag");
+DS_INCBIN(ds_gl_mark_frag, DSPERATE_GL_SHADER_DIR "/gl_mark.frag");
 DS_INCBIN(ds_gl_fs_vert, DSPERATE_GL_SHADER_DIR "/gl_fs.vert");
 DS_INCBIN(ds_gl_null_frag, DSPERATE_GL_SHADER_DIR "/gl_null.frag");
 
@@ -39,13 +36,10 @@ DS_TEXT(text_gl_common, ds_gl_common)
 DS_TEXT(text_gl_pull, ds_gl_pull)
 DS_TEXT(text_vk_layout, ds_gl_vk_layout)
 DS_TEXT(text_ds_shade, ds_gl_ds_shade)
-DS_TEXT(text_ds_spans, ds_gl_ds_spans)
 DS_TEXT(text_lean_vert, ds_gl_lean_vert)
 DS_TEXT(text_lean_frag, ds_gl_lean_frag)
 DS_TEXT(text_resolve_frag, ds_gl_resolve_frag)
-DS_TEXT(text_edge_vert, ds_gl_edge_vert)
-DS_TEXT(text_edge_frag, ds_gl_edge_frag)
-DS_TEXT(text_cutout_frag, ds_gl_cutout_frag)
+DS_TEXT(text_mark_frag, ds_gl_mark_frag)
 DS_TEXT(text_fs_vert, ds_gl_fs_vert)
 DS_TEXT(text_null_frag, ds_gl_null_frag)
 #undef DS_TEXT
@@ -66,7 +60,6 @@ void resolve(const std::string& in, std::string& out) {
       Text t;
       if (name == "vk_layout.h") t = text_vk_layout();
       else if (name == "ds_shade.glsl") t = text_ds_shade();
-      else if (name == "ds_spans.glsl") t = text_ds_spans();
       else if (name == "gl_common.glsl") t = text_gl_common();
       else if (name == "gl_pull.glsl") t = text_gl_pull();
       if (t.data) resolve(std::string(t.data, t.size), out);

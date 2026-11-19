@@ -99,19 +99,27 @@ public:
     // VK_KHR_shader_atomic_int64 + shaderInt64: without it, the visibility
     // pass's atomicMin owner key can't run and the ordered loop draws the whole list.
     bool int64_atomics = false;
+    // fragmentStoresAndAtomics: fragment shaders may write storage buffers (a
+    // decode pass noting per texture whether any texel is transparent).
+    bool fragment_stores = false;
     double timestamp_period_ns = 0;   // GPU timestamp ns/tick on the compute queue, 0 if none (DS_VK_TIMING=1)
     // dma-buf IMPORT: frontend scanout buffers bindable as images the GPU
     // writes. drm_modifier: LINEAR layout stated explicitly, else VK_IMAGE_TILING_LINEAR.
     bool dmabuf_import = false;
     bool drm_modifier = false;
     // Queue does graphics + VK_EXT_rasterization_order_attachment_access:
-    // triangle path's translucent tail reads its own colour attachment in
-    // one draw; without it, a barrier per polygon (correct, slower).
+    // the lean raster draws a translucent run in one pass, reading its own
+    // colour attachment in rasterisation order (vk_lean.cpp, DS_LEAN_FETCH).
     bool graphics = false;
     bool ordered_attachments = false;
+    bool ordered_depth = false;   // ... and the depth attachment likewise (the lean raster's in-tile fog)
+    // shaderFloat16 (enabled): explicit fp16 arithmetic, the one-pass translucency's
+    // copy of the blend unit (lean.frag DS_FETCH), which RelaxedPrecision alone does not get.
+    bool float16 = false;
     // 4x multisampled R32UI colour and depth attachments, and sample-rate
     // shading (enabled): the triangle path's MSAA.
     bool msaa4 = false;
+    bool depth_resolve = false;   // VK_KHR_depth_stencil_resolve (sample 0): the lean raster's multisampled frames resolved on the tile
     // The present extensions (set_present_extensions) and VK_KHR_swapchain are enabled.
     bool present = false;
   };

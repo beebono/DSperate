@@ -28,7 +28,9 @@ public:
   const u32* lookup(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0);
   // Same, plus identity: `id` is stable for the entry's life, `version` counts
   // decodes, so a caller keeping its own copy can tell if it's stale.
-  struct Ref { const u32* texels = nullptr; u32 words = 0; u32 id = 0; u32 version = 0; bool transparent = false; };   // transparent: any texel has alpha 0
+  // transparent: any texel has alpha 0; alpha_grid: where, as 8x8 blocks (alpha_grid.h).
+  // grid31, grid_part: the blocks with a texel of alpha 31, and of alpha 1 to 30 (the formats with an alpha field alone; the others: all, none).
+  struct Ref { const u32* texels = nullptr; u32 words = 0; u32 id = 0; u32 version = 0; bool transparent = false; u64 alpha_grid = 0; u64 grid31 = 0, grid_part = 0; };
   Ref lookup_ref(const VramMap& vm, u32 fmt, u32 base, u32 width, u32 height, u32 texpal, u32 alpha0);
   void clear();
   u32  decodes_this_frame() const { return decodes_; }
@@ -43,6 +45,8 @@ private:
     u64 validated = 0, used = 0; // frames
     u32 id = 0, version = 0;     // identity and decode count, for Ref
     bool transparent = false;
+    u64 alpha_grid = 0;          // alpha_grid_of(texels)
+    u64 grid31 = ~u64{0}, grid_part = 0;
     u32 gen = 0, banks = 0;      // generation and banks last validated at
     u64 sig = 0;                 // block_signature of the ranges then
   };

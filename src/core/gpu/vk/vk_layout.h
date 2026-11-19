@@ -40,6 +40,11 @@ using uint = u32;
 // transparent index, or direct-colour alpha bit); without it every texel is
 // alpha 31 and needs no sample for the alpha test.
 #define DS_PF_TEX_ALPHA   0x0040u
+// A translucent polygon's pixels are drawn opaque where their alpha is 31 and blended elsewhere, a pass each
+// (lean_runs.h). A31_NONE: none of its pixels can have alpha 31 (no first pass); A31_ALL: none can have an
+// alpha from 1 to 30 (no second pass). From the polygon's alpha and mode and its texture's texels (alpha_grid.h).
+#define DS_PF_A31_NONE    0x0100u
+#define DS_PF_A31_ALL     0x0200u
 
 // Shadow mask RUN INDEX, per polygon per scanline. The DS clears the stencil
 // per-scanline at the start of a mask run, but a tiled raster can't see that
@@ -69,7 +74,7 @@ struct GpuPoly {
   uint   tex_w, tex_h;  // decoded texture dimensions, texels
   uint   flags;         // DS_PF_*
   DS_INT ytop, ybot;    // screen scanline range, inclusive
-  uint   span_base;     // first row of this polygon in the span table (gpu_span_rows), DS_SPAN_NONE for none
+  uint   span_base;     // unused: DS_SPAN_NONE
   uint   vbot;          // slot of the bottom vertex (unused by the lean path)
   DS_INT xmin, xmax;    // screen x bounds, for the binning pass
   uint   row_base;      // lean path: the polygon's s range, min | max << 16, each + 32768 (the fragment stage's clamp)
@@ -95,24 +100,7 @@ struct GpuRow {
 #define DS_VIS_ROWS  8
 #define DS_VIS_LANES 8
 
-// Span table rows a frame needs (sum of polygons' clamped heights); refused,
-// not truncated, if it wants more. Worst case 2048*192 falls back to the CPU.
-#define DS_MAX_SPAN_ROWS 49152
-
-// The lean path's span table: the CPU raster's own per-row span endpoints
-// (Renderer3D::gpu_span_rows walks the polygon's edges with its Slope and
-// Interp code), so the fragment stage can interpolate colour and texcoords
-// along the row exactly as the hardware does and the GPU raster's texels
-// match the CPU raster's. Per row of a polygon's [max(ytop, 0),
-// min(ybot, 191)], from GpuPoly::span_base, DS_SPAN_WORDS words:
-//   0 xstart  1 xend (inclusive, the right-edge push applied)  2 wl  3 wr
-//   4 left r | g << 10 | b << 20 (9-bit)   5 left s | t << 16 (12.4, s16)
-//   6 right rgb                            7 right st
-// DS_SPAN_NONE marks a polygon without rows (a frame over DS_MAX_SPAN_ROWS,
-// or a recorded dump): the stage falls back to the hardware's interpolation.
-#define DS_SPAN_WORDS 8
-#define DS_SPAN_NONE 0xFFFFFFFFu
-#define DS_SPAN_TABLE_WORDS (DS_SPAN_WORDS * DS_MAX_SPAN_ROWS)
+#define DS_SPAN_NONE 0xFFFFFFFFu   // GpuPoly::span_base, always (the span table is gone; the field keeps the record's layout)
 
 // Per-frame constants; pushed, not a buffer (changes every frame, small).
 struct GpuFrame {
@@ -129,7 +117,7 @@ struct GpuFrame {
   // [first_ordered, npoly) is the ordered tail. opaque_rows is the prefix's span-table size.
   uint   first_ordered;
   uint   opaque_rows;
-  uint   nrows;         // span rows this frame, all polygons: the span pass is one lane per row
+  uint   nrows;         // unused (0)
   uint   flags;         // DS_FF_*
   uint   flags2;        // DS_FF2_* (flags is full: bits 16-31 are the shadow run)
   // GL raster, W-buffered frames under DS_WCLIP: the clip z carries
@@ -143,14 +131,15 @@ struct GpuFrame {
 #define DS_FF_FACE_BACK  0x4u  // triangle path opaque draw, back-facing only
 #define DS_FF_FACE_FRONT 0x8u  // ... front-facing only, drawn second, LESS_OR_EQUAL (wins ties over opaque back-facing)
 #define DS_FF_RUN_SHIFT 16u  // bits 16-31: shadow-mask run this draw belongs to
-#define DS_FF_ROWS     0x2000u // span table holds this frame's rows (edge flags/coverage for edge marking, fast AA)
 #define DS_FF_AAFAST   0x4000u // post.comp: fast AA, edge pixels blended with outside neighbour, two stages
 #define DS_FF_POST2    0x8000u // post.comp: stage 2 of fast AA (stage 1 wrote fogged/marked pixels to the scratch plane)
 // Smooth-3D present filter: fast AA's stage 2 writes each pixel's edge
 // record to the edge plane instead of blending; present stage splits it.
 #define DS_FF2_SMOOTH  0x1u
 #define DS_FF2_MSAA    0x2u   // 4x MSAA: vertices on pixel corners, so coverage is the polygon's true area
-#define DS_FF2_CUTOUT  0x4u   // the edge cut's cut-out pass (video.aa = enhanced): texture cut-out edges too
+#define DS_FF2_GAME_AA 0x10u   // the game has the DS's anti-aliasing on (DISP3DCNT bit 4, which dispcnt loses with video.aa off): edge marking's half coverage
+#define DS_FF2_CENTRE  0x20u  // polygons of four or more vertices drawn as a fan around their centre (lean.vert)
+#define DS_FF2_EDGEMARK 0x8u  // the draw leaves each pixel's front opaque polygon id, fog bit and depth for the edge marking pass (lean_mark.frag)
 
 // Render state too large for push constants (fog table, edge colours, toon
 // table). Uploaded every frame, 320 bytes, cheaper than tracking changes.

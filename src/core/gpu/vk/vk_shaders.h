@@ -15,16 +15,18 @@ struct Spirv {
 };
 
 Spirv shader_tri_fs();       // a fullscreen triangle (the resolve subpass)
-Spirv shader_lean_vert();    // lean path (vk_lean.cpp): fans at 1x, MSAA vertex placement
+Spirv shader_lean_vert();    // lean path (vk_lean.cpp): each polygon a fan
 Spirv shader_lean_frag();    // ... its one fragment stage
 Spirv shader_lean_frag_early();   // ... without the alpha test (early depth test) for polygons that cannot fail it
 Spirv shader_lean_frag_opq();     // ... a translucent polygon's alpha-31 pixels only (drawn as opaque)
 Spirv shader_lean_frag_trans();   // ... its other pixels only (the translucent passes)
+Spirv shader_lean_frag_fetch(bool ds_blend);   // a translucent run in one pass, the tile read back (-DDS_ALPHA_SEL=2 -DDS_FETCH=1, or =2: the DS blend)
 Spirv shader_lean_resolve(); // ... and the resolve into the 3D layer record
-Spirv shader_lean_edge_vert();     // the edge cut: a band around each polygon edge ...
-Spirv shader_lean_edge_frag();     // ... placing the edge line in the pixels it crosses (lean_edge.vert/.frag)
-Spirv shader_lean_cutout_frag();   // ... and cut-out textures' edges (lean_cutout.frag)
 Spirv shader_lean_resolve_1x();   // ... the same over single-sample attachments (aa off)
+Spirv shader_lean_mark();         // ... edge marking over the finished record (lean_mark.frag)
+Spirv shader_lean_down();         // ... the 1x record of a frame drawn above 1x (lean_down.frag)
+Spirv shader_lean_msdec();        // ... the record of a multisampled frame from the hardware's resolve (lean_msdec.frag)
+Spirv shader_lean_fog();          // ... the fog as the draw subpass's last draw (the direct output)
 
 } // namespace ds::gpu::vk
 

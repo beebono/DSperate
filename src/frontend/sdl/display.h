@@ -47,15 +47,15 @@ public:
   bool open(const char* title, int scale, bool fullscreen, bool linear, bool vsync, const Layout& layout, int only_screen = -1, int display_index = 0);
   void close();
 
-  // `edges`: the edge cut's planes for fb (core/gpu/edge_cut.h), or null.
-  // Only a Vulkan present cuts; the others ignore them.
-  void draw(const u32* const fb[SCREENS], const EdgePlanes* edges = nullptr);
+  // `merge`: the 3D merge for fb (video/presenter.h), or null; only for a
+  // window merge3d_ok() said yes to before the frame was drawn.
+  void draw(const u32* const fb[SCREENS], const Merge3D* merge = nullptr);
   // The frame loop's present: each GPU-presenting window of `ds` takes the
   // frame on the present thread (present_thread.h) and this returns once the
   // frame is copied out, so `fb` may change straight after. The others draw
   // here, as draw() does. Every other call on a window waits for its present
   // first, so none of them sees one half done.
-  static void draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const EdgePlanes* edges = nullptr);
+  static void draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const Merge3D* merge = nullptr);
 
   // Per-scanline scaling: the core scales each line into place as it's
   // produced, straight into the window surface or a scanout tier's buffer
@@ -138,6 +138,21 @@ public:
   // with its GL context handed to that thread (open_renderer).
   bool async_present() const { return gpu_ != nullptr || ren_threaded_; }
   bool vk_present() const { return gpu_ && gpu_->kind() == FramePresenter::Kind::Vulkan; }
+  // The Vulkan present can put the 3D layer into any screen this window
+  // shows (Merge3D): its views sample nearest and nothing corrects colours
+  // or draws cells before the merge.
+  bool merge3d_ok() const;
+  // Where `screen` shows in this window, in the canvas's coordinates; false if it does not.
+  bool screen_rect(int screen, frontend::Rect& out) const {
+    for (int i = 0; i < nviews_; ++i) if (views_[i].shown && views_[i].screen == screen) { out = views_[i].rect; return true; }
+    return false;
+  }
+  // The largest whole scale a shown view reaches, rounded up (a 640x480 view: 3): no finer 3D image shows more on this window.
+  int max_view_scale() const {
+    int m = 1;
+    for (int i = 0; i < nviews_; ++i) if (views_[i].shown) m = std::max({m, (views_[i].rect.w + static_cast<int>(SCREEN_W) - 1) / static_cast<int>(SCREEN_W), (views_[i].rect.h + static_cast<int>(SCREEN_H) - 1) / static_cast<int>(SCREEN_H)});
+    return m;
+  }
   // Colour correction for the Vulkan present to apply as it uploads the
   // frames (Gpu::colour_lut), or null; ignored by every other route, where
   // the core corrects.
@@ -280,7 +295,7 @@ private:
   // the overlay's rect) so it can be presented on another.
   struct GpuFrame { FramePresenter* p = nullptr; FramePresenter::View v[SCREENS]; int n = 0; FramePresenter::Params params; };
   bool prepare_gpu(GpuFrame& f);        // false: nothing to present (the presenter was lost)
-  void draw_gpu(const u32* const fb[SCREENS], const EdgePlanes* edges);
+  void draw_gpu(const u32* const fb[SCREENS], const Merge3D* merge);
   mutable u64       job_ = 0;             // present thread ticket of this window's last frame; 0 once waited for
   void sync() const;                    // wait for it
   SDL_Surface*      surf_ = nullptr;    // window surface; owned by SDL

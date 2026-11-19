@@ -4,9 +4,10 @@
 
 #include "core/gpu/gl/gl_api.h"
 #include "core/gpu/gl/gl_shaders.h"
-#include "core/gpu/vk/vk_seams.h"
+#include "core/gpu/vk/lean_runs.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -21,14 +22,17 @@ namespace ds::gpu::gl {
 using namespace ds::gpu::vk;   // the layout types (vk_layout.h)
 
 namespace {
-constexpr u32 W = 256, H = 192;
+u32 W = 256, H = 192;   // 256 * scale x 192 * scale (DS_LEAN_SCALE, probe-only: the renderer reads the record as 1x)
+// DS_LEAN_SKIP=hex (debug, vk_lean.cpp's pass-kind bits): 0 early opaque, 1 alpha-tested opaque, 2 translucent alpha-31,
+// 3 translucent A, 4 translucent B, 5 shadow prep, 6 shadow, 7 shadow mask (+ clear), 8 opaque in the tail, 9 resolve, 10 record readback.
+const u32 g_skip = std::getenv("DS_LEAN_SKIP") ? static_cast<u32>(std::strtoul(std::getenv("DS_LEAN_SKIP"), nullptr, 16)) : 0u;
 constexpr u32 kTexelWords = 2u << 20;   // 8 MB of decoded texels, as the Vulkan raster's arena
 constexpr u32 kMaxDraws = 4096;
 constexpr u32 kPullW = 1024;            // the polygon/vertex textures' width in texels
 // The stencil layout and the pass kinds, vk_lean.cpp's.
 constexpr u32 S_DRAWN = 0x80, S_MASK = 0x40, S_T = 0x20, S_CODE = 0x1F;
-enum Pipe : u32 { P_OPAQUE = 0, P_TRANS_A, P_TRANS_B, P_TRANS_A_DW, P_TRANS_B_DW, P_MASK, P_SHADOW, P_SHADOW_PREP, P_MASK_CLEAR, P_OPAQUE_EARLY, P_TRANS_OPQ, P_COUNT };
-enum Variant : u32 { V_PLAIN = 0, V_EARLY, V_OPQ, V_TRANS, V_COUNT };   // the fragment stage's build
+enum Pipe : u32 { P_OPAQUE = 0, P_TRANS_A, P_TRANS_B, P_TRANS_A_DW, P_TRANS_B_DW, P_MASK, P_SHADOW, P_SHADOW_PREP, P_MASK_CLEAR, P_OPAQUE_EARLY, P_TRANS_OPQ, P_TRANS_ONE, P_TRANS_ONE_DW, P_COUNT };
+enum Variant : u32 { V_PLAIN = 0, V_EARLY, V_OPQ, V_TRANS, V_FETCH, V_COUNT };   // the fragment stage's build (V_FETCH: a translucent run in one pass, d.fetch)
 double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }
 
@@ -37,29 +41,52 @@ struct Lean::Impl {
   EGLDisplay dpy = nullptr;
   EGLContext ctx = nullptr;
   EGLSurface surf = nullptr;
-  bool edges = false, timing = false, indexed = false, egl_sync = false, nostencil = false, wclip = false, span_exact = false;
+  bool timing = false, indexed = false, egl_sync = false, nostencil = false, wclip = false;
+  u32 fetch = 0;   // translucent runs in one pass through GL_ARM_shader_framebuffer_fetch: 1 the blend unit's maths, 2 the DS's (DS_LEAN_FETCH)
   static constexpr u32 kSlots = 4;
+  u32 scale = 1;
+  double flush_at[kSlots] = {};      // when each slot's frame was flushed to the GPU
+  std::atomic<u64> last_fence_ns{0}; // flush to fence signal of the last collected frame (an idle-GPU probe's GPU time)
   // Host staging as the Vulkan raster has it; the slot's device copies are
   // the persistently mapped buffers below (and the vertex stage's textures).
   std::vector<GpuPoly> host_polys, sorted;
   std::vector<GpuVert> host_verts;
-  vk::SeamTable seams;   // the band pass's shared-edge marks (vk_seams.h)
-  std::vector<u32> host_spans;
   GpuPost host_post{};
   std::vector<std::pair<s64, u32>> key;
-  GLuint ssbo_polys[kSlots] = {}, ssbo_spans[kSlots] = {}, ssbo_post[kSlots] = {}, ubo_frame[kSlots] = {}, ssbo_texels = 0;
-  void* map_polys[kSlots] = {}; void* map_spans[kSlots] = {}; void* map_post[kSlots] = {}; void* map_frame[kSlots] = {}; u32* map_texels = nullptr;
+  GLuint ssbo_polys[kSlots] = {}, ssbo_post[kSlots] = {}, ubo_frame[kSlots] = {}, ssbo_texels = 0;
+  void* map_polys[kSlots] = {}; void* map_post[kSlots] = {}; void* map_frame[kSlots] = {}; u32* map_texels = nullptr;
   GLuint tex_polys[kSlots] = {}, tex_verts[kSlots] = {};
-  GLuint t_col = 0, t_fog = 0, t_ids = 0, t_ds = 0, t_ebyte = 0, t_res = 0;
-  GLuint fbo_draw = 0, fbo_edge = 0, fbo_res = 0;
-  GLuint pbo_out[kSlots] = {}, pbo_edge[kSlots] = {};
-  const u32* map_out[kSlots] = {}; const u8* map_edge[kSlots] = {};
-  // The record and the edge bytes copied out of the mapped PBOs (uncached memory on Mali) into host memory the compositor can read (finish_slot).
+  GLuint t_col = 0, t_fog = 0, t_ids = 0, t_ds = 0, t_res = 0;
+  GLuint fbo_draw = 0, fbo_res = 0;
+  GLuint pbo_out[kSlots] = {};
+  const u32* map_out[kSlots] = {};
+  // The record copied out of the mapped PBOs (uncached memory on Mali) into host memory the compositor can read (finish_slot).
   std::vector<u32> out_host[kSlots];
-  std::vector<u8> edge_bytes[kSlots];
-  GLuint prog_draw[2][V_COUNT] = {};   // [wdepth][variant]
-  GLuint prog_prep = 0, prog_mask = 0, prog_resolve = 0, prog_band = 0, prog_cutout = 0;
-  GLint loc_base_draw[2][V_COUNT] = {}, loc_base_prep = -1, loc_base_band = -1, loc_base_cutout = -1;
+  // The direct output (GPU-RENDER-PLAN B9): a frame without fog has no resolve pass. The
+  // draw's colour attachment is read back as the record, its alpha byte decoded in the copy out of the PBO.
+  bool direct = true;
+  bool direct_slot[kSlots] = {};
+  void copy_out(u32 slot) {
+    u32* dst = out_host[slot].data();
+    std::memcpy(dst, map_out[slot], sizeof(u32) * W * H);   // out of the uncached map in one go; decoded in cached memory
+    if (!direct_slot[slot]) return;
+    for (u32 i = 0, n = W * H; i < n; ++i) {   // as gl_resolve.frag: undrawn 0, else the channels and the 5-bit alpha out of (a + 1) * 8
+      const u32 w = dst[i], ab = w >> 24;
+      const u32 a5 = ab < 4u ? 0u : std::min(31u, (ab + 4u) / 8u - 1u);
+      dst[i] = ab ? ((w & 0x00FFFFFFu) | (a5 << 24)) : 0u;
+    }
+  }
+  // Program sets: 0 with mode-2 (toon / highlight) shading, 1 without (DS_TOON false: a frame without mode-2
+  // polygons). [set][W-depth][variant].
+  GLuint prog_draw[2][2][V_COUNT] = {};
+  bool toon_now = true;     // ... has mode-2 (toon / highlight) polygons
+  GLuint prog_prep = 0, prog_mask = 0, prog_resolve = 0;
+  // Edge marking (vk_lean.cpp's Impl::mark has the design): t_ids as the draw's third attachment holds the id word,
+  // and prog_mark recolours the record's edge pixels, in fbo_res or, for a frame whose colour attachment is the
+  // record, in fbo_col. DS_LEAN_EDGEMARK=0 leaves the pass out.
+  bool mark = false, mark_on = true;
+  GLuint prog_mark = 0, fbo_col = 0;
+  GLint loc_base_draw[2][2][V_COUNT] = {}, loc_base_prep = -1;
   GLuint vao = 0;
   GLuint query[kSlots] = {};
   // The slot state: submit() on the job thread, the readers on any. A
@@ -110,8 +137,8 @@ struct Lean::Impl {
       EGLSyncKHR sy = sync[slot];
       lk.unlock();
       if (sy) a->eglClientWaitSyncKHR(dpy, sy, 0, EGL_FOREVER_KHR);
-      std::memcpy(out_host[slot].data(), map_out[slot], sizeof(u32) * W * H);
-      if (edges) { const u8* e = map_edge[slot]; u8* o = edge_bytes[slot].data(); for (u32 k = 0; k < W * H; ++k) o[k] = e[4 * k]; }
+      last_fence_ns.store(static_cast<u64>((now_ms() - flush_at[slot]) * 1e6), std::memory_order_relaxed);
+      if (!((g_skip >> 10) & 1)) copy_out(slot);
       lk.lock();
       live[slot] = false; valid[slot] = true; collected = g;
       cv.notify_all();
@@ -125,19 +152,20 @@ struct Lean::Impl {
       // Ours on this thread: the objects go now. On another thread (the
       // job thread, which keeps its last context) EGL frees them with the
       // context once that thread binds another.
-      for (auto& row : prog_draw) for (GLuint p : row) if (p) a->glDeleteProgram(p);
-      for (GLuint p : {prog_prep, prog_mask, prog_resolve, prog_band, prog_cutout}) if (p) a->glDeleteProgram(p);
+      for (auto& set : prog_draw) for (auto& row : set) for (GLuint p : row) if (p) a->glDeleteProgram(p);
+      for (GLuint p : {prog_prep, prog_mask, prog_resolve, prog_mark}) if (p) a->glDeleteProgram(p);
+      if (fbo_col) a->glDeleteFramebuffers(1, &fbo_col);
       for (u32 i = 0; i < kSlots; ++i) {
-        GLuint bufs[6] = {ssbo_polys[i], ssbo_spans[i], ssbo_post[i], ubo_frame[i], pbo_out[i], pbo_edge[i]};
-        a->glDeleteBuffers(6, bufs);
+        GLuint bufs[4] = {ssbo_polys[i], ssbo_post[i], ubo_frame[i], pbo_out[i]};
+        a->glDeleteBuffers(4, bufs);
         GLuint texs[2] = {tex_polys[i], tex_verts[i]};
         a->glDeleteTextures(2, texs);
       }
       if (ssbo_texels) a->glDeleteBuffers(1, &ssbo_texels);
-      GLuint texs[6] = {t_col, t_fog, t_ids, t_ds, t_ebyte, t_res};
-      a->glDeleteTextures(6, texs);
-      GLuint fbos[3] = {fbo_draw, fbo_edge, fbo_res};
-      a->glDeleteFramebuffers(3, fbos);
+      GLuint texs[5] = {t_col, t_fog, t_ids, t_ds, t_res};
+      a->glDeleteTextures(5, texs);
+      GLuint fbos[2] = {fbo_draw, fbo_res};
+      a->glDeleteFramebuffers(2, fbos);
       if (vao) a->glDeleteVertexArrays(1, &vao);
       if (timing && a->glDeleteQueriesEXT) a->glDeleteQueriesEXT(kSlots, query);
       a->eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -149,22 +177,17 @@ struct Lean::Impl {
 };
 
 Lean::~Lean() { if (d_) d_->destroy(); }
-bool Lean::edges() const { return d_->edges; }
 GpuPoly* Lean::poly_buffer() { return d_->host_polys.data(); }
 GpuVert* Lean::vert_buffer() { return d_->host_verts.data(); }
 u32* Lean::texel_buffer(u32* cap) { if (cap) *cap = kTexelWords; return d_->map_texels; }
 GpuPost* Lean::post_buffer() { return &d_->host_post; }
-u32* Lean::span_buffer() { return d_->host_spans.data(); }
 const u32* Lean::output() { return frame_ready(0, false); }
 bool Lean::has_frame() const { return d_->gen != 0; }
 u64 Lean::gpu_ns() const { return d_->last_gpu_ns; }
+u32 Lean::scale() const { return d_->scale; }
+u64 Lean::fence_ns() const { return d_->last_fence_ns.load(std::memory_order_relaxed); }
 u32 Lean::draws() const { return d_->last_draws; }
 Lean::Stats Lean::stats(bool reset) { std::lock_guard<std::mutex> lk(d_->m); Stats s = d_->st; if (reset) d_->st = Stats{}; return s; }
-const u8* Lean::edges_for(const u32* o) const {
-  if (!d_->edges) return nullptr;
-  for (u32 i = 0; i < Impl::kSlots; ++i) if (o == d_->out_host[i].data()) return d_->edge_bytes[i].data();
-  return nullptr;
-}
 
 namespace {
 bool has_gl_ext(Api& a, const char* name) {
@@ -225,8 +248,8 @@ void* persistent(Api& a, GLenum target, GLuint* buf, size_t size, bool read) {
 }
 }
 
-std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
-  (void)aa;   // no MSAA on this backend: the edge cut is its AA
+std::unique_ptr<Lean> Lean::create(bool aa, std::string* why) {
+  (void)aa;   // no MSAA on this backend
   auto fail_null = [&](const char* m) { if (why) *why = m; return nullptr; };
   if (std::getenv("DS_GL3D") && std::atoi(std::getenv("DS_GL3D")) == 0) return fail_null("disabled (DS_GL3D=0)");
   Api& a = gl_api();
@@ -234,7 +257,8 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
   std::unique_ptr<Lean> self(new Lean);
   self->d_ = std::make_unique<Impl>();
   Impl& d = *self->d_;
-  d.a = &a; d.edges = edges;
+  d.a = &a;
+  { const char* e = std::getenv("DS_LEAN_SCALE"); d.scale = std::clamp(e ? static_cast<u32>(std::atoi(e)) : 1u, 1u, 4u); W = 256 * d.scale; H = 192 * d.scale; }
   auto fail = [&](const char* m) { if (why) { *why = m; if (a.glGetError) { const GLenum e = a.glGetError(); if (e) *why += " (GL error " + std::to_string(e) + ")"; } } return nullptr; };
 
   // EGL: the default display, an ES 3.1 context on no surface (a 1x1
@@ -281,43 +305,46 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
   if (gmaj < 3 || (gmaj == 3 && gmin < 1)) return fail("OpenGL ES 3.1 needed");
   GLint fssbo = 0; a.glGetIntegerv(GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS, &fssbo);
   if (fssbo < 4) return fail("fewer than four fragment storage blocks");
+  if (const char* e = std::getenv("DS_GL_EXTS"); e && std::atoi(e)) {   // debug: the context's GL extensions, to stderr
+    GLint n = 0; a.glGetIntegerv(GL_NUM_EXTENSIONS, &n);
+    for (GLint i = 0; i < n; ++i) std::fprintf(stderr, "gl ext: %s\n", reinterpret_cast<const char*>(a.glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i))));
+  }
   if (!a.glBufferStorageEXT || !(has_gl_ext(a, "GL_EXT_buffer_storage") || gmaj > 3)) return fail("no EXT_buffer_storage");
   d.indexed = a.glColorMaski && a.glEnablei && a.glDisablei && a.glBlendFuncSeparatei && a.glBlendEquationSeparatei &&
               (has_gl_ext(a, "GL_EXT_draw_buffers_indexed") || has_gl_ext(a, "GL_OES_draw_buffers_indexed") || (gmaj == 3 && gmin >= 2) || gmaj > 3);
+  d.direct = true;
   d.egl_sync = has_egl_ext(egl_exts, "EGL_KHR_fence_sync") && a.eglCreateSyncKHR && a.eglClientWaitSyncKHR && a.eglGetSyncAttribKHR;
   d.timing = (std::getenv("DS_GL_TIMING") || std::getenv("DS_VK_TIMING")) && has_gl_ext(a, "GL_EXT_disjoint_timer_query") && a.glGenQueriesEXT && a.glGetQueryObjectui64vEXT;
   d.nostencil = std::getenv("DS_LEAN_NOSTENCIL") && std::atoi(std::getenv("DS_LEAN_NOSTENCIL")) != 0;
+  // A translucent run in one pass (B3, vk_lean.cpp) through GL_ARM_shader_framebuffer_fetch, on by default:
+  // DS_LEAN_FETCH=2 (default, as the Vulkan raster) the DS's blend, 1 the blend unit's maths, 0 off.
+  if (const char* e = std::getenv("DS_LEAN_FETCH"); (!e || std::atoi(e) > 0) && d.indexed && !d.nostencil && has_gl_ext(a, "GL_ARM_shader_framebuffer_fetch")) d.fetch = e ? static_cast<u32>(std::min(2, std::atoi(e))) : 2u;
 
   // Staging and the mapped buffers.
   d.host_polys.resize(DS_MAX_POLYS); d.sorted.resize(DS_MAX_POLYS);
   d.host_verts.resize(DS_MAX_VERTS);
-  d.host_spans.resize(DS_SPAN_TABLE_WORDS);
   d.map_texels = static_cast<u32*>(persistent(a, GL_SHADER_STORAGE_BUFFER, &d.ssbo_texels, sizeof(u32) * kTexelWords, false));
   if (!d.map_texels) return fail("texel arena");
   for (u32 i = 0; i < Impl::kSlots; ++i) {
     d.map_polys[i] = persistent(a, GL_SHADER_STORAGE_BUFFER, &d.ssbo_polys[i], sizeof(GpuPoly) * DS_MAX_POLYS, false);
-    d.map_spans[i] = persistent(a, GL_SHADER_STORAGE_BUFFER, &d.ssbo_spans[i], sizeof(u32) * DS_SPAN_TABLE_WORDS, false);
     d.map_post[i] = persistent(a, GL_SHADER_STORAGE_BUFFER, &d.ssbo_post[i], sizeof(GpuPost), false);
     d.map_frame[i] = persistent(a, GL_UNIFORM_BUFFER, &d.ubo_frame[i], sizeof(GpuFrame), false);
     d.map_out[i] = static_cast<const u32*>(persistent(a, GL_PIXEL_PACK_BUFFER, &d.pbo_out[i], sizeof(u32) * W * H, true));
-    if (!d.map_polys[i] || !d.map_spans[i] || !d.map_post[i] || !d.map_frame[i] || !d.map_out[i]) return fail("buffer mapping");
+    if (!d.map_polys[i] || !d.map_post[i] || !d.map_frame[i] || !d.map_out[i]) return fail("buffer mapping");
     d.out_host[i].assign(W * H, 0);
-    if (d.edges) {
-      d.map_edge[i] = static_cast<const u8*>(persistent(a, GL_PIXEL_PACK_BUFFER, &d.pbo_edge[i], 4 * W * H, true));
-      if (!d.map_edge[i]) return fail("edge buffer mapping");
-      d.edge_bytes[i].assign(W * H, 0);
-    }
     d.tex_polys[i] = tex2d(a, GL_RGBA32UI, kPullW, DS_MAX_POLYS * 4 / kPullW);
     d.tex_verts[i] = tex2d(a, GL_RGBA32UI, kPullW, DS_MAX_VERTS * 3 / kPullW);
   }
   static_assert(sizeof(GpuPoly) == 64 && sizeof(GpuVert) == 48, "gl_pull.glsl reads four and three texels");
   static_assert((DS_MAX_POLYS * 4) % kPullW == 0 && (DS_MAX_VERTS * 3) % kPullW == 0, "whole texture rows");
 
-  // Attachments: colour, fog bit, the polygon record (edges), depth/stencil;
-  // the edge bytes; the resolved record. Float depth first, as vk_lean.cpp.
+  // Attachments: colour, fog bit, edge marking's id word, depth/stencil;
+  // the resolved record. Float depth first, as vk_lean.cpp.
   d.t_col = tex2d(a, GL_RGBA8, W, H);
   d.t_fog = tex2d(a, GL_R8, W, H);
-  if (d.edges) { d.t_ids = tex2d(a, GL_R16UI, W, H); d.t_ebyte = tex2d(a, GL_RGBA8, W, H); }
+  d.mark = d.indexed;   // the third attachment needs its own write mask
+  d.mark_on = !(std::getenv("DS_LEAN_EDGEMARK") && std::atoi(std::getenv("DS_LEAN_EDGEMARK")) == 0);
+  if (d.mark) d.t_ids = tex2d(a, GL_R32UI, W, H);
   d.t_res = tex2d(a, GL_RGBA8, W, H);
   const bool d24 = std::getenv("DS_LEAN_D24") && std::atoi(std::getenv("DS_LEAN_D24")) != 0;
   for (int attempt = d24 ? 1 : 0; attempt < 2 && !d.fbo_draw; ++attempt) {
@@ -325,10 +352,10 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
     GLuint fbo = 0; a.glGenFramebuffers(1, &fbo); a.glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     a.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.t_col, 0);
     a.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + 1, GL_TEXTURE_2D, d.t_fog, 0);
-    if (d.edges) a.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + 2, GL_TEXTURE_2D, d.t_ids, 0);
+    if (d.mark) a.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + 2, GL_TEXTURE_2D, d.t_ids, 0);
     a.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, ds, 0);
     const GLenum bufs[3] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT0 + 1, GL_COLOR_ATTACHMENT0 + 2};
-    a.glDrawBuffers(d.edges ? 3 : 2, bufs);
+    a.glDrawBuffers(d.mark ? 3 : 2, bufs);
     if (a.glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) { d.fbo_draw = fbo; d.t_ds = ds; }
     else { a.glDeleteFramebuffers(1, &fbo); a.glDeleteTextures(1, &ds); }
   }
@@ -336,15 +363,15 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
   a.glGenFramebuffers(1, &d.fbo_res); a.glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_res);
   a.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.t_res, 0);
   if (a.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return fail("resolve framebuffer incomplete");
-  if (d.edges) {
-    a.glGenFramebuffers(1, &d.fbo_edge); a.glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
-    a.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.t_ebyte, 0);
-    if (a.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return fail("edge framebuffer incomplete");
+  if (d.mark) {
+    a.glGenFramebuffers(1, &d.fbo_col); a.glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_col);
+    a.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, d.t_col, 0);
+    if (a.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return fail("edge marking framebuffer incomplete");
   }
   a.glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
   // Programs: the draw's vertex stage with the fragment variants (x the
-  // W-buffer depth write), the stencil-only pair, the resolve, the edge passes.
+  // W-buffer depth write), the stencil-only pair, the resolve, edge marking.
   {
     std::string err;
     // W-buffered frames: the clip z carries wscale / w (early depth test;
@@ -355,23 +382,22 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
     const bool wclip = !(std::getenv("DS_GL_WCLIP") && std::atoi(std::getenv("DS_GL_WCLIP")) == 0);
     d.wclip = wclip;
     const std::string vdefs = wclip ? "#define DS_WCLIP 1\n" : "";
-    // DS_SPAN_EXACT=1: the span table's exact integer interpolation along a
-    // row instead of its float form (ds_spans.glsl), for the draw and the cut-out pass.
-    d.span_exact = std::getenv("DS_SPAN_EXACT") && std::atoi(std::getenv("DS_SPAN_EXACT")) != 0;
-    const std::string sdefs = d.span_exact ? "#define DS_SPAN_EXACT 1\n" : "";
     const GLuint vs_lean = compile(a, GL_VERTEX_SHADER, source(text_lean_vert(), vdefs), &err);
     const GLuint vs_fs = compile(a, GL_VERTEX_SHADER, source(text_fs_vert(), ""), &err);
     const GLuint fs_null = compile(a, GL_FRAGMENT_SHADER, source(text_null_frag(), ""), &err);
     if (!vs_lean || !vs_fs || !fs_null) { if (why) *why = err; return nullptr; }
-    static const char* const variant_defs[V_COUNT] = {"", "#define DS_EARLY 1\n", "#define DS_ALPHA_SEL 1\n", "#define DS_ALPHA_SEL 2\n"};
-    for (u32 wd = 0; wd < 2; ++wd) for (u32 v = 0; v < V_COUNT; ++v) {
-      const std::string defs = std::string(variant_defs[v]) + (wd && !wclip ? "#define DS_WDEPTH 1\n" : "") + sdefs;
+    const std::string fetch_defs = "#extension GL_ARM_shader_framebuffer_fetch : require\n#define DS_ALPHA_SEL 2\n#define DS_FETCH " + std::to_string(d.fetch) + "\n";
+    const std::string variant_defs[V_COUNT] = {"", "#define DS_EARLY 1\n", "#define DS_ALPHA_SEL 1\n", "#define DS_ALPHA_SEL 2\n", fetch_defs};
+    for (u32 sp = 0; sp < 2; ++sp) for (u32 wd = 0; wd < 2; ++wd) for (u32 v = 0; v < V_COUNT; ++v) {
+      if (v == V_FETCH && !d.fetch) continue;
+      const std::string defs = variant_defs[v] + (wd && !wclip ? "#define DS_WDEPTH 1\n" : "") + (sp == 1 ? "#define DS_TOON false\n" : "");
       const GLuint fs = compile(a, GL_FRAGMENT_SHADER, source(text_lean_frag(), defs), &err);
-      d.prog_draw[wd][v] = link(a, vs_lean, fs, &err);
+      GLuint& prog = d.prog_draw[sp][wd][v];
+      prog = link(a, vs_lean, fs, &err);
       if (fs) a.glDeleteShader(fs);
-      if (!d.prog_draw[wd][v]) { if (why) *why = err; return nullptr; }
-      a.glUseProgram(d.prog_draw[wd][v]); sampler(a, d.prog_draw[wd][v], "polytex", 0); sampler(a, d.prog_draw[wd][v], "verttex", 1);
-      d.loc_base_draw[wd][v] = a.glGetUniformLocation(d.prog_draw[wd][v], "u_base");
+      if (!prog) { if (why) *why = err; return nullptr; }
+      a.glUseProgram(prog); sampler(a, prog, "polytex", 0); sampler(a, prog, "verttex", 1);
+      d.loc_base_draw[sp][wd][v] = a.glGetUniformLocation(prog, "u_base");
     }
     d.prog_prep = link(a, vs_lean, fs_null, &err);
     d.prog_mask = link(a, vs_fs, fs_null, &err);
@@ -382,16 +408,12 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
     if (fs_res) a.glDeleteShader(fs_res);
     if (!d.prog_resolve) { if (why) *why = err; return nullptr; }
     a.glUseProgram(d.prog_resolve); sampler(a, d.prog_resolve, "s_col", 2); sampler(a, d.prog_resolve, "s_depth", 3); sampler(a, d.prog_resolve, "s_fog", 4);
-    if (d.edges) {
-      const GLuint vs_edge = compile(a, GL_VERTEX_SHADER, source(text_edge_vert(), vdefs), &err);
-      const GLuint fs_edge = compile(a, GL_FRAGMENT_SHADER, source(text_edge_frag(), vdefs), &err);
-      const GLuint fs_cut = compile(a, GL_FRAGMENT_SHADER, source(text_cutout_frag(), vdefs + sdefs), &err);
-      d.prog_band = link(a, vs_edge, fs_edge, &err);
-      d.prog_cutout = link(a, vs_lean, fs_cut, &err);
-      for (GLuint s : {vs_edge, fs_edge, fs_cut}) if (s) a.glDeleteShader(s);
-      if (!d.prog_band || !d.prog_cutout) { if (why) *why = err; return nullptr; }
-      for (GLuint p : {d.prog_band, d.prog_cutout}) { a.glUseProgram(p); sampler(a, p, "polytex", 0); sampler(a, p, "verttex", 1); sampler(a, p, "s_ids", 2); sampler(a, p, "s_depth", 3); }
-      d.loc_base_band = a.glGetUniformLocation(d.prog_band, "u_base"); d.loc_base_cutout = a.glGetUniformLocation(d.prog_cutout, "u_base");
+    if (d.mark) {
+      const GLuint fs_mark = compile(a, GL_FRAGMENT_SHADER, source(text_mark_frag(), vdefs), &err);
+      d.prog_mark = link(a, vs_fs, fs_mark, &err);
+      if (fs_mark) a.glDeleteShader(fs_mark);
+      if (!d.prog_mark) { if (why) *why = err; return nullptr; }
+      a.glUseProgram(d.prog_mark); sampler(a, d.prog_mark, "s_ids", 5);
     }
     a.glDeleteShader(vs_lean); a.glDeleteShader(vs_fs); a.glDeleteShader(fs_null);
     a.glUseProgram(0);
@@ -405,8 +427,8 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
   if (a.glGetError() != GL_NO_ERROR) return fail("GL error during warm-up");
   if (d.egl_sync) d.collector = std::thread([&d] { d.collect_loop(); });
   self->ready_ = true;
-  std::fprintf(stderr, "gpu lean (OpenGL ES): %s | %s; 1x%s, %s depth/stencil%s%s%s; warm-up %.0f ms\n", a.glGetString(GL_RENDERER), a.glGetString(GL_VERSION), d.edges ? " with the edge cut" : " (no MSAA)",
-               d24 ? "D24S8" : "D32S8", d.span_exact ? ", exact spans" : "", d.indexed ? "" : ", no per-attachment blend", d.egl_sync ? "" : ", no EGL fences (frames finish synchronously)", now_ms() - t_warm);
+  std::fprintf(stderr, "gpu lean (OpenGL ES): %s | %s; 1x%s, %s depth/stencil%s%s%s%s; warm-up %.0f ms\n", a.glGetString(GL_RENDERER), a.glGetString(GL_VERSION), " (no MSAA)",
+               d24 ? "D24S8" : "D32S8", "", d.fetch ? (d.fetch == 2 ? ", one-pass translucency (DS blend)" : ", one-pass translucency") : "", d.indexed ? "" : ", no per-attachment blend", d.egl_sync ? "" : ", no EGL fences (frames finish synchronously)", now_ms() - t_warm);
   return self;
 }
 
@@ -419,12 +441,12 @@ void set_state(Lean::Impl& d, u32 kind, bool eq, u32 ref, bool wbuf) {
   // Nearer is smaller (z, or w by gl_FragDepth); under DS_GL_WCLIP a W-buffered frame holds 1/w: nearer is larger.
   const bool inv = wbuf && d.wclip;
   if (stencil_only) a.glDisable(GL_DEPTH_TEST); else { a.glEnable(GL_DEPTH_TEST); a.glDepthFunc(inv ? (eq ? GL_GEQUAL : GL_GREATER) : (eq ? GL_LEQUAL : GL_LESS)); }
-  a.glDepthMask((kind == P_OPAQUE || kind == P_OPAQUE_EARLY || kind == P_TRANS_OPQ || kind == P_TRANS_A_DW || kind == P_TRANS_B_DW) ? 1 : 0);
+  a.glDepthMask((kind == P_OPAQUE || kind == P_OPAQUE_EARLY || kind == P_TRANS_OPQ || kind == P_TRANS_A_DW || kind == P_TRANS_B_DW || kind == P_TRANS_ONE_DW) ? 1 : 0);
   GLenum cmp = GL_ALWAYS, zfail = GL_KEEP, pass = GL_KEEP; GLuint cmask = 0, wmask = 0;
   switch (kind) {
     case P_OPAQUE: case P_OPAQUE_EARLY: case P_TRANS_OPQ: pass = GL_REPLACE; wmask = S_DRAWN | S_T | S_CODE; break;
     case P_TRANS_A: case P_TRANS_A_DW: cmp = GL_NOTEQUAL; cmask = S_DRAWN; pass = GL_REPLACE; wmask = S_DRAWN | S_T | S_CODE; break;
-    case P_TRANS_B: case P_TRANS_B_DW: cmp = d.nostencil ? GL_ALWAYS : GL_NOTEQUAL; cmask = S_DRAWN | S_T | S_CODE; pass = GL_REPLACE; wmask = S_DRAWN | S_T | S_CODE; break;
+    case P_TRANS_B: case P_TRANS_B_DW: case P_TRANS_ONE: case P_TRANS_ONE_DW: cmp = d.nostencil ? GL_ALWAYS : GL_NOTEQUAL; cmask = S_DRAWN | S_T | S_CODE; pass = GL_REPLACE; wmask = S_DRAWN | S_T | S_CODE; break;
     case P_MASK: zfail = GL_REPLACE; wmask = S_MASK; break;
     case P_MASK_CLEAR: pass = GL_REPLACE; wmask = S_MASK; break;
     case P_SHADOW_PREP: cmp = GL_EQUAL; cmask = S_CODE; pass = GL_REPLACE; wmask = S_MASK; break;
@@ -438,7 +460,10 @@ void set_state(Lean::Impl& d, u32 kind, bool eq, u32 ref, bool wbuf) {
   const bool blend = kind == P_TRANS_B || kind == P_TRANS_B_DW || kind == P_SHADOW;
   if (d.indexed) {
     a.glColorMaski(0, col, col, col, col); a.glColorMaski(1, col, 0, 0, 0); a.glColorMaski(2, ids, 0, 0, 0);
-    if (blend) {
+    if (kind == P_TRANS_ONE || kind == P_TRANS_ONE_DW) {   // the shader blends the colour (framebuffer fetch); the fog bit's MIN stays here
+      a.glDisablei(GL_BLEND, 0);
+      a.glEnablei(GL_BLEND, 1); a.glBlendFuncSeparatei(1, GL_ONE, GL_ONE, GL_ONE, GL_ONE); a.glBlendEquationSeparatei(1, GL_MIN, GL_MIN);
+    } else if (blend) {
       a.glEnablei(GL_BLEND, 0); a.glBlendFuncSeparatei(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE); a.glBlendEquationSeparatei(0, GL_FUNC_ADD, GL_MAX);
       a.glEnablei(GL_BLEND, 1); a.glBlendFuncSeparatei(1, GL_ONE, GL_ONE, GL_ONE, GL_ONE); a.glBlendEquationSeparatei(1, GL_MIN, GL_MIN);   // fog kept only if every layer had it
     } else { a.glDisablei(GL_BLEND, 0); a.glDisablei(GL_BLEND, 1); }
@@ -457,8 +482,9 @@ GLint Lean::Impl::use_kind(u32 kind, bool wbuf, bool eq, u32 ref) {
   if (kind == P_MASK_CLEAR) { prog = prog_mask; loc = -1; }
   else if (kind == P_SHADOW_PREP) { prog = prog_prep; loc = loc_base_prep; }
   else {
-    const u32 v = kind == P_OPAQUE_EARLY ? V_EARLY : kind == P_TRANS_OPQ ? V_OPQ : (kind == P_TRANS_A || kind == P_TRANS_B || kind == P_TRANS_A_DW || kind == P_TRANS_B_DW) ? V_TRANS : V_PLAIN;
-    prog = prog_draw[wbuf ? 1 : 0][v]; loc = loc_base_draw[wbuf ? 1 : 0][v];
+    const u32 v = kind == P_OPAQUE_EARLY ? V_EARLY : kind == P_TRANS_OPQ ? V_OPQ : (kind == P_TRANS_ONE || kind == P_TRANS_ONE_DW) ? V_FETCH : (kind == P_TRANS_A || kind == P_TRANS_B || kind == P_TRANS_A_DW || kind == P_TRANS_B_DW) ? V_TRANS : V_PLAIN;
+    const u32 set = toon_now ? 0u : 1u;
+    prog = prog_draw[set][wbuf ? 1 : 0][v]; loc = loc_base_draw[set][wbuf ? 1 : 0][v];
   }
   if (prog != bound_prog) { a->glUseProgram(prog); bound_prog = prog; }
   set_state(*this, kind, eq, ref, wbuf);
@@ -476,13 +502,15 @@ void Lean::Impl::warm() {
   g.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo_polys[0]);
   g.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, ssbo_texels);
   g.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, ssbo_post[0]);
-  g.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, ssbo_spans[0]);
   g.glBindVertexArray(vao);
   g.glBindFramebuffer(GL_FRAMEBUFFER, fbo_draw);
   g.glViewport(0, 0, W, H);
   g.glEnable(GL_STENCIL_TEST);
+  for (u32 sp = 0; sp < 2; ++sp)
   for (u32 wd = 0; wd < 2; ++wd)
     for (u32 kind = 0; kind < P_COUNT; ++kind) {
+      if ((kind == P_TRANS_ONE || kind == P_TRANS_ONE_DW) && !fetch) continue;
+      toon_now = sp == 0;
       const GLint loc = use_kind(kind, wd != 0, false, 0);
       if (loc >= 0) g.glUniform1i(loc, 0);
       if (kind == P_MASK_CLEAR) g.glDrawArrays(GL_TRIANGLES, 0, 3); else g.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, 1);
@@ -491,13 +519,6 @@ void Lean::Impl::warm() {
   if (indexed) { g.glDisablei(GL_BLEND, 0); g.glDisablei(GL_BLEND, 1); g.glColorMaski(0, 1, 1, 1, 1); g.glColorMaski(1, 1, 1, 1, 1); g.glColorMaski(2, 1, 1, 1, 1); }
   else g.glDisable(GL_BLEND);
   g.glColorMask(1, 1, 1, 1);
-  if (edges) {
-    g.glBindFramebuffer(GL_FRAMEBUFFER, fbo_edge);
-    g.glActiveTexture(GL_TEXTURE0 + 2); g.glBindTexture(GL_TEXTURE_2D, t_ids);
-    g.glActiveTexture(GL_TEXTURE0 + 3); g.glBindTexture(GL_TEXTURE_2D, t_ds);
-    g.glUseProgram(prog_band); g.glUniform1i(loc_base_band, 0); g.glDrawArraysInstanced(GL_TRIANGLES, 0, 60, 1);
-    g.glUseProgram(prog_cutout); g.glUniform1i(loc_base_cutout, 0); g.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, 1);
-  }
   g.glBindFramebuffer(GL_FRAMEBUFFER, fbo_res);
   g.glActiveTexture(GL_TEXTURE0 + 2); g.glBindTexture(GL_TEXTURE_2D, t_col);
   g.glActiveTexture(GL_TEXTURE0 + 3); g.glBindTexture(GL_TEXTURE_2D, t_ds);
@@ -529,6 +550,11 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   }
 
   GpuFrame f = fin;
+  // Polygons of four or more vertices as fans around their centre (lean.vert).
+  const bool centre = true;
+  const bool marking = d.mark && d.mark_on && (f.dispcnt & 0x20u) != 0u;   // edge marking this frame
+  if (marking) f.flags2 |= DS_FF2_EDGEMARK;
+  if (centre) f.flags2 |= DS_FF2_CENTRE;
   const bool wbuf = (f.flags & DS_FF_WBUFFER) != 0;
   // The clip z of a W-buffered frame carries wscale / w (gl_pull.glsl, ds_clip_z).
   f.wscale = 0x3F800000u;   // 1.0f
@@ -541,18 +567,20 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   float wscale_f = 1.0f; std::memcpy(&wscale_f, &f.wscale, sizeof wscale_f);
   GpuPoly* gpw = d.host_polys.data();
   const GpuPoly* gp = gpw;
+  // Fog where a pixel can carry the flag only: an opaque pixel takes its
+  // polygon's fog bit, a translucent one can only clear it (melonDS), so
+  // with neither the rear plane's nor any polygon's bit set no pixel is
+  // fogged, and DISP3DCNT bit 7 goes off for the frame: the resolve skips
+  // fog (and the GLES raster drops depth and fog bit, below). Exact.
+  if ((f.dispcnt & 0x80u) && !(f.clear_attr & 0x8000u) && std::none_of(gp, gp + npoly, [](const GpuPoly& p) { return ((p.attr >> 15) & 1u) != 0u; })) f.dispcnt &= ~0x80u;
   const GpuVert* gv = d.host_verts.data();
-  // Each polygon's texcoord range for the fragment stage's clamp, and its
-  // centroid (28.4, s16 x | y << 16) in vbot for the vertex stage's grow
-  // and the band pass's inside point.
+  // Each polygon's texcoord range for the fragment stage's clamp.
   for (u32 k = 0; k < npoly; ++k) {
     GpuPoly& p = gpw[k];
-    s32 s0 = 0x7FFF, s1 = -0x8000, t0 = 0x7FFF, t1 = -0x8000, cx = 0, cy = 0;
-    for (u32 v = 0; v < p.nverts; ++v) { const GpuVert& q = gv[p.first_vert + v]; s0 = std::min(s0, q.s); s1 = std::max(s1, q.s); t0 = std::min(t0, q.t); t1 = std::max(t1, q.t); cx += q.fx; cy += q.fy; }
+    s32 s0 = 0x7FFF, s1 = -0x8000, t0 = 0x7FFF, t1 = -0x8000;
+    for (u32 v = 0; v < p.nverts; ++v) { const GpuVert& q = gv[p.first_vert + v]; s0 = std::min(s0, q.s); s1 = std::max(s1, q.s); t0 = std::min(t0, q.t); t1 = std::max(t1, q.t);; }
     auto pk = [](s32 lo, s32 hi) { return static_cast<u32>(std::clamp(lo + 32768, 0, 65535)) | (static_cast<u32>(std::clamp(hi + 32768, 0, 65535)) << 16); };
     p.row_base = pk(s0, s1); p.pad_ = pk(t0, t1);
-    if (p.nverts) { cx /= static_cast<s32>(p.nverts); cy /= static_cast<s32>(p.nverts); }
-    p.vbot = (static_cast<u32>(std::clamp(cx, -32768, 32767)) & 0xFFFF) | (static_cast<u32>(std::clamp(cy, -32768, 32767)) << 16);
   }
   // The frame's id codes (vk_lean.cpp: the stencil layout).
   u8 code[64] = {};
@@ -562,6 +590,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     for (u32 k = 0; k < npoly; ++k) if (gp[k].flags & (DS_PF_TRANSLUCENT | DS_PF_SHADOW)) want((gp[k].attr >> 24) & 0x3F);
   }
   auto code_of = [&](const GpuPoly& p) -> u32 { return code[(p.attr >> 24) & 0x3F]; };
+  d.toon_now = std::any_of(gp, gp + npoly, [](const GpuPoly& p) { return ((p.attr >> 4) & 3u) == 2u; });   // which program set draws
 
   // The opaque prefix reordered for the hardware (vk_lean.cpp): polygons
   // that cannot fail the alpha test first, front to back, then the cut-out
@@ -572,30 +601,26 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (first_ordered) {
     auto nearest = [&](const GpuPoly& p) -> s32 { const GpuVert* v = gv + p.first_vert; s32 zmin = 0x7FFFFFFF; for (u32 k = 0; k < p.nverts; ++k) zmin = std::min(zmin, v[k].z); return zmin; };
     d.key.clear(); d.key.reserve(first_ordered);
-    for (u32 k = 0; k < first_ordered; ++k) { const bool at = (gp[k].flags & DS_PF_TEX_ALPHA) != 0, eq = (gp[k].attr & 0x4000u) != 0; d.key.emplace_back((at ? (s64{1} << 40) : 0) + (eq ? (s64{1} << 38) : 0) + (s64{code_of(gp[k])} << 32) + nearest(gp[k]), k); }
+    // Not for the early depth test: polygons that discard (the alpha test; a wireframe's inside, gl_lean.frag).
+    auto late = [](const GpuPoly& p) { return (p.flags & DS_PF_TEX_ALPHA) != 0 || ((p.attr >> 16) & 0x1Fu) == 0u; };
+    for (u32 k = 0; k < first_ordered; ++k) { const bool at = late(gp[k]), eq = (gp[k].attr & 0x4000u) != 0; d.key.emplace_back((at ? (s64{1} << 40) : 0) + (eq ? (s64{1} << 38) : 0) + (s64{code_of(gp[k])} << 32) + nearest(gp[k]), k); }
     std::sort(d.key.begin(), d.key.end());
-    for (u32 k = 0; k < first_ordered; ++k) { out_p[k] = gp[d.key[k].second]; if (!(out_p[k].flags & DS_PF_TEX_ALPHA)) ++n_early; }
+    for (u32 k = 0; k < first_ordered; ++k) { out_p[k] = gp[d.key[k].second]; if (!late(out_p[k])) ++n_early; }
   }
   if (npoly > first_ordered) std::memcpy(out_p + first_ordered, gp + first_ordered, sizeof(GpuPoly) * (npoly - first_ordered));
 
   // The slot's device copies.
   if (npoly) std::memcpy(d.map_polys[slot], out_p, sizeof(GpuPoly) * npoly);
   std::memcpy(d.map_post[slot], &d.host_post, sizeof(GpuPost));
-  std::memcpy(d.map_frame[slot], &f, sizeof(GpuFrame));
-  {
-    const u32 nrows = std::min<u32>(f.nrows, DS_MAX_SPAN_ROWS);
-    if (nrows) std::memcpy(d.map_spans[slot], d.host_spans.data(), sizeof(u32) * DS_SPAN_WORDS * nrows);
-  }
+  { GpuFrame fs = f; fs.scale = d.scale; std::memcpy(d.map_frame[slot], &fs, sizeof(GpuFrame)); }
   a.glActiveTexture(GL_TEXTURE0); a.glBindTexture(GL_TEXTURE_2D, d.tex_polys[slot]);
   if (npoly) a.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kPullW, static_cast<GLsizei>((npoly * 4 + kPullW - 1) / kPullW), GL_RGBA_INTEGER, GL_UNSIGNED_INT, out_p);
-  if (d.edges) vk::mark_shared_edges(gpw, npoly, d.host_verts.data(), d.seams);
   a.glActiveTexture(GL_TEXTURE0 + 1); a.glBindTexture(GL_TEXTURE_2D, d.tex_verts[slot]);
   if (nvert) a.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kPullW, static_cast<GLsizei>((nvert * 3 + kPullW - 1) / kPullW), GL_RGBA_INTEGER, GL_UNSIGNED_INT, gv);
   a.glBindBufferBase(GL_UNIFORM_BUFFER, 0, d.ubo_frame[slot]);
   a.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, d.ssbo_polys[slot]);
   a.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, d.ssbo_texels);
   a.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, d.ssbo_post[slot]);
-  a.glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, d.ssbo_spans[slot]);
   a.glBindVertexArray(d.vao);
 
   const double t_rec = now_ms();
@@ -610,23 +635,24 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     const u32 c = f.clear_color, ca = (c >> 24) & 0x1F;
     const float col[4] = {static_cast<float>(c & 0x3F) / 255.f, static_cast<float>((c >> 8) & 0x3F) / 255.f, static_cast<float>((c >> 16) & 0x3F) / 255.f, ca == 0 ? 0.f : static_cast<float>(std::min(255u, (ca + 1) * 8)) / 255.f};
     const float fog[4] = {(f.clear_attr & 0x8000) ? 1.f : 0.f, 0.f, 0.f, 0.f};
-    const GLuint zero[4] = {0, 0, 0, 0};
     const float cz = static_cast<float>(f.clear_depth & 0xFFFFFF);
     a.glClearBufferfv(GL_COLOR, 0, col);
     a.glClearBufferfv(GL_COLOR, 1, fog);
-    if (d.edges) a.glClearBufferuiv(GL_COLOR, 2, zero);
+    if (d.mark) { const GLuint cw[4] = {((f.clear_attr >> 24) & 0x3Fu) | ((f.clear_depth & 0xFFFFFFu) << 8), 0, 0, 0}; a.glClearBufferuiv(GL_COLOR, 2, cw); }
     a.glClearBufferfi(GL_DEPTH_STENCIL, 0, wbuf && d.wclip ? std::min(1.f, wscale_f / std::max(cz, 1.f)) : std::min(1.f, cz / 16777215.f), ca ? static_cast<GLint>(S_DRAWN | code[(f.clear_attr >> 24) & 0x3F]) : 0);
   }
   a.glEnable(GL_STENCIL_TEST);
   u32 draws = 0;
   auto use = [&](u32 kind, bool eq, u32 ref) { return d.use_kind(kind, wbuf, eq, ref); };
-  auto draw = [&](GLint loc, u32 first, u32 count) { if (loc >= 0) a.glUniform1i(loc, static_cast<GLint>(first)); a.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, static_cast<GLsizei>(count)); ++draws; };
+  // A draw's vertex count is its largest polygon's fan (B7): most runs hold triangles and quads only, 6 vertices
+  // an instance instead of the 24 a 10-gon needs (lean_runs.h).
+  auto draw = [&](u32 kind, GLint loc, u32 first, u32 count) { if ((g_skip >> kind) & 1) return; if (loc >= 0) a.glUniform1i(loc, static_cast<GLint>(first)); a.glDrawArraysInstanced(GL_TRIANGLES, 0, static_cast<GLsizei>(fan_vertices(out_p, first, count, centre)), static_cast<GLsizei>(count)); ++draws; };
   if (first_ordered) {
     for (u32 k = 0; k < first_ordered;) {
       const u32 c = code_of(out_p[k]); const bool early = k < n_early, eq = (out_p[k].attr & 0x4000u) != 0;
       u32 j = k + 1;
       while (j < first_ordered && code_of(out_p[j]) == c && (j < n_early) == early && ((out_p[j].attr & 0x4000u) != 0) == eq) ++j;
-      draw(use(early ? P_OPAQUE_EARLY : P_OPAQUE, eq, S_DRAWN | c), k, j - k);
+      draw(early ? 0 : 1, use(early ? P_OPAQUE_EARLY : P_OPAQUE, eq, S_DRAWN | c), k, j - k);
       k = j;
     }
   }
@@ -646,18 +672,24 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     }
     const u32 n = j - i;
     if (mask) {
-      if (any_mask && !prev_mask) { use(P_MASK_CLEAR, eq, 0); a.glDrawArrays(GL_TRIANGLES, 0, 3); ++draws; }
+      if (any_mask && !prev_mask && !((g_skip >> 7) & 1)) { use(P_MASK_CLEAR, eq, 0); a.glDrawArrays(GL_TRIANGLES, 0, 3); ++draws; }
       any_mask = true;
-      draw(use(P_MASK, eq, S_MASK), i, n);
+      draw(7, use(P_MASK, eq, S_MASK), i, n);
     } else if (shadow) {
-      draw(use(P_SHADOW_PREP, eq, c), i, n);
-      draw(use(P_SHADOW, eq, S_T | c), i, n);
+      draw(5, use(P_SHADOW_PREP, eq, c), i, n);
+      draw(6, use(P_SHADOW, eq, S_T | c), i, n);
     } else if (trans) {
-      draw(use(P_TRANS_OPQ, eq, S_DRAWN | c), i, n);
-      if (!d.nostencil) draw(use(dw ? P_TRANS_A_DW : P_TRANS_A, eq, S_DRAWN | S_T | c), i, n);
-      draw(use(dw ? P_TRANS_B_DW : P_TRANS_B, eq, S_DRAWN | S_T | c), i, n);
+      u32 lo[vk::kA31Ranges], cnt[vk::kA31Ranges];   // the alpha-31 pass over the run's alpha-31 polygons alone (vk_lean.cpp)
+      if (const u32 nr = vk::alpha_31_ranges(gp, i, j, lo, cnt)) { const GLint loc = use(P_TRANS_OPQ, eq, S_DRAWN | c); for (u32 r = 0; r < nr; ++r) draw(2, loc, lo[r], cnt[r]); }
+      const u32 npart = vk::alpha_part_ranges(gp, i, j, lo, cnt);   // the rest over the polygons that can have a pixel below 31
+      if (!npart) {}
+      else if (d.fetch) { const GLint loc = use(dw ? P_TRANS_ONE_DW : P_TRANS_ONE, eq, S_DRAWN | S_T | c); for (u32 r = 0; r < npart; ++r) draw(4, loc, lo[r], cnt[r]); }   // A and B in one pass, the shader blending
+      else {
+        if (!d.nostencil) { const GLint loc = use(dw ? P_TRANS_A_DW : P_TRANS_A, eq, S_DRAWN | S_T | c); for (u32 r = 0; r < npart; ++r) draw(3, loc, lo[r], cnt[r]); }
+        const GLint loc = use(dw ? P_TRANS_B_DW : P_TRANS_B, eq, S_DRAWN | S_T | c); for (u32 r = 0; r < npart; ++r) draw(4, loc, lo[r], cnt[r]);
+      }
     } else {
-      draw(use(P_OPAQUE, eq, S_DRAWN | c), i, n);
+      draw(8, use(P_OPAQUE, eq, S_DRAWN | c), i, n);
     }
     prev_mask = mask;
     i = j;
@@ -667,60 +699,45 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (d.indexed) { a.glDisablei(GL_BLEND, 0); a.glDisablei(GL_BLEND, 1); a.glColorMaski(0, 1, 1, 1, 1); a.glColorMaski(1, 1, 1, 1, 1); a.glColorMaski(2, 1, 1, 1, 1); }
   else a.glDisable(GL_BLEND);
   a.glColorMask(1, 1, 1, 1);
-  if (d.edges) {
-    // The edge passes (vk_lean.cpp): the band pass over every polygon's
-    // edges, the cut-out pass over the alpha-tested opaque ones; the draw's
-    // record and depth as textures.
-    a.glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
-    const float zero[4] = {0.f, 0.f, 0.f, 0.f};
-    a.glClearBufferfv(GL_COLOR, 0, zero);
-    a.glActiveTexture(GL_TEXTURE0 + 2); a.glBindTexture(GL_TEXTURE_2D, d.t_ids);
-    a.glActiveTexture(GL_TEXTURE0 + 3); a.glBindTexture(GL_TEXTURE_2D, d.t_ds);
-    a.glUseProgram(d.prog_band); d.bound_prog = d.prog_band;
-    if (npoly) {
-      constexpr u32 kMaxBandRuns = 32;
-      u32 runs = 0, run_first[kMaxBandRuns], run_count[kMaxBandRuns];
-      for (u32 k = 0; k < npoly && runs <= kMaxBandRuns; ++k) {
-        if (out_p[k].nverts <= 4) continue;
-        if (runs && run_first[runs - 1] + run_count[runs - 1] == k) ++run_count[runs - 1];
-        else if (runs < kMaxBandRuns) { run_first[runs] = k; run_count[runs] = 1; ++runs; }
-        else ++runs;
-      }
-      static const bool one_draw = std::getenv("DS_LEAN_BANDRUNS") && std::atoi(std::getenv("DS_LEAN_BANDRUNS")) == 0;
-      for (GLint pass = 0; pass < 120; pass += 60) {   // seams (vertex ids 0-59) first, the rest after: vk_lean.cpp
-        a.glUniform1i(d.loc_base_band, 0);
-        if (runs > kMaxBandRuns || one_draw) { a.glDrawArraysInstanced(GL_TRIANGLES, pass, 60, static_cast<GLsizei>(npoly)); ++draws; }
-        else {
-          a.glDrawArraysInstanced(GL_TRIANGLES, pass, 24, static_cast<GLsizei>(npoly)); ++draws;
-          for (u32 r = 0; r < runs; ++r) { a.glUniform1i(d.loc_base_band, static_cast<GLint>(run_first[r])); a.glDrawArraysInstanced(GL_TRIANGLES, pass + 24, 36, static_cast<GLsizei>(run_count[r])); ++draws; }
-        }
-      }
-    }
-    static const bool no_cutout = std::getenv("DS_LEAN_NOCUTOUT") && std::atoi(std::getenv("DS_LEAN_NOCUTOUT")) != 0;
-    if (first_ordered > n_early && (f.flags2 & DS_FF2_CUTOUT) && !no_cutout) { a.glUseProgram(d.prog_cutout); d.bound_prog = d.prog_cutout; a.glUniform1i(d.loc_base_cutout, static_cast<GLint>(n_early)); a.glDrawArraysInstanced(GL_TRIANGLES, 0, 24, static_cast<GLsizei>(first_ordered - n_early)); ++draws; }
+  // What the resolve won't read stays in the tile: the stencil always, depth
+  // and the fog bit unless the frame fogs.
+  // Without this the Mali writes them to memory at the switch.
+  {
+    const GLenum all[2] = {GL_DEPTH_STENCIL_ATTACHMENT, GL_COLOR_ATTACHMENT1}, stencil = GL_STENCIL_ATTACHMENT;
+    if (!(f.dispcnt & 0x80u)) a.glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, all); else a.glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &stencil);
+    if (d.mark && !marking) { const GLenum idw = GL_COLOR_ATTACHMENT0 + 2; a.glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &idw); }   // the id word, unless the marking pass reads it
   }
-  // The resolve into the record, and the record (and the edge bytes) to the slot's PBO.
-  a.glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_res);
-  a.glActiveTexture(GL_TEXTURE0 + 2); a.glBindTexture(GL_TEXTURE_2D, d.t_col);
-  a.glActiveTexture(GL_TEXTURE0 + 3); a.glBindTexture(GL_TEXTURE_2D, d.t_ds);
-  a.glActiveTexture(GL_TEXTURE0 + 4); a.glBindTexture(GL_TEXTURE_2D, d.t_fog);
-  a.glUseProgram(d.prog_resolve); d.bound_prog = d.prog_resolve;
-  a.glDrawArrays(GL_TRIANGLES, 0, 3); ++draws;
+  // The resolve into the record, and the record to the slot's PBO. A frame without fog
+  // has nothing to resolve: its colour attachment is the record (Impl::copy_out decodes the alpha).
+  const bool direct = d.direct && !(f.dispcnt & 0x80u);
+  d.direct_slot[slot] = direct;
+  if (!direct) {
+    a.glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_res);
+    a.glActiveTexture(GL_TEXTURE0 + 2); a.glBindTexture(GL_TEXTURE_2D, d.t_col);
+    a.glActiveTexture(GL_TEXTURE0 + 3); a.glBindTexture(GL_TEXTURE_2D, d.t_ds);
+    a.glActiveTexture(GL_TEXTURE0 + 4); a.glBindTexture(GL_TEXTURE_2D, d.t_fog);
+    a.glUseProgram(d.prog_resolve); d.bound_prog = d.prog_resolve;
+    if (!((g_skip >> 9) & 1)) { a.glDrawArrays(GL_TRIANGLES, 0, 3); ++draws; }
+  }
+  if (marking) {   // the record's edge pixels recoloured (gl_mark.frag); the framebuffer stays bound for the read below
+    a.glBindFramebuffer(GL_FRAMEBUFFER, direct ? d.fbo_col : d.fbo_res);
+    a.glActiveTexture(GL_TEXTURE0 + 5); a.glBindTexture(GL_TEXTURE_2D, d.t_ids);
+    a.glUseProgram(d.prog_mark); d.bound_prog = d.prog_mark;
+    a.glEnable(GL_BLEND); a.glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE); a.glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+    a.glColorMask(1, 1, 1, 0);
+    a.glDrawArrays(GL_TRIANGLES, 0, 3); ++draws;
+    a.glDisable(GL_BLEND); a.glColorMask(1, 1, 1, 1);
+  }
   a.glPixelStorei(GL_PACK_ALIGNMENT, 4);
   a.glBindBuffer(GL_PIXEL_PACK_BUFFER, d.pbo_out[slot]);
   a.glReadBuffer(GL_COLOR_ATTACHMENT0);
-  a.glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-  if (d.edges) {
-    a.glBindFramebuffer(GL_FRAMEBUFFER, d.fbo_edge);
-    a.glBindBuffer(GL_PIXEL_PACK_BUFFER, d.pbo_edge[slot]);
-    a.glReadBuffer(GL_COLOR_ATTACHMENT0);
-    a.glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-  }
+  if (!((g_skip >> 10) & 1)) a.glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
   a.glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
   if (d.timing) a.glEndQueryEXT(GL_TIME_ELAPSED_EXT);
   const double t_q = now_ms();
   EGLSyncKHR sync = nullptr;
   if (d.egl_sync) { sync = a.eglCreateSyncKHR(d.dpy, EGL_SYNC_FENCE_KHR, nullptr); a.glFlush(); }
+  d.flush_at[slot] = now_ms();
   if (!sync) a.glFinish();   // no fence: the frame is done when this returns
   static const bool check = std::getenv("DS_GL_CHECK") && std::atoi(std::getenv("DS_GL_CHECK")) != 0;   // debug: glGetError per frame
   if (check) { const GLenum e = a.glGetError(); if (e) std::fprintf(stderr, "gl lean: GL error 0x%x after frame %llu\n", e, (unsigned long long)d.gen); }
@@ -733,7 +750,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     d.last_draws = draws;
     if (wbuf) ++d.st.wbuf;
     // No fence: finished here (glFinish); copied out on this thread.
-    if (!sync) { d.valid[slot] = true; std::memcpy(d.out_host[slot].data(), d.map_out[slot], sizeof(u32) * W * H); if (d.edges) for (u32 k = 0; k < W * H; ++k) d.edge_bytes[slot][k] = d.map_edge[slot][4 * k]; }
+    if (!sync) { d.valid[slot] = true; d.copy_out(slot); }
     ++d.gen;
     if (!sync) d.collected = d.gen;
   }

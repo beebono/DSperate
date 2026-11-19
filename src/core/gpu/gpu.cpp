@@ -5,6 +5,7 @@
 #include "core/state/state.h"
 #include "core/gpu/vram_map.h"
 #include "core/gpu/kernels.h"
+#include "core/gpu/split3d.h"
 #include "core/nds.h"
 #include "core/profile.h"
 
@@ -50,6 +51,40 @@ Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
   split_ = thread_layout_on() || std::getenv("DS_2D_BWORKER");
   worker_.start(&Gpu::worker_job, this, split_ ? ThreadRole::EngineA : ThreadRole::Line, split_ ? "2d-engine-a" : "line-worker");
   if (split_) worker_b_.start(&Gpu::worker_b_job, this, ThreadRole::Line, "2d-engine-b");
+  // DS_SPLIT3D: compose engine A without the 3D layer and merge it after
+  // (core/gpu/split3d.h). 1: the CPU merge is the output; verify: the
+  // one-pass line is, and every difference is reported; gpu: the split
+  // alone, no merge (the picture lacks the 3D layer: for timing the split);
+  // present: set_split3d_present(true) (GPU raster frames; headless resolves each frame on the CPU).
+  stat_on_ = std::getenv("DS_SPLIT3D") || std::getenv("DS_SPLIT_STAT");
+  cap_follow_ = true;
+  cap_late_ok_ = !(std::getenv("DS_CAP_SYNC") && std::atoi(std::getenv("DS_CAP_SYNC")) != 0);
+  split_cap_ = !(std::getenv("DS_SPLIT3D_NOCAP") && std::atoi(std::getenv("DS_SPLIT3D_NOCAP")) != 0);   // debug: captured images shown again stay as they are
+  if (const char* e = std::getenv("DS_SPLIT3D")) {
+    split3d_verify_ = !std::strcmp(e, "verify");
+    split_req_ = !std::strcmp(e, "present");   // as the frontend asks for it (set_split3d_present); the caller resolves
+    if (!split_req_) engine[0].set_split3d(split3d_verify_ ? Split3D::Verify : !std::strcmp(e, "gpu") ? Split3D::Gpu : *e != '0' ? Split3D::Cpu : Split3D::Off);
+  }
+}
+
+Gpu::~Gpu() {
+  const bool stat = std::getenv("DS_SPLIT3D") || std::getenv("DS_SPLIT_STAT");
+  if (stat && (split_miss_cpu_ || split_miss_mixed_))
+    std::fprintf(stderr, "split3d: 3D lines left to the 1x composite: %llu of a frame drawn on the CPU, %llu on a screen already showing a captured frame\n",
+                 static_cast<unsigned long long>(split_miss_cpu_), static_cast<unsigned long long>(split_miss_mixed_));
+  if (stat && (cap_late_frames_ || cap_untagged_.load())) std::fprintf(stderr, "split3d: %u capture frames did not wait for their 3D frame (late capture), %u written again with it; %u captured lines with 3D had no tag\n", cap_late_frames_, cap_late_filled_, cap_untagged_.load());
+  if (stat && cap_frames_) std::fprintf(stderr, "split3d: %u capture frames, %u of them waiting for their 3D frame after a late capture was taken early (by a remap to textures or the ARM7 %u, a read %u, a DMA out %u)\n", cap_frames_, cap_backoff_frames_, cap_taken_remap_, cap_taken_read_, cap_taken_dma_);
+  if (stat && split_scrolled_) std::fprintf(stderr, "split3d: %llu split lines had BG0 scrolled\n", static_cast<unsigned long long>(split_scrolled_));
+  if (split_lines_ && stat) std::fprintf(stderr, "split3d: %llu lines split for the present, %llu frames merged on the CPU\n", static_cast<unsigned long long>(split_lines_), static_cast<unsigned long long>(split_resolved_));
+  if (stat && split_cap_effect_) std::fprintf(stderr, "split3d: %llu captured 3D pixels were shown under a colour effect (left at 1x)\n", static_cast<unsigned long long>(split_cap_effect_));
+  if (stat && (split_cap_merged_ || split_cap_shown_ || split_cap_changed_))
+    std::fprintf(stderr, "split3d: %llu captured lines merged for the game; captured pixels shown again: %llu split (%llu away from where they were captured), %llu written to since, %llu of a second frame on a screen; %llu of %llu checked differed\n",
+                 static_cast<unsigned long long>(split_cap_merged_), static_cast<unsigned long long>(split_cap_shown_), static_cast<unsigned long long>(split_cap_moved_), static_cast<unsigned long long>(split_cap_changed_),
+                 static_cast<unsigned long long>(split_cap_other_), static_cast<unsigned long long>(split_cap_bad_), static_cast<unsigned long long>(split_cap_checked_));
+  if (stat && (cap_copied_out_ || cap_copied_in_))
+    std::fprintf(stderr, "split3d: captured pixels followed through main RAM: %llu out of a bank, %llu back into one\n", static_cast<unsigned long long>(cap_copied_out_ * 128), static_cast<unsigned long long>(cap_copied_in_ * 128));
+  if (split3d_verify_) std::fprintf(stderr, "split3d: %llu pixels differed in %llu lines\n", static_cast<unsigned long long>(engine[0].split_mismatches()),
+                                    static_cast<unsigned long long>(engine[0].split_verified()));
 }
 
 void Gpu::reset() {
@@ -226,9 +261,31 @@ void Gpu::vram_store_trap(Cpu cpu, u32 addr) {
   fall_back_per_line(mask);
 }
 
+bool Gpu::vram_remap_begin(u32 moved_2d, const VramMap* next) {
+  // A late capture's bank on its way to the texture units or the ARM7 (Etrian Odyssey draws its captured
+  // screen as a texture): nothing there waits for late_fill, so the lines are written with their own 3D now.
+  if (next && (late_[0].pending || late_[1].pending)) {
+    u32 to = 0;
+    for (u32 b = 0; b < next->texture.blocks(); ++b) to |= next->texture.mask[b];
+    for (u32 b = 0; b < next->arm7.blocks(); ++b) to |= next->arm7.mask[b];
+    if ((late_[0].pending && (to >> late_[0].bank & 1)) || (late_[1].pending && (to >> late_[1].bank & 1))) {
+      join_worker(JoinSite::Remap);
+      if (late_fill(render_next_[0] >= SCREEN_H)) { cap_backoff_ = 600; ++cap_taken_remap_; }
+    }
+  }
+  const bool trapped = vram_remap_begin_core(moved_2d, next);
+  // The read trap held for a late capture, with nothing in flight: its saved entries would go stale under the
+  // rebuild, as the in-flight one's would. Lifted now, back in its generic form after (vram_remap_end).
+  if (read_trap_bank_ >= 0 && !read_trap_reapply_ && late_hold(read_trap_bank_) && !lines_in_flight()) {
+    if (read_trap_generic_) nds_.bus.set_bank_read_trap(read_trap_bank_, false); else nds_.bus.set_lcdc_read_trap(read_trap_bank_, false);
+    read_trap_generic_ = false; read_trap_reapply_ = true;
+  }
+  return trapped;
+}
+
 // `moved_2d`: engines whose read views this remap actually moves. CENSUS
 // ONLY for now -- the catch-up below is still unconditional.
-bool Gpu::vram_remap_begin(u32 moved_2d, const VramMap* next) {
+bool Gpu::vram_remap_begin_core(u32 moved_2d, const VramMap* next) {
   // LCDC (bit 2) is an engine A view only while A displays a VRAM bank or
   // a capture writes one; otherwise a bank entering or leaving it changes
   // nothing the 2D render reads, and the remap needs no catch-up or join
@@ -318,7 +375,7 @@ bool Gpu::vram_remap_begin(u32 moved_2d, const VramMap* next) {
   return trap_armed_;
 }
 void Gpu::vram_remap_end(bool trapped) {
-  if (trapped) { arm_trap(); return; }
+  if (trapped) arm_trap();
   // Kept armed across the remap (a job in flight on its snapshot); the bus
   // re-applied the trap over the pages it rewrote. The capture read trap
   // comes back in its generic form, over every page the bank backs now --
@@ -334,10 +391,14 @@ void Gpu::capture_read_hit() {
   static const bool snap_log = std::getenv("DS_SNAP_LOG") != nullptr;
   if (snap_log) std::fprintf(stderr, "[snap] frame %llu line %u capture read hit\n", (unsigned long long)nds_.frame_count, line_);
   join_worker(JoinSite::Trap);
+  // The lines of a late capture, read before the next frame's render has written them again: now.
+  if ((late_[0].pending || late_[1].pending) && late_fill(render_next_[0] >= SCREEN_H)) { cap_backoff_ = 600; ++cap_taken_read_; }
+  release_read_trap(true);
 }
 
-void Gpu::release_read_trap() {
+void Gpu::release_read_trap(bool force) {
   if (read_trap_bank_ < 0) return;
+  if (!force && late_hold(read_trap_bank_)) return;
   if (read_trap_generic_) nds_.bus.set_bank_read_trap(read_trap_bank_, false);
   else nds_.bus.set_lcdc_read_trap(read_trap_bank_, false);
   read_trap_bank_ = -1; read_trap_generic_ = false; read_trap_reapply_ = false;
@@ -588,7 +649,43 @@ void Gpu::begin_frame() {
   if (capture_on_) capture_recent_ = CAPTURE_STICKY; else if (capture_recent_) --capture_recent_;
   // 3D frame this display frame reads, latched here since the raster moves on
   // at line 215 while the compositor may still be reading it.
-  ref3d_ = nds_.gpu3d.frame_ref(!capture_on_);   // a capture frame reads the 3D of this frame, never the one before
+  // A capture frame reads the 3D of this frame, never the one before; unless the capture is tagged whole and
+  // shown from the frame's image (cap_late_, gpu.h), when the emulation does not wait for the raster.
+  {
+    const u32 un = cap_untagged_.load(std::memory_order_relaxed);
+    if (capture_on_) cap_idle_ = 0; else if (++cap_idle_ > 4) cap_clean_ = 0;
+    if (un != cap_untagged_seen_) { cap_untagged_seen_ = un; cap_clean_ = 0; } else if (capture_on_ && cap_clean_ < 255) ++cap_clean_;
+    const bool tracked = split_req_ && !scaling() && !(colour_lut_ && colour_cpu_) && !raw_active_ && nds_.gpu3d.renderer().gpu_layers();
+    if (capture_on_) { ++cap_frames_; if (cap_backoff_) ++cap_backoff_frames_; }
+    if (cap_backoff_) --cap_backoff_;
+    cap_late_ = capture_on_ && cap_late_ok_ && !cap_backoff_ && tracked && split_cap_ && nds_.gpu3d.renderer().gpu_scale() > 1 && ((capcnt_ >> 29) & 3) == 0 && cap_clean_ >= 3;
+    late_at_ = -1; ++late_seq_;
+    if (cap_late_) { for (int k = 0; k < 2; ++k) if (!late_[k].pending) late_at_ = k; cap_late_ = late_at_ >= 0; }
+  }
+  ref3d_ = nds_.gpu3d.frame_ref(!capture_on_ || cap_late_);
+  // A frame the raster refused, drawn on the CPU: it has no record to wait for and no image to show the capture
+  // from (its ref holds the picture itself). Captured as at 1x.
+  if (cap_late_ && !ref3d_.gpu) { cap_late_ = false; late_at_ = -1; }
+  if (cap_late_) ++cap_late_frames_;
+  if (cap_late_) {
+    LateCap& lc = late_[late_at_];
+    ref3d_exact_ = ref3d_; ref3d_exact_.allow_lag = false; ref3d_exact_.out = nullptr;
+    lc.pending = true; lc.frame = late_seq_; lc.ref = ref3d_; lc.bank = (capcnt_ >> 16) & 3; std::memset(lc.kind, 0, sizeof lc.kind);
+    if (lc.u.empty()) { lc.u.resize(SCREEN_W * SCREEN_H); lc.w.resize(SCREEN_W * SCREEN_H); }
+  }
+  if (split_cur_.drawn) split_done_ = split_cur_;
+  split_cur_ = SplitFrame{};
+  split_cur_.track = split_req_ && !scaling() && !(colour_lut_ && colour_cpu_) && !raw_active_ && nds_.gpu3d.renderer().gpu_layers();
+  split_cur_.want = split_cur_.track && ref3d_.gpu;
+  if (split_cur_.track && cap_words_.empty()) {
+    for (int k = 0; k < 2; ++k) { split_fb_[k].assign(SCREEN_W * SCREEN_H, 0); split_xy_[k].assign(SCREEN_W * SCREEN_H, 0); }
+    cap_words_.assign(Engine2D::CAP_SLOTS * 65536, 0); cap_seg_.assign(Engine2D::CAP_SLOTS * 512, CapSeg{});
+  }
+  if (split_cur_.track != split_engine_) {   // step_engine sets engine A's split line by line while tracked
+    split_engine_ = split_cur_.track;
+    engine[0].set_cap_track(split_engine_ && split_cap_); engine[1].set_cap_track(split_engine_ && split_cap_);
+    if (!split_engine_) { engine[0].set_split3d(Split3D::Off); std::fill(cap_seg_.begin(), cap_seg_.end(), CapSeg{}); for (CapCopy& c : cap_copy_) c.bytes = 0; }
+  }
   update_phase();
   if (prof::enabled) {
     prof::add(prof::C_FRAMES_TOTAL, 1);
@@ -724,7 +821,11 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
   const bool a_has = af <= al, b_has = bf <= bl;
   if (!a_has && !b_has) return;
   join_worker(JoinSite::RangesPre);   // a job handed now snapshots the live map: nothing stale may still be in flight
+  // The captures of the frames before, before anything of this range can show them. Line 0's sprites were
+  // drawn at the end of the frame before (one line ahead): again, where they may show such a bank.
+  if (late_fill()) { if (a_has && af == 0) engine[0].render_sprites(0); if (b_has && bf == 0) engine[1].render_sprites(0); }
   capcnt_render_ = capcnt_; capture_render_ = capture_on_;
+  late_render_ = cap_late_ ? late_at_ : -1;
   lcdc_mask_render_ = nds_.bus.vram_map().lcdc_mask;   // latched so the job doesn't consult a live map that may be rebuilding
   const bool dbg = g_dbg_join;
   auto hand = [&](bool a, bool b) {
@@ -823,6 +924,11 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
       release_read_trap();
       engine[0].frame_done(); engine[1].frame_done(); disarm_trap();
     }
+    // A late capture's bank stays read-trapped until late_fill (a job handed with the capture trapped it already).
+    if (late_render_ >= 0 && capture_render_ && read_trap_bank_ < 0) {
+      const int bank = static_cast<int>((capcnt_render_ >> 16) & 3);
+      if (nds_.bus.vram_map().lcdc_mask & (1u << bank)) { nds_.bus.set_lcdc_read_trap(bank, true); read_trap_bank_ = bank; }
+    }
   }
 }
 
@@ -841,9 +947,75 @@ void Gpu::step_engine(int e, u32 line) {
   const bool draw = !skip_frame_ && !(e == 1 && !screen_visible_[en.screen()]);
   if (!draw) skipped_[e] = true; else if (skipped_[e]) { skipped_[e] = false; en.render_sprites(line); }
   // Reading the 3D line joins the raster bands: skip it when the raster never ran.
-  if (e == 0 && (draw || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(ref3d_, line); en.set_3d_line(line3d_); en.set_3d_edges(edge_export_ ? nds_.gpu3d.edge_line(ref3d_, line) : nullptr); }
+  // The 3D split for the present's merge: this line composes without BG0 and
+  // never reads the record. Not on a screen already showing a capture's 3D
+  // this frame (one 3D frame a screen).
+  const int scr = en.screen();
+  // A line engine A composes only to capture it (the screen shows a bank
+  // or the FIFO meanwhile: Golden Sun: Dark Dawn draws all its 3D so) is
+  // split as well, for the capture's tags.
+  const u32 dmode = e == 0 ? (en.dispcnt() >> 16) & 3 : 1;
+  const bool cap_comp = e == 0 && capture_render_ && !(capcnt_render_ & (1u << 24)) && ((capcnt_render_ >> 29) & 3) != 1;   // the capture takes the composed line
+  const bool split = e == 0 && draw && split_cur_.want &&
+                     (dmode == 1 ? screens_on_ && !(split_cur_.s[scr].any && !split_cur_.s[scr].live) : cap_comp);
+  if (e == 0 && split_cur_.track) en.set_split3d(split ? Split3D::Gpu : Split3D::Off);
+  if (e == 0 && draw) split_cur_.drawn = true;
+  // Lines with the 3D layer on that are not split show the 1x record (DS_SPLIT_STAT): why.
+  if (e == 0 && draw && split_cur_.track && !split && (en.dispcnt() & 0x108) == 0x108 && (dmode == 1 ? screens_on_ : cap_comp))
+    ++(!split_cur_.want ? split_miss_cpu_ : split_miss_mixed_);
+  // A split line reads the record only to capture it (below): the frame's own, waited for.
+  // A late capture frame's line that is not split shows the 1x record itself: the frame's own, waited for.
+  const bool exact3d = late_render_ >= 0 && draw && !split;
+  if (e == 0 && (draw || capture_render_) && (!split || capture_render_)) { prof::Scope l3(prof::R3D_LINE); line3d_ = nds_.gpu3d.line(exact3d ? ref3d_exact_ : ref3d_, line); en.set_3d_line(line3d_); }
   if (draw) { en.render_line(line); output_engine(e, line); }
-  if (e == 0 && capture_render_ && !skip_frame_) { DS_PROF(CAPTURE); capture(line); }
+  // A late frame's line the engine could not split after all shows the 3D it was given, the frame before's: late capture stands down.
+  if (e == 0 && draw && late_render_ >= 0 && split && !en.split_on() && (en.dispcnt() & 0x108) == 0x108) cap_untagged_.fetch_add(1, std::memory_order_relaxed);
+  if (draw && split_cur_.track) {
+    const bool live = split && en.split_on() && dmode == 1;
+    if (live) {
+      std::memcpy(split_fb_[scr].data() + line * SCREEN_W, en.split(), SCREEN_W * sizeof(u32));
+      SplitScreen& ss = split_cur_.s[scr];
+      if (!ss.any) { ss.any = ss.live = true; ss.ref = ref3d_; }
+      ++split_lines_;
+    } else if (split_cap_) split_capture_display(e, line);
+    else std::memset(split_fb_[scr].data() + line * SCREEN_W, 0, SCREEN_W * sizeof(u32));
+    const u16 reg = en.master_bright();
+    const u32 mode = reg >> 14, f = std::min<u32>(reg & 0x1F, 16);   // kern::master_brightness as one multiply-add
+    split_reg_[scr][line] = reg;
+    // BG0's X offset on a line with the frame's own 3D: bits 20-28 (the merge reads the 3D pixel that far along).
+    const u32 xpos = live ? nds_.gpu3d.layer_xpos(line) : 0;
+    if (xpos) { split_cur_.s[scr].scrolled = true; ++split_scrolled_; }
+    split_mb_[scr][line] = (mode == 1 ? (16 - f) | ((63 * f) << 8) : mode == 2 ? 16 - f : 16) | (xpos << 20);
+  }
+  if (e == 0 && capture_render_ && !skip_frame_) {
+    DS_PROF(CAPTURE);
+    // A split line's composite, for a capture that takes it (source A the
+    // screen, not the 3D layer alone, and not source B alone): merged here,
+    // as the present will. The capture is tagged with the line's split
+    // words (a capture of the 3D layer alone: every pixel the layer's own).
+    alignas(16) Pixel merged[SCREEN_W];
+    static const std::array<u32, SCREEN_W> plain3d = [] { std::array<u32, SCREEN_W> a; a.fill(split3d::pack(0, split3d::PLAIN, 16, 0)); return a; }();
+    const Pixel* comp = nullptr;
+    const u32* words = nullptr;
+    // A line with BG0 scrolled is captured untagged: its pixels are not where the frame's image has them.
+    const bool cap_scrolled = nds_.gpu3d.layer_xpos(line) != 0;
+    if (capcnt_render_ & (1u << 24)) { if (split_cur_.want && !cap_scrolled) words = plain3d.data(); }
+    else if (split && en.split_on()) {
+      if (!cap_scrolled) words = en.split();
+      if (((capcnt_render_ >> 29) & 3) != 1) { kern::active::split_merge_line(en.split(), en.output(), line3d_, merged); comp = merged; ++split_cap_merged_; }
+    }
+    capture(line, comp, words);
+    if (late_render_ >= 0 && words && ((capcnt_render_ >> 29) & 3) == 0) {   // what late_fill writes this line again from
+      LateCap& lc = late_[late_render_];
+      lc.cnt = capcnt_render_; lc.lcdc = lcdc_mask_render_;
+      if (capcnt_render_ & (1u << 24)) lc.kind[line] = 2;
+      else if (comp) {
+        std::memcpy(lc.u.data() + line * SCREEN_W, en.output(), SCREEN_W * sizeof(Pixel));
+        std::memcpy(lc.w.data() + line * SCREEN_W, en.split(), SCREEN_W * sizeof(u32));
+        lc.kind[line] = 1;
+      }
+    }
+  }
   // Sprites are rendered one line ahead of the backgrounds.
   if (draw && line < SCREEN_H - 1) {
     prof::Scope sc(prof::OBJ_DRAW, e == 0);
@@ -855,90 +1027,6 @@ void Gpu::step_engine(int e, u32 line) {
 // The output stage for one engine's line: display mode, master brightness,
 // 6->8 bit expansion, into the screen POWCNT1 bit 15 gives it (or scaled
 // straight into the frontend's buffer).
-void Gpu::set_edge_export(bool on) {
-  if (on == edge_export_) return;
-  nds_.gpu3d.sync_raster();   // no band still drawing with the old setting
-  edge_export_ = on;
-  nds_.gpu3d.renderer().set_edge_export(on);
-  for (int s = 0; s < 2; ++s) {
-    edge_fb_[s].fill(0); edge_rows_[s][0] = edge_rows_[s][1] = edge_rows_[s][2] = 0;
-    if (on) { prev_fb_[s].assign(SCREEN_W * SCREEN_H, 0); prev_edge_[s].assign(SCREEN_W * SCREEN_H, 0); }
-    else { prev_fb_[s].clear(); prev_fb_[s].shrink_to_fit(); prev_edge_[s].clear(); prev_edge_[s].shrink_to_fit(); }
-  }
-  if (on) edge_vram_.assign(4 * 65536, 0); else { edge_vram_.clear(); edge_vram_.shrink_to_fit(); }
-  for (Engine2D& en : engine) en.set_edge_vram(on ? edge_vram_.data() : nullptr);
-}
-
-// The edge plane's line: the edge pixels that show on it, through the
-// output stage's master brightness and expansion like the frame. Display
-// mode 1 composes them (Engine2D::edge_compose: the 3D layer's, a captured
-// image's on a bitmap layer); mode 2 shows a VRAM bank with the edge bytes
-// a capture left beside it. A line shown again unchanged keeps last frame's
-// edges (a game copying its captured frame to the other screen with the
-// CPU, as Golden Sun: Dark Dawn does): the edges are a function of the picture.
-void Gpu::output_edges(const Engine2D& en, int screen, u32 line, const u32* shown) {
-  u32* const dst = edge_fb_[screen].data() + line * SCREEN_W;
-  u64& row = edge_rows_[screen][line >> 6];
-  const u64 bit = u64{1} << (line & 63);
-  bool any = false;
-  if (screens_on_) {
-    const u32 mode = &en == &engine[0] ? (en.dispcnt() >> 16) & 3 : (en.dispcnt() >> 16) & 1;
-    alignas(16) Pixel own[256];
-    alignas(16) u8 bytes[256];
-    if (mode == 1 && en.edge_compose(own, bytes)) {
-      alignas(16) u32 out[256];
-      kern::active::output_line(own, en.master_bright(), out);
-      if (colour_lut_ && colour_cpu_) {   // as the shown line; only the (few) edge pixels
-        for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (kern::colour_pixel(*colour_lut_, out[x]) & 0x00FFFFFF) : 0;
-      } else
-        for (u32 x = 0; x < 256; ++x) dst[x] = bytes[x] ? (static_cast<u32>(bytes[x]) << 24) | (out[x] & 0x00FFFFFF) : 0;
-      any = true;
-    } else if (mode == 2) {
-      const u32 bank = (en.dispcnt() >> 18) & 3;
-      if (lcdc_mask_render_ & (1u << bank)) {
-        const u8* const eb = edge_vram_.data() + bank * 65536 + line * 256;
-        u32 nz = 0;
-        for (u32 x = 0; x < 256; ++x) { dst[x] = eb[x] ? (static_cast<u32>(eb[x]) << 24) | (shown[x] & 0x00FFFFFF) : 0; nz |= eb[x]; }
-        any = nz != 0;
-      }
-    }
-  }
-  u32* const pfb = prev_fb_[screen].data() + line * SCREEN_W;
-  u32* const ped = prev_edge_[screen].data() + line * SCREEN_W;
-  const u64 prev_bit = prev_rows_[screen][line >> 6] & bit;
-  if (!any && prev_bit && std::memcmp(shown, pfb, SCREEN_W * sizeof(u32)) == 0) { std::memcpy(dst, ped, SCREEN_W * sizeof(u32)); any = true; }
-  if (!any && (row & bit)) std::memset(dst, 0, SCREEN_W * sizeof(u32));
-  std::memcpy(pfb, shown, SCREEN_W * sizeof(u32));
-  if (any) { std::memcpy(ped, dst, SCREEN_W * sizeof(u32)); row |= bit; prev_rows_[screen][line >> 6] |= bit; }
-  else { row &= ~bit; prev_rows_[screen][line >> 6] &= ~bit; }
-}
-
-// The edge bytes of a captured line beside the colour (edge_vram_): source
-// A's (the 3D layer's, or engine A's composed line), source B's (the
-// bank's own), or for a blend the stronger source's.
-void Gpu::capture_edges(u32 cnt, u32 line, u32 width, u32 dst_bank, u32 lcdc) {
-  u8* const edst = edge_vram_.data() + dst_bank * 65536 + (((((cnt >> 18) & 3) << 14) + line * width) & 0xFFFF);
-  alignas(16) u8 ea[256] = {};
-  if (cnt & (1 << 24)) {
-    if (const u32* w = nds_.gpu3d.edge_line(ref3d_, line)) for (u32 x = 0; x < 256; ++x) ea[x] = static_cast<u8>(w[x] >> 24);
-  } else { alignas(16) Pixel own[256]; engine[0].edge_compose(own, ea); }
-  const u8* eb = nullptr;
-  if (!(cnt & (1 << 25))) {
-    const u32 dispcnt = engine[0].dispcnt();
-    const u32 src_bank = (dispcnt >> 18) & 3;
-    if (lcdc & (1u << src_bank)) {
-      u32 off = line * 256;
-      if (((dispcnt >> 16) & 3) != 2) off += ((cnt >> 26) & 3) << 14;
-      eb = edge_vram_.data() + src_bank * 65536 + (off & 0xFFFF);
-    }
-  }
-  const u32 mode = (cnt >> 29) & 3;
-  const u32 eva = std::min<u32>(cnt & 0x1F, 16), evb = std::min<u32>((cnt >> 8) & 0x1F, 16);
-  const u8* pick = mode == 0 ? ea : mode == 1 ? eb : (eva >= evb ? ea : eb);
-  if (!pick) std::memset(edst, 0, width);
-  else if (pick != edst) std::memmove(edst, pick, width);
-}
-
 void Gpu::output_engine(int e, u32 line) {
   prof::Scope sc(prof::OUTPUT, e == 0);
   const Engine2D& en = engine[e];
@@ -961,7 +1049,6 @@ void Gpu::output_engine(int e, u32 line) {
     ++raw_lines_[e];
   }
   if (colour_lut_ && colour_cpu_ && screens_on_) kern::active::colour_correct(*colour_lut_, dst);   // the panel's black stays black when the LCDs are off
-  if (edge_export_ && !scaled) output_edges(en, screen, line, dst);
   if (scaled) {
     if (e == 1 && bscale_defer_ && bscale_n_ < SCREEN_H) {
       StashedLine& st = bscale_[bscale_n_++];
@@ -1330,9 +1417,16 @@ void Gpu::output_b(u32* dst) {
   apply_master_brightness(engine[1].master_bright(), dst);
 }
 
+// 128 pixels of a bank as display capture left them: to tell them written to since.
+static inline u32 cap_sum(const u16* p) {
+  u32 a = 0, b = 0;
+  for (u32 i = 0; i < 128; ++i) { a += p[i]; b += p[i] * (i + 1); }
+  return a ^ (b * 0x9E3779B1u);
+}
+
 // Display capture: blends source A (engine A composite or the 3D layer) with
 // source B (VRAM or the display FIFO) into an LCDC-mapped bank as BGR555.
-void Gpu::capture(u32 line) {
+void Gpu::capture(u32 line, const Pixel* composite, const u32* words) {
   const u32 cnt = capcnt_render_;
   const u32 size = (cnt >> 20) & 3;
   const u32 width = size == 0 ? 128 : 256, height = size == 0 ? 128 : 64 * size;
@@ -1344,7 +1438,7 @@ void Gpu::capture(u32 line) {
   if (!(lcdc & (1u << dst_bank))) return;
   u16* dst = reinterpret_cast<u16*>(vm.bank(dst_bank)) + (((((cnt >> 18) & 3) << 14) + line * width) & 0xFFFF);
 
-  const Pixel* src_a = (cnt & (1 << 24)) ? line3d_ : engine[0].output();
+  const Pixel* src_a = (cnt & (1 << 24)) ? line3d_ : composite ? composite : engine[0].output();
   const u16* src_b = nullptr;
   if (cnt & (1 << 25)) src_b = fifo_line_.data();
   else {
@@ -1357,7 +1451,33 @@ void Gpu::capture(u32 line) {
     }
   }
 
-  if (edge_export_) capture_edges(cnt, line, width, dst_bank, lcdc);
+  // The 3D split: what this line leaves in the bank, for when it is shown again.
+  const u32 cap_idx = ((((cnt >> 18) & 3) << 14) + line * width) & 0xFFFF;
+  const bool cap_track = split_cur_.track && split_cap_ && cap_idx + width <= 65536;
+  // A line with 3D in what it captures and no tag for it: its bank pixels are all a later display has (cap_late_).
+  if (!(cap_track && words && ((cnt >> 29) & 3) == 0) && ((cnt >> 29) & 3) != 1 && ((cnt & (1 << 24)) || (engine[0].dispcnt() & 0x108) == 0x108))
+    cap_untagged_.fetch_add(1, std::memory_order_relaxed);
+  u32 cap_uniform = 0;
+  bool cap_each = false;
+  if (cap_track && words && ((cnt >> 29) & 3) == 0) {   // source A alone
+    // Not where the layer is hidden (op 0), nor where a 2D pixel stands in front unblended (FIXED, ka 0): the VRAM pixel is all there is.
+    auto tag_of = [](u32 w) { return (w & (0x1Fu << split3d::KA_SHIFT | 3u << split3d::OP_SHIFT)) <= (split3d::FIXED << split3d::OP_SHIFT) ? 0u : w | split3d::Q15; };
+    u32 diff = 0;
+    for (u32 x = 0; x < width; ++x) diff |= words[x] ^ words[0];
+    if (!diff) cap_uniform = tag_of(words[0]);   // one word for the line (a 3D scene with nothing over it): nothing per pixel to keep
+    else {
+      u32* const cw = cap_words_.data() + dst_bank * 65536 + cap_idx;
+      u32 any = 0;
+      for (u32 x = 0; x < width; ++x) { const u32 t = tag_of(words[x]); cw[x] = t; any |= t; }
+      cap_each = any != 0;
+    }
+    if ((cap_uniform || cap_each) && cap_ref_[cap_ref_at_].gpu_gen != ref3d_.gpu_gen) {
+      cap_ref_at_ = (cap_ref_at_ + 1) % 4; cap_ref_[cap_ref_at_] = ref3d_;
+      // The last two captured frames keep their images while the game shows them, however many frames it draws meanwhile.
+      const Renderer3D::FrameRef& before = cap_ref_[(cap_ref_at_ + 3) % 4];
+      nds_.gpu3d.renderer().gpu_pin(ref3d_.gpu_gen, before.gpu ? before.gpu_gen : 0);
+    }
+  }
   switch ((cnt >> 29) & 3) {
   case 0:
     kern::active::capture_a15(src_a, width, dst);
@@ -1376,6 +1496,14 @@ void Gpu::capture(u32 line) {
     break;
   }
   }
+  if (cap_track)
+    for (u32 k = 0; k < width; k += 128) {
+      CapSeg& seg = cap_seg_[dst_bank * 512 + ((cap_idx + k) >> 7)];
+      seg.gen = cap_uniform || cap_each ? ref3d_.gpu_gen : 0;
+      seg.base = static_cast<u16>((cap_idx - line * width) & 0xFFFF); seg.width = static_cast<u16>(width);
+      seg.uniform = cap_uniform; seg.each = cap_each;
+      seg.sum = cap_sum(dst + k);
+    }
 }
 
 
@@ -1410,8 +1538,47 @@ void Gpu::apply_master_brightness(u16 reg, u32* dst) { kern::active::master_brig
 void Gpu::expand_colours(u32* dst) { kern::active::expand_colours(dst); }
 
 
+// The late captures of frames before this one, written again with their own 3D frame (waited for): each line
+// as capture() wrote it, where the bank still holds what that wrote. The worker is idle (render_ranges, quiesce).
+bool Gpu::late_fill(bool current) {
+  bool any = false;
+  for (LateCap& lc : late_) {
+    if (!lc.pending || (lc.frame == late_seq_ && !current)) continue;
+    lc.pending = false;
+    const u32 cnt = lc.cnt, size = (cnt >> 20) & 3;
+    const u32 width = size == 0 ? 128 : 256, height = size == 0 ? 128 : 64 * size;
+    const u32 dst_bank = (cnt >> 16) & 3;
+    if (!(lc.lcdc & (1u << dst_bank))) continue;
+    // The bank itself, wherever the game has mapped it since (to show it): bank pointers are remap-invariant.
+    u16* const bank = reinterpret_cast<u16*>(nds_.bus.vram_map().bank(dst_bank));
+    Renderer3D::FrameRef r = lc.ref;
+    r.allow_lag = false; r.out = nullptr;   // that frame's own record
+    bool synced = false;
+    alignas(16) Pixel merged[SCREEN_W];
+    for (u32 line = 0; line < std::min<u32>(height, SCREEN_H); ++line) {
+      if (!lc.kind[line]) continue;
+      const u32 cap_idx = ((((cnt >> 18) & 3) << 14) + line * width) & 0xFFFF;
+      if (cap_idx + width > 65536) continue;
+      u16* const dst = bank + cap_idx;
+      // Still that capture's pixels: its tags, and nothing written over them.
+      bool ours = true;
+      for (u32 k = 0; k < width; k += 128) { const CapSeg& seg = cap_seg_[dst_bank * 512 + ((cap_idx + k) >> 7)]; ours = ours && seg.gen == lc.ref.gpu_gen && seg.sum == cap_sum(dst + k); }
+      if (!ours) continue;
+      if (!synced) { nds_.gpu3d.renderer().sync_line(r, 0); synced = true; }
+      const Pixel* src = r.line(line);
+      if (lc.kind[line] == 1) { kern::active::split_merge_line(lc.w.data() + line * SCREEN_W, lc.u.data() + line * SCREEN_W, src, merged); src = merged; }
+      kern::active::capture_a15(src, width, dst);
+      for (u32 k = 0; k < width; k += 128) cap_seg_[dst_bank * 512 + ((cap_idx + k) >> 7)].sum = cap_sum(dst + k);
+    }
+    if (synced) { ++cap_late_filled_; any = true; }
+  }
+  if (read_trap_bank_ >= 0 && !lines_in_flight()) release_read_trap();   // held for a capture now written
+  return any;
+}
+
 void Gpu::quiesce() {
   join_worker();
+  late_fill();
   engine[0].apply_pending(); engine[1].apply_pending();
 }
 
@@ -1422,6 +1589,313 @@ void Gpu::prepare_load() {
   lazy_frame_ = false; per_line_[0] = per_line_[1] = true;
   render_next_[0] = render_next_[1] = SCREEN_H; frame_finished_ = true;
   burst_[0] = burst_[1] = false; burst_left_[0] = burst_left_[1] = 0; lag_frame_ = false;
+  split_cur_ = split_done_ = SplitFrame{};
+  for (CapCopy& c : cap_copy_) c.bytes = 0;
+}
+
+// The bank (a slot of Engine2D::CAP_SLOTS) and 16-bit pixel behind an ARM9 VRAM address that starts 128
+// pixels lying in one bank.
+bool Gpu::vram_pixels_at(u32 addr, u32& bank, u32& idx) const {
+  const VramMap& vm = nds_.bus.vram_map();
+  const u32 a = addr & 0x00FFFFFF;
+  const u8* p;
+  if (a >= 0x800000) {
+    const u32 b = (a - 0x800000) >> 17;
+    if (b > 3 || !(vm.lcdc_mask & (1u << b))) return false;
+    p = vm.bank(static_cast<int>(b)) + (a & 0x1FFFF);
+  } else {
+    const VramView& v = a < 0x200000 ? vm.abg : a < 0x400000 ? vm.bbg : a < 0x600000 ? vm.aobj : vm.bobj;
+    if (!v.size) return false;
+    p = v.direct(a, 256);
+    if (!p) return false;
+  }
+  for (u32 b = 0; b < Engine2D::CAP_SLOTS; ++b) {
+    const u8* const base = vm.bank(Engine2D::cap_slot_bank(b));
+    if (p < base || p >= base + Engine2D::cap_slot_size(b)) continue;
+    const u32 off = static_cast<u32>(p - base);
+    if (off & 0xFF) return false;
+    bank = b; idx = off >> 1;
+    return true;
+  }
+  return false;
+}
+
+void Gpu::dma_copied(u32 src, u32 dst, u32 bytes) {
+  if (cap_seg_.empty() || !bytes || (bytes & 0xFF)) return;
+  const VramMap& vm = nds_.bus.vram_map();
+  const u32 n = bytes >> 8;
+  if ((src >> 24) == 0x06 && (dst >> 24) == 0x02) {
+    // Out of a bank: keep the tags of what is still as the capture wrote it.
+    if (n > 4 * 512) return;
+    u32 b0, i0;
+    if (!vram_pixels_at(src, b0, i0)) return;
+    // The capture's lines may still be on their way to the bank's tags.
+    join_worker(JoinSite::Trap);
+    // A late capture on its way out before the next frame's render: written with its own 3D frame now, and the
+    // block copied again (Golden Sun: Dark Dawn moves every captured frame through main RAM).
+    const bool refilled = (late_[0].pending || late_[1].pending) && late_fill(render_next_[0] >= SCREEN_H);
+    if (refilled) { cap_backoff_ = 600; ++cap_taken_dma_; }
+    if (refilled && !nds_.dsi) {
+      const u32 at = dst & (mem::Bus::MAIN_RAM_SIZE - 1);
+      if (at + bytes <= mem::Bus::MAIN_RAM_SIZE)
+        for (u32 k = 0; k < n; ++k) {
+          u32 b, i;
+          if (vram_pixels_at(src + (k << 8), b, i)) std::memcpy(nds_.bus.main_ram.get() + at + (k << 8), vm.bank(Engine2D::cap_slot_bank(b)) + i * 2, 256);
+        }
+    }
+    CapCopy* rec = nullptr;
+    for (CapCopy& c : cap_copy_) if (c.bytes && c.addr == dst) rec = &c;
+    bool any = false;
+    for (u32 k = 0; k < n && !any; ++k) {
+      u32 b, i;
+      any = vram_pixels_at(src + (k << 8), b, i) && cap_seg_[b * 512 + (i >> 7)].gen != 0;
+    }
+    if (!any) { if (rec) rec->bytes = 0; return; }
+    if (!rec) { cap_copy_at_ ^= 1; rec = &cap_copy_[cap_copy_at_]; }
+    rec->addr = dst; rec->bytes = bytes;
+    rec->seg.assign(n, CapSeg{});
+    bool each = false;
+    for (u32 k = 0; k < n; ++k) {
+      u32 b, i;
+      if (!vram_pixels_at(src + (k << 8), b, i)) continue;
+      const CapSeg& s = cap_seg_[b * 512 + (i >> 7)];
+      if (!s.gen || cap_sum(reinterpret_cast<const u16*>(vm.bank(Engine2D::cap_slot_bank(b))) + i) != s.sum) continue;
+      CapSeg& r = rec->seg[k];
+      r = s; r.base = static_cast<u16>((i - s.base) & 0xFFFF);
+      if (s.each) {
+        if (!each) { each = true; rec->words.resize(static_cast<size_t>(n) * 128); }
+        std::memcpy(rec->words.data() + k * 128, cap_words_.data() + b * 65536 + i, 128 * sizeof(u32));
+      }
+      ++cap_copied_out_;
+    }
+    return;
+  }
+  if ((src >> 24) != 0x02 || (dst >> 24) != 0x06) return;
+  // Back into a bank: the destination is tagged as that capture's pixels,
+  // if they are still what went out.
+  for (const CapCopy& c : cap_copy_) {
+    if (!c.bytes || src < c.addr || src - c.addr + bytes > c.bytes || ((src - c.addr) & 0xFF)) continue;
+    const u32 k0 = (src - c.addr) >> 8;
+    for (u32 k = 0; k < n; ++k) {
+      u32 b, i;
+      if (!vram_pixels_at(dst + (k << 8), b, i)) continue;
+      const CapSeg& r = c.seg[k0 + k];
+      CapSeg& d = cap_seg_[b * 512 + (i >> 7)];
+      if (!r.gen || cap_sum(reinterpret_cast<const u16*>(vm.bank(Engine2D::cap_slot_bank(b))) + i) != r.sum) { d.gen = 0; continue; }
+      d = r; d.base = static_cast<u16>((i - r.base) & 0xFFFF);
+      if (r.each) std::memcpy(cap_words_.data() + b * 65536 + i, c.words.data() + (k0 + k) * 128, 128 * sizeof(u32));
+      ++cap_copied_in_;
+    }
+    return;
+  }
+}
+
+// A line not split for this frame's 3D: where it shows pixels of a captured
+// image (a bitmap BG, bitmap sprites, VRAM display) as the capture wrote
+// them, their words for the merge, with the frame that was captured.
+void Gpu::split_capture_display(int e, u32 line) {
+  const Engine2D& en = engine[e];
+  const int scr = en.screen();
+  SplitScreen& ss = split_cur_.s[scr];
+  u32* const row = split_fb_[scr].data() + line * SCREEN_W;
+  u32* const xy = split_xy_[scr].data() + line * SCREEN_W;
+  alignas(16) u32 refs[SCREEN_W];
+  const u32 mode = e == 0 ? (en.dispcnt() >> 16) & 3 : (en.dispcnt() >> 16) & 1;
+  bool have = false, vram = false;
+  if (screens_on_ && !ss.live) {
+    if (mode == 1) have = en.cap_refs(refs);
+    else if (e == 0 && mode == 2) {
+      const u32 bank = (en.dispcnt() >> 18) & 3;
+      if (lcdc_mask_render_ & (1u << bank)) {
+        for (u32 x = 0; x < SCREEN_W; ++x) refs[x] = Engine2D::CAP_REF | (bank << 16) | (line * 256 + x);
+        have = vram = true;
+      }
+    }
+  }
+  if (!have) { std::memset(row, 0, SCREEN_W * sizeof(u32)); return; }
+  const VramMap& vm = nds_.bus.vram_map();
+  const Pixel* const out = en.output();
+  const u32 mreg = en.master_bright();
+  const bool mb_on = ((mreg >> 14) == 1 || (mreg >> 14) == 2) && (mreg & 0x1F) != 0;
+  auto frame_of = [&](u64 gen) -> const Renderer3D::FrameRef* {
+    for (const Renderer3D::FrameRef& c : cap_ref_) if (c.gpu && c.gpu_gen == gen) return &c;
+    return nullptr;   // captured too long ago
+  };
+  u32 shown = 0, moved = 0, changed = 0, other = 0;
+  // The usual line: one capture's line shown where it was captured (a
+  // full-screen image, whatever carries it). Then the words are the
+  // capture's, less the pixels that are not on top or not shown as they are.
+  {
+    u32 x0 = 0;
+    while (x0 < SCREEN_W && !refs[x0]) ++x0;
+    if (x0 == SCREEN_W) { std::memset(row, 0, SCREEN_W * sizeof(u32)); return; }
+    const u32 rb = refs[x0] - x0;   // the reference pixel 0 has, or would have
+    u32 off = 0;
+    for (u32 x = 0; x < SCREEN_W; ++x) off |= refs[x] ? refs[x] ^ (rb + x) : 0;
+    const u32 b = (rb >> 16) & 7, idx = rb & 0xFFFF;
+    const CapSeg& s0 = cap_seg_[b * 512 + (idx >> 7)];
+    const CapSeg& s1 = cap_seg_[b * 512 + (((idx + 128) & 0xFFFF) >> 7)];
+    if (!off && !mb_on && !(idx & 0xFF) && s0.gen && s0.gen == s1.gen && s0.base == s1.base && s0.width == 256 && s1.width == 256 &&
+        s0.uniform == s1.uniform && s0.each == s1.each && ((idx - s0.base) & 0xFFFF) == line * 256 && (!ss.any || ss.ref.gpu_gen == s0.gen)) {
+      const Renderer3D::FrameRef* const ref = ss.any ? &ss.ref : frame_of(s0.gen);
+      const u16* const v = reinterpret_cast<const u16*>(vm.bank(Engine2D::cap_slot_bank(b))) + idx;
+      if (!ref || cap_sum(v) != s0.sum || cap_sum(v + 128) != s1.sum) {   // captured too long ago, or written to since
+        std::memset(row, 0, SCREEN_W * sizeof(u32));
+        if (ref) split_cap_changed_ += SCREEN_W;
+        return;
+      }
+      const u32* const cw = cap_words_.data() + b * 65536 + idx;
+      const u32 uni = s0.uniform;
+      u32 n = 0;
+      if (vram && !s0.each) { for (u32 x = 0; x < SCREEN_W; ++x) row[x] = uni; n = SCREEN_W; }
+      else if (vram) { for (u32 x = 0; x < SCREEN_W; ++x) { row[x] = cw[x]; n += cw[x] != 0; } }
+      else if (!s0.each) { for (u32 x = 0; x < SCREEN_W; ++x) { const u32 w = refs[x] && (out[x] & 0x00FFFFFF) == kern::direct_colour(v[x]) ? uni : 0; row[x] = w; n += w != 0; } }
+      else { for (u32 x = 0; x < SCREEN_W; ++x) { const u32 w = refs[x] && (out[x] & 0x00FFFFFF) == kern::direct_colour(v[x]) ? cw[x] : 0; row[x] = w; n += w != 0; } }
+      if (!vram && stat_on_) for (u32 x = 0; x < SCREEN_W; ++x) split_cap_effect_ += refs[x] && (s0.each ? cw[x] : uni) && (out[x] & 0x00FFFFFF) != kern::direct_colour(v[x]);
+      if (n && !ss.any) { ss.any = true; ss.live = false; ss.ref = *ref; }
+      split_cap_shown_ += n;
+      return;
+    }
+  }
+  u32 memo = ~0u;
+  bool memo_ok = false;
+  for (u32 x = 0; x < SCREEN_W; ++x) {
+    row[x] = 0;
+    const u32 r = refs[x];
+    if (!r) continue;
+    const u32 b = (r >> 16) & 7, idx = r & 0xFFFF;
+    const CapSeg& seg = cap_seg_[b * 512 + (idx >> 7)];
+    if (!seg.gen) continue;
+    u32 w = seg.each ? cap_words_[b * 65536 + idx] : seg.uniform;
+    if (!w) continue;
+    // Still the pixels the capture wrote, and this one shown as it is (no effect, nothing blended over it).
+    const u16* const bank = reinterpret_cast<const u16*>(vm.bank(Engine2D::cap_slot_bank(b)));
+    if (memo != b * 512 + (idx >> 7)) { memo = b * 512 + (idx >> 7); memo_ok = cap_sum(bank + (idx & ~127u)) == seg.sum; }
+    if (!memo_ok) { ++changed; continue; }
+    if (!vram && (out[x] & 0x00FFFFFF) != kern::direct_colour(bank[idx])) { ++split_cap_effect_; continue; }   // on top, but not shown as it is: a colour effect
+    if (ss.any && ss.ref.gpu_gen != seg.gen) { ++other; continue; }   // one 3D frame a screen
+    const u32 rel = (idx - seg.base) & 0xFFFF, cx = rel & (seg.width - 1u), cy = rel >> (seg.width == 256 ? 8 : 7);
+    if (cy >= SCREEN_H) continue;
+    if (!ss.any) {
+      const Renderer3D::FrameRef* const ref = frame_of(seg.gen);
+      if (!ref) continue;
+      ss.any = true; ss.live = false; ss.ref = *ref;
+    }
+    if (split3d::op_of(w) == split3d::PLAIN && mb_on) w = split3d::pack(0, split3d::FIXED, 16, 0) | split3d::Q15;   // PLAIN skips master brightness
+    if (cx != x || cy != line) { w |= split3d::XY; xy[x] = cx | (cy << 8); ss.coords = true; ++moved; }
+    row[x] = w;
+    ++shown;
+  }
+  split_cap_shown_ += shown; split_cap_moved_ += moved; split_cap_changed_ += changed; split_cap_other_ += other;
+}
+
+bool Gpu::split3d_screen(int screen, Split3DScreen* f) const {
+  const SplitScreen& ss = split_done_.s[screen & 1];
+  if (!ss.any) return false;
+  f->words = split_fb_[screen & 1].data(); f->coords = ss.coords ? split_xy_[screen & 1].data() : nullptr; f->lines = split_mb_[screen & 1];
+  f->gen = ss.ref.gpu_gen; f->live = ss.live; f->scrolled = ss.scrolled;
+  return true;
+}
+
+void Gpu::merge_split3d(int screen, u32* dst) {
+  screen &= 1;
+  const SplitScreen& f = split_done_.s[screen];
+  const u32* const fb = fb_[screen].data();
+  if (dst != fb) std::memcpy(dst, fb, SCREEN_W * SCREEN_H * sizeof(u32));
+  if (!f.any) return;
+  Renderer3D::FrameRef r = f.ref;
+  r.allow_lag = false; r.out = nullptr;   // that frame's own record, as the present samples it
+  nds_.gpu3d.renderer().sync_line(r, 0);
+  alignas(16) Pixel merged[SCREEN_W];
+  alignas(16) u32 shown[SCREEN_W];
+  for (u32 y = 0; y < SCREEN_H; ++y) {
+    const u32* const w = split_fb_[screen].data() + y * SCREEN_W;
+    const u32* const xy = split_xy_[screen].data() + y * SCREEN_W;
+    const u32* const t = r.line(y);
+    const s32 xofs = static_cast<s32>(split_mb_[screen][y] << 3) >> 23;   // BG0's X offset on this line (bits 20-28, signed)
+    u64 on[4] = {};
+    for (u32 x = 0; x < SCREEN_W; ++x) {
+      merged[x] = 0;
+      if (split3d::op_of(w[x]) == split3d::HIDDEN) continue;
+      const u32 tx = static_cast<u32>(static_cast<s32>(x) + xofs);
+      const u32 p = (w[x] & split3d::XY) ? r.line(std::min<u32>(xy[x] >> 8, SCREEN_H - 1))[xy[x] & 255] : tx < SCREEN_W ? t[tx] : 0;
+      if (!((p >> 24) & 0x1F)) continue;
+      merged[x] = split3d::merge_pixel(w[x], 0, p);
+      on[x >> 6] |= u64{1} << (x & 63);
+    }
+    if (!(on[0] | on[1] | on[2] | on[3])) continue;
+    kern::active::output_line(merged, split_reg_[screen][y], shown);   // as the output stage shows a composed line
+    u32* const o = dst + y * SCREEN_W;
+    for (u32 x = 0; x < SCREEN_W; ++x) if ((on[x >> 6] >> (x & 63)) & 1) o[x] = shown[x];
+  }
+}
+
+bool Gpu::merge_split3d_scaled(int screen, u32 n, u32* dst) {
+  screen &= 1;
+  const SplitScreen& f = split_done_.s[screen];
+  const u32* const fb = fb_[screen].data();
+  const u32 W = SCREEN_W * n;
+  const u32* fine = nullptr;
+  if (f.any) {
+    Renderer3D::FrameRef r = f.ref;
+    r.allow_lag = false; r.out = nullptr;   // that frame's own record, as merge_split3d
+    nds_.gpu3d.renderer().sync_line(r, 0);
+    u32 sc = 0;
+    fine = nds_.gpu3d.renderer().gpu_fine(r, &sc);
+    if (!fine || sc != n) return false;
+  }
+  for (u32 y = 0; y < SCREEN_H * n; ++y)
+    for (u32 x = 0; x < W; ++x) dst[y * W + x] = fb[(y / n) * SCREEN_W + x / n];
+  if (!f.any) return true;
+  alignas(16) Pixel merged[SCREEN_W];
+  alignas(16) u32 shown[SCREEN_W];
+  for (u32 y = 0; y < SCREEN_H; ++y) {
+    const u32* const w = split_fb_[screen].data() + y * SCREEN_W;
+    const u32* const xy = split_xy_[screen].data() + y * SCREEN_W;
+    const s32 xofs = static_cast<s32>(split_mb_[screen][y] << 3) >> 23;   // BG0's X offset on this line, in DS pixels
+    for (u32 sy = 0; sy < n; ++sy)
+      for (u32 sx = 0; sx < n; ++sx) {
+        u64 on[4] = {};
+        for (u32 x = 0; x < SCREEN_W; ++x) {
+          merged[x] = 0;
+          if (split3d::op_of(w[x]) == split3d::HIDDEN) continue;
+          u32 p;
+          if (w[x] & split3d::XY) p = fine[(std::min<u32>(xy[x] >> 8, SCREEN_H - 1) * n + sy) * W + (xy[x] & 255) * n + sx];
+          else {
+            const u32 tx = static_cast<u32>(static_cast<s32>(x) + xofs);
+            p = tx < SCREEN_W ? fine[(y * n + sy) * W + tx * n + sx] : 0;
+          }
+          if (!((p >> 24) & 0x1F)) continue;
+          merged[x] = split3d::merge_pixel(w[x], 0, p);
+          on[x >> 6] |= u64{1} << (x & 63);
+        }
+        if (!(on[0] | on[1] | on[2] | on[3])) continue;
+        kern::active::output_line(merged, split_reg_[screen][y], shown);
+        u32* const o = dst + (y * n + sy) * W + sx;
+        for (u32 x = 0; x < SCREEN_W; ++x) if ((on[x >> 6] >> (x & 63)) & 1) o[x * n] = shown[x];
+      }
+  }
+  return true;
+}
+
+void Gpu::resolve_split3d() {
+  static const bool stat = std::getenv("DS_SPLIT3D") != nullptr;
+  for (int s = 0; s < 2; ++s) {
+    SplitScreen& ss = split_done_.s[s];
+    if (!ss.any) continue;
+    if (ss.live) { merge_split3d(s, fb_[s].data()); ++split_resolved_; }
+    else if (stat) {   // a capture shown again: at 1x the merge must give the framebuffer's own pixels
+      std::vector<u32> m(SCREEN_W * SCREEN_H);
+      merge_split3d(s, m.data());
+      for (u32 i = 0; i < SCREEN_W * SCREEN_H; ++i) {
+        if (!split_fb_[s][i]) continue;
+        ++split_cap_checked_;
+        if (m[i] != fb_[s][i] && split_cap_bad_++ < 16)
+          std::fprintf(stderr, "split3d: frame %llu screen %d pixel %u,%u: the capture's merge gives %06x, the screen shows %06x (word %08x)\n", static_cast<unsigned long long>(nds_.frame_count), s, i % SCREEN_W, i / SCREEN_W, m[i] & 0xFFFFFF, fb_[s][i] & 0xFFFFFF, split_fb_[s][i]);
+      }
+    }
+    ss.any = false;
+  }
 }
 
 template <class S> void Gpu::sync_state(S& s) {

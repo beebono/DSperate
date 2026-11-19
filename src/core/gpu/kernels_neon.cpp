@@ -7,6 +7,7 @@
 // byte planes (ids, kinds, masks) are handled 16 at a time, widened to u32
 // lane masks where they gate colour lanes.
 #include "core/gpu/kernels.h"
+#include "core/gpu/split3d.h"
 #include "core/div64.h"
 
 #if DSPERATE_NEON
@@ -729,6 +730,36 @@ void colour_correct(const ColourLut& t, u32* dst) {
 // channels, the 5-bit channels are a shift and a mask, and the alpha bit
 // lands in bit 15 by widening the 0/0xFF byte mask and shifting it 15 (only
 // bit 0 survives the halfword).
+// split3d::merge_pixel, four pixels a step in 32-bit lanes: red and blue
+// through the formula together 16 bits apart (a sum is below 4096), the shift
+// and the clamp in their 16-bit halves.
+void split_merge_line(const u32* words, const Pixel* u, const Pixel* line3d, Pixel* out) {
+  const uint32x4_t m1f = vdupq_n_u32(0x1F), m3f = vdupq_n_u32(0x3F), mrb = vdupq_n_u32(0x003F003F), zero = vdupq_n_u32(0);
+  const uint32x4_t one = vdupq_n_u32(1), k31 = vdupq_n_u32(31), k63 = vdupq_n_u32(63);
+  for (u32 i = 0; i < 256; i += 4) {
+    const uint32x4_t w = vld1q_u32(words + i), t = vld1q_u32(line3d + i);
+    const uint32x4_t op = vandq_u32(vshrq_n_u32(w, 28), vdupq_n_u32(3));
+    const uint32x4_t a3 = vandq_u32(vshrq_n_u32(t, 24), m1f);
+    const uint32x4_t by = vceqq_u32(op, vdupq_n_u32(2));   // ALPHA3D: the weights from the 3D pixel's alpha, of 32
+    const uint32x4_t ka = vbslq_u32(by, vaddq_u32(a3, one), vandq_u32(vshrq_n_u32(w, 18), m1f));
+    const uint32x4_t kb = vbslq_u32(by, vsubq_u32(k31, a3), vandq_u32(vshrq_n_u32(w, 23), m1f));
+    const uint32x4_t round = vbslq_u32(by, vdupq_n_u32(16), vdupq_n_u32(8));
+    const uint32x4_t c_rb = vorrq_u32(vandq_u32(w, m3f), vandq_u32(vshlq_n_u32(w, 4), vdupq_n_u32(0x003F0000)));
+    uint32x4_t rb = vmlaq_u32(vmulq_u32(round, vdupq_n_u32(0x00010001)), vandq_u32(t, mrb), ka);
+    rb = vmlaq_u32(rb, c_rb, kb);
+    uint32x4_t g = vmlaq_u32(round, vandq_u32(vshrq_n_u32(t, 8), m3f), ka);
+    g = vmlaq_u32(g, vandq_u32(vshrq_n_u32(w, 6), m3f), kb);
+    const int16x8_t sh16 = vreinterpretq_s16_u32(vbslq_u32(by, vdupq_n_u32(0xFFFBFFFB), vdupq_n_u32(0xFFFCFFFC)));   // >> 5 or >> 4
+    const int32x4_t sh32 = vreinterpretq_s32_u32(vbslq_u32(by, vdupq_n_u32(0xFFFFFFFB), vdupq_n_u32(0xFFFFFFFC)));
+    rb = vreinterpretq_u32_u16(vminq_u16(vshlq_u16(vreinterpretq_u16_u32(rb), sh16), vdupq_n_u16(63)));
+    g = vminq_u32(vshlq_u32(g, sh32), k63);
+    uint32x4_t o = vorrq_u32(vorrq_u32(rb, vshlq_n_u32(g, 8)), vdupq_n_u32(0xFF000000));
+    o = vbicq_u32(o, vandq_u32(vtstq_u32(w, vdupq_n_u32(split3d::Q15)), vdupq_n_u32(0x00010101)));
+    const uint32x4_t keep = vorrq_u32(vceqq_u32(op, zero), vceqq_u32(a3, zero));   // hidden, or no 3D pixel: the line without it
+    vst1q_u32(out + i, vbslq_u32(keep, vld1q_u32(u + i), o));
+  }
+}
+
 void capture_a15(const Pixel* src, u32 n, u16* dst) {
   const uint8x16_t v1f = vdupq_n_u8(0x1F);
   for (u32 i = 0; i < n; i += 16) {

@@ -256,7 +256,7 @@ int main() {
     }
     std::unique_ptr<ds::gpu::kern::ColourLut> lut;
     if (c.colour != ds::gpu::ColourProfile::Off) { lut = std::make_unique<ds::gpu::kern::ColourLut>(); ds::gpu::build_colour_lut(c.colour, *lut); }
-    if (!gp->present(out, fb, c.v, c.nviews, c.rot, c.lw, c.lh, c.alpha, c.over, c.grid, nullptr, lut.get(), c.filter)) { std::printf("%s: present failed\n", c.name); pass = false; continue; }
+    if (!gp->present(out, fb, c.v, c.nviews, c.rot, c.lw, c.lh, c.alpha, c.over, c.grid, lut.get(), c.filter)) { std::printf("%s: present failed\n", c.name); pass = false; continue; }
     gp->flush(out);
     const std::vector<u32> got = out.shown(), want = model(c, pw, ph, fb, over, lut.get());
     u32 off1 = 0, bad = 0, fx = 0, fy = 0, fg = 0, fw = 0;

@@ -24,8 +24,8 @@ const Choice kIntScale[] = {{"off", N_("OFF")}, {"under", N_("UNDER")}, {"over",
 const Choice kSeam[]     = {{"dark", N_("DARK")}, {"blend", N_("BLEND")}, {"blend_linear", N_("BLEND LINEAR")}};
 const Choice kChunky[]   = {{"false", N_("OFF")}, {"mean", N_("DEFAULT")}, {"extreme", N_("ADAPTIVE")},
                             {"mode", N_("COMMON")}, {"tl", N_("FIRST")}, {"min", N_("DARKEST")}, {"max", N_("LIGHTEST")}};
-const Choice kAa[]       = {{"false", N_("OFF")}, {"true", N_("ON")}, {"enhanced", N_("ENHANCED")}};
 const Choice kColourProfile[] = {{"off", N_("OFF")}, {"nds", N_("DS")}, {"nds_lite", N_("DS LITE")}};
+const Choice kGpuScale[] = {{"1", "1X"}, {"2", "2X"}, {"4", "4X"}};
 const Choice kScreen[]   = {{"top", N_("TOP")}, {"bottom", N_("BOTTOM")}};
 // GBATEK's order, matching the firmware.
 const Choice kColour[]   = {{"0", N_("GREY")}, {"1", N_("BROWN")}, {"2", N_("RED")}, {"3", N_("PINK")},
@@ -169,10 +169,12 @@ const Setting kVideoSettings[] = {
          N_("PANEL PIXELS PER CELL"), "auto", N_("AUTO")),
   pick("video.colour", N_("COLOUR"), kColourProfile, 3, "off", FlagLive, Dep::None,
        N_("ANOTHER SCREEN'S COLOURS: THE ORIGINAL DS, OR THE BRIGHTER DS LITE")),
-  pick("video.aa", N_("ANTI-ALIASING"), kAa, 3, "false", FlagLive, Dep::None,
-       N_("DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)")),
+  boolean("video.aa", N_("ANTI-ALIASING"), "false", FlagLive, Dep::None,
+          N_("DS ACCURATE IN CPU RENDER, 4X MSAA ON GPU (VULKAN ONLY)")),
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,
           N_("DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED")),
+  pick("video.gpu3d_scale", N_("GPU 3D SCALE"), kGpuScale, 3, "1", FlagLive, Dep::None,
+       N_("3D RESOLUTION ON THE GPU, TIMES THE DS'S (VULKAN ONLY). 2D STAYS AS IT IS")),
   boolean("video.fps", N_("FPS COUNTER"), "false", FlagLive, Dep::None,
           N_("FRAMES PER SECOND IN THE CORNER OF THE SCREEN")),
   boolean("video.fullscreen", N_("FULLSCREEN"), "false", FlagDeferred, Dep::Windowed, nullptr),
@@ -272,6 +274,8 @@ std::string percent_str(int p) {
 }
 
 int choice_index(const Setting& s, const std::string& v) {
+  // video.aa's older mode words are on (the frontend's aa_on).
+  if (s.type == T::Bool && !std::strcmp(s.key, "video.aa") && (v == "enhanced" || v == "accurate" || v == "smooth")) return 1;
   for (int i = 0; i < s.nchoices; ++i) {
     if (v == s.choices[i].value) return i;
     if (s.type == T::Bool && truthy(v) == truthy(s.choices[i].value)) return i;   // tolerate hand-edited variants

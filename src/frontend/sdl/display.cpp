@@ -477,20 +477,29 @@ bool Display::prepare_gpu(GpuFrame& f) {
   return true;
 }
 
-void Display::draw_gpu(const u32* const fb[SCREENS], const EdgePlanes* edges) {
+bool Display::merge3d_ok() const {
+  if (!vk_present() || linear_ || colour_ || src_gpu_) return false;
+  if (seam_blend_)   // seams blend except at a whole scale or on a view shorter than the screen (GpuPresent::present)
+    for (int i = 0; i < nviews_; ++i) {
+      const frontend::Rect& r = views_[i].rect;
+      if (views_[i].shown && !(r.h < 192 || (r.w % 256 == 0 && r.h % 192 == 0))) return false;
+    }
+  return true;
+}
+
+void Display::draw_gpu(const u32* const fb[SCREENS], const Merge3D* merge) {
   GpuFrame f;
   if (!prepare_gpu(f)) return;
-  if (edges) f.params.edges = *edges;
+  if (merge) f.params.merge = *merge;
   f.p->present(fb, f.v, f.n, f.params);
 }
 
-void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const EdgePlanes* edges) {
+void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const Merge3D* merge) {
   // One copy of the frame for every window: the core writes the next frame
   // into fb while the present thread reads this one. Reused once the job
   // that read it is done.
   static std::vector<u32> stage[SCREENS];
-  static std::vector<u32> estage[SCREENS];   // the edge planes' marked lines (the others are never read)
-  static u64 erows[SCREENS][3];
+  static std::vector<u32> mstage[SCREENS], mexpect[SCREENS];   // per screen: the 3D merge's words, its coordinate words, its 192 line words; the check's frame
   static u64 stage_job = 0;
   // A frame reaches the sink at the next present, when its fence has long
   // signalled: on the Mali-G52 a present's compute takes ~5 ms from submit
@@ -505,7 +514,7 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
     Display& d = *ds[i];
     d.sync();
     if (d.ren_threaded_) { rens[nr++] = &d; continue; }
-    if (!d.gpu_) { d.draw(fb, edges); continue; }
+    if (!d.gpu_) { d.draw(fb, merge); continue; }
     if (d.prepare_gpu(frames[nf])) owners[nf++] = &d;
   }
   if (!nf && !nr) return;
@@ -515,16 +524,22 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
     stage[s].resize(static_cast<size_t>(SCREEN_W) * SCREEN_H);
     std::memcpy(stage[s].data(), fb[s], stage[s].size() * sizeof(u32));
   }
-  EdgePlanes staged;
-  if (edges)
-    for (int s = 0; s < SCREENS; ++s) {
-      if (!edges->plane[s] || !edges->rows[s]) continue;
-      estage[s].resize(static_cast<size_t>(SCREEN_W) * SCREEN_H);
-      copy_edge_rows(estage[s].data(), *edges, s, fb[s]);
-      for (int k = 0; k < 3; ++k) erows[s][k] = edges->rows[s][k];
-      staged.plane[s] = estage[s].data(); staged.rows[s] = erows[s];
+  Merge3D mstaged;
+  if (merge)
+    for (int k = 0; k < SCREENS; ++k) {
+      const Merge3D::Screen& m = merge->s[k];
+      if (!m.has()) continue;
+      const size_t n = static_cast<size_t>(SCREEN_W) * SCREEN_H;
+      std::vector<u32>& st = mstage[k];
+      st.resize(2 * n + SCREEN_H);
+      std::memcpy(st.data(), m.words, n * sizeof(u32));
+      if (m.coords) std::memcpy(st.data() + n, m.coords, n * sizeof(u32));
+      std::memcpy(st.data() + 2 * n, m.lines, SCREEN_H * sizeof(u32));
+      Merge3D::Screen& o = mstaged.s[k];
+      o = m; o.words = st.data(); o.coords = m.coords ? st.data() + n : nullptr; o.lines = st.data() + 2 * n;
+      if (m.expect) { mexpect[k].assign(m.expect, m.expect + n); o.expect = mexpect[k].data(); }
     }
-  for (int k = 0; k < nf; ++k) frames[k].params.edges = staged;
+  for (int k = 0; k < nf; ++k) frames[k].params.merge = mstaged;
   stage_job = pt.post([frames, nf, rens, nr] {
     const u32* const sfb[SCREENS] = {stage[0].data(), stage[1].data()};
     for (int k = 0; k < nr; ++k) rens[k]->draw_renderer(sfb);
@@ -538,9 +553,9 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
   for (int k = 0; k < nr; ++k) rens[k]->job_ = stage_job;
 }
 
-void Display::draw(const u32* const fb[SCREENS], const EdgePlanes* edges) {
+void Display::draw(const u32* const fb[SCREENS], const Merge3D* merge) {
   sync();
-  if (gpu_) { draw_gpu(fb, edges); return; }
+  if (gpu_) { draw_gpu(fb, merge); return; }
   if (disp_) {
     if (disp_->overlay_available()) { disp_->overlay_changed(canvas_taken_); canvas_taken_ = false; }
     const u32* slots[DispOut::VIEWS] = {nullptr, nullptr};

@@ -4,7 +4,6 @@
 // Headless frontend: boots the BIOS/firmware (and optionally a ROM), runs N
 // frames, optionally tracing instructions or dumping frames/audio.
 #include "core/gpu/colour.h"
-#include "core/gpu/edge_cut.h"
 #include "core/nds.h"
 #include "core/cpu/timing_mode.h"
 #include "core/pc_sampler.h"
@@ -250,11 +249,13 @@ int main(int argc, char** argv) {
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
   const char* pc_profile = nullptr;
   int dump_from = 0, dump_count = 0;   // --dump-from/--dump-count: window of a large dump
-  int cut_n = 0; const char* cut_path = nullptr;   // --dump-cut
+  std::vector<int> dump_at;   // --dump-at F1,F2,..: only these frames (replaces the window)
   long gpu_dump_frame = -1; const char* gpu_dump_path = nullptr;   // --dump-gpu-frame
   const char* rec3d_path = nullptr;   // --dump-3d
+  const char* fine3d_path = nullptr;  // --dump-3d-fine
+  const char* screens_scaled_path = nullptr;  // --dump-screens-scaled
   bool gpu3d = false;   // --gpu3d
-  bool aa_enhanced = false;   // --aa-enhanced: video.aa = enhanced (the GPU raster's cut-out pass)
+  int gpu3d_scale = 1;
   int frames = 60; bool direct = false;
 #if DSPERATE_JIT
   bool jit = true;                    // both CPUs; --interp clears it
@@ -331,14 +332,22 @@ int main(int argc, char** argv) {
     else if (arg("--trace")) trace = argv[++i];
     else if (arg("--max")) ts.max = std::strtoull(argv[++i], nullptr, 0);
     else if (arg("--dump-frames")) dump = argv[++i];
-    else if (arg("--dump-cut")) { cut_n = std::atoi(argv[++i]); cut_path = argv[++i]; }   // N FILE: both screens through the edge cut (core/gpu/edge_cut.h) at Nx, raw 0xAARRGGBB
     else if (arg("--dump-3d")) rec3d_path = argv[++i];   // FILE: the 3D layer record as the compositor reads it (256x192 words: RGB666 + 5-bit alpha in 24-28), for the --dump-from/--dump-count frames
+    else if (arg("--dump-screens-scaled")) {   // FILE: with --gpu3d --gpu3d-scale N, both screens at N x as the GPU present composes them
+      // (the 2D side repeated, the 3D layer at full scale through the split merge); records as dsperate-research's
+      // DeSmuME harness --dump-screens: 256N x 192N words a screen, top then bottom, r | g << 8 | b << 16 | 31 << 24, RGB666
+      screens_scaled_path = argv[++i];
+      setenv("DS_LEAN_FINE", "1", 1); setenv("DS_SPLIT3D", "present", 1);
+      if (!std::getenv("DS_GPU_NOLAG")) setenv("DS_GPU_NOLAG", "1", 1);   // each frame's own record, not the lag rule's
+    }
+    else if (arg("--dump-3d-fine")) { fine3d_path = argv[++i]; setenv("DS_LEAN_FINE", "1", 1); }   // FILE: with --gpu3d --gpu3d-scale N, the GPU raster's record at its own scale (256N x 192N words a frame; a frame without one is written as zeros)
     else if (arg("--dump-gpu-frame")) { gpu_dump_frame = std::atol(argv[++i]); gpu_dump_path = argv[++i]; }   // N FILE: frame N's polygon list in the GPU raster's layout (vk_dump.h)
 
     else if (arg("--hash-frames")) hash_frames = argv[++i];   // FILE: "frame top bottom" per frame, FNV-1a 64 of each screen's 0xAARRGGBB (the video golden hashes)
     else if (arg("--dump-scaled")) { scaled_n = std::atoi(argv[++i]); scaled_path = argv[++i]; }   // N FILE: both screens through the scanline scaler at Nx, raw BGRA
     else if (arg("--dump-from")) dump_from = std::atoi(argv[++i]);    // first frame to dump
     else if (arg("--dump-count")) dump_count = std::atoi(argv[++i]);  // how many (0 = to the end)
+    else if (arg("--dump-at")) { for (const char* p = argv[++i]; *p;) { char* e; dump_at.push_back(static_cast<int>(std::strtol(p, &e, 10))); p = *e ? e + 1 : e; } }   // F1,F2,..: every dump takes these frames only
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
@@ -360,7 +369,8 @@ int main(int argc, char** argv) {
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
     else if (arg("--colour")) colour = argv[++i];                            // colour correction (video.colour): off | nds | nds_lite; shows in --dump-frames / --hash
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
-    else if (flag("--aa-enhanced")) aa_enhanced = true;
+    else if (flag("--aa-enhanced")) no_aa = false;                           // the old enhanced mode: plain anti-aliasing, as --aa on the SDL frontend
+    else if (arg("--gpu3d-scale")) gpu3d_scale = std::atoi(argv[++i]);   // the GPU raster at N times the DS's resolution; the composite here reads its 1x record
     else if (flag("--gpu3d")) gpu3d = true;   // the 3D layer on the GPU (Renderer3D::set_gpu, gpu_raster.h: Vulkan, else OpenGL ES); declines to the CPU without a driver
     else if (arg("--load-state")) load_state = argv[++i];                   // restore a save state before running
     else if (arg("--frameskip")) frameskip = std::atoi(argv[++i]);          // skip drawing N of every N+1 frames (Gpu::set_frame_skip); a dump of a skipped frame is stale
@@ -388,6 +398,16 @@ int main(int argc, char** argv) {
 #else
               "");
 #endif
+  // A GPU frame dump is written from the polygon list, which a stream frame
+  // (DS_GPU_GEOM=only, the default) does not have: the list path for this run, unless asked otherwise.
+  if (gpu_dump_path && !std::getenv("DS_GPU_GEOM")) {
+    setenv("DS_GPU_GEOM", "off", 1);
+    std::fprintf(stderr, "gpu dump: DS_GPU_GEOM=off for this run (the dump needs the polygon list)\n");
+  }
+  auto dump_frame = [&](int i) {   // the frames the dumps write: --dump-at's, else the --dump-from/--dump-count window
+    if (!dump_at.empty()) return std::find(dump_at.begin(), dump_at.end(), i) != dump_at.end();
+    return i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count);
+  };
   ds::NDS nds;
   if (frameskip_capture) nds.gpu.set_frameskip_capture(true);
   if (hide_screen) nds.gpu.set_screen_visible(!std::strcmp(hide_screen, "bottom") ? 1 : 0, false);
@@ -534,7 +554,6 @@ int main(int argc, char** argv) {
     if (!ds::gpu::parse_colour_profile(colour, cp)) { std::fprintf(stderr, "--colour: unknown profile %s (off | nds | nds_lite)\n", colour); return 2; }
     nds.gpu.set_colour_profile(cp);
   }
-  nds.gpu3d.renderer().set_aa_enhanced(aa_enhanced);
   std::vector<ds::u32> scaled_px[2]; std::vector<ds::u16> scaled_xrun; FILE* scaled_out = nullptr;
   if (scaled_n > 0 && scaled_path) {
     const ds::u32 W = ds::SCREEN_W * scaled_n, H = ds::SCREEN_H * scaled_n;
@@ -675,16 +694,13 @@ int main(int argc, char** argv) {
   unsigned long long last9 = 0, last7 = 0;
   FILE* dump_out = dump ? std::fopen(dump, "wb") : nullptr;
   FILE* rec3d_out = rec3d_path ? std::fopen(rec3d_path, "wb") : nullptr;
+  FILE* fine3d_out = fine3d_path ? std::fopen(fine3d_path, "wb") : nullptr;
+  FILE* screens_scaled_out = screens_scaled_path ? std::fopen(screens_scaled_path, "wb") : nullptr;
+  std::vector<ds::u32> screens_scaled_px;
   if (dump && !dump_out) { std::fprintf(stderr, "could not open %s\n", dump); return 1; }
   if (gpu_dump_path && gpu_dump_frame >= 0) nds.gpu3d.renderer().set_gpu_dump(gpu_dump_path, static_cast<ds::u64>(gpu_dump_frame));
+  nds.gpu3d.renderer().set_gpu_scale(static_cast<ds::u32>(gpu3d_scale));
   if (gpu3d) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); }
-  FILE* cut_out = nullptr; std::vector<ds::u32> cut_px;
-  if (cut_n > 0 && cut_path) {
-    cut_out = std::fopen(cut_path, "wb");
-    if (!cut_out) { std::fprintf(stderr, "could not open %s\n", cut_path); return 1; }
-    cut_px.resize(static_cast<size_t>(256 * cut_n) * static_cast<size_t>(192 * cut_n));
-    nds.gpu.set_edge_export(true);
-  }
   FILE* hash_out = hash_frames ? std::fopen(hash_frames, "w") : nullptr;
   if (hash_frames && !hash_out) { std::fprintf(stderr, "could not open %s\n", hash_frames); return 1; }
   ds::input::Log log;
@@ -871,6 +887,22 @@ int main(int argc, char** argv) {
     } else
 #endif
     nds.run_frame();
+    if (screens_scaled_out && dump_frame(i)) {
+      const ds::u32 n = static_cast<ds::u32>(std::max(1, gpu3d_scale));
+      screens_scaled_px.resize(static_cast<size_t>(ds::SCREEN_W) * n * ds::SCREEN_H * n);
+      for (int k = 0; k < 2; ++k) {
+        if (!nds.gpu.merge_split3d_scaled(k, n, screens_scaled_px.data())) {   // no full-scale record (a CPU frame): the 1x picture repeated
+          static bool said = false;
+          if (!said) { std::fprintf(stderr, "dump-screens-scaled: frame %d screen %d has no %ux record; written at 1x repeated\n", i, k, n); said = true; }
+          nds.gpu.merge_split3d(k, screens_scaled_px.data());
+          for (ds::u32 y = ds::SCREEN_H * n; y-- > 0;)
+            for (ds::u32 x = ds::SCREEN_W * n; x-- > 0;) screens_scaled_px[static_cast<size_t>(y) * ds::SCREEN_W * n + x] = screens_scaled_px[(y / n) * ds::SCREEN_W + x / n];
+        }
+        for (ds::u32& c : screens_scaled_px) c = ((c >> 18) & 0x3F) | (((c >> 10) & 0x3F) << 8) | (((c >> 2) & 0x3F) << 16) | (31u << 24);   // 0xAARRGGBB to RGB666
+        std::fwrite(screens_scaled_px.data(), 4, screens_scaled_px.size(), screens_scaled_out);
+      }
+    }
+    nds.gpu.resolve_split3d();   // DS_SPLIT3D=present: the split a GPU compositor would merge, merged on the CPU
     if (!write_state(i + 1)) return 1;
     if (static const bool fh = std::getenv("DS_FRAME_HASH") != nullptr; fh) {
       auto fnv = [](const ds::u8* p, size_t n, ds::u64 h) { for (size_t k = 0; k < n; ++k) h = (h ^ p[k]) * 1099511628211ull; return h; };
@@ -892,24 +924,25 @@ int main(int argc, char** argv) {
         std::fwrite(nds.bus.arm7_wram.get(), 1, 64u << 10, f); std::fwrite(nds.bus.dtcm.get(), 1, 16u << 10, f); std::fclose(f);
       }
     }
-    if (scaled_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
+    if (scaled_out && dump_frame(i))
       for (int k = 0; k < 2; ++k) std::fwrite(scaled_px[k].data(), 4, scaled_px[k].size(), scaled_out);
-    if (cut_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count))
-      for (int k = 0; k < 2; ++k) {
-        ds::gpu::edge_cut_screen(nds.gpu.framebuffer(k), nds.gpu.edge_plane(k), cut_n, cut_px.data(), std::getenv("DS_EDGE_BLEND") ? static_cast<float>(std::atof(std::getenv("DS_EDGE_BLEND"))) : 1.0f);
-        std::fwrite(cut_px.data(), 4, cut_px.size(), cut_out);
-      }
-    if (cut_out && std::getenv("DS_DUMP_EDGE") && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {   // DS_DUMP_EDGE=FILE with --dump-cut: the top screen's edge plane words (Renderer3D::set_edge_export) of the last dumped frame
-      FILE* ef = std::fopen(std::getenv("DS_DUMP_EDGE"), "wb"); std::fwrite(nds.gpu.edge_plane(0), 4, 256 * 192, ef); std::fclose(ef);
-    }
-    if (dump_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
+    if (dump_out && dump_frame(i)) {
       // raw 0xAARRGGBB, top screen then bottom, 256x192 each, one record per frame
       std::fwrite(nds.gpu.framebuffer(0), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
       std::fwrite(nds.gpu.framebuffer(1), 4, ds::SCREEN_W * ds::SCREEN_H, dump_out);
     }
-    if (rec3d_out && i >= dump_from && (dump_count <= 0 || i < dump_from + dump_count)) {
+    if (rec3d_out && dump_frame(i)) {
       const auto ref = nds.gpu3d.frame_ref(false);
       for (int y = 0; y < static_cast<int>(ds::SCREEN_H); ++y) std::fwrite(nds.gpu3d.line(ref, static_cast<ds::u32>(y)), 4, ds::SCREEN_W, rec3d_out);
+    }
+    if (fine3d_out && dump_frame(i)) {
+      const auto ref = nds.gpu3d.frame_ref(false);
+      (void)nds.gpu3d.line(ref, 0);   // picks the frame's record
+      ds::u32 sc = static_cast<ds::u32>(gpu3d_scale);
+      const ds::u32* fine = nds.gpu3d.renderer().gpu_fine(ref, &sc);
+      const size_t words = static_cast<size_t>(ds::SCREEN_W) * sc * ds::SCREEN_H * sc;
+      if (fine) std::fwrite(fine, 4, words, fine3d_out);
+      else { static std::vector<ds::u32> zeros; zeros.assign(words, 0); std::fwrite(zeros.data(), 4, words, fine3d_out); }
     }
     if (hash_out) {
       auto fnv = [](const ds::u32* p) { ds::u64 h = 1469598103934665603ull; for (ds::u32 k = 0; k < ds::SCREEN_W * ds::SCREEN_H; ++k) h = (h ^ p[k]) * 1099511628211ull; return h; };
@@ -957,7 +990,6 @@ int main(int argc, char** argv) {
     else std::fprintf(stderr, "firmware override: saved %s\n", fw_override);
   }
   if (dump_out) std::fclose(dump_out);
-  if (cut_out) std::fclose(cut_out);
   if (hash_out) std::fclose(hash_out);
   if (scaled_out) std::fclose(scaled_out);
   if (audio_out) std::fclose(audio_out);

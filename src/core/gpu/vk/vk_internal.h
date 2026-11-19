@@ -37,12 +37,12 @@ namespace ds::gpu::vk {
   F(vkCmdBindPipeline) F(vkCmdBindDescriptorSets) F(vkCmdPushConstants) \
   F(vkCmdDispatch) F(vkCmdPipelineBarrier) F(vkCmdFillBuffer) \
   F(vkCreateFence) F(vkDestroyFence) F(vkResetFences) F(vkWaitForFences) F(vkGetFenceStatus) \
-  F(vkCreateQueryPool) F(vkDestroyQueryPool) F(vkCmdResetQueryPool) F(vkCmdWriteTimestamp) F(vkGetQueryPoolResults) \
+  F(vkCreateQueryPool) F(vkDestroyQueryPool) F(vkCmdResetQueryPool) F(vkCmdWriteTimestamp) F(vkGetQueryPoolResults) F(vkCmdBeginQuery) F(vkCmdEndQuery) \
   F(vkQueueSubmit) \
   F(vkCreateImage) F(vkDestroyImage) F(vkGetImageMemoryRequirements) F(vkBindImageMemory) \
   F(vkCreateImageView) F(vkDestroyImageView) F(vkGetImageSubresourceLayout) F(vkCreateBufferView) F(vkDestroyBufferView) \
   F(vkGetMemoryFdPropertiesKHR) F(vkGetPhysicalDeviceImageFormatProperties2) \
-  F(vkCreateGraphicsPipelines) F(vkCreateRenderPass) F(vkDestroyRenderPass) F(vkCreateFramebuffer) F(vkDestroyFramebuffer) \
+  F(vkCreateGraphicsPipelines) F(vkCreateRenderPass) F(vkCreateRenderPass2KHR) F(vkDestroyRenderPass) F(vkCreateFramebuffer) F(vkDestroyFramebuffer) \
   F(vkCmdBeginRenderPass) F(vkCmdEndRenderPass) F(vkCmdNextSubpass) F(vkCmdDraw) F(vkCmdSetStencilReference) F(vkCmdCopyImageToBuffer) F(vkGetPhysicalDeviceFormatProperties) F(vkCmdClearAttachments)
 
 // Presentation (VK_KHR_surface / VK_KHR_swapchain; null when not enabled) and

@@ -9,6 +9,7 @@
 // (timestamps) and the submit-to-fence time of each path, and checks every
 // pixel against nearest. Device-only, not a test.
 #include "core/gpu/vk/vk_internal.h"
+#include "core/gpu/split3d.h"
 #include "frontend/sdl/dmaheap.h"
 
 #include <algorithm>
@@ -33,7 +34,11 @@ __asm__(".section .rodata\n.balign 4\n.globl ds_present_vert_data\nds_present_ve
         ".globl ds_present_vert_end\nds_present_vert_end:\n"
         ".balign 4\n.globl ds_present_frag_data\nds_present_frag_data:\n"
         ".incbin \"" DSPERATE_PRESENT_SHADER_DIR "/present_frag.spv\"\n"
-        ".globl ds_present_frag_end\nds_present_frag_end:\n.previous\n");
+        ".globl ds_present_frag_end\nds_present_frag_end:\n"
+        ".balign 4\n.globl ds_present_merge_data\nds_present_merge_data:\n"
+        ".incbin \"" DSPERATE_PRESENT_SHADER_DIR "/present_merge_frag.spv\"\n"
+        ".globl ds_present_merge_end\nds_present_merge_end:\n.previous\n");
+extern "C" const unsigned char ds_present_merge_data[], ds_present_merge_end[];
 extern "C" const unsigned char ds_present_vert_data[], ds_present_vert_end[], ds_present_frag_data[], ds_present_frag_end[];
 
 namespace {
@@ -201,7 +206,7 @@ int main(int argc, char** argv) {
   std::vector<u32> pattern(2 * kFrameWords);
   u32 seed = 0x12345678u;
   for (u32& p : pattern) { seed = seed * 1664525u + 1013904223u; p = 0xFF000000u | (seed >> 8); }
-  Buffer ssbo = dev->alloc(sizeof(u32) * 2 * kFrameWords, Access::CpuWrite);
+  Buffer ssbo = dev->alloc(sizeof(u32) * 6 * kFrameWords, Access::CpuWrite);   // the frames, then (planes 4 and 5) the 3D merge's words and line table
   Buffer stage = dev->alloc(sizeof(u32) * 2 * kFrameWords, Access::CpuWrite);
   Buffer over = dev->alloc(sizeof(u32) * W * H, Access::CpuWrite);
   Buffer tab = dev->alloc(sizeof(u32) * 128, Access::CpuWrite);
@@ -243,7 +248,7 @@ int main(int argc, char** argv) {
   }
 
   // The fragment present: a render pass on each import, one triangle over it; a pipeline per filter (FILTER).
-  VkRenderPass rp; VkFramebuffer fbs[2]; VkPipelineLayout gpl; VkPipeline gpipes[4]; VkDescriptorSetLayout gdsl; VkDescriptorSet gset;
+  VkRenderPass rp; VkFramebuffer fbs[2]; VkPipelineLayout gpl; VkPipeline gpipes[4]; VkPipeline gmerge; VkDescriptorSetLayout gdsl; VkDescriptorSet gset;
   {
     VkAttachmentDescription at{}; at.format = kFmt; at.samples = VK_SAMPLE_COUNT_1_BIT;
     at.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; at.storeOp = VK_ATTACHMENT_STORE_OP_STORE;   // the letterbox
@@ -262,12 +267,12 @@ int main(int argc, char** argv) {
       fci.pAttachments = &imp[i].view; fci.width = W; fci.height = H; fci.layers = 1;
       if (a->vkCreateFramebuffer(vk->dev, &fci, nullptr, &fbs[i]) != VK_SUCCESS) { std::printf("framebuffer on the import failed\n"); return 1; }
     }
-    VkDescriptorSetLayoutBinding b[5]{};
-    for (u32 i = 0; i < 5; ++i) { b[i].binding = i + 1; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutBinding b[7]{};
+    for (u32 i = 0; i < 7; ++i) { b[i].binding = i + 1; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
       b[i].descriptorType = i < 3 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; }
-    VkDescriptorSetLayoutCreateInfo dl{}; dl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; dl.bindingCount = 5; dl.pBindings = b;
+    VkDescriptorSetLayoutCreateInfo dl{}; dl.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; dl.bindingCount = 7; dl.pBindings = b;
     a->vkCreateDescriptorSetLayout(vk->dev, &dl, nullptr, &gdsl);
-    const VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2}};
+    const VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4}};
     VkDescriptorPoolCreateInfo dp{}; dp.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO; dp.maxSets = 1; dp.poolSizeCount = 2; dp.pPoolSizes = ps;
     VkDescriptorPool gpool; a->vkCreateDescriptorPool(vk->dev, &dp, nullptr, &gpool);
     VkDescriptorSetAllocateInfo da{}; da.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; da.descriptorPool = gpool; da.descriptorSetCount = 1; da.pSetLayouts = &gdsl;
@@ -305,12 +310,36 @@ int main(int argc, char** argv) {
     VkGraphicsPipelineCreateInfo gp{}; gp.pDynamicState = &dys; gp.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gp.stageCount = 2; gp.pStages = st;
     gp.pVertexInputState = &vin; gp.pInputAssemblyState = &ia; gp.pViewportState = &vs; gp.pRasterizationState = &rs; gp.pMultisampleState = &ms;
     gp.pColorBlendState = &cbs; gp.layout = gpl; gp.renderPass = rp;
+    // PROBE_PLAIN_FEAT / PROBE_FEAT: present.frag's FEAT for the plain pipelines and the merge's (default: everything in,
+    // 255; gpu_present.cpp builds each view's with only what it uses). PROBE_MERGE_SPV=FILE: the merge's fragment shader from a file.
+    const u32 plain_feat = std::getenv("PROBE_PLAIN_FEAT") ? static_cast<u32>(std::strtoul(std::getenv("PROBE_PLAIN_FEAT"), nullptr, 0)) : 255u;
+    const u32 merge_feat = std::getenv("PROBE_FEAT") ? static_cast<u32>(std::strtoul(std::getenv("PROBE_FEAT"), nullptr, 0)) : 255u;
     for (u32 f = 0; f < 4; ++f) {
-      const VkSpecializationMapEntry me{0, 0, sizeof(u32)};
-      const VkSpecializationInfo spec{1, &me, sizeof(u32), &f};
+      const VkSpecializationMapEntry me[2] = {{0, 0, sizeof(u32)}, {1, sizeof(u32), sizeof(u32)}};
+      const u32 consts[2] = {f, plain_feat};
+      const VkSpecializationInfo spec{2, me, sizeof consts, consts};
       st[1].pSpecializationInfo = &spec;
       if (a->vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &gpipes[f]) != VK_SUCCESS) { std::printf("present.frag pipeline %u failed\n", f); return 1; }
     }
+    // The 3D merge variant (present_merge_frag.spv), nearest.
+    VkShaderModule mm;
+    si.codeSize = static_cast<size_t>(ds_present_merge_end - ds_present_merge_data); si.pCode = reinterpret_cast<const u32*>(ds_present_merge_data);
+    static std::vector<u32> mfile;
+    if (const char* path = std::getenv("PROBE_MERGE_SPV")) {
+      if (FILE* f = std::fopen(path, "rb")) {
+        std::fseek(f, 0, SEEK_END); const long n = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+        mfile.resize(static_cast<size_t>(n) / 4);
+        if (std::fread(mfile.data(), 4, mfile.size(), f) == mfile.size()) { si.codeSize = mfile.size() * 4; si.pCode = mfile.data(); std::printf("merge shader: %s\n", path); }
+        std::fclose(f);
+      } else std::printf("merge shader: cannot open %s\n", path);
+    }
+    a->vkCreateShaderModule(vk->dev, &si, nullptr, &mm);
+    st[1].module = mm;
+    const VkSpecializationMapEntry me[2] = {{0, 0, sizeof(u32)}, {1, sizeof(u32), sizeof(u32)}};
+    const u32 consts[2] = {0, merge_feat};
+    const VkSpecializationInfo spec{2, me, sizeof consts, consts};
+    st[1].pSpecializationInfo = &spec;
+    if (a->vkCreateGraphicsPipelines(vk->dev, VK_NULL_HANDLE, 1, &gp, nullptr, &gmerge) != VK_SUCCESS) { std::printf("merge pipeline failed\n"); return 1; }
   }
 
   VkCommandPool cpool; VkCommandBuffer cb; VkFence fence; VkQueryPool qp;
@@ -347,11 +376,64 @@ int main(int argc, char** argv) {
   };
   const VkPipelineStageFlags all = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
+  // The 3D merge's layer: the record at PROBE_3D_SCALE (default 4), R32UI,
+  // three fills (every pixel opaque, translucent, empty).
+  const u32 lscale = std::getenv("PROBE_3D_SCALE") ? static_cast<u32>(std::atoi(std::getenv("PROBE_3D_SCALE"))) : 4u;
+  const u32 LW = SW * lscale, LH = SH * lscale;
+  VkImageView lview[3]; VkSampler lsamp;
+  std::vector<u32> lfill[3];
+  {
+    Buffer lst = dev->alloc(sizeof(u32) * LW * LH, Access::CpuWrite);
+    if (!lst) { std::printf("layer staging failed\n"); return 1; }
+    VkSamplerCreateInfo sci{}; sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO; sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    a->vkCreateSampler(vk->dev, &sci, nullptr, &lsamp);
+    for (u32 k = 0; k < 3; ++k) {
+      u32* px = static_cast<u32*>(lst.ptr);
+      for (u32 i = 0; i < LW * LH; ++i) { seed = seed * 1664525u + 1013904223u; px[i] = k == 2 ? 0 : ((seed >> 8) & 0x3F3F3F) | ((k == 0 ? 31u : 1 + (seed >> 27) % 30) << 24); }
+      lfill[k].assign(px, px + LW * LH);
+      dev->flush(lst, 0, lst.size);
+      VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; ii.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT; ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R32_UINT;   // as the raster's record
+      ii.extent = {LW, LH, 1}; ii.mipLevels = 1; ii.arrayLayers = 1; ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+      ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      VkImage li; VkDeviceMemory lm;
+      if (a->vkCreateImage(vk->dev, &ii, nullptr, &li) != VK_SUCCESS) { std::printf("layer image failed\n"); return 1; }
+      VkMemoryRequirements mr{}; a->vkGetImageMemoryRequirements(vk->dev, li, &mr);
+      VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; ai.allocationSize = mr.size;
+      ai.memoryTypeIndex = find_mem(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      if (a->vkAllocateMemory(vk->dev, &ai, nullptr, &lm) != VK_SUCCESS || a->vkBindImageMemory(vk->dev, li, lm, 0) != VK_SUCCESS) { std::printf("layer memory failed\n"); return 1; }
+      VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = li; vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+      vi.format = VK_FORMAT_R8G8B8A8_UINT; vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      a->vkCreateImageView(vk->dev, &vi, nullptr, &lview[k]);
+      double ga, gb, wl;
+      if (!run([&] {
+            VkImageMemoryBarrier ib = img_barrier(li, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT);
+            a->vkCmdPipelineBarrier(cb, all, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+            a->vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qp, 1);
+            VkBufferImageCopy rg{}; rg.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; rg.imageExtent = {LW, LH, 1};
+            a->vkCmdCopyBufferToImage(cb, vk_buf(lst), li, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rg);
+            ib = img_barrier(li, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+            a->vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+          }, &ga, &gb, &wl)) { std::printf("layer upload failed\n"); return 1; }
+    }
+  }
+  auto bind_layer = [&](u32 k) {
+    const VkDescriptorImageInfo li{lsamp, lview[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w[2]{};
+    for (u32 j = 0; j < 2; ++j) {   // binding 7 (the merge made in a pass before, not probed here) names a valid image
+      w[j].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[j].dstSet = gset; w[j].dstBinding = 6 + j; w[j].descriptorCount = 1;
+      w[j].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[j].pImageInfo = &li;
+    }
+    a->vkUpdateDescriptorSets(vk->dev, 2, w, 0, nullptr);
+  };
+  bind_layer(0);
+
   struct Case { const char* name; Rect r; };
   const Case cases[] = {
     {"4x at 0,0", {0, 0, 4 * static_cast<int>(SW), 4 * static_cast<int>(SH)}},
     {"3x at 129,97", {129, 97, 3 * static_cast<int>(SW), 3 * static_cast<int>(SH)}},
     {"2.5x at 0,0", {0, 0, 640, 480}},
+    {"2x at 0,0", {0, 0, 512, 384}},
   };
   bool pass = true;
   for (const Case& c : cases) {
@@ -423,7 +505,7 @@ int main(int argc, char** argv) {
       Stats up, gpu, wall;
       for (int it = 0; it < kRuns; ++it) {
         const double u0 = now_ms();
-        std::memcpy(ssbo.ptr, pattern.data(), ssbo.size); dev->flush(ssbo, 0, ssbo.size);
+        std::memcpy(ssbo.ptr, pattern.data(), sizeof(u32) * 2 * kFrameWords); dev->flush(ssbo, 0, sizeof(u32) * 2 * kFrameWords);
         up.add(now_ms() - u0);
         double g = 0, w = 0;
         for (int v = 0; v < 2; ++v) {
@@ -471,6 +553,76 @@ int main(int argc, char** argv) {
       std::printf("  C fragment (present.frag)%s GPU median %.3f ms p90 %.3f max %.3f | submit-to-fence median %.3f p90 %.3f | CPU upload %.3f\n",
                   kFilterName[filter], gpu.pct(0.5), gpu.pct(0.9), gpu.pct(1.0), wall.pct(0.5), wall.pct(0.9), up.pct(0.5));
       if (filter == 0) for (int v = 0; v < 2; ++v) pass &= check(dbuf[v], W, H, pattern.data() + v * kFrameWords, c.r);   // (filters: gpu_present_probe)
+    }
+
+    // D: the 3D merge (present_merge_frag.spv) on view 0, the other view plain
+    // through the same pipeline: what the split's words and the layer cost.
+    struct MCase { const char* name; u32 op, ka, kb; u32 fill; };
+    static const MCase mcases[] = {
+      {"words say hidden          ", 0, 0, 0, 0},
+      {"3D on top, empty          ", 1, 16, 0, 2},
+      {"3D on top, opaque         ", 1, 16, 0, 0},
+      {"3D on top, opaque, plain  ", 3, 16, 0, 0},
+      {"3D on top, blends over R  ", 2, 0, 0, 1},
+      {"3D under a blending layer ", 1, 7, 9, 1},
+    };
+    for (const MCase& m : mcases) {
+      u32* const sp = static_cast<u32*>(ssbo.ptr);
+      for (u32 i = 0; i < kFrameWords; ++i) { seed = seed * 1664525u + 1013904223u; sp[4 * kFrameWords + i] = ((seed >> 8) & 0x3FFFF) | (m.ka << 18) | (m.kb << 23) | (m.op << 28); }
+      for (u32 y = 0; y < SH; ++y) sp[5 * kFrameWords + y] = 16;   // master brightness off
+      dev->flush(ssbo, 0, ssbo.size);
+      bind_layer(m.fill);
+      Stats gpu, wall;
+      for (int it = 0; it < kRuns; ++it) {
+        std::memcpy(ssbo.ptr, pattern.data(), sizeof(u32) * 2 * kFrameWords); dev->flush(ssbo, 0, sizeof(u32) * 2 * kFrameWords);
+        double g = 0, w = 0;
+        for (int v = 0; v < 2; ++v) {
+          Push pc{}; pc.rect[0] = c.r.x; pc.rect[1] = c.r.y; pc.rect[2] = c.r.w; pc.rect[3] = c.r.h;
+          pc.a[0] = W; pc.a[1] = H; pc.a[2] = W; pc.a[3] = H;
+          pc.b[0] = 0; pc.b[1] = v == 0 ? (4u << 8) | ((5u * 256u) << 16) : 0;   // the words in plane 4, the line table at plane 5
+          pc.b[2] = static_cast<u32>(v) * kFrameWords; pc.b[3] = 256u << 16;
+          pc.s[0] = 256.0f / static_cast<float>(c.r.w); pc.s[1] = 192.0f / static_cast<float>(c.r.h);
+          pc.s[2] = 0.5f / static_cast<float>(c.r.w); pc.s[3] = 0.5f / static_cast<float>(c.r.h);
+          double ga, gb, wl;
+          if (!run([&] {
+                a->vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qp, 1);
+                VkClearValue black{};
+                VkRenderPassBeginInfo rb{}; rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rb.renderPass = rp; rb.framebuffer = fbs[v]; rb.renderArea = {{0, 0}, {W, H}};
+                rb.clearValueCount = 1; rb.pClearValues = &black;
+                a->vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
+                a->vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, gmerge);
+                a->vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, gpl, 0, 1, &gset, 0, nullptr);
+                const float bc[4] = {1, 1, 1, 1};
+                a->vkCmdSetBlendConstants(cb, bc);
+                a->vkCmdPushConstants(cb, gpl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+                a->vkCmdDraw(cb, 4, 1, 0, 0);
+                a->vkCmdEndRenderPass(cb);
+              }, &ga, &gb, &wl)) { std::printf("  merge: submit failed\n"); return 1; }
+          g += gb; w += wl;
+        }
+        gpu.add(g); wall.add(w);
+      }
+      std::printf("  D merge, %ux layer, %s GPU median %.3f ms p90 %.3f max %.3f | submit-to-fence median %.3f p90 %.3f\n",
+                  lscale, m.name, gpu.pct(0.5), gpu.pct(0.9), gpu.pct(1.0), wall.pct(0.5), wall.pct(0.9));
+      // Against the CPU merge (split3d.h), where a layer texel is a panel pixel; view 1 stays the plain frame.
+      pass &= check(dbuf[1], W, H, pattern.data() + kFrameWords, c.r);
+      if (c.r.x == 0 && c.r.y == 0 && c.r.w == static_cast<int>(LW) && c.r.h == static_cast<int>(LH)) {
+        dbuf[0].sync(true, false);
+        u32 bad = 0, bx = 0, by = 0;
+        for (u32 y = 0; y < LH; ++y)
+          for (u32 x = 0; x < LW; ++x) {
+            const u32 si = (y / lscale) * SW + x / lscale, word = sp[4 * kFrameWords + si], p3 = lfill[m.fill][y * LW + x];
+            u32 want = pattern[si] & 0xFFFFFFu;
+            if ((word >> 28) != 0 && ((p3 >> 24) & 0x1F) != 0) {
+              const u32 mp = gpu::split3d::merge_pixel(word, 0, p3);
+              const u32 v8 = ((mp & 0x3F) << 18) | ((mp & 0x3F00) << 2) | ((mp & 0x3F0000) >> 14);
+              want = v8 | ((v8 & 0xC0C0C0) >> 6);
+            }
+            if ((dbuf[0].px[y * W + x] & 0xFFFFFFu) != want && !bad++) { bx = x; by = y; }
+          }
+        dbuf[0].sync(false, false);
+        if (bad) { std::printf("    MERGE MISMATCH: %u pixels, first at %u,%u\n", bad, bx, by); pass = false; }
+      } else if (m.op == 0) pass &= check(dbuf[0], W, H, pattern.data(), c.r);
     }
   }
   a->vkDeviceWaitIdle(vk->dev);

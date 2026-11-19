@@ -5,6 +5,7 @@
 #include <cstring>
 #include "core/types.h"
 #include "core/gpu/render3d.h"
+#include "core/gpu/geom_stream.h"
 
 #include <array>
 #include <vector>
@@ -127,132 +128,9 @@ public:
   Renderer3D::FrameRef frame_ref(bool allow_lag = true) const { return renderer_.frame_ref(allow_lag); }
   u64 last_raster_ns() const { return renderer_.last_band_sum_ns(); }
   const u32* line(const Renderer3D::FrameRef& f, u32 y);
-  // The edge plane of that line (Renderer3D::set_edge_export; after line(),
-  // so synced), or null when not exported or the 3D layer is scrolled.
-  // A GPU frame's edge bytes are made into the plane's words here, with the
-  // record's colour (unblended: the GPU raster has no AA blend); a word
-  // with bit 31 clear is no edge (the tag below). A pixel in
-  // a clump of edge pixels gets none: where a small-polygon mesh (a distant
-  // kart, a face, wheel spokes) marks whole areas, the lines are too short to
-  // judge and the cuts shred the picture, so a pixel with edge_density_ or
-  // more edge pixels in its 3x3 (a straight line has 3, a corner about 5)
-  // shows whole (DS_EDGE_DENSITY=N; 0 keeps every pixel).
-  // The byte for a pixel with none that an edge run passes through (edge_line's
-  // gap fill): where the line crosses a corner of the pixel the band pass
-  // found full coverage and wrote nothing, and the tilt either side lost its
-  // partner, so the cut steps there. Its two neighbours along the run (the
-  // columns either side for a vertical-axis run, the rows for a horizontal
-  // one), each holding one byte of that axis within a pixel across, place the
-  // line through it; 0 when they don't.
-  // The pixels of row `y` edge_gap could fill, in byte lanes: bit 0 a
-  // vertical-axis gap (no byte in its column over the three rows, one in
-  // each column beside), bit 1 a horizontal one (none in its row three wide,
-  // bytes in the rows above and below). A handful per row survive.
-  static void edge_gap_candidates(const u8* bytes, u32 y, u8 out[256]) {
-    const u8* r = bytes + y * 256;
-    const u8* a = y ? r - 256 : nullptr;
-    const u8* d = y + 1 < 192 ? r + 256 : nullptr;
-    alignas(8) u8 any[272] = {}, ra[272] = {}, rd[272] = {}, rb[272] = {};   // 8 zero either side
-    for (u32 x = 0; x < 256; x += 8) {
-      const u64 vb = load64(r + x), va = a ? load64(a + x) : 0, vd = d ? load64(d + x) : 0;
-      store64(any + 8 + x, vb | va | vd); store64(ra + 8 + x, va); store64(rd + 8 + x, vd); store64(rb + 8 + x, vb);
-    }
-    const u64 ones = 0x0101010101010101ull;
-    for (u32 x = 0; x < 256; x += 8) {
-      const u64 cv = (nonzero_lanes(load64(any + 8 + x)) ^ ones) & nonzero_lanes(load64(any + 7 + x)) & nonzero_lanes(load64(any + 9 + x));
-      const u64 b3 = load64(rb + 7 + x) | load64(rb + 8 + x) | load64(rb + 9 + x);
-      const u64 a3 = load64(ra + 7 + x) | load64(ra + 8 + x) | load64(ra + 9 + x);
-      const u64 d3 = load64(rd + 7 + x) | load64(rd + 8 + x) | load64(rd + 9 + x);
-      const u64 ch = (nonzero_lanes(b3) ^ ones) & nonzero_lanes(a3) & nonzero_lanes(d3);
-      store64(out + x, cv | (ch << 1));
-    }
-  }
-  static u8 edge_gap(const u8* bytes, u32 x, u32 y, u8 kinds) {   // kinds: edge_gap_candidates' bits
-    auto pos = [](u8 v) { const float f = static_cast<float>((v & 31) + 1) / 32.0f; return (v & 0x40) ? 1.0f - f : f; };
-    // One byte of axis `vert` in the three pixels of `line` (a row or a column) around `at`, its line position across; false if none or more.
-    auto one = [&](bool vert, bool column, u32 line, u32 at, float* h) {
-      int n = 0;
-      for (int k = -1; k <= 1; ++k) {
-        const int p = static_cast<int>(at) + k;
-        if (p < 0 || p >= (column ? 192 : 256)) continue;
-        const u8 v = column ? bytes[p * 256 + line] : bytes[line * 256 + p];
-        if (!(v & 0x80) || static_cast<bool>(v & 0x20) != vert) continue;
-        if (n++) return false;
-        *h = static_cast<float>(k) + pos(v);
-      }
-      return n == 1;
-    };
-    auto make = [](bool vert, float h) -> u8 {
-      const bool neg = h < 0.5f;
-      const int cov = std::clamp(static_cast<int>((neg ? 1.0f - h : h) * 32.0f + 0.5f) - 1, 0, 31);
-      return static_cast<u8>(0x80 | (neg ? 0x40 : 0) | (vert ? 0x20 : 0) | cov);
-    };
-    float hl, hr;
-    if ((kinds & 1) && one(true, true, x - 1, y, &hl) && one(true, true, x + 1, y, &hr)) {
-      const float hm = (hl + hr) * 0.5f, dh = hr - hl;
-      if (hm >= 0.0f && hm <= 1.0f && dh > -1.5f && dh < 1.5f) return make(true, hm);
-    }
-    if ((kinds & 2) && one(false, false, y - 1, x, &hl) && one(false, false, y + 1, x, &hr)) {
-      const float hm = (hl + hr) * 0.5f, dh = hr - hl;
-      if (hm >= 0.0f && hm <= 1.0f && dh > -1.5f && dh < 1.5f) return make(false, hm);
-    }
-    return 0;
-  }
-  const u32* edge_line(const Renderer3D::FrameRef& f, u32 y) const {
-    if (render_xpos_) return nullptr;
-    if (!f.edge_bytes) return f.edge_line(y);
-    const u8* b = f.edge_bytes + y * 256;
-    bool any = false;
-    for (u32 x = 0; x < 256 && !any; x += 8) any = load64(b + x) != 0;
-    if (!any) { std::memset(edge_words_, 0, sizeof(edge_words_)); return edge_words_; }
-    const u32* c = f.line(y);
-    // Eight columns at a time in byte lanes: 1 per edge pixel over the three
-    // rows (at most 3 a lane), then the three columns (at most 9), then
-    // lane + (0x80 - N) has bit 7 set where the count reaches N.
-    alignas(8) u8 col[272] = {};   // the 3-row count per column, 8 zero either side
-    alignas(8) u8 dense[256];
-    if (edge_density_) {
-      const u8* a = y ? b - 256 : nullptr;
-      const u8* d = y + 1 < 192 ? b + 256 : nullptr;
-      for (u32 x = 0; x < 256; x += 8) {
-        u64 n = nonzero_lanes(load64(b + x));
-        if (a) n += nonzero_lanes(load64(a + x));
-        if (d) n += nonzero_lanes(load64(d + x));
-        store64(col + 8 + x, n);
-      }
-      const u64 bias = 0x0101010101010101ull * static_cast<u64>(0x80 - std::min(edge_density_, 0x7F));
-      for (u32 x = 0; x < 256; x += 8) {
-        const u64 n = load64(col + 7 + x) + load64(col + 8 + x) + load64(col + 9 + x);
-        store64(dense + x, (n + bias) & 0x8080808080808080ull);
-      }
-    } else std::memset(dense, 0, sizeof(dense));
-    alignas(8) u8 gap[3][256];   // edge_gap_candidates of rows y - 1, y, y + 1 (the tag loop needs the fills beside)
-    if (edge_gap_) for (int k = -1; k <= 1; ++k) { if (static_cast<int>(y) + k >= 0 && static_cast<int>(y) + k < 192) edge_gap_candidates(f.edge_bytes, y + k, gap[k + 1]); }
-    else std::memset(gap, 0, sizeof(gap));
-    for (u32 x = 0; x < 256; ++x) {
-      const u32 w = c[x];
-      const u8 e = dense[x] ? 0 : b[x] ? b[x] : gap[1][x] ? edge_gap(f.edge_bytes, x, y, gap[1][x]) : 0;
-      edge_words_[x] = e ? (static_cast<u32>(e) << 24) | (w & 63) | (((w >> 8) & 63) << 6) | (((w >> 16) & 63) << 12) | (((w >> 24) & 31) << 18) : 0;
-    }
-    // The present's blend reaches one pixel past an edge pixel, so a pixel
-    // with no edge looks its four neighbours up for one; a tag word (byte
-    // 1: bit 7 clear, no edge) on the pixels beside an edge pixel spares
-    // the rest that. Beside: along the row by the words, above and below
-    // by the bytes (a superset where the density limit dropped one).
-    {
-      const u8* a = y ? b - 256 : nullptr;
-      const u8* d = y + 1 < 192 ? b + 256 : nullptr;
-      for (u32 x = 0; x < 256; ++x) {
-        if (edge_words_[x]) continue;
-        const bool beside = (x && (edge_words_[x - 1] >> 31)) || (x < 255 && (edge_words_[x + 1] >> 31)) || (a && (a[x] || (gap[0][x] && edge_gap(f.edge_bytes, x, y - 1, gap[0][x])))) || (d && (d[x] || (gap[2][x] && edge_gap(f.edge_bytes, x, y + 1, gap[2][x]))));
-        if (beside) { const u32 w = c[x]; edge_words_[x] = (1u << 24) | (w & 63) | (((w >> 8) & 63) << 6) | (((w >> 16) & 63) << 12) | (((w >> 24) & 31) << 18); }   // with the pixel's colour and alpha: Engine2D::edge_compose reads them
-      }
-    }
-    return edge_words_;
-  }
-  static u64 load64(const u8* p) { u64 v; std::memcpy(&v, p, 8); return v; }
-  static void store64(u8* p, u64 v) { std::memcpy(p, &v, 8); }
-  static u64 nonzero_lanes(u64 v) { return ((((v & 0x7F7F7F7F7F7F7F7Full) + 0x7F7F7F7F7F7F7F7Full) | v) >> 7) & 0x0101010101010101ull; }   // 1 in each byte that is not 0
+  bool layer_scrolled() const { return render_xpos_ != 0; }   // line() shifts the record (BG0's X offset)
+  // That offset as line() applies it to line y now: 9 bits, signed (pixel x shows the record's x + offset; off the record: nothing).
+  u32 layer_xpos(u32 /*y*/) const { return render_xpos_; }
   // Finish async raster; needed before touching texture VRAM (raster workers may still read it).
   void sync_raster();
   void debug_dump(FILE* f) { renderer_.debug_dump(f); }
@@ -266,7 +144,13 @@ public:
   const RenderState& render_state() const { return rstate_; }
   const Vertex& vertex(u32 idx) const { return vram_[idx]; }
   const Polygon* const* render_polygons() const { return render_polys_[raster_bank_].data(); }
+  // The frame to render as a stream (DS_GPU_GEOM=only: the raster's vertex stage), or
+  // null when it has a polygon list. Held like the list until the next render_frame.
+  const GeomStream* render_stream() const { const GeomStream& g = streams_[raster_bank_]; return g.gpu_only ? &g : nullptr; }
   u32 render_polygon_count() const { return render_count_[raster_bank_]; }
+  // The stream frame's polygon list built by the caller's thread (gpu3d.cpp stream_list); stream_bank(): which bank, as render() sees it.
+  u32 stream_bank() const { return raster_bank_; }
+  u32 stream_list(u32 bank, std::vector<const Polygon*>& out);
   // No SWAP_BUFFERS/render-register change since last render: rasteriser may keep prior output.
   bool render_identical() const { return render_identical_; }
   u64 swap_count() const { return swaps_; }
@@ -339,9 +223,6 @@ private:
   RenderState rstate_;
   // BG0HOFS of engine A, applied from its journal in display-line order on the compositor thread.
   u16 render_xpos_ = 0;
-  mutable u32 edge_words_[256] = {};   // edge_line's GPU-frame row
-  int edge_density_ = 6;                // edge_line: the 3x3 count that drops a pixel (set at construction from DS_EDGE_DENSITY)
-  bool edge_gap_ = true;                // edge_line: fill the pixels a run passes through without a byte (DS_EDGE_GAP=0 off)
   std::atomic<bool> render_on_{false};
   alignas(16) u32 scrolled_[256] = {};
 
@@ -349,6 +230,25 @@ private:
   u32 matrix_mode_ = 0;
   std::array<s32, 16> proj_, pos_, vec_, tex_, clip_;
   bool clip_dirty_ = true;
+  // The raster's vertex stage (Renderer3D::gpu_stream_job): record each frame's
+  // GeomStream as the commands run and skip the transform, classification and
+  // emission here (polygon RAM stays empty); the raster's submit thread builds
+  // the list from the stream. DS_GPU_GEOM=off|only (default only). A frame is
+  // recorded only when it will be used (geom_skip_): the CPU raster and the
+  // GLES raster pay nothing for the default.
+  enum class GeomMode : u8 { Off, Only };
+  GeomMode geom_mode_ = GeomMode::Only;
+  std::array<GeomStream, 4> streams_;   // per polygon-RAM bank, the same roles
+  bool geom_skip_ = false;              // this frame is recorded: Only, and the GPU raster takes streams (renderer_.geom_ready())
+  void begin_stream();                  // at a swap: the new write bank's stream
+  // Bank b's polygon list built on the CPU from its stream (every polygon on
+  // its own, as the GPU does): for a frame the GPU raster refused, and for a
+  // save state. Leaves the stream a CPU-list frame (gpu_only false).
+  void build_list_from_stream(u32 b);
+  void sort_list(u32 b, u32 npoly, u32 nopaque, bool manual);   // finalise_list's split and sort into render_polys_[b]
+  static bool streams_equal(const GeomStream& a, const GeomStream& b);
+  void record_vertex(const Vertex& vt);
+  void record_polygon();
   std::array<s32, 16> proj_stack_, tex_stack_;
   std::array<std::array<s32, 16>, 32> pos_stack_, vec_stack_;
   s32 proj_sp_ = 0, pos_sp_ = 0, tex_sp_ = 0;
@@ -432,6 +332,12 @@ private:
   Polygon* new_polygon(bool facing);
   static u8 outcode(const s32* pos);
   void finish_polygon(Polygon* poly, int nverts);
+  template <class S> static void emit_unclipped_t(S& s, const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, bool facing);
+  template <class S> static void emit_clipped_t(S& s, const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, int lastpolyverts, bool facing);
+  template <class S> static Polygon* new_polygon_t(S& s, bool facing);
+  template <class S> static void finish_polygon_t(S& s, Polygon* poly, int nverts);
+  template <class S> static void stream_polys_t(S& s, const GeomStream& g);   // every polygon of the stream through the emission
+  struct StreamEmit;
   void calculate_lighting();
   void box_test(const u32* params);
   void pos_test();

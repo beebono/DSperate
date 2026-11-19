@@ -17,19 +17,19 @@
 // the fragment stage, a custom resolve into the 3D layer record, one submit
 // and one fence per frame. No DS edge-row emulation of coverage, no
 // per-sample shading, no attribute planes: what the old triangle path paid
-// for (see gpu-raster-todo.md, G0). Attributes, though, are the DS's: the
-// CPU raster's per-row span endpoints come in a table (span_buffer,
-// vk_layout.h) and the fragment stage runs the hardware's fixed-point
-// interpolation along the row, so every texel and vertex colour matches the
-// CPU raster; only coverage is the GPU's.
+// for (see gpu-raster-todo.md, G0). Coverage and attributes are the hardware
+// rasteriser's over the game's own triangles (shaders/lean.vert).
 namespace ds::gpu::vk {
 
 class Lean final : public Raster3D {
 public:
   // `msaa`: 4x MSAA where the device has it (video.aa on the GPU raster); else 1 sample.
-  // `edges`: the edge cut instead: 1 sample, and the edge plane beside each record.
+  // `scale`: the attachments are 256 * scale x 192 * scale (1-4); the record
+  // the CPU reads stays 256x192 (one texel of each block), the image of
+  // layer() is the whole. 0, the probes: DS_LEAN_SCALE, and the record read
+  // back at that size.
   // The device is kept alive by the Lean.
-  static std::unique_ptr<Lean> create(std::shared_ptr<Device> dev, bool msaa, bool edges, std::string* why = nullptr);
+  static std::unique_ptr<Lean> create(std::shared_ptr<Device> dev, bool msaa, std::string* why = nullptr, u32 scale = 0);
   ~Lean() override;
   Lean(const Lean&) = delete;
   Lean& operator=(const Lean&) = delete;
@@ -37,20 +37,27 @@ public:
   bool ready() const override { return ready_; }
   const char* api() const override { return "Vulkan"; }
   bool msaa() const override;
-  u32 scale() const;   // the attachment scale (DS_LEAN_SCALE, probe-only): the record is 256*scale x 192*scale
-  bool edges() const override;
+  u32 scale() const override;   // the attachment scale (see create)
   GpuPoly* poly_buffer() override;
   GpuVert* vert_buffer() override;
   u32*     texel_buffer(u32* capacity) override;
   GpuPost* post_buffer() override;
-  u32*     span_buffer() override;
+  Scissor* scissor_buffer(u32* capacity) override;
+  void     scissor_count(u32 n) override;
   bool submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& f) override;
+  // Blocks until the pipelines create() leaves to a thread exist (the set without mode-2 shading); probes call it before timing.
+  void wait_pipelines();
+  bool takes_streams() const override { return true; }
   void wait() override;
   void wait_all() override;
   const u32* output() override;
   const u32* frame_ready(u64 gen, bool allow_lag) override;
-  const u8* edges_for(const u32* out) const override;
+  const u32* fine_for(const u32* out) const override;
   bool has_frame() const override;
+  bool layer(u64 gen, Layer3D* out) override;
+  bool has_layers() const override;
+  void layer_wait(u64 gen) override;
+  void pin(u64 a, u64 b) override;
   u64 gpu_ns() const override;
   u32 draws() const override;
   Stats stats(bool reset) override;

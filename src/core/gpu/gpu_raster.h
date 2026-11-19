@@ -14,19 +14,34 @@
 // has no Vulkan: the RG35XX SP's Mali-G31 blob). create() picks the first
 // that comes up, Vulkan before GLES; DS_GPU3D_API=vk|gles forces one.
 namespace ds::gpu {
+class Raster3D;
+// What a frame's submit thread answers to a reader on another thread (Layer3D::later).
+struct LayerJobs { virtual ~LayerJobs() = default; virtual void layer_job_wait(u64 job) = 0; };
+// Raster3D::layer. With `later` set the image is not known yet (the frame's
+// submit is still on its thread: `view` is 0, `scale` and `gen` are right)
+// and the reader calls resolve() on its own thread before its submit.
+struct Layer3D {
+  u64 view = 0; u32 scale = 1; u64 gen = 0; Raster3D* wait = nullptr;
+  LayerJobs* later = nullptr; u64 job = 0; Raster3D* from = nullptr; bool live = true;
+  // Waits for the frame's submit and asks its raster. A live frame the raster
+  // refused has the frame before's image (the picture that stands). False: no image, no merge.
+  inline bool resolve();
+};
 
 class Raster3D {
 public:
   virtual ~Raster3D() = default;
   // `aa`: video.aa for the GPU raster (4x MSAA on Vulkan where the device
-  // has it); `edges`: the edge cut instead (core/gpu/edge_cut.h): 1 sample,
-  // and beside each record the edge plane of the drawn polygons (edges_for).
-  static std::unique_ptr<Raster3D> create(bool aa, bool edges, std::string* why = nullptr);
+  // has it).
+  // `scale`: the 3D image at 256 * scale x 192 * scale (1-4), for a compositor
+  // that takes it as an image (layer()); the record read here stays 256x192.
+  // A backend that hands no image over draws at 1 whatever is asked (scale()).
+  static std::unique_ptr<Raster3D> create(bool aa, u32 scale, std::string* why = nullptr);
 
   virtual bool ready() const = 0;
   virtual const char* api() const = 0;   // "Vulkan" / "OpenGL ES"
   virtual bool msaa() const = 0;   // 4x MSAA in use (else 1 sample: the device could not)
-  virtual bool edges() const = 0;  // the edge plane is drawn
+  virtual u32 scale() const { return 1; }
 
   // Frame input: polygons, vertices and post tables are host staging
   // (rewritten freely between submits); the texel arena is mapped device
@@ -35,8 +50,13 @@ public:
   virtual vk::GpuVert* vert_buffer() = 0;
   virtual u32*         texel_buffer(u32* capacity) = 0;
   virtual vk::GpuPost* post_buffer() = 0;
-  // The span table staging (vk_layout.h): DS_MAX_SPAN_ROWS rows of DS_SPAN_WORDS; the frame's row count travels in GpuFrame::nrows.
-  virtual u32*         span_buffer() = 0;
+  // Polygons of the list drawn inside a rectangle of the screen alone (render3d.cpp gpu_tex_clip: the part where
+  // their texture has anything in it): polygon index in the list as submitted, then x0, y0, x1, y1 in DS pixels,
+  // the last two exclusive. Staging as the others; scissor_count() before each submit (0: none). A backend
+  // without it has no buffer and draws every polygon whole, which is the same picture.
+  struct Scissor { u32 poly; u16 x0, y0, x1, y1; };
+  virtual Scissor*     scissor_buffer(u32* capacity) { *capacity = 0; return nullptr; }
+  virtual void         scissor_count(u32 /*n*/) {}
 
   // Draw the frame into the next of four output slots; false if refused.
   // Frames are in flight until read: wait() blocks on the newest, output()
@@ -63,11 +83,29 @@ public:
   // submit and asks again. Null before the first frame.
   virtual const u32* frame_ready(u64 gen, bool allow_lag) = 0;
   const u32* newest_ready(bool allow_lag) { return frame_ready(0, allow_lag); }
-  // The edge bytes drawn with record `out` (from output / newest_ready), one
-  // per pixel, the edge byte of Renderer3D::set_edge_export's layout (the
-  // pixel's colour is the record's); null without edges.
-  virtual const u8* edges_for(const u32* out) const = 0;
+  // Debug (DS_LEAN_FINE=1, the headless --dump-3d-fine): the whole record at scale() beside
+  // the 1x one `out`, 256 * scale words a row; null where the backend keeps none.
+  virtual const u32* fine_for(const u32* /*out*/) const { return nullptr; }
   virtual bool has_frame() const = 0;
+  // The record of submitted frame `gen` as an image, for a compositor on the
+  // raster's own device (the Vulkan present's 3D merge, split3d.h): no
+  // readback, and at the raster's scale. `view`: a VkImageView, the record's
+  // texels a byte a channel (RGBA8UI: r, g, b of RGB666, then the 5-bit
+  // alpha), in SHADER_READ_ONLY_OPTIMAL once the frame's submit has run. The
+  // reader submits after this call, and on the device's shared queue the GPU
+  // orders the two. Where the raster has a queue of its own nothing does:
+  // `wait` is then the raster, and the reader calls layer_wait(gen) before
+  // its submit (any thread; it blocks until the GPU has finished the frame).
+  // The image holds until four more frames are submitted, or while pinned (pin()).
+  // False: no such image (the frame is not submitted yet or no longer
+  // resident, or the backend has none) and the caller merges from the record.
+  virtual bool layer(u64 /*gen*/, Layer3D* /*out*/) { return false; }
+  virtual bool has_layers() const { return false; }
+  virtual void layer_wait(u64 /*gen*/) {}
+  // Keep the images of up to two frames (0: none) beyond the four-frame
+  // residency, until the next call: a captured frame the game goes on
+  // showing while later ones are drawn. Any thread.
+  virtual void pin(u64 /*a*/, u64 /*b*/) {}
 
   // GPU time of the last waited frame in ns (DS_VK_TIMING=1 and timestamps), else 0.
   virtual u64 gpu_ns() const = 0;
@@ -75,8 +113,27 @@ public:
   virtual u32 draws() const = 0;
   // Diagnostics (DS_GPU_TRACE): CPU ms of the last submit's command recording
   // and queue submit; how newest_ready() resolved since the last reset.
-  struct Stats { double record_ms = 0, queue_ms = 0, slot_wait_ms = 0, prep_ms = 0, gpu_ms = 0; u32 newest = 0, lagged = 0, stalled = 0, nolag = 0, timed = 0, wbuf = 0; double lat_ms = 0; u32 lat_n = 0; double gap_ms = 0; u32 gap_n = 0; };   // gap: submit to the first read of that frame   // lat: submit to signal, exact from blocking waits
+  // stage_ms/stage_max (DS_VK_TIMING=2, Vulkan): GPU time per stage, summed over the `timed` frames and the worst
+  // frame's: 0 what precedes the main render pass (nothing now: the row table's compute once), 1 the main render pass (draws and resolve), 2 edge marking, 3 the rest
+  // (the 1x record's pass, the copies out).
+  static constexpr unsigned kStages = 4;
+  struct Stats { double stage_ms[kStages] = {}, stage_max[kStages] = {}; double record_ms = 0, queue_ms = 0, slot_wait_ms = 0, prep_ms = 0, gpu_ms = 0; u32 newest = 0, lagged = 0, stalled = 0, nolag = 0, timed = 0, wbuf = 0; u32 rec_late = 0;   /* 1x records made on a read, not with their frame */  double lat_ms = 0; u32 lat_n = 0; double gap_ms = 0; u32 gap_n = 0; };   // gap: submit to the first read of that frame   // lat: submit to signal, exact from blocking waits
   virtual Stats stats(bool reset) = 0;
+
+  // The renderer may give this raster stream frames (Renderer3D::gpu_stream_job: the vertex stage on the
+  // submit thread, the list it makes submitted there like any other).
+  virtual bool takes_streams() const { return false; }
 };
+
+inline bool Layer3D::resolve() {
+  if (!later) return view != 0;
+  later->layer_job_wait(job);
+  later = nullptr;
+  const u64 g = gen; const bool was_live = live;
+  Layer3D got;
+  if (!from || !(from->layer(g, &got) || (was_live && g > 1 && from->layer(g - 1, &got)))) { view = 0; return false; }
+  view = got.view; scale = got.scale; gen = got.gen; wait = got.wait;
+  return true;
+}
 
 } // namespace ds::gpu

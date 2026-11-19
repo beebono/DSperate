@@ -9,6 +9,8 @@
 #include "core/gpu/vk/vk_device.h"
 #include "core/gpu/vk/vk_dump.h"
 #include "core/gpu/vk/vk_lean.h"
+#include "hwc_probe.h"
+#include "probe_alpha.h"
 
 #include <chrono>
 #include <thread>
@@ -32,7 +34,7 @@ int main(int argc, char** argv) {
   GpuDumpHeader h;
   if (std::fread(&h, sizeof h, 1, f) != 1 || h.magic != GpuDumpHeader::kMagic) { std::fprintf(stderr, "not a gpu frame dump\n"); return 1; }
   if (h.version != 2) { std::fprintf(stderr, "dump version %u: regenerate it with this build's headless --dump-gpu-frame\n", h.version); return 1; }
-  std::vector<GpuPoly> gp(h.npoly); std::vector<GpuVert> gv(h.nvert); std::vector<u32> tex(h.ntexels), shrun(static_cast<size_t>(h.npoly) * DS_SHRUN_LINES), rowpoly(h.nrows), spans(static_cast<size_t>(h.nspanrows) * DS_SPAN_WORDS);
+  std::vector<GpuPoly> gp(h.npoly); std::vector<GpuVert> gv(h.nvert); std::vector<u32> tex(h.ntexels), shrun(static_cast<size_t>(h.npoly) * DS_SHRUN_LINES), rowpoly(h.nrows), spans(static_cast<size_t>(h.nspanrows) * 8);   // an older dump's row and span tables: read past
   auto rd = [&](void* p, size_t n) { return n == 0 || std::fread(p, n, 1, f) == 1; };
   if (!rd(gp.data(), sizeof(GpuPoly) * gp.size()) || !rd(gv.data(), sizeof(GpuVert) * gv.size()) || !rd(tex.data(), sizeof(u32) * tex.size()) ||
       !rd(shrun.data(), sizeof(u32) * shrun.size()) || !rd(rowpoly.data(), sizeof(u32) * rowpoly.size()) || !rd(spans.data(), sizeof(u32) * spans.size())) { std::fprintf(stderr, "short dump\n"); return 1; }
@@ -41,17 +43,22 @@ int main(int argc, char** argv) {
   // marking, bit 7 fog); DS_PROBE_NOTEX=1 draws every polygon untextured.
   if (const char* e = std::getenv("DS_PROBE_DISPCNT")) h.f.dispcnt = static_cast<u32>(std::strtoul(e, nullptr, 16));
   if (const char* e = std::getenv("DS_PROBE_NOTEX"); e && std::atoi(e)) for (auto& p : gp) p.flags &= ~(DS_PF_TEXTURED | DS_PF_TEX_ALPHA);
-  // DS_PROBE_NOSPAN=1: no span table, the hardware's own interpolation (what a scaled render would use).
-  if (const char* e = std::getenv("DS_PROBE_NOSPAN"); e && std::atoi(e)) for (auto& p : gp) p.span_base = DS_SPAN_NONE;
+  for (auto& p : gp) { p.span_base = DS_SPAN_NONE; p.flags &= ~0x0C80u; }   // an older dump: no span rows, and the flags of the fill rule, the line case and the push
+  probe::alpha_passes(gp, gv, tex);
   std::printf("frame %llu: %u polygons (%u opaque prefix), %u vertices, %u texel words, %u rows, %u span rows, dispcnt %04x%s\n",
               (unsigned long long)h.frame, h.npoly, h.f.first_ordered, h.nvert, h.ntexels, h.nrows, h.nspanrows, h.f.dispcnt, (h.f.flags & DS_FF_WBUFFER) ? ", W-buffer" : "");
 
+  {   // the features the frame uses: DISP3DCNT bit 1 toon/highlight, 5 edge marking, 7 fog; polygons in mode 2 and with the fog bit
+    u32 toon = 0, fog = 0; for (const GpuPoly& p : gp) { toon += ((p.attr >> 4) & 3u) == 2u; fog += (p.attr >> 15) & 1u; }
+    std::printf("features: %s, edge marking %s, fog %s (%s); mode-2 polygons %u, fog-bit polygons %u, of %u\n", (h.f.dispcnt & 2u) ? "highlight" : "toon", (h.f.dispcnt & 32u) ? "on" : "off",
+                (h.f.dispcnt & 128u) ? "on" : "off", (h.f.dispcnt & 64u) ? "alpha only" : "colour", toon, fog, h.npoly);
+  }
   std::string why;
   std::shared_ptr<Device> dev = Device::shared(&why);
   if (!dev) { std::fprintf(stderr, "no Vulkan device: %s\n", why.c_str()); return 1; }
   std::printf("device: %s (graphics %d, msaa4 %d, int64 atomics %d, timestamps %s)\n", dev->name().c_str(), (int)dev->limits().graphics, (int)dev->limits().msaa4,
               (int)dev->limits().int64_atomics, dev->limits().timestamp_period_ns > 0 ? "yes" : "no");
-  std::unique_ptr<Lean> L = Lean::create(dev, std::getenv("DS_VK_MSAA") && std::atoi(std::getenv("DS_VK_MSAA")) != 0, std::getenv("DS_VK_EDGES") && std::atoi(std::getenv("DS_VK_EDGES")) != 0, &why);
+  std::unique_ptr<Lean> L = Lean::create(dev, std::getenv("DS_VK_MSAA") && std::atoi(std::getenv("DS_VK_MSAA")) != 0, &why);
   if (!L || !L->ready()) { std::fprintf(stderr, "GPU raster unavailable: %s\n", why.c_str()); return 1; }
 
   auto upload = [&]() {
@@ -60,9 +67,9 @@ int main(int argc, char** argv) {
     std::memcpy(L->vert_buffer(), gv.data(), sizeof(GpuVert) * gv.size());
     if (tex.size() > cap) { std::fprintf(stderr, "texel arena too small (%zu > %u)\n", tex.size(), cap); std::exit(1); }
     std::memcpy(t, tex.data(), sizeof(u32) * tex.size());
-    if (!spans.empty()) std::memcpy(L->span_buffer(), spans.data(), sizeof(u32) * spans.size());
     *L->post_buffer() = h.post;
   };
+  L->wait_pipelines();
   auto submit = [&]() { return L->submit(h.npoly, h.nvert, h.ntexels, h.f); };
   auto waitf = [&]() { L->wait(); };
 
@@ -74,6 +81,8 @@ int main(int argc, char** argv) {
   std::vector<double> ms; ms.reserve(iters);
   std::vector<double> wait_ms; wait_ms.reserve(iters);
   std::vector<double> gms; gms.reserve(iters);
+  HwcProbe hwc;   // DS_PROBE_HWC=1: Mali counters over the timed loop
+  hwc.begin();
   const auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < iters; ++i) {
     const auto a = std::chrono::steady_clock::now();
@@ -92,6 +101,7 @@ int main(int argc, char** argv) {
     ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
     if (L->gpu_ns()) gms.push_back(static_cast<double>(L->gpu_ns()) / 1e6);
   }
+  hwc.end(iters);
   if (!wait_ms.empty()) {
     std::sort(wait_ms.begin(), wait_ms.end());
     std::printf("wait after sleep: median %.2f ms, p90 %.2f, max %.2f\n", wait_ms[wait_ms.size() / 2], wait_ms[std::min(wait_ms.size() - 1, static_cast<size_t>(0.9 * wait_ms.size()))], wait_ms.back());
@@ -100,6 +110,8 @@ int main(int argc, char** argv) {
     std::sort(gms.begin(), gms.end());
     std::printf("GPU time per frame median %.2f ms, p90 %.2f, max %.2f; %u draws\n", gms[gms.size() / 2], gms[std::min(gms.size() - 1, static_cast<size_t>(0.9 * gms.size()))], gms.back(), L->draws());
   }
+  if (const auto st = L->stats(false); st.timed && (st.stage_ms[0] + st.stage_ms[1] + st.stage_ms[2] + st.stage_ms[3]) > 0.0)   // DS_VK_TIMING=2
+    std::printf("stages (ms/frame, mean): rows %.2f, main pass %.2f, edge mark %.2f, down+copy %.2f\n", st.stage_ms[0] / st.timed, st.stage_ms[1] / st.timed, st.stage_ms[2] / st.timed, st.stage_ms[3] / st.timed);
   const double total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   std::sort(ms.begin(), ms.end());
   auto q = [&](double p) { return ms[std::min(ms.size() - 1, static_cast<size_t>(p * ms.size()))]; };
@@ -109,11 +121,6 @@ int main(int argc, char** argv) {
     const u32* out = L->output();
     std::FILE* o = std::fopen(ppm, "wb");
     if (!o) { std::fprintf(stderr, "cannot write %s\n", ppm); return 1; }
-    if (std::strlen(ppm) > 5 && !std::strcmp(ppm + std::strlen(ppm) - 5, ".edge")) {   // the edge plane (DS_VK_EDGES=1): one byte per pixel
-      const u8* e = L->edges_for(out);
-      if (!e) { std::fprintf(stderr, "no edge plane (DS_VK_EDGES=1?)\n"); return 1; }
-      std::fwrite(e, 1, 256 * 192 * S * S, o); std::fclose(o); std::printf("wrote %s\n", ppm); return 0;
-    }
     if (std::strlen(ppm) > 4 && !std::strcmp(ppm + std::strlen(ppm) - 4, ".raw")) {   // the record itself: RGB666 + 5-bit alpha words
       std::fwrite(out, sizeof(u32), 256 * 192 * S * S, o); std::fclose(o); return 0;
     }

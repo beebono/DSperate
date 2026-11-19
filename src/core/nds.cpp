@@ -553,6 +553,8 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   // A thumbnail of the top screen, RGB565.
   w.put(THUMB_W); w.put(THUMB_H);
   const u32* fb = gpu.framebuffer(0);
+  std::vector<u32> merged;   // a frame split for the present's 3D merge: the top screen with its 3D layer
+  if (gpu::Gpu::Split3DScreen sf; gpu.split3d_screen(0, &sf) && sf.live) { merged.resize(SCREEN_W * SCREEN_H); gpu.merge_split3d(0, merged.data()); fb = merged.data(); }
   for (u32 y = 0; y < THUMB_H; ++y)
     for (u32 x = 0; x < THUMB_W; ++x) {
       const u32 p = fb[(y * 2) * SCREEN_W + x * 2];

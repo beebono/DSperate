@@ -7,6 +7,7 @@
 #include "core/state/state.h"
 #include "core/gpu/vram_map.h"
 #include "core/gpu/kernels.h"
+#include "core/gpu/split3d.h"
 #include "core/nds.h"
 #include "core/profile.h"
 
@@ -147,7 +148,8 @@ void Engine2D::render_line(u32 line) {
   struct AtExit { Engine2D* e; u32 line; ~AtExit() { if (g_outhash_on) e->debug_outhash(line); } } at_exit{this, line};
   cur_ = regs_.begin_line();
   top_mode_ = TOP_NONE;
-  bg_edge_any_[0] = bg_edge_any_[1] = bg_edge_any_[2] = bg_edge_any_[3] = false;
+  top_backdrop_ = false; split_bg0_ = false; split_on_ = false;
+  bg_cap_any_[0] = bg_cap_any_[1] = bg_cap_any_[2] = bg_cap_any_[3] = false;
   if (!cur_.enabled) {
     // Powered-down engines output a fixed colour: black for A, white for B.
     out_.fill(num_ ? 0xFF3F3F3F : 0xFF000000);
@@ -179,7 +181,11 @@ void Engine2D::render_line(u32 line) {
   case 7: if (bg_on(0)) draw_bg_text(line, 0); if (bg_on(1)) draw_bg_text(line, 1); break;
   }
   // BG0 is the 3D layer on engine A when DISPCNT bit 3 is set (modes 0-5, 7; mode 6 has no text BG0).
-  if (!num_ && (cur_.dispcnt & 8) && bg_on(0)) draw_bg_3d();
+  // Split: BG0 stays out of the composite and is merged afterwards.
+  const bool is3d = !num_ && (cur_.dispcnt & 8) && bg_on(0);
+  split_bg0_ = is3d && split_mode_ != Split3D::Off && (line3d_ || split_mode_ == Split3D::Gpu);
+  if (is3d && !split_bg0_) draw_bg_3d();
+  if (split_bg0_) bg_[0].any = false;   // whatever the text pass drew there
   }
 
   // 2. Window plane, 3. sprite X mosaic, 4. priority select, 5. colour effects.
@@ -196,6 +202,30 @@ void Engine2D::render_line(u32 line) {
     if (cur_.dispcnt & 0xE000) prof::add(prof::C_2D_WIN_PRESENT, 1);
   }
   { DS_PROF(WINDOW); build_window_plane(); apply_sprite_mosaic_x(); }
+  compose_line();
+  if (!split_bg0_) return;
+  build_split();
+  if (split_mode_ == Split3D::Gpu) return;
+  alignas(16) Pixel merged[256];
+  kern::active::split_merge_line(split_.data(), out_.data(), line3d_, merged);
+  if (split_mode_ == Split3D::Cpu) { std::memcpy(out_.data(), merged, sizeof merged); return; }
+  // Verify: the one-pass composite of the same planes, compared.
+  ++split_lines_;
+  split_bg0_ = false; split_on_ = false;
+  top_mode_ = TOP_NONE; top_backdrop_ = false;
+  draw_bg_3d();
+  compose_line();
+  for (u32 x = 0; x < 256; ++x) {
+    if (((merged[x] ^ out_[x]) & 0x00FFFFFF) == 0) continue;
+    if (split_bad_++ < 32)
+      std::fprintf(stderr, "split3d: line %u x %u merged %06x one-pass %06x (word %08x, 3d %08x, bldcnt %04x, mode %d)\n", line, x,
+                   merged[x] & 0xFFFFFF, out_[x] & 0xFFFFFF, split_[x], line3d_[x], cur_.bldcnt, static_cast<int>(top_mode_));
+  }
+}
+
+// Priority select and colour effects of the line's planes into out_, by the
+// cheapest pass that applies.
+void Engine2D::compose_line() {
   if (!effect_possible()) {
     // No colour effect touches this line: skip second-layer bookkeeping and
     // pick the cheapest applicable pass below.
@@ -206,7 +236,7 @@ void Engine2D::render_line(u32 line) {
     const bool objs = (cur_.layer_enable & 0x10) && num_sprites_ && obj_prio_mask_;
     if (!objs) {
       // Nothing on the line: the backdrop shows everywhere.
-      if (nlayers == 0) { prof::add(prof::C_2D_FAST_BACKDROP, 1); out_.fill(std_pal18()[0] | 0xFF000000); return; }
+      if (nlayers == 0) { prof::add(prof::C_2D_FAST_BACKDROP, 1); top_backdrop_ = true; out_.fill(std_pal18()[0] | 0xFF000000); return; }
       // With no windows and no OBJ pixels, a fully opaque BG that is the
       // topmost layer with content hides everything below it and can be
       // resolved directly. Walk planes topmost first (priority 0..3, BG0
@@ -244,53 +274,21 @@ void Engine2D::render_line(u32 line) {
   top_mode_ = TOP_FULL;
 }
 
-bool Engine2D::edge_compose(Pixel* own, u8* bytes) const {
+bool Engine2D::cap_refs(u32* refs) const {
   if (top_mode_ == TOP_NONE || !cur_.enabled || cur_.forced_blank) return false;
-  const bool is3d = !num_ && (cur_.dispcnt & 8) && edge3d_;
-  // Carried edge bytes (Gpu::edge_vram_): per layer, those its bitmap row read this line.
-  const u8* carried[T_COUNT] = {};
-  bool any_carried = false;
-  for (int bg = 0; bg < 4; ++bg) if (bg_edge_any_[bg] && !(bg == 0 && is3d)) { carried[bg] = bg_edge_[bg]; any_carried = true; }
-  if (obj_edge_any_) { carried[T_OBJ_STD] = carried[T_OBJ_EXT] = carried[T_OBJ_DIRECT] = obj_edge_.data(); any_carried = true; }
-  if (!is3d && !any_carried) return false;
-  // Whether the layer on top at x would be behind the 3D layer were it
-  // opaque there: BG0's priority or lower (BG0 wins ties among BGs, a
-  // sprite wins them over a BG), or the backdrop.
-  const u32 p3d = cur_.bgcnt[0] & 3;
-  auto behind_3d = [&](u32 x) {
-    const u8 t = top_tid_[x];
-    if (t == T_BACKDROP) return true;
-    if (t >= T_BG1 && t <= T_BG3) return (cur_.bgcnt[t] & 3u) >= p3d;
-    if (t >= T_OBJ_STD && t <= T_OBJ_DIRECT) return (obj_attr_[x] & OA_PRIO) > p3d;
-    return false;
-  };
+  const u32* carried[T_COUNT] = {};
   bool any = false;
-  for (u32 x = 0; x < 256; ++x) {
-    bytes[x] = 0; own[x] = 0;
-    const u8 top = top_mode_ == TOP_ALL ? static_cast<u8>(top_all_bg_) : top_tid_[x];
-    const u32 e = is3d ? edge3d_[x] : 0;
-    if (e && !((e >> 18) & 0x1F)) {
-      // A transparent 3D pixel (the GPU raster's plane marks the rear plane
-      // beside an edge too): its own side is what shows through it.
-      if (top_mode_ == TOP_ALL || !(cur_.layer_enable & 1) || !behind_3d(x)) continue;
-      own[x] = out_[x]; bytes[x] = static_cast<u8>(e >> 24); any = true;
-      continue;
-    }
-    if (e && top == T_BG0) {
-      const Pixel p = (e & 0x3F) | (((e >> 6) & 0x3F) << 8) | (((e >> 12) & 0x3F) << 16) | (((e >> 18) & 0x1F) << 24);
-      Pixel o;
-      switch (top_mode_) {
-      case TOP_FADE: o = kern::ref::fade_pixel(cur_.bldcnt, cur_.evy, p, top_id_[x], win_[x]); break;
-      case TOP_FULL: o = kern::ref::composite_pixel(cur_.bldcnt, cur_.eva, cur_.evb, cur_.evy, p, second_[x], top_id_[x], K_3D, top_alpha_[x], second_id_[x], win_[x]); break;
-      default: o = (p & 0x00FFFFFF) | 0xFF000000; break;
-      }
-      own[x] = o; bytes[x] = static_cast<u8>(e >> 24); any = true;
-      continue;
-    }
-    // A captured image shown again: its edge pixel's own colour is the pixel as shown.
-    if (top < T_COUNT && carried[top] && carried[top][x]) { own[x] = out_[x]; bytes[x] = carried[top][x]; any = true; }
+  for (int bg = 0; bg < 4; ++bg) if (bg_cap_any_[bg]) { carried[bg] = bg_cap_[bg]; any = true; }
+  if (obj_cap_any_) { carried[T_OBJ_STD] = carried[T_OBJ_EXT] = carried[T_OBJ_DIRECT] = obj_cap_.data(); any = true; }
+  if (!any) return false;
+  if (top_mode_ == TOP_ALL) {
+    const u32* c = top_all_bg_ < T_COUNT ? carried[top_all_bg_] : nullptr;
+    if (!c) return false;
+    std::memcpy(refs, c, 256 * sizeof(u32));
+    return true;
   }
-  return any;
+  for (u32 x = 0; x < 256; ++x) { const u8 top = top_tid_[x]; refs[x] = top < T_COUNT && carried[top] ? carried[top][x] : 0; }
+  return true;
 }
 
 // Whether any pixel of the line could be changed by the colour-effects pass.
@@ -306,6 +304,7 @@ bool Engine2D::effect_possible() const {
   const bool blend_identity = cur_.eva == 16 && cur_.evb == 0;
   const bool mode_noop = (mode == 1 && blend_identity) || (mode >= 2 && cur_.evy == 0);
   if (mode != 0 && !mode_noop && (cur_.bldcnt & 0x3F & present) && (mode != 1 || second)) { prof::add(prof::C_2D_FULL_MODE, 1); return true; }
+  if (split_bg0_ && split_under_blend()) return true;
   if (!second) return false;
   if (!num_ && (cur_.dispcnt & 8) && bg_[0].any) {
     // 3D blends only where alpha is strictly between 0 and 31.
@@ -611,10 +610,8 @@ void Engine2D::bitmap_row_degenerate(int bg, Layer& plane, u32 base, u32 xmask, 
   const u32 width = (xmask >> 8) + 1;
   const s32 x0 = rx >> 8;
   bool any = false;
-  // The edge cut: a direct-colour row read straight from one of banks A-D
-  // carries the captured pixels' edge bytes beside it (Gpu::edge_vram_).
-  u8* const erow = (edge_vram_ && direct) ? bg_edge_[bg] : nullptr;
-  if (erow) std::memset(erow, 0, 256);
+  u32* const crow = (cap_track_ && direct) ? bg_cap_[bg] : nullptr;   // the 3D split: which VRAM pixels the row shows
+  if (crow) std::memset(crow, 0, 256 * sizeof(u32));
   auto emit = [&](u32 texel, u32 i, u32 n) {
     // [i, i + n) of the line from texel offset `texel` of the row.
     u32 addr = base + (direct ? texel << 1 : texel);
@@ -625,10 +622,14 @@ void Engine2D::bitmap_row_degenerate(int bg, Layer& plane, u32 base, u32 xmask, 
       if (const u8* p = vv.ptr[a / VramView::BLOCK]) {
         const u8* src = p + (a & (VramView::BLOCK - 1));
         any |= direct ? kern::active::bmp_row_16(reinterpret_cast<const u16*>(src), m, plane.v() + i) : kern::active::bmp_row_8(src, m, plane.v() + i);
-        if (erow)
-          for (int b = 0; b < 4; ++b) {
-            const u8* bank = vm.bank(b);
-            if (src >= bank && src < bank + 0x20000) { std::memcpy(erow + i, edge_vram_ + b * 65536 + (src - bank) / 2, m); bg_edge_any_[bg] = true; break; }
+        if (crow)
+          for (u32 b = 0; b < CAP_SLOTS; ++b) {
+            const u8* bank = vm.bank(cap_slot_bank(b));
+            if (!(src >= bank && src < bank + cap_slot_size(b))) continue;
+            const u32 ref = CAP_REF | (b << 16) | static_cast<u32>((src - bank) / 2);
+            for (u32 k = 0; k < m; ++k) crow[i + k] = ref + k;
+            bg_cap_any_[bg] = true;
+            break;
           }
       } else if (direct) {
         for (u32 k = 0; k < m; ++k) { const u16 c = vm.read16(vv, addr + k * 2); if (c & 0x8000) { plane.v()[i + k] = c; any = true; } }
@@ -716,7 +717,7 @@ void Engine2D::render_sprites(u32 line) {
   // Only the attribute plane needs clearing: obj_v_/obj_alpha_ readers are
   // gated on OA_OPAQUE.
   obj_attr_.fill(0); obj_win_.fill(0);
-  if (edge_vram_ && obj_edge_any_) { obj_edge_.fill(0); obj_edge_any_ = false; }
+  if (obj_cap_any_) { obj_cap_.fill(0); obj_cap_any_ = false; }
   if (!spr_.obj_enable) return;
 
   const u16* oam = regs_.oam();
@@ -797,17 +798,17 @@ void Engine2D::draw_sprite_normal(const u16* attr, int w, int h, s32 x, s32 y, b
     }
     if (window) { for (u32 i = 0; i < xend - xoff; ++i) if (col[i] & 0x8000) obj_win_[x + i] = 1; return; }
     kern::active::obj_row_bmp16(col, xend - xoff, a, static_cast<u8>(alpha + 1), obj_v_.data() + x, obj_attr_.data() + x, obj_alpha_.data() + x);
-    if (edge_vram_ && row) {
-      // The edge cut: a bitmap sprite read straight from one of banks A-D
-      // carries the captured pixels' edge bytes on the pixels it won (where
-      // this colour, alpha and attribute now stand).
-      for (int b = 0; b < 4; ++b) {
-        const u8* bank = vm.bank(b);
-        if (!(row >= bank && row < bank + 0x20000)) continue;
-        const u8* ebank = edge_vram_ + b * 65536 + (row - bank) / 2;
+    if (cap_track_ && row) {
+      // The 3D split: the same for the pixels' VRAM references (a later sprite
+      // over one of these pixels leaves a stale reference; the caller's
+      // colour check drops it).
+      for (u32 b = 0; b < CAP_SLOTS; ++b) {
+        const u8* bank = vm.bank(cap_slot_bank(b));
+        if (!(row >= bank && row < bank + cap_slot_size(b))) continue;
+        const u32 ref = CAP_REF | (b << 16) | static_cast<u32>((row - bank) / 2);
         for (u32 i = xoff; i < xend; ++i) {
           const u32 k = x + i - xoff, sx = hflip ? (w - 1 - i) : i;
-          if ((col[i - xoff] & 0x8000) && obj_v_[k] == col[i - xoff] && obj_alpha_[k] == alpha + 1 && (obj_attr_[k] & ~OA_OPAQUE) == a) { obj_edge_[k] = ebank[sx]; obj_edge_any_ |= ebank[sx] != 0; }
+          if ((col[i - xoff] & 0x8000) && obj_v_[k] == col[i - xoff] && obj_alpha_[k] == alpha + 1 && (obj_attr_[k] & ~OA_OPAQUE) == a) { obj_cap_[k] = ref + sx; obj_cap_any_ = true; }
         }
         break;
       }
@@ -1036,14 +1037,105 @@ void Engine2D::select_layers() {
   resolve_full();
 }
 
-// Whether the composite can read the second target at all on this line. Only
-// the three blending paths do: a blend effect, the 3D layer over something,
-// and semi-transparent or bitmap sprites. A fade (brighten/darken) over plain
-// layers never looks below the top pixel, so nothing under it need be
-// resolved.
+// The split's words for the line just composed without BG0 (split3d.h): the
+// colour-effect rule of each pixel worked out for a 3D pixel there, from R
+// (the top pixel, in whichever records the pass left) and BG0's place
+// against it. Below R, BG0 counts only directly below (the full pass knows
+// the second layer); the cheaper passes are taken only when nothing can
+// blend with what is beneath it, where U is the answer anyway.
+void Engine2D::build_split() {
+  split_on_ = true;
+  const u32 bld = cur_.bldcnt, effect = (bld >> 6) & 3, eva = cur_.eva, evb = cur_.evb, evy = cur_.evy;
+  const u32 p0 = cur_.bgcnt[0] & 3;
+  static const u8 id_of[T_COUNT] = {L_BG0, L_BG1, L_BG2, L_BG3, L_OBJ, L_OBJ, L_OBJ, L_BACKDROP, 0};
+  // BG0 wins ties among the BGs; a sprite wins them over a BG.
+  auto bg0_above = [&](u8 tid, u32 x) {
+    if (tid >= T_BACKDROP) return true;
+    if (tid <= T_BG3) return (cur_.bgcnt[tid] & 3u) >= p0;
+    return (obj_attr_[x] & OA_PRIO) > p0;
+  };
+  const bool records = top_mode_ == TOP_FADE || top_mode_ == TOP_FULL;   // top_ holds R (out_ is R itself otherwise)
+  const bool full = top_mode_ == TOP_FULL;
+  const Pixel* const rp = records ? top_.data() : out_.data();
+  // The 3D pixel alone, or under BG0's own fade.
+  const u32 mbm = cur_.master_bright >> 14;
+  const bool mb_off = (mbm != 1 && mbm != 2) || !(cur_.master_bright & 0x1F);
+  const u32 alone = split3d::pack(0, mb_off ? split3d::PLAIN : split3d::FIXED, 16, 0);
+  u32 faded = alone;
+  if ((bld & L_BG0) && effect == 2 && evy) faded = split3d::pack(0x3F3F3F, split3d::FIXED, 16 - evy, evy);
+  else if ((bld & L_BG0) && effect == 3 && evy) faded = split3d::pack(0, split3d::FIXED, 16 - evy, 0);
+  // Per layer on top: whether BG0 is above it (sprites: by the pixel's
+  // priority), and the word then, inside and outside the effect window. A
+  // second target takes the 3D blend, its colour added per pixel.
+  const u32 blend3d = split3d::pack(0, split3d::ALPHA3D, 0, 0);
+  bool above_of[T_COUNT]; u32 word_of[2][T_COUNT];
+  for (u32 t = 0; t < T_COUNT; ++t) {
+    above_of[t] = t >= T_BACKDROP || (t <= T_BG3 && (cur_.bgcnt[t] & 3u) >= p0);
+    const bool target = bld & (static_cast<u32>(id_of[t]) << 8);
+    word_of[0][t] = target ? blend3d : alone; word_of[1][t] = target ? blend3d : faded;
+  }
+  auto colour18 = [](Pixel c) { return (c & 0x3F) | ((c >> 2) & 0xFC0) | ((c >> 4) & 0x3F000); };
+  // One layer everywhere and no windows: one word, or the 3D blend over each pixel.
+  if (!(cur_.dispcnt & 0xE000) && (top_backdrop_ || top_mode_ == TOP_ALL)) {
+    const u8 tid = top_backdrop_ ? static_cast<u8>(T_BACKDROP) : static_cast<u8>(top_all_bg_);
+    const u32 w = above_of[tid] ? word_of[1][tid] : 0;
+    if (w == blend3d) for (u32 x = 0; x < 256; ++x) split_[x] = blend3d | colour18(out_[x]);
+    else split_.fill(w);
+    return;
+  }
+  if (top_backdrop_) top_tid_.fill(T_BACKDROP);   // (with windows: that pass keeps no records)
+  for (u32 x = 0; x < 256; ++x) {
+    const u8 win = win_[x], tid = top_tid_[x];
+    const bool obj = tid >= T_OBJ_STD && tid <= T_OBJ_DIRECT;
+    u32 w = 0;
+    if (obj ? (obj_attr_[x] & OA_PRIO) > p0 : above_of[tid]) {
+      w = word_of[(win >> 5) & 1][tid];
+      if (w == blend3d) w |= colour18(rp[x]);
+    } else if (full && bg0_above(second_tid_[x], x)) {
+      // R over the 3D pixel.
+      const Pixel r = rp[x];
+      const u32 rid = id_of[tid];
+      const bool under = bld & (static_cast<u32>(L_BG0) << 8);
+      const u8 at = obj ? obj_attr_[x] : 0;
+      if ((at & (OA_BITMAP | OA_SEMI)) && under) {
+        const u32 ea = (at & OA_BITMAP) ? obj_alpha_[x] : eva, eb = (at & OA_BITMAP) ? 16 - ea : evb;
+        w = split3d::pack(r, split3d::FIXED, eb, ea);
+      } else if ((bld & rid) && (win & 0x20) && effect == 1 && under) w = split3d::pack(r, split3d::FIXED, evb, eva);
+      else w = split3d::pack(effect >= 2 ? kern::ref::fade_pixel(bld, evy, r, static_cast<u8>(rid), win) : r, split3d::FIXED, 0, 16);
+    }
+    split_[x] = (win & 1) ? w : 0;
+  }
+}
+
+// Split lines: whether a pixel could blend over a 3D pixel directly beneath
+// it (BG0 a second target under a blending sprite or a first target of the
+// alpha effect). Only then does the split need the second layer, to tell
+// "directly beneath"; the 3D pixel on top needs the top pixel alone, and a
+// pixel that blends with nothing shows as U has it.
+bool Engine2D::split_under_blend() const {
+  if (!(cur_.bldcnt & (static_cast<u32>(L_BG0) << 8))) return false;
+  // Only a layer in front of BG0 can: a BG of a higher priority, a sprite of BG0's or higher.
+  const u32 p0 = cur_.bgcnt[0] & 3;
+  const bool objs = (cur_.layer_enable & 0x10) && num_sprites_ && (obj_prio_mask_ & ((2u << p0) - 1));
+  u32 front = objs ? L_OBJ : 0;
+  for (u32 n = 1; n < 4; ++n) if (bg_[n].any && (cur_.bgcnt[n] & 3u) < p0) front |= 1u << n;
+  if (((cur_.bldcnt >> 6) & 3) == 1 && (cur_.bldcnt & front) && !(cur_.eva == 16 && cur_.evb == 0)) return true;
+  if (objs) {
+    u64 acc = 0;
+    for (u32 i = 0; i < 256; i += 8) { u64 v; std::memcpy(&v, &obj_attr_[i], 8); acc |= v; }
+    if (acc & 0x0C0C0C0C0C0C0C0Cull) return true;   // OA_SEMI | OA_BITMAP
+  }
+  return false;
+}
+
 bool Engine2D::needs_second() const {
   if (((cur_.bldcnt >> 6) & 3) == 1) return true;
-  if (!num_ && (cur_.dispcnt & 8) && bg_[0].any && kern::active::line_has_translucent_3d(line3d_)) return true;
+  if (split_bg0_ && split_under_blend()) return true;
+  // A 3D pixel over a second target takes the 3D blend, never the fade, even
+  // at alpha 31 (where the blend leaves it as it is): with BG0 a first
+  // target the fade-only pass would fade it.
+  if (!num_ && (cur_.dispcnt & 8) && bg_[0].any && ((cur_.bldcnt >> 8) & 0x3F) &&
+      ((cur_.bldcnt & L_BG0) || kern::active::line_has_translucent_3d(line3d_))) return true;
   if ((cur_.layer_enable & 0x10) && num_sprites_) {
     u64 acc = 0;
     for (u32 i = 0; i < 256; i += 8) { u64 v; std::memcpy(&v, &obj_attr_[i], 8); acc |= v; }

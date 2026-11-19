@@ -14,7 +14,7 @@ namespace ds::gpu {
 // Vulkan first (the reference backend, and on the RG DS Plus the one that
 // shares the device with the present), then OpenGL ES. DS_GPU3D_API=vk|gles
 // tries one alone.
-std::unique_ptr<Raster3D> Raster3D::create(bool aa, bool edges, std::string* why) {
+std::unique_ptr<Raster3D> Raster3D::create(bool aa, u32 scale, std::string* why) {
   const char* e = std::getenv("DS_GPU3D_API");
   const bool forced = e && *e;
   const bool want_vk = !forced || !std::strcmp(e, "vk") || !std::strcmp(e, "vulkan");
@@ -23,12 +23,12 @@ std::unique_ptr<Raster3D> Raster3D::create(bool aa, bool edges, std::string* why
   if (want_vk) {
     std::shared_ptr<vk::Device> dev = vk::Device::shared(&wv);
     if (dev) {
-      std::unique_ptr<vk::Lean> l = vk::Lean::create(dev, aa, edges, &wv);
+      std::unique_ptr<vk::Lean> l = vk::Lean::create(dev, aa, &wv, scale < 1 ? 1 : scale);
       if (l && l->ready()) return l;
     }
   }
   if (want_gl) {
-    std::unique_ptr<gl::Lean> l = gl::Lean::create(aa, edges, &wg);
+    std::unique_ptr<gl::Lean> l = gl::Lean::create(aa, &wg);
     if (l && l->ready()) return l;
   }
   if (why) *why = "Vulkan: " + wv + "; OpenGL ES: " + wg;
