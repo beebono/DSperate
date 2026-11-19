@@ -165,7 +165,14 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   std::vector<VkPhysicalDevice> devs(n);
   d.api.vkEnumeratePhysicalDevices(d.inst, &n, devs.data());
   // DS_VK_DEVICE: pick physical device by index or name substring; DS_VK_LIST_EXT lists them.
-  d.phys = devs[0];
+  // Left to itself it takes the first hardware device, and none at all where the loader has only a software
+  // one: Mesa's llvmpipe beside a GPU blob with no ICD of its own (the RK3326 images) is slower than every CPU
+  // path it would replace. Naming it in DS_VK_DEVICE still selects it.
+  d.phys = VK_NULL_HANDLE;
+  for (u32 i = 0; i < n && !d.phys; ++i) {
+    VkPhysicalDeviceProperties pp{}; d.api.vkGetPhysicalDeviceProperties(devs[i], &pp);
+    if (pp.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) d.phys = devs[i];
+  }
   if (const char* pick = std::getenv("DS_VK_DEVICE")) {
     char* end = nullptr;
     const long idx = std::strtol(pick, &end, 10);
@@ -177,6 +184,7 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   }
   if (std::getenv("DS_VK_LIST_EXT"))
     for (u32 i = 0; i < n; ++i) { VkPhysicalDeviceProperties pp{}; d.api.vkGetPhysicalDeviceProperties(devs[i], &pp); std::fprintf(stderr, "vk: device %u: %s%s\n", i, pp.deviceName, devs[i] == d.phys ? " (selected)" : ""); }
+  if (!d.phys) return set("only a software Vulkan device");
 
   VkPhysicalDeviceProperties props{};
   d.api.vkGetPhysicalDeviceProperties(d.phys, &props);
