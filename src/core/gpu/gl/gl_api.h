@@ -25,7 +25,7 @@ constexpr void* EGL_NO_SURFACE = nullptr;
 constexpr void* EGL_NO_SYNC_KHR = nullptr;
 constexpr EGLint EGL_SURFACE_TYPE = 0x3033, EGL_PBUFFER_BIT = 1, EGL_RENDERABLE_TYPE = 0x3040, EGL_OPENGL_ES3_BIT = 0x40, EGL_NONE = 0x3038;
 constexpr EGLint EGL_WIDTH = 0x3057, EGL_HEIGHT = 0x3056, EGL_CONTEXT_CLIENT_VERSION = 0x3098, EGL_CONTEXT_MINOR_VERSION_KHR = 0x30FB, EGL_EXTENSIONS = 0x3055, EGL_RED_SIZE = 0x3024;
-constexpr EGLenum EGL_OPENGL_ES_API = 0x30A0;
+constexpr EGLenum EGL_OPENGL_ES_API = 0x30A0, EGL_PLATFORM_GBM_KHR = 0x31D7;
 constexpr EGLenum EGL_SYNC_FENCE_KHR = 0x30F9;
 constexpr EGLint EGL_SYNC_STATUS_KHR = 0x30F1, EGL_SIGNALED_KHR = 0x30F2, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR = 1, EGL_CONDITION_SATISFIED_KHR = 0x30F6;
 constexpr EGLTimeKHR EGL_FOREVER_KHR = 0xFFFFFFFFFFFFFFFFull;
@@ -74,6 +74,10 @@ struct Api {
   const char* (*eglQueryString)(EGLDisplay, EGLint) = nullptr;
   EGLint (*eglGetError)() = nullptr;
   void* (*eglGetProcAddress)(const char*) = nullptr;
+  EGLDisplay (*eglGetPlatformDisplayEXT)(EGLenum, void*, const EGLint*) = nullptr;   // optional
+  // The process's gbm_device on the first DRM node that gives one (libgbm by dlopen, opened once and kept), for
+  // drivers whose EGL has no default display; null where there is no libgbm or no node.
+  void* gbm_device();
   EGLSyncKHR (*eglCreateSyncKHR)(EGLDisplay, EGLenum, const EGLint*) = nullptr;
   EGLBoolean (*eglDestroySyncKHR)(EGLDisplay, EGLSyncKHR) = nullptr;
   EGLint (*eglClientWaitSyncKHR)(EGLDisplay, EGLSyncKHR, EGLint, EGLTimeKHR) = nullptr;

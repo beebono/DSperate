@@ -3,6 +3,8 @@
 #include "core/gpu/gl/gl_api.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <mutex>
 #include <string>
 
@@ -26,6 +28,29 @@ template <typename F> void resolve2(F& fn, const char* a, const char* b, void* (
 }
 }
 
+void* Api::gbm_device() {
+  static std::mutex m;
+  static void* dev = nullptr;
+  static bool tried = false;
+  std::lock_guard<std::mutex> lk(m);
+  if (tried) return dev;
+  tried = true;
+  void* lib = dlopen("libgbm.so.1", RTLD_NOW | RTLD_LOCAL);
+  if (!lib) lib = dlopen("libgbm.so", RTLD_NOW | RTLD_LOCAL);
+  if (!lib) return nullptr;
+  auto create = reinterpret_cast<void* (*)(int)>(dlsym(lib, "gbm_create_device"));
+  if (!create) return nullptr;
+  // The card node first, as SDL's KMSDRM driver does (no master is needed for this): the RK3326's 4.4 kernel
+  // oopses in an ioctl the Mali blob's GBM makes on the render node.
+  for (const char* node : {"/dev/dri/card0", "/dev/dri/card1", "/dev/dri/renderD128"}) {
+    const int fd = open(node, O_RDWR | O_CLOEXEC);
+    if (fd < 0) continue;
+    if ((dev = create(fd))) return dev;
+    close(fd);
+  }
+  return nullptr;
+}
+
 bool Api::load(std::string* why) {
   if (loaded) return true;
   static std::mutex m;
@@ -39,6 +64,7 @@ bool Api::load(std::string* why) {
 #define R(n) resolve(n, #n, gpa)
   R(eglGetDisplay); R(eglInitialize); R(eglChooseConfig); R(eglCreateContext); R(eglDestroyContext); R(eglCreatePbufferSurface); R(eglDestroySurface);
   R(eglMakeCurrent); R(eglGetCurrentContext); R(eglBindAPI); R(eglQueryString); R(eglGetError);
+  R(eglGetPlatformDisplayEXT);
   R(eglCreateSyncKHR); R(eglDestroySyncKHR); R(eglClientWaitSyncKHR); R(eglGetSyncAttribKHR);
   R(glGetString); R(glGetStringi); R(glGetIntegerv); R(glGetError);
   R(glCreateShader); R(glShaderSource); R(glCompileShader); R(glGetShaderiv); R(glGetShaderInfoLog); R(glDeleteShader);

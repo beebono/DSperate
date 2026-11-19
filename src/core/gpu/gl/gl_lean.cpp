@@ -240,22 +240,36 @@ std::unique_ptr<Lean> Lean::create(bool aa, bool edges, std::string* why) {
   // EGL: the default display, an ES 3.1 context on no surface (a 1x1
   // pbuffer where the driver wants one). The display is initialised once
   // and never terminated: the frontend may share it.
-  d.dpy = a.eglGetDisplay(EGL_DEFAULT_DISPLAY);
-  if (!d.dpy) return fail("eglGetDisplay failed");
+  // A GBM build of the driver (the RK3326 images' Mali blob) has no default display: it takes a gbm_device, and
+  // offers window configs only, so the context there has to do without a surface.
   EGLint maj = 0, min = 0;
-  if (!a.eglInitialize(d.dpy, &maj, &min)) return fail("eglInitialize failed");
+  d.dpy = a.eglGetDisplay(EGL_DEFAULT_DISPLAY);
+  bool up = d.dpy && a.eglInitialize(d.dpy, &maj, &min);
+  bool on_gbm = false;
+  if (!up) {
+    if (void* gbm = a.gbm_device()) {
+      d.dpy = a.eglGetPlatformDisplayEXT ? a.eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR, gbm, nullptr) : nullptr;
+      if (!d.dpy) d.dpy = a.eglGetDisplay(gbm);
+      up = on_gbm = d.dpy && a.eglInitialize(d.dpy, &maj, &min);
+    }
+  }
+  if (!d.dpy) return fail("eglGetDisplay failed");
+  if (!up) return fail("eglInitialize failed");
   const char* egl_exts = a.eglQueryString(d.dpy, EGL_EXTENSIONS);
+  const bool surfaceless = has_egl_ext(egl_exts, "EGL_KHR_surfaceless_context");
   a.eglBindAPI(EGL_OPENGL_ES_API);
   const EGLint cfg_attrs[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_RED_SIZE, 8, EGL_NONE};
+  const EGLint cfg_any[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_RED_SIZE, 8, EGL_NONE};
   EGLConfig cfg = nullptr; EGLint ncfg = 0;
-  if (!a.eglChooseConfig(d.dpy, cfg_attrs, &cfg, 1, &ncfg) || ncfg < 1) return fail("no OpenGL ES 3 config");
+  if ((!a.eglChooseConfig(d.dpy, cfg_attrs, &cfg, 1, &ncfg) || ncfg < 1) && !(surfaceless && a.eglChooseConfig(d.dpy, cfg_any, &cfg, 1, &ncfg) && ncfg >= 1))
+    return fail(on_gbm ? "no OpenGL ES 3 config on the GBM display" : "no OpenGL ES 3 config");
   const bool create_ctx = has_egl_ext(egl_exts, "EGL_KHR_create_context");
   const EGLint ctx_attrs31[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_CONTEXT_MINOR_VERSION_KHR, 1, EGL_NONE};
   const EGLint ctx_attrs3[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
   d.ctx = a.eglCreateContext(d.dpy, cfg, EGL_NO_CONTEXT, create_ctx ? ctx_attrs31 : ctx_attrs3);
   if (!d.ctx && create_ctx) d.ctx = a.eglCreateContext(d.dpy, cfg, EGL_NO_CONTEXT, ctx_attrs3);
   if (!d.ctx) return fail("eglCreateContext failed");
-  if (!has_egl_ext(egl_exts, "EGL_KHR_surfaceless_context")) {
+  if (!surfaceless) {
     const EGLint pb[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
     d.surf = a.eglCreatePbufferSurface(d.dpy, cfg, pb);
     if (!d.surf) return fail("eglCreatePbufferSurface failed");
