@@ -743,8 +743,24 @@ bool attach(NDS& nds, bool arm9, bool arm7) {
     r.stubs_fast = g_fast_timing;
   }
   if (!r.arena) {
-    void* p = mmap(nullptr, ARENA_BYTES, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // Hot code spans over a megabyte of the arena, far past the instruction
+    // TLB's reach in 4 KB pages, so block entries stall on iTLB misses: the
+    // arena is 2 MB aligned and asks for transparent huge pages (DS_JIT_HUGE=0: not).
+    static const bool huge = [] { const char* e = std::getenv("DS_JIT_HUGE"); return !e || std::atoi(e) != 0; }();
+    constexpr size_t HUGE_ALIGN = size_t{2} << 20;
+    const size_t span = huge ? ARENA_BYTES + HUGE_ALIGN : ARENA_BYTES;
+    void* p = mmap(nullptr, span, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) { std::fprintf(stderr, "jit: cannot map code arena\n"); return false; }
+    if (huge) {
+      u8* const raw = static_cast<u8*>(p);
+      u8* const aligned = reinterpret_cast<u8*>((reinterpret_cast<uintptr_t>(raw) + HUGE_ALIGN - 1) & ~(HUGE_ALIGN - 1));
+      if (aligned > raw) munmap(raw, static_cast<size_t>(aligned - raw));
+      if (u8* const end = aligned + ARENA_BYTES; end < raw + span) munmap(end, static_cast<size_t>(raw + span - end));
+      p = aligned;
+#ifdef MADV_HUGEPAGE
+      madvise(p, ARENA_BYTES, MADV_HUGEPAGE);
+#endif
+    }
     r.arena = static_cast<u8*>(p);
     r.cap = ARENA_BYTES;
     for (int c = 0; c < 2; ++c) {
