@@ -147,6 +147,11 @@ struct Lean::Impl {
   // scale, which layer() hands the compositor (it reads 256 * scale x 192 * scale texels from the corner). The rest
   // of the image is not written. DS_LEAN_FLAT1X=0: every frame at the raster's scale.
   bool flat1x = false; u32 fscale[kSlots] = {}; u32 flat_n = 0, flat_of = 0;
+  // And a frame whose textures are all blown up, no polygon with more than half a texel to the DS pixel (a texel
+  // is 2x2 DS pixels or more; untextured polygons count), is drawn at 2x where the raster's scale is higher, the
+  // same way: at 4x each texel was 64 pixels or more of one colour. Polygon outlines are at 2x with it.
+  // Solatorobo's flight through clouds (three screens of blended cloud a frame). DS_LEAN_SOFT2X=0: off.
+  bool soft2x = false; u32 soft_n = 0;
   Img idm, idm_ms;   // idm_ms: under MSAA the draw's attachment, resolved (one sample's word) into idm
   VkRenderPass rp_keep = VK_NULL_HANDLE, rp_mark = VK_NULL_HANDLE;
   VkFramebuffer fb_mark[kSlots] = {};
@@ -378,6 +383,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
   d.mark_on = !(std::getenv("DS_LEAN_EDGEMARK") && std::atoi(std::getenv("DS_LEAN_EDGEMARK")) == 0);
   d.mark_width = d.scale;   // one DS pixel
   { const char* e = std::getenv("DS_LEAN_FLAT1X"); const char* fe = std::getenv("DS_LEAN_FINE");   // the debug read-back is the whole image: no corner frames beside it
+    { const char* se = std::getenv("DS_LEAN_SOFT2X"); d.soft2x = d.scale > 2 && !(se && std::atoi(se) == 0); }
     d.flat1x = d.scale > 1 && (e ? std::atoi(e) != 0 : d.down) && !(fe && std::atoi(fe) != 0); }   // the probes (no 1x record: the output is the whole image) only when asked
   d.msaa = msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
   const VkSampleCountFlagBits samples = d.msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
@@ -1073,10 +1079,21 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     if (p.flags & (DS_PF_SHADOW | DS_PF_SHADOW_MASK)) flat = false;
     for (u32 n = 1; flat && n < p.nverts; ++n) if (v[n].z != v[0].z || v[n].w != v[0].w) flat = false;
   }
-  const u32 FS = flat ? 1u : d.scale;
+  bool soft = d.flat1x && d.soft2x && !flat && npoly != 0;
+  for (u32 k = 0; soft && k < npoly; ++k) {
+    const GpuPoly& p = gp[k]; const GpuVert* v = d.host_verts.data() + p.first_vert;
+    if (!(p.flags & DS_PF_TEXTURED)) continue;
+    for (u32 n = 1; soft && n + 1 < p.nverts; ++n) {   // each fan triangle: texel area against screen area (both in sixteenths), a quarter at most
+      const s64 cxy = s64{v[n].fx - v[0].fx} * (v[n + 1].fy - v[0].fy) - s64{v[n].fy - v[0].fy} * (v[n + 1].fx - v[0].fx);
+      const s64 cst = s64{v[n].s - v[0].s} * (v[n + 1].t - v[0].t) - s64{v[n].t - v[0].t} * (v[n + 1].s - v[0].s);
+      const s64 axy = cxy < 0 ? -cxy : cxy, ast = cst < 0 ? -cst : cst;
+      if (axy >= 256 && 4 * ast > axy) soft = false;   // under half a DS pixel of area: not judged
+    }
+  }
+  const u32 FS = flat ? 1u : soft ? 2u : d.scale;
   const u32 W = 256 * FS, H = 192 * FS;   // over the file's: every area below is the frame's
   d.fscale[slot] = FS;
-  if (d.flat1x) { d.flat_n += flat; if (++d.flat_of == 600) { static const bool tr = std::getenv("DS_GPU_TRACE") != nullptr; if (tr) std::fprintf(stderr, "lean flat1x: %u of 600 frames at 1x\n", d.flat_n); d.flat_n = d.flat_of = 0; } }
+  if (d.flat1x) { d.flat_n += flat; d.soft_n += soft; if (++d.flat_of == 600) { static const bool tr = std::getenv("DS_GPU_TRACE") != nullptr; if (tr) std::fprintf(stderr, "lean flat1x: %u of 600 frames at 1x, %u at 2x\n", d.flat_n, d.soft_n); d.flat_n = d.soft_n = d.flat_of = 0; } }
   // Fog where a pixel can carry the flag only: an opaque pixel takes its
   // polygon's fog bit, a translucent one can only clear it (melonDS), so
   // with neither the rear plane's nor any polygon's bit set no pixel is
@@ -1342,7 +1359,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     a.vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
     a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_mark); a.vkCmdSetScissor(cb, 0, 1, &whole);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_mark, 0, 1, &d.set_mark[slot], 0, nullptr);
-    const u32 mpc[4] = {mark_clear, flat ? 1u : d.mark_width, (f.dispcnt & ~0x10u) | ((f.flags2 & DS_FF2_GAME_AA) ? 0x10u : 0u), W | (H << 16)};   // bit 4 the game's own; the frame's size
+    const u32 mpc[4] = {mark_clear, FS < d.scale ? FS : d.mark_width, (f.dispcnt & ~0x10u) | ((f.flags2 & DS_FF2_GAME_AA) ? 0x10u : 0u), W | (H << 16)};   // bit 4 the game's own; the frame's size
     a.vkCmdPushConstants(cb, d.layout_mark, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(mpc), mpc);
     if (!((skip >> 13) & 1)) a.vkCmdDraw(cb, 3, 1, 0, 0);
     a.vkCmdEndRenderPass(cb);
