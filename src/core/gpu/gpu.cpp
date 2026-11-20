@@ -271,7 +271,7 @@ bool Gpu::vram_remap_begin(u32 moved_2d, const VramMap* next) {
     for (u32 b = 0; b < next->arm7.blocks(); ++b) to |= next->arm7.mask[b];
     if ((late_[0].pending && (to >> late_[0].bank & 1)) || (late_[1].pending && (to >> late_[1].bank & 1))) {
       join_worker(JoinSite::Remap);
-      if (late_fill(render_next_[0] >= SCREEN_H)) { cap_backoff_ = 600; ++cap_taken_remap_; }
+      if (late_fill(render_next_[0] >= SCREEN_H)) { cap_stand_down(); ++cap_taken_remap_; }
     }
   }
   const bool trapped = vram_remap_begin_core(moved_2d, next);
@@ -393,7 +393,7 @@ void Gpu::capture_read_hit() {
   if (snap_log) std::fprintf(stderr, "[snap] frame %llu line %u capture read hit\n", (unsigned long long)nds_.frame_count, line_);
   join_worker(JoinSite::Trap);
   // The lines of a late capture, read before the next frame's render has written them again: now.
-  if ((late_[0].pending || late_[1].pending) && late_fill(render_next_[0] >= SCREEN_H)) { cap_backoff_ = 600; ++cap_taken_read_; }
+  if ((late_[0].pending || late_[1].pending) && late_fill(render_next_[0] >= SCREEN_H)) { cap_stand_down(); ++cap_taken_read_; }
   release_read_trap(true);
 }
 
@@ -878,7 +878,7 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
   join_worker(JoinSite::RangesPre);   // a job handed now snapshots the live map: nothing stale may still be in flight
   // The captures of the frames before, before anything of this range can show them. Line 0's sprites were
   // drawn at the end of the frame before (one line ahead): again, where they may show such a bank.
-  if (late_fill()) { if (a_has && af == 0) engine[0].render_sprites(0); if (b_has && bf == 0) engine[1].render_sprites(0); }
+  if (late_fill()) { cap_backoff_len_ = CAP_BACKOFF_MIN; if (a_has && af == 0) engine[0].render_sprites(0); if (b_has && bf == 0) engine[1].render_sprites(0); }   // one that lasted to its own time: the stand-down starts short again
   capcnt_render_ = capcnt_; capture_render_ = capture_on_;
   late_render_ = cap_late_ ? late_at_ : -1;
   lcdc_mask_render_ = nds_.bus.vram_map().lcdc_mask;   // latched so the job doesn't consult a live map that may be rebuilding
@@ -1691,7 +1691,7 @@ void Gpu::dma_copied(u32 src, u32 dst, u32 bytes) {
     // A late capture on its way out before the next frame's render: written with its own 3D frame now, and the
     // block copied again (Golden Sun: Dark Dawn moves every captured frame through main RAM).
     const bool refilled = (late_[0].pending || late_[1].pending) && late_fill(render_next_[0] >= SCREEN_H);
-    if (refilled) { cap_backoff_ = 600; ++cap_taken_dma_; }
+    if (refilled) { cap_stand_down(); ++cap_taken_dma_; }
     if (refilled && !nds_.dsi) {
       const u32 at = dst & (mem::Bus::MAIN_RAM_SIZE - 1);
       if (at + bytes <= mem::Bus::MAIN_RAM_SIZE)

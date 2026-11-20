@@ -979,7 +979,10 @@ void Gpu3D::record_vertex(const Vertex& vt) {
 // The polygon from the vertices vptr_ names now (strip order applied).
 void Gpu3D::record_polygon() {
   GeomStream& g = streams_[bank_];
-  if (g.viewports.empty() || g.viewports.back() != viewport_) g.viewports.push_back(viewport_);
+  // Compared in line: this runs per polygon, and the array's own != is a library call.
+  bool vp_new = g.viewports.empty();
+  if (!vp_new) { const u32* const l = g.viewports.back().data(); u32 d = 0; for (int i = 0; i < 6; ++i) d |= l[i] ^ viewport_[i]; vp_new = d != 0; }
+  if (vp_new) g.viewports.push_back(viewport_);
   GeomStream::Poly r{};
   r.nverts = (poly_mode_ & 1) ? 4 : 3;
   for (u32 i = 0; i < r.nverts; ++i) r.vtx[i] = g.slot_vert[vptr_[i] - temp_vtx_];

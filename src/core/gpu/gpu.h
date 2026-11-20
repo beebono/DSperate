@@ -537,6 +537,12 @@ private:
   // A late capture something took before the next frame's render (a read, a DMA out, a texture mapping) was
   // written again at once, which is the waiting capture with work added: late capture stands down for a while.
   u32 cap_backoff_ = 0;
+  // Each time in a row a late capture is taken early the stand-down doubles (10 s to about 10 min): a game that
+  // takes every capture at once (Golden Sun: Dark Dawn's copy-out DMA) paid for a failed try every 600 frames,
+  // a 20 ms frame every ten seconds.
+  static constexpr u32 CAP_BACKOFF_MIN = 600, CAP_BACKOFF_MAX = 38400;
+  u32 cap_backoff_len_ = CAP_BACKOFF_MIN;
+  void cap_stand_down() { cap_backoff_ = cap_backoff_len_; cap_backoff_len_ = std::min(cap_backoff_len_ * 2, CAP_BACKOFF_MAX); }
   // DS_SPLIT_STAT: capture frames; those that waited for their 3D frame while late capture stood down; late captures taken early, by what took them.
   u32 cap_frames_ = 0, cap_backoff_frames_ = 0, cap_taken_remap_ = 0, cap_taken_read_ = 0, cap_taken_dma_ = 0;
   u32 cap_idle_ = 0;   // frames since the last capture frame: a new run of captures starts by waiting (cap_clean_ from 0)
