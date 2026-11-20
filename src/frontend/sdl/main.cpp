@@ -1898,10 +1898,14 @@ sdl_ready:
   // (Raster3D::warm) on a worker, with a notice if it takes more than a moment: the first time a setting is used
   // it is seconds on the Mali-G52, and a frozen picture with no word looked like a hang. `page`: the display is
   // already in page mode (the pause menu is up).
+  // `scale` and every scale under it: the raster runs no finer than the largest view shows and at 1x where the
+  // windows cannot merge its image (gpu3d_scale_now), so a 4x setting meets 2x on a change of layout. Without
+  // MSAA those are other pipelines (4x draws straight into the record), a second or more on the G52 the first
+  // time; with it, or already built, each is a few milliseconds.
   auto warm_gpu3d = [&](bool aa, ds::u32 scale, bool page) {
     const ds::sdl::OffRealtime off_rt;   // the worker inherits it
     std::atomic<bool> done{false};
-    std::thread worker([&] { ds::gpu::Raster3D::warm(aa, scale); done = true; });
+    std::thread worker([&] { for (ds::u32 n = scale >= 4 ? 4 : scale >= 2 ? 2 : 1; n >= 1; n /= 2) ds::gpu::Raster3D::warm(aa, n); done = true; });
     const Uint32 start = SDL_GetTicks();
     Uint32 last_step = start;
     int dots = 0;
@@ -1929,7 +1933,7 @@ sdl_ready:
     apply_aa(nds, cfg.str("video.aa", "false"));   // before the raster starts: its MSAA is fixed at creation
     gpu3d_scale_asked = gpu3d_scale_now(cfg.num("video.gpu3d_scale", 1), display, display2, dual_window);
     nds.gpu3d.renderer().set_gpu_scale(gpu3d_scale_asked);   // and its scale
-    if (want) warm_gpu3d(nds.gpu3d.renderer().aa(), gpu3d_scale_asked, false);   // a first launch compiles its shaders: said on screen
+    if (want) warm_gpu3d(nds.gpu3d.renderer().aa(), std::max<ds::u32>(gpu3d_scale_asked, static_cast<ds::u32>(std::max(1, cfg.num("video.gpu3d_scale", 1)))), false);   // a first launch compiles its shaders: said on screen
     if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) { std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); gpu3d_refused = why.empty() ? "?" : why; } else std::fprintf(stderr, "gpu3d: on (%s)\n", nds.gpu3d.renderer().gpu_api()); }
   }
   bool rom_cancelled = false;   // the last load_rom_notice was stopped with B
@@ -3042,13 +3046,17 @@ sdl_ready:
     }
     if (is("video.aa")) {
       ds::gpu::Renderer3D& r3 = nds.gpu3d.renderer();
-      if (*r3.gpu_api() && aa_on(v) != r3.aa()) warm_gpu3d(aa_on(v), gpu3d_scale_asked, true);   // the raster is rebuilt for it at the next frame
+      if (*r3.gpu_api() && aa_on(v) != r3.aa()) warm_gpu3d(aa_on(v), static_cast<ds::u32>(std::max(1, gpu3d_scale)), true);   // the raster is rebuilt for it at the next frame
       apply_aa(nds, v);
       return;
     }
     if (is("video.colour")) { apply_colour(nds, v); return; }
-    if (is("video.gpu3d")) { std::string why; if (on) warm_gpu3d(nds.gpu3d.renderer().aa(), gpu3d_scale_asked, true); if (!nds.gpu3d.renderer().set_gpu(on, &why)) { std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); gpu3d_note = why.empty() ? "?" : why; } return; }
-    if (is("video.gpu3d_scale")) { gpu3d_scale = std::atoi(v.c_str()); return; }
+    if (is("video.gpu3d")) { std::string why; if (on) warm_gpu3d(nds.gpu3d.renderer().aa(), static_cast<ds::u32>(std::max(1, gpu3d_scale)), true); if (!nds.gpu3d.renderer().set_gpu(on, &why)) { std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); gpu3d_note = why.empty() ? "?" : why; } return; }
+    if (is("video.gpu3d_scale")) {
+      gpu3d_scale = std::atoi(v.c_str());
+      if (*nds.gpu3d.renderer().gpu_api()) warm_gpu3d(nds.gpu3d.renderer().aa(), static_cast<ds::u32>(std::max(1, gpu3d_scale)), true);
+      return;
+    }
     if (is("video.gpu_present")) { host.reopen_wanted = true; return; }
     if (is("video.fps")) { fps_osd = on; if (on && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; } return; }
     if (is("video.pip_touch_hold")) { pip_touch_hold = std::max(0, std::atoi(v.c_str())); return; }
