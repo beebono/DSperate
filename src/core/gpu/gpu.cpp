@@ -68,6 +68,7 @@ Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
 }
 
 Gpu::~Gpu() {
+  late_join();
   const bool stat = std::getenv("DS_SPLIT3D") || std::getenv("DS_SPLIT_STAT");
   if (stat && (split_miss_cpu_ || split_miss_mixed_))
     std::fprintf(stderr, "split3d: 3D lines left to the 1x composite: %llu of a frame drawn on the CPU, %llu on a screen already showing a captured frame\n",
@@ -88,7 +89,7 @@ Gpu::~Gpu() {
 }
 
 void Gpu::reset() {
-  join_worker();
+  join_worker(); late_join();
   disarm_trap();
   line_ = 0; next_vcount_ = 0xFFFF; hblank_done_ = false;
   lazy_frame_ = false; per_line_[0] = per_line_[1] = false;
@@ -589,9 +590,10 @@ void Gpu::on_scanline_start() {
   if (line_ >= SCREEN_H) { engine[0].latch(Engine2D::L_WINDOWS, line_, false); engine[1].latch(Engine2D::L_WINDOWS, line_, false); }
   if (line_ == 0) {
     // All display lines must be drawn before the frontend reads them and before begin_frame runs.
-    { prof::Scope j(prof::JOIN0); join_worker(JoinSite::Line0); }
+    { prof::Scope j(prof::JOIN0); join_worker(JoinSite::Line0); late_join(); }
     if (probe_enabled_) async_probe_check(true);
     { prof::Scope b(prof::BEGIN_FRAME); begin_frame(); }
+    late_prefill();
     nds_.frame_ready = true;
   } else if (line_ == 192) {
     if (probe_enabled_) async_probe_check(false);
@@ -709,7 +711,8 @@ void Gpu::begin_frame() {
     LateCap& lc = late_[late_at_];
     ref3d_exact_ = ref3d_; ref3d_exact_.allow_lag = false; ref3d_exact_.out = nullptr;
     lc.pending = true; lc.frame = late_seq_; lc.ref = ref3d_; lc.bank = (capcnt_ >> 16) & 3; std::memset(lc.kind, 0, sizeof lc.kind);
-    if (lc.u.empty()) { lc.u.resize(SCREEN_W * SCREEN_H); lc.w.resize(SCREEN_W * SCREEN_H); }
+    if (lc.u.empty()) { lc.u.resize(SCREEN_W * SCREEN_H); lc.w.resize(SCREEN_W * SCREEN_H); lc.px.resize(SCREEN_W * SCREEN_H); }
+    lc.pre = false;
   }
   if (split_cur_.drawn) split_done_ = split_cur_;
   split_cur_ = SplitFrame{};
@@ -797,6 +800,7 @@ void Gpu::on_display_fifo(u32 x) {
 // One engine's run of display lines on the worker; engine state is disjoint.
 void Gpu::worker_job(void* self) {
   Gpu& g = *static_cast<Gpu*>(self);
+  if (g.late_job_) { for (LateCap& lc : g.late_) if (lc.pending && lc.frame != g.late_job_seq_ && !lc.pre) g.late_lines(lc); return; }
   if (g_worker_delay_us) { const auto t = std::chrono::steady_clock::now() + std::chrono::microseconds(g_worker_delay_us); while (std::chrono::steady_clock::now() < t) {} }
   for (int e = 0; e < 2; ++e)
     for (u32 l = g.job_first_[e]; l <= g.job_last_[e]; ++l) g.step_engine(e, l);
@@ -808,6 +812,7 @@ void Gpu::worker_job(void* self) {
 
 void Gpu::worker_b_job(void* self) {
   Gpu& g = *static_cast<Gpu*>(self);
+  if (g.late_job_) { for (LateCap& lc : g.late_) if (lc.pending && lc.frame != g.late_job_seq_ && !lc.pre) g.late_lines(lc); return; }
   if (g_worker_delay_us) { const auto t = std::chrono::steady_clock::now() + std::chrono::microseconds(g_worker_delay_us); while (std::chrono::steady_clock::now() < t) {} }
   for (u32 l = g.bjob_first_; l <= g.bjob_last_; ++l) g.step_engine(1, l);
 }
@@ -885,6 +890,7 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
   const bool dbg = g_dbg_join;
   auto hand = [&](bool a, bool b) {
     if (dbg) std::fprintf(stderr, "[hand] frame %llu line %u a %u..%u b %u..%u lag %d stash %u\n", (unsigned long long)nds_.frame_count, line_, a ? af : 1, a ? al : 0, b ? bf : 1, b ? bl : 0, lag_frame_ ? 1 : 0, bscale_n_);
+    late_join();
     job_first_[0] = a ? af : 1; job_last_[0] = a ? al : 0;
     job_first_[1] = b ? bf : 1; job_last_[1] = b ? bl : 0;
     scale_inflight_ = bscale_n_ > 0;
@@ -1598,6 +1604,7 @@ void Gpu::expand_colours(u32* dst) { kern::active::expand_colours(dst); }
 // The late captures of frames before this one, written again with their own 3D frame (waited for): each line
 // as capture() wrote it, where the bank still holds what that wrote. The worker is idle (render_ranges, quiesce).
 bool Gpu::late_fill(bool current) {
+  late_join();
   bool any = false;
   for (LateCap& lc : late_) {
     if (!lc.pending || (lc.frame == late_seq_ && !current)) continue;
@@ -1608,10 +1615,7 @@ bool Gpu::late_fill(bool current) {
     if (!(lc.lcdc & (1u << dst_bank))) continue;
     // The bank itself, wherever the game has mapped it since (to show it): bank pointers are remap-invariant.
     u16* const bank = reinterpret_cast<u16*>(nds_.bus.vram_map().bank(dst_bank));
-    Renderer3D::FrameRef r = lc.ref;
-    r.allow_lag = false; r.out = nullptr;   // that frame's own record
-    bool synced = false;
-    alignas(16) Pixel merged[SCREEN_W];
+    bool filled = false;
     for (u32 line = 0; line < std::min<u32>(height, SCREEN_H); ++line) {
       if (!lc.kind[line]) continue;
       const u32 cap_idx = ((((cnt >> 18) & 3) << 14) + line * width) & 0xFFFF;
@@ -1621,16 +1625,44 @@ bool Gpu::late_fill(bool current) {
       bool ours = true;
       for (u32 k = 0; k < width; k += 128) { const CapSeg& seg = cap_seg_[dst_bank * 512 + ((cap_idx + k) >> 7)]; ours = ours && seg.gen == lc.ref.gpu_gen && seg.sum == cap_sum(dst + k); }
       if (!ours) continue;
-      if (!synced) { nds_.gpu3d.renderer().sync_line(r, 0); synced = true; }
-      const Pixel* src = r.line(line);
-      if (lc.kind[line] == 1) { kern::active::split_merge_line(lc.w.data() + line * SCREEN_W, lc.u.data() + line * SCREEN_W, src, merged); src = merged; }
-      kern::active::capture_a15(src, width, dst);
+      if (!lc.pre) late_lines(lc);
+      std::memcpy(dst, lc.px.data() + line * SCREEN_W, width * sizeof(u16));
       for (u32 k = 0; k < width; k += 128) cap_seg_[dst_bank * 512 + ((cap_idx + k) >> 7)].sum = cap_sum(dst + k);
+      filled = true;
     }
-    if (synced) { ++cap_late_filled_; any = true; }
+    if (filled) { ++cap_late_filled_; any = true; }
   }
   if (read_trap_bank_ >= 0 && !lines_in_flight()) release_read_trap();   // held for a capture now written
   return any;
+}
+
+// A late capture's lines with its own 3D frame (waited for), each as capture() would have written it. On the
+// emulation thread or the 2D worker: nothing here but the LateCap (all its lines drawn) and that frame's record.
+void Gpu::late_lines(LateCap& lc) {
+  const u32 size = (lc.cnt >> 20) & 3;
+  const u32 width = size == 0 ? 128 : 256, height = size == 0 ? 128 : 64 * size;
+  Renderer3D::FrameRef r = lc.ref;
+  r.allow_lag = false; r.out = nullptr;   // that frame's own record
+  nds_.gpu3d.renderer().sync_line(r, 0);
+  alignas(16) Pixel merged[SCREEN_W];
+  for (u32 line = 0; line < std::min<u32>(height, SCREEN_H); ++line) {
+    if (!lc.kind[line]) continue;
+    const Pixel* src = r.line(line);
+    if (lc.kind[line] == 1) { kern::active::split_merge_line(lc.w.data() + line * SCREEN_W, lc.u.data() + line * SCREEN_W, src, merged); src = merged; }
+    kern::active::capture_a15(src, width, lc.px.data() + line * SCREEN_W);
+  }
+  lc.pre = true;
+}
+
+// Line 0, after the join and begin_frame: the captures of the frames before go to the worker.
+void Gpu::late_prefill() {
+  static const bool on = !(std::getenv("DS_CAP_PRE") && std::getenv("DS_CAP_PRE")[0] == '0');
+  if (!on || late_inflight_ || lines_in_flight() || !worker_.running()) return;
+  bool due = false;
+  for (const LateCap& lc : late_) due = due || (lc.pending && lc.frame != late_seq_ && !lc.pre);
+  if (!due) return;
+  late_job_seq_ = late_seq_; late_job_ = true; late_inflight_ = true;
+  worker_.dispatch();
 }
 
 void Gpu::quiesce() {
@@ -1640,7 +1672,7 @@ void Gpu::quiesce() {
 }
 
 void Gpu::prepare_load() {
-  join_worker();
+  join_worker(); late_join();
   release_read_trap();
   disarm_trap();
   lazy_frame_ = false; per_line_[0] = per_line_[1] = true;

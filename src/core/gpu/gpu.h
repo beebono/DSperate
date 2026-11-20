@@ -525,7 +525,18 @@ private:
     u8 kind[SCREEN_H] = {};        // per line: 0 not captured, 1 the merged composite, 2 the 3D layer alone
     std::vector<Pixel> u;          // kind 1: the line without BG0 ...
     std::vector<u32> w;            // ... and its split words
+    std::vector<u16> px;           // the lines as late_fill writes them (late_lines), once `pre`
+    bool pre = false;
   };
+  // late_lines waits for a late capture's 3D frame and makes its lines again, into the LateCap alone. Line 0
+  // starts it on the 2D worker for the frame before's capture (late_prefill), which is idle from there to the
+  // frame's first lines, so late_fill on the emulation thread only copies. late_join before the worker is given
+  // anything else and before a LateCap is touched. DS_CAP_PRE=0: late_fill makes the lines itself.
+  void late_lines(LateCap& lc);
+  void late_prefill();
+  void late_join() { if (late_inflight_) { worker_.wait(static_cast<int>(JoinSite::Other)); late_inflight_ = false; late_job_ = false; } }
+  bool late_job_ = false, late_inflight_ = false;
+  u64 late_job_seq_ = 0;
   LateCap late_[2];
   u64 late_seq_ = 0;
   Renderer3D::FrameRef ref3d_exact_;   // a late frame's own 3D frame, waited for: for a line that shows the 1x record itself
