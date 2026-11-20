@@ -142,6 +142,11 @@ struct Lean::Impl {
   // stays); mark_width is the second neighbour distance in raster pixels: the scale, one DS pixel
   bool mark = false, mark_on = true;
   u32 mark_width = 1;
+  // A frame of flat polygons alone (each at one depth and one w: sprites, backdrops, fades) is drawn at 1x into the
+  // top left 256x192 of the slot's images, the viewport, scissor and render areas with it; fscale is each slot's
+  // scale, which layer() hands the compositor (it reads 256 * scale x 192 * scale texels from the corner). The rest
+  // of the image is not written. DS_LEAN_FLAT1X=0: every frame at the raster's scale.
+  bool flat1x = false; u32 fscale[kSlots] = {}; u32 flat_n = 0, flat_of = 0;
   Img idm, idm_ms;   // idm_ms: under MSAA the draw's attachment, resolved (one sample's word) into idm
   VkRenderPass rp_keep = VK_NULL_HANDLE, rp_mark = VK_NULL_HANDLE;
   VkFramebuffer fb_mark[kSlots] = {};
@@ -372,6 +377,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
   d.down = scale > 1;
   d.mark_on = !(std::getenv("DS_LEAN_EDGEMARK") && std::atoi(std::getenv("DS_LEAN_EDGEMARK")) == 0);
   d.mark_width = d.scale;   // one DS pixel
+  { const char* e = std::getenv("DS_LEAN_FLAT1X"); const char* fe = std::getenv("DS_LEAN_FINE");   // the debug read-back is the whole image: no corner frames beside it
+    d.flat1x = d.scale > 1 && (e ? std::atoi(e) != 0 : d.down) && !(fe && std::atoi(fe) != 0); }   // the probes (no 1x record: the output is the whole image) only when asked
   d.msaa = msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
   const VkSampleCountFlagBits samples = d.msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
   if (const char* e = std::getenv("DS_LEAN_FETCH"); (!e || std::atoi(e) > 0) && !d.msaa && dev.limits().ordered_attachments) {   // on by default
@@ -601,7 +608,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     lb[1].binding = 1; lb[1].descriptorCount = 1; lb[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; lb[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     VkDescriptorSetLayoutCreateInfo lci{}; lci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO; lci.bindingCount = 2; lci.pBindings = lb;
     if (a.vkCreateDescriptorSetLayout(vk->dev, &lci, nullptr, &d.dsl_mark) != VK_SUCCESS) return fail("edge marking layout");
-    VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr.size = 3 * sizeof(u32);
+    VkPushConstantRange pcr{}; pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr.size = 4 * sizeof(u32);
     VkPipelineLayoutCreateInfo pli{}; pli.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO; pli.setLayoutCount = 1; pli.pSetLayouts = &d.dsl_mark; pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pcr;
     if (a.vkCreatePipelineLayout(vk->dev, &pli, nullptr, &d.layout_mark) != VK_SUCCESS) return fail("edge marking pipeline layout");
     const VkDescriptorPoolSize psz[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Impl::kSlots}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, Impl::kSlots}};
@@ -637,6 +644,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = 2; gpi.pStages = st;
     gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
     gpi.pColorBlendState = &cbs; gpi.layout = d.layout_mark; gpi.renderPass = d.rp_mark; gpi.subpass = 0;
+    static const VkDynamicState fs_dyn[1] = {VK_DYNAMIC_STATE_SCISSOR}; VkPipelineDynamicStateCreateInfo fs_dys{}; fs_dys.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; fs_dys.dynamicStateCount = 1; fs_dys.pDynamicStates = fs_dyn;   // the frame's area (Impl::flat1x)
+    gpi.pDynamicState = &fs_dys;
     if (a.vkCreateGraphicsPipelines(vk->dev, vk->pcache, 1, &gpi, nullptr, &d.pipe_mark) != VK_SUCCESS) return fail("edge marking pipeline");
   }
   {
@@ -819,6 +828,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
       VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = 2; gpi.pStages = st;
       gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
       gpi.pColorBlendState = &cbs; gpi.layout = d.layout_dec; gpi.renderPass = d.rp_dec; gpi.subpass = 0;
+      static const VkDynamicState fs_dyn[1] = {VK_DYNAMIC_STATE_SCISSOR}; VkPipelineDynamicStateCreateInfo fs_dys{}; fs_dys.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; fs_dys.dynamicStateCount = 1; fs_dys.pDynamicStates = fs_dyn;   // the frame's area (Impl::flat1x)
+      gpi.pDynamicState = &fs_dys;
       if (a.vkCreateGraphicsPipelines(vk->dev, vk->pcache, 1, &gpi, nullptr, &d.pipe_dec) != VK_SUCCESS) return fail("resolve decode pipeline");
     }
   }
@@ -929,8 +940,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     }
     VkPipelineColorBlendStateCreateInfo cbs{}; cbs.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO; cbs.attachmentCount = d.mark && !nm ? 3 : 2; cbs.pAttachments = cba;
     if (one || shadow_one) cbs.flags = VK_PIPELINE_COLOR_BLEND_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_BIT_EXT;
-    const VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_SCISSOR};   // the scissor: the whole image but for Impl::sc's polygons
-    VkPipelineDynamicStateCreateInfo dys{}; dys.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dys.dynamicStateCount = 2; dys.pDynamicStates = dyn;
+    const VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VIEWPORT};   // the scissor: the frame's area but for Impl::sc's polygons; the viewport: the frame's (Impl::flat1x)
+    VkPipelineDynamicStateCreateInfo dys{}; dys.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dys.dynamicStateCount = 3; dys.pDynamicStates = dyn;
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = stencil_only ? 1 : 2; gpi.pStages = st;
     gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
     gpi.pDepthStencilState = &dss; gpi.pColorBlendState = &cbs; gpi.pDynamicState = &dys; gpi.layout = d.layout; gpi.renderPass = nm ? d.rp_nm : d.rp; gpi.subpass = 0;
@@ -954,6 +965,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = 2; gpi.pStages = st;
     gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
     gpi.pColorBlendState = &cbs; gpi.layout = d.layout; gpi.renderPass = d.rp; gpi.subpass = 1;
+    static const VkDynamicState fs_dyn[1] = {VK_DYNAMIC_STATE_SCISSOR}; VkPipelineDynamicStateCreateInfo fs_dys{}; fs_dys.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; fs_dys.dynamicStateCount = 1; fs_dys.pDynamicStates = fs_dyn;   // the frame's area (Impl::flat1x)
+    gpi.pDynamicState = &fs_dys;
     if (d.mshw) {
     } else if (!d.direct) {
       if (a.vkCreateGraphicsPipelines(vk->dev, vk->pcache, 1, &gpi, nullptr, &d.pipe_resolve) != VK_SUCCESS) return fail("resolve pipeline");
@@ -1053,6 +1066,17 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   const bool wbuf = (f.flags & DS_FF_WBUFFER) != 0;
   GpuPoly* gpw = d.host_polys.data();
   const GpuPoly* gp = gpw;
+  // The frame's scale (Impl::flat1x): 1 where no polygon has a slope in depth or w, the raster's otherwise.
+  bool flat = d.flat1x;
+  for (u32 k = 0; flat && k < npoly; ++k) {
+    const GpuPoly& p = gp[k]; const GpuVert* v = d.host_verts.data() + p.first_vert;
+    if (p.flags & (DS_PF_SHADOW | DS_PF_SHADOW_MASK)) flat = false;
+    for (u32 n = 1; flat && n < p.nverts; ++n) if (v[n].z != v[0].z || v[n].w != v[0].w) flat = false;
+  }
+  const u32 FS = flat ? 1u : d.scale;
+  const u32 W = 256 * FS, H = 192 * FS;   // over the file's: every area below is the frame's
+  d.fscale[slot] = FS;
+  if (d.flat1x) { d.flat_n += flat; if (++d.flat_of == 600) { static const bool tr = std::getenv("DS_GPU_TRACE") != nullptr; if (tr) std::fprintf(stderr, "lean flat1x: %u of 600 frames at 1x\n", d.flat_n); d.flat_n = d.flat_of = 0; } }
   // Fog where a pixel can carry the flag only: an opaque pixel takes its
   // polygon's fog bit, a translucent one can only clear it (melonDS), so
   // with neither the rear plane's nor any polygon's bit set no pixel is
@@ -1128,7 +1152,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   a.vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 0, 1, &d.set[slot], 0, nullptr);
   if (d.fetch) a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 1, 1, &d.set_in[slot], 0, nullptr);   // binding 3: the tile's colour
-  GpuFrame fp = f; fp.scale = d.scale;
+  GpuFrame fp = f; fp.scale = FS;
   if (marking) fp.flags2 |= DS_FF2_EDGEMARK;
   fp.flags2 |= DS_FF2_CENTRE;   // polygons of four or more vertices as fans around their centre (lean.vert)
   a.vkCmdPushConstants(cb, d.layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GpuFrame), &fp);
@@ -1142,6 +1166,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   // The frame's scissored polygons.
   const VkRect2D whole{{0, 0}, {W, H}};
   a.vkCmdSetScissor(cb, 0, 1, &whole);
+  { const VkViewport vpf{0.f, 0.f, static_cast<float>(W), static_cast<float>(H), 0.f, 1.f}; a.vkCmdSetViewport(cb, 0, 1, &vpf); }
   u32 n_sc = 0;
   if (d.sc_n) {
     d.sc_of.assign(npoly, 0);
@@ -1168,7 +1193,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
           if (e > k) a.vkCmdDraw(cb, vc, e - k, 0, k);
           if (e < end) {
             const Raster3D::Scissor& r = d.sc[d.sc_of[kind <= 1 ? d.key[e].second : e] - 1];
-            const VkRect2D box{{static_cast<s32>(r.x0 * d.scale), static_cast<s32>(r.y0 * d.scale)}, {(r.x1 - r.x0) * d.scale, (r.y1 - r.y0) * d.scale}};
+            const VkRect2D box{{static_cast<s32>(r.x0 * FS), static_cast<s32>(r.y0 * FS)}, {(r.x1 - r.x0) * FS, (r.y1 - r.y0) * FS}};
             a.vkCmdSetScissor(cb, 0, 1, &box); a.vkCmdDraw(cb, vc, 1, 0, e); a.vkCmdSetScissor(cb, 0, 1, &whole);
             ++e;
           }
@@ -1293,11 +1318,11 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (d.raw && !(f.dispcnt & 128u)) {
     // The tile is the record already and nothing fogs: no last draw.
   } else if (d.direct) {   // the tile into the record, fogged in frames that fog (kind 9, as the resolve it replaces)
-    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (nm ? d.pipe_fog_nm : d.pipe_fog)[(f.dispcnt & 128u) ? 1 : 0]); occ(9, [&] { a.vkCmdDraw(cb, 3, 1, 0, 0); });
+    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, (nm ? d.pipe_fog_nm : d.pipe_fog)[(f.dispcnt & 128u) ? 1 : 0]); a.vkCmdSetScissor(cb, 0, 1, &whole); occ(9, [&] { a.vkCmdDraw(cb, 3, 1, 0, 0); });
   } else if (d.mshw) {   // the hardware resolves at the subpass's end; the record is written from that below
   } else {
     a.vkCmdNextSubpass(cb, VK_SUBPASS_CONTENTS_INLINE);
-    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_resolve);
+    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_resolve); a.vkCmdSetScissor(cb, 0, 1, &whole);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout, 1, 1, &d.set_in[slot], 0, nullptr);
     occ(9, [&] { a.vkCmdDraw(cb, 3, 1, 0, 0); });
   }
@@ -1305,7 +1330,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (d.mshw) {
     VkRenderPassBeginInfo rb{}; rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rb.renderPass = d.rp_dec; rb.framebuffer = d.fb_dec[slot]; rb.renderArea = {{0, 0}, {W, H}};
     a.vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
-    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_dec);
+    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_dec); a.vkCmdSetScissor(cb, 0, 1, &whole);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_dec, 0, 1, &d.set_dec[slot], 0, nullptr);
     a.vkCmdPushConstants(cb, d.layout_dec, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GpuFrame), &fp);
     occ(9, [&] { a.vkCmdDraw(cb, 3, 1, 0, 0); });
@@ -1315,9 +1340,9 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   if (marking) {   // the record's edge pixels recoloured (lean_mark.frag), before anything reads it
     VkRenderPassBeginInfo rb{}; rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rb.renderPass = d.rp_mark; rb.framebuffer = d.fb_mark[slot]; rb.renderArea = {{0, 0}, {W, H}};
     a.vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
-    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_mark);
+    a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_mark); a.vkCmdSetScissor(cb, 0, 1, &whole);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_mark, 0, 1, &d.set_mark[slot], 0, nullptr);
-    const u32 mpc[3] = {mark_clear, d.mark_width, (f.dispcnt & ~0x10u) | ((f.flags2 & DS_FF2_GAME_AA) ? 0x10u : 0u)};   // bit 4 the game's own
+    const u32 mpc[4] = {mark_clear, flat ? 1u : d.mark_width, (f.dispcnt & ~0x10u) | ((f.flags2 & DS_FF2_GAME_AA) ? 0x10u : 0u), W | (H << 16)};   // bit 4 the game's own; the frame's size
     a.vkCmdPushConstants(cb, d.layout_mark, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(mpc), mpc);
     if (!((skip >> 13) & 1)) a.vkCmdDraw(cb, 3, 1, 0, 0);
     a.vkCmdEndRenderPass(cb);
@@ -1338,7 +1363,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     a.vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
     a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_down);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_down, 0, 1, &d.set_down[slot], 0, nullptr);
-    a.vkCmdPushConstants(cb, d.layout_down, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32), &d.scale);
+    a.vkCmdPushConstants(cb, d.layout_down, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32), &FS);
     if (!((skip >> 11) & 1)) a.vkCmdDraw(cb, 3, 1, 0, 0);
     a.vkCmdEndRenderPass(cb);
     VkBufferImageCopy r1{}; r1.bufferRowLength = 256; r1.bufferImageHeight = 192; r1.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; r1.imageExtent = {256, 192, 1};
@@ -1429,7 +1454,7 @@ static void record_now(Lean::Impl& d, u32 slot) {
   a.vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
   a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_down);
   a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_down, 0, 1, &d.set_down[slot], 0, nullptr);
-  a.vkCmdPushConstants(cb, d.layout_down, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32), &d.scale);
+  a.vkCmdPushConstants(cb, d.layout_down, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(u32), &d.fscale[slot]);
   a.vkCmdDraw(cb, 3, 1, 0, 0);
   a.vkCmdEndRenderPass(cb);
   VkBufferImageCopy r1{}; r1.bufferRowLength = 256; r1.bufferImageHeight = 192; r1.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; r1.imageExtent = {256, 192, 1};
@@ -1488,7 +1513,7 @@ bool Lean::layer(u64 gen, Layer3D* out) {
   if (found < 0) return false;
   const u32 slot = static_cast<u32>(found);
   if (!d.res8[slot]) return false;
-  out->view = reinterpret_cast<u64>(d.res8[slot]); out->scale = d.scale; out->gen = gen;
+  out->view = reinterpret_cast<u64>(d.res8[slot]); out->scale = d.fscale[slot] ? d.fscale[slot] : d.scale; out->gen = gen;
   out->wait = d.vk->queue2 ? this : nullptr;   // the raster's own queue: nothing orders a reader's submit after this frame's
   return true;
 }

@@ -23,7 +23,7 @@
 #include "vk_layout.h"
 layout(binding = 0) uniform highp usampler2D ids;
 layout(std430, binding = 1) readonly buffer Post { GpuPost ps; };
-layout(push_constant) uniform PC { uint clear_word; uint width; uint dispcnt; } pc;
+layout(push_constant) uniform PC { uint clear_word; uint width; uint dispcnt; uint size; } pc;   // size: the frame's, x | y << 16 (a frame drawn at 1x fills a corner of the image)
 layout(location = 0) out vec4 o_col;   // r, g, b as the record's bytes (6-bit values of 255); a the share of the edge colour
 uint c15_to_18(uint c, uint shift) { uint v = ((shift == 0u ? (c << 1) : (c >> shift)) & 0x3Eu); return v != 0u ? v + 1u : v; }
 uint fog_density(uint z) {
@@ -50,7 +50,7 @@ bool edge_at(uvec2 c, ivec2 p, ivec2 size, int d) {
          behind_other(c, tap(p + ivec2(0, -d), size)) || behind_other(c, tap(p + ivec2(0, d), size));
 }
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy), size = textureSize(ids, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy), size = ivec2(int(pc.size & 0xFFFFu), int(pc.size >> 16));
   uvec2 c = word(texelFetch(ids, p, 0));
   if ((c.x & 0x80u) == 0u) discard;   // nothing opaque here, or not a polygon's edge
   int w = int(pc.width);
