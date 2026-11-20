@@ -489,7 +489,7 @@ msgstr "本地无线"
 
 #: src/frontend/sdl/main.cpp:3257
 msgid "WAITING FOR HOST"
-msgstr ""
+msgstr "等待主机"
 
 #: src/frontend/sdl/main.cpp:3297
 msgid "SCAN FAILED"
