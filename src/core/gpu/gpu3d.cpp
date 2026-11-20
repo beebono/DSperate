@@ -455,8 +455,15 @@ void Gpu3D::gxfifo_write(u32 value) {
 // A GXFIFO DMA burst: `n` words from one direct-mapped source page. Nothing
 // can observe the log mid-burst (CPU stopped for the DMA); caller keeps `n`
 // under fifo_burst_room() so the log cannot fill.
+namespace {
+// Commands with exactly one parameter.
+struct OneParam { u8 is[256]; constexpr OneParam() : is{} { for (unsigned k = 0; k < 256; ++k) is[k] = CMD_PARAMS[k] == 1; } };
+constexpr OneParam kOneParam;
+}
+
 void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
   if (!geometry_on_) return;
+  static const bool quads = !(std::getenv("DS_GX_QUAD") && std::getenv("DS_GX_QUAD")[0] == '0');
   // The cursors ride in registers for the whole run and are written back once.
   struct BurstSink {
     u8* c; u32* p; u32 cn, pn, inf;
@@ -468,6 +475,21 @@ void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
   } sink{cmd_log_.get(), par_log_.get(), cmd_n_, par_n_, inflight_n_};
   GxParse p = parse_;   // local copy, written back once
   for (u32 i = 0; i < n; ) {
+    // The usual packed word: four commands of one parameter each, and their four parameters behind it (a
+    // display list of texcoord / colour / vertex groups is nothing else). Logged in one step, as the walk below
+    // logs them one word at a time, parser state included (it is saved with a state).
+    if (p.num_cmds == 0 && sink.inf == 0 && n - i >= 5 && quads) {
+      u32 h;
+      std::memcpy(&h, src + i * 4, 4);
+      if (kOneParam.is[h & 0xFF] & kOneParam.is[(h >> 8) & 0xFF] & kOneParam.is[(h >> 16) & 0xFF] & kOneParam.is[h >> 24]) {
+        std::memcpy(sink.c + sink.cn, &h, 4);   // command bytes in the word's order (little-endian hosts)
+        std::memcpy(sink.p + sink.pn, src + i * 4 + 4, 16);
+        sink.cn += 4; sink.pn += 4;
+        p.cur_cmd = 0; p.param_count = 1; p.total_params = 1;
+        i += 5;
+        continue;
+      }
+    }
     // Bulk parameters: copy them in one go, leaving the LAST parameter to go
     // through the walk below so the commit happens exactly where it did before.
     if (p.num_cmds != 0) {
