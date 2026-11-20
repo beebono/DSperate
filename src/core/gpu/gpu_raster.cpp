@@ -35,4 +35,16 @@ std::unique_ptr<Raster3D> Raster3D::create(bool aa, u32 scale, std::string* why)
   return nullptr;
 }
 
+bool Raster3D::warm(bool aa, u32 scale) {
+  const char* e = std::getenv("DS_GPU3D_API");
+  if (e && *e && std::strcmp(e, "vk") != 0 && std::strcmp(e, "vulkan") != 0) return false;
+  std::string why;
+  std::shared_ptr<vk::Device> dev = vk::Device::shared(&why);
+  if (!dev) return false;
+  std::unique_ptr<vk::Lean> l = vk::Lean::create(dev, aa, &why, scale < 1 ? 1 : scale);
+  if (!l || !l->ready()) return false;
+  l->wait_pipelines();   // the set built on a thread too
+  return true;
+}
+
 } // namespace ds::gpu

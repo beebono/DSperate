@@ -37,6 +37,11 @@ public:
   // that takes it as an image (layer()); the record read here stays 256x192.
   // A backend that hands no image over draws at 1 whatever is asked (scale()).
   static std::unique_ptr<Raster3D> create(bool aa, u32 scale, std::string* why = nullptr);
+  // Builds the Vulkan raster for these settings and lets it go, so its pipelines are in the device's pipeline
+  // cache (and the cache's file) and the create() that follows is quick: the first build of a setting compiles
+  // every shader, seconds on the Mali-G52. For a thread of its own while the frontend says what is going on.
+  // False where there is no Vulkan raster to build (the OpenGL ES raster keeps no cache: nothing to warm).
+  static bool warm(bool aa, u32 scale);
 
   virtual bool ready() const = 0;
   virtual const char* api() const = 0;   // "Vulkan" / "OpenGL ES"
