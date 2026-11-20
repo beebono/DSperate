@@ -1416,7 +1416,13 @@ u32 Gpu3D::read(u32 addr, u32 width) {
   case 0x60: return dispcnt_;
   case 0x320: return 46;                         // RDLINES_COUNT: rendering keeps up
   case 0x604:
-    // A stream frame has no counts on this thread (its list is built on the raster's submit thread): none.
+    // RAM_COUNT is the list being built: how many polygons and vertices the frame has so far. A stream frame has
+    // no counts on this thread (culling and clipping, which decide them, run on the raster's submit thread a
+    // frame later), and reads none. Phantom Hourglass, Spirit Tracks and Golden Sun: Dark Dawn poll it every
+    // frame to see how much room is left, and draw the same picture with 0 as with the true counts
+    // (DS_GPU_GEOM=off). Do not hand out the last swapped frame's counts in its place: tried 2026-11-19, and
+    // the first two took a full frame's count at the start of the next for full RAM and drew next to nothing.
+    // A game whose scene really overflows the RAM gets the hardware's own overflow, not its own trimming.
     if (geom_skip_) return 0;
     return num_polygons_ | (num_vertices_ << 16);
   case 0x620: return static_cast<u32>(pos_test_[0]);
