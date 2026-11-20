@@ -148,9 +148,11 @@ struct Lean::Impl {
   // of the image is not written. DS_LEAN_FLAT1X=0: every frame at the raster's scale.
   bool flat1x = false; u32 fscale[kSlots] = {}; u32 flat_n = 0, flat_of = 0;
   // And a frame whose textures are all blown up, no polygon with more than half a texel to the DS pixel (a texel
-  // is 2x2 DS pixels or more; untextured polygons count), is drawn at 2x where the raster's scale is higher, the
-  // same way: at 4x each texel was 64 pixels or more of one colour. Polygon outlines are at 2x with it.
-  // Solatorobo's flight through clouds (three screens of blended cloud a frame). DS_LEAN_SOFT2X=0: off.
+  // is 2x2 DS pixels or more; untextured polygons count), is drawn at half the raster's scale the same way (4x at
+  // 2x, 2x at 1x): each texel was a block of one colour either way. Polygon outlines are at the lower scale with it.
+  // A flat sprite of a texel a DS pixel (text, a HUD) does not count against the frame: it is the same picture at
+  // every scale, but for where a sprite placed between two pixels lands (the DS's own place for it at 1x). Solatorobo's flight through clouds (three screens of blended
+  // cloud a frame, its credits such sprites). DS_LEAN_SOFT2X=0: off.
   bool soft2x = false; u32 soft_n = 0;
   Img idm, idm_ms;   // idm_ms: under MSAA the draw's attachment, resolved (one sample's word) into idm
   VkRenderPass rp_keep = VK_NULL_HANDLE, rp_mark = VK_NULL_HANDLE;
@@ -383,7 +385,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
   d.mark_on = !(std::getenv("DS_LEAN_EDGEMARK") && std::atoi(std::getenv("DS_LEAN_EDGEMARK")) == 0);
   d.mark_width = d.scale;   // one DS pixel
   { const char* e = std::getenv("DS_LEAN_FLAT1X"); const char* fe = std::getenv("DS_LEAN_FINE");   // the debug read-back is the whole image: no corner frames beside it
-    { const char* se = std::getenv("DS_LEAN_SOFT2X"); d.soft2x = d.scale > 2 && !(se && std::atoi(se) == 0); }
+    { const char* se = std::getenv("DS_LEAN_SOFT2X"); d.soft2x = d.scale > 1 && !(se && std::atoi(se) == 0); }
     d.flat1x = d.scale > 1 && (e ? std::atoi(e) != 0 : d.down) && !(fe && std::atoi(fe) != 0); }   // the probes (no 1x record: the output is the whole image) only when asked
   d.msaa = msaa && dev.limits().msaa4 && !(std::getenv("DS_LEAN_MSAA") && std::atoi(std::getenv("DS_LEAN_MSAA")) == 0);   // DS_LEAN_MSAA=0: off regardless (debug)
   const VkSampleCountFlagBits samples = d.msaa ? VK_SAMPLE_COUNT_4_BIT : VK_SAMPLE_COUNT_1_BIT;
@@ -1083,6 +1085,16 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   for (u32 k = 0; soft && k < npoly; ++k) {
     const GpuPoly& p = gp[k]; const GpuVert* v = d.host_verts.data() + p.first_vert;
     if (!(p.flags & DS_PF_TEXTURED)) continue;
+    {   // the sprite of a texel a pixel: flat, every vertex on a whole texel, every side along an axis and as many texels as pixels long (to an eighth)
+      bool one = p.nverts >= 4;
+      for (u32 n = 0; one && n < p.nverts; ++n) {
+        const GpuVert& a0 = v[n]; const GpuVert& a1 = v[n + 1 == p.nverts ? 0 : n + 1];
+        const s32 dx = a1.fx - a0.fx, dy = a1.fy - a0.fy, ds = a1.s - a0.s, dt = a1.t - a0.t;
+        if (a0.z != v[0].z || a0.w != v[0].w || ((a0.s | a0.t) & 15) != 0 || (dx != 0 && dy != 0) || (ds != 0 && dt != 0) ||
+            std::abs(std::abs(dx) + std::abs(dy) - std::abs(ds) - std::abs(dt)) > 2) one = false;   // the games place them a sixteenth or so off the pixel (Solatorobo's credits end at x - 1/16)
+      }
+      if (one) continue;
+    }
     for (u32 n = 1; soft && n + 1 < p.nverts; ++n) {   // each fan triangle: texel area against screen area (both in sixteenths), a quarter at most
       const s64 cxy = s64{v[n].fx - v[0].fx} * (v[n + 1].fy - v[0].fy) - s64{v[n].fy - v[0].fy} * (v[n + 1].fx - v[0].fx);
       const s64 cst = s64{v[n].s - v[0].s} * (v[n + 1].t - v[0].t) - s64{v[n].t - v[0].t} * (v[n + 1].s - v[0].s);
@@ -1090,10 +1102,10 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
       if (axy >= 256 && 4 * ast > axy) soft = false;   // under half a DS pixel of area: not judged
     }
   }
-  const u32 FS = flat ? 1u : soft ? 2u : d.scale;
+  const u32 FS = flat ? 1u : soft ? d.scale / 2 : d.scale;
   const u32 W = 256 * FS, H = 192 * FS;   // over the file's: every area below is the frame's
   d.fscale[slot] = FS;
-  if (d.flat1x) { d.flat_n += flat; d.soft_n += soft; if (++d.flat_of == 600) { static const bool tr = std::getenv("DS_GPU_TRACE") != nullptr; if (tr) std::fprintf(stderr, "lean flat1x: %u of 600 frames at 1x, %u at 2x\n", d.flat_n, d.soft_n); d.flat_n = d.soft_n = d.flat_of = 0; } }
+  if (d.flat1x) { d.flat_n += flat; d.soft_n += soft; if (++d.flat_of == 600) { static const bool tr = std::getenv("DS_GPU_TRACE") != nullptr; if (tr) std::fprintf(stderr, "lean flat1x: %u of 600 frames at 1x, %u at half scale\n", d.flat_n, d.soft_n); d.flat_n = d.soft_n = d.flat_of = 0; } }
   // Fog where a pixel can carry the flag only: an opaque pixel takes its
   // polygon's fog bit, a translucent one can only clear it (melonDS), so
   // with neither the rear plane's nor any polygon's bit set no pixel is
