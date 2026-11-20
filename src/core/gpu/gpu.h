@@ -89,7 +89,15 @@ public:
   void vram_remap_end(bool trapped);  // after: re-arm it
   void set_lazy(bool on) { lazy_enabled_ = on; }   // off: per-line rendering (tests)
 
-  const u32* framebuffer(int screen) const { return fb_[screen].data(); }   // 0 = top, 1 = bottom
+  const u32* framebuffer(int screen) const { return pages_[front_].fb[screen].data(); }   // 0 = top, 1 = bottom
+  // For a frontend that shows the frame from another thread: between frames, hands over the frame just finished
+  // and moves the core's drawing to its other page, so what framebuffer() and split3d_screen() return from here
+  // on is not written while the next frame is drawn (nothing to copy). It is written again by the frame after
+  // that, and only once hand_frame has been called for the next one: the reader must be done by then.
+  // The picture is what one buffer would hold: lines no frame has drawn since the pages changed over come from
+  // the other page, at the next frame's start, from where readers get that frame whether it is handed or not.
+  // No effect while the output stage scales into frontend buffers.
+  void hand_frame();
   // Colour correction of every shown line (core/gpu/colour.h), after the
   // output stage and before the scaler or framebuffer, so fb_ holds the
   // corrected colours. Joins any lines in flight; set between frames.
@@ -278,7 +286,21 @@ private:
   u8 fifo_rd_ = 0, fifo_wr_ = 0;
   alignas(16) std::array<u16, 256> fifo_line_{};
   bool run_fifo_ = false;
-  std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb_{};
+  // What a frame leaves for its readers, twice over (hand_frame): the screens, and the 3D split's words, XY
+  // words, per-line brightness words (Split3DScreen::lines) and brightness registers.
+  struct Page {
+    std::array<std::array<u32, SCREEN_W * SCREEN_H>, 2> fb{};
+    std::vector<u32> split_fb[2], split_xy[2];   // 256x192 each (allocated on first use)
+    u32 split_mb[2][SCREEN_H] = {};
+    u16 split_reg[2][SCREEN_H] = {};
+  };
+  Page pages_[2];
+  u32 page_ = 0, front_ = 0;            // where lines are drawn; what the readers between frames get
+  u64 page_drawn_[2][3] = {};           // per screen, a bit a line: drawn into pages_[page_] since it became the drawing page
+  Page& wp() { return pages_[page_]; }
+  Page& fp() { return pages_[front_]; }
+  const Page& fp() const { return pages_[front_]; }
+  void patch_page();                    // the drawing page's undrawn lines, from the front page
   std::shared_ptr<const kern::ColourLut> colour_lut_;   // null: off
   ColourProfile colour_ = ColourProfile::Off;
   bool colour_cpu_ = true;
@@ -521,9 +543,6 @@ private:
   u32 cap_untagged_seen_ = 0, cap_clean_ = 0, cap_late_frames_ = 0, cap_late_filled_ = 0;
   u64 split_lines_ = 0, split_resolved_ = 0, split_cap_merged_ = 0;   // DS_SPLIT3D=present: what the run split and merged back
   SplitFrame split_cur_, split_done_;
-  std::vector<u32> split_fb_[2], split_xy_[2];   // per screen: the words and the XY words, 256x192 (allocated on first use)
-  u32 split_mb_[2][SCREEN_H] = {};      // Split3DScreen::lines
-  u16 split_reg_[2][SCREEN_H] = {};     // the master brightness register of each split line
   u64 split_cap_shown_ = 0, split_cap_moved_ = 0, split_cap_changed_ = 0, split_cap_other_ = 0, split_cap_bad_ = 0, split_cap_checked_ = 0;
   // Lag mode: per-line frames hand BOTH engines' line to the
   // worker at its HBlank without waiting, joining at that line's HBlank or

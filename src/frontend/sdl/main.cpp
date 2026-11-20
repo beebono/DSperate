@@ -4370,6 +4370,12 @@ sdl_ready:
         ds::frontend::Rect crect{};
         const bool cursor_on_canvas = cursor && !at_src && cursor_win.vk_present() && cursor_win.screen_rect(1, crect) && crect.w > 0 && crect.h > 0 &&
                                       cursor_win.canvas(ccv) && crect.x >= 0 && crect.y >= 0 && crect.x + crect.w <= ccv.w && crect.y + crect.h <= ccv.h && crect.w < 65536;
+        // The frame goes to the present thread from the core's own buffers (Gpu::hand_frame), once per frame.
+        static const bool hand_on = !(std::getenv("DS_HAND_FRAME") && std::getenv("DS_HAND_FRAME")[0] == '0');
+        static ds::u64 handed_frame = ~ds::u64{0};
+        const bool will_async = hand_on && !std::getenv("DS_PRESENT_SYNC") && display.async_present() && (!dual_window || display2.async_present());
+        if (will_async && handed_frame != nds.frame_count) { nds.gpu.hand_frame(); handed_frame = nds.frame_count; }
+        const ds::u32* const core_fb[2] = {nds.gpu.framebuffer(0), nds.gpu.framebuffer(1)};
         ds::sdl::Merge3D merge;
         {
           const bool osd_drawn = (slot_osd || fps_field || toast_on() || menu_over_live) && !display.canvas_capable();
@@ -4446,7 +4452,8 @@ sdl_ready:
 
         if (!present_sync && display.async_present() && (!dual_window || display2.async_present())) {
           ds::sdl::Display* const ds_[2] = {&display, &display2};
-          ds::sdl::Display::draw_async(ds_, dual_window ? 2 : 1, fb, &merge);
+          const bool held[2] = {will_async && fb[0] == core_fb[0], will_async && fb[1] == core_fb[1]};
+          ds::sdl::Display::draw_async(ds_, dual_window ? 2 : 1, fb, &merge, held);
         } else {
           // Pinned (thread layout), the emulation thread presents here as a
           // normal task: the kernel work a present queues on this core (a

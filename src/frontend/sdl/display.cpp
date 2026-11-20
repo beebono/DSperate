@@ -517,7 +517,7 @@ void Display::draw_gpu(const u32* const fb[SCREENS], const Merge3D* merge) {
   f.p->present(fb, f.v, f.n, f.params);
 }
 
-void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const Merge3D* merge) {
+void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const Merge3D* merge, const bool* held) {
   // One copy of the frame for every window: the core writes the next frame
   // into fb while the present thread reads this one. Reused once the job
   // that read it is done.
@@ -543,15 +543,19 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
   if (!nf && !nr) return;
   PresentThread& pt = PresentThread::get();
   pt.wait(stage_job);
+  static const u32* shown[SCREENS];
   for (int s = 0; s < SCREENS; ++s) {
+    if (held && held[s]) { shown[s] = fb[s]; continue; }
     stage[s].resize(static_cast<size_t>(SCREEN_W) * SCREEN_H);
     std::memcpy(stage[s].data(), fb[s], stage[s].size() * sizeof(u32));
+    shown[s] = stage[s].data();
   }
   Merge3D mstaged;
   if (merge)
     for (int k = 0; k < SCREENS; ++k) {
       const Merge3D::Screen& m = merge->s[k];
       if (!m.has()) continue;
+      if (held && held[k] && !m.expect) { mstaged.s[k] = m; continue; }
       const size_t n = static_cast<size_t>(SCREEN_W) * SCREEN_H;
       std::vector<u32>& st = mstage[k];
       st.resize(2 * n + SCREEN_H);
@@ -564,7 +568,7 @@ void Display::draw_async(Display* const ds[], int n, const u32* const fb[SCREENS
     }
   for (int k = 0; k < nf; ++k) frames[k].params.merge = mstaged;
   stage_job = pt.post([frames, nf, rens, nr] {
-    const u32* const sfb[SCREENS] = {stage[0].data(), stage[1].data()};
+    const u32* const sfb[SCREENS] = {shown[0], shown[1]};
     for (int k = 0; k < nr; ++k) rens[k]->draw_renderer(sfb);
     for (int k = 0; k < nf; ++k) {
       const GpuFrame& f = frames[k];

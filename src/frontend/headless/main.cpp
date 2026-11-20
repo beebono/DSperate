@@ -887,6 +887,9 @@ int main(int argc, char** argv) {
     } else
 #endif
     nds.run_frame();
+    // DS_HAND_FRAME=1 (a check): every frame handed as a frontend with a present thread takes it (Gpu::hand_frame);
+    // =2: every other frame. The picture and every hash must be what they are without it.
+    if (static const int hand = std::getenv("DS_HAND_FRAME") ? std::atoi(std::getenv("DS_HAND_FRAME")) : 0; hand == 1 || (hand == 2 && (nds.frame_count & 1)) || (hand == 3 && nds.frame_count % 3 == 0)) nds.gpu.hand_frame();
     if (screens_scaled_out && dump_frame(i)) {
       const ds::u32 n = static_cast<ds::u32>(std::max(1, gpu3d_scale));
       screens_scaled_px.resize(static_cast<size_t>(ds::SCREEN_W) * n * ds::SCREEN_H * n);

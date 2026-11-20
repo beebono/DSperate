@@ -55,7 +55,9 @@ public:
   // frame is copied out, so `fb` may change straight after. The others draw
   // here, as draw() does. Every other call on a window waits for its present
   // first, so none of them sees one half done.
-  static void draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const Merge3D* merge = nullptr);
+  // `held`: per screen, fb[s] (and the merge's words for it) stay as they are until the draw_async after next
+  // (the core's handed frame, Gpu::hand_frame): shown from where they are instead of from a copy.
+  static void draw_async(Display* const ds[], int n, const u32* const fb[SCREENS], const Merge3D* merge = nullptr, const bool* held = nullptr);
 
   // Per-scanline scaling: the core scales each line into place as it's
   // produced, straight into the window surface or a scanout tier's buffer
