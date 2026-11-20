@@ -1747,6 +1747,7 @@ sdl_ready:
     }
   }
   if (!open_displays(vs, display, display2)) { SDL_Quit(); return 1; }
+  std::string gpu3d_refused;   // set where video.gpu3d is on and no raster starts: told on screen once the frame loop runs
   // video.gpu3d (DS_GPU3D=1 overrides): the 3D layer on the GPU (Renderer3D::set_gpu).
   // After the displays: the Vulkan device opens the DRM node, and under direct
   // KMS the display must take master first.
@@ -1755,7 +1756,7 @@ sdl_ready:
     const bool want = g ? std::atoi(g) != 0 : cfg.flag("video.gpu3d", false);
     apply_aa(nds, cfg.str("video.aa", "false"));   // before the raster starts: its MSAA is fixed at creation
     nds.gpu3d.renderer().set_gpu_scale(gpu3d_scale_now(cfg.num("video.gpu3d_scale", 1), display, display2, dual_window));   // and its scale
-    if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); else std::fprintf(stderr, "gpu3d: on (%s)\n", nds.gpu3d.renderer().gpu_api()); }
+    if (want) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) { std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); gpu3d_refused = why.empty() ? "?" : why; } else std::fprintf(stderr, "gpu3d: on (%s)\n", nds.gpu3d.renderer().gpu_api()); }
   }
   // Let fullscreen windows take their final size before the ROM loads (see
   // Display::settle_step); bounded, in case no configure comes.
@@ -2398,6 +2399,7 @@ sdl_ready:
   };
   if (cfg.flag("emu.dsi_nand_shortcuts", false)) sync_nand_shortcuts(true);
   std::string shortcuts_note;   // what the last change of the row did, for a toast
+  std::string gpu3d_note = std::move(gpu3d_refused);   // why GPU 3D did not start (at launch, or from its row), for a toast
   std::vector<ds::sdl::Menu::GameEntry> games =
       boot_firmware && nds.cart ? enumerate_library(cfg) : std::vector<ds::sdl::Menu::GameEntry>{};
   menu.set_games(&games);
@@ -2556,6 +2558,7 @@ sdl_ready:
     bool per_game = false;
     // Pointer, not a copy: transports come up after this host is built.
     const bool* net_live = nullptr;
+    const Disp* display2 = nullptr;   // the second window's display under dual_window
 
     Host(ds::sdl::Config& c, NDS& n, Disp& d, VideoSetup& v, const std::string& gi, const std::string& pi, ds::sdl::Input& in)
         : cfg(c), nds(n), display(d), vs(v), global_ini(gi), game_ini(pi), input(in) {}
@@ -2912,6 +2915,26 @@ sdl_ready:
         return nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak ? "" : tr("NO RUMBLE PAK IN SLOT 2");
       case ds::sdl::Dep::SolarSensor:
         return nds.gba_cart() && nds.gba_cart()->solar_sensor() ? "" : tr("NO BOKTAI CARTRIDGE IN SLOT 2");
+      case ds::sdl::Dep::Gpu3dScale: {
+        // What gpu3d_scale_now() holds the raster to 1x for, said on the row. The config for what the menu can
+        // change (so a row just set greys this one at once), the display for the rest.
+        const char* const api = nds.gpu3d.renderer().gpu_api();
+        if (!*api) return flag("video.gpu3d", false) ? tr("GPU 3D IS NOT AVAILABLE HERE") : tr("ONLY WITH GPU 3D ON");
+        if (std::strcmp(api, "Vulkan") != 0) return tr("VULKAN ONLY");
+        if (flag("video.linear", false)) return tr("BILINEAR IS ON");
+        if (cfg.str("video.colour", "off") != "off") return tr("NOT WITH COLOUR CORRECTION");
+        Disp::MergeBlock b = display.merge3d_block();
+        if (b == Disp::MergeBlock::None && display2) b = display2->merge3d_block();
+        switch (b) {
+          case Disp::MergeBlock::NoVulkanPresent: return tr("NEEDS THE VULKAN PRESENT");
+          case Disp::MergeBlock::Bilinear: return tr("BILINEAR IS ON");
+          case Disp::MergeBlock::Colour: return tr("NOT WITH COLOUR CORRECTION");
+          case Disp::MergeBlock::ChunkySource: return tr("NOT WITH CHUNKY ON");
+          case Disp::MergeBlock::SeamBlend: return tr("NOT WITH BLENDED SEAMS AT THIS SIZE");
+          case Disp::MergeBlock::None: break;
+        }
+        return "";
+      }
       }
       return "";
     }
@@ -2921,6 +2944,7 @@ sdl_ready:
   host.reconfigure_input = [&] { input.configure(cfg); };
   host.fw_override = fw_override;
   host.net_live = &net_live;
+  host.display2 = dual_window ? &display2 : nullptr;
   host.reopen = [&] { reopen_display(); };
   // Whole layout re-read from the config in one go. Mode is the LAYOUT
   // row's pending choice if one was made, else the live one (a hotkey or
@@ -2989,7 +3013,7 @@ sdl_ready:
     }
     if (is("video.aa")) { apply_aa(nds, v); return; }
     if (is("video.colour")) { apply_colour(nds, v); return; }
-    if (is("video.gpu3d")) { std::string why; if (!nds.gpu3d.renderer().set_gpu(on, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); return; }
+    if (is("video.gpu3d")) { std::string why; if (!nds.gpu3d.renderer().set_gpu(on, &why)) { std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); gpu3d_note = why.empty() ? "?" : why; } return; }
     if (is("video.gpu3d_scale")) { gpu3d_scale = std::atoi(v.c_str()); return; }
     if (is("video.gpu_present")) { host.reopen_wanted = true; return; }
     if (is("video.fps")) { fps_osd = on; if (on && !show_fps) { fps_mark = SDL_GetPerformanceCounter(); emu_ticks = draw_ticks = wait_ticks = 0; } return; }
@@ -4153,6 +4177,17 @@ sdl_ready:
 #endif
     toast_step();
 
+    if (!gpu3d_note.empty()) {
+      // video.gpu3d is on and no raster started: the picture is the CPU's, which would otherwise go unsaid.
+      Toast t;
+      t.header = tr("GPU 3D UNAVAILABLE");
+      t.title = tr("DRAWING 3D ON THE CPU");
+      t.detail = std::move(gpu3d_note);   // the raster's own words, in the menu's capitals
+      for (char& c : t.detail) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      t.frames = TOAST_FRAMES;
+      toast_queue.push_back(std::move(t));
+      gpu3d_note.clear();
+    }
     if (!shortcuts_note.empty()) {
       Toast t;
       t.header = tr("NAND SHORTCUTS");

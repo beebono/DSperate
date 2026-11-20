@@ -142,6 +142,9 @@ public:
   // shows (Merge3D): its views sample nearest and nothing corrects colours
   // or draws cells before the merge.
   bool merge3d_ok() const;
+  // What keeps the window from merging it, for the menu's GPU 3D SCALE row.
+  enum class MergeBlock : u8 { None, NoVulkanPresent, Bilinear, Colour, ChunkySource, SeamBlend };
+  MergeBlock merge3d_block() const;
   // Where `screen` shows in this window, in the canvas's coordinates; false if it does not.
   bool screen_rect(int screen, frontend::Rect& out) const {
     for (int i = 0; i < nviews_; ++i) if (views_[i].shown && views_[i].screen == screen) { out = views_[i].rect; return true; }

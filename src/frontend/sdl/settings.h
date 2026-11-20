@@ -47,6 +47,7 @@ enum class Dep : u8 {
   Slot2Link,          // the game reads GBA games (slot2/compat.h), and paths.gba_games is set
   RumblePak,          // the Rumble Pak is in slot 2 this session
   SolarSensor,        // a Boktai cartridge is in slot 2
+  Gpu3dScale,         // GPU 3D is on, on the Vulkan raster, and the windows can merge its image (the Vulkan present, no bilinear, colour correction or chunky cells)
 };
 
 struct Setting {
