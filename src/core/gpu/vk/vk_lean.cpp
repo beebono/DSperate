@@ -68,6 +68,9 @@ constexpr u32 kMaxDraws = 4096;
 // with more than 31 such ids folds them (id & 31: rare, and only a wrong
 // same-id refusal).
 constexpr u32 S_DRAWN = 0x80, S_MASK = 0x40, S_T = 0x20, S_CODE = 0x1F;
+// Edge marking's word, a byte a field so a pass can write the depth alone: r the polygon id (bits 0-5), its fog bit (6)
+// and "a pixel of the polygon's edge" (7); g, b, a the DS depth >> 1, low byte first (lean.frag o_id, lean_mark.frag).
+constexpr VkFormat kIdFormat = VK_FORMAT_R8G8B8A8_UINT;
 enum Pipe : u32 { P_OPAQUE = 0, P_TRANS_A, P_TRANS_B, P_TRANS_A_DW, P_TRANS_B_DW, P_MASK, P_SHADOW, P_SHADOW_PREP, P_MASK_CLEAR, P_OPAQUE_EARLY, P_TRANS_OPQ, P_TRANS_ONE, P_TRANS_ONE_DW, P_TRANS_KEEP, P_TRANS_KEEP_DW, P_COUNT };   // KEEP: the one-pass stage keeping the pixels of alpha 31 (Impl::fold)
 }
 
@@ -576,8 +579,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     // Edge marking: the id word's image (a colour attachment of the draw, sampled by the marking pass), the
     // marking pass's render pass over each slot's record (loaded and stored, in the layout the main pass
     // leaves it and the copy-out expects), and its one pipeline.
-    if (!make_image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.idm, VK_SAMPLE_COUNT_1_BIT)) return fail("edge marking image");
-    if (d.msaa && !make_image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_COLOR_BIT, d.idm_ms, samples)) return fail("edge marking MSAA image");
+    if (!make_image(kIdFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT, d.idm, VK_SAMPLE_COUNT_1_BIT)) return fail("edge marking image");
+    if (d.msaa && !make_image(kIdFormat, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | transient, VK_IMAGE_ASPECT_COLOR_BIT, d.idm_ms, samples)) return fail("edge marking MSAA image");
     if (!shader(shader_lean_mark(), &d.mod_mark)) return fail("edge marking shader");
     VkAttachmentDescription at{}; at.format = VK_FORMAT_R8G8B8A8_UNORM; at.samples = VK_SAMPLE_COUNT_1_BIT; at.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; at.storeOp = VK_ATTACHMENT_STORE_OP_STORE;   // the record through its byte view: the blend unit mixes
     at.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; at.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at.initialLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; at.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -669,7 +672,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     // Under MSAA 4 is multisampled and never stored, and 5 its resolve (an integer format: one sample's word), the one kept.
     const bool mark_ms = d.mark && d.msaa;
     const u32 mark_at = mark_ms ? 5u : 4u;   // the attachment the marking pass samples
-    if (d.mark) { at[4] = at[3]; at[4].format = VK_FORMAT_R32_UINT; at[4].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[4].samples = d.msaa ? samples : VK_SAMPLE_COUNT_1_BIT; }
+    if (d.mark) { at[4] = at[3]; at[4].format = kIdFormat; at[4].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[4].samples = d.msaa ? samples : VK_SAMPLE_COUNT_1_BIT; }
     if (mark_ms) { at[5] = at[4]; at[5].samples = VK_SAMPLE_COUNT_1_BIT; at[5].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; }
     const VkAttachmentReference rs0[3] = {{VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED}, {VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED}, {5, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
     VkAttachmentReference c0[3] = {{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {3, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}}, ds0{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
@@ -721,8 +724,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
         t[1].format = d.ds_format; t[1].samples = samples; t[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; t[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; t[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         t[2].format = VK_FORMAT_R8G8B8A8_UNORM; t[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         t[3] = t[0]; t[3].format = VK_FORMAT_R8_UNORM;
-        t[4] = t[0]; t[4].format = VK_FORMAT_R32_UINT;
-        t[5].format = VK_FORMAT_R32_UINT; t[5].storeOp = keep ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        t[4] = t[0]; t[4].format = kIdFormat;
+        t[5].format = kIdFormat; t[5].storeOp = keep ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         t[6].format = VK_FORMAT_R8_UNORM; t[6].storeOp = fog ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         t[7].format = d.ds_format; t[7].storeOp = t[6].storeOp; t[7].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         auto ref = [](u32 att, VkImageLayout l, VkImageAspectFlags as) { VkAttachmentReference2 r{}; r.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2; r.attachment = att; r.layout = l; r.aspectMask = as; return r; };
@@ -899,7 +902,11 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     VkPipelineColorBlendAttachmentState cba[3]{};
     cba[0].colorWriteMask = (kind == P_MASK || stencil_only) ? 0u : 0xFu;
     cba[1].colorWriteMask = (kind == P_MASK || stencil_only) ? 0u : 0x1u;
-    cba[2].colorWriteMask = (kind == P_OPAQUE || kind == P_OPAQUE_EARLY || kind == P_TRANS_OPQ) ? 0x1u : 0u;   // edge marking: the opaque passes keep the id word
+    // Edge marking's word (kIdFormat): the opaque passes write all of it; a translucent polygon that writes depth writes the
+    // word's depth bytes alone, as the DS's marking compares the depths the frame ends with (a sky's edge behind a
+    // depth-writing translucent bar is not in front of its neighbour: Solatorobo's flight).
+    cba[2].colorWriteMask = (kind == P_OPAQUE || kind == P_OPAQUE_EARLY || kind == P_TRANS_OPQ) ? 0xFu :
+                            (kind == P_TRANS_A_DW || kind == P_TRANS_B_DW || kind == P_TRANS_ONE_DW || kind == P_TRANS_KEEP_DW) ? 0xEu : 0u;
     const bool blend = kind == P_TRANS_B || kind == P_TRANS_B_DW || kind == P_SHADOW;
     if (blend || one) {
       cba[0].blendEnable = VK_TRUE;
@@ -1112,7 +1119,8 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
   const bool one_id = std::all_of(gp, gp + npoly, [&](const GpuPoly& p) { return ((p.attr ^ f.clear_attr) & 0x3F000000u) == 0u; });
   const bool marking = d.mark && d.mark_on && (f.dispcnt & 0x20u) != 0u && !one_id;
   const u32 mark_clear = ((f.clear_attr >> 24) & 0x3Fu) | (((f.clear_depth & 0xFFFFFFu) >> 1) << 9);
-  cv[4].color.uint32[0] = d.mark ? mark_clear : 0u;
+  if (d.mark) { const u32 cz = mark_clear >> 9; cv[4].color.uint32[0] = mark_clear & 0x3Fu; cv[4].color.uint32[1] = cz & 0xFFu; cv[4].color.uint32[2] = (cz >> 8) & 0xFFu; cv[4].color.uint32[3] = cz >> 16; }
+  else cv[4].color.uint32[0] = 0u;
   static const u32 skip = std::getenv("DS_LEAN_SKIP") ? static_cast<u32>(std::strtoul(std::getenv("DS_LEAN_SKIP"), nullptr, 16)) : 0u;   // DS_LEAN_SKIP (bisect): pass kinds below; bit 13: no edge-marking draw
   stamp(1);
   VkRenderPassBeginInfo rbi{}; rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; const bool nm = d.split && !marking; VkPipeline (*const P)[2][2][P_COUNT] = nm ? d.pipe_nm : d.pipe;

@@ -137,7 +137,7 @@ struct GpuFrame {
 // record to the edge plane instead of blending; present stage splits it.
 #define DS_FF2_SMOOTH  0x1u
 #define DS_FF2_MSAA    0x2u   // 4x MSAA: vertices on pixel corners, so coverage is the polygon's true area
-#define DS_FF2_GAME_AA 0x10u   // the game has the DS's anti-aliasing on (DISP3DCNT bit 4, which dispcnt loses with video.aa off): edge marking's half coverage
+#define DS_FF2_GAME_AA 0x10u   // the game has the DS's anti-aliasing on and video.aa is on (DISP3DCNT bit 4 as the CPU raster sees it): edge marking's half coverage
 #define DS_FF2_CENTRE  0x20u  // polygons of four or more vertices drawn as a fan around their centre (lean.vert)
 #define DS_FF2_EDGEMARK 0x8u  // the draw leaves each pixel's front opaque polygon id, fog bit and depth for the edge marking pass (lean_mark.frag)
 

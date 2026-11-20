@@ -9,8 +9,9 @@
 // has anti-aliasing on, the DS gives a marked pixel half coverage and its edge blend then
 // mixes the edge colour evenly with what is behind; here with the pixel's own colour (what
 // is behind is not kept), which leaves the same soft line. Alpha stays the pixel's own.
-//   the word: bits 0-5 polygon id, 6 the polygon's fog bit, 7 drawn, 8 a pixel of the polygon's edge
-//   (the DS marks no others: not a texture's cut-out inside a polygon), 9-31 DS depth >> 1.
+//   the word (vk_lean.cpp kIdFormat): r bits 0-5 polygon id, 6 the polygon's fog bit, 7 a pixel of the polygon's edge
+//   (the DS marks no others: not a texture's cut-out inside a polygon); g, b, a the DS depth >> 1. The depth is the
+//   one the frame ends with: a translucent polygon that writes depth has written it here too, as on the DS.
 // Neighbours: `width` raster pixels away, one DS pixel at any scale (the default: the outline
 // the game was drawn with; width 1 above 1x is the hairline melonDS's renderers draw). Every
 // pixel within a DS pixel of another id's is then marked. The neighbours one raster pixel away
@@ -37,28 +38,29 @@ uint fog_density(uint z) {
   uint d = ((ps.density[id] * (0x20000u - frac)) + (ps.density[id + 1u] * frac)) >> 17;
   return d >= 127u ? 128u : d;
 }
-// A neighbour's word; past the screen's edge the rear plane's.
-uint tap(ivec2 p, ivec2 size) {
-  if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) return pc.clear_word;
-  return texelFetch(ids, p, 0).r;
+// A word as (id | fog bit << 6 | edge << 7, depth); past the screen's edge the rear plane's (clear_word: id, depth << 9).
+uvec2 word(uvec4 t) { return uvec2(t.r, t.g | (t.b << 8) | (t.a << 16)); }
+uvec2 tap(ivec2 p, ivec2 size) {
+  if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) return uvec2(pc.clear_word & 0x3Fu, pc.clear_word >> 9);
+  return word(texelFetch(ids, p, 0));
 }
-bool behind_other(uint c, uint n) { return ((c ^ n) & 0x3Fu) != 0u && (c >> 9) < (n >> 9); }
-bool edge_at(uint c, ivec2 p, ivec2 size, int d) {
+bool behind_other(uvec2 c, uvec2 n) { return ((c.x ^ n.x) & 0x3Fu) != 0u && c.y < n.y; }
+bool edge_at(uvec2 c, ivec2 p, ivec2 size, int d) {
   return behind_other(c, tap(p + ivec2(-d, 0), size)) || behind_other(c, tap(p + ivec2(d, 0), size)) ||
          behind_other(c, tap(p + ivec2(0, -d), size)) || behind_other(c, tap(p + ivec2(0, d), size));
 }
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy), size = textureSize(ids, 0);
-  uint c = texelFetch(ids, p, 0).r;
-  if ((c & 0x180u) != 0x180u) discard;   // nothing opaque here, or not a polygon's edge
+  uvec2 c = word(texelFetch(ids, p, 0));
+  if ((c.x & 0x80u) == 0u) discard;   // nothing opaque here, or not a polygon's edge
   int w = int(pc.width);
   if (!edge_at(c, p, size, w)) discard;
-  uint ec = ps.edge[(c & 0x3Fu) >> 3];
+  uint ec = ps.edge[(c.x & 0x3Fu) >> 3];
   uvec3 rgb = uvec3(c15_to_18(ec, 0u), c15_to_18(ec, 4u), c15_to_18(ec, 9u));
-  if ((pc.dispcnt & 128u) != 0u && (pc.dispcnt & 64u) == 0u && (c & 0x40u) != 0u) {
+  if ((pc.dispcnt & 128u) != 0u && (pc.dispcnt & 64u) == 0u && (c.x & 0x40u) != 0u) {
     uint fc = ps.fog_color;
     uvec4 fogc = uvec4(c15_to_18(fc, 0u), c15_to_18(fc, 4u), c15_to_18(fc, 9u), (fc >> 16) & 0x1Fu);
-    uint d = fog_density((c >> 9) << 1);
+    uint d = fog_density(c.y << 1);
     rgb = (fogc.rgb * d + rgb * (128u - d)) >> 7;
   }
   o_col = vec4(vec3(rgb) / 255.0, (pc.dispcnt & 16u) != 0u ? 0.5 : 1.0);

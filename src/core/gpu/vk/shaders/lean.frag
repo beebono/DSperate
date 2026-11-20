@@ -31,7 +31,7 @@ layout(location = 0) out vec4 o_col;
 layout(location = 1) out float o_fog;   // the polygon's fog bit; blended with MIN so a pixel keeps fog only if every layer had it (the DS rule)
 // Edge marking's word (lean_mark.frag reads it), kept by the opaque passes
 // only. Without the attachment the write goes nowhere.
-layout(location = 2) out uint o_id;
+layout(location = 2) out uvec4 o_id;   // r: id, fog bit << 6, edge << 7; g, b, a: the DS depth >> 1 (vk_lean.cpp kIdFormat)
 #ifdef DS_EARLY
 // Polygons whose alpha cannot fail the test (no cut-out texture): no
 // discard, so the depth test runs before shading and overdraw costs nothing.
@@ -139,12 +139,14 @@ void main() {
   }
 #endif
   o_fog = float(fogbit);
-  // Edge marking (lean_mark.frag): the polygon's id, fog bit, "drawn", whether the pixel is one of the
-  // polygon's edge and its DS depth less a bit, where a frame marks edges.
+  // Edge marking (lean_mark.frag): the polygon's id, fog bit, whether the pixel is one of the polygon's edge and
+  // its DS depth less a bit, where a frame marks edges. A translucent polygon that writes depth keeps the depth
+  // bytes alone (the pipeline's write mask).
   if (ds_mark && (pc.f.flags2 & DS_FF2_EDGEMARK) != 0u) {
     highp float dz = (pc.f.flags & DS_FF_WBUFFER) != 0u ? v_zp : v_z;
     // A pixel of the polygon's edge: within a DS pixel of its outline, along x or along y (the DS's edge runs).
     // Every pixel was one before, and a texture that cuts texels out was outlined texel by texel (Solatorobo's clouds).
-    o_id = uint(v_tex.w) | (any(lessThan(v_edge, vec3(1.0))) ? 0x100u : 0u) | ((uint(clamp(dz, 0.0, 16777215.0)) >> 1) << 9);
-  } else o_id = vpoly + 1u;
+    uint dq = uint(clamp(dz, 0.0, 16777215.0)) >> 1;
+    o_id = uvec4((uint(v_tex.w) & 0x7Fu) | (any(lessThan(v_edge, vec3(1.0))) ? 0x80u : 0u), dq & 255u, (dq >> 8) & 255u, dq >> 16);
+  } else o_id = uvec4(0u);
 }

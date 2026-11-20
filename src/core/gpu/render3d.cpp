@@ -3331,7 +3331,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   f.first_ordered = first_ordered;
   for (u32 i = 0; i < npoly; ++i) if (!polys[i]->degenerate) { if (polys[i]->wbuffer) f.flags |= DS_FF_WBUFFER; break; }
   if (lean_->msaa()) f.flags2 |= DS_FF2_MSAA;
-  if (rs_->dispcnt & 0x10u) f.flags2 |= DS_FF2_GAME_AA;   // vertices on pixel corners (lean.vert)
+  if (dispcnt_ & 0x10u) f.flags2 |= DS_FF2_GAME_AA;   // edge marks at half coverage, as the CPU raster's: the game's bit under video.aa (off: marks at full strength)
   {
     const u16 c = static_cast<u16>(rs_->clear_attr1);
     auto ch = [](u16 v, u32 shift) { u32 x = (shift == 0 ? (v << 1) : (v >> shift)) & 0x3E; return x ? x + 1 : x; };
