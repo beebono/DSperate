@@ -174,7 +174,7 @@ const Setting kVideoSettings[] = {
   boolean("video.gpu3d", "GPU 3D", "false", FlagLive, Dep::None,
           N_("DRAW THE 3D LAYER ON THE GPU WHEN POSSIBLE, OTHERWISE CPU IS USED")),
   pick("video.gpu3d_scale", N_("GPU 3D SCALE"), kGpuScale, 3, "1", FlagLive, Dep::Gpu3dScale,
-       N_("3D RESOLUTION ON THE GPU, TIMES THE DS'S (VULKAN ONLY). 2D STAYS AS IT IS")),
+       N_("THE MOST THE GPU DRAWS 3D AT, TIMES THE DS'S (VULKAN ONLY). A SMALLER VIEW TAKES LESS. 2D STAYS AS IT IS")),
   boolean("video.fps", N_("FPS COUNTER"), "false", FlagLive, Dep::None,
           N_("FRAMES PER SECOND IN THE CORNER OF THE SCREEN")),
   boolean("video.fullscreen", N_("FULLSCREEN"), "false", FlagDeferred, Dep::Windowed, nullptr),

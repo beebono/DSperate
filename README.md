@@ -68,7 +68,8 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   the fallback: what the GPU draws may differ from it within reason, never in
   what is on screen. With the Vulkan raster and the Vulkan present,
   `video.gpu3d_scale` (`--gpu3d-scale`, the GPU 3D SCALE menu row) draws the 3D
-  at two or four times the DS's resolution: the 2D layers stay at the DS's and
+  at up to two or four times the DS's resolution (no finer than the largest
+  view shows): the 2D layers stay at the DS's and
   the present merges them with the finer 3D image, also where the game shows
   a captured 3D frame again; the game itself reads a 1x copy.
 - **Sound.** All sixteen SPU channels (PCM8/16, ADPCM, PSG, noise) and capture

@@ -302,7 +302,7 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # a texel step can land a pixel early or late against the hardware;
                                 # the CPU raster stays the exact reference, and the fallback where
                                 # there is no GPU driver. aa above for its anti-aliasing
-# gpu3d_scale = 1               # the GPU raster's 3D at 1, 2 or 4 times the DS's resolution. The 2D layers
+# gpu3d_scale = 1               # the most the GPU raster draws its 3D at: 1, 2 or 4 times the DS's. The 2D layers
                                 # stay at the DS's and are merged with the finer 3D image on the way
                                 # to the panel; the game itself (display capture) gets a 1x copy.
                                 # Needs gpu3d on the Vulkan raster with gpu_present, nearest scaling
