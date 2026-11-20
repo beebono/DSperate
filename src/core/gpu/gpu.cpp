@@ -1824,7 +1824,7 @@ void Gpu::split_capture_display(int e, u32 line) {
     const u32 b = (rb >> 16) & 7, idx = rb & 0xFFFF;
     const CapSeg& s0 = cap_seg_[b * 512 + (idx >> 7)];
     const CapSeg& s1 = cap_seg_[b * 512 + (((idx + 128) & 0xFFFF) >> 7)];
-    if (!off && !mb_on && !(idx & 0xFF) && s0.gen && s0.gen == s1.gen && s0.base == s1.base && s0.width == 256 && s1.width == 256 &&
+    if (!off && !(idx & 0xFF) && s0.gen && s0.gen == s1.gen && s0.base == s1.base && s0.width == 256 && s1.width == 256 &&
         s0.uniform == s1.uniform && s0.each == s1.each && ((idx - s0.base) & 0xFFFF) == line * 256 && (!ss.any || ss.ref.gpu_gen == s0.gen)) {
       const Renderer3D::FrameRef* const ref = ss.any ? &ss.ref : frame_of(s0.gen);
       const u16* const v = reinterpret_cast<const u16*>(vm.bank(Engine2D::cap_slot_bank(b))) + idx;
@@ -1834,13 +1834,22 @@ void Gpu::split_capture_display(int e, u32 line) {
         return;
       }
       const u32* const cw = cap_words_.data() + b * 65536 + idx;
-      const u32 uni = s0.uniform;
+      // The line's words: the capture's, PLAIN ones as FIXED under master brightness (PLAIN skips it). Then, but
+      // for a VRAM display, only where the captured pixel is on top and shown as it is. Loops without branches:
+      // this runs for every line of a screen showing a capture.
+      const u32 fixed = split3d::pack(0, split3d::FIXED, 16, 0) | split3d::Q15;
+      const u32 mbm = mb_on ? ~0u : 0u;
+      alignas(16) u32 wl[SCREEN_W];
+      if (s0.each) for (u32 x = 0; x < SCREEN_W; ++x) { const u32 w = cw[x]; const u32 p = (w != 0 && split3d::op_of(w) == split3d::PLAIN) ? mbm : 0u; wl[x] = (w & ~p) | (fixed & p); }
+      else { const u32 w0 = s0.uniform; const u32 w = mb_on && w0 && split3d::op_of(w0) == split3d::PLAIN ? fixed : w0; for (u32 x = 0; x < SCREEN_W; ++x) wl[x] = w; }
       u32 n = 0;
-      if (vram && !s0.each) { for (u32 x = 0; x < SCREEN_W; ++x) row[x] = uni; n = SCREEN_W; }
-      else if (vram) { for (u32 x = 0; x < SCREEN_W; ++x) { row[x] = cw[x]; n += cw[x] != 0; } }
-      else if (!s0.each) { for (u32 x = 0; x < SCREEN_W; ++x) { const u32 w = refs[x] && (out[x] & 0x00FFFFFF) == kern::direct_colour(v[x]) ? uni : 0; row[x] = w; n += w != 0; } }
-      else { for (u32 x = 0; x < SCREEN_W; ++x) { const u32 w = refs[x] && (out[x] & 0x00FFFFFF) == kern::direct_colour(v[x]) ? cw[x] : 0; row[x] = w; n += w != 0; } }
-      if (!vram && stat_on_) for (u32 x = 0; x < SCREEN_W; ++x) split_cap_effect_ += refs[x] && (s0.each ? cw[x] : uni) && (out[x] & 0x00FFFFFF) != kern::direct_colour(v[x]);
+      if (vram) for (u32 x = 0; x < SCREEN_W; ++x) { row[x] = wl[x]; n += wl[x] != 0; }
+      else for (u32 x = 0; x < SCREEN_W; ++x) {
+        const u32 m = ((refs[x] != 0) & ((out[x] & 0x00FFFFFF) == kern::direct_colour(v[x]))) ? ~0u : 0u;
+        const u32 w = wl[x] & m;
+        row[x] = w; n += w != 0;
+      }
+      if (!vram && stat_on_) for (u32 x = 0; x < SCREEN_W; ++x) split_cap_effect_ += refs[x] && wl[x] && (out[x] & 0x00FFFFFF) != kern::direct_colour(v[x]);
       if (n && !ss.any) { ss.any = true; ss.live = false; ss.ref = *ref; }
       split_cap_shown_ += n;
       return;
