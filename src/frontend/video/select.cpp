@@ -100,12 +100,25 @@ WindowPlan plan_window(const WindowProbe& p) {
       // uploads it while emulation wants every core): the renderer is the
       // fallback there, unless the picture is rotated, which only the
       // scanline sinks apply. video.sink = surface still asks for it.
-      if (!wayland || p.rotated || !p.scanline_env.empty()) w.order.push_back(Sink::Surface);
+      // KMSDRM's surface on a large panel loses to the renderer too (kSurfaceMaxPanelPx).
+      const bool big_kms = kms && p.panel_px > kSurfaceMaxPanelPx;
+      if ((!wayland && !big_kms) || p.rotated || !p.scanline_env.empty()) w.order.push_back(Sink::Surface);
     }
   }
   w.order.push_back(Sink::Renderer);
   if (w.required) w.required = std::any_of(w.order.begin(), w.order.end(), [](Sink s) { return s == Sink::Kms || s == Sink::Dmabuf; });
   return w;
+}
+
+int pick_kms_mode(const std::vector<ModeSize>& modes, int w, int h, bool* turned) {
+  if (turned) *turned = false;
+  if (w <= 0 || h <= 0) return -1;
+  for (size_t i = 0; i < modes.size(); ++i)
+    if (modes[i].w == static_cast<u32>(w) && modes[i].h == static_cast<u32>(h)) return static_cast<int>(i);
+  if (turned && w != h)
+    for (size_t i = 0; i < modes.size(); ++i)
+      if (modes[i].w == static_cast<u32>(h) && modes[i].h == static_cast<u32>(w)) { *turned = true; return static_cast<int>(i); }
+  return -1;
 }
 
 } // namespace ds::frontend

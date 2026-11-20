@@ -111,6 +111,11 @@ void Display::rotate_out(u32* dst, u32 dst_pitch) const {
   }
 }
 
+void Display::presented_size(int& w, int& h) const {
+  SDL_GetWindowSize(win_, &w, &h);
+  if (turned_) std::swap(w, h);
+}
+
 void Display::output_size(int& w, int& h) const {
   out_size(w, h);
   if (rotated()) std::swap(w, h);
@@ -151,6 +156,7 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
   if (!win_) { std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError()); return false; }
   fullscreen_ = fullscreen;
   rot_ = 0;
+  turned_ = false;
 
   if (panel && panel_ == Sink::Disp && open_disp(linear, vsync, rot)) { sink_ = Sink::Disp; return true; }
   if (panel && panel_ == Sink::Fbdev) {
@@ -160,7 +166,9 @@ bool Display::open(const char* title, int scale, bool fullscreen, bool linear, b
 
   const char* vd = SDL_GetCurrentVideoDriver();
   auto env = [](const char* k) { const char* e = std::getenv(k); return std::string(e ? e : ""); };
-  const frontend::WindowPlan plan = frontend::plan_window({want_, vd ? vd : "", env("DS_DMABUF"), env("DS_SCANLINE_SCALE"), rot != 0});
+  u32 panel_px = 0;
+  { SDL_DisplayMode dm{}; if (SDL_GetDesktopDisplayMode(display_index, &dm) == 0 && dm.w > 0 && dm.h > 0) panel_px = static_cast<u32>(dm.w) * static_cast<u32>(dm.h); }
+  const frontend::WindowPlan plan = frontend::plan_window({want_, vd ? vd : "", env("DS_DMABUF"), env("DS_SCANLINE_SCALE"), rot != 0, panel_px});
   ren_fallback_ = false;
   for (const Sink s : plan.order) {
     bool ok = false;
@@ -229,7 +237,17 @@ bool Display::open_kms(int rot) {
   SDL_GetWindowSize(win_, &ow, &oh);
   auto dr = std::make_unique<DrmOut>();
   if (gpu_wanted_) dr->set_bufs(DrmOut::DEFAULT_BUFS + 1);
-  if (!dr->open(win_, ow, oh, display_index_)) { scaled_ = false; rot_ = 0; return false; }
+  bool turned = false;
+  if (!dr->open(win_, ow, oh, display_index_, &turned)) { scaled_ = false; rot_ = 0; return false; }
+  if (turned) {
+    // SDL reports the panel turned and would turn its own GLES frames before scanout (the RGA rotate patches of
+    // ArkOS and dArkMoss on portrait panels mounted landscape). This sink scans out past SDL, so the turn is ours:
+    // the rotation asked for if it is a quarter turn, else SDL's usual one, 270 (DS_ROTATE=90 for a panel
+    // mounted the other way). A half turn asked for on top of it makes 90.
+    turned_ = true;
+    rot_ = (rot == 90 || rot == 270) ? rot : rot == 180 ? 90 : 270;
+    std::fprintf(stderr, "drm: SDL reports the %dx%d panel as %dx%d; scanning out at the panel's size, picture turned %d here\n", oh, ow, ow, oh, rot_);
+  }
   out_ = std::move(dr);
   layout();
   build_scale();
@@ -453,7 +471,7 @@ void Display::sync() const {
 
 bool Display::prepare_gpu(GpuFrame& f) {
   int w = 0, h = 0;
-  SDL_GetWindowSize(win_, &w, &h);
+  presented_size(w, h);
   switch (gpu_->fit(win_, w, h)) {
     case FramePresenter::Fit::Lost:
       // The sink may be closed now; begin_frame() reopens it or falls back
@@ -627,8 +645,9 @@ void Display::set_layout(const Layout& l) {
 }
 
 bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
-  // Pointer events arrive in presented pixels; inverse of rotate_out()'s mapping.
-  if (rot_ && scaled_) {
+  // Pointer events arrive in presented pixels; inverse of rotate_out()'s mapping. (Not under turned_: SDL has
+  // turned them already.)
+  if (rot_ && scaled_ && !turned_) {
     const int lw = scaled_w_, lh = scaled_h_;
     int lx = wx, ly = wy;
     switch (rot_) {
@@ -659,7 +678,7 @@ bool Display::out_size(int& w, int& h) const {
   if (!win_) return false;
   // Window size is the truth on a scanout tier: the shm surface can lag a
   // configure by a frame, and KMSDRM has no window surface to ask at all.
-  if (out_) { SDL_GetWindowSize(win_, &w, &h); if (rotated()) std::swap(w, h); return w > 0 && h > 0; }
+  if (out_) { presented_size(w, h); if (rotated()) std::swap(w, h); return w > 0 && h > 0; }
   SDL_Surface* s = SDL_GetWindowSurface(win_);
   if (!s) return false;
   w = s->w; h = s->h;
@@ -985,7 +1004,7 @@ bool Display::begin_frame(Target out[SCREENS]) {
     // A configure resizes the window under us; buffers must follow before
     // anything writes at the new geometry.
     int w = 0, h = 0;
-    SDL_GetWindowSize(win_, &w, &h);
+    presented_size(w, h);
     if (w != out_->width() || h != out_->height()) {
       if (!out_->reopen(win_, w, h)) {
         std::fprintf(stderr, "video: scanout resize failed; window surface from here\n");

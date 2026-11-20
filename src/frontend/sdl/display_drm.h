@@ -30,7 +30,9 @@ public:
   // connector, window size doesn't match a panel mode, allocation failed).
   // `display_index` is SDL's: KMSDRM enumerates one display per connected
   // connector in DRM resource order.
-  bool open(SDL_Window* win, int w, int h, int display_index);
+  // `turned`: where no mode is w x h but one is h x w (an SDL that reports the panel turned), open at h x w and
+  // set it; width() and height() are then the panel's. Null: only an exact mode.
+  bool open(SDL_Window* win, int w, int h, int display_index, bool* turned = nullptr);
 
   bool reopen(SDL_Window* win, int w, int h) override { const int d = display_; close(); return open(win, w, h, d); }
   void close() override;

@@ -3,6 +3,7 @@
 #include "display_drm.h"
 #include "dmaheap.h"
 #include "drm_uapi.h"
+#include "frontend/video/select.h"
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -90,7 +91,8 @@ void DrmOut::drop_buf(Buf& b) {
   b = Buf{};
 }
 
-bool DrmOut::open(SDL_Window* win, int w, int h, int display_index) {
+bool DrmOut::open(SDL_Window* win, int w, int h, int display_index, bool* turned) {
+  if (turned) *turned = false;
   fd_ = sdl_drm_fd(win);
   if (fd_ < 0) return false;
   display_ = display_index;
@@ -124,8 +126,15 @@ bool DrmOut::open(SDL_Window* win, int w, int h, int display_index) {
     conn_ = c;
     // A page flip's framebuffer must cover the CRTC, so only a mode matching
     // the window's exact size works -- no windowed (sub-panel) use here.
-    for (const drmu::mode_modeinfo& m : modes)
-      if (m.hdisplay == w && m.vdisplay == h) { mode = m; found = true; break; }
+    // Or the panel's own shape under an SDL that reports it turned (frontend::pick_kms_mode).
+    {
+      std::vector<frontend::ModeSize> sizes;
+      for (const drmu::mode_modeinfo& m : modes) sizes.push_back({m.hdisplay, m.vdisplay});
+      bool t = false;
+      const int pick = frontend::pick_kms_mode(sizes, w, h, turned ? &t : nullptr);
+      if (pick >= 0) { mode = modes[static_cast<size_t>(pick)]; found = true; }
+      if (t) { *turned = true; std::swap(w_, h_); }
+    }
     if (!found) {
       std::fprintf(stderr, "drm: display %d has no %dx%d mode (panel is %ux%u); scanout needs a fullscreen window\n",
                    display_index, w, h, modes[0].hdisplay, modes[0].vdisplay);

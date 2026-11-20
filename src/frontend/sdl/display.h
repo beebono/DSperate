@@ -242,6 +242,9 @@ private:
   void build_scale();          // pick up the window surface and rebuild the x-map
   bool out_size(int& w, int& h) const;   // renderer output, or the surface in scaled mode (logical under rotation)
   bool rotated() const { return rot_ == 90 || rot_ == 270; }   // logical and presented sizes differ
+  // The window's size as it is presented. SDL's own, but under an SDL that reports the panel turned (turned_)
+  // the window is the logical side and the scanout buffer the panel's.
+  void presented_size(int& w, int& h) const;
   // Points the frame at the logical staging buffer under rotation, clearing
   // what the last frame left; the presented buffer is kept for present().
   void take_frame(u32* px, u32 stride, int w, int h, int idx, Target out[SCREENS]);
@@ -273,6 +276,7 @@ private:
   bool              scaled_ = false;
   int               rot_wanted_ = 0;      // set_rotation(); DS_ROTATE otherwise
   int               rot_ = 0;             // in effect on the scanline tiers
+  bool              turned_ = false;      // KMS under an SDL that reports the panel turned: rot_ is the panel's turn, pointer events come logical
   int               phys_w_ = 0, phys_h_ = 0;   // the presented buffer's size (scaled_w_/h_ are logical)
   std::vector<u32>  stage_;               // the logical frame under rotation
   u32*              phys_px_ = nullptr;   // the presented buffer this frame, under rotation

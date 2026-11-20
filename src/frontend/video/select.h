@@ -55,11 +55,24 @@ struct WindowProbe {
   std::string dmabuf_env;           // $DS_DMABUF: "0" forbids Kms/Dmabuf, "1" makes their failure fatal
   std::string scanline_env;         // $DS_SCANLINE_SCALE: "0" forces Renderer, anything else the scanline sinks
   bool rotated = false;             // a rotation is asked for (the renderer applies none)
+  u32 panel_px = 0;                 // the display's pixels as SDL reports it (0: unknown)
 };
 struct WindowPlan {
   std::vector<Sink> order;          // tried first to last; Renderer always ends it
   bool required = false;            // DS_DMABUF=1: a failed Kms/Dmabuf fails the open
 };
 WindowPlan plan_window(const WindowProbe& p);
+
+// Above this many pixels KMSDRM's window surface is not tried in the automatic order: SDL builds a hidden GLES
+// renderer behind it and uploads the whole panel every frame, on top of our full-panel scanline scale, where the
+// renderer uploads DS-sized textures. Measured on a 1440x1600 panel (2.3 MP): 52-54 fps against 59; the panels
+// it was cheap on are 0.15-0.9 MP.
+constexpr u32 kSurfaceMaxPanelPx = 1500000;
+
+// The KMS mode a window of w x h can scan out to: the index of the first mode of exactly that size, else of the
+// first of h x w with *turned set (an SDL that reports the panel turned and rotates its own frames: the scanout
+// buffer is then the panel's shape and the picture is ours to turn), else -1.
+struct ModeSize { u32 w, h; };
+int pick_kms_mode(const std::vector<ModeSize>& modes, int w, int h, bool* turned);
 
 } // namespace ds::frontend
