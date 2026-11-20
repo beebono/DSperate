@@ -485,7 +485,12 @@ void Gpu::on_hblank() {
     u32 f[2], l[2];
     for (int e = 0; e < 2; ++e) {
       const bool batch = lazy_frame_ && !per_line_[e];
-      if (batch && line_ != SCREEN_H - 1) { f[e] = 1; l[e] = 0; continue; }   // nothing yet
+      if (batch && line_ != SCREEN_H - 1) {
+        f[e] = 1; l[e] = 0;   // nothing yet
+        // But a piece of engine A's batch (early_a_), when the piece before is done: never a wait here.
+        if (e == 0 && early_ok_ && lag_frame_ && line_ + 1u >= render_next_[0] + EARLY_A_LINES && trap_armed_ && (trap_mask_ & 1) && !a_deferred_ && worker_.done()) { f[0] = render_next_[0]; l[0] = line_; }
+        continue;
+      }
       f[e] = batch ? render_next_[e] : line_;
       l[e] = batch ? SCREEN_H - 1 : line_;
       if (!batch && render_next_[e] < line_) f[e] = render_next_[e];          // catch up anything skipped
@@ -718,6 +723,13 @@ void Gpu::begin_frame() {
   lazy_tried_ = lazy_frame_ || (lazy_enabled_ && !g_no_lazy && !run_fifo_);
   lag_frame_ = !run_fifo_ && !g_no_lag;
   lag_trap_hits_ = 0; lag_trap_stores_ = 0;
+  {
+    static const bool early_on = !(std::getenv("DS_2D_EARLY") && std::getenv("DS_2D_EARLY")[0] == '0');
+    static const bool early_all = std::getenv("DS_2D_EARLY") && std::getenv("DS_2D_EARLY")[0] == '2';   // debug: every frame that may
+    if (early_all) early_a_ = EARLY_A_HOLD;
+    if (early_a_) --early_a_;
+    early_ok_ = early_on && early_a_ && lazy_frame_ && lag_frame_ && !per_line_[0] && !scaling() && !skip_frame_ && (!ref3d_.gpu || !ref3d_.allow_lag);
+  }
   if (snap_hit_) snap_want_ = SNAP_HOLD; else if (snap_want_) --snap_want_;
   snap_hit_ = false;
   arm_trap();
@@ -772,6 +784,7 @@ void Gpu::join_worker(JoinSite site) {
   if (b_deferred_) worker_b_.wait(static_cast<int>(site));
   const bool dbg = g_dbg_join;
   if (dbg) std::fprintf(stderr, "[join] frame %llu line %u hblank %d a %u..%u b %u..%u deferred %d\n", (unsigned long long)nds_.frame_count, line_, hblank_done_ ? 1 : 0, job_first_[0], job_last_[0], job_first_[1], job_last_[1], a_deferred_ ? 1 : 0);
+  if (a_deferred_ && site != JoinSite::Line0 && site != JoinSite::Other && !worker_.done()) early_a_ = EARLY_A_HOLD;
   { const u64 t0 = prof::now_ns(); worker_.wait(static_cast<int>(site));
     const u64 dt = prof::now_ns() - t0;
     join_wait_ns_ += dt; prof::add_ns(prof::W2D_JOIN, dt);
@@ -783,7 +796,7 @@ void Gpu::join_worker(JoinSite site) {
         prof::C_W2D_JOIN_NS_RPRE, prof::C_W2D_JOIN_NS_RPOST, prof::C_W2D_JOIN_NS_OTHER };
       prof::add(kBySite[static_cast<int>(site)], dt);
     } }
-  inflight_[0] = inflight_[1] = false; scale_inflight_ = false; bscale_n_ = 0;
+  inflight_[0] = inflight_[1] = false; scale_inflight_ = false; bscale_n_ = 0; early_inflight_ = false;
   for (int e = 0; e < 2; ++e) {
     engine[e].set_vram_override(nullptr);
     if (remap_pending_[e]) { engine[e].vram_remapped(); remap_pending_[e] = false; }
@@ -820,6 +833,15 @@ void Gpu::debug_dump(FILE* f) {
 void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
   const bool a_has = af <= al, b_has = bf <= bl;
   if (!a_has && !b_has) return;
+  // A piece of engine A's batch in flight and engine B's line alone to draw: here, beside it (the engines'
+  // state is disjoint, and nothing is handed that would snapshot the map).
+  if (early_inflight_ && !a_has && bl < SCREEN_H - 1 && !scaling() && !inflight_[1] && !scale_inflight_) {
+    prof::add(prof::C_2D_RANGE_B, 1);
+    for (u32 x = bf; x <= bl; ++x) step_engine(1, x);
+    render_next_[1] = bl + 1;
+    return;
+  }
+  const bool early_piece = a_has && al < SCREEN_H - 1 && early_ok_ && lazy_frame_ && !per_line_[0];
   join_worker(JoinSite::RangesPre);   // a job handed now snapshots the live map: nothing stale may still be in flight
   // The captures of the frames before, before anything of this range can show them. Line 0's sprites were
   // drawn at the end of the frame before (one line ahead): again, where they may show such a bank.
@@ -891,6 +913,7 @@ void Gpu::render_ranges(u32 af, u32 al, u32 bf, u32 bl) {
     prof::add(prof::C_RR_LAG, 1);
     hand(a_has, false);
     a_handed = a_has;
+    early_inflight_ = early_piece;
   } else if (b_has && (b_len >= 24 || !worker_.parked())) {
     // Short run against a parked worker drawn here: wake-up costs more than the lines do.
     prof::add(prof::C_RR_HAND_B, 1);

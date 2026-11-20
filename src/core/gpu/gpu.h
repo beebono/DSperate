@@ -370,6 +370,18 @@ private:
   // only the windows of a batching engine, and A's in a lag frame.
   static constexpr u32 LAZY_FUTILE_LIMIT = 4, LAZY_PROBE_PERIOD = 64;
   u32  eng_futile_[2] = {0, 0};
+  // Engine A's batch handed in pieces. A game that takes the frame's picture as soon as the last line is
+  // drawn (Golden Sun: Dark Dawn copies each capture out of its bank by DMA at line 192) joins the batch the
+  // moment it is handed, and the emulation waits out all 192 lines of it. While that goes on (early_a_: frames
+  // left since such a join) the lines are handed as the frame goes, EARLY_A_LINES or more at a time and only
+  // when the piece before is done (one waiting for the frame's 3D holds the rest back, never the emulation),
+  // left in flight as a lag frame's line is (the trap over A's windows guards them): only the last piece is waited for. Not in
+  // a frame whose 3D may be the frame before's (the record would be asked for at the first piece, before the
+  // raster has had its time). DS_2D_EARLY=0: off; 2: in every frame that may (debug).
+  static constexpr u32 EARLY_A_LINES = 16, EARLY_A_HOLD = 60;
+  u32 early_a_ = 0;
+  bool early_ok_ = false;        // this frame (begin_frame)
+  bool early_inflight_ = false;  // a piece is in flight: engine B's lines are drawn beside it, with no join
   u32  eng_probe_in_[2] = {LAZY_PROBE_PERIOD, LAZY_PROBE_PERIOD};
   bool lazy_tried_ = false;       // last frame batched (its end state feeds eng_futile_)
   u32  frontier() const { return hblank_done_ ? line_ + 1u : line_; }   // first line a write now can still affect
