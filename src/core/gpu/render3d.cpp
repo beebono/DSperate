@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
+#include "core/gpu/gpu_timeline.h"
 #include "core/gpu/render3d.h"
 #include "core/gpu/vk/vk_dump.h"
 #include "core/gpu/gpu_raster.h"
@@ -383,8 +384,20 @@ void Renderer3D::gpu_job_start() {
     place_current_thread(ThreadRole::Band, 1);   // a band core: the band workers idle while the GPU draws
     std::unique_lock<std::mutex> lk(j->m);
     for (;;) {
-      j->cv.wait(lk, [j] { return j->pending || j->quit; });
+      j->cv.wait(lk, [j] { return j->pending || j->list || j->quit; });
       if (j->quit) return;
+      if (j->list) {   // a list alone, ahead of its frame's submit
+        Gpu3D* const gx = j->list_gx; const u32 lbank = j->list_bank;
+        j->list = false; j->list_busy = true;
+        lk.unlock();
+        pre_serial_ = 0;
+        const u64 serial = gx->stream_serial(lbank);
+        pre_n_ = gx->stream_list(lbank, job_polys_); pre_bank_ = lbank; pre_serial_ = serial;
+        lk.lock();
+        j->list_busy = false;
+        j->cv.notify_all();
+        continue;
+      }
       const u32 np = j->np, nv = j->nv, ntex = j->ntex; const vk::GpuFrame f = j->f;
       const bool cpu = j->cpu; const u32 bank = j->bank; const u64 jframe = j->frame;
       lk.unlock();
@@ -401,6 +414,23 @@ void Renderer3D::gpu_job_post(u32 np, u32 nv, u32 ntex, const vk::GpuFrame& f) {
   GpuJob* j = gpu_job_.get();
   { std::lock_guard<std::mutex> lk(j->m); j->np = np; j->nv = nv; j->ntex = ntex; j->f = f; j->cpu = false; j->pending = true; ++j->posted; }
   j->cv.notify_all();
+}
+void Renderer3D::gpu_stream_prelist(Gpu3D& gx, u32 bank) {
+  static const bool off = std::getenv("DS_GPU_PRELIST") && std::atoi(std::getenv("DS_GPU_PRELIST")) == 0;   // debug: the list with the submit, as before
+  GpuJob* j = gpu_job_.get();
+  if (!j || !gpu_on_ || !lean_ || off) return;
+  {
+    std::lock_guard<std::mutex> lk(j->m);
+    if (j->pending || j->list || j->list_busy) return;
+    j->list = true; j->list_gx = &gx; j->list_bank = bank;
+  }
+  j->cv.notify_all();
+}
+void Renderer3D::gpu_prelist_wait() {
+  GpuJob* j = gpu_job_.get();
+  if (!j) return;
+  std::unique_lock<std::mutex> lk(j->m);
+  j->cv.wait(lk, [j] { return !j->list && !j->list_busy; });
 }
 bool Renderer3D::gpu_job_wait() {
   GpuJob* j = gpu_job_.get();
@@ -2916,6 +2946,7 @@ void Renderer3D::render(const Gpu3D& gx) {
       GpuJob* j = gpu_job_.get();
       { std::lock_guard<std::mutex> lk(j->m); j->cpu = true; j->bank = gx.stream_bank(); j->frame = nds_.frame_count; j->pending = true; ++j->posted; }
       j->cv.notify_all();
+      tl::ev("J_post");
     }
     gpu_frame_ = true; ++gpu_gen_; pending_bands_ = 0; geom_drawn_ = true;
     return;
@@ -3402,8 +3433,13 @@ bool Renderer3D::gpu_stream_post(bool* same_textures) {
 
 // Submit thread: the list from the stream, then filled and submitted as any list frame.
 bool Renderer3D::gpu_stream_job(u32 bank, u64 frame) {
+  tl::ev("J_start");
   job_texcache_.begin_frame(frame);
-  const u32 n = const_cast<Gpu3D*>(gx_)->stream_list(bank, job_polys_);   // the bank's RAM is this frame's alone (Gpu3D::StreamEmit)
+  // The list built ahead, if it is this bank's stream still; else here (the bank's RAM is this frame's alone: Gpu3D::StreamEmit).
+  const bool pre = pre_serial_ && pre_bank_ == bank && pre_serial_ == gx_->stream_serial(bank);
+  const u32 n = pre ? pre_n_ : const_cast<Gpu3D*>(gx_)->stream_list(bank, job_polys_);
+  pre_serial_ = 0;
+  tl::ev("J_list", n);
   on_job_ = true; gpu_arena_reset_ = false;
   bool ok = gpu_submit(*gx_, job_polys_.data(), n);
   if (!ok && gpu_arena_reset_) ok = gpu_submit(*gx_, job_polys_.data(), n);   // the arena was full and is empty now

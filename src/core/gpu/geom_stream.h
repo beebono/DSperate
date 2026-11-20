@@ -45,6 +45,7 @@ struct GeomStream {
   u32 flush_attr = 0;                          // SWAP_BUFFERS mode in force (bit 1: W-buffer)
   u32 swap_attr = 0;                           // the SWAP_BUFFERS that closed the frame (bit 0: manual translucent sort)
   u32 zero_dot_w_limit = 0xFFFFFF;
+  u64 serial = 0;                              // which swap closed it (Gpu3D::stream_serial): tells a list built ahead from a later frame's in the same bank
   bool gpu_only = false;                       // the CPU built no polygon list for this frame: the GPU raster draws it from here
 
   // Writer state: which stream vertex each temp-vertex slot holds.

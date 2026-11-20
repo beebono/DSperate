@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
+#include "core/gpu/gpu_timeline.h"
 #include "core/gpu/gpu3d.h"
 #include "core/div64.h"
 #include "core/host_cores.h"
@@ -328,6 +329,7 @@ void Gpu3D::reset() {
   vertex_num_ = vertex_in_poly_ = consecutive_polys_ = 0;
   last_strip_poly_ = nullptr; num_opaque_ = 0;
   bank_ = 0; render_bank_ = 1; raster_bank_ = 1; pending_bank_ = 1; num_vertices_ = num_polygons_ = 0;
+  renderer_.gpu_prelist_wait();
   for (GeomStream& g : streams_) { g.begin(clip_); g.gpu_only = false; }
   geom_skip_ = false;
   swaps_ = 0; list_unconsumed_ = false;
@@ -617,6 +619,7 @@ void Gpu3D::exec_single(u8 cmd, const u32* p) {
   case 0x50:   // swap buffers
     flush_attr_ = param & 3;   // finalise_list's sort mode
     streams_[bank_].swap_attr = flush_attr_;
+    streams_[bank_].serial = ++stream_serial_;
     // Takes effect now: list finalised and bank flipped immediately; render
     // happens at VBlank. swap_wait_ carries the busy bit until then.
     if (rendering_on_) finalise_list();
@@ -1241,6 +1244,7 @@ void Gpu3D::vec_test(u32 param) {
 // ---- frame --------------------------------------------------------------------
 
 void Gpu3D::finalise_list() {
+    tl::ev("J_swap", nds_.gpu.line());
     sort_list(bank_, num_polygons_, num_opaque_, flush_attr_ & 1);
     ++swaps_;
     if (prof::enabled && list_unconsumed_) prof::add(prof::C_GX_LIST_DROPPED, 1);
@@ -1339,6 +1343,8 @@ void Gpu3D::vblank() {
     rstate_.fog_density[33] = fog_density_[31];
     rstate_.clear_attr1 = clear_attr1_; rstate_.clear_attr2 = clear_attr2_;
   }
+  // The new frame's list on the submit thread from now, not from the render at line 215 (its textures are read then).
+  if (swapped_ && rendering_on_ && streams_[render_bank_].gpu_only) renderer_.gpu_stream_prelist(*this, render_bank_);
   swapped_ = false;
   if (swap_wait_) { swap_busy_until_ = nds_.sched.now() + 650; swap_wait_ = false; }
   // No lock strictly needed here, but taken anyway so every write to a bank
@@ -1356,7 +1362,7 @@ void Gpu3D::render_frame() {
   renderer_.render(*this);
   // A stream frame the GPU raster refused (rear-plane bitmap, the raster gone,
   // a driver error): its list built on the CPU and the frame drawn from that.
-  if (renderer_.take_geom_refused()) { build_list_from_stream(raster_bank_); renderer_.render(*this); }
+  if (renderer_.take_geom_refused()) { renderer_.gpu_prelist_wait(); build_list_from_stream(raster_bank_); renderer_.render(*this); }
 }
 
 void Gpu3D::set_render_xpos(u16 value, u16 mask) {
@@ -1548,6 +1554,7 @@ template <class S> void sync_polygon(S& s, Polygon& p) {
 } // namespace
 
 template <class S> void Gpu3D::sync_state(S& s) {
+  renderer_.gpu_prelist_wait();   // a list being built ahead writes a bank's RAM
   if constexpr (!S::reading) drain_all();   // the log does not travel; it is replayed out first
   // Stream frames have no polygon list: a state stores lists, so they are
   // built here, and the frame in progress goes on the CPU way.

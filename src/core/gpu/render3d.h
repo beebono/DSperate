@@ -442,11 +442,19 @@ private:
   // and the texel arena, then posts the Lean::submit call. gpu_job_wait()
   // before anything that reads the result or rewrites the staging.
   struct GpuJob { std::thread thread; std::mutex m; std::condition_variable cv; bool pending = false, quit = false, ok = false; u64 posted = 0, done = 0; u32 np = 0, nv = 0, ntex = 0; vk::GpuFrame f{};
-                  bool cpu = false; u32 bank = 0; u64 frame = 0; }; // cpu: gpu_stream_job(bank, frame), the vertex stage here
+                  bool cpu = false; u32 bank = 0; u64 frame = 0;    // cpu: gpu_stream_job(bank, frame), the vertex stage here
+                  bool list = false, list_busy = false; Gpu3D* list_gx = nullptr; u32 list_bank = 0; };   // gpu_stream_prelist
   std::unique_ptr<GpuJob> gpu_job_;
   void gpu_job_start();
   void gpu_job_post(u32 np, u32 nv, u32 ntex, const vk::GpuFrame& f);
   bool gpu_job_wait();   // the last posted submit's result (true: on the GPU)
+public:
+  // A stream frame's polygon list, started on the submit thread at the swap's VBlank, 23 lines ahead of the
+  // render that submits it (Gpu3D::vblank): the raster starts that much sooner, which is what a frame that
+  // waits for its own picture (a display capture) gains. Not when the thread still has the frame before.
+  void gpu_stream_prelist(Gpu3D& gx, u32 bank);
+  void gpu_prelist_wait();   // before anything else writes a bank's vertex and polygon RAM or its stream
+private:
   bool gpu_on_ = false;
   bool gpu_frame_ = false;   // the last drawn frame went to the GPU: lean_ holds the picture, not out_[]
   u64 gpu_gen_base_ = 0;     // gpu_gen_ when the raster in use was created (its own count starts at 1)
@@ -465,6 +473,9 @@ private:
   // lookup on the emulation thread.
   bool gpu_stream_post(bool* same_textures);   // false: refused (as gpu_submit would)
   bool gpu_stream_job(u32 bank, u64 frame);
+  // The list of a stream frame built ahead of its submit (gpu_stream_prelist): which bank and stream it is of
+  // (serial 0: none). The submit thread's alone.
+  u32 pre_n_ = 0, pre_bank_ = 0; u64 pre_serial_ = 0;
   void job_snapshot(u32* tdirty, u32* pdirty);           // emulation thread, no job in flight
   std::vector<u8> job_snap_;                             // texture view (512 K), then palette view (128 K), as of the frame posted
   const u8* job_blk_src_[40] = {};                       // per block: the bank bytes last copied from (null: none or several banks)

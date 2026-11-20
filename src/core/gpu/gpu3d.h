@@ -151,6 +151,7 @@ public:
   // The stream frame's polygon list built by the caller's thread (gpu3d.cpp stream_list); stream_bank(): which bank, as render() sees it.
   u32 stream_bank() const { return raster_bank_; }
   u32 stream_list(u32 bank, std::vector<const Polygon*>& out);
+  u64 stream_serial(u32 bank) const { return streams_[bank].serial; }
   // No SWAP_BUFFERS/render-register change since last render: rasteriser may keep prior output.
   bool render_identical() const { return render_identical_; }
   u64 swap_count() const { return swaps_; }
@@ -298,6 +299,7 @@ private:
   std::array<std::array<const Polygon*, PRAM_BANK>, BANKS> render_polys_{};
   std::array<u32, BANKS> render_count_{};
   u64 swaps_ = 0;
+  u64 stream_serial_ = 0;   // GeomStream::serial of the last swap; never reset (a list built ahead is told by it)
   bool list_unconsumed_ = false;   // a finalised list is waiting for a render (C_GX_LIST_DROPPED)
   bool render_identical_ = false;
   bool render_stale_ = false;      // last render is older than rstate_ says (note_raster_skipped)
