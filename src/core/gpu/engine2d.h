@@ -98,6 +98,10 @@ public:
   static constexpr u32 cap_slot_size(u32 slot) { return slot < 4 ? 0x20000u : 0x8000u; }
   void set_cap_track(bool on) { cap_track_ = on; }
   bool cap_refs(u32* refs) const;
+  // The same where one layer is the line's top everywhere, fully opaque, with no window and no colour effect
+  // (compose_line's one-layer pass): that layer's own references, not copied; else null. The line's output is
+  // then that layer's pixels as resolved, nothing else.
+  const u32* cap_refs_whole() const;
 
   // The 3D split, engine A only. A line is split when BG0 is the 3D layer
   // and enabled; split_on() says so.

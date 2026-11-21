@@ -274,6 +274,11 @@ void Engine2D::compose_line() {
   top_mode_ = TOP_FULL;
 }
 
+const u32* Engine2D::cap_refs_whole() const {
+  if (top_mode_ != TOP_ALL || !cur_.enabled || cur_.forced_blank || top_all_bg_ < 0 || top_all_bg_ >= 4 || !bg_cap_any_[top_all_bg_]) return nullptr;
+  return bg_cap_[top_all_bg_];
+}
+
 bool Engine2D::cap_refs(u32* refs) const {
   if (top_mode_ == TOP_NONE || !cur_.enabled || cur_.forced_blank) return false;
   const u32* carried[T_COUNT] = {};

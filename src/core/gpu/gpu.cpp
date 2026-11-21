@@ -1791,8 +1791,14 @@ void Gpu::split_capture_display(int e, u32 line) {
   alignas(16) u32 refs[SCREEN_W];
   const u32 mode = e == 0 ? (en.dispcnt() >> 16) & 3 : (en.dispcnt() >> 16) & 1;
   bool have = false, vram = false;
+  const u32* whole = nullptr;
   if (screens_on_ && !ss.live) {
-    if (mode == 1) have = en.cap_refs(refs);
+    if (mode == 1) {
+      // One opaque layer over the whole line, no effect: its references as they are, and every pixel of it is
+      // shown as it is (no need to look).
+      whole = en.cap_refs_whole();
+      if (whole) have = true; else have = en.cap_refs(refs);
+    }
     else if (e == 0 && mode == 2) {
       const u32 bank = (en.dispcnt() >> 18) & 3;
       if (lcdc_mask_render_ & (1u << bank)) {
@@ -1802,6 +1808,7 @@ void Gpu::split_capture_display(int e, u32 line) {
     }
   }
   if (!have) { std::memset(row, 0, SCREEN_W * sizeof(u32)); return; }
+  const u32* const rf = whole ? whole : refs;
   const VramMap& vm = nds_.bus.vram_map();
   const Pixel* const out = en.output();
   const u32 mreg = en.master_bright();
@@ -1816,11 +1823,12 @@ void Gpu::split_capture_display(int e, u32 line) {
   // capture's, less the pixels that are not on top or not shown as they are.
   {
     u32 x0 = 0;
-    while (x0 < SCREEN_W && !refs[x0]) ++x0;
+    while (x0 < SCREEN_W && !rf[x0]) ++x0;
     if (x0 == SCREEN_W) { std::memset(row, 0, SCREEN_W * sizeof(u32)); return; }
-    const u32 rb = refs[x0] - x0;   // the reference pixel 0 has, or would have
-    u32 off = 0;
-    for (u32 x = 0; x < SCREEN_W; ++x) off |= refs[x] ? refs[x] ^ (rb + x) : 0;
+    const u32 rb = rf[x0] - x0;   // the reference pixel 0 has, or would have
+    u32 off = 0, zero = 0;
+    for (u32 x = 0; x < SCREEN_W; ++x) { off |= rf[x] ? rf[x] ^ (rb + x) : 0; zero |= rf[x] == 0; }
+    const bool as_is = vram || (whole && !zero);   // every pixel is the capture's, on top and shown as it is
     const u32 b = (rb >> 16) & 7, idx = rb & 0xFFFF;
     const CapSeg& s0 = cap_seg_[b * 512 + (idx >> 7)];
     const CapSeg& s1 = cap_seg_[b * 512 + (((idx + 128) & 0xFFFF) >> 7)];
@@ -1843,13 +1851,13 @@ void Gpu::split_capture_display(int e, u32 line) {
       if (s0.each) for (u32 x = 0; x < SCREEN_W; ++x) { const u32 w = cw[x]; const u32 p = (w != 0 && split3d::op_of(w) == split3d::PLAIN) ? mbm : 0u; wl[x] = (w & ~p) | (fixed & p); }
       else { const u32 w0 = s0.uniform; const u32 w = mb_on && w0 && split3d::op_of(w0) == split3d::PLAIN ? fixed : w0; for (u32 x = 0; x < SCREEN_W; ++x) wl[x] = w; }
       u32 n = 0;
-      if (vram) for (u32 x = 0; x < SCREEN_W; ++x) { row[x] = wl[x]; n += wl[x] != 0; }
+      if (as_is) for (u32 x = 0; x < SCREEN_W; ++x) { row[x] = wl[x]; n += wl[x] != 0; }
       else for (u32 x = 0; x < SCREEN_W; ++x) {
-        const u32 m = ((refs[x] != 0) & ((out[x] & 0x00FFFFFF) == kern::direct_colour(v[x]))) ? ~0u : 0u;
+        const u32 m = ((rf[x] != 0) & ((out[x] & 0x00FFFFFF) == kern::direct_colour(v[x]))) ? ~0u : 0u;
         const u32 w = wl[x] & m;
         row[x] = w; n += w != 0;
       }
-      if (!vram && stat_on_) for (u32 x = 0; x < SCREEN_W; ++x) split_cap_effect_ += refs[x] && wl[x] && (out[x] & 0x00FFFFFF) != kern::direct_colour(v[x]);
+      if (!as_is && stat_on_) for (u32 x = 0; x < SCREEN_W; ++x) split_cap_effect_ += rf[x] && wl[x] && (out[x] & 0x00FFFFFF) != kern::direct_colour(v[x]);
       if (n && !ss.any) { ss.any = true; ss.live = false; ss.ref = *ref; }
       split_cap_shown_ += n;
       return;
@@ -1859,7 +1867,7 @@ void Gpu::split_capture_display(int e, u32 line) {
   bool memo_ok = false;
   for (u32 x = 0; x < SCREEN_W; ++x) {
     row[x] = 0;
-    const u32 r = refs[x];
+    const u32 r = rf[x];
     if (!r) continue;
     const u32 b = (r >> 16) & 7, idx = r & 0xFFFF;
     const CapSeg& seg = cap_seg_[b * 512 + (idx >> 7)];
