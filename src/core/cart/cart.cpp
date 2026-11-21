@@ -433,10 +433,18 @@ template <class S> void Cart::sync_state(S& s) {
       detect_buf_.clear();
     }
   }
-  s.blob(sram_.data(), sram_.size());
+  if constexpr (S::reading) {
+    // The state's save memory is what the game goes on with, but loading it is
+    // not the game saving: the file is left alone until the game writes to the
+    // chip, and the frontend then keeps the file it replaces (sram_from_state).
+    const std::vector<u8> before = sram_;
+    s.blob(sram_.data(), sram_.size());
+    if (sram_ != before) sram_from_state_ = true;
+  } else {
+    s.blob(sram_.data(), sram_.size());
+  }
   s.end();
   if constexpr (S::reading) {
-    mark_dirty();
     if (cmd_mode_ == 1) key1_init(header_.game_code_u32(), 2, 2);
   }
 }

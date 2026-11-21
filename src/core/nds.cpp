@@ -597,7 +597,28 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
   return true;
 }
 
+// A load that fails once the machine is being overwritten puts back the
+// machine as it was: taken as a state of its own just before, loaded again
+// on the failure. The run goes on from where it stood, save memory included.
 bool NDS::load_state(state::Reader& r, std::string& err) {
+  bool began = false;
+  state::Writer undo;
+  // Whether each save file is behind its memory is the session's, not the state's.
+  const bool dirty = cart && cart->sram_dirty(), from = cart && cart->sram_from_state();
+  slot2::GameCart* const g = gba_cart();
+  const bool g_dirty = g && g->save_dirty(), g_from = g && g->save_from_state();
+  if (load_state_into(r, err, &undo, began)) return true;
+  if (!began) return false;
+  if (undo.data().empty()) { err += " (the machine is left half loaded: reset it)"; return false; }
+  state::Reader back(undo.data().data(), undo.data().size());
+  std::string why; bool again = false;
+  if (!load_state_into(back, why, nullptr, again)) { err += " (and the machine could not be put back: " + why + "; reset it)"; return false; }
+  if (cart) cart->set_sram_flags(dirty, from);
+  if (g && g == gba_cart()) g->set_save_flags(g_dirty, g_from);
+  return false;
+}
+
+bool NDS::load_state_into(state::Reader& r, std::string& err, state::Writer* undo, bool& began) {
   char magic[4]; r.blob_raw(magic, 4);
   u32 version = 0; r.blob_raw(&version, 4);
   if (std::memcmp(magic, "DSST", 4) != 0) { err = "not a DSperate save state"; return false; }
@@ -659,7 +680,12 @@ bool NDS::load_state(state::Reader& r, std::string& err) {
     }
   }
 
-  // From here the machine is being overwritten: a failure leaves it broken.
+  // From here the machine is being overwritten: a failure is undone by the caller.
+  if (undo) {
+    std::string e;
+    if (!save_state(*undo, e)) undo->data().clear();
+  }
+  began = true;
   if (dsi) io.sd.attach_sd(with_card ? &dsi_sd : nullptr);
   gpu.prepare_load();
   gpu3d.sync_raster();

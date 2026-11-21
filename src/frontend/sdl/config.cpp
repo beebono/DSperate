@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "core/safe_file.h"
+#include <cerrno>
+#include <cstring>
 #include "config.h"
 
 #include <cstdio>
@@ -106,14 +109,22 @@ bool Config::flag(const std::string& key, bool def) const {
   return def;
 }
 
-bool Config::store(const std::string& path, const std::string& key, const std::string& value) {
+bool Config::store(const std::string& file, const std::string& key, const std::string& value) {
+  // Through a link to the file it names: the replacement must not take the link's place.
+  std::string path = file;
+  if (char* real = ::realpath(file.c_str(), nullptr)) { path = real; std::free(real); }
   std::string sec, name;
   split_key(key, sec, name);
   std::vector<std::string> lines;
   {
+    // A file that is there and cannot be read is not an empty one: writing
+    // back what was read would leave it holding this one key.
+    errno = 0;
     std::ifstream f(path);
+    if (!f && errno != ENOENT) { std::fprintf(stderr, "config: cannot read %s: %s; not rewriting it\n", path.c_str(), std::strerror(errno)); return false; }
     std::string line;
     while (std::getline(f, line)) lines.push_back(line);
+    if (f.bad()) { std::fprintf(stderr, "config: cannot read all of %s; not rewriting it\n", path.c_str()); return false; }
   }
   size_t sec_start = std::string::npos, sec_end = lines.size();
   for (size_t i = 0; i < lines.size(); ++i) {
@@ -142,9 +153,10 @@ bool Config::store(const std::string& path, const std::string& key, const std::s
       lines.insert(lines.begin() + static_cast<long>(at), entry);
     }
   }
-  std::ofstream f(path);
-  if (!f) return false;
-  for (const std::string& l : lines) f << l << '\n';
+  std::string text, err;
+  for (const std::string& l : lines) { text += l; text += '\n'; }
+  // Never truncated in place: a failed or interrupted write leaves the old settings.
+  if (!write_file_atomic(path, text.data(), text.size(), err)) { std::fprintf(stderr, "config: %s\n", err.c_str()); return false; }
   return true;
 }
 

@@ -244,7 +244,9 @@ void test_state() {
   r.begin("SLT2");
   b.sync_state(r);
   r.end();
-  CHECK(r.ok() && b.save()[0x100] == 0x9C && b.save_dirty());
+  // The state's save memory is what the game goes on with, but loading is not
+  // the game saving: the file waits for a write of the game's, and is kept then.
+  CHECK(r.ok() && b.save()[0x100] == 0x9C && !b.save_dirty() && b.save_from_state());
   CHECK(b.sram_read8(0) == 0x62);   // still in ID mode
   CHECK(a.identity() == b.identity() && a.identity() != GameCart(make_rom("BPRE"), save).identity());
 }

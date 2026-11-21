@@ -20,6 +20,7 @@
 #include "core/frame_report.h"
 #include "core/input/input_log.h"
 #include "core/state/state.h"
+#include "core/safe_file.h"
 #include "core/io/dsi_nand_persist.h"
 #include "core/io/dsi_title_install.h"
 #include "core/io/dsi_nand_launch.h"
@@ -341,41 +342,57 @@ ds::u32 gpu3d_scale_now(int setting, const ds::sdl::Display& d1, const ds::sdl::
   return n >= 4 ? 4u : n >= 2 ? 2u : 1u;
 }
 
-void load_save(NDS& nds, const std::string& path) {
+// What the last write of a save or a state could not do, for the frame
+// loop's toast: the player must not go on believing the game is saved.
+std::string g_save_failed;
+
+// False when the save file is there and could not be read: the game must not
+// start, or its first write would replace a save nobody has seen.
+bool load_save(NDS& nds, const std::string& path) {
   const ds::sdl::OffRealtime off_rt;
-  if (!nds.cart) return;
+  if (!nds.cart) return true;
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) {
+    if (errno != ENOENT) { std::fprintf(stderr, "save: cannot open %s: %s\n", path.c_str(), std::strerror(errno)); return false; }
     if (!nds.cart->save_type_listed()) VLOG("save: game code not in the save list; the chip is detected on first use\n");
-    return;
+    return true;
   }
   std::vector<u8> data;
   u8 buf[65536];
   for (size_t got; (got = std::fread(buf, 1, sizeof buf, f)) > 0;) data.insert(data.end(), buf, buf + got);
+  // A read cut short is not a save of another size: nothing is loaded, and no .bak is made from the part read.
+  const bool read_error = std::ferror(f) != 0;
   std::fclose(f);
+  if (read_error) { std::fprintf(stderr, "save: cannot read %s (stopped after %zu bytes)\n", path.c_str(), data.size()); return false; }
   const ds::cart::Cart::SaveLoad r = nds.cart->load_save(data.data(), data.size());
-  if (r.fitted) { VLOG("save: loaded %zu bytes from %s\n", data.size(), path.c_str()); return; }
+  if (r.fitted) { VLOG("save: loaded %zu bytes from %s\n", data.size(), path.c_str()); return true; }
   // First write resizes to the chip's size, which would cut off/pad the
   // player's original: keep it as .bak.
   const std::string bak = path + ".bak";
   if (r.chip_bytes) std::fprintf(stderr, "save: %s is %zu bytes but the game's save chip holds %u; the original is kept as %s\n", path.c_str(), data.size(), r.chip_bytes, bak.c_str());
   else std::fprintf(stderr, "save: %s is %zu bytes, a size no save chip has; ignored, the original is kept as %s\n", path.c_str(), data.size(), bak.c_str());
-  if (FILE* e = std::fopen(bak.c_str(), "rb")) { std::fclose(e); return; }   // earlier original wins
-  if (FILE* o = std::fopen(bak.c_str(), "wb")) {
-    if (std::fwrite(data.data(), 1, data.size(), o) != data.size()) std::fprintf(stderr, "save: cannot write %s\n", bak.c_str());
-    std::fclose(o);
-  }
+  if (FILE* e = std::fopen(bak.c_str(), "rb")) { std::fclose(e); return true; }   // earlier original wins
+  std::string err;
+  if (!ds::write_file_atomic(bak, data.data(), data.size(), err)) std::fprintf(stderr, "save: %s\n", err.c_str());
+  return true;
 }
 
+// The save file a state load left behind the game: kept under this name when
+// the game's next write replaces it (one deep; the newest replaced file wins).
+std::string prestate_bak(const std::string& path) { return path + ".prestate.bak"; }
+
+// Dirty stays set on a failure, so the next flush tries again.
 void write_save(NDS& nds, const std::string& path) {
   if (!nds.cart || nds.cart->sram().empty()) return;
-  // Write-then-rename: a power cut mid-write leaves the previous file.
-  const std::string tmp = path + ".tmp";
-  FILE* f = std::fopen(tmp.c_str(), "wb");
-  if (!f) { std::fprintf(stderr, "save: cannot write %s\n", tmp.c_str()); return; }
-  const bool ok = std::fwrite(nds.cart->sram().data(), 1, nds.cart->sram().size(), f) == nds.cart->sram().size();
-  std::fclose(f);
-  if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "save: cannot write %s\n", path.c_str()); return; }
+  const bool keep = nds.cart->sram_from_state();
+  std::string err;
+  if (!ds::write_file_atomic(path, nds.cart->sram().data(), nds.cart->sram().size(), err, keep ? prestate_bak(path) : std::string())) {
+    std::fprintf(stderr, "save: %s\n", err.c_str());
+    g_save_failed = "GAME SAVE NOT WRITTEN";
+    return;
+  }
+  if (keep) std::fprintf(stderr, "save: the game wrote its save after a state was loaded; the file it replaced is kept as %s\n", prestate_bak(path).c_str());
+  nds.cart->clear_sram_from_state();
   nds.cart->clear_sram_dirty();
 }
 
@@ -420,7 +437,12 @@ void write_gba_save(NDS& nds, const std::string& path) {
   ds::slot2::GameCart* g = nds.gba_cart();
   if (!g || !g->save_dirty() || path.empty()) return;
   std::string err;
-  if (!ds::slot2::write_save(*g, path, err)) { std::fprintf(stderr, "slot2: %s\n", err.c_str()); return; }
+  if (!ds::slot2::write_save(*g, path, err, g->save_from_state() ? prestate_bak(path) : std::string())) {
+    std::fprintf(stderr, "slot2: %s\n", err.c_str());
+    g_save_failed = "GBA SAVE NOT WRITTEN";
+    return;
+  }
+  g->clear_save_from_state();
   g->clear_save_dirty();
 }
 
@@ -585,12 +607,11 @@ bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::
   if (!nds.save_state(w, err)) { std::fprintf(stderr, "state: cannot save: %s\n", err.c_str()); return false; }
   write_layout_chunk(w, layout);
   write_cheevos_chunk(w);
-  const std::string tmp = path + ".tmp";
-  FILE* f = std::fopen(tmp.c_str(), "wb");
-  if (!f) { std::fprintf(stderr, "state: cannot write %s\n", tmp.c_str()); return false; }
-  const bool ok = std::fwrite(w.data().data(), 1, w.data().size(), f) == w.data().size();
-  std::fclose(f);
-  if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "state: cannot write %s\n", path.c_str()); return false; }
+  if (!ds::write_file_atomic(path, w.data().data(), w.data().size(), err)) {
+    std::fprintf(stderr, "state: %s\n", err.c_str());
+    g_save_failed = "STATE NOT WRITTEN";
+    return false;
+  }
   std::fprintf(stderr, "state: saved %s (%zu KB)\n", path.c_str(), w.data().size() >> 10);
   return true;
 }
@@ -599,8 +620,8 @@ bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::
 // format); not for an empty/unreadable slot. Shown on the slot row.
 std::string g_state_refused;
 
-// False if unusable, machine untouched; caller must reset if this fails
-// after the load began. `layout` is set only if the state carries one.
+// False if unusable: the machine is as it was (NDS::load_state puts it back
+// when a load fails part way). `layout` is set only if the state carries one.
 bool load_state_file(NDS& nds, const std::string& path, ds::sdl::Display::Layout& layout, bool& layout_loaded) {
   const ds::sdl::OffRealtime off_rt;
   layout_loaded = false;
@@ -940,7 +961,10 @@ void take_quit_signals() {
   sigemptyset(&quit);
   sigaddset(&quit, SIGINT);
   sigaddset(&quit, SIGTERM);
+  sigaddset(&quit, SIGHUP);    // the terminal or the session going away ends the run as SIGTERM does, saves written
+  sigaddset(&quit, SIGQUIT);
   pthread_sigmask(SIG_BLOCK, &quit, nullptr);
+  std::signal(SIGPIPE, SIG_IGN);   // a closed stderr or socket is a failed write, not the end of the process
   std::thread([quit] {
     for (int sig = 0;;)
       if (sigwait(&quit, &sig) == 0) g_signalled = 1;
@@ -2207,7 +2231,7 @@ sdl_ready:
   };
   fill_slot2(choose_slot2());
   // A replay must start from the same battery save every time, so it's loaded read-only.
-  load_save(nds, session.sav);
+  if (!load_save(nds, session.sav)) { start_failed(rom_path, tr("SAVE CANNOT BE READ")); return quit_early(1); }
   const bool save_readonly = replay != nullptr;
   if (save_readonly) VLOG("save: read-only for the replay\n");
 
@@ -2218,7 +2242,8 @@ sdl_ready:
     if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return quit_early(1); }
     VLOG("replay: %u frames from %s\n", log.frames(), replay);
   }
-  // After the battery save (state's SRAM wins) and after the replay log
+  // After the battery save (the game goes on from the state's save memory;
+  // the file is left alone until the game writes) and after the replay log
   // opens (can wind forward to the state's frame). Skipped under
   // replay/recording, since the log runs inputs from boot.
   const std::string autoload = load_state || log.reading() || log.writing()
@@ -2511,7 +2536,9 @@ sdl_ready:
     if (r.files || r.dirs || r.removed) VLOG("dsi sd: %d files written, %d folders made, %d removed in %s\n", r.files, r.dirs, r.removed, nds.dsi_sd.folder().c_str());
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi sd: %s\n", n.c_str());
   };
+  bool saves_blocked = false;   // the game's save file could not be read: nothing is written beside it, the auto state included
   auto flush_save = [&] {
+    if (saves_blocked) return;
     if (!save_readonly && nds.cart && nds.cart->sram_dirty()) write_save(nds, session.sav);
     if (!save_readonly) write_gba_save(nds, session.gba_sav);
     flush_dsi();
@@ -2528,7 +2555,7 @@ sdl_ready:
   bool fb_current = false;
   auto autosave_now = [&] {
     // net_live: quitting would otherwise leave a state resuming a dead conversation.
-    if (!autosave || save_readonly || log.writing() || net_live) return;
+    if (!autosave || save_readonly || saves_blocked || log.writing() || net_live) return;
     // Thumbnail comes from fb_; run one more unscaled frame if stale.
     if (autosave_png && !fb_current) {
       ds::sdl::Display::Target none[2] = {};
@@ -2536,8 +2563,10 @@ sdl_ready:
       nds.run_frame();
       fb_current = true;
     }
+    // The battery save first: it is small, and it is what must not be lost
+    // if the launcher's patience runs out while the state is being written.
+    flush_save();
     if (!save_state_file(nds, auto_state_path(nds, session.states_dir), display.current_layout())) return;
-    flush_save();   // the .sav and the state never diverge
     if (!autosave_png) return;
     const bool beside = autosave_png_cfg == "true" || autosave_png_cfg == "1";
     std::string png = autosave_png_cfg;
@@ -3681,8 +3710,14 @@ sdl_ready:
     session.refresh_analog(nds, cfg);
     fill_slot2(choose_slot2());
     rumble_seen = gba_writes_seen = 0;
-    load_save(nds, session.sav);
-    // After the battery save, so the state's SRAM wins; never during replay/recording.
+    if (!load_save(nds, session.sav)) {
+      // Nothing of this game may be written over a save that could not be read.
+      start_failed(pick, tr("SAVE CANNOT BE READ"));
+      saves_blocked = true;
+      input.request_quit();
+      return;
+    }
+    // After the battery save: the game goes on from the state's save memory; never during replay/recording.
     if (const std::string a = log.reading() || log.writing()
                                   ? std::string()
                                   : autoload_path(nds, session.states_dir, cfg.flag("emu.autoload", false));
@@ -3730,6 +3765,7 @@ sdl_ready:
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
         apply_cheat_changes();
+        flush_save();   // what the game has written so far reaches its file before the state replaces the memory
         // A load leaves the menu too: the player wants to see where they landed.
         if (load_state_file(nds, state_path(nds, session.states_dir, menu.slot()), loaded_layout, got_layout)) {
           session.refresh_analog(nds, cfg);
@@ -3877,6 +3913,7 @@ sdl_ready:
         if (net_live) { std::fprintf(stderr, "state: not during a network session\n"); break; }
         if (save_readonly) { std::fprintf(stderr, "state: not during a replay\n"); break; }
         if (log.writing()) { std::fprintf(stderr, "state: not while recording\n"); break; }
+        flush_save();   // as the menu's load
         if (load_state_file(nds, state_path(nds, session.states_dir, state_slot), loaded_layout, got_layout)) {
           session.refresh_analog(nds, cfg);
           apply_loaded_layout();
@@ -4239,6 +4276,15 @@ sdl_ready:
       t.frames = TOAST_FRAMES;
       toast_queue.push_back(std::move(t));
       gpu3d_note.clear();
+    }
+    if (!g_save_failed.empty()) {
+      Toast t;
+      t.header = tr("NOT SAVED");
+      t.title = tr(g_save_failed.c_str());
+      t.detail = tr("CHECK THE CARD: FULL OR READ-ONLY?");
+      t.frames = TOAST_FRAMES * 2;
+      toast_queue.push_back(std::move(t));
+      g_save_failed.clear();
     }
     if (turbo_note) {
       turbo_note = false;
@@ -4693,8 +4739,8 @@ sdl_ready:
   }
 
   apply_cheat_changes();
-  autosave_now();
   flush_save();
+  autosave_now();
   discard_session_cache();
   // Not after a DSiWare session: nothing a DSi title wrote belongs beside the DS firmware.
   if (!fw_override.empty() && nds.firmware_override_dirty() && !nds.dsi) {

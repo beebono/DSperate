@@ -39,6 +39,10 @@ add_executable(test_cart_save cart_save_test.cpp)
 target_link_libraries(test_cart_save PRIVATE dsperate_core)
 add_test(NAME cart_save COMMAND test_cart_save)
 
+add_executable(test_state_load state_load_test.cpp)
+target_link_libraries(test_state_load PRIVATE dsperate_core)
+add_test(NAME state_load COMMAND test_state_load)
+
 add_executable(test_slot2 slot2_test.cpp)
 target_link_libraries(test_slot2 PRIVATE dsperate_core)
 add_test(NAME slot2 COMMAND test_slot2)

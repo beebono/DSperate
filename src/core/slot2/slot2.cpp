@@ -6,6 +6,7 @@
 // team; its Flash handling is in turn from DeSmuME).
 #include "core/slot2/slot2.h"
 #include "core/state/state.h"
+#include "core/safe_file.h"
 
 #include <cstdio>
 #include <cstring>
@@ -263,10 +264,14 @@ template <class S> void GameCart::sync(S& s) {
     // before the state was taken is what it will read back.
     if (n > 256 * 1024) { s.fail("GBA save too large"); return; }
     save_type_ = static_cast<SaveType>(type);
+    // Not a write of the game's: the file waits for one (save_from_state).
+    const std::vector<u8> before = save_;
     save_.resize(n);
+    s.blob(save_.data(), save_.size());
+    if (save_ != before) save_from_state_ = true;
+  } else {
+    s.blob(save_.data(), save_.size());
   }
-  s.blob(save_.data(), save_.size());
-  if constexpr (S::reading) if (n) mark_dirty();
 }
 
 std::unique_ptr<GameCart> load_game(const std::string& rom_path, const std::string& save_path, std::string& err) {
@@ -308,14 +313,9 @@ bool peek_game(const std::string& rom_path, char code[5], char title[13]) {
   return true;
 }
 
-bool write_save(const GameCart& cart, const std::string& path, std::string& err) {
+bool write_save(const GameCart& cart, const std::string& path, std::string& err, const std::string& keep_as) {
   if (cart.save().empty()) return true;
-  const std::string tmp = path + ".tmp";
-  FILE* f = std::fopen(tmp.c_str(), "wb");
-  if (!f) { err = "cannot write " + tmp; return false; }
-  const bool ok = std::fwrite(cart.save().data(), 1, cart.save().size(), f) == cart.save().size();
-  if (std::fclose(f) != 0 || !ok || std::rename(tmp.c_str(), path.c_str()) != 0) { err = "cannot write " + path; return false; }
-  return true;
+  return write_file_atomic(path, cart.save().data(), cart.save().size(), err, keep_as);
 }
 
 void RumblePak::rom_write16(u32, u16 v) {

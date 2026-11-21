@@ -97,6 +97,10 @@ public:
   bool save_dirty() const { return save_dirty_; }
   u32 save_writes() const { return save_writes_; }   // bumped on every change
   void clear_save_dirty() { save_dirty_ = false; }
+  // As Cart::sram_from_state: a save state replaced the save memory.
+  bool save_from_state() const { return save_from_state_; }
+  void clear_save_from_state() { save_from_state_ = false; }
+  void set_save_flags(bool dirty, bool from_state) { save_dirty_ = dirty; save_from_state_ = from_state; }
 
 private:
   template <class S> void sync(S& s);
@@ -114,6 +118,7 @@ private:
   char code_[5] = {};
   bool solar_ = false;
   bool save_dirty_ = false;
+  bool save_from_state_ = false;
   u32 save_writes_ = 0;
 
   // GPIO port (0x080000C4 data, C6 direction, C8 control; readable only with control bit 0).
@@ -137,7 +142,8 @@ std::unique_ptr<GameCart> load_game(const std::string& rom_path, const std::stri
 // the file isn't one (too short, or no 0x96 fixed byte).
 bool peek_game(const std::string& rom_path, char code[5], char title[13]);
 // Writes the cart's save back (write-then-rename). False with `err` on failure.
-bool write_save(const GameCart& cart, const std::string& path, std::string& err);
+// `keep_as`: the file being replaced is kept under that name (write_file_atomic).
+bool write_save(const GameCart& cart, const std::string& path, std::string& err, const std::string& keep_as = std::string());
 
 // The DS Rumble Pak (NTR-008), and the rumble of the Slide Controller and
 // similar: the motor follows writes to the ROM bus, and the ROM bus reads

@@ -167,9 +167,11 @@ struct NDS {
 
   // Whole-machine snapshots, taken only where run_frame() returns.
   // save_state does not disturb the run; a failed load_state leaves the
-  // machine unusable (reset it). `err` gets the reason on failure.
+  // machine as it was (when it cannot, `err` says to reset). `err` gets the
+  // reason on failure. Loading never marks a save file as needing a write.
   bool save_state(state::Writer& w, std::string& err);
   bool load_state(state::Reader& r, std::string& err);
+  bool load_state_into(state::Reader& r, std::string& err, state::Writer* undo, bool& began);   // load_state's body
   // Set by a DSi load_state without the state's SD card (folder changed, or
   // this session has none); empty otherwise. Frontends surface it.
   std::string sd_card_note;

@@ -100,6 +100,12 @@ public:
   bool sram_dirty() const { return sram_dirty_; }
   u32  sram_writes() const { return sram_writes_; }   // bumped on every chip write
   void clear_sram_dirty() { sram_dirty_ = false; }
+  // Set when a save state brought in save memory other than what was there:
+  // the save file on disk is then not what the game continues from, and the
+  // next write of it replaces something the game never saw.
+  bool sram_from_state() const { return sram_from_state_; }
+  void clear_sram_from_state() { sram_from_state_ = false; }
+  void set_sram_flags(bool dirty, bool from_state) { sram_dirty_ = dirty; sram_from_state_ = from_state; }
 
   // A `B7` read at the cart's own arm9_rom_offset, which only happens when
   // the firmware's menu launches the card. Sticky until cleared; not in the
@@ -141,6 +147,7 @@ private:
   bool ir_cart_ = false; u8 ir_cmd_ = 0; u32 ir_pos_ = 0;
   std::vector<u8> sram_;
   bool sram_dirty_ = false;
+  bool sram_from_state_ = false;
   u32  sram_writes_ = 0;
   void mark_dirty() { sram_dirty_ = true; ++sram_writes_; }
   u32 spi_pos_ = 0; u8 spi_cmd_ = 0; u32 spi_addr_ = 0; u8 spi_status_ = 0;
