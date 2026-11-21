@@ -70,6 +70,9 @@ template <class S> void DsiAes::sync_state(S& s) {
   s.fields(cnt_, blkcnt_, rem_extra_, rem_blocks_, input_dma_size_, output_dma_size_, mode_,
            in_.entries, in_.occupied, in_.rd, in_.wr, out_.entries, out_.occupied, out_.rd, out_.wr,
            iv_, mac_, key_normal_, key_x_, key_y_, cur_key_, cur_mac_, output_mac_, output_mac_due_, ctx_);
+  if constexpr (S::reading) {
+    for (Fifo* f : {&in_, &out_}) { f->rd &= 15; f->wr &= 15; if (f->occupied > 16) f->occupied = 16; }   // positions in the 16-word FIFOs
+  }
 }
 template void DsiAes::sync_state<state::Writer>(state::Writer&);
 template void DsiAes::sync_state<state::Reader>(state::Reader&);

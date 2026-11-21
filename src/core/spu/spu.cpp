@@ -449,6 +449,9 @@ template <class S> void Spu::sync_state(S& s) {
       c.adpcm_idx = std::clamp(c.adpcm_idx, 0, 88); c.adpcm_idx_loop = std::clamp(c.adpcm_idx_loop, 0, 88);
     }
     for (Capture& cp : cap_) { cp.fifo_rd &= 3; cp.fifo_wr &= 0xF; }
+    // The mix period divides and steps the clock (zero would never advance it); the batch sets how far one event reaches.
+    if (mix_period_ != MIX_PERIOD && mix_period_ != MIX_PERIOD_47K) { mix_period_ = MIX_PERIOD; s.fail("sound mix period"); return; }
+    batch_ = std::clamp<u32>(batch_, 1, 16);
   }
   if constexpr (S::reading) timer_step_ = mix_period_ / 4;
   if constexpr (S::reading) { rd_ = wr_ = 0; silence_cycles_ = 0; nds_.sched.rebind(EventId::Spu, ev_mix); }

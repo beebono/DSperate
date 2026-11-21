@@ -307,6 +307,7 @@ void Engine::load_journal(state::Reader& r) {
   }
   u32 n = 0;
   r.put(n);
+  if (n > r.remaining() / 8) { r.fail("cheat journal: more writers than bytes"); r.end(); return; }   // each is an id and a length word at least; a read past the end adds no failure
   for (u32 i = 0; i < n && r.ok(); ++i) {
     Carried c;
     r.put(c.id);

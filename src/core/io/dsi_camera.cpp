@@ -159,6 +159,7 @@ void DsiCamera::mcu_write(u16 addr, u8 val) {
 template <class S> void DsiCamera::sync_state(S& s) {
   s.fields(reset_held_, data_pos_, reg_addr_, reg_data_, pll_div_, pll_pdiv_, pll_cnt_, clocks_cnt_, standby_cnt_, misc_cnt_,
            mcu_addr_, mcu_, frame_width_, frame_height_, frame_read_mode_, frame_format_, internal_y_, transfer_y_);
+  if constexpr (S::reading) internal_y_ = std::clamp(internal_y_, 0, 480);   // a source row (frame_ is 480 rows)
 }
 template void DsiCamera::sync_state<state::Writer>(state::Writer&);
 template void DsiCamera::sync_state<state::Reader>(state::Reader&);
@@ -340,7 +341,11 @@ template <class S> void DsiCamModule::sync_state(S& s) {
            cur_buf_, buffer_num_lines_);
   cam_[0].sync_state(s);
   cam_[1].sync_state(s);
-  if constexpr (S::reading) cur_cam_ = active_camera();
+  if constexpr (S::reading) {
+    cur_buf_ &= 1;
+    for (PixelBuffer& b : buf_) { if (b.read_pos > 512) b.read_pos = 512; if (b.write_pos > 512) b.write_pos = 512; }   // positions in data[512]
+    cur_cam_ = active_camera();
+  }
 }
 template void DsiCamModule::sync_state<state::Writer>(state::Writer&);
 template void DsiCamModule::sync_state<state::Reader>(state::Reader&);

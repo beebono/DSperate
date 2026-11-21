@@ -450,6 +450,8 @@ template <class S> void Dma::sync_state(S& s) {
     if constexpr (S::reading) {
       c.burst_table = bt == 1 ? READ16.data : bt == 2 ? READ32.data : bt == 3 ? READ32_N2.data : MRAM_DUMMY.data;
       c.tim_key_src = c.tim_key_dst = ~0u;   // timing cache: refilled on the next access
+      const Burst* bm = burst_meta(c.burst_table);
+      if (c.burst_pos > (bm ? bm->len : 255u)) c.burst_pos = 0;   // an index into the 256-entry table and its prefix sums
     }
   }
   s.end();

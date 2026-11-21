@@ -657,13 +657,28 @@ void NWifi::ms_timer() {
 }
 
 template <class S> void NWifi::sync_state(S& s) {
-  for (Fifo& f : mb_) { s.fields(f.occupied, f.rd, f.wr); s.vec(f.e); }
+  for (Fifo& f : mb_) {
+    const size_t size = f.e.size();   // fixed at reset; the file's length must match it
+    s.fields(f.occupied, f.rd, f.wr);
+    s.vec(f.e);
+    if constexpr (S::reading) {
+      if (f.e.size() != size) { f.e.assign(size, 0); f.occupied = f.rd = f.wr = 0; s.fail("wifi mailbox size"); return; }
+      if (f.rd >= size) f.rd = 0;
+      if (f.wr >= size) f.wr = 0;
+      if (f.occupied > size) f.occupied = static_cast<u32>(size);
+    }
+  }
   s.fields(transfer_cmd_, transfer_addr_, rem_size_, irq,
            f0_irq_enable_, f0_irq_status_, f1_irq_enable_, f1_irq_enable_cpu_, f1_irq_enable_error_, f1_irq_enable_counter_,
            f1_irq_status_, f1_irq_status_cpu_, f1_irq_status_error_, f1_irq_status_counter_,
            window_data_, window_read_addr_, window_write_addr_, rom_id_, chip_id_, host_int_addr_,
            eeprom_, eeprom_ready_, boot_phase_, error_mask_, scan_timer_, beacon_timer_, connection_status_, send_bss_info_);
   s.fields(probed_ssid_);
+  if constexpr (S::reading) {
+    probed_ssid_[32] = 0;                                                       // read with strlen
+    transfer_addr_ &= 0x1FFFF;                                                  // what send_cmd leaves
+    if (!(transfer_cmd_ & (1u << 27)) && rem_size_ > 0x200) rem_size_ = 0x200;  // a block read or write holds 0x200 bytes
+  }
 }
 template void NWifi::sync_state<state::Writer>(state::Writer&);
 template void NWifi::sync_state<state::Reader>(state::Reader&);

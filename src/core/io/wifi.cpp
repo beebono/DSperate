@@ -1301,6 +1301,14 @@ template <class S> void Wifi::sync_state_engine(S& s) {
            mp_reply_timer_, mp_client_mask_, mp_client_fail_, mp_client_replies_, mp_last_seqno_,
            is_mp_, is_mp_client_, next_sync_, rx_timestamp_);
   s.fields(ap_.us_counter, ap_.seq_no, ap_.beacon_due, ap_.packet, ap_.packet_len, ap_.rx_num, ap_.client_status);
+  if constexpr (S::reading) {
+    // Positions and lengths the engine indexes its buffers with.
+    for (auto& t : tx_slots_) { t.addr &= 0x1FFE; t.length &= 0x3FFF; }   // as the slot registers give them
+    if (rx_buffer_ptr_ > 2046) rx_buffer_ptr_ = 2046;                    // a halfword read of rx_buffer_
+    mp_client_mask_ &= 0xFFFE;                                           // the reply walk looks for a set bit from 1 up
+    if (tx_cur_slot_ < -1 || tx_cur_slot_ > 5 || ((com_status_ & 2) && tx_cur_slot_ < 0)) { s.fail("wifi tx slot"); return; }
+    if (static_cast<u32>(ap_.packet_len) > 2020) { s.fail("wifi AP packet length"); return; }   // copied into the 2048-byte rx buffer with its header and check word
+  }
 }
 template void Wifi::sync_state_regs<state::Writer>(state::Writer&);
 template void Wifi::sync_state_regs<state::Reader>(state::Reader&);

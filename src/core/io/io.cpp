@@ -1839,6 +1839,7 @@ template <class S> void Io::sync_state(S& s) {
   s.fields(cart.auxspicnt, cart.auxspidata, cart.romctrl, cart.cmd, cart.transfer_pos, cart.transfer_len, cart.fifo_count, cart.fifo, cart.fifo_head,
            cart.late, cart.next_word_at, cart.event_armed);
   if constexpr (S::reading) { cart.fifo_head &= 1; if (cart.fifo_count > 2) cart.fifo_count = 2; }
+  if constexpr (S::reading) { rtc.input_bit &= 7; rtc.output_bit &= 7; if (rtc.output_pos > 7) rtc.output_pos = 7; }   // a shift count and an index into output[8]
   s.fields(math.divcnt, math.sqrtcnt, math.div_num, math.div_den, math.div_quot, math.div_rem, math.sqrt_val, math.sqrt_res);
   wifi.sync_state_regs(s);
   bool fast_load_state = false;   // a fast-load cart transfer in flight, from older states
@@ -1874,6 +1875,7 @@ template <class S> void Io::sync_state(S& s) {
     sdio.sync_state(s);         // appended
     cam.sync_state(s);          // appended
     s.fields(dsi.mic_cnt, dsi.mic_fifo, dsi.mic_rd, dsi.mic_wr, dsi.mic_level, dsi.mic_divider, dsi.mic_temp_count, dsi.mic_temp);
+    if constexpr (S::reading) { dsi.mic_rd &= 15; dsi.mic_wr &= 15; if (dsi.mic_level > 16) dsi.mic_level = 16; }   // the mic FIFO's positions
     s.end();
     if constexpr (S::reading) { nds_.sched.rebind(EventId::RtcClock, grid_rtc_event); nds_.sched.rebind(EventId::CamIrq, DsiCamModule::irq_event); nds_.sched.rebind(EventId::CamTransfer, DsiCamModule::transfer_event);
                                  nds_.sched.rebind(EventId::SdMmc, SdHost::ev_transfer_mmc); nds_.sched.rebind(EventId::Sdio, SdHost::ev_transfer_sdio);

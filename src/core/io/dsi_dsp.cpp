@@ -25,6 +25,7 @@ void DsiDsp::set_rst_line(bool release) {
 template <class S> void DsiDsp::sync_state(S& s) {
   s.fields(rst_, padr_, pcfg_, psts_, psem_, pmask_, pclear_, cmd_, pdata_dma_len_,
            rd_fifo_.entries, rd_fifo_.occupied, rd_fifo_.rd, rd_fifo_.wr);
+  if constexpr (S::reading) { rd_fifo_.rd &= 15; rd_fifo_.wr &= 15; if (rd_fifo_.occupied > 16) rd_fifo_.occupied = 16; }   // positions in the 16-entry FIFO
 }
 template void DsiDsp::sync_state<state::Writer>(state::Writer&);
 template void DsiDsp::sync_state<state::Reader>(state::Reader&);

@@ -345,6 +345,7 @@ template <class S> void Engine2DRegs::sync_fields(S& s) {
            win0_, win1_, wincnt_, bg_mosaic_w_, bg_mosaic_h_, obj_mosaic_w_, obj_mosaic_h_, bldcnt_, bldalpha_, eva_, evb_, evy_,
            dispcnt_hist_, layer_enable_, obj_enable_, forced_blank_, win0_active_, win1_active_,
            bg_mosaic_y_, bg_mosaic_ymax_, obj_mosaic_y_, bg_mosaic_latch_, obj_mosaic_latch_, bg_mosaic_line_, obj_mosaic_line_);
+  if constexpr (S::reading) screen_ &= 1;   // 0 = top, 1 = bottom: indexes the frame pages
 }
 template void Engine2DRegs::sync_fields<state::Writer>(state::Writer&);
 template void Engine2DRegs::sync_fields<state::Reader>(state::Reader&);

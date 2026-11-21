@@ -197,6 +197,7 @@ template <class S> void CpuContext::sync_state(S& s) {
            cp15_control, cp15_dtcm, cp15_itcm, pu_region, pu_code_cacheable, pu_data_cacheable, pu_data_bufferable, pu_code_perm, pu_data_perm,
            code_cycles, data_cycles, code_region, data_region, branch_fetch, budget_at_halt);
   s.fields(boot_stall, code_latch, irq_offline, irq_skip_once, defer_cost);   // DSi; zero on a DS
+  if constexpr (S::reading) { if (which == Cpu::ARM7) code_cycles &= 0x1FFFF; }   // an ARM7 index into timing7 (pc >> 15)
   s.end();
 }
 template void CpuContext::sync_state<state::Writer>(state::Writer&);

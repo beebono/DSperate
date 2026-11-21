@@ -784,6 +784,20 @@ template <class S> void Scheduler::sync_state(S& s) {
   s.fields(arm9_carry_);   // appended: DS states leave it 0
   s.end();
   if constexpr (S::reading) {
+    armed_ &= (1u << EVENT_COUNT) - 1;   // a bit past the last event would index the tables
+    // Handlers decode their parameter into an array index, a shift or an offset: put back the ones each event schedules.
+    for (u32 i = 0; i < EVENT_COUNT; ++i) {
+      if (!(armed_ & (1u << i))) continue;   // an idle event's parameter is never read, and stays as the file had it
+      u32& p = param_[i];
+      switch (static_cast<EventId>(i)) {
+      case EventId::Timer0: case EventId::Timer1: case EventId::Timer2: case EventId::Timer3: p = i - static_cast<u32>(EventId::Timer0); break;
+      case EventId::Timer7_0: case EventId::Timer7_1: case EventId::Timer7_2: case EventId::Timer7_3: p = 4 + i - static_cast<u32>(EventId::Timer7_0); break;
+      case EventId::DisplayFifo: if (p > 256 || (p & 7)) p = 0; break;   // pixel step of the line, a multiple of 8
+      case EventId::CartPower1: p = 0; break;
+      case EventId::CartPower2: p = 1; break;
+      default: break;
+      }
+    }
     fn_.fill(nullptr); in_dma_ = false; running_ = nullptr;
     static const bool dbg = std::getenv("DS_DEBUG_STATE") != nullptr;   // the armed events as loaded, against now_
     if (dbg) for (u32 i = 0; i < EVENT_COUNT; ++i)

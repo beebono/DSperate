@@ -864,6 +864,7 @@ u32 MmcStorage::write_block(u64 addr) {
 
 template <class S> void MmcStorage::sync_state(S& s) {
   s.fields(cid_, csd_, csr_, ocr_, rca_, scr_, ssr_, block_size_, rw_address_, rw_command_, irq, read_only);
+  if constexpr (S::reading) { if (block_size_ > MMC_BLOCK_SIZE) block_size_ = MMC_BLOCK_SIZE; }   // as CMD16 holds it
 }
 template void MmcStorage::sync_state<state::Writer>(state::Writer&);
 template void MmcStorage::sync_state<state::Reader>(state::Reader&);
@@ -876,6 +877,13 @@ template <class S> void SdHost::sync_state(S& s) {
            data_fifo_[0].buf, data_fifo_[0].read_pos, data_fifo_[0].write_pos, data_fifo_[0].level,
            data_fifo_[1].buf, data_fifo_[1].read_pos, data_fifo_[1].write_pos, data_fifo_[1].level,
            data_fifo32_.buf, data_fifo32_.read_pos, data_fifo32_.write_pos, data_fifo32_.level);
+  if constexpr (S::reading) {
+    cur_fifo_ &= 1;                                          // data_fifo_[2]
+    if (block_len16_ > MMC_BLOCK_SIZE) block_len16_ = MMC_BLOCK_SIZE;   // the block buffers hold one sector
+    block_len32_ &= 0x03FF;
+    auto held = [](auto& f, u32 n) { if (f.read_pos >= n) f.read_pos = 0; if (f.write_pos >= n) f.write_pos = 0; if (f.level > n) f.level = n; };
+    held(data_fifo_[0], 0x100); held(data_fifo_[1], 0x100); held(data_fifo32_, 0x80);
+  }
   if (storage_) storage_->sync_state(s);
   // Card presence recorded: a state loaded without its card skips its registers.
   u8 card = card_ != nullptr;

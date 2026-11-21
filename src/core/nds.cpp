@@ -491,11 +491,11 @@ template <class S, class T> void sync_vec(S& s, std::vector<T>& v) { s.vec(v); }
 template <class S> void sync_strings(S& s, std::vector<std::string>& v) {
   u32 n = static_cast<u32>(v.size());
   s.put(n);
-  if constexpr (S::reading) { if (!s.more() && n) { s.fail("short read"); return; } v.resize(n); }
+  if constexpr (S::reading) { if (n > s.remaining() / 4) { s.fail("short read"); v.clear(); return; } v.resize(n); }   // each string is at least its length word
   for (std::string& str : v) {
     u32 len = static_cast<u32>(str.size());
     s.put(len);
-    if constexpr (S::reading) str.resize(len);
+    if constexpr (S::reading) { if (len > s.remaining()) { s.fail("short read"); return; } str.resize(len); }
     if (len) s.blob(str.data(), len);
   }
 }
@@ -522,6 +522,12 @@ template <class S> void sync_sd(S& s, io::SdCard::StateSnapshot& c) {
     sync_strings(s, c.files);
     sync_strings(s, c.known_key); sync_strings(s, c.known_host);
     sync_vec(s, c.known_dir); sync_vec(s, c.known_size); sync_vec(s, c.known_mtime); sync_vec(s, c.known_mtime_ns);
+    if constexpr (S::reading) {   // the records are walked in step: one length for each group
+      const size_t n = c.known_key.size(), e = c.ext_start.size();
+      if (c.known_host.size() != n || c.known_dir.size() != n || c.known_size.size() != n || c.known_mtime.size() != n || c.known_mtime_ns.size() != n ||
+          c.ext_len.size() != e || c.ext_file_off.size() != e || c.ext_file.size() != e || c.data.size() != c.sectors.size() * 512)
+        s.fail("SD card record");
+    }
   }
   s.end();
 }

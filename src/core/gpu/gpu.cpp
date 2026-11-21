@@ -2119,7 +2119,11 @@ void Gpu::resolve_split3d() {
 template <class S> void Gpu::sync_state(S& s) {
   s.begin("GPU ");
   s.fields(line_, hblank_done_, frame_begun_, screens_on_, master_bright_g_, capcnt_, capture_on_, fifo_, fifo_rd_, fifo_wr_, fifo_line_, run_fifo_);
-  if constexpr (S::reading) { page_[0] = page_[1] = front_[0] = front_[1] = 0; }
+  if constexpr (S::reading) {
+    page_[0] = page_[1] = front_[0] = front_[1] = 0;
+    if (line_ >= SCANLINES_PER_FRAME) { s.fail("scanline"); return; }
+    fifo_rd_ &= 0xF; fifo_wr_ &= 0xE;   // display FIFO positions: the write side steps by two
+  }
   s.fields(fp(0).fb[0], fp(1).fb[1]);   // what the display shows until the next frame (and the thumbnail)
   s.end();
   engine[0].sync_state(s);
