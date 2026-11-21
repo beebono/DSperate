@@ -905,6 +905,12 @@ void Gpu3D::build_list_from_stream(u32 b) {
 }
 
 template <class S> void Gpu3D::stream_polys_t(S& s, const GeomStream& g) {
+  // A strip's polygon takes its first two vertices from the one before, as
+  // the engine's own list does (and the hardware's vertex RAM): told here by
+  // the stream's vertex indices. Without it a strip quad cost four vertices
+  // and the 6144 ran out at 1536 quads, polygons the hardware draws.
+  u32 prev_stream[4] = {}, prev_viewport = 0, prev_n = 0;
+  u16 prev_vram[4] = {};
   for (const GeomStream::Poly& p : g.polys) {
     Vertex v[4] = {};
     const Vertex* src[4];
@@ -930,9 +936,28 @@ template <class S> void Gpu3D::stream_polys_t(S& s, const GeomStream& g) {
     s64 nz = static_cast<s64>(v0.pos[0] - v1.pos[0]) * (v2.pos[1] - v1.pos[1]) - static_cast<s64>(v0.pos[1] - v1.pos[1]) * (v2.pos[0] - v1.pos[0]);
     while ((((nx >> 31) ^ (nx >> 63)) != 0) || (((ny >> 31) ^ (ny >> 63)) != 0) || (((nz >> 31) ^ (nz >> 63)) != 0)) { nx >>= 4; ny >>= 4; nz >>= 4; }
     const s64 dot = static_cast<s64>(v1.pos[0]) * nx + static_cast<s64>(v1.pos[1]) * ny + static_cast<s64>(v1.pos[3]) * nz;
-    if ((dot < 0 && !(p.attr & (1 << 7))) || (dot > 0 && !(p.attr & (1 << 6)))) continue;
-    if (oc_any == 0) emit_unclipped_t(s, src, n, 0, nullptr, dot <= 0);
-    else emit_clipped_t(s, src, n, 0, nullptr, 0, dot <= 0);
+    if ((dot < 0 && !(p.attr & (1 << 7))) || (dot > 0 && !(p.attr & (1 << 6)))) { prev_n = 0; continue; }
+    if (oc_any != 0) { prev_n = 0; emit_clipped_t(s, src, n, 0, nullptr, 0, dot <= 0); continue; }
+    u16 reused[2] = {};
+    int shared = 0;
+    if (prev_n && prev_viewport == p.viewport) {
+      for (; shared < 2; ++shared) {
+        u32 k = 0;
+        while (k < prev_n && prev_stream[k] != p.vtx[shared]) ++k;
+        if (k == prev_n) break;
+        reused[shared] = prev_vram[k];
+      }
+      if (shared < 2) shared = 0;
+      else for (int k = 0; k < 2; ++k) src[k] = &s.cur_vram()[reused[k] - s.vram_base()];
+    }
+    const u32 before = s.num_polygons_;
+    emit_unclipped_t(s, src, n, shared, reused, dot <= 0);
+    prev_n = 0;
+    if (s.num_polygons_ != before) {
+      const Polygon& made = s.cur_pram()[before];
+      prev_n = static_cast<u32>(n); prev_viewport = p.viewport;
+      for (int k = 0; k < n; ++k) { prev_stream[k] = p.vtx[k]; prev_vram[k] = made.vtx[k]; }
+    }
   }
 }
 
