@@ -206,6 +206,13 @@ GLuint compile(Api& a, GLenum kind, const std::string& src, std::string* why) {
   const char* p = src.c_str(); const GLint len = static_cast<GLint>(src.size());
   a.glShaderSource(s, 1, &p, &len);
   a.glCompileShader(s);
+  // DS_GL_DUMP_SHADERS=DIR: every stage as it is compiled, includes and defines in, to DIR/NN.vert|frag in the
+  // order of Lean::create (for the Mali offline compiler; a value that is no directory only prints a rejected one).
+  if (const char* dir = std::getenv("DS_GL_DUMP_SHADERS"); dir && std::strchr(dir, '/')) {
+    static int n = 0;
+    char name[512]; std::snprintf(name, sizeof name, "%s/%02d.%s", dir, n++, kind == GL_VERTEX_SHADER ? "vert" : "frag");
+    if (std::FILE* f = std::fopen(name, "w")) { std::fwrite(src.data(), 1, src.size(), f); std::fclose(f); }
+  }
   GLint ok = 0; a.glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
   if (!ok) {
     char log[2048] = {}; a.glGetShaderInfoLog(s, sizeof log - 1, nullptr, log);
