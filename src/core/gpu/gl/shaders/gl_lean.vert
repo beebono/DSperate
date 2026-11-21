@@ -16,7 +16,7 @@ out float v_zp;     // DS depth, perspective-correct
 // the Malis every operation there is paid per pixel, and the G31 has a third of the G52's arithmetic).
 flat out ivec4 v_pb;    // the texcoord range: s and t min, s and t max (a clamped axis: within the texture)
 flat out ivec4 v_wrap;  // texel = min(c & mask, fold - (c & mask)): mask.st, fold.st
-flat out ivec4 v_tex;   // arena offset, width, blend mode | alpha << 2 (a wireframe's 0 as 31) | fog bit << 7 | textured << 8 | wireframe << 9, the edge-marking word's low bits
+flat out ivec4 v_tex;   // arena offset, width, blend mode | alpha << 2 (a wireframe's 0 as 31) | fog bit << 7 | textured << 8, the edge-marking word's low bits
 #ifdef DS_EDGE_AA
 // Edge anti-aliasing (gl_resolve.frag): how far the pixel is from each side of the triangle that is the polygon's
 // own outline, in pixels along the axis the side is nearer to crossing (8 on a side inside the polygon), times w
@@ -40,8 +40,7 @@ void poly_out(GpuPoly p) {
   hi = max(hi - 1, lo);   // the DS reads no pixel at a span's far end (lean.vert)
   v_pb = ivec4(mix(clamp(lo, ivec2(0), wh * 16 - 1), lo, rep), mix(clamp(hi, ivec2(0), wh * 16 - 1), hi, rep));
   v_wrap = ivec4(mix(ivec2(0xFFFF), mix(wh - 1, 2 * wh - 1, flp), rep), mix(ivec2(0xFFFFF), 2 * wh - 1, flp));
-  bool wire = pa == 0u && (p.flags & (DS_PF_SHADOW | DS_PF_SHADOW_MASK)) == 0u;
-  v_tex = ivec4(int(p.tex_offset), wh.x, int(((p.attr >> 4) & 3u) | ((pa == 0u ? 31u : pa) << 2) | (fogbit << 7) | ((p.flags & DS_PF_TEXTURED) != 0u ? 256u : 0u) | (wire ? 512u : 0u)),
+  v_tex = ivec4(int(p.tex_offset), wh.x, int(((p.attr >> 4) & 3u) | ((pa == 0u ? 31u : pa) << 2) | (fogbit << 7) | ((p.flags & DS_PF_TEXTURED) != 0u ? 256u : 0u)),
                int(((p.attr >> 24) & 0x3Fu) | (fogbit << 6) | 0x80u));
 }
 void main() {

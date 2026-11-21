@@ -5,8 +5,12 @@
 // channels with the 5-bit alpha encoded for the blend, the fog bit and the
 // polygon record to their attachments. Variants: DS_EARLY (no alpha test,
 // early depth), DS_ALPHA_SEL 1/2 (a translucent run's alpha-31 pixels /
-// the rest), DS_WDEPTH (W-buffered frame: depth written here).
+// the rest), DS_WDEPTH (W-buffered frame: depth written here), DS_WIRE (a
+// run of wireframe polygons: the edge test; no other build has it, nor
+// the polygon records and the vertex texture it reads).
+#ifdef DS_WIRE
 layout(std430, binding = 0) readonly buffer Polys  { GpuPoly polys[]; };
+#endif
 layout(std430, binding = 2) readonly buffer Texels { uint texels[]; };
 layout(std430, binding = 3) readonly buffer Post   { GpuPost ps; };
 flat in uint v_poly;
@@ -32,13 +36,13 @@ layout(location = 2) out uint o_id;
 layout(early_fragment_tests) in;
 #endif
 #include "ds_shade.glsl"
-#ifndef DS_EARLY
+#ifdef DS_WIRE
 // A wireframe polygon (alpha 0): the DS draws its edges only, a pixel a row
 // along a steep one and a pixel a column along a shallow one. The fan covers
 // the polygon; kept is what lies within a pixel of an edge, inside it. The
 // vertices come from the vertex stage's texture (three texels each, the
 // 28.4 position in the third). Such polygons are never drawn with the early
-// depth test (gl_lean.cpp).
+// depth test, and are drawn in runs of their own by this build (gl_lean.cpp).
 uniform highp usampler2D verttex;
 highp vec2 wire_vert(uint i, highp float sc) {
   uint t = i * 3u + 2u;
@@ -74,8 +78,8 @@ void main() {
   ivec2 st4 = clamp(ivec2(floor(v_st + 0.03125)), v_pb.xy, v_pb.zw);
   DS_MP uint blendmode = uint(v_tex.z) & 3u, polyalpha = (uint(v_tex.z) >> 2) & 31u;
   uint fogbit = (uint(v_tex.z) >> 7) & 1u;
-#ifndef DS_EARLY
-  if ((v_tex.z & 512) != 0) {   // wireframe: opaque lines (the record is read for these alone)
+#ifdef DS_WIRE
+  {   // opaque lines (the record is read for these alone)
     GpuPoly wp = polys[v_poly];
     if (!wire_keeps(wp)) discard;
   }
