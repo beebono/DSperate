@@ -17,6 +17,10 @@ in float v_zp;
 flat in ivec4 v_pb;
 flat in ivec4 v_wrap;
 flat in ivec4 v_tex;
+#ifdef DS_EDGE_AA
+in vec3 v_edge;       // gl_lean.vert: the distance from each outline side, times w
+flat in int v_edir;
+#endif
 #define DS_WRAP_VARY v_wrap
 layout(location = 0) out vec4 o_col;
 layout(location = 1) out vec4 o_fog;
@@ -134,7 +138,28 @@ void main() {
 #endif
   }
 #endif
+#ifdef DS_EDGE_AA
+  // Edge anti-aliasing (DS_EDGE_AA: the programs of a frame with the game's bit under video.aa): a pixel whose
+  // centre is under half a pixel inside the polygon's outline is covered by the polygon for half a pixel and that
+  // distance more; the rest is the neighbour's across the side. The byte: the neighbour's direction << 6, the
+  // distance over half a pixel in 0-62; 255: no edge. With it the polygon's id (what lies across an edge of the
+  // same object is not blended in). Kept from the opaque passes alone (gl_lean.cpp's write mask);
+  // gl_resolve.frag does the blend.
+  float ecode = 1.0;
+#if DS_ALPHA_SEL != 2
+  {
+    vec3 e = v_edge * gl_FragCoord.w;
+    float ed = min(e.x, min(e.y, e.z));
+    if (ed < 0.5) {
+      int side = (e.x <= e.y && e.x <= e.z) ? 0 : (e.y <= e.z ? 1 : 2);
+      ecode = float(((v_edir >> (2 * side)) & 3) * 64 + int(clamp(ed, 0.0, 0.4999) * 126.0)) / 255.0;
+    }
+  }
+#endif
+  o_fog = vec4(float(fogbit), ecode, float(v_tex.w & 63) / 255.0, 1.0);
+#else
   o_fog = vec4(float(fogbit), 0.0, 0.0, 1.0);
+#endif
   // Edge marking (gl_mark.frag): the polygon's id, fog bit, "drawn" and the pixel's DS depth, where a frame marks edges.
   if ((pc.f.flags2 & DS_FF2_EDGEMARK) != 0u) o_id = uint(v_tex.w) | (uint(clamp(v_zp, 0.0, 16777215.0)) << 8);
   else o_id = v_poly + 1u;

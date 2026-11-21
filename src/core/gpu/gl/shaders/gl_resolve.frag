@@ -30,7 +30,26 @@ void main() {
   if (ab == 0u) { o_word = vec4(0.0); return; }
   uvec3 rgb = uvec3(round(c.rgb * 255.0));
   uint a5 = decode_alpha(ab);
+#ifdef DS_EDGE_AA
+  vec4 fg = texelFetch(s_fog, xy, 0);   // the fog bit, the edge byte, the polygon's id (gl_lean.frag)
+  // Edge anti-aliasing: an edge pixel takes its neighbour across the edge for the part of it the polygon does
+  // not cover. Nothing drawn there: the pixel's alpha is its coverage, and the 2D layers behind show through
+  // (as the DS's own does). The same object's id there: left as it is. One texel more a pixel, two more on an edge.
+  uint ecode = uint(round(fg.g * 255.0));
+  if (ecode != 255u) {
+    uint dir = ecode >> 6;
+    float cov = 0.5 + float(ecode & 63u) * (1.0 / 126.0);
+    ivec2 nxy = xy + ivec2(dir == 0u ? 1 : dir == 1u ? -1 : 0, dir == 2u ? 1 : dir == 3u ? -1 : 0);
+    if (nxy.x >= 0 && nxy.y >= 0 && nxy.x < 256 * int(max(pc.f.scale, 1u)) && nxy.y < 192 * int(max(pc.f.scale, 1u))) {
+      vec4 nc = texelFetch(s_col, nxy, 0);
+      if (nc.a * 255.0 < 0.5) a5 = max(uint(float(a5) * cov + 0.5), 1u);
+      else if (abs(texelFetch(s_fog, nxy, 0).b - fg.b) > 0.002) rgb = uvec3(mix(round(nc.rgb * 255.0), vec3(rgb), cov) + 0.5);
+    }
+  }
+  if (fog_on && fg.r > 0.5) {
+#else
   if (fog_on && texelFetch(s_fog, xy, 0).r > 0.5) {
+#endif
     uint fc = ps.fog_color;
     uint fr = c15_to_18(fc, 0u), fg = c15_to_18(fc, 4u), fb = c15_to_18(fc, 9u), fa = (fc >> 16) & 0x1Fu;
     float dz = texelFetch(s_depth, xy, 0).r;
