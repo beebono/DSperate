@@ -246,6 +246,11 @@ void Bus::update_bios_map() {
   // DSi ARM7 BIOS: left unmapped so every access goes through io_read, which
   // applies the BIOS protection rules.
   if (!(nds_.dsi && !(scfg_bios & 0x0200))) pt7.map(0x00000000, BIOS7_SIZE, bios7.get(), RO);
+#if DSPERATE_JIT
+  // The DSi's switch to the DS BIOS images puts other code at the same addresses.
+  jit::remapped(nds_.cpu(Cpu::ARM9), 0xFFFF0000, 0xFFFFFFFF);
+  jit::remapped(nds_.cpu(Cpu::ARM7), 0x00000000, 0x0000FFFF);
+#endif
 }
 
 void Bus::update_vram_timings() {
@@ -339,6 +344,10 @@ void Bus::apply_wram(bool nwram, bool windows_only) {
     }
     wram_key_[c] = key;
     std::memcpy(wram_win_[c], win, sizeof win);
+#if DSPERATE_JIT
+    // WRAMCNT or a DSi window moved: code translated from 03xxxxxx may be other bytes now.
+    jit::remapped(nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9), 0x03000000, 0x03FFFFFF);
+#endif
   }
 }
 
@@ -520,6 +529,11 @@ void Bus::update_vram() {
   }
   nds_.gpu.vram_remap_end(trapped);
   if (watch_on && (watch_addr >> 24) == 0x06) { pt9.map_mmio(watch_addr & ~0x7FFu, 0x800); pt7.map_mmio(watch_addr & ~0x7FFu, 0x800); }
+#if DSPERATE_JIT
+  // Code run from VRAM (the ARM7's work-RAM banks) and a bank mapped elsewhere.
+  jit::remapped(nds_.cpu(Cpu::ARM9), 0x06000000, 0x06FFFFFF);
+  jit::remapped(nds_.cpu(Cpu::ARM7), 0x06000000, 0x06FFFFFF);
+#endif
 }
 
 // Slow-path VRAM access for blocks with overlapping banks (and LCDC gaps).

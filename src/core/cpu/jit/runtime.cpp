@@ -150,6 +150,7 @@ void kill_block(JitCpu& jc, Block* b) {
   const u32 idx = (b->key >> 1) & (LUT_SIZE - 1);
   if (static_cast<u32>(jc.lut[idx]) == b->key) jc.lut[idx] = LUT_EMPTY_KEY;
   jc.blocks.erase(b->key);
+  if (u32& n = jc.region_live[key_pc(b->key) >> 24]) --n;
   g_rt.stats.blocks_invalidated++;
 }
 
@@ -172,6 +173,7 @@ void reset_arena() {
     jc.all_blocks.clear();
     jc.blocks.clear();
     jc.parked.clear();
+    std::memset(jc.region_live, 0, sizeof jc.region_live);
     if (jc.lut) for (u32 i = 0; i < LUT_SIZE; ++i) jc.lut[i] = LUT_EMPTY_KEY;
   }
   for (auto& kv : r.code_pages) set_code_tag(kv.first, false);
@@ -317,6 +319,7 @@ static void register_block(JitCpu& jc, Block* b) {
     v.add(b, lo, hi);
   }
   jc.blocks[b->key] = b;
+  ++jc.region_live[pc >> 24];
   lut_insert(jc, b);
 }
 
@@ -835,6 +838,28 @@ void detach(NDS& nds) {
 }
 
 void flush(CpuContext& cpu) { if (cpu.jit) invalidate_cpu(*static_cast<JitCpu*>(cpu.jit)); }
+
+void remapped(CpuContext& cpu, u32 lo, u32 hi) {
+  if (!cpu.jit) return;
+  JitCpu& jc = *static_cast<JitCpu*>(cpu.jit);
+  u32 any = 0;
+  for (u32 r = lo >> 24; r <= hi >> 24; ++r) any |= jc.region_live[r];
+  if (!any) return;
+  u64 killed = 0;
+  for (Block* b : jc.all_blocks) {
+    if (b->dead) continue;
+    const u32 pc = key_pc(b->key);
+    if (pc > hi || static_cast<u64>(pc) + b->guest_len - 1 < lo) continue;
+    // As register_block took them: the host bytes of the block's first and last guest byte.
+    const bool span = b->span_hi != 0;
+    if (jc.ctx->page_table.read_ptr(span ? b->span_lo : pc) == b->host_lo &&
+        jc.ctx->page_table.read_ptr(span ? b->span_hi : pc + b->guest_len - 1) == b->host_hi) continue;
+    remove_from_page_lists(b);
+    kill_block(jc, b);   // parked: it comes back only if the address shows its bytes again
+    ++killed;
+  }
+  if (killed) jc.ctx->hot.alerts |= ALERT_INVALIDATED;
+}
 void flush_all() { reset_arena(); }
 void set_trace(bool on) { if (g_rt.trace != on) { g_rt.trace = on; for (JitCpu& jc : g_rt.cpus) if (jc.ctx) invalidate_cpu(jc); } }
 void set_strict(bool on) { if (g_rt.strict != on) { g_rt.strict = on; for (JitCpu& jc : g_rt.cpus) if (jc.ctx) invalidate_cpu(jc); } }

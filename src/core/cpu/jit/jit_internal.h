@@ -129,6 +129,7 @@ struct JitCpu {
   u64*  lut = nullptr;                       // into the arena
   std::unordered_map<u32, Block*> blocks;
   std::vector<Block*> all_blocks;
+  u32 region_live[256] = {};                 // live blocks by pc >> 24: jit::remapped's question "is there code here at all"
   std::unordered_map<u32, std::vector<Block*>> parked;   // killed translations, newest last
   // Cold-code threshold (DS_JIT_WARM, opt-in): lookups per key (direct-mapped,
   // the LUT's hash) before a block is translated; below it the slice is

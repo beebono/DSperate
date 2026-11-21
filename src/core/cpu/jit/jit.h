@@ -45,6 +45,12 @@ void run_loop(void* scheduler);
 // Drop every translated block of `cpu`. Cheap to call; translation is lazy.
 void flush(CpuContext& cpu);
 void flush_all();
+// The page table of `cpu` was remapped somewhere in [lo, hi] (WRAMCNT, a DSi
+// window, the BIOS switch, a VRAM bank): drop the blocks translated from that
+// range whose bytes are no longer the ones the address shows. A block is found
+// by its pc alone, so without this the old translation would run on. Free when
+// nothing was translated from the range, which is the usual case.
+void remapped(CpuContext& cpu, u32 lo, u32 hi);
 
 // Per-instruction tracing: when enabled, every translated instruction calls
 // NDS::trace before executing, exactly as the interpreter does.
