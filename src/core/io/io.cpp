@@ -52,9 +52,9 @@ void Io::reset() {
   powcnt1 = 0; powcnt2 = 0; math = MathUnit{};
   sleeping = false; sleep_frame_cycles = 0;
   keyinput = 0x03FF; extkeyin = 0x007F; keycnt[0] = keycnt[1] = 0;
-  exmemcnt = 0x6000; rcnt = 0; wifiwaitcnt = 0;   // boot2's ARM7 spins on these bits
+  exmemcnt = 0x6000; exmemcnt7 = 0; rcnt = 0; wifiwaitcnt = 0;   // boot2's ARM7 spins on these bits
   spicnt = 0; spidata = 0; spi_ready_at = 0; spi_busy_ = false; spi_flag_mode_ = false;
-  spi_fw = SpiFirmware{}; spi_tsc = SpiTouch{}; spi_pm = SpiPower{};
+  spi_fw = SpiFirmware{}; spi_tsc = SpiTouch{}; spi_pm = SpiPower{}; spi_pm.regs[4] = 0x40;   // backlight register: external power absent
   mic_ = nullptr; mic_count_ = 0; mic_start_ = 0;
   rtc = Rtc{};
   if (rtc_host_clock_) rtc_seed();
@@ -218,7 +218,10 @@ u16 Io::timer_value(Cpu cpu, int idx) {
   u64 elapsed = (nds_.sched.now() - t.start_time) >> 1;   // 33 MHz system clock
   u64 ticks = elapsed >> t.prescaler_shift();
   u64 v = t.counter + ticks;
-  return static_cast<u16>(v);   // overflow handling happens in the event
+  // Past an overflow the event has not serviced yet (a read later in the same
+  // slice): the count has already gone round from the reload value.
+  if (v > 0xFFFF) v = t.reload + (v - 0x10000) % (0x10000u - t.reload);
+  return static_cast<u16>(v);
 }
 
 void Io::timer_schedule(Cpu cpu, int idx) {
@@ -295,14 +298,18 @@ u8 Io::spi_transfer(u8 value) {
   case 0: {                                             // power management
     SpiPower& p = spi_pm;
     if (!p.hold) { p.hold = true; p.cmd = value; p.pos = 1; p.data = 0; return 0; }
-    const u32 reg = p.cmd & 0x7F;
-    if (p.cmd & 0x80) p.data = (reg < 8) ? p.regs[reg] : 0;
+    if (p.pos++ != 1) { p.data = 0; return 0; }   // one data byte a transfer
+    // Five registers, mirrored through the index's low three bits, each with
+    // its own writable bits (melonDS PowerMan). The DSi's 0x10 is apart.
+    static constexpr u8 writable[8] = {0x7F, 0x00, 0x01, 0x03, 0x0F, 0, 0, 0};
+    const u32 full = p.cmd & 0x7F, reg = full & 7;
+    if (p.cmd & 0x80) p.data = p.regs[reg];
     else {
-      if (reg < 8) p.regs[reg] = value;
-      if (reg == 0 && (value & 0x40)) nds_.power_off = true;   // system power line; frontend decides what it means
+      if (!(nds_.dsi && full == 0x10)) p.regs[reg] = static_cast<u8>((p.regs[reg] & ~writable[reg]) | (value & writable[reg]));
+      if (reg == 0 && full != 0x10 && (value & 0x40)) nds_.power_off = true;   // system power line; frontend decides what it means
       // DSi register 0x10 bit 0: reset. A DS-mode title's only way back to
       // the DSi Menu (no I2C reset access); same soft reset as bptwl_write.
-      if (reg == 0x10 && (value & 0x01) && nds_.dsi) {
+      if (full == 0x10 && (value & 0x01) && nds_.dsi) {
         nds_.dsi_soft_reset_pending = true;
         nds_.cpu(Cpu::ARM7).halted = true;
       }
@@ -359,29 +366,28 @@ u8 Io::spi_transfer(u8 value) {
   case 2: {                                             // touchscreen
     SpiTouch& t = spi_tsc;
     if (nds_.dsi && t.dsi_mode) return dsi_tsc_transfer(value);
+    // The byte that comes back belongs to the conversion already under way
+    // (bits 11:5, then 4:0 << 3, then zeros), also when this byte starts the
+    // next one: drivers chain conversions that way and read the low byte of
+    // one sample while sending the next control byte (melonDS TSC::Write).
+    const u8 out = t.pos == 1 ? static_cast<u8>(t.sample >> 5) : t.pos == 2 ? static_cast<u8>((t.sample << 3) & 0xF8) : 0;
     if (value & 0x80) {                                 // control byte
-      t.cmd = value; t.pos = 0;
-      const u32 channel = (value >> 4) & 7;
-      u16 sample = 0;
-      switch (channel) {
+      t.cmd = value;
+      u16 sample;
+      switch ((value >> 4) & 7) {
       case 1: sample = t.y; break;        // Y
       case 5: sample = t.x; break;        // X
       case 6: sample = mic_sample(); break;   // AUX: the microphone
-      default: sample = 0; break;
+      default: sample = 0xFFF; break;     // temperature, battery: nothing wired
       }
       // Bit 3 selects an 8-bit conversion (one byte less per sample, used by
-      // mic sampling loops). Result stream starts one clock after the
-      // control byte, MSB first: 12-bit = 11..5 then 4..0<<3, 8-bit = 7..1
-      // then bit 0<<7.
-      if (value & 0x08) sample = static_cast<u16>((sample >> 4) << 4);
+      // mic sampling loops): the low four bits are not converted.
+      if (value & 0x08) sample = static_cast<u16>(sample & 0x0FF0);
       t.sample = sample;
-      t.data = static_cast<u8>(t.sample >> 5);          // first byte: bits 11:5
+      t.data = static_cast<u8>(t.sample >> 5);
       t.pos = 1;
-      return 0;
-    }
-    if (t.pos == 1) { t.pos = 2; return t.data; }
-    t.pos = 0;
-    return static_cast<u8>((t.sample << 3) & 0xF8);
+    } else if (t.pos && t.pos < 3) ++t.pos;
+    return out;
   }
   default:
     return 0;
@@ -605,6 +611,16 @@ static int from_bcd(u8 v) { return (v >> 4) * 10 + (v & 0x0F); }
 static void rtc_ev(NDS& nds, u32) { nds.io.rtc_event(); }
 
 void Io::rtc_seed() {
+  rtc_seed_time();
+  Rtc& r = rtc;
+  r.status1 = 0x02;      // 24-hour mode, not power-lost
+  r.ticking = true;
+  r.next_tick = nds_.sched.now() + ARM9_CLOCK_HZ;
+  nds_.sched.schedule(EventId::Rtc, r.next_tick, rtc_ev, 0);
+}
+
+// The date and time alone, from the host's local time.
+void Io::rtc_seed_time() {
   const std::time_t t = std::time(nullptr);
   std::tm lt{};
 #if defined(_WIN32)
@@ -620,10 +636,6 @@ void Io::rtc_seed() {
   r.datetime[4] = to_bcd(lt.tm_hour);   // always 24-hour (status1 bit 1)
   r.datetime[5] = to_bcd(lt.tm_min);
   r.datetime[6] = to_bcd(std::min(lt.tm_sec, 59));   // no leap seconds on this chip
-  r.status1 = 0x02;      // 24-hour mode, not power-lost
-  r.ticking = true;
-  r.next_tick = nds_.sched.now() + ARM9_CLOCK_HZ;
-  nds_.sched.schedule(EventId::Rtc, r.next_tick, rtc_ev, 0);
 }
 
 void Io::start_rtc_clock() {
@@ -863,7 +875,7 @@ void Io::cart_catch_up_slow() {
 }
 
 void Io::cart_receive_word(u64 at) {
-  cart.fifo[(cart.fifo_head + cart.fifo_count) & 1] = nds_.cart ? nds_.cart->command_receive() : 0;
+  cart.fifo[(cart.fifo_head + cart.fifo_count) & 1] = nds_.cart ? nds_.cart->command_receive() : 0xFFFFFFFFu;   // an empty slot floats high
   cart.fifo_count++;
   cart.transfer_pos += 4;
   cart.romctrl |= 0x00800000u;                 // DRQ
@@ -1119,12 +1131,14 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0xc2: return ipc_fifo_cnt_read(cpu);
   case 0xd0: return cart.auxspicnt;
   case 0xd1: return cart.auxspidata;
+  case 0xd2: cart_catch_up(); return static_cast<u16>(cart.romctrl);          // ROMCTRL by halves (the 32-bit path is read32_special)
+  case 0xd3: cart_catch_up(); return static_cast<u16>(cart.romctrl >> 16);
   case 0xd4: case 0xd5: case 0xd6: case 0xd7: {
     const u32 i = addr - 0x040001A8; return static_cast<u16>(cart.cmd[i] | (cart.cmd[i + 1] << 8));
   }
   case 0xe0: return a9 ? 0 : spicnt_read_arm7();
   case 0xe1: return a9 ? 0 : spidata;
-  case 0x102: return exmemcnt;
+  case 0x102: return a9 ? exmemcnt : static_cast<u16>((exmemcnt & 0xFF80) | exmemcnt7);
   case 0x103: return (!a9 && (powcnt2 & 2)) ? wifiwaitcnt : 0;
   case 0x5d: case 0x63: case 0x69: case 0x6f: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000BA) / 12) >> 16);
   case 0x5c: case 0x62: case 0x68: case 0x6e: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12));
@@ -1178,6 +1192,8 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
     }
     cart.auxspicnt = (cart.auxspicnt & 0x0080) | (value & 0xE043);
     return;
+  case 0xd2: cart_write_romctrl((cart.romctrl & 0xFFFF0000u) | value); return;   // ROMCTRL by halves, as melonDS
+  case 0xd3: cart_write_romctrl((cart.romctrl & 0x0000FFFFu) | (static_cast<u32>(value) << 16)); return;
   case 0xd1: {
     if (!(cart.auxspicnt & 0x8000) || !(cart.auxspicnt & 0x2000)) return;
     const bool hold = cart.auxspicnt & 0x0040;
@@ -1193,11 +1209,12 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
     return;
   case 0xe1: if (!a9) spi_write_data(static_cast<u8>(value)); return;
   case 0x102: {
-    const u16 old = exmemcnt;
+    const u16 old = exmemcnt_slot2();
     // DSi has one more ARM9 bit, 10: which CPU the second card slot answers.
     const u16 rw9 = nds_.dsi ? 0x8CFF : 0x88FF;
-    exmemcnt = a9 ? ((exmemcnt & 0x6000) | (value & rw9)) : ((exmemcnt & 0xFF80) | (value & 0x007F));
-    if ((old ^ exmemcnt) & 0xFF) nds_.bus.update_gba_slot_timings();
+    if (a9) exmemcnt = (exmemcnt & 0x6000) | (value & rw9);
+    else exmemcnt7 = value & 0x7F;
+    if ((old ^ exmemcnt_slot2()) & 0xFF) nds_.bus.update_gba_slot_timings();
     return;
   }
   case 0xd4: case 0xd5: case 0xd6: case 0xd7: {
@@ -1304,9 +1321,18 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
   if (!a9 && addr == 0x04000138) { rtc_write(value, true); return; }
   if (!a9 && addr == 0x04000139) { rtc_write(static_cast<u16>((rtc.io & 0xFF) | (value << 8)), false); return; }
   if (!a9 && addr == 0x040001C2) { spi_write_data(value); return; }
+  // IF acknowledges the bits written as ones: only this byte's, not what the other byte reads back.
+  if ((addr & ~3u) == 0x04000214 || (addr & ~1u) == 0x0400021C) { write16(cpu, addr & ~1u, static_cast<u16>((addr & 1) ? value << 8 : value)); return; }
+  // A timer's reload is write-only (the address reads the counter): the other byte is the reload's own.
+  if (addr >= 0x04000100 && addr < 0x04000110 && !(addr & 2)) {
+    u16& reload = cpu_io[ci(cpu)].timers[(addr - 0x04000100) / 4].reload;
+    reload = (addr & 1) ? static_cast<u16>((reload & 0x00FF) | (value << 8)) : static_cast<u16>((reload & 0xFF00) | value);
+    return;
+  }
   // Generic byte write: read-modify-write the halfword.
   const u32 base = addr & ~1u;
   u16 cur = read16(cpu, base);
+  if (addr == 0x04000184) cur &= ~0x4000;   // IPCFIFOCNT: the error flag is acknowledged by a one written to it, in the other byte
   if (addr & 1) cur = static_cast<u16>((cur & 0x00FF) | (value << 8)); else cur = static_cast<u16>((cur & 0xFF00) | value);
   write16(cpu, base, cur);
 }
@@ -1858,6 +1884,9 @@ template <class S> void Io::sync_state(S& s) {
   wifi.sync_state_engine(s);  // appended (frames)
   if constexpr (S::reading) { sleeping = false; sleep_frame_cycles = 0; }
   s.fields(sleeping, sleep_frame_cycles);   // appended: older states are awake
+  if constexpr (S::reading) exmemcnt7 = exmemcnt & 0x7F;   // older states had one copy
+  s.fields(exmemcnt7);   // appended
+  if constexpr (S::reading) exmemcnt7 &= 0x7F;
   if constexpr (S::reading) nds_.bus.update_wifi_timings();
   s.end();
   if (nds_.dsi) {
@@ -1895,7 +1924,10 @@ template <class S> void Io::sync_state(S& s) {
     nds_.sched.rebind(EventId::LcdIrq, ev_lcd_irq);
     nds_.sched.rebind(EventId::Wifi, [](NDS& n, u32) { n.io.wifi.us_timer(); });
     // Clock is a session property, not state: this run's setting keeps
-    // going, rebased onto the restored timeline.
+    // going, rebased onto the restored timeline. A clock that follows the
+    // host shows the host's time again, not the hour the state was saved at
+    // (the chip's own registers -- status, alarms -- are the state's).
+    if (rtc_host_clock_) rtc_seed_time();
     if (rtc.ticking) { rtc.next_tick = nds_.sched.now() + ARM9_CLOCK_HZ; nds_.sched.schedule(EventId::Rtc, rtc.next_tick, rtc_ev, 0); }
     else nds_.sched.cancel(EventId::Rtc);
   }

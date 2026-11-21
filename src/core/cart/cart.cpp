@@ -255,6 +255,12 @@ static const bool g_auxspi_log = std::getenv("DS_AUXSPI_LOG") != nullptr;
 void Cart::spi_release() {
   if (g_auxspi_log && spi_pos_) std::fprintf(stderr, "[auxspi] cmd %02x addr %06x len %u status %02x%s\n", spi_cmd_, spi_addr_, spi_pos_, spi_status_, ir_cart_ ? " (ir)" : "");
   if (save_type_ == SaveType::Detect && spi_pos_ > 0) detect_release();
+  // The write-enable latch drops when a write, program or erase ends: each
+  // needs its own WREN, as on the chips (melonDS does the same).
+  if (spi_pos_ > 1) {
+    const bool flash = save_type_ == SaveType::Flash;
+    if (spi_cmd_ == 0x02 || spi_cmd_ == 0x0A || spi_cmd_ == 0x01 || (flash && (spi_cmd_ == 0xDB || spi_cmd_ == 0xD8))) spi_status_ &= ~2;
+  }
   spi_pos_ = 0; ir_pos_ = 0;
 }
 
@@ -341,8 +347,8 @@ u8 Cart::spi_transfer(u8 v) {
   u8 ret = 0xFF;
   if (spi_pos_ == 0) {
     switch (v) {
-    case 0x04: spi_status_ &= ~2; spi_pos_++; return 0;   // write disable
-    case 0x06: spi_status_ |= 2;  spi_pos_++; return 0;   // write enable
+    case 0x04: spi_status_ &= ~2; spi_cmd_ = v; spi_pos_++; return 0;   // write disable
+    case 0x06: spi_status_ |= 2;  spi_cmd_ = v; spi_pos_++; return 0;   // write enable
     default: spi_cmd_ = v; spi_addr_ = 0; break;
     }
     if (save_type_ == SaveType::Detect) detect_buf_.assign(1, v);

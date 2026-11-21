@@ -253,6 +253,7 @@ void Spu::next_adpcm(Channel& c) {
 s32 Spu::run_channel(Channel& c, u32 n) {
   if (!(c.cnt & 0x80000000u)) return 0;
   const u32 fmt = c.format();
+  if (fmt == 3 && (&c - ch_.data()) < 8) return 0;   // no PSG behind channels 0-7: the format is silent there
   const bool psg = fmt == 3 && (&c - ch_.data()) < 14;
   const bool noise = fmt == 3 && !psg;
   if (fmt < 3 && c.loop + c.len < 16) return 0;

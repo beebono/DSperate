@@ -149,7 +149,7 @@ void Bus::update_wifi_timings() {
 
 void Bus::update_gba_slot_timings() {
   // Only bits 0-4 and 7 reach the slot timings (5-6 are the PHI output).
-  const u16 ex = nds_.io.exmemcnt & 0x9F;
+  const u16 ex = nds_.io.exmemcnt_slot2() & 0x9F;
   if (gba_slot_applied_ == ex) return;
   gba_slot_applied_ = ex;
   prof::add(prof::C_BUS_GBA_TIMING, 1);
@@ -710,7 +710,7 @@ u32 Bus::slot2_read(Cpu cpu, u32 addr, u32 width) {
     if (width == 32) v |= rd(addr + 2) << 16 | rd(addr + 3) << 24;
   } else {
     static constexpr u16 decay[4] = {0xFE08, 0x0000, 0x0000, 0xFFFF};   // by the ROM's first-access wait (EXMEMCNT bits 2-3)
-    const u16 open = decay[(nds_.io.exmemcnt >> 2) & 3];
+    const u16 open = decay[(nds_.io.exmemcnt_slot2() >> 2) & 3];
     auto rd = [&](u32 a) -> u32 { return dev ? dev->rom_read16(a) : (((a >> 1) & 0xFFFF) | open); };
     v = width == 8 ? ((addr & 1) ? rd(addr - 1) >> 8 : rd(addr) & 0xFF) : rd(addr);
     if (width == 32) v |= rd(addr + 2) << 16;

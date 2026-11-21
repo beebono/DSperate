@@ -607,7 +607,7 @@ void NDS::setup_direct_boot_dsi() {
   // ARM9 starts 34 bus cycles late and the ARM7 15.
   arm9->boot_stall = 136; arm7->boot_stall = 15;
 
-  io.exmemcnt = hle ? 0xE88C : 0xE880; bus.update_gba_slot_timings();
+  io.exmemcnt = hle ? 0xE88C : 0xE880; io.exmemcnt7 = hle ? 0x0C : 0; bus.update_gba_slot_timings();
   io.cpu_io[0].postflg = 1; io.cpu_io[1].postflg = 1;
   io.powcnt1 = 0x820F; gpu.set_powcnt(0x820F);
   io.powcnt2 = 0x0001; spu.set_powcnt2(0x0001);

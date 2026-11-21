@@ -235,7 +235,12 @@ public:
   // Game has sampled AUX at least once.
   bool mic_used() const { return mic_used_; }
   void update_key_irq();
+  // EXMEMCNT. Bits 7-15 are the ARM9's and both CPUs read them; bits 0-6 (the
+  // GBA slot's waits) are one copy per CPU. `exmemcnt` is the ARM9's register.
   u16 exmemcnt = 0;
+  u8  exmemcnt7 = 0;         // the ARM7's bits 0-6
+  // The slot's waits are those of the CPU that owns it (bit 7), as melonDS.
+  u16 exmemcnt_slot2() const { return (exmemcnt & 0x80) ? static_cast<u16>((exmemcnt & 0xFF80) | exmemcnt7) : exmemcnt; }
   u16 wifiwaitcnt = 0;       // 0x04000206 (ARM7): live only while POWCNT2 bit 1
   u16 rcnt = 0;                     // 0x04000134 (ARM7), readback only
   u16 spicnt = 0; u8 spidata = 0;   // bit 7 never stored, see spi_busy()
@@ -319,6 +324,7 @@ private:
   void rtc_cmd_write(u8 value);
   void rtc_tick();
   void rtc_seed();              // from host local time
+  void rtc_seed_time();         // ... the date and time only
   bool rtc_host_clock_ = false; // survives reset()
   // status1 bit 7 (power lost) clears on guest read and stays clear across
   // reset(); otherwise every reboot re-enters the setup wizard.

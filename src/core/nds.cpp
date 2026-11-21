@@ -410,11 +410,19 @@ void NDS::setup_direct_boot() {
     w32(0x027FF868, static_cast<u32>(user_off) << 3);
     w16(0x027FF874, static_cast<u16>(firmware[0x06] | (firmware[0x07] << 8)));
     w16(0x027FF876, static_cast<u16>(firmware[0x04] | (firmware[0x05] << 8)));
-    // Two copies of the user settings; the one with the higher update counter wins.
+    // Two copies of the user settings: the one whose CRC holds, and of two
+    // good ones the newer by the 7-bit update counter, which wraps (0 follows
+    // 0x7F). As the firmware and melonDS choose.
     const u32 u0 = static_cast<u32>(user_off) << 3, u1 = u0 + 0x100;
-    auto counter = [&](u32 off) { return (off + 0x72 <= firmware.size()) ? (firmware[off + 0x70] | (firmware[off + 0x71] << 8)) & 0x7F : -1; };
-    const int c0 = counter(u0), c1 = counter(u1);
-    const u32 sel = (c1 > c0 && ((c1 - c0) & 0x7F) == 1) ? u1 : u0;
+    auto good = [&](u32 off) {
+      return off + 0x74 <= firmware.size() &&
+             bios::crc16(&firmware[off], 0x70, 0xFFFF) == static_cast<u16>(firmware[off + 0x72] | (firmware[off + 0x73] << 8));
+    };
+    auto counter = [&](u32 off) { return static_cast<u32>(firmware[off + 0x70] | (firmware[off + 0x71] << 8)) & 0x7F; };
+    const bool g0 = good(u0), g1 = good(u1);
+    u32 sel = u0;
+    if (g1 && (!g0 || ((counter(u1) - counter(u0)) & 0x7F) == 1)) sel = u1;
+    if (sel + 0x70 > firmware.size()) sel = 0;   // a pointer past the image: nothing sensible to copy, but stay inside it
     for (u32 i = 0; i < 0x70; i += 4) w32(0x027FFC80 + i, rd32(firmware.data() + sel + i));
   }
 
@@ -438,7 +446,7 @@ void NDS::setup_direct_boot() {
   arm7->jump(h.arm7_entry, true);
   arm9->hot.cycle_budget = 0; arm7->hot.cycle_budget = 0;
 
-  io.exmemcnt = 0xE880; bus.update_gba_slot_timings();
+  io.exmemcnt = 0xE880; io.exmemcnt7 = 0; bus.update_gba_slot_timings();
   io.wifiwaitcnt = 0x0030; bus.update_wifi_timings();   // Wi-Fi is unpowered until POWCNT2 says otherwise
   io.cpu_io[0].postflg = 1; io.cpu_io[1].postflg = 1;
   io.powcnt1 = 0x820F; gpu.set_powcnt(0x820F);

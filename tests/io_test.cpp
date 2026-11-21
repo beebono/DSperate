@@ -188,8 +188,55 @@ static void test_input() {
   nds.io.set_touch(400, -8, true);                                  // clamped to the screen
   CHECK_EQ(tsc_read(nds, 5), 255u << 4);
   CHECK_EQ(tsc_read(nds, 1), 0u);
+  // Chained conversions: the control byte of the next sample clocks out the
+  // low byte of the one before; an unwired channel reads full scale.
+  {
+    nds.io.set_touch(100, 50, true);
+    auto spi = [&](u8 v) {
+      nds.io.write(Cpu::ARM7, 0x040001C0, 16, 0x8000 | 0x0800 | 0x0200);
+      nds.io.write(Cpu::ARM7, 0x040001C2, 8, v);
+      nds.sched.run_until(nds.sched.now() + 4000);
+      return static_cast<u8>(nds.io.read(Cpu::ARM7, 0x040001C2, 8));
+    };
+    spi(0xD0);                                    // X
+    const u8 xhi = spi(0), xlo = spi(0x90);       // ... its low byte comes back under the Y control byte
+    const u8 yhi = spi(0), ylo = spi(0);
+    CHECK_EQ(static_cast<u32>((xhi << 5) | (xlo >> 3)), 100u << 4);
+    CHECK_EQ(static_cast<u32>((yhi << 5) | (ylo >> 3)), 50u << 4);
+    CHECK_EQ(spi(0), 0u);                         // past the sample: zeros
+    nds.io.write(Cpu::ARM7, 0x040001C0, 16, 0);
+    CHECK_EQ(tsc_read(nds, 2), 0xFFFu);           // battery channel
+  }
   nds.io.set_touch(0, 0, false);
   CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x40, 0x40u);
+
+  // ROMCTRL by halves and bytes reads what the 32-bit access reads.
+  nds.io.write(Cpu::ARM9, 0x040001A4, 32, 0x00416657);
+  CHECK_EQ(nds.io.read(Cpu::ARM9, 0x040001A4, 16), nds.io.read(Cpu::ARM9, 0x040001A4, 32) & 0xFFFF);
+  CHECK_EQ(nds.io.read(Cpu::ARM9, 0x040001A6, 16), nds.io.read(Cpu::ARM9, 0x040001A4, 32) >> 16);
+  CHECK_EQ(nds.io.read(Cpu::ARM9, 0x040001A5, 8), 0x66u);
+  nds.io.write(Cpu::ARM9, 0x040001A4, 16, 0x1234);
+  CHECK_EQ(nds.io.read(Cpu::ARM9, 0x040001A4, 32) & 0x1FFF, 0x1234u & 0x1FFF);
+  CHECK_EQ(nds.io.read(Cpu::ARM9, 0x040001A6, 16) & 0x003F, 0x0041u & 0x003F);   // the other half kept
+
+  // EXMEMCNT: bits 0-6 are one copy per CPU, the rest the ARM9's.
+  nds.io.write(Cpu::ARM9, 0x04000204, 16, 0x0015);
+  nds.io.write(Cpu::ARM7, 0x04000204, 16, 0xFF6A);
+  CHECK_EQ(nds.io.read(Cpu::ARM9, 0x04000204, 16) & 0x7F, 0x15u);
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000204, 16) & 0x7F, 0x6Au);
+  CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000204, 16) & 0xFF80, nds.io.read(Cpu::ARM9, 0x04000204, 16) & 0xFF80);
+
+  // A byte written to IF acknowledges that byte's bits only.
+  nds.io.cpu_io[0].if_ = 0x00010101;
+  nds.io.write(Cpu::ARM9, 0x04000214, 8, 0x01);
+  CHECK_EQ(nds.io.cpu_io[0].if_, 0x00010100u);
+  nds.io.write(Cpu::ARM9, 0x04000216, 8, 0x01);
+  CHECK_EQ(nds.io.cpu_io[0].if_, 0x00000100u);
+  nds.io.cpu_io[0].if_ = 0;
+  // A byte written to a timer's reload keeps the reload's other byte, not the counter's.
+  nds.io.write(Cpu::ARM9, 0x0400010C, 16, 0xAB00);
+  nds.io.write(Cpu::ARM9, 0x0400010C, 8, 0xCD);
+  CHECK_EQ(nds.io.cpu_io[0].timers[3].reload, 0xABCDu);
   CHECK_EQ(tsc_read(nds, 1), 0xFFFu);
 }
 
