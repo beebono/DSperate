@@ -329,9 +329,9 @@ void apply_colour(NDS& nds, const std::string& v) {
 
 // video.gpu3d_scale as the raster should run now: the setting, but 1 where
 // the windows cannot merge the raster's image (anything but the Vulkan
-// present, a bilinear or fractional seam filter: the CPU composite then
-// shows the 1x record and a finer image would be drawn for nothing), and no
-// finer than the largest view shows.
+// present, or chunky cells made at the source: the CPU composite then shows
+// the 1x record and a finer image would be drawn for nothing), and no finer
+// than the largest view shows.
 ds::u32 gpu3d_scale_now(int setting, const ds::sdl::Display& d1, const ds::sdl::Display& d2, bool dual) {
   const char* const e = std::getenv("DS_GPU3D_SCALE");   // overrides the setting, and is not held to the views' size (measurements; the merge's downsample)
   if (e) setting = std::atoi(e);
@@ -2960,14 +2960,11 @@ sdl_ready:
         const char* const api = nds.gpu3d.renderer().gpu_api();
         if (!*api) return flag("video.gpu3d", false) ? tr("GPU 3D IS NOT AVAILABLE HERE") : tr("ONLY WITH GPU 3D ON");
         if (std::strcmp(api, "Vulkan") != 0) return tr("VULKAN ONLY");
-        if (flag("video.linear", false)) return tr("BILINEAR IS ON");
         Disp::MergeBlock b = display.merge3d_block();
         if (b == Disp::MergeBlock::None && display2) b = display2->merge3d_block();
         switch (b) {
           case Disp::MergeBlock::NoVulkanPresent: return tr("NEEDS THE VULKAN PRESENT");
-          case Disp::MergeBlock::Bilinear: return tr("BILINEAR IS ON");
           case Disp::MergeBlock::ChunkySource: return tr("NOT WITH CHUNKY ON");
-          case Disp::MergeBlock::SeamBlend: return tr("NOT WITH BLENDED SEAMS AT THIS SIZE");
           case Disp::MergeBlock::None: break;
         }
         return "";

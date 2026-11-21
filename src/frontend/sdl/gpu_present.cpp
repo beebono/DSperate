@@ -118,7 +118,9 @@ struct GpuPresent::Impl {
   // The merge made once at the 3D layer's scale, where the view is larger (present.frag's `merged`): a pass into
   // an image of the layer's size per slot and screen, which the view's quad then takes texel by texel. On the
   // Mali-G52 the merge costs by the pixel (1.4-2.6 ms on a 4x view, 0.3-0.6 on one of a 2x layer's size).
-  struct Pre { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; VkFramebuffer fb = VK_NULL_HANDLE; };
+  // A view that filters (bilinear, blended seams) filters this image, the picture with its 3D in: `view_srgb`
+  // for the seams blended in linear light (decoded before the sampler weighs).
+  struct Pre { VkImage img = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE, view_srgb = VK_NULL_HANDLE; VkFramebuffer fb = VK_NULL_HANDLE; };
   Pre pre[kSlots][2];
   u32 pre_scale = 0;
   VkRenderPass rp_pre = VK_NULL_HANDLE;
@@ -128,6 +130,7 @@ struct GpuPresent::Impl {
     for (auto& s : pre) for (Pre& p : s) {
       if (p.fb) a->vkDestroyFramebuffer(vk->dev, p.fb, nullptr);
       if (p.view) a->vkDestroyImageView(vk->dev, p.view, nullptr);
+      if (p.view_srgb) a->vkDestroyImageView(vk->dev, p.view_srgb, nullptr);
       if (p.img) a->vkDestroyImage(vk->dev, p.img, nullptr);
       if (p.mem) a->vkFreeMemory(vk->dev, p.mem, nullptr);
       p = Pre{};
@@ -163,6 +166,7 @@ struct GpuPresent::Impl {
       VkImageCreateInfo ii{}; ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO; ii.imageType = VK_IMAGE_TYPE_2D; ii.format = VK_FORMAT_R8G8B8A8_UNORM;
       ii.extent = {256 * scale, 192 * scale, 1}; ii.mipLevels = 1; ii.arrayLayers = 1; ii.samples = VK_SAMPLE_COUNT_1_BIT; ii.tiling = VK_IMAGE_TILING_OPTIMAL;
       ii.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      ii.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;   // the sRGB view
       if (a->vkCreateImage(vk->dev, &ii, nullptr, &p.img) != VK_SUCCESS) { p.img = VK_NULL_HANDLE; return fail("image"); }
       VkMemoryRequirements mr{}; a->vkGetImageMemoryRequirements(vk->dev, p.img, &mr);
       VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; ai.allocationSize = mr.size;
@@ -172,6 +176,8 @@ struct GpuPresent::Impl {
       VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = p.img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
       vi.format = VK_FORMAT_R8G8B8A8_UNORM; vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
       if (a->vkCreateImageView(vk->dev, &vi, nullptr, &p.view) != VK_SUCCESS) { p.view = VK_NULL_HANDLE; return fail("image view"); }
+      vi.format = VK_FORMAT_R8G8B8A8_SRGB;
+      if (a->vkCreateImageView(vk->dev, &vi, nullptr, &p.view_srgb) != VK_SUCCESS) { p.view_srgb = VK_NULL_HANDLE; return fail("sRGB image view"); }
       VkFramebufferCreateInfo fci{}; fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fci.renderPass = rp_pre;
       fci.attachmentCount = 1; fci.pAttachments = &p.view; fci.width = 256 * scale; fci.height = 192 * scale; fci.layers = 1;
       if (a->vkCreateFramebuffer(vk->dev, &fci, nullptr, &p.fb) != VK_SUCCESS) { p.fb = VK_NULL_HANDLE; return fail("framebuffer"); }
@@ -743,6 +749,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
   // nearest without the grid, no copy and no filter pipeline (those cost
   // ~0.8 ms of GPU a frame at 4x, enough to tip GS:DD's GPU-bound frames over).
   u32 vfilter[2] = {kNearest, kNearest};
+  u32 mfilt[2] = {kNearest, kNearest};   // per view: the filter over a merged screen's picture (present.frag FEAT bits 13-14)
   bool vgrid[2] = {false, false};
   bool need_image = false;
   for (int v = 0; v < std::min(nviews, 2); ++v) {
@@ -751,6 +758,19 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     if (filter == kSeamBlend || filter == kSeamLinear) {
       vgrid[v] = false;   // the seams stand in for the grid
       if (r.h < 192 || (r.w % 256 == 0 && r.h % 192 == 0)) vfilter[v] = kNearest;
+    }
+    // A merged screen is filtered from its picture with the 3D in, the merge made first at the layer's scale
+    // (below): bilinear by the sampler over that image, the seams between the layer's texels (a view at a whole
+    // multiple of the layer, or smaller than it, has none to blend and is merged as a nearest view is). Where
+    // that pass cannot be made the view goes without its filter and not without its 3D.
+    const int scr = views[v].screen & 1;
+    if (views[v].shown && r.w > 0 && r.h > 0 && merging[scr] && (filter & 3u) != kNearest) {
+      const int lw3 = 256 * static_cast<int>(merge->s[scr].scale), lh3 = 192 * static_cast<int>(merge->s[scr].scale);
+      const u32 sc = merge->s[scr].scale;
+      u32 mf = filter & 3u;
+      if (mf != kBilinear && (r.w < lw3 || r.h < lh3 || (r.w % lw3 == 0 && r.h % lh3 == 0))) mf = kNearest;
+      if (mf != kNearest && !(sc >= 1 && sc <= 7 && d.merge_pipeline(false) && d.ensure_pre(sc))) mf = kNearest;
+      mfilt[v] = mf; vfilter[v] = kNearest;
     }
     need_image |= views[v].shown && vfilter[v] != kNearest;
   }
@@ -804,13 +824,15 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     const int scr = views[v].screen & 1;
     if (!views[v].shown || r.w <= 0 || r.h <= 0 || !merging[scr] || premerged[scr] || vfilter[v] != kNearest) continue;
     const u32 sc = merge->s[scr].scale;
-    if (sc < 1 || sc > 7 || 256 * static_cast<int>(sc) > r.w || 192 * static_cast<int>(sc) > r.h) continue;
-    if (static_cast<s64>(r.w) * r.h < 2 * static_cast<s64>(256 * sc) * (192 * sc)) continue;
+    if (mfilt[v] == kNearest) {   // a filtered view always takes the pass
+      if (sc < 1 || sc > 7 || 256 * static_cast<int>(sc) > r.w || 192 * static_cast<int>(sc) > r.h) continue;
+      if (static_cast<s64>(r.w) * r.h < 2 * static_cast<s64>(256 * sc) * (192 * sc)) continue;
+    }
     if (!d.merge_pipeline(false) || !d.ensure_pre(sc)) continue;
     VkPipeline pp = d.feat_pipeline(0, false, true, merge_feat(scr, SDL_Rect{0, 0, static_cast<int>(256 * sc), static_cast<int>(192 * sc)}), true);
     if (!pp) continue;
     const Impl::Pre& pi = d.pre[slot][scr];
-    const VkDescriptorImageInfo mi{d.lsamp, pi.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    const VkDescriptorImageInfo mi{mfilt[v] != kNearest ? d.fsamp : d.lsamp, mfilt[v] == kSeamLinear ? pi.view_srgb : pi.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet w{}; w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w.dstSet = d.bufs[buf].set[slot][scr]; w.dstBinding = 7; w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo = &mi;
     a.vkUpdateDescriptorSets(d.vk->dev, 1, &w, 0, nullptr);
@@ -877,7 +899,8 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     if (mp) {
       const u32 sc = merge->s[scr].scale;
       // Merged already at the layer's scale, if this view is no smaller than the layer: its texels alone.
-      if (premerged[scr] && 256 * static_cast<int>(sc) <= r.w && 192 * static_cast<int>(sc) <= r.h) feat |= 0x800u | (sc << 8);
+      if (premerged[scr] && mfilt[v] != kNearest) feat = 0x800u | (sc << 8) | (mfilt[v] << 13);   // no grid under a filter
+      else if (premerged[scr] && 256 * static_cast<int>(sc) <= r.w && 192 * static_cast<int>(sc) <= r.h) feat |= 0x800u | (sc << 8);
       else feat |= merge_feat(scr, r);
     }
     if (VkPipeline want = d.feat_pipeline(mp ? 0u : vfilter[v], fade, mp != VK_NULL_HANDLE, feat); want != bound) { a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, want); bound = want; }
@@ -917,7 +940,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     const Merge3D::Screen& m = merge->s[k];
     const int mv = merged_view[k];
     const bool fade = mv >= 0 && views[mv].blends && inset_alpha < 255;
-    if (mv < 0 || rot != 0 || grid < 256 || fade || views[mv].rect.w % 256 != 0 || views[mv].rect.h != views[mv].rect.w / 256 * 192) {
+    if (mv < 0 || mfilt[mv] != kNearest || rot != 0 || grid < 256 || fade || views[mv].rect.w % 256 != 0 || views[mv].rect.h != views[mv].rect.w / 256 * 192) {
       static bool said = false;
       if (!said) { said = true; std::fprintf(stderr, "gpu present: 3D merge check: a view is not checked (merged %d, rot %d, grid %u, fade %d)\n", mv >= 0 ? 1 : 0, rot, grid, fade ? 1 : 0); }
       continue;

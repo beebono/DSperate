@@ -46,9 +46,8 @@ public:
   // `filter`: how a view samples its frame, as the CPU scanline scaler does
   // (core/gpu/gpu.cpp emit_scaled): nearest (with the grid), bilinear (no
   // grid), or box-filter seams that stand in for the grid.
-  // `merge`: the 3D merge for one screen (video/presenter.h), or null. Only
-  // a view that samples nearest merges; the caller
-  // sees to that. Its screen is colour-corrected in the shader, after the merge, and not as it is uploaded.
+  // `merge`: the 3D merge for one screen (video/presenter.h), or null. A
+  // view that filters takes the merged picture through its filter. Its screen is colour-corrected in the shader, after the merge, and not as it is uploaded.
   enum Filter : u32 { kNearest = 0, kBilinear = 1, kSeamBlend = 2, kSeamLinear = 3 };
   bool present(ScanoutOut& out, const u32* const fb[2], const View* views, int nviews, int rot, int lw, int lh, u8 inset_alpha,
                SDL_Rect drawn = SDL_Rect{0, 0, 0, 0}, u32 grid = 256,
