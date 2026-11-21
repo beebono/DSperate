@@ -408,6 +408,11 @@ void directed() {
     {Cpu::ARM7, false, {0xE321F0D2, 0xE1500000, 0x116FF001, 0x016FF004, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {7, 0x1234ABD2u, 0, 0, 0xF00000D3u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM9, false, {0xE1500000, 0xE16FF001, 0xE14F2000, 0xE10F3000}, {7, 0xF00000D2u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM7, false, {0xE1500000, 0xE16FF001, 0xE14F2000, 0xE10F3000}, {7, 0xF00000D2u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // MSR CPSR_c from a register the ARMv7 backend caches (r4, r5), read again by the next instruction:
+    // the inline path's poll must not leave the cache believing the register is still in a scratch.
+    {Cpu::ARM9, false, {0xE129F004, 0xE0840004, 0xE2800001}, {0, 0, 0, 0, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE129F004, 0xE0840004, 0xE2800001}, {0, 0, 0, 0, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE129F004, 0xE0841004, 0xE129F005, 0xE0852005}, {0, 0, 0, 0, 0x5F, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     // v5TE DSP multiplies (ARM9 only). Operands are chosen so the halves are
     // distinguishable and the accumulate overflows, which is the only way the
     // sticky Q flag is exercised. r6/r9/r13 are reserved by the harness.

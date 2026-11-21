@@ -934,7 +934,14 @@ private:
   void emit_branch_indirect(u32 htarget, bool interwork, bool cdi = false, u32 hnumd = 0, u32 haddr = 0) {
     assert(cond_ == AL);
     cache_.flush();                                 // temps keep their values
-    flush_pending();
+    // The charge here, not through flush_pending: the flush above unlocked every slot, so a
+    // charge that is no immediate would take its temp from the slot holding the target.
+    if (pending_) {
+      u32 i;
+      if (encode_imm12(pending_, i)) e().dp_imm(SUB, false, R_BUDGET, R_BUDGET, i);
+      else { e().mov_imm(R_LR, pending_); e().sub_reg(R_BUDGET, R_BUDGET, R_LR); }
+      pending_ = 0;
+    }
     if (cdi) { const u32 d[3] = {0, 1, 2}, sr[3] = {htarget, hnumd, haddr}; emit_permute(d, sr, 3); }
     else if (htarget != SCRATCH0) e().mov(SCRATCH0, htarget);
     if (!interwork) {
@@ -1074,6 +1081,7 @@ void Translator::arm_msr(u32 instr, AOp op) {
   }
   if (fields & 8) e().msr_apsr_nzcvq(wv);
   if (fields & 1) { call_stub(rt().poll); e().word(make_key(pc_ + 4, thumb_)); }   // I may have changed
+  cache_.release(wv);   // the poll uses r0, r1 and r3: a cached source register is not in its slot any more (a pinned one is not a slot)
   cache_.release(t2); cache_.release(t3);
   if (f != 0xFF) cache_.release(f);
   if (fail.empty()) return;
