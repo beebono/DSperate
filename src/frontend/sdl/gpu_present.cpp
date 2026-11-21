@@ -62,7 +62,7 @@ constexpr u32 kFrameWords = 256 * 192;     // one screen
 // A slot's planes: both screens, two unused (2, 3), then
 // the 3D merge's: each screen's words (4, 5), each screen's coordinate words
 // (6, 7: present.frag finds them two planes on), and the line tables (192 words a screen).
-constexpr u32 kSlotPlanes = 9;
+constexpr u32 kSlotPlanes = 9;                // present.frag SLOT_PLANES is this
 constexpr u32 kSlotWords = kSlotPlanes * kFrameWords;
 constexpr u32 kMergePlane = 4, kLinePlane = 8;
 constexpr int kSlots = 2;                  // frames in flight + the one being written

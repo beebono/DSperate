@@ -36,7 +36,12 @@ layout(constant_id = 1) const uint FEAT = 255u;
 layout(binding = 4) uniform sampler2DArray frame;
 layout(binding = 5) uniform sampler2DArray frame_srgb;   // the same, decoded to linear before filtering
 
-float frame_layer() { uint q = pc.b.z / 49152u; return float((q >> 2) * 2u + (q & 3u)); }   // slot * 2 + screen
+// The frame's layer of the filters' image, slot * 2 + screen, from the view's base in `src`: a slot there is
+// SLOT_PLANES planes (gpu_present.cpp kSlotPlanes; the screens are its first two). It was taken as 4 after the
+// 3D merge's planes made it 9: the second slot's frames then came from layers that are not there, which the
+// sampler turned into one screen's last frame on both views, every other frame, under bilinear and blended seams.
+const uint SLOT_PLANES = 9u;
+float frame_layer() { uint q = pc.b.z / 49152u; return float((q / SLOT_PLANES) * 2u + q % SLOT_PLANES); }
 uint pack8(vec3 c) { uvec3 b = uvec3(round(clamp(c, 0.0, 1.0) * 255.0)); return 0xFF000000u | (b.r << 16) | (b.g << 8) | b.b; }
 vec3 encode_srgb(vec3 l) { return mix(l * 12.92, 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), l)); }
 
