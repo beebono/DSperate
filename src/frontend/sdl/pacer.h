@@ -72,11 +72,11 @@ public:
     next_ += static_cast<Uint64>(scale > 0.0 ? period_ / scale : period_);
     Uint64 now = SDL_GetPerformanceCounter();
     if (relief_) now = relieve(now);
-    late_ = 0; slipped_ = false;
+    late_ = 0; lost_ = 0;
     if (now >= next_) {
       late_ = now - next_;
       const Uint64 budget = static_cast<Uint64>(period_);   // cap debt at one frame
-      if (now - next_ > budget) { next_ = now - budget; slipped_ = true; }
+      if (now - next_ > budget) { lost_ = now - next_ - budget; next_ = now - budget; }
     } else {
       sleep_until(next_, now);
     }
@@ -84,9 +84,9 @@ public:
   }
 
   // The last wait(): how far past its deadline the frame's work ended (0: in time, and the wait slept the
-  // rest), and whether that was more than the frame of debt kept, so that the time over it is lost for good.
+  // rest), and how much of that was over the frame of debt kept: time lost for good, the game slow by it.
   double last_late_ms() const { return static_cast<double>(late_) / ticks_per_ns() / 1e6; }
-  bool last_slipped() const { return slipped_; }
+  double last_lost_ms() const { return static_cast<double>(lost_) / ticks_per_ns() / 1e6; }
 
   // Spin cost in us/frame, averaged since the last call. Informational only.
   double spin_us() {
@@ -192,7 +192,7 @@ private:
   double period_ = 0;        // in performance-counter ticks
   Uint64 next_ = 0;
   Uint64 late_ = 0;
-  bool slipped_ = false;
+  Uint64 lost_ = 0;
   double margin_ticks_ = 0;  // learned; starts at zero and grows into the first few frames
   double spin_ticks_ = 0;    // what the spin has cost since the last spin_us()
   unsigned spin_n_ = 0;

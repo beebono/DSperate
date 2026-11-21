@@ -62,18 +62,20 @@ inline void frame_report(const std::vector<double>& frame_ms, const char* label 
 // How the run kept to the frame limiter's schedule. `late_ms`: per paced frame, how far past its deadline its
 // work ended (0: in time). The deadlines accumulate, so a frame over its own budget is behind only when the frames
 // before it left no slack, and one long frame leaves the frames after it behind until their slack has paid it
-// back: behind is not slow (the sound's buffer takes it up), it is how little is left before time is lost. `slips`: frames late by more than the debt the limiter carries (a frame); the time
-// beyond that is lost, and the game ran slow by it.
-inline void pacing_report(const std::vector<double>& late_ms, unsigned long long slips) {
+// back: behind is not slow (the sound's buffer takes it up), it is how little is left before time is lost. `lost_ms`: the time by which frames
+// were later than the debt the limiter carries (a frame), over `slips` frames: that time is lost, and the game ran
+// slow by it. The time says how slow; the count alone does not (a tier whose flip waits for the panel's refresh
+// loses a little on many frames when the panel is a shade slower than the DS, and the run is still at speed).
+inline void pacing_report(const std::vector<double>& late_ms, double lost_ms, unsigned long long slips) {
   if (late_ms.empty()) return;
   size_t late = 0, late1 = 0, run = 0, longest = 0; double worst = 0, sum = 0;
   for (double x : late_ms) {
     if (x > 0) { ++late; sum += x; worst = std::max(worst, x); if (++run > longest) longest = run; } else run = 0;
     if (x > 1.0) ++late1;
   }
-  std::fprintf(stderr, "pacing: behind the limiter's schedule on %zu of %zu frames (%.2f%%), %zu by more than 1 ms; mean %.3f ms behind, worst %.3f (a frame is %.1f); longest stretch behind %zu frames; %llu frames lost time for good\n",
+  std::fprintf(stderr, "pacing: behind the limiter's schedule on %zu of %zu frames (%.2f%%), %zu by more than 1 ms; mean %.3f ms behind, worst %.3f (a frame is %.1f); longest stretch behind %zu frames; %.1f ms lost for good over %llu frames (the run %.2f%% slow)\n",
                late, late_ms.size(), 100.0 * static_cast<double>(late) / static_cast<double>(late_ms.size()), late1,
-               late ? sum / static_cast<double>(late) : 0.0, worst, kFrameBudgetMs, longest, slips);
+               late ? sum / static_cast<double>(late) : 0.0, worst, kFrameBudgetMs, longest, lost_ms, slips, 100.0 * lost_ms / (static_cast<double>(late_ms.size()) * kFrameBudgetMs));
 }
 
 }  // namespace ds

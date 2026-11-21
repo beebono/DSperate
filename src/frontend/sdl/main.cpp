@@ -2341,7 +2341,7 @@ sdl_ready:
   const double ticks_to_ms = 1e3 / static_cast<double>(SDL_GetPerformanceFrequency());
   std::vector<double> frame_ms, work_ms;   // emu slice; emu + present slice
   std::vector<double> late_ms;             // how far past its deadline each paced frame's work ended (frame_report.h pacing_report)
-  u64 late_slips = 0;                      // of those, the frames late by more than the debt the pacer keeps
+  double late_lost = 0; u64 late_slips = 0;   // the time over the debt the pacer keeps (lost for good), and the frames that lost some
   bool stats_frame = false, shown_started = false;
   if (frame_limit > 0) { frame_ms.reserve(static_cast<size_t>(frame_limit)); work_ms.reserve(static_cast<size_t>(frame_limit)); }
   Uint64 pace_ticks = 0, draw_ticks_total = 0;
@@ -4617,7 +4617,7 @@ sdl_ready:
     if ((fast && ff_speed <= 0) || limiter_off) pacer.reset();   // unthrottled: do not bank the time it gains
     else {
       pacer.wait(scale);
-      if (stats_frame) { late_ms.push_back(pacer.last_late_ms()); late_slips += pacer.last_slipped(); }
+      if (stats_frame) { late_ms.push_back(pacer.last_late_ms()); const double lost = pacer.last_lost_ms(); late_lost += lost; late_slips += lost > 0; }
     }
 
     pace_ticks += SDL_GetPerformanceCounter() - t3;
@@ -4741,7 +4741,7 @@ sdl_ready:
     ds::frame_report(work_ms, "work");
     // What the two series above cannot say: whether a frame over its budget cost anything. The pacer's deadlines
     // run on, so a long frame after a short one is still in time; and the display tier says what the panel showed.
-    ds::pacing_report(late_ms, late_slips);
+    ds::pacing_report(late_ms, late_lost, late_slips);
     {
       const ds::sdl::Display* const ds2[2] = {&display, &display2};
       for (int i = 0; i < 2; ++i) {
