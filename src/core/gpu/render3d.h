@@ -457,7 +457,11 @@ public:
 private:
   bool gpu_on_ = false;
   bool gpu_frame_ = false;   // the last drawn frame went to the GPU: lean_ holds the picture, not out_[]
-  u64 gpu_gen_base_ = 0;     // gpu_gen_ when the raster in use was created (its own count starts at 1)
+  // gpu_gen_ when the raster in use was created (its own count starts at 1),
+  // plus one for each job since that the submit thread could not submit: the
+  // raster counts only the frames it took, and a posted frame it did not take
+  // must not shift every later one's number (it reads as the frame before).
+  std::atomic<u64> gpu_gen_base_{0};
   u64 gpu_gen_ = 0;          // GPU submits posted (the last frame's is gpu_gen_)
   struct GpuResident { u32 off = 0, words = 0, version = 0; };
   std::unordered_map<u32, GpuResident> gpu_resident_;   // decoded texture (cache id) -> arena offset

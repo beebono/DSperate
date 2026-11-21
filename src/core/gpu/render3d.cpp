@@ -402,8 +402,13 @@ void Renderer3D::gpu_job_start() {
       const bool cpu = j->cpu; const u32 bank = j->bank; const u64 jframe = j->frame;
       lk.unlock();
       bool ok;
-      if (cpu) ok = gpu_stream_job(bank, jframe);
+      // DS_GPU_JOB_FAIL_AT=N (debug): the Nth job is not submitted, as a failed submit.
+      static const u64 fail_at = std::getenv("DS_GPU_JOB_FAIL_AT") ? std::strtoull(std::getenv("DS_GPU_JOB_FAIL_AT"), nullptr, 10) : 0;
+      static u64 job_n = 0;
+      if (fail_at && ++job_n == fail_at) ok = false;
+      else if (cpu) ok = gpu_stream_job(bank, jframe);
       else ok = lean_->submit(np, nv, ntex, f);
+      if (!ok) gpu_gen_base_.fetch_add(1, std::memory_order_relaxed);   // see gpu_gen_base_
       lk.lock();
       j->ok = ok; j->pending = false; ++j->done;
       j->cv.notify_all();
