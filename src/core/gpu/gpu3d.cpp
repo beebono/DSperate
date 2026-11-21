@@ -214,9 +214,15 @@ void clip_segment(Vertex& out, const Vertex& vin, const Vertex& vout) {
   out.clipped = true;
 }
 
+// A convex polygon of 4 vertices leaves the six planes with at most 10. A quad that is not convex (a bow tie, a
+// dart) can gain a vertex for every second one it has at each of the six half-plane passes: 4, 6, 9, 13, 19, 28,
+// 42. The buffers hold that; what is kept is the first kPolyMax (Polygon::vtx), as before for every polygon that
+// fitted. (Guitar Hero: On Tour sends such a quad when its frame logic runs late; ten wrote past the stack buffer.)
+constexpr int kClipMax = 48, kPolyMax = 10;
+
 template <int comp, bool attribs>
 int clip_against_plane(Vertex* v, int nverts, int clipstart, bool far_clip) {
-  Vertex temp[10];
+  Vertex temp[kClipMax];
   int c = clipstart;
   if (clipstart == 2) { temp[0] = v[0]; temp[1] = v[1]; }
   // Each pass reads one array and writes the other, avoiding a per-vertex copy.
@@ -276,7 +282,7 @@ int clip_polygon(Vertex* v, int nverts, int clipstart, bool far_clip) {
   nverts = clip_against_plane<2, attribs>(v, nverts, clipstart, far_clip);
   nverts = clip_against_plane<1, attribs>(v, nverts, clipstart, far_clip);
   nverts = clip_against_plane<0, attribs>(v, nverts, clipstart, far_clip);
-  return nverts;
+  return std::min(nverts, kPolyMax);
 }
 
 } // namespace
@@ -1129,7 +1135,7 @@ template <class S> void Gpu3D::emit_unclipped_t(S& s, const Vertex* const* src, 
 }
 
 template <class S> void Gpu3D::emit_clipped_t(S& s, const Vertex* const* src, int nverts, int clipstart, const u16* reused_idx, int lastpolyverts, bool facing) {
-  Vertex clipped[10];
+  Vertex clipped[kClipMax];
   for (int i = 0; i < nverts; ++i) clipped[i] = *src[i];
 
   nverts = clip_polygon<true>(clipped, nverts, clipstart, s.cur_polygon_attr_ & (1 << 12));
@@ -1245,7 +1251,7 @@ void Gpu3D::box_test(const u32* params) {
   }
   static const int faces[6][4] = {{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 3, 4, 5}, {1, 2, 7, 6}, {0, 1, 6, 5}, {2, 3, 4, 7}};
   for (const auto& f : faces) {
-    Vertex face[10];
+    Vertex face[kClipMax];
     for (int i = 0; i < 4; ++i) face[i] = cube[f[i]];
     if (clip_polygon<false>(face, 4, 0, cur_polygon_attr_ & (1 << 12)) > 0) { box_result_ = 1u << 1; return; }
   }
