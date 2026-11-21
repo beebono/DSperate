@@ -274,6 +274,69 @@ void Engine2D::compose_line() {
   top_mode_ = TOP_FULL;
 }
 
+const u8* Engine2D::repeat_row(u32 line, u32* cap_ref) const {
+  *cap_ref = 0;
+  const LineRegs r = regs_.capture();
+  if (!r.enabled || r.forced_blank) return nullptr;
+  if ((r.dispcnt & 0xE000) || (r.layer_enable & 0x10)) return nullptr;          // windows, sprites
+  if (num_ ? !((r.dispcnt >> 16) & 1) : ((r.dispcnt >> 16) & 3) != 1) return nullptr;   // a display mode that shows the engine
+  const u16 mb = r.master_bright;
+  if (((mb >> 14) == 1 || (mb >> 14) == 2) && (mb & 0x1F)) return nullptr;
+  const int mode = r.dispcnt & 7;
+  int bmp = -1;
+  for (int bg = 0; bg < 4; ++bg) {
+    if (!((r.layer_enable >> bg) & 1)) continue;
+    const u16 cnt = r.bgcnt[bg];
+    const bool ext = (bg == 3 && (mode == 3 || mode == 4 || mode == 5)) || (bg == 2 && mode == 5);
+    if (ext && (cnt & 0x84) == 0x84) { if (bmp >= 0) return nullptr; bmp = bg; continue; }   // a direct-colour bitmap
+    const bool text = bg < 2 || (bg == 2 && mode <= 1) || (bg == 3 && mode == 0);
+    if (!text || (bg == 0 && !num_ && (r.dispcnt & 8))) return nullptr;           // affine, or BG0 as the 3D layer
+    // A text row: blank only if its map row is one tile, repeated, and that tile's row is empty (draw_bg_text's test).
+    if ((cnt & (1 << 6)) && r.bg_mosaic_w > 0) return nullptr;
+    const VramView& vv = bg_vram();
+    const u32 yoff = r.bgvofs[bg] + ((cnt & (1 << 6)) ? r.bg_mosaic_line : line);
+    const bool wide = cnt & (1 << 14), tall = cnt & (1 << 15);
+    u32 tileset = (cnt & 0x003C) << 12, tilemap = (cnt & 0x1F00) << 3;
+    if (!num_) { tileset += (r.dispcnt & 0x07000000) >> 8; tilemap += (r.dispcnt & 0x38000000) >> 11; }
+    if (tall) { tilemap += (yoff & 0x1F8) << 3; if (wide) tilemap += (yoff & 0x100) << 3; } else tilemap += (yoff & 0xF8) << 3;
+    const u8* m0 = vv.direct(tilemap, 64);
+    const u8* m1 = wide ? vv.direct(tilemap + 0x800, 64) : m0;
+    if (!m0 || !m1) return nullptr;
+    u16 t0; std::memcpy(&t0, m0, 2);
+    for (const u8* m : {m0, m1}) for (u32 k = 0; k < 32; ++k) { u16 t; std::memcpy(&t, m + 2 * k, 2); if (t != t0) return nullptr; }
+    const bool c256 = cnt & (1 << 7);
+    const u32 ty = (t0 & (1 << 11)) ? 7 - (yoff & 7) : (yoff & 7);
+    const u32 a = c256 ? tileset + ((t0 & 0x3FF) << 6) + (ty << 3) : tileset + ((t0 & 0x3FF) << 5) + (ty << 2);
+    const u8* tp = vv.direct(a, c256 ? 8 : 4);
+    if (!tp) return nullptr;
+    u64 row = 0; std::memcpy(&row, tp, c256 ? 8 : 4);
+    if (row) return nullptr;
+  }
+  if (bmp < 0) return nullptr;
+  const u16 cnt = r.bgcnt[bmp];
+  if ((cnt & (1 << 6)) && r.bg_mosaic_w > 0) return nullptr;
+  if (((cnt >> 14) & 3) != 1) return nullptr;                                    // 256 pixels wide
+  if (r.pa[bmp - 2] != 0x100 || r.pc[bmp - 2] != 0) return nullptr;
+  const s32 rx = r.ref_x[bmp - 2], ry = r.ref_y[bmp - 2];
+  if ((rx >> 8) != 0) return nullptr;
+  const u32 ymask = 0xFFFF;
+  if (!(cnt & (1 << 13)) && (static_cast<u32>(ry) & ~ymask)) return nullptr;    // past the bitmap: nothing drawn
+  const u32 base = (cnt & 0x1F00) << 6;
+  const u32 rowoff = ((static_cast<u32>(ry) & ymask) >> 8) << 8;
+  // A colour effect with BG2/BG3 as a first target could change it.
+  const u32 bmode = (r.bldcnt >> 6) & 3;
+  if (bmode && (r.bldcnt & (1u << bmp))) return nullptr;
+  const u8* const src = bg_vram().direct(base + (rowoff << 1), 512);
+  if (src && cap_track_) {
+    const VramMap& vm = vram();
+    for (u32 b = 0; b < CAP_SLOTS; ++b) {
+      const u8* bank = vm.bank(cap_slot_bank(b));
+      if (src >= bank && src < bank + cap_slot_size(b)) { *cap_ref = CAP_REF | (b << 16) | static_cast<u32>((src - bank) / 2); break; }
+    }
+  }
+  return src;
+}
+
 const u32* Engine2D::cap_refs_whole() const {
   if (top_mode_ != TOP_ALL || !cur_.enabled || cur_.forced_blank || top_all_bg_ < 0 || top_all_bg_ >= 4 || !bg_cap_any_[top_all_bg_]) return nullptr;
   return bg_cap_[top_all_bg_];

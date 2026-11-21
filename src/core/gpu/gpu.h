@@ -89,7 +89,7 @@ public:
   void vram_remap_end(bool trapped);  // after: re-arm it
   void set_lazy(bool on) { lazy_enabled_ = on; }   // off: per-line rendering (tests)
 
-  const u32* framebuffer(int screen) const { return pages_[front_].fb[screen].data(); }   // 0 = top, 1 = bottom
+  const u32* framebuffer(int screen) const { return pages_[front_[screen & 1]].fb[screen & 1].data(); }   // 0 = top, 1 = bottom
   // For a frontend that shows the frame from another thread: between frames, hands over the frame just finished
   // and moves the core's drawing to its other page, so what framebuffer() and split3d_screen() return from here
   // on is not written while the next frame is drawn (nothing to copy). It is written again by the frame after
@@ -295,12 +295,29 @@ private:
     u16 split_reg[2][SCREEN_H] = {};
   };
   Page pages_[2];
-  u32 page_ = 0, front_ = 0;            // where lines are drawn; what the readers between frames get
+  // Per screen: the page its lines are drawn into, and the one its readers get between frames. A screen that
+  // draws no line in a frame (every line repeated) keeps showing the page it had, with nothing copied.
+  u32 page_[2] = {}, front_[2] = {};
   u64 page_drawn_[2][3] = {};           // per screen, a bit a line: drawn into pages_[page_] since it became the drawing page
-  Page& wp() { return pages_[page_]; }
-  Page& fp() { return pages_[front_]; }
-  const Page& fp() const { return pages_[front_]; }
+  Page& wp(int s) { return pages_[page_[s]]; }
+  Page& fp(int s) { return pages_[front_[s]]; }
+  const Page& fp(int s) const { return pages_[front_[s]]; }
   void patch_page();                    // the drawing page's undrawn lines, from the front page
+  void settle_pages();                  // the readers' pages from here (hand_frame, begin_frame)
+  // Repeated lines (DS_2D_REPEAT=0 off, 1 on, 2 verify): a game showing a 3D scene on each screen at 30 fps
+  // (Golden Sun: Dark Dawn) shows on the screen engine B drives the captured image engine A showed there the
+  // frame before, fed back a row per HBlank. A line engine B would draw from one row equal to the bank row
+  // engine A displayed on that screen and line the frame before (Engine2D::repeat_row, a hash of the 512
+  // bytes) is not drawn: the page keeps that frame's pixels and split words (patch_page). Verify draws it and
+  // compares. a_hash_: per frame parity and screen, engine A's displayed bank rows (VRAM display, no master
+  // brightness), on the worker that draws engine A, read from line 0 of the next frame.
+  int repeat_mode_ = 1;
+  u32 a_cur_ = 0;
+  u64 a_hash_[2][2][SCREEN_H] = {}, a_whash_[2][2][SCREEN_H] = {};   // the row's pixels; the line's split words and brightness words as engine A left them
+  bool a_ok_[2][2][SCREEN_H] = {};
+  u32 a_n_[2][2] = {};
+  std::atomic<u64> rep_lines_{0}, rep_checked_{0}, rep_bad_{0};
+  bool repeat_line(int e, u32 line);
   std::shared_ptr<const kern::ColourLut> colour_lut_;   // null: off
   ColourProfile colour_ = ColourProfile::Off;
   bool colour_cpu_ = true;

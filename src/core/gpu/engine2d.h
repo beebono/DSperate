@@ -98,6 +98,13 @@ public:
   static constexpr u32 cap_slot_size(u32 slot) { return slot < 4 ? 0x20000u : 0x8000u; }
   void set_cap_track(bool on) { cap_track_ = on; }
   bool cap_refs(u32* refs) const;
+  // The line ahead of drawing it (journal replayed, pre_draw done): when all it would show is one direct-colour
+  // bitmap row, unscaled from x 0 and 256 wide, opaque everywhere, with no window, sprites, colour effect on it or
+  // master brightness, and every other enabled background a uniformly blank text row: that row (512 bytes).
+  // Else null. Then the line's output is that row's colours and nothing else (Gpu's repeated lines).
+  // `cap_ref`: what the line's capture references would start from (CAP_REF | slot | pixel, the row's first
+  // pixel; 0 when the row is in no capture slot or captures are not tracked), as bitmap_row_degenerate sets them.
+  const u8* repeat_row(u32 line, u32* cap_ref) const;
   // The same where one layer is the line's top everywhere, fully opaque, with no window and no colour effect
   // (compose_line's one-layer pass): that layer's own references, not copied; else null. The line's output is
   // then that layer's pixels as resolved, nothing else.
