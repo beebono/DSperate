@@ -148,7 +148,7 @@ FlagUse arm_flag_use(u32 instr, bool a9) {
   case AOp::Mrs: u.reads = F_ALL; break;
   case AOp::MsrReg: case AOp::MsrImm:
     u.reads = F_ALL;                                   // mode-change path syncs CPSR via the interpreter
-    if (instr & (1u << 19)) u.writes = F_ALL;          // f field
+    if ((instr & (1u << 19)) && !(instr & (1u << 22))) u.writes = F_ALL;   // f field of the CPSR; MSR SPSR must not claim the flags
     break;
   case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::BlxReg: case AOp::Clz: case AOp::Pld: case AOp::Mcr:
   case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY:
@@ -1013,6 +1013,34 @@ void Translator::arm_msr(u32 instr, AOp op) {
   u32 wv;
   if (op == AOp::MsrImm) { wv = cache_.temp(); e().mov_imm(wv, rotr(instr & 0xFF, ((instr >> 8) & 0xF) * 2)); }
   else wv = cache_.read(instr & 0xF);
+  // MSR SPSR: one word of the context, no flags, no mode or bank change; skipped in USR/SYS, which have none.
+  if (instr & (1u << 22)) {
+    const u32 smask = ((fields & 1) ? 0x000000FFu : 0) | ((fields & 2) ? 0x0000FF00u : 0)
+                    | ((fields & 4) ? 0x00FF0000u : 0) | ((fields & 8) ? 0xFF000000u : 0);
+    add_pending(numC(pc_));
+    flush_pending();
+    if (!smask) return;
+    const u32 t2 = cache_.temp(), t3 = cache_.temp(), f = cache_.temp();
+    e().mrs_apsr(f);                              // the mode test below uses the host flags, which hold the guest's
+    e().ldr(t2, R_CTX, OFF_CPSR);
+    e().ubfx(t3, t2, 0, 5);
+    e().cmp_imm(t3, 0x10);
+    e().cmp_imm(t3, 0x1F, NE);
+    const size_t skip = e().b_fwd(EQ);
+    if (smask == 0xFFFFFFFFu) e().str(wv, R_CTX, OFF_SPSR);
+    else {
+      e().ldr(t2, R_CTX, OFF_SPSR);
+      e().mov_imm(t3, smask);
+      e().dp_reg(BIC, false, t2, t2, t3);
+      e().and_reg(t3, wv, t3);
+      e().orr_reg(t2, t2, t3);
+      e().str(t2, R_CTX, OFF_SPSR);
+    }
+    e().bind(skip);
+    e().msr_apsr_nzcvq(f);
+    cache_.release(t2); cache_.release(t3); cache_.release(f);
+    return;
+  }
   const u32 mem_mask = ((fields & 1) ? 0xC0u : 0) | ((fields & 2) ? 0xFF00u : 0) | ((fields & 4) ? 0xFF0000u : 0) | ((fields & 8) ? 0x0F000000u : 0);
   const bool tests = (fields & 7) != 0;
   std::vector<size_t> fail;

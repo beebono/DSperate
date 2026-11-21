@@ -394,6 +394,20 @@ void directed() {
     // MSR CPSR_cxsf with the full mask, same mode, and an IRQ-enable (I cleared) with no IRQ pending.
     {Cpu::ARM9, false, {0xE12FF001, 0xE2800001}, {0, 0x600000DFu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM9, false, {0xE129F001, 0xE2800001}, {0, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // MSR SPSR, read back with MRS SPSR (r2) beside MRS CPSR (r3): the write must land in the SPSR and
+    // leave the CPSR and the flags alone. In IRQ with the value's mode bits equal to the current mode
+    // (the case an MSR CPSR translation would take inline), with another mode in the value, one field
+    // from an immediate after a flag-setting compare, a conditional form, and in SYS, which has no SPSR.
+    {Cpu::ARM9, false, {0xE321F0D2, 0xE16FF001, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {0, 0x600000D2u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE321F0D2, 0xE16FF001, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {0, 0x600000D2u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE321F0D3, 0xE169F001, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {0, 0x9000001Fu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE321F0D3, 0xE169F001, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {0, 0x9000001Fu, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE321F0D2, 0xE1500000, 0xE368F20A, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE321F0D2, 0xE1500000, 0xE368F20A, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE321F0D2, 0xE1500000, 0x116FF001, 0x016FF004, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {7, 0x1234ABD2u, 0, 0, 0xF00000D3u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE321F0D2, 0xE1500000, 0x116FF001, 0x016FF004, 0xE14F2000, 0xE10F3000, 0xE321F0DF}, {7, 0x1234ABD2u, 0, 0, 0xF00000D3u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE1500000, 0xE16FF001, 0xE14F2000, 0xE10F3000}, {7, 0xF00000D2u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE1500000, 0xE16FF001, 0xE14F2000, 0xE10F3000}, {7, 0xF00000D2u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     // v5TE DSP multiplies (ARM9 only). Operands are chosen so the halves are
     // distinguishable and the accumulate overflows, which is the only way the
     // sticky Q flag is exercised. r6/r9/r13 are reserved by the harness.
