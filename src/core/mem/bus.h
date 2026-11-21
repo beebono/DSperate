@@ -115,6 +115,10 @@ public:
   u32 read32(Cpu cpu, u32 addr);
   // Fetch fallback for pages not directly mapped; DSi ARM7 BIOS lives here.
   u32 fetch(Cpu cpu, u32 addr, u32 width);
+  // The DS ARM7 BIOS: code that no page-table entry backs (see update_bios_map)
+  // and that Bus::fetch serves. The recompilers run a block on through it.
+  bool bios7_code(Cpu cpu, u32 addr) const;
+  static bool bios7_protect;   // see bus.cpp; read when the BIOS is mapped (update_bios_map)
   void write8 (Cpu cpu, u32 addr, u8  v);
   void write16(Cpu cpu, u32 addr, u16 v);
   void write32(Cpu cpu, u32 addr, u32 v);

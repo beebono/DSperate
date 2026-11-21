@@ -474,7 +474,7 @@ private:
     constexpr u32 SCAN = 8;
     u32 undecided = F_ALL, live = 0, nlo = std::min(lo, a), nhi = hi;
     for (u32 k = 0; k < SCAN && undecided; ++k, a += step()) {
-      if (!cpu_.page_table.read_ptr(a)) return F_ALL;
+      if (!cpu_.page_table.read_ptr(a) && !cpu_.nds->bus.bios7_code(cpu_.which, a)) return F_ALL;
       nlo = std::min(nlo, a); nhi = std::max(nhi, a + step() - 1);
       if (nhi - nlo >= mem::PAGE_SIZE) return F_ALL;
       const u32 raw = fetch(a);
@@ -917,6 +917,15 @@ private:
     e().bind(done);
     e().sub_reg(R_BUDGET, R_BUDGET, SCRATCH5);
   }
+  // The ARM7's BIOS answers a read by where it comes from (Bus::io_read), and
+  // translated code keeps no r15: a slow-path load on the ARM7 leaves the
+  // interpreter's value there first. Cold code only; w0 is the result register.
+  void emit_read_pc() {
+    if (a9_) return;
+    e().mov_imm(SCRATCH0, pc_ + (thumb_ ? 4 : 8));
+    e().str_w(SCRATCH0, R_CTX, off_reg(15));
+  }
+
   // One access at w1. const_nd >= 0: translate-time data cost, charged before
   // the access (nothing observes the budget in between).
   // `cold_poll`: the slow path polls and may leave at the next instruction; a
@@ -1013,6 +1022,7 @@ private:
     }
     cold_begin(fail);
     if (!is_load(m) && wdata != SCRATCH2) e().mov(SCRATCH2, wdata);
+    if (is_load(m)) emit_read_pc();
     call_stub(is_load(m) ? rt().slow_load[size_index(m)] : rt().slow_store[size_index(m)]);
     if (is_load(m)) emit_load_post(m, dst);
     cost();
@@ -1036,6 +1046,7 @@ private:
   // (both preserved by the stubs). LDM with r15 never reaches here.
   void emit_block_slow(u32 list, bool load, bool writeback, u32 rn, u32 n, bool user_bank, u32 pc_store_value) {
     e().and_imm(SCRATCH1, SCRATCH1, ~3u);
+    if (load) emit_read_pc();
     bool first = true;
     for (u32 i = 0; i < 16; ++i) {
       if (!(list & (1u << i))) continue;
@@ -2068,7 +2079,7 @@ bool Translator::run() {
     const bool ends = thumb_ ? shape::thumb_ends_block(static_cast<u16>(raw)) : shape::arm_ends_block(raw, a9_);
     addr += step();
     if (ends) break;
-    if (!cpu_.page_table.read_ptr(addr)) break;
+    if (!cpu_.page_table.read_ptr(addr) && !cpu_.nds->bus.bios7_code(cpu_.which, addr)) break;
   }
 
   phase(prof::JIT_TX_DECODE);

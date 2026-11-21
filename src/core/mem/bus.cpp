@@ -11,6 +11,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
 
@@ -227,6 +228,11 @@ void Bus::update_main_ram() {
 #endif
 }
 
+// DS_BIOS7_PROT=1: the DS ARM7 BIOS answers reads by where they come from, as
+// the hardware does. Off by default: its own reads (the SWI table, the sound
+// tables) then leave the recompilers' fast path, 0.06-0.19 ms a frame on the
+// RG DS Plus (2026-11-21), and no game is known to need it.
+bool Bus::bios7_protect = [] { const char* e = std::getenv("DS_BIOS7_PROT"); return e && e[0] == '1'; }();
 // DS: 4 KB ARM9 image mirrored over the top 64 KB, 16 KB ARM7 image at 0.
 // DSi: 64 KB images unless SCFG_BIOS switched a CPU back to its DS image;
 // hidden upper halves read as all ones via the slow path.
@@ -243,9 +249,10 @@ void Bus::update_bios_map() {
     map_page_aligned(pt9, 0xFFFF0000, BIOS9_SIZE, bios9.get(), RO, 0xFFFFFFFFu - 0xFFF);
     pt9.map(0xFFFFF000, 0x1000, bios9.get(), RO);
   }
-  // DSi ARM7 BIOS: left unmapped so every access goes through io_read, which
-  // applies the BIOS protection rules.
-  if (!(nds_.dsi && !(scfg_bios & 0x0200))) pt7.map(0x00000000, BIOS7_SIZE, bios7.get(), RO);
+  // DSi ARM7 BIOS, and the DS one under bios7_protect: left unmapped so every
+  // data read goes through io_read, which applies the BIOS protection rules;
+  // code is fetched through Bus::fetch.
+  if (!bios7_protect && !(nds_.dsi && !(scfg_bios & 0x0200))) pt7.map(0x00000000, BIOS7_SIZE, bios7.get(), RO);
 #if DSPERATE_JIT
   // The DSi's switch to the DS BIOS images puts other code at the same addresses.
   jit::remapped(nds_.cpu(Cpu::ARM9), 0xFFFF0000, 0xFFFFFFFF);
@@ -654,6 +661,14 @@ u32 Bus::io_read(Cpu cpu, u32 addr, u32 width) {
     return v;
   }
   if ((addr & 0xFF000000) == 0x04000000) return nds_.io.read(cpu, addr, width);
+  // The DS ARM7 BIOS reads as all ones to code outside it, and below BIOSPROT
+  // to code above it (melonDS NDS::ARM7Read). r15 is the interpreter's, and
+  // the recompilers' on a slow-path load.
+  if (bios7_code(cpu, addr)) {
+    const u32 pc = nds_.cpu(cpu).hot.regs[15], prot = nds_.io.arm7_bios_prot;
+    if (pc >= BIOS7_SIZE || (addr < prot && pc >= prot)) return width == 32 ? 0xFFFFFFFFu : width == 16 ? 0xFFFFu : 0xFFu;
+    u32 v = 0; std::memcpy(&v, bios7.get() + (addr & ~(width / 8 - 1)), width / 8); return v;
+  }
   // DSi: BIOS halves SCFG_BIOS hides read as all ones on both CPUs.
   if (nds_.dsi && (cpu == Cpu::ARM9 ? addr >= 0xFFFF0000 : addr < 0x00010000)) {
     const u32 ones = width == 32 ? 0xFFFFFFFFu : width == 16 ? 0xFFFFu : 0xFFu;
@@ -869,7 +884,13 @@ u32 Bus::read32(Cpu cpu, u32 addr) { return io_read(cpu, addr, 32); }
 void Bus::write8 (Cpu cpu, u32 addr, u8  v) { io_write(cpu, addr, 8, v); }
 void Bus::write16(Cpu cpu, u32 addr, u16 v) { io_write(cpu, addr, 16, v); }
 void Bus::write32(Cpu cpu, u32 addr, u32 v) { io_write(cpu, addr, 32, v); }
+bool Bus::bios7_code(Cpu cpu, u32 addr) const {
+  return bios7_protect && cpu == Cpu::ARM7 && addr < BIOS7_SIZE && (!nds_.dsi || (nds_.io.dsi.scfg_bios & 0x0200));
+}
 u32 Bus::fetch(Cpu cpu, u32 addr, u32 width) {
+  if (bios7_code(cpu, addr)) {
+    u32 v = 0; std::memcpy(&v, bios7.get() + (addr & ~(width / 8 - 1)), width / 8); return v;
+  }
   if (nds_.dsi && cpu == Cpu::ARM7 && addr < 0x00010000 && !(nds_.io.dsi.scfg_bios & 0x0200)) {
     if (addr >= 0x8000 && (nds_.io.dsi.scfg_bios & 0x0100)) return width == 32 ? 0xFFFFFFFFu : 0xFFFFu;
     u32 v = 0; std::memcpy(&v, bios7i.get() + (addr & 0xFFFF & ~(width / 8 - 1)), width / 8); return v;

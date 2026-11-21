@@ -28,7 +28,10 @@ struct Machine {
   NDS nds;
   CpuContext& cpu;
   explicit Machine(Cpu which) : cpu(nds.cpu(which)) {}
-  u8* host(u32 addr) { return cpu.page_table.read_ptr(addr); }
+  u8* host(u32 addr) {
+    if (cpu.which == Cpu::ARM7 && addr < mem::Bus::BIOS7_SIZE) return nds.bus.bios7.get() + addr;   // no page-table entry: read protection
+    return cpu.page_table.read_ptr(addr);
+  }
   void poke32(u32 addr, u32 v) { std::memcpy(host(addr), &v, 4); }
   void poke16(u32 addr, u16 v) { std::memcpy(host(addr), &v, 2); }
 };

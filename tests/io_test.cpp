@@ -647,6 +647,27 @@ int main() {
   test_power_off();
   test_dma_ignores_tcm();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
+  // ARM7 BIOS read protection: all ones to code outside the BIOS, and below
+  // BIOSPROT to BIOS code above it; code fetch is not a data read.
+  {
+    mem::Bus::bios7_protect = true;
+    NDS n2;
+    u32 word = 0x12345678; std::memcpy(n2.bus.bios7.get() + 0x100, &word, 4); std::memcpy(n2.bus.bios7.get() + 0x2000, &word, 4);
+    n2.io.arm7_bios_prot = 0x1204;
+    CpuContext& a7 = n2.cpu(Cpu::ARM7);
+    a7.hot.regs[15] = 0x02380008;
+    CHECK_EQ(n2.bus.read32(Cpu::ARM7, 0x2000), 0xFFFFFFFFu);
+    CHECK_EQ(n2.bus.read16(Cpu::ARM7, 0x2000), 0xFFFFu);
+    CHECK_EQ(n2.bus.read8(Cpu::ARM7, 0x100), 0xFFu);
+    a7.hot.regs[15] = 0x00002008;                       // BIOS code above the protected part
+    CHECK_EQ(n2.bus.read32(Cpu::ARM7, 0x2000), 0x12345678u);
+    CHECK_EQ(n2.bus.read32(Cpu::ARM7, 0x100), 0xFFFFFFFFu);
+    a7.hot.regs[15] = 0x00000208;                       // and inside it
+    CHECK_EQ(n2.bus.read32(Cpu::ARM7, 0x100), 0x12345678u);
+    CHECK_EQ(n2.bus.read8(Cpu::ARM7, 0x101), 0x56u);
+    a7.hot.regs[15] = 0x02380008;
+    CHECK_EQ(n2.bus.fetch(Cpu::ARM7, 0x100, 32), 0x12345678u);
+  }
   std::puts("io: ok");
   return 0;
 }

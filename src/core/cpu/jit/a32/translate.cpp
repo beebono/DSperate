@@ -718,6 +718,10 @@ private:
     cache_.restore(s0);
     cache_.writeback();
     emit_slow_args(a, load ? 0xFF : data);
+    if (load && !a9_) {   // the ARM7's BIOS answers a read by where it comes from (Bus::io_read): cold code only
+      e().mov_imm(SCRATCH3, pc_ + (thumb_ ? 4 : 8));
+      e().str(SCRATCH3, R_CTX, off_reg(15));
+    }
     call_stub(load ? rt().slow_load[size_index(m)] : rt().slow_store[size_index(m)]);
     if (load) {
       emit_load_post(m, 0, 1, 2);
@@ -1693,7 +1697,7 @@ bool Translator::run() {
     const bool ends = thumb_ ? shape::thumb_ends_block(static_cast<u16>(raw)) : shape::arm_ends_block(raw, a9_);
     addr += step();
     if (ends) break;
-    if (!cpu_.page_table.read_ptr(addr)) break;
+    if (!cpu_.page_table.read_ptr(addr) && !cpu_.nds->bus.bios7_code(cpu_.which, addr)) break;
   }
 
   // Backward flag liveness.
