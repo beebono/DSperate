@@ -377,7 +377,7 @@ void report() {
     const auto& il = ds::cpu::idle_loop_stats();
     std::fprintf(stderr, "[profile] idle-loop: queries %llu hits %llu analyses %llu\n",
                  (unsigned long long)il.queries, (unsigned long long)il.hits, (unsigned long long)il.analyses);
-    for (u32 r = 1; r < 12; ++r)
+    for (u32 r = 1; r < 13; ++r)
       if (il.by_reason[r])
         std::fprintf(stderr, "[profile]   reject %-14s %10llu\n",
                      ds::cpu::idle_reject_name(static_cast<ds::cpu::IdleReject>(r)),

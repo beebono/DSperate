@@ -6,8 +6,9 @@
 // no stores/MMIO/SWI/coprocessor/PSR writes/calls, all loads from
 // page-table-backed RAM (loop-invariant, no writeback), and no loop-carried
 // register dependency (distinguishes a poll loop from a counting delay loop).
-// The structural verdict is cached per (pc, mode); load addresses are
-// re-checked against live registers each time since the base can differ.
+// The structural verdict is cached per (pc, mode). Each query then runs the
+// loop once from the live state (still_spinning): the exit condition must not
+// hold now, and the loads must hit pure addresses with the bases they have.
 #pragma once
 #include "core/types.h"
 
@@ -29,13 +30,14 @@ bool in_idle_loop(CpuContext& cpu, IdlePorts ports = IdlePorts::All);
 void invalidate_idle_loops();
 
 // Diagnostics (DS_PROFILE): how the analysis is landing.
-enum class IdleReject : u8 { None, Thumb, Fetch, NoBackEdge, TooLong, Store, LoadForm, BadInstr, PcWrite, Carried, NoLoad, Mmio };
+enum class IdleReject : u8 { None, Thumb, Fetch, NoBackEdge, TooLong, Store, LoadForm, BadInstr, PcWrite, Carried, NoLoad, Mmio, Exit };
 const char* idle_reject_name(IdleReject r);
 IdleReject idle_loop_last_reject();
 
 struct IdleLoopStats {
   u64 queries, hits, analyses;
-  u64 by_reason[12];   // indexed by IdleReject
+  u64 by_reason[13];   // indexed by IdleReject
+  u64 check_differs;   // DS_IDLE_CHECK=1: instructions the proof and the interpreter ran differently
 };
 const IdleLoopStats& idle_loop_stats();
 
