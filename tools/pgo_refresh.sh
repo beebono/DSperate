@@ -197,21 +197,15 @@ train ghontour --guitar-grip --save "$HERE/scenes/ghontour.sav" --load-state "$H
 # DS_SPLIT3D=present runs the split with no presenter. Without these runs all of that was built cold, and a
 # PGO build was the slower one with GPU 3D on (Golden Sun's title: 555-566 of 1500 frames over 16.7 ms against
 # 107-113 unprofiled, 2026-11-20). The scenes are ones above again, so both routes weigh in the profile.
-# They run GPU_PASSES times in all (the counts add up): run once, the eleven CPU-raster runs outweighed them
-# and the functions the two routes share were still laid out for the CPU raster's use of them. On the RG DS
-# Plus, frames of 1500 over 16.7 ms with GPU 3D at 2x, once against four times: Golden Sun's title 332-500
-# against 39-45, Spirit Tracks 14 against 0; with the CPU raster the two profiles are the same (25 and 0-2).
-# A run of the instrumented build on the device itself did no better than this.
-GPU_PASSES=4
+# Once each is enough: four times each measured 0.2-0.3 ms better on Golden Sun's title on the RG DS Plus, inside
+# the runs' own spread (42-53 against 47-59 frames of 1500 over 16.7 ms), and a run of the instrumented build on
+# the device itself did no better either.
 train_gpu() { echo "  train: $1"; shift; DS_GPU3D_API=null DS_SPLIT3D=present $Q "$G" "${C[@]}" --gpu3d "$@" > /dev/null 2>&1 || echo "  (run failed: $*)"; }
-gpu_scenes() {
-  train_gpu gpu-gsdd  --frames 2400 "$DS_ROMS/Golden Sun - Dark Dawn.nds" &
-  train_gpu gpu-st    --frames 2400 "$DS_ROMS/Legend of Zelda, The - Spirit Tracks.nds" &
-  train_gpu gpu-nsmb  --frames 1500 "$DS_ROMS/New Super Mario Bros..nds" &
-  train_gpu gpu-sm64  --replay "$HERE/scenes/sm64.dsin"  --frames 600 "$DS_ROMS/Super Mario 64 DS.nds" &
-  train_gpu gpu-dbori --replay "$HERE/scenes/dbori.dsin" --frames 600 "$DS_ROMS/Dragon Ball - Origins.nds" &
-}
-gpu_scenes
+train_gpu gpu-gsdd  --frames 2400 "$DS_ROMS/Golden Sun - Dark Dawn.nds" &
+train_gpu gpu-st    --frames 2400 "$DS_ROMS/Legend of Zelda, The - Spirit Tracks.nds" &
+train_gpu gpu-nsmb  --frames 1500 "$DS_ROMS/New Super Mario Bros..nds" &
+train_gpu gpu-sm64  --replay "$HERE/scenes/sm64.dsin"  --frames 600 "$DS_ROMS/Super Mario 64 DS.nds" &
+train_gpu gpu-dbori --replay "$HERE/scenes/dbori.dsin" --frames 600 "$DS_ROMS/Dragon Ball - Origins.nds" &
 SCENES="mlbis sm64 etody dbori meteos gsdd st nsmb ghontour gpu-gsdd gpu-st gpu-nsmb gpu-sm64 gpu-dbori"
 if [ $DSI_OK = 1 ]; then
   # BIOS-only DSiWare: the launcher's hand-off is emulated over a synthetic
@@ -231,7 +225,6 @@ else
   echo "  (DSi scenes skipped: $DSI_WHY)"
 fi
 wait
-for pass in $(seq 2 $GPU_PASSES); do echo "  GPU route, pass $pass of $GPU_PASSES"; gpu_scenes; wait; done
 n=$(find "$PROFILE" -name '*.gcda' | wc -l)
 echo "  profiles: $n"
 [ "$n" -gt 0 ] || { echo "no profile written"; exit 1; }
