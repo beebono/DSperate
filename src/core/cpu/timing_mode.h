@@ -8,6 +8,11 @@
 //   fast   (the default where the recompiler implements it) every data
 //          access costs a constant, loads and stores pay numC + data with no
 //          overlap and no region rules, and every jump's refill is a constant.
+//   turbo  fast with the ARM9 charged less than the hardware charges it: a
+//          game that sets its frame rate by how long its frame took (Okamiden
+//          drops from 30 to 20 fps in its wide views, on the hardware's
+//          timing too) holds the higher rate. Not the console's speed, so a
+//          game that leans on it may misbehave.
 // What fast removes is the per-access timing code in translated code (a table
 // load and the combine) and the refill lookup of every indirect branch; numC,
 // resolved when a block is translated, stays exact. The cartridge keeps its
@@ -26,9 +31,24 @@ namespace ds {
 // A single constant low enough for the former made main-RAM-bound idle work
 // (PW2's) iterate ~40% more per frame, and one at the whole-run average (4)
 // pushed ST's and NSMB's frame logic past VBlank, halving their 3D rate.
-struct FastTiming { u32 d9s = 0, d9 = 5, d7 = 2, r9 = 4, r7 = 2; };
+//
+// d9 and r9 were 5 and 4 until 2026-11-20: that charged main-RAM-bound games
+// more than the exact model does. Okamiden's still 900-polygon view ran at
+// 15 fps (exact: 20) and its pans dropped frames exact does not; Dragon Ball:
+// Origins showed 415 new top-screen frames in 1800 against exact's 458. With
+// 4 and 3 both match or pass exact, and the boot scenes (GS:DD, ST, PH, NSMB,
+// Mario Kart) keep their frame counts.
+// Turbo: Okamiden's wide views hold 30 fps from d9 2, r9 2 down (one slip in
+// 240 frames at exactly that); 1 and 2 leave a margin. The ARM7 is left alone.
+struct FastTiming { u32 d9s = 0, d9 = 4, d7 = 2, r9 = 3, r7 = 2; };
+constexpr FastTiming kTurboTiming{0, 1, 2, 2, 2};
 extern bool g_fast_timing;
 extern FastTiming g_fast;
+// "exact" | "fast" | "turbo": sets the two above. False (and nothing changes)
+// for any other word. Before anything runs, as the recompiler bakes them in.
+// DS_FAST's constants, when set, stay over fast's and turbo's.
+bool set_timing(const char* name);
+const char* timing_name();
 
 // Whether a load/store addresses through SP. ARM: every load/store encoding
 // has its base in bits 19-16 (and the cost is only read by those). Thumb: only

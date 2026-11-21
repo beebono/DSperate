@@ -20,6 +20,7 @@ const Choice kSkipMode[] = {{"adaptive", N_("ADAPTIVE")}, {"fixed", N_("FIXED")}
 // Panel-typical rates, plus the console's own (auto, the default) and no limit.
 const Choice kLimiter[] = {{"auto", N_("CONSOLE (59.8)")}, {"30", "30"}, {"60", "60"}, {"120", "120"},
                            {"144", "144"}, {"240", "240"}, {"off", N_("UNLIMITED")}};
+const Choice kTiming[]   = {{"fast", N_("FAST")}, {"exact", N_("EXACT")}, {"turbo", N_("TURBO")}};
 const Choice kIntScale[] = {{"off", N_("OFF")}, {"under", N_("UNDER")}, {"over", N_("OVER")}};
 const Choice kSeam[]     = {{"dark", N_("DARK")}, {"blend", N_("BLEND")}, {"blend_linear", N_("BLEND LINEAR")}};
 const Choice kChunky[]   = {{"false", N_("OFF")}, {"mean", N_("DEFAULT")}, {"extreme", N_("ADAPTIVE")},
@@ -111,6 +112,9 @@ const Setting kEmuSettings[] = {
   number("audio.buffer_size", N_("AUDIO BUFFER"), 20, 200, 10, "auto", FlagLive, Dep::None,
          N_("SOUND HELD AHEAD. LOWER IS LESS DELAY, LESS SLACK BEFORE A LATE FRAME IS HEARD"),
          "auto", N_("AUTO"), " MS"),
+  // Turbo is not the console's speed: the host warns once a session when it is picked here (main.cpp).
+  pick("emu.timing", N_("CPU TIMING"), kTiming, 3, "fast", FlagRestart, Dep::None,
+       N_("EXACT IS THE CONSOLE'S, AND SLOWER TO RUN. TURBO GIVES GAMES MORE CPU: SMOOTHER, MAY BREAK SOME")),
   boolean("emu.autosave", N_("AUTOSAVE ON QUIT"), "false", FlagLive, Dep::None,
           N_("SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM")),
   boolean("emu.autoload", N_("AUTOLOAD ON START"), "false", FlagRestart, Dep::None,

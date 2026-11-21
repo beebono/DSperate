@@ -11,17 +11,26 @@
 
 namespace ds {
 
-// Fast unless DS_TIMING=exact.
+// Fast unless DS_TIMING says otherwise (exact | fast | turbo).
 // DS_FAST="d9s,d9,d7,r9,r7" overrides the fast model's constants (tuning only).
-FastTiming g_fast = [] {
-  FastTiming f;
+namespace {
+bool g_turbo = false;
+FastTiming fast_constants(bool turbo) {
+  FastTiming f = turbo ? kTurboTiming : FastTiming{};
   if (const char* e = std::getenv("DS_FAST")) std::sscanf(e, "%u,%u,%u,%u,%u", &f.d9s, &f.d9, &f.d7, &f.r9, &f.r7);
   return f;
-}();
-bool g_fast_timing = [] {
-  if (const char* e = std::getenv("DS_TIMING")) return std::strcmp(e, "exact") != 0;
+}
+}
+FastTiming g_fast = fast_constants(false);
+bool g_fast_timing = true;
+bool set_timing(const char* name) {
+  const bool exact = !std::strcmp(name, "exact"), turbo = !std::strcmp(name, "turbo");
+  if (!exact && !turbo && std::strcmp(name, "fast") != 0) return false;
+  g_fast_timing = !exact; g_turbo = turbo; g_fast = fast_constants(turbo);
   return true;
-}();
+}
+const char* timing_name() { return !g_fast_timing ? "exact" : g_turbo ? "turbo" : "fast"; }
+namespace { [[maybe_unused]] const bool g_timing_env = [] { const char* e = std::getenv("DS_TIMING"); return e && set_timing(e); }(); }
 
 namespace {
 // Bank index for each mode: {USR/SYS, FIQ, IRQ, SVC, ABT, UND}.

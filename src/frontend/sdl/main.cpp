@@ -194,7 +194,8 @@ const char* kUsage =
     "  --no-vsync      present without waiting for the display refresh\n"
     "  --interp        interpreter instead of the recompiler\n"
     "  --timing M      CPU cycle model: fast (default: constant memory and jump costs, much cheaper)\n"
-    "                  | exact (melonDS's per-access model); emu.timing\n"
+    "                  | exact (melonDS's per-access model) | turbo (fast, the ARM9 charged less than\n"
+    "                  the console's: smoother where a game drops frames, may break others); emu.timing\n"
     "  --aa / --no-aa  3D anti-aliasing (video.aa, off by default): the DS's own edge blend on the\n"
     "                  CPU raster; 4x MSAA on the GPU raster under Vulkan, none under OpenGL ES\n"
     "  --gpu3d / --no-gpu3d  the 3D layer drawn on the GPU (video.gpu3d, off by default): Vulkan,\n"
@@ -1432,8 +1433,9 @@ static int run(int argc, char** argv) {
   std::optional<ds::sdl::OffRealtime> startup_off_rt(std::in_place);
   // CPU timing model (core/cpu/timing_mode.h), fixed before anything runs or
   // the recompiler emits its stubs. DS_TIMING wins.
-  if (cfg.has("emu.timing") && !std::getenv("DS_TIMING")) ds::g_fast_timing = cfg.str("emu.timing") != "exact";
-  VLOG("cpu timing: %s\n", ds::g_fast_timing ? "fast" : "exact");
+  if (cfg.has("emu.timing") && !std::getenv("DS_TIMING") && !ds::set_timing(cfg.str("emu.timing").c_str()))
+    std::fprintf(stderr, "config: emu.timing = %s is not exact, fast or turbo; fast\n", cfg.str("emu.timing").c_str());
+  VLOG("cpu timing: %s\n", ds::timing_name());
   if (cfg.num("emu.host_cores", 0) > 0) ds::set_host_cores(static_cast<ds::u32>(cfg.num("emu.host_cores", 0)));   // DS_HOST_CORES still wins
   VLOG("host: %u cores\n", ds::host_cores());
   // Thread layout (host_cores.h): before any worker starts, so each places itself.
@@ -2432,6 +2434,7 @@ sdl_ready:
   };
   if (cfg.flag("emu.dsi_nand_shortcuts", false)) sync_nand_shortcuts(true);
   std::string shortcuts_note;   // what the last change of the row did, for a toast
+  bool turbo_note = false, turbo_warned = false;   // emu.timing was set to turbo in the menu: a warning toast, once a session (not at launch: the ini says it)
   std::string gpu3d_note = std::move(gpu3d_refused);   // why GPU 3D did not start (at launch, or from its row), for a toast
   std::vector<ds::sdl::Menu::GameEntry> games =
       boot_firmware && nds.cart ? enumerate_library(cfg) : std::vector<ds::sdl::Menu::GameEntry>{};
@@ -3024,6 +3027,7 @@ sdl_ready:
     if (is("slot2.solar")) { if (ds::slot2::GameCart* g = nds.gba_cart()) g->set_light_level(std::atoi(v.c_str())); return; }
     if (is("emu.frameskip")) { if (!net_live) fs_limit = std::atoi(v.c_str()); return; }
     if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }
+    if (is("emu.timing")) { if (v == "turbo" && !turbo_warned) turbo_warned = turbo_note = true; return; }   // read at launch; the warning is the frame loop's toast
     if (is("emu.dsi_nand_shortcuts")) {
       shortcuts_note = sync_nand_shortcuts(on);   // shown by the frame loop's toast
       if (boot_firmware && nds.cart) games = enumerate_library(cfg);
@@ -4237,6 +4241,15 @@ sdl_ready:
       t.frames = TOAST_FRAMES;
       toast_queue.push_back(std::move(t));
       gpu3d_note.clear();
+    }
+    if (turbo_note) {
+      turbo_note = false;
+      Toast t;
+      t.header = tr("TURBO TIMING");
+      t.title = tr("NOT THE CONSOLE'S SPEED");
+      t.detail = tr("GAMES MAY GLITCH OR HANG");
+      t.frames = TOAST_FRAMES;
+      toast_queue.push_back(std::move(t));
     }
     if (!shortcuts_note.empty()) {
       Toast t;

@@ -363,7 +363,7 @@ int main(int argc, char** argv) {
     else if (arg("--cheat")) enable_cheats.push_back(argv[++i]);   // enable one by name, or by "#N" from --list-cheats
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit = false;
-    else if (arg("--timing")) { const char* m = argv[++i]; if (!std::getenv("DS_TIMING")) ds::g_fast_timing = std::strcmp(m, "exact") != 0; }   // CPU cycle model (timing_mode.h): fast (default) | exact; DS_TIMING wins
+    else if (arg("--timing")) { const char* m = argv[++i]; if (!std::getenv("DS_TIMING") && !ds::set_timing(m)) { std::fprintf(stderr, "--timing: exact, fast or turbo\n"); return 2; } }   // CPU cycle model (timing_mode.h): fast (default) | exact | turbo; DS_TIMING wins
 
     else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
