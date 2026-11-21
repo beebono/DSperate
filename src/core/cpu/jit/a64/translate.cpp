@@ -11,6 +11,7 @@
 //   w1    effective address (preserved across cost arithmetic and slow path)
 //   x2,x3 page-table entry / host base
 //   w4-w7 temporaries; w7 = writeback value (preserved by the slow path)
+#include "core/cpu/block_xfer.h"
 #include "core/cpu/jit/jit_internal.h"
 #include "core/cpu/wait_loop.h"
 #include "core/cpu/jit/a64/convention.h"
@@ -1046,14 +1047,14 @@ private:
         // STM of its own base: old base if first in list, else new.
         if (i == 15) e().mov_imm(SCRATCH2, pc_store_value);
         else if (ub) e().ldr_w(SCRATCH2, R_CTX, ub);
-        else e().mov(SCRATCH2, (i == rn && !first && writeback) ? SCRATCH7 : host_reg(i));
+        else e().mov(SCRATCH2, (i == rn && writeback && cpu::stm_stores_new_base(a9_, first)) ? SCRATCH7 : host_reg(i));
         call_stub(rt().slow_store[2]);
       }
       e().add_imm(SCRATCH1, SCRATCH1, 4, true);
       first = false;
     }
     // LDM loading its own base keeps the loaded value.
-    if (load) { if (writeback && !(list & (1u << rn))) e().mov(host_reg(rn), SCRATCH7); }
+    if (load) { if (writeback && cpu::ldm_writeback_wins(a9_, thumb_, list, rn)) e().mov(host_reg(rn), SCRATCH7); }
     else if (writeback) e().mov(host_reg(rn), SCRATCH7);
     // Cost after the transfers, as the interpreter and the single-access slow path
     // charge it: an I/O access sees the time before this instruction's data cycles
@@ -1120,7 +1121,7 @@ private:
         if (ub) e().str_w(SCRATCH2, R_CTX, ub);
         ++k;
       }
-      if (writeback && !(list & (1u << rn))) e().mov(host_reg(rn), SCRATCH7);
+      if (writeback && cpu::ldm_writeback_wins(a9_, thumb_, list, rn)) e().mov(host_reg(rn), SCRATCH7);
     } else {
       for (u32 i = 0; i < 16; ++i) {
         if (!(list & (1u << i))) continue;
@@ -1128,7 +1129,7 @@ private:
         const u32 ub = user_bank ? user_bank_off(i) : 0;
         if (ub) { e().ldr_w(SCRATCH2, R_CTX, ub); src = SCRATCH2; }
         else if (i == 15) { e().mov_imm(SCRATCH0, pc_store_value); src = SCRATCH0; }
-        else if (i == rn && !first && writeback) src = SCRATCH7;
+        else if (i == rn && writeback && cpu::stm_stores_new_base(a9_, first)) src = SCRATCH7;
         else src = host_reg(i);
         if (k == 0 && fast) fm_fault_here();
         e().str_w(src, SCRATCH3, 4 * k);

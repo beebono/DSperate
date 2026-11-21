@@ -6,6 +6,7 @@
 // Guest r0-r3/sp are pinned in r4-r8; others go through an LRU RegCache (host
 // r0-r3/r12), written back before anything can observe memory. Guest NZCVQ lives
 // in host APSR; conditionals are predicated. Rare ops go to the fallback stub.
+#include "core/cpu/block_xfer.h"
 #include "core/cpu/jit/jit_internal.h"
 #include "core/cpu/jit/a32/convention.h"
 #include "core/cpu/jit/a32/emit.h"
@@ -782,7 +783,7 @@ private:
         cache_.unlock(h);
         ++k;
       }
-      if (writeback && !(list & (1u << rn))) {         // a loaded rn wins over the writeback
+      if (writeback && cpu::ldm_writeback_wins(a9_, thumb_, list, rn)) {   // on the ARM7 a loaded rn wins over the writeback
         const u32 h = cache_.write(rn, false);
         e().mov(h, wv);
         cache_.unlock(h);
@@ -793,7 +794,7 @@ private:
         u32 src;
         bool tmp = false;
         if (i == 15) { src = cache_.temp(); e().mov_imm(src, pc_store_value); tmp = true; }
-        else if (i == rn && !first && writeback) src = wv;
+        else if (i == rn && writeback && cpu::stm_stores_new_base(a9_, first)) src = wv;
         else src = cache_.read(i);
         e().str(src, en, 4 * k);
         if (tmp) cache_.release(src); else if (src != a && src != t_w) cache_.unlock(src);
@@ -1150,7 +1151,7 @@ void Translator::arm_ldm_stm(u32 instr, bool load) {
   else   { if (p) e().sub_imm(a, hb, n * 4, a); else e().sub_imm(a, hb, n * 4 - 4, a); }
   e().and_imm(a, a, ~3u);
   u32 t_w = 0xFF;
-  if (w && !(!u && p)) {                               // db!: writeback = start address, no t_w
+  if (w) {                                             // its own register: `a` is word-aligned below, the writeback is not
     t_w = cache_.temp();
     if (u) e().add_imm(t_w, hb, n * 4, t_w); else e().sub_imm(t_w, hb, n * 4, t_w);
   }

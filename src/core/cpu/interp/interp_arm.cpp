@@ -3,6 +3,7 @@
 //
 // ARM-state executor (ARMv5TE). melonDS is the behavioural reference for
 // DS-specific corners, including where each instruction charges its cycles.
+#include "core/cpu/block_xfer.h"
 #include "core/cpu/interp/interp_internal.h"
 #include "core/cpu/cp15.h"
 
@@ -174,7 +175,7 @@ void ldm_stm(CpuContext& cpu, u32 instr, bool load) {
       u32 v = mem_read32(cpu, addr, !first); first = false; addr += 4;
       if (i == 15) { pc_loaded = true; pc_val = v; } else R(cpu, i) = v;
     }
-    if (w && !(list & (1u << rn))) R(cpu, rn) = wb;   // Rn in list: loaded value wins
+    if (w && cpu::ldm_writeback_wins(is_arm9(cpu), false, list, rn)) R(cpu, rn) = wb;   // Rn in list: the loaded value stays on the ARM7
     if (user_bank && saved_mode) cpu.switch_mode(saved_mode);
     if (pc_loaded) {
       if (s) cpu.restore_cpsr();
@@ -186,8 +187,8 @@ void ldm_stm(CpuContext& cpu, u32 instr, bool load) {
       if (!(list & (1u << i))) continue;
       u32 v = R(cpu, i);
       if (i == 15) v += 4;
-      // STM Rn-in-list: first reg stores original base, later ones the writeback value.
-      if (i == rn && !first && w) v = wb;
+      // STM Rn-in-list: the original base, or on the ARM7 the writeback value when it is not the first stored.
+      if (i == rn && w && cpu::stm_stores_new_base(is_arm9(cpu), first)) v = wb;
       mem_write32(cpu, addr, v, !first); addr += 4;
       first = false;
     }

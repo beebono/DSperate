@@ -417,6 +417,21 @@ void directed() {
     // an ADC that reads the earlier C (set) and a CMP that rewrites every flag.
     {Cpu::ARM9, false, {0xE1500000, 0xE2A66000, 0xE2905000, 0xE7991062, 0xE1500000}, {0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM7, false, {0xE1500000, 0xE2A66000, 0xE2905000, 0xE7991062, 0xE1500000}, {0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // LDM/STM with the base in the list and writeback: the ARM7 and the ARM9 differ (cpu/block_xfer.h).
+    {Cpu::ARM9, false, {0xE8A10003, 0xE9110018}, {0x11, BUF_BASE + 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // STMIA r1!, {r0, r1}: the base stored second (ARM7: the new base; ARM9: the old), read back into r3/r4
+    {Cpu::ARM7, false, {0xE8A10003, 0xE9110018}, {0x11, BUF_BASE + 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // STMIA r1!, {r0, r1}: the base stored second (ARM7: the new base; ARM9: the old), read back into r3/r4
+    {Cpu::ARM9, false, {0xE8A00003, 0xE9100018}, {BUF_BASE + 0x40, 0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // STMIA r0!, {r0, r1}: the base stored first is the old base on both
+    {Cpu::ARM7, false, {0xE8A00003, 0xE9100018}, {BUF_BASE + 0x40, 0x22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // STMIA r0!, {r0, r1}: the base stored first is the old base on both
+    {Cpu::ARM9, false, {0xE8800006, 0xE8B00003}, {BUF_BASE + 0x40, 0x111, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // LDMIA r0!, {r0, r1}: the base not last (ARM9: writeback wins; ARM7: the loaded value)
+    {Cpu::ARM7, false, {0xE8800006, 0xE8B00003}, {BUF_BASE + 0x40, 0x111, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // LDMIA r0!, {r0, r1}: the base not last (ARM9: writeback wins; ARM7: the loaded value)
+    {Cpu::ARM9, false, {0xE8800006, 0xE8B00001}, {BUF_BASE + 0x40, 0x111, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // LDMIA r0!, {r0}: the base alone (ARM9: writeback wins)
+    {Cpu::ARM7, false, {0xE8800006, 0xE8B00001}, {BUF_BASE + 0x40, 0x111, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // LDMIA r0!, {r0}: the base alone (ARM9: writeback wins)
+    {Cpu::ARM9, false, {0xE8810005, 0xE8B10003}, {0x111, BUF_BASE + 0x40, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // LDMIA r1!, {r0, r1}: the base last, the loaded value stays on both
+    {Cpu::ARM7, false, {0xE8810005, 0xE8B10003}, {0x111, BUF_BASE + 0x40, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // LDMIA r1!, {r0, r1}: the base last, the loaded value stays on both
+    {Cpu::ARM9, false, {0xE9200006, 0xE9100018}, {BUF_BASE + 0x42, 0x111, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // STMDB r0!, {r1, r2} from an unaligned base: the writeback keeps the low bits
+    {Cpu::ARM7, false, {0xE9200006, 0xE9100018}, {BUF_BASE + 0x42, 0x111, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // STMDB r0!, {r1, r2} from an unaligned base: the writeback keeps the low bits
+    {Cpu::ARM9, true, {0xC103, 0x3908, 0xC90C}, {0x11, BUF_BASE + 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // Thumb STMIA r1!, {r0, r1}, read back into r2/r3
+    {Cpu::ARM7, true, {0xC103, 0x3908, 0xC90C}, {0x11, BUF_BASE + 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // Thumb STMIA r1!, {r0, r1}, read back into r2/r3
     // v5TE DSP multiplies (ARM9 only). Operands are chosen so the halves are
     // distinguishable and the accumulate overflows, which is the only way the
     // sticky Q flag is exercised. r6/r9/r13 are reserved by the harness.
