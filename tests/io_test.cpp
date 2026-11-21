@@ -210,6 +210,45 @@ static void test_input() {
   nds.io.set_touch(0, 0, false);
   CHECK_EQ(nds.io.read(Cpu::ARM7, 0x04000136, 16) & 0x40, 0x40u);
 
+  // RTC: the hour in both modes, and the alarm and per-minute interrupts.
+  {
+    io::Rtc& r = nds.io.rtc;
+    const io::Rtc keep = r;
+    const u8 t2359[7] = {0x26, 0x11, 0x21, 6, 0x23 | 0x40, 0x59, 0x59};
+    r.status1 = 0x02; std::memcpy(r.datetime, t2359, 7);
+    nds.io.rtc_step_second();
+    CHECK(r.datetime[4] == 0x00 && r.datetime[2] == 0x22 && r.datetime[3] == 0);      // midnight: next day, flag clear
+    r.datetime[4] = 0x11; r.datetime[5] = 0x59; r.datetime[6] = 0x59;
+    nds.io.rtc_step_second();
+    CHECK(r.datetime[4] == (0x12 | 0x40));                                             // noon: the PM flag in 24-hour mode
+    r.status1 = 0x00; r.datetime[4] = 0x11; r.datetime[5] = 0x59; r.datetime[6] = 0x59;   // 12-hour mode, 11:59:59 AM
+    nds.io.rtc_step_second();
+    CHECK(r.datetime[4] == 0x40 && r.datetime[2] == 0x22);                             // 0 PM, same day
+    r.datetime[4] = 0x11 | 0x40; r.datetime[5] = 0x59; r.datetime[6] = 0x59;
+    nds.io.rtc_step_second();
+    CHECK(r.datetime[4] == 0x00 && r.datetime[2] == 0x23);                             // 0 AM, next day
+
+    io::CpuIo& c7 = nds.io.cpu_io[1];
+    nds.io.rcnt = 0x8100; c7.if_ = 0;
+    r.status1 = 0x02; r.status2 = 0x04; r.irq_flag = 0;                                // INT1: alarm 1
+    r.alarm1[0] = 0; r.alarm1[1] = 0x80 | 0x07; r.alarm1[2] = 0x80 | 0x30;             // 07:30, any day
+    r.datetime[4] = 0x07; r.datetime[5] = 0x28; r.datetime[6] = 0x59;
+    nds.io.rtc_step_second();
+    CHECK(!(c7.if_ & (1u << io::IRQ_RTC)));                                            // 07:29
+    r.datetime[6] = 0x59;
+    nds.io.rtc_step_second();
+    CHECK(c7.if_ & (1u << io::IRQ_RTC));                                               // 07:30
+    CHECK(r.status1 & 0x10);
+    c7.if_ = 0; r.datetime[6] = 0x59;
+    nds.io.rtc_step_second();
+    CHECK(!(c7.if_ & (1u << io::IRQ_RTC)) && !(r.irq_flag & 0x10));                    // 07:31: the line drops
+    r.status2 = 0x02; r.datetime[6] = 0x59;                                            // per-minute edge
+    nds.io.rtc_step_second();
+    CHECK(c7.if_ & (1u << io::IRQ_RTC));
+    nds.io.rcnt = 0; c7.if_ = 0;
+    r = keep;
+  }
+
   // ROMCTRL by halves and bytes reads what the 32-bit access reads.
   nds.io.write(Cpu::ARM9, 0x040001A4, 32, 0x00416657);
   CHECK_EQ(nds.io.read(Cpu::ARM9, 0x040001A4, 16), nds.io.read(Cpu::ARM9, 0x040001A4, 32) & 0xFFFF);
@@ -409,7 +448,7 @@ static void test_rtc_clock() {
   // Second, minute and hour carry.
   set_date(nds, 0x26, 0x09, 0x02, 3, 0x11, 0x59, 0x59);
   advance_seconds(nds, 1);
-  CHECK_DATE(nds, 0x26, 0x09, 0x02, 0x12, 0x00, 0x00);
+  CHECK_DATE(nds, 0x26, 0x09, 0x02, 0x12 | 0x40, 0x00, 0x00);   // the PM flag is set from noon in 24-hour mode too
   set_date(nds, 0x26, 0x09, 0x02, 3, 0x23, 0x59, 0x59);
   advance_seconds(nds, 1);
   CHECK_DATE(nds, 0x26, 0x09, 0x03, 0x00, 0x00, 0x00);
@@ -693,7 +732,6 @@ int main() {
   test_generated_firmware();
   test_power_off();
   test_dma_ignores_tcm();
-  if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   // ARM7 BIOS read protection: all ones to code outside the BIOS, and below
   // BIOSPROT to BIOS code above it; code fetch is not a data read.
   {
@@ -715,6 +753,38 @@ int main() {
     a7.hot.regs[15] = 0x02380008;
     CHECK_EQ(n2.bus.fetch(Cpu::ARM7, 0x100, 32), 0x12345678u);
   }
+  // DSi power button and volume keys: BPTWL flags, and IRQ2 bit 6 once register 0x12 enables it.
+  {
+    NDS d;
+    d.dsi = true;
+    d.io.bptwl_reset();
+    u8* r = d.io.dsi.bptwl_regs;
+    d.io.dsi.if2 = 0;
+    r[0x40] = 0x10;
+    d.io.dsi_volume_button(true);
+    CHECK(r[0x40] == 0x15 && (r[0x10] & 0x40) && !(d.io.dsi.if2 & (1u << io::IRQ2_BPTWL)));   // flagged, interrupt off
+    r[0x12] = 0x01; r[0x10] = 0;
+    d.io.dsi_volume_button(false);
+    CHECK(r[0x40] == 0x10 && (d.io.dsi.if2 & (1u << io::IRQ2_BPTWL)));
+    d.io.dsi.if2 = 0; r[0x10] = 0;
+    d.io.dsi_power_button(true);
+    CHECK(r[0x10] == 0x08);                                   // pressed
+    d.io.dsi_power_button(false);
+    CHECK(r[0x10] == 0x09 && !d.dsi_soft_reset_pending);      // a tap: reset, left to software
+    r[0x10] = 0;
+    d.io.dsi_power_button(true);
+    d.sched.run_until(d.sched.now() + ARM9_CLOCK_HZ);
+    d.io.dsi_power_button(true);
+    d.io.dsi_power_button(true);
+    CHECK(r[0x10] == 0x0A && !d.power_off);                   // held: shutdown, flagged once
+    d.io.dsi_power_button(false);
+    CHECK(r[0x10] == 0x0A);
+    r[0x12] = 0x00;                                           // interrupt off: the controller acts itself
+    d.io.dsi_power_button(true);
+    d.io.dsi_power_button(false);
+    CHECK(d.dsi_soft_reset_pending);
+  }
+  if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
   std::puts("io: ok");
   return 0;
 }

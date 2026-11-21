@@ -80,6 +80,7 @@ struct Rtc {
   u8  datetime[7] = {0, 1, 1, 0, 0, 0, 0};   // yy mm dd dow hh mm ss (BCD)
   u8  alarm1[3] = {}, alarm2[3] = {};
   u8  clock_adjust = 0, free_reg = 0;
+  u8  irq_flag = 0;             // 0x10 / 0x20: the INT1 / INT2 lines; 0x01: a minute has carried
   // Off by default for determinism; see Io::start_rtc_clock.
   bool ticking = false;
   u64  next_tick = 0;           // next one-second carry
@@ -192,6 +193,16 @@ public:
   DsiCamModule cam;        // 0x04004200 (ARM9); sensors on I2C 0x78/0x7A
   void request_irq2(u32 bit);
   void bptwl_reset();
+  // The DSi's power button and volume keys, from the frontend (no-ops on a DS).
+  // They reach software as BPTWL interrupt flags (register 0x10, IRQ2 bit 6
+  // when register 0x12 enables it); with the interrupt off the controller
+  // resets or powers off itself. After melonDS DSi_BPTWL.
+  // Power: call with `down` every frame it is held, and once with false on release.
+  void dsi_power_button(bool down);
+  void dsi_volume_button(bool up);   // one press (the frontend's key repeat is the hold)
+  void bptwl_irq(u8 flags);
+  bool bptwl_power_down_ = false, bptwl_power_shut_ = false;   // this press: held, and its shutdown flag raised
+  u64  bptwl_power_since_ = 0;
   void reprice_clock9_store(u32 idx);
   void i2c_write_cnt(u8 value);
   u8   bptwl_read(bool last);
@@ -323,6 +334,10 @@ private:
   void rtc_cmd_read();
   void rtc_cmd_write(u8 value);
   void rtc_tick();
+  void rtc_set_irq(u8 line);
+  void rtc_carry_minute();
+  void rtc_hour_written();
+  void rtc_process_irq(int type);   // 0 = minute carry, 1 = second, 2 = status register written
   void rtc_seed();              // from host local time
   void rtc_seed_time();         // ... the date and time only
   bool rtc_host_clock_ = false; // survives reset()
@@ -330,6 +345,7 @@ private:
   // reset(); otherwise every reboot re-enters the setup wizard.
   bool rtc_power_lost_seen_ = false;
 public:
+  void rtc_step_second() { rtc_tick(); }   // one second of the clock, with its interrupts (tests)
   void start_rtc_clock();   // host time; also clears power-lost; survives reset()
   bool rtc_host_clock() const { return rtc_host_clock_; }
   // Re-read the host clock into a running RTC (after the host slept, which

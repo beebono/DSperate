@@ -611,9 +611,9 @@ static int from_bcd(u8 v) { return (v >> 4) * 10 + (v & 0x0F); }
 static void rtc_ev(NDS& nds, u32) { nds.io.rtc_event(); }
 
 void Io::rtc_seed() {
-  rtc_seed_time();
   Rtc& r = rtc;
   r.status1 = 0x02;      // 24-hour mode, not power-lost
+  rtc_seed_time();
   r.ticking = true;
   r.next_tick = nds_.sched.now() + ARM9_CLOCK_HZ;
   nds_.sched.schedule(EventId::Rtc, r.next_tick, rtc_ev, 0);
@@ -633,7 +633,10 @@ void Io::rtc_seed_time() {
   r.datetime[1] = to_bcd(lt.tm_mon + 1);
   r.datetime[2] = to_bcd(lt.tm_mday);
   r.datetime[3] = static_cast<u8>(lt.tm_wday);  // 0 = Sunday
-  r.datetime[4] = to_bcd(lt.tm_hour);   // always 24-hour (status1 bit 1)
+  // In the chip's own mode (status 1 bit 1): 24-hour with the PM flag set
+  // from noon, or 0-11 with the flag.
+  if (r.status1 & 0x02) r.datetime[4] = static_cast<u8>(to_bcd(lt.tm_hour) | (lt.tm_hour >= 12 ? 0x40 : 0));
+  else r.datetime[4] = static_cast<u8>(to_bcd(lt.tm_hour % 12) | (lt.tm_hour >= 12 ? 0x40 : 0));
   r.datetime[5] = to_bcd(lt.tm_min);
   r.datetime[6] = to_bcd(std::min(lt.tm_sec, 59));   // no leap seconds on this chip
 }
@@ -643,20 +646,74 @@ void Io::start_rtc_clock() {
   rtc_seed();
 }
 
+// The chip's two interrupt outputs, after melonDS RTC::ProcessIRQ. Both reach
+// the ARM7 as IRQ 7 when RCNT routes the pin there. The clock here steps in
+// whole seconds, so the per-minute and alarm interrupts are exact to the
+// second; the selected-frequency steady interrupt and the 32 kHz output (INT1
+// modes 1, 5 and 8-15), which need the 32768 Hz count, are not produced.
+void Io::rtc_set_irq(u8 line) {
+  Rtc& r = rtc;
+  const u8 old = r.irq_flag;
+  r.irq_flag |= line;
+  r.status1 |= line;
+  if (!(old & 0x30) && (r.irq_flag & 0x30) && (rcnt & 0xC100) == 0x8100) request_irq(Cpu::ARM7, IRQ_RTC);
+}
+
+void Io::rtc_process_irq(int type) {
+  Rtc& r = rtc;
+  const auto alarm = [&r](const u8* a) {
+    bool hit = true;
+    if (a[0] & 0x80) hit = hit && (a[0] & 0x07) == r.datetime[3];
+    if (a[1] & 0x80) hit = hit && (a[1] & 0x7F) == r.datetime[4];
+    if (a[2] & 0x80) hit = hit && (a[2] & 0x7F) == r.datetime[5];
+    return hit;
+  };
+  const bool minute = type == 0 || (type == 2 && (r.irq_flag & 0x01));
+  switch (r.status2 & 0x0F) {
+  case 0x0: if (type == 2) r.irq_flag &= ~0x10; break;
+  case 0x2: case 0x6: if (minute) rtc_set_irq(0x10); break;                      // per-minute edge
+  case 0x3:                                                                      // per-minute steady, low for 30 s
+    if (minute) rtc_set_irq(0x10);
+    else if (type == 1 && r.datetime[6] == 0x30) r.irq_flag &= ~0x10;
+    break;
+  case 0x7:                                                                      // per-minute steady, a 7.8 ms pulse: over by the next second
+    if (minute) rtc_set_irq(0x10);
+    else if (type == 1) r.irq_flag &= ~0x10;
+    break;
+  case 0x4: if (type == 0) { if (alarm(r.alarm1)) rtc_set_irq(0x10); else r.irq_flag &= ~0x10; } break;
+  default: break;
+  }
+  if (r.status2 & 0x40) { if (type == 0) { if (alarm(r.alarm2)) rtc_set_irq(0x20); else r.irq_flag &= ~0x20; } }
+  else if (type == 2) r.irq_flag &= ~0x20;
+}
+
 // One second of carry, field-by-field rather than via time_t: a game's own
 // (possibly invalid) date must still advance.
 void Io::rtc_tick() {
   Rtc& r = rtc;
   int sec = from_bcd(r.datetime[6]) + 1;
-  if (sec < 60) { r.datetime[6] = to_bcd(sec); return; }
+  if (sec < 60) { r.datetime[6] = to_bcd(sec); rtc_process_irq(1); return; }
   r.datetime[6] = 0;
+  rtc_carry_minute();
+  r.irq_flag |= 0x01;
+  rtc_process_irq(0);
+}
+
+void Io::rtc_carry_minute() {
+  Rtc& r = rtc;
   int min = from_bcd(r.datetime[5]) + 1;
   if (min < 60) { r.datetime[5] = to_bcd(min); return; }
   r.datetime[5] = 0;
-  const u8 pm = r.datetime[4] & 0x40;
+  u8 pm = r.datetime[4] & 0x40;
   int hour = from_bcd(static_cast<u8>(r.datetime[4] & 0x3F)) + 1;
-  if (hour < 24) { r.datetime[4] = static_cast<u8>(to_bcd(hour) | pm); return; }
-  r.datetime[4] = pm;
+  if (r.status1 & 0x02) {   // 24-hour mode: the flag follows the hour
+    if (hour < 24) { r.datetime[4] = static_cast<u8>(to_bcd(hour) | (hour >= 12 ? 0x40 : 0)); return; }
+    r.datetime[4] = 0;
+  } else {                  // 12-hour mode: 0-11 twice, the day turns after PM
+    if (hour < 12) { r.datetime[4] = static_cast<u8>(to_bcd(hour) | pm); return; }
+    r.datetime[4] = pm ^ 0x40;
+    if (!pm) return;
+  }
   r.datetime[3] = static_cast<u8>((r.datetime[3] + 1) % 7);
   const int year = from_bcd(r.datetime[0]), month = from_bcd(r.datetime[1]);
   // Two-digit years (2000-2099): every year divisible by 4 is a leap year.
@@ -723,18 +780,33 @@ void Io::rtc_cmd_write(u8 v) {
   switch (r.cmd & 0x70) {
   case 0x00:
     if (pos == 1) {
-      if (v & 1) { r.status1 = 0; r.status2 = 0; std::memset(r.datetime, 0, 7); r.datetime[1] = r.datetime[2] = 1; }
+      const u8 old = r.status1;
+      if (v & 1) { r.status1 = 0; r.status2 = 0; r.irq_flag = 0; std::memset(r.datetime, 0, 7); r.datetime[1] = r.datetime[2] = 1; }
       r.status1 = (r.status1 & 0xF0) | (v & 0x0E);
+      if ((r.status1 ^ old) & 0x02) {   // 12/24-hour mode changed: the hour is rewritten in the new one
+        int hour = from_bcd(static_cast<u8>(r.datetime[4] & 0x3F));
+        const bool pm = r.datetime[4] & 0x40;
+        if (r.status1 & 0x02) { if (pm && hour < 12) hour += 12; if (hour > 23) hour = 23; r.datetime[4] = static_cast<u8>(to_bcd(hour) | (hour >= 12 ? 0x40 : 0)); }
+        else { const bool late = hour >= 12; if (late) hour -= 12; if (hour > 11) hour = 11; r.datetime[4] = static_cast<u8>(to_bcd(hour) | (late ? 0x40 : 0)); }
+      }
     }
     break;
-  case 0x40: if (pos == 1) r.status2 = v; break;
-  case 0x20: if (pos >= 1 && pos <= 7) r.datetime[pos - 1] = v; break;
-  case 0x60: if (pos >= 1 && pos <= 3) r.datetime[3 + pos] = v; break;
+  case 0x40: if (pos == 1) { r.status2 = v; rtc_process_irq(2); } break;
+  case 0x20: if (pos >= 1 && pos <= 7) { r.datetime[pos - 1] = v; if (pos == 5) rtc_hour_written(); } break;
+  case 0x60: if (pos >= 1 && pos <= 3) { r.datetime[3 + pos] = v; if (pos == 1) rtc_hour_written(); } break;
   case 0x10: if (r.status2 & 0x04) { if (pos >= 1 && pos <= 3) r.alarm1[pos - 1] = v; } else if (pos == 1) r.alarm1[2] = v; break;
   case 0x50: if (pos >= 1 && pos <= 3) r.alarm2[pos - 1] = v; break;
   case 0x30: if (pos == 1) r.clock_adjust = v; break;
   case 0x70: if (pos == 1) r.free_reg = v; break;
   }
+}
+
+// 24-hour mode keeps the PM flag itself: set from noon, whatever was written.
+void Io::rtc_hour_written() {
+  Rtc& r = rtc;
+  if (!(r.status1 & 0x02)) return;
+  const u8 hour = r.datetime[4] & 0x3F;
+  r.datetime[4] = static_cast<u8>(hour | (hour >= 0x12 ? 0x40 : 0));
 }
 
 void Io::rtc_byte_in(u8 v) {
@@ -1345,6 +1417,7 @@ void Io::write8(Cpu cpu, u32 addr, u8 value) {
 void Io::bptwl_reset() {
   dsi.i2c_cnt = dsi.i2c_data = dsi.i2c_device = 0;
   dsi.bptwl_pos = 0xFFFFFFFF;
+  bptwl_power_down_ = bptwl_power_shut_ = false;
   u8* r = dsi.bptwl_regs;
   std::memset(r, 0x5A, 0x100);
   r[0x00] = 0x33; r[0x01] = 0x00; r[0x02] = 0x50;
@@ -1358,6 +1431,45 @@ void Io::bptwl_reset() {
   r[0x60] = 0x00; r[0x61] = 0x01; r[0x62] = 0x50; r[0x63] = 0x00;
   for (u32 i = 0x70; i <= 0x77; ++i) r[i] = 0x00;   // 0x70 = boot flag
   r[0x80] = 0x10; r[0x81] = 0x64;
+}
+
+void Io::bptwl_irq(u8 flags) {
+  dsi.bptwl_regs[0x10] |= flags & 0x7B;
+  if (dsi.bptwl_regs[0x12] & 0x01) request_irq2(IRQ2_BPTWL);
+}
+
+void Io::dsi_volume_button(bool up) {
+  if (!nds_.dsi) return;
+  // The 32 volume steps as the keys walk them (melonDS's tables, read off the hardware).
+  static constexpr u8 down_to[32] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x02, 0x03, 0x04, 0x05, 0x06, 0x06, 0x07, 0x08, 0x09, 0x0A,
+                                     0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A};
+  static constexpr u8 up_to[32]   = {0x02, 0x03, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14,
+                                     0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F, 0x1F};
+  u8& vol = dsi.bptwl_regs[0x40];
+  vol = (up ? up_to : down_to)[vol & 0x1F];
+  bptwl_irq(0x40);
+}
+
+void Io::dsi_power_button(bool down) {
+  if (!nds_.dsi) return;
+  const bool irq_mode = dsi.bptwl_regs[0x12] & 0x01;
+  const u64 now = nds_.sched.now();
+  const u64 held = bptwl_power_down_ ? now - bptwl_power_since_ : 0;
+  if (down) {
+    if (!bptwl_power_down_) { bptwl_power_down_ = true; bptwl_power_shut_ = false; bptwl_power_since_ = now; bptwl_irq(0x08); return; }
+    if (held >= 5 * ARM9_CLOCK_HZ) { nds_.power_off = true; return; }          // five seconds: off, whatever software says
+    if (held >= ARM9_CLOCK_HZ / 2) {                                           // half a second: shutdown
+      if (!bptwl_power_shut_) { bptwl_power_shut_ = true; bptwl_irq(0x02); }
+      if (!irq_mode) nds_.power_off = true;
+    }
+    return;
+  }
+  if (!bptwl_power_down_) return;
+  bptwl_power_down_ = false;
+  if (held < ARM9_CLOCK_HZ / 2) {                                              // a tap: reset
+    bptwl_irq(0x01);
+    if (!irq_mode) { nds_.dsi_soft_reset_pending = true; nds_.cpu(Cpu::ARM7).halted = true; }
+  }
 }
 
 u8 Io::bptwl_read(bool last) {
@@ -1886,6 +1998,7 @@ template <class S> void Io::sync_state(S& s) {
   s.fields(sleeping, sleep_frame_cycles);   // appended: older states are awake
   if constexpr (S::reading) exmemcnt7 = exmemcnt & 0x7F;   // older states had one copy
   s.fields(exmemcnt7);   // appended
+  s.fields(rtc.irq_flag);   // appended
   if constexpr (S::reading) exmemcnt7 &= 0x7F;
   if constexpr (S::reading) nds_.bus.update_wifi_timings();
   s.end();

@@ -3997,8 +3997,8 @@ sdl_ready:
         }
         else pause_pending = true;
         break;
-      case A::VolumeUp: audio.set_volume(audio.volume() + 10); audio.set_muted(false); VLOG("volume %d%%\n", audio.volume()); break;
-      case A::VolumeDown: audio.set_volume(audio.volume() - 10); VLOG("volume %d%%\n", audio.volume()); break;
+      case A::VolumeUp: nds.io.dsi_volume_button(true); audio.set_volume(audio.volume() + 10); audio.set_muted(false); VLOG("volume %d%%\n", audio.volume()); break;
+      case A::VolumeDown: nds.io.dsi_volume_button(false); audio.set_volume(audio.volume() - 10); VLOG("volume %d%%\n", audio.volume()); break;
       case A::Mute: audio.set_muted(!audio.muted()); VLOG("%s\n", audio.muted() ? "muted" : "unmuted"); break;
       // Anything moving the screens while paused must recomposite the menu.
       case A::Fullscreen: display.toggle_fullscreen(); if (dual_window) display2.toggle_fullscreen(); menu_dirty = true; break;
