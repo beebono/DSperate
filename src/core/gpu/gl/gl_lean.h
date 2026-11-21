@@ -5,6 +5,7 @@
 #include "core/gpu/vk/vk_layout.h"
 #include "core/types.h"
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 
@@ -60,6 +61,9 @@ public:
   const u32* output() override;
   const u32* frame_ready(u64 gen, bool allow_lag) override;
   bool has_frame() const override;
+  // Stream frames (Renderer3D::gpu_stream_job): the vertex stage and the list on the submit thread, as on Vulkan.
+  // Nothing in it is the raster's: the list that comes out is submitted here like any other.
+  bool takes_streams() const override { static const bool on = !(std::getenv("DS_GL_STREAMS") && std::getenv("DS_GL_STREAMS")[0] == '0'); return on; }
   u64 gpu_ns() const override;
   u32 scale() const override;   // the attachment scale (DS_LEAN_SCALE, probe-only): the record is 256*scale x 192*scale
   u64 fence_ns() const;   // flush to fence of the last collected frame: its GPU time when nothing else was queued (gles_probe)
