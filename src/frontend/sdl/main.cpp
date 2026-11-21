@@ -499,29 +499,100 @@ bool write_png(NDS& nds, const std::string& path, const ds::sdl::Display::Layout
   return true;
 }
 
+std::string code_key(const NDS& nds);
+
 // <GAMECODE>-<timestamp>.png in paths.screenshots (states dir unless set).
 bool screenshot(NDS& nds, const std::string& dir, const ds::sdl::Display::Layout& layout, const u32* const* frames = nullptr) {
   ::mkdir(dir.c_str(), 0755);
   char stamp[32];
   const std::time_t now = std::time(nullptr);
   std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", std::localtime(&now));
-  std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
-  const std::string path = dir + "/" + code + "-" + stamp + ".png";
+  const std::string path = dir + "/" + code_key(nds) + "-" + stamp + ".png";
   const bool ok = write_png(nds, path, layout, frames);
   if (ok) std::fprintf(stderr, "screenshot: %s\n", path.c_str());
   return ok;
 }
 
-std::string state_path(NDS& nds, const std::string& dir, int slot) {
-  const std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
-  return dir + "/" + code + "." + std::to_string(slot) + ".dss";
+// The game code as part of a file name: the header's four bytes are the
+// file's word, so anything but a printable character (and '/') becomes '_',
+// as Config::game_path_code does.
+std::string code_key(const NDS& nds) {
+  if (!nds.cart) return "NONE";
+  std::string c;
+  for (int i = 0; i < 4; ++i) { const char ch = nds.cart->header().game_code[i]; c += (ch >= 0x20 && ch < 0x7f && ch != '/') ? ch : '_'; }
+  return c;
+}
+
+// The ROM image a state file was made with (NDS::save_state's HEAD: magic,
+// version, "HEAD", length, game code, identity). False: not a state.
+bool peek_state_ident(const std::string& path, u64& ident) {
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+  u8 h[28];
+  const bool ok = std::fread(h, 1, sizeof h, f) == sizeof h && !std::memcmp(h, "DSST", 4) && !std::memcmp(h + 8, "HEAD", 4);
+  std::fclose(f);
+  if (ok) std::memcpy(&ident, h + 20, 8);
+  return ok;
+}
+
+// What a game's state files are named by: its code, and for every ROM image
+// with that code after the first one seen (a hack, another revision, homebrew
+// that shares a code) a ".vN" tag, so each image has slots and an auto state
+// of its own. Which image is which is kept in <CODE>.roms beside the states,
+// one identity a line, first seen first; the file appears only once a second
+// image does, and the first image keeps the untagged names it always had.
+// Set by Session::open.
+std::string g_state_key = "NONE";
+
+std::string state_key_for(const NDS& nds, const std::string& dir) {
+  const std::string code = code_key(nds);
+  if (!nds.cart) return code;
+  const std::string index = dir + "/" + code + ".roms";
+  std::vector<u64> ids;
+  if (FILE* f = std::fopen(index.c_str(), "r")) {
+    char line[64];
+    while (std::fgets(line, sizeof line, f) && ids.size() < 99) { char* e; const u64 v = std::strtoull(line, &e, 16); if (e != line) ids.push_back(v); }
+    std::fclose(f);
+  }
+  if (ids.empty()) {
+    // No second image yet. The untagged states say whose they are: ours or
+    // nobody's, and this image is the first; another's, and that one is.
+    u64 other = 0; bool ours = false, theirs = false; time_t newest = 0;
+    std::vector<std::string> names = {dir + "/" + code + ".auto.dss"};
+    for (int i = 0; i < 10; ++i) names.push_back(dir + "/" + code + "." + std::to_string(i) + ".dss");
+    for (const std::string& n : names) {
+      u64 id = 0; struct stat st;
+      if (!peek_state_ident(n, id) || stat(n.c_str(), &st) != 0) continue;
+      if (id == nds.rom_id) ours = true;
+      else if (!theirs || st.st_mtime > newest) { theirs = true; other = id; newest = st.st_mtime; }
+    }
+    if (ours || !theirs) return code;
+    ids.push_back(other);
+  }
+  size_t at = 0;
+  while (at < ids.size() && ids[at] != nds.rom_id) ++at;
+  if (at == ids.size()) {
+    ids.push_back(nds.rom_id);
+    std::string text, err;
+    for (const u64 v : ids) { char line[32]; std::snprintf(line, sizeof line, "%016llx\n", static_cast<unsigned long long>(v)); text += line; }
+    if (!ds::write_file_atomic(index, text.data(), text.size(), err)) {
+      // Nowhere to remember it: the shared names, as before, and say so.
+      std::fprintf(stderr, "state: %s; this ROM shares its state slots with another that has the same game code\n", err.c_str());
+      return code;
+    }
+    std::fprintf(stderr, "state: another ROM image with the game code %s has states here; this one's are named %s.v%zu.*\n", code.c_str(), code.c_str(), at + 1);
+  }
+  return at == 0 ? code : code + ".v" + std::to_string(at + 1);
+}
+
+std::string state_path(NDS&, const std::string& dir, int slot) {
+  return dir + "/" + g_state_key + "." + std::to_string(slot) + ".dss";
 }
 
 // ".auto" rather than a number so it can't collide with a player slot and
 // refresh_slots() (walks 0..9) leaves it off the menu; reached only via --load-state.
-std::string auto_state_path(NDS& nds, const std::string& dir) {
-  const std::string code(nds.cart ? nds.cart->header().game_code : "NONE", 4);
-  return dir + "/" + code + ".auto.dss";
+std::string auto_state_path(NDS&, const std::string& dir) {
+  return dir + "/" + g_state_key + ".auto.dss";
 }
 
 // Auto slot as the starting point when emu.autoload is set and it exists.
@@ -738,6 +809,7 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   rom_dir = slash == std::string::npos ? "." : rom_path.substr(0, slash);
   states_dir = cfg.str("paths.states", rom_dir);
   shots_dir = cfg.str("paths.screenshots", states_dir);
+  g_state_key = state_key_for(nds, states_dir);
   sav = save_arg ? std::string(save_arg) : save_path(rom_path, cfg.str("paths.saves"));
   game_ini.clear();
   if (nds.cart) {
@@ -810,7 +882,7 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   }
   // Names, not indices: a database update renumbers; a stale name is dropped.
   if (!cheats.codes.empty())
-    cheats_on_path = states_dir + "/" + std::string(nds.cart ? nds.cart->header().game_code : "NONE", 4) + ".cheats";
+    cheats_on_path = states_dir + "/" + code_key(nds) + ".cheats";
 }
 
 void Session::load_enabled(NDS& nds) const {
