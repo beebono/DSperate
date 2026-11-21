@@ -768,14 +768,15 @@ void Wifi::mp_client_reply_rx(int client) {
   if (!(reg(W_RXCnt) & 0x8000)) return;
   if (reg(W_RXBufBegin) == reg(W_RXBufEnd)) return;
   const u8* reply = &mp_client_replies_[(client - 1) * 1024];
-  int framelen = ld16(&reply[10]);
+  // The length is the peer's word: no more than its slot holds.
+  int framelen = std::min<int>(ld16(&reply[10]), 1024 - 12);
   WIFI_LOG("MP reply from client %d: FC:%04X len=%d\n", client, ld16(&reply[12]), framelen);
   if (FILE* tf = wifi_trace_file()) std::fprintf(tf, "# host reply-in client %d len %d body %04X %04X %04X %04X %04X us %llX\n", client, framelen, ld16(&reply[36]), ld16(&reply[38]), ld16(&reply[40]), ld16(&reply[42]), ld16(&reply[44]), (unsigned long long)us_timestamp_);
   const u8 txrate = reply[8];
   const u16 framectl = ld16(&reply[12]);
   if (framectl & 0x4000) {
     framelen -= (reg(W_RXLenCrop) >> 7) & 0x1FE;
-    if (framelen > 24) std::memmove(&rx_buffer_[12 + 24], &rx_buffer_[12 + 28], framelen);
+    if (framelen > 24) std::memmove(&rx_buffer_[12 + 24], &rx_buffer_[12 + 28], std::min<size_t>(static_cast<size_t>(framelen), rx_buffer_.size() - (12 + 28)));
   } else framelen -= (reg(W_RXLenCrop) << 1) & 0x1FE;
   if (framelen < 0) framelen = 0;
   std::memcpy(rx_buffer_.data(), reply, 12 + framelen);
@@ -816,7 +817,7 @@ bool Wifi::check_rx(int type) {   // 0 = regular, 1 = MP replies, 2 = MP host fr
     txrate = rx_buffer_[8];
     if (framectl & 0x4000) {
       framelen -= (reg(W_RXLenCrop) >> 7) & 0x1FE;
-      if (framelen > 24) std::memmove(&rx_buffer_[12 + 24], &rx_buffer_[12 + 28], framelen);
+      if (framelen > 24) std::memmove(&rx_buffer_[12 + 24], &rx_buffer_[12 + 28], std::min<size_t>(static_cast<size_t>(framelen), rx_buffer_.size() - (12 + 28)));
     } else framelen -= (reg(W_RXLenCrop) << 1) & 0x1FE;
     if (framelen < 0) framelen = 0;
     break;

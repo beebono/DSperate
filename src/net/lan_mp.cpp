@@ -53,6 +53,10 @@ void put32(u8* p, u32 v) { p[0] = u8(v); p[1] = u8(v >> 8); p[2] = u8(v >> 16); 
 u32 get32(const u8* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (u32(p[3]) << 24); }
 } // namespace
 
+// A player's id is its place in the table, never the number in the entry:
+// on a guest the entries are the host's bytes.
+int LanMp::slot_of(const Player* p) const { return static_cast<int>(p - players_.data()); }
+
 LanMp::LanMp() {
   if (enet_initialize() != 0) { err_ = "enet_initialize failed"; return; }
   inited_ = true;
@@ -242,8 +246,9 @@ int LanMp::step_join(int wait_ms) {
     if (join_state_ == 0 && ev.type == ENET_EVENT_TYPE_CONNECT) { join_state_ = 1; continue; }
     if (join_state_ == 1 && ev.type == ENET_EVENT_TYPE_RECEIVE) {
       const u8* d = ev.packet->data;
-      const bool init = ev.channelID == Chan_Cmd && d[0] == Cmd_ClientInit && ev.packet->dataLength == 11 &&
-                        get32(d + 1) == kLanMagic && get32(d + 5) == kProtocolVersion && d[10] <= 16;
+      const bool init = ev.channelID == Chan_Cmd && ev.packet->dataLength == 11 && d[0] == Cmd_ClientInit &&
+                        get32(d + 1) == kLanMagic && get32(d + 5) == kProtocolVersion &&
+                        d[9] >= 1 && d[9] < 16 && d[10] >= 1 && d[10] <= 16;   // our id indexes tables and shifts masks
       if (!init) { enet_packet_destroy(ev.packet); continue; }
       max_players_ = d[10];
       me_.id = d[9];
@@ -319,9 +324,10 @@ void LanMp::process_host_event(ENetEvent& ev) {
   case ENET_EVENT_TYPE_DISCONNECT: {
     Player* p = static_cast<Player*>(ev.peer->data);
     if (!p) break;
-    connected_mask_ &= static_cast<u16>(~(1 << p->id));
-    peers_[p->id] = nullptr;
-    LAN_LOG("client %d left\n", p->id);
+    const int id = slot_of(p);
+    connected_mask_ &= static_cast<u16>(~(1 << id));
+    peers_[id] = nullptr;
+    LAN_LOG("client %d left\n", id);
     p->id = 0; p->status = PlayerStatus::None;
     num_players_--;
     host_update_player_list();
@@ -336,7 +342,7 @@ void LanMp::process_host_event(ENetEvent& ev) {
       if (get32(d + 1) != kLanMagic || get32(d + 5) != kProtocolVersion) { enet_peer_disconnect(ev.peer, 0); break; }
       Player p; std::memcpy(&p, d + 9, sizeof p); p.name[31] = '\0';
       Player* mine = static_cast<Player*>(ev.peer->data);
-      if (!mine || p.id != mine->id) { enet_peer_disconnect(ev.peer, 0); break; }
+      if (!mine || p.id != slot_of(mine)) { enet_peer_disconnect(ev.peer, 0); break; }
       {
         std::lock_guard<std::mutex> l(players_mutex_);
         p.status = PlayerStatus::Client; p.address = ev.peer->address.host;
@@ -348,8 +354,8 @@ void LanMp::process_host_event(ENetEvent& ev) {
       if (connected_mask_ & (1 << me_.id)) { const u8 c = Cmd_PlayerConnect; enet_peer_send(ev.peer, Chan_Cmd, enet_packet_create(&c, 1, ENET_PACKET_FLAG_RELIABLE)); }
       break;
     }
-    case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ |= static_cast<u16>(1 << p->id); LAN_LOG("player %d radio on (mask %04x)\n", p->id, connected_mask_); } break;
-    case Cmd_PlayerDisconnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ &= static_cast<u16>(~(1 << p->id)); LAN_LOG("player %d radio off (mask %04x)\n", p->id, connected_mask_); } break;
+    case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ |= static_cast<u16>(1 << slot_of(p)); LAN_LOG("player %d radio on (mask %04x)\n", slot_of(p), connected_mask_); } break;
+    case Cmd_PlayerDisconnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ &= static_cast<u16>(~(1 << slot_of(p))); LAN_LOG("player %d radio off (mask %04x)\n", slot_of(p), connected_mask_); } break;
     default: break;
     }
     enet_packet_destroy(ev.packet);
@@ -376,8 +382,9 @@ void LanMp::process_client_event(ENetEvent& ev) {
   case ENET_EVENT_TYPE_DISCONNECT: {
     Player* p = static_cast<Player*>(ev.peer->data);
     if (!p) break;
-    connected_mask_ &= static_cast<u16>(~(1 << p->id));
-    peers_[p->id] = nullptr;
+    const int id = slot_of(p);
+    connected_mask_ &= static_cast<u16>(~(1 << id));
+    peers_[id] = nullptr;
     { std::lock_guard<std::mutex> l(players_mutex_); p->status = PlayerStatus::Disconnected; }
     break;
   }
@@ -391,7 +398,10 @@ void LanMp::process_client_event(ENetEvent& ev) {
         std::lock_guard<std::mutex> l(players_mutex_);
         num_players_ = d[1];
         std::memcpy(players_.data(), d + 2, sizeof(players_));
-        for (Player& p : players_) p.name[31] = '\0';
+        for (int i = 0; i < 16; ++i) {
+          players_[i].name[31] = '\0';
+          if (players_[i].status != PlayerStatus::None) players_[i].id = i;   // the host's number is not trusted with our tables
+        }
       }
       // clients connect directly to each other; host only introduces them
       for (int i = 0; i < 16; ++i) {
@@ -401,8 +411,8 @@ void LanMp::process_client_event(ENetEvent& ev) {
       }
       break;
     }
-    case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ |= static_cast<u16>(1 << p->id); LAN_LOG("player %d radio on (mask %04x)\n", p->id, connected_mask_); } break;
-    case Cmd_PlayerDisconnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ &= static_cast<u16>(~(1 << p->id)); LAN_LOG("player %d radio off (mask %04x)\n", p->id, connected_mask_); } break;
+    case Cmd_PlayerConnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ |= static_cast<u16>(1 << slot_of(p)); LAN_LOG("player %d radio on (mask %04x)\n", slot_of(p), connected_mask_); } break;
+    case Cmd_PlayerDisconnect: if (ev.packet->dataLength == 1) if (Player* p = static_cast<Player*>(ev.peer->data)) { connected_mask_ &= static_cast<u16>(~(1 << slot_of(p))); LAN_LOG("player %d radio off (mask %04x)\n", slot_of(p), connected_mask_); } break;
     default: break;
     }
     enet_packet_destroy(ev.packet);
@@ -438,7 +448,11 @@ void LanMp::process_lan(int type) {
   while (enet_host_service(host_, &ev, static_cast<u32>(timeout)) > 0) {
     if (ev.type == ENET_EVENT_TYPE_RECEIVE && ev.channelID == Chan_MP) {
       auto* h = reinterpret_cast<MpPacketHeader*>(ev.packet->data);
-      const bool good = ev.packet->dataLength >= sizeof(MpPacketHeader) && h->magic == kPacketMagic && h->sender_id != static_cast<u32>(me_.id);
+      // Everything read from a queued packet later is checked here, once: the
+      // sender indexes masks, the length is the payload really carried.
+      const bool good = ev.packet->dataLength >= sizeof(MpPacketHeader) && h->magic == kPacketMagic &&
+                        h->sender_id < 16 && h->sender_id != static_cast<u32>(me_.id) &&
+                        h->length <= ev.packet->dataLength - sizeof(MpPacketHeader);
       if (!good) { enet_packet_destroy(ev.packet); }
       else {
         h->magic = ms_now();
@@ -586,7 +600,11 @@ u16 LanMp::recv_replies(u8* packets, u64 timestamp, u16 aidmask) {
   u16 ret = 0;
   u16 seen = static_cast<u16>(1 << me_.id);
   if ((seen & connected_mask_) == connected_mask_) return 0;
+  // Each wait is bounded, and so is their sum: a peer that keeps sending
+  // anything but the replies awaited cannot hold the emulation thread here.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(4 * recv_timeout_ms_);
   for (;;) {
+    if (std::chrono::steady_clock::now() >= deadline) return ret;
     process_lan(2);
     if (rx_.empty()) return ret;
     ENetPacket* pkt = rx_.front(); rx_.pop();

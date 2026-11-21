@@ -109,6 +109,7 @@ private:
   void process_discovery();
   u32  first_with_room(std::string* name);   // the first session heard with a free slot
   void poll_discovery(u32 tick);          // read every beacon waiting on the socket
+  int  slot_of(const Player* p) const;
   void host_update_player_list();
   void process_host_event(_ENetEvent& ev);
   void process_client_event(_ENetEvent& ev);
