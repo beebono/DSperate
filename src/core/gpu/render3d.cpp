@@ -2702,6 +2702,26 @@ void Renderer3D::clear_line(s32 y) {
 // The polygon itself goes out as it is, so every pixel still drawn is the same; an alpha-0 texel draws nothing
 // in every blend mode but decal, so only empty pixels are left out. Returns 1: nothing to do; 2: `rect` (x0, y0,
 // x1, y1 in DS pixels, the last two exclusive) is the scissor; 0: no texel of the range has alpha.
+// DS_PF_SPRITE (vk_layout.h). Smaller than what gpu_tex_clip cuts, so the two never meet.
+static u32 gpu_sprite(const vk::GpuPoly& o, const vk::GpuVert* v) {
+  using namespace ds::gpu::vk;
+  static const bool on = !(std::getenv("DS_GPU_SPRITE") && std::getenv("DS_GPU_SPRITE")[0] == '0');   // DS_GPU_SPRITE=0: every polygon as the game's own triangles (A/B)
+  if (!on) return 0;
+  if (o.nverts != 4 || (o.flags & (DS_PF_SHADOW | DS_PF_SHADOW_MASK)) || v[1].w != v[0].w || v[2].w != v[0].w || v[3].w != v[0].w) return 0;
+  const s32 ax = v[1].sx - v[0].sx, ay = v[1].sy - v[0].sy, bx = v[2].sx - v[1].sx, by = v[2].sy - v[1].sy;
+  if (!((ax != 0 && ay == 0 && bx == 0 && by != 0) || (ax == 0 && ay != 0 && bx != 0 && by == 0))) return 0;
+  if (v[3].sx != v[0].sx + bx || v[3].sy != v[0].sy + by) return 0;
+  if (v[3].s != v[0].s + v[2].s - v[1].s || v[3].t != v[0].t + v[2].t - v[1].t) return 0;   // the texture on one plane
+  s32 x0 = v[0].fx, x1 = x0, y0 = v[0].fy, y1 = y0;
+  for (u32 k = 1; k < 4; ++k) { x0 = std::min(x0, v[k].fx); x1 = std::max(x1, v[k].fx); y0 = std::min(y0, v[k].fy); y1 = std::max(y1, v[k].fy); }
+  if (s64{x1 - x0} * (y1 - y0) >= s64{64 * 16} * (48 * 16)) return 0;
+  // Texels a pixel along each side, in 12.4 over whole pixels: 3/4 to 4/3.
+  const s32 la = std::abs(ax + ay) * 16, lb = std::abs(bx + by) * 16;
+  const s32 ta = std::max(std::abs(v[1].s - v[0].s), std::abs(v[1].t - v[0].t)), tb = std::max(std::abs(v[2].s - v[1].s), std::abs(v[2].t - v[1].t));
+  if (ta * 4 < la * 3 || ta * 3 > la * 4 || tb * 4 < lb * 3 || tb * 3 > lb * 4) return 0;
+  return DS_PF_SPRITE;
+}
+
 static u32 gpu_tex_clip(const TextureCache::Ref& r, const vk::GpuPoly& o, const vk::GpuVert* v, s32 rect[4]) {
   using namespace ds::gpu::vk;
   const u32 n = o.nverts;
@@ -2848,6 +2868,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
         const bool may_alpha = (p.texparam & (1u << 29)) || fmt == 5 || fmt == 7 || fmt == 1 || fmt == 6;   // as gpu_submit
         if (may_alpha && gpu_alpha_tested(r, o, gv.data() + o.first_vert)) o.flags |= DS_PF_TEX_ALPHA;
         o.flags |= gpu_alpha_passes(&r, o, gv.data() + o.first_vert);
+        o.flags |= gpu_sprite(o, gv.data() + o.first_vert);
       }
     }
     if (!(o.flags & DS_PF_TEXTURED)) o.flags |= gpu_alpha_passes(nullptr, o, gv.data() + o.first_vert);
@@ -3347,6 +3368,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
       }
       if (may_alpha && gpu_alpha_tested(r, o, gv + o.first_vert)) o.flags |= DS_PF_TEX_ALPHA;
       o.flags |= gpu_alpha_passes(&r, o, gv + o.first_vert);
+      o.flags |= gpu_sprite(o, gv + o.first_vert);
     }
     if (!(o.flags & DS_PF_TEXTURED)) o.flags |= gpu_alpha_passes(nullptr, o, gv + o.first_vert);
     ++np;

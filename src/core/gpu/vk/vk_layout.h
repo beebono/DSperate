@@ -45,6 +45,12 @@ using uint = u32;
 // alpha from 1 to 30 (no second pass). From the polygon's alpha and mode and its texture's texels (alpha_grid.h).
 #define DS_PF_A31_NONE    0x0100u
 #define DS_PF_A31_ALL     0x0200u
+// A sprite: a textured quad of one w, a rectangle along the screen's axes once its vertices are on whole pixels,
+// near a texel to a pixel (render3d.cpp gpu_sprite). The DS draws it from whole-pixel vertices and reads the
+// texture at the pixel's corner; from the sub-pixel position and the pixel's centre the texel row or column
+// that does not fit (32 texels on 31 pixels) is dropped somewhere else (Pokemon White's trainer: the second row
+// of the hat, where the DS drops the last, empty one). At 1x the vertex stage draws it the DS's way.
+#define DS_PF_SPRITE      0x0400u
 
 // Shadow mask RUN INDEX, per polygon per scanline. The DS clears the stencil
 // per-scanline at the start of a mask run, but a tiled raster can't see that

@@ -42,12 +42,22 @@ void main() {
     ta.r = int(crgb.r * cw + 0.5); ta.g = int(crgb.g * cw + 0.5); ta.b = int(crgb.b * cw + 0.5);
     ta.z = int(wb ? zs * cw : zs / n);
   }
+  // A sprite at 1x (DS_PF_SPRITE, vk_layout.h): its vertices on whole pixels, and the texture read half a pixel
+  // up and left, at the pixel's corner (a 128th short of it, so a coordinate on a texel's edge stays in the texel).
+  vec2 st_off = vec2(0.0);
+  if ((p.flags & DS_PF_SPRITE) != 0u && pc.f.scale <= 1u) {
+    GpuVert q0 = load_vert(p.first_vert), q1 = load_vert(p.first_vert + 1u), q2 = load_vert(p.first_vert + 2u);
+    float l1 = float((q1.sx - q0.sx) + (q1.sy - q0.sy)), l2 = float((q2.sx - q1.sx) + (q2.sy - q1.sy));
+    st_off = (0.5 - 1.0 / 128.0) * (vec2(float(q1.s - q0.s), float(q1.t - q0.t)) / l1 + vec2(float(q2.s - q1.s), float(q2.t - q1.t)) / l2);
+    if (cfan) { ta.fx = (q0.sx + q2.sx) * 8; ta.fy = (q0.sy + q2.sy) * 8; } else { ta.fx = ta.sx * 16; ta.fy = ta.sy * 16; }
+    tb.fx = tb.sx * 16; tb.fy = tb.sy * 16; tc.fx = tc.sx * 16; tc.fy = tc.sy * 16;
+  }
   GpuVert vt = ta; if (k == 1u) vt = tb; else if (k == 2u) vt = tc;
   float w = max(float(vt.w), 1.0);
   // The game's own triangle: the 28.4 position and the vertex's own attributes, nothing moved or grown (lean.vert, plain).
   float sxf = float(vt.fx) / 16.0, syf = float(vt.fy) / 16.0;
   vec3 a_rgb = vec3(float(vt.r), float(vt.g), float(vt.b));
-  vec2 a_st = vec2(float(vt.s), float(vt.t));
+  vec2 a_st = vec2(float(vt.s), float(vt.t)) - st_off;
   float x = sxf / 256.0 * 2.0 - 1.0, y = syf / 192.0 * 2.0 - 1.0;
   float zd = ds_depth(vt, p.attr);
   float zc = ds_clip_z(zd, p.attr, w);
