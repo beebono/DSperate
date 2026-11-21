@@ -19,5 +19,9 @@ void DmabufOut::on_release(void*, struct wl_buffer*) {}
 bool DmabufOut::alloc_buf(Buf&) { return false; }
 void DmabufOut::drop_buf(Buf&) {}
 bool DmabufOut::dmabuf_plane(int, DmabufPlane&) const { return false; }
+ScanoutOut::Shown DmabufOut::panel_shown() const { return {}; }
+void DmabufOut::panel_shown_reset() {}
+void DmabufOut::on_presented(void*, struct wp_presentation_feedback*, u32, u32, u32, u32, u32, u32, u32) {}
+void DmabufOut::on_discarded(void*, struct wp_presentation_feedback*) {}
 
 } // namespace ds::sdl
