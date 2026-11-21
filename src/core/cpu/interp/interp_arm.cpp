@@ -27,7 +27,8 @@ void data_processing(CpuContext& cpu, u32 instr, u32 op2, bool sc, u32 rn_val, u
   bool write = true;
   const bool c = carry(cpu);
 
-  if (s && rd != 15) {
+  // TST/TEQ/CMP/CMN write no register, so an rd of 15 there is not the CPSR restore: they set the flags as ever.
+  if (s && (rd != 15 || (opcode >= 0x8 && opcode <= 0xB))) {
     switch (opcode) {
     case 0x0: res = rn_val & op2;  set_nzc(cpu, res, sc); break;               // AND
     case 0x1: res = rn_val ^ op2;  set_nzc(cpu, res, sc); break;               // EOR
@@ -137,15 +138,16 @@ void ldr_str_h(CpuContext& cpu, u32 instr, u32 offset) {
     return;
   }
   if (!is_arm9(cpu)) { charge_C(cpu); return; }     // unpredictable on ARM7; ignore
-  if (sh == 2) {                    // LDRD rd, rd+1
+  const u32 r = rd & ~1u;           // an odd rd (UNPREDICTABLE) transfers the pair below it, as melonDS has it
+  if (sh == 2) {                    // LDRD r, r+1
     u32 lo = mem_read32(cpu, ea), hi = mem_read32(cpu, ea + 4, true);
     if (wb) R(cpu, rn) = wbv;
-    R(cpu, rd) = lo; R(cpu, (rd + 1) & 0xF) = hi;
+    R(cpu, r) = lo; R(cpu, r + 1) = hi;
     charge_CDI(cpu);
     return;
   }
-  mem_write32(cpu, ea, R(cpu, rd));          // STRD
-  mem_write32(cpu, ea + 4, R(cpu, (rd + 1) & 0xF), true);
+  mem_write32(cpu, ea, R(cpu, r));          // STRD
+  mem_write32(cpu, ea + 4, R(cpu, r + 1), true);
   if (wb) R(cpu, rn) = wbv;
   charge_CD(cpu);
 }
@@ -411,7 +413,9 @@ void exec_arm(CpuContext& cpu, u32 instr) {
   case AOp::Swi:
     if ((cpu.nds->dsi_font_hle || cpu.nds->dsi_loader_watch) && cpu.nds->dsi_hle_swi(cpu, (instr >> 16) & 0xFF)) return;
     cpu.raise_exception(CpuContext::Exception::Swi); return;
-  case AOp::Bkpt: cpu.raise_exception(CpuContext::Exception::PrefetchAbort); return;
+  case AOp::Bkpt:
+    if (!is_arm9(cpu)) break;   // ARMv4T has no BKPT: the undefined instruction trap, as in Thumb state
+    cpu.raise_exception(CpuContext::Exception::PrefetchAbort); return;
 
   case AOp::Mcr: case AOp::Mrc: {
     const u32 cp = (instr >> 8) & 0xF;

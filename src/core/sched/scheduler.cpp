@@ -74,6 +74,7 @@ void Scheduler::set_idle_skip(const char* mode) {
 void Scheduler::reset() {
   now_ = 0;
   arm7_debt_ = 0; arm9_carry_ = 0;
+  std::memset(idle_pc_ring_, 0, sizeof idle_pc_ring_); idle_pc_pos_[0] = idle_pc_pos_[1] = 0;   // a reset machine starts as a new one does
   armed_ = 0;
   at_.fill(0); fn_.fill(nullptr); param_.fill(0);
   next_ = std::numeric_limits<u64>::max();

@@ -1699,7 +1699,7 @@ bool Translator::run() {
   // Backward flag liveness.
   u32 live = F_ALL;
   for (size_t i = instrs_.size(); i-- > 0;) {
-    instrs_[i].live_out = live;
+    instrs_[i].live_out = rt().trace ? F_ALL : live;   // a traced run prints the CPSR at every instruction: no flag is dead to it
     const bool paired = thumb_ && i > 0 && arm::decode_thumb(static_cast<u16>(instrs_[i - 1].raw)) == TOp::BlPrefix;
     const FlagUse u = instrs_[i].fallback ? FlagUse{F_ALL, 0}
                     : thumb_ ? thumb_flag_use(static_cast<u16>(instrs_[i].raw), a9_, paired) : arm_flag_use(instrs_[i].raw, a9_);

@@ -432,6 +432,14 @@ void directed() {
     {Cpu::ARM7, false, {0xE9200006, 0xE9100018}, {BUF_BASE + 0x42, 0x111, 0x222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // STMDB r0!, {r1, r2} from an unaligned base: the writeback keeps the low bits
     {Cpu::ARM9, true, {0xC103, 0x3908, 0xC90C}, {0x11, BUF_BASE + 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // Thumb STMIA r1!, {r0, r1}, read back into r2/r3
     {Cpu::ARM7, true, {0xC103, 0x3908, 0xC90C}, {0x11, BUF_BASE + 0x40, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},   // Thumb STMIA r1!, {r0, r1}, read back into r2/r3
+    // TST / TEQ / CMP / CMN with rd = 15 (the old "P" forms): flags only, read back through MRS (r4-r7).
+    {Cpu::ARM9, false, {0xE110F001, 0xE10F4000, 0xE130F001, 0xE10F5000, 0xE150F001, 0xE10F6000, 0xE170F001, 0xE10F7000}, {0x80000001u, 0x80000001u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE110F001, 0xE10F4000, 0xE130F001, 0xE10F5000, 0xE150F001, 0xE10F6000, 0xE170F001, 0xE10F7000}, {0x80000001u, 0x80000001u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM9, false, {0xE310F102, 0xE10F4000, 0xE350F001, 0xE10F5000, 0xE11FF001, 0xE10F6000}, {0x80000001u, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE310F102, 0xE10F4000, 0xE350F001, 0xE10F5000, 0xE11FF001, 0xE10F6000}, {0x80000001u, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // LDRD / STRD with an odd rd transfer the pair below it (ARM9; ignored on the ARM7).
+    {Cpu::ARM9, false, {0xE1C930F0, 0xE1C950D0}, {0, 0, 0x1111, 0x2222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE1C930F0, 0xE1C950D0}, {0, 0, 0x1111, 0x2222, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     // v5TE DSP multiplies (ARM9 only). Operands are chosen so the halves are
     // distinguishable and the accumulate overflows, which is the only way the
     // sticky Q flag is exercised. r6/r9/r13 are reserved by the harness.

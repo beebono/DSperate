@@ -611,7 +611,7 @@ void Bus::update_tcm(CpuContext& cpu, bool force) {
   if (watch_on) pt.map_mmio(watch_addr & ~0x7FFu, 0x800);
   const u32 ctl = cpu.cp15_control;
   if (ctl & (1u << 16)) {                                       // DTCM enabled
-    const u32 base = cpu.cp15_dtcm & 0xFFFFF000;
+    const u32 base = cpu.dtcm_base;   // aligned to the window's size, as the timing table and melonDS have it
     u32 size = 512u << ((cpu.cp15_dtcm >> 1) & 0x1F);
     if (size < DTCM_SIZE) size = DTCM_SIZE;
     for (u32 off = 0; off < size; off += DTCM_SIZE) {

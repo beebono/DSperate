@@ -2076,7 +2076,7 @@ bool Translator::run() {
   u32 span_lo = start, span_hi = addr - 1;
   u32 live = exit_flag_live(addr, span_lo, span_hi);
   for (size_t i = instrs_.size(); i-- > 0;) {
-    instrs_[i].live_out = live;
+    instrs_[i].live_out = rt().trace ? F_ALL : live;   // a traced run prints the CPSR at every instruction: no flag is dead to it
     const FlagUse u = thumb_ ? thumb_flag_use(static_cast<u16>(instrs_[i].raw), a9_) : arm_flag_use(instrs_[i].raw, a9_);
     live = u.reads | (live & ~u.writes);
   }
