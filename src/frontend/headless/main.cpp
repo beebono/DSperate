@@ -42,6 +42,8 @@
 #include "net/lan_mp.h"
 #include "net/slirp_driver.h"
 #include <arpa/inet.h>
+#include <strings.h>
+#include <sys/stat.h>
 #endif
 
 namespace {
@@ -175,6 +177,31 @@ void swi_log_cb(ds::CpuContext& cpu, ds::u32 instr, void* user) {
   }
 }
 
+// False (with the reason on stderr) when writing `path` would destroy something: it is one of the run's input
+// files, or it exists and is named as a ROM, an archive or a battery save.
+bool output_path_safe(const char* opt, const char* path, const char* const* inputs, size_t n_inputs) {
+  struct stat out;
+  if (stat(path, &out) != 0) return true;   // a new file
+  if (!S_ISREG(out.st_mode)) return true;   // /dev/null, a pipe
+  for (size_t k = 0; k < n_inputs; ++k) {
+    struct stat in;
+    if (inputs[k] && stat(inputs[k], &in) == 0 && in.st_dev == out.st_dev && in.st_ino == out.st_ino) {
+      std::fprintf(stderr, "%s %s: that file is an input of this run; not overwriting it\n", opt, path);
+      return false;
+    }
+  }
+  static const char* const kept[] = {".nds", ".dsi", ".srl", ".ids", ".gba", ".zip", ".7z", ".sav", ".dsv", ".cia", ".dsin"};
+  const size_t len = std::strlen(path);
+  for (const char* e : kept) {
+    const size_t el = std::strlen(e);
+    if (len >= el && !strcasecmp(path + len - el, e)) {
+      std::fprintf(stderr, "%s %s: an existing %s file; not overwriting it\n", opt, path, e);
+      return false;
+    }
+  }
+  return true;
+}
+
 void write_blob(const std::string& path, const ds::u8* p, size_t n) {
   if (FILE* f = std::fopen(path.c_str(), "wb")) { std::fwrite(p, 1, n, f); std::fclose(f); }
 }
@@ -290,7 +317,17 @@ int main(int argc, char** argv) {
   std::vector<Touch> touches;          // --touch F:x,y[:N]: press (x,y) from frame F for N frames (default 10)
   bool pace = false;                   // --pace: sleep to 60 frames a second
   for (int i = 1; i < argc; ++i) {
-    auto arg = [&](const char* name) { return !std::strcmp(argv[i], name) && i + 1 < argc; };
+    // An option that takes values must be followed by them: a missing one is an error, never the next
+    // argument (which was the ROM, and an output option then wrote over it).
+    auto arg = [&](const char* name, int n = 1) {
+      if (std::strcmp(argv[i], name)) return false;
+      for (int k = 1; k <= n; ++k)
+        if (i + k >= argc || !argv[i + k][0] || !std::strncmp(argv[i + k], "--", 2)) {
+          std::fprintf(stderr, "%s needs %s\n", name, n > 1 ? "its values" : "a value");
+          std::exit(2);
+        }
+      return true;
+    };
     auto flag = [&](const char* name) { return !std::strcmp(argv[i], name); };
     if (arg("--frames")) { frames = std::atoi(argv[++i]); frames_given = true; }
     else if (arg("--lan-host")) { lan_host = argv[++i]; pace = true; }
@@ -341,10 +378,10 @@ int main(int argc, char** argv) {
       if (!std::getenv("DS_GPU_NOLAG")) setenv("DS_GPU_NOLAG", "1", 1);   // each frame's own record, not the lag rule's
     }
     else if (arg("--dump-3d-fine")) { fine3d_path = argv[++i]; setenv("DS_LEAN_FINE", "1", 1); }   // FILE: with --gpu3d --gpu3d-scale N, the GPU raster's record at its own scale (256N x 192N words a frame; a frame without one is written as zeros)
-    else if (arg("--dump-gpu-frame")) { gpu_dump_frame = std::atol(argv[++i]); gpu_dump_path = argv[++i]; }   // N FILE: frame N's polygon list in the GPU raster's layout (vk_dump.h)
+    else if (arg("--dump-gpu-frame", 2)) { gpu_dump_frame = std::atol(argv[++i]); gpu_dump_path = argv[++i]; }   // N FILE: frame N's polygon list in the GPU raster's layout (vk_dump.h)
 
     else if (arg("--hash-frames")) hash_frames = argv[++i];   // FILE: "frame top bottom" per frame, FNV-1a 64 of each screen's 0xAARRGGBB (the video golden hashes)
-    else if (arg("--dump-scaled")) { scaled_n = std::atoi(argv[++i]); scaled_path = argv[++i]; }   // N FILE: both screens through the scanline scaler at Nx, raw BGRA
+    else if (arg("--dump-scaled", 2)) { scaled_n = std::atoi(argv[++i]); scaled_path = argv[++i]; }   // N FILE: both screens through the scanline scaler at Nx, raw BGRA
     else if (arg("--dump-from")) dump_from = std::atoi(argv[++i]);    // first frame to dump
     else if (arg("--dump-count")) dump_count = std::atoi(argv[++i]);  // how many (0 = to the end)
     else if (arg("--dump-at")) { for (const char* p = argv[++i]; *p;) { char* e; dump_at.push_back(static_cast<int>(std::strtol(p, &e, 10))); p = *e ? e + 1 : e; } }   // F1,F2,..: every dump takes these frames only
@@ -381,7 +418,21 @@ int main(int argc, char** argv) {
     else if (arg("--stats-from")) stats_from = std::atoi(argv[++i]);
     else if (arg("--pc-profile")) pc_profile = argv[++i];                   // a sampling profile of every thread from --stats-from on
     else if (arg("--save-state-at")) { save_state_at = std::atoi(argv[++i]); save_state_path = std::strchr(argv[i], ':'); if (save_state_path) ++save_state_path; }   // N:path -- write after N frames (0 = at once)
+    else if (!std::strncmp(argv[i], "--", 2)) { std::fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
+    else if (rom) { std::fprintf(stderr, "two ROMs given: %s and %s\n", rom, argv[i]); return 2; }
     else rom = argv[i];
+  }
+  // No output may land on a file the run reads, or on an existing ROM, archive or save.
+  {
+    const char* const ins[] = {rom, bios9, bios7, fw, bios9i, bios7i, dsi_boot, dsi_nand, dsi_install, dsi_tmd, dsi_font,
+                               replay, save, gba_rom, gba_save, cheat_db, analog_db, load_state};
+    const std::pair<const char*, const char*> outs[] = {
+        {"--dump-frames", dump}, {"--dump-3d", rec3d_path}, {"--dump-3d-fine", fine3d_path},
+        {"--dump-screens-scaled", screens_scaled_path}, {"--dump-gpu-frame", gpu_dump_path}, {"--hash-frames", hash_frames},
+        {"--dump-scaled", scaled_path}, {"--dump-audio", dump_audio}, {"--gba-save-out", gba_save_out},
+        {"--pc-profile", pc_profile}, {"--save-state-at", save_state_path}};
+    for (const auto& [opt, path] : outs)
+      if (path && !output_path_safe(opt, path, ins, sizeof ins / sizeof ins[0])) return 2;
   }
   // Without --direct, replay inputs land in the firmware setup wizard instead.
   if (replay && !direct)
