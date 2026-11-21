@@ -32,7 +32,11 @@ uint sample_tex(GpuPoly p, int s12, int t12) {
   ivec2 st = (ivec2(s12, t12) >> 4) & DS_WRAP_VARY.xy;
   st = min(st, DS_WRAP_VARY.zw - st);
   highp int a = int(p.tex_offset) + st.y * int(p.tex_w) + st.x;
+#ifdef DS_TEXEL_BUFFER
   return texelFetch(texels_tb, a).r;
+#else
+  return texels[uint(a)];   // the GLES raster's arena is a storage buffer
+#endif
 }
 #else
 uint sample_tex(GpuPoly p, int s12, int t12) {

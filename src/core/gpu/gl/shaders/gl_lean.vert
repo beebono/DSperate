@@ -12,6 +12,25 @@ flat out uint v_poly;
 out vec3 v_rgb;     // 9-bit colour and 12.4 texture coordinates, perspective-correct:
 out vec2 v_st;
 out float v_zp;     // DS depth, perspective-correct
+// The polygon's words the fragment stage shades by, unpacked here once a vertex (lean.vert poly_out has why: on
+// the Malis every operation there is paid per pixel, and the G31 has a third of the G52's arithmetic).
+flat out ivec4 v_pb;    // the texcoord range: s and t min, s and t max (a clamped axis: within the texture)
+flat out ivec4 v_wrap;  // texel = min(c & mask, fold - (c & mask)): mask.st, fold.st
+flat out ivec4 v_tex;   // arena offset, width, blend mode | alpha << 2 (a wireframe's 0 as 31) | fog bit << 7 | textured << 8 | wireframe << 9, the edge-marking word's low bits
+void poly_out(GpuPoly p) {
+  uint pa = (p.attr >> 16) & 0x1Fu;
+  uint fogbit = ((pc.f.dispcnt & 128u) != 0u && (p.attr & 0x8000u) != 0u) ? 1u : 0u;
+  ivec2 wh = ivec2(int(p.tex_w), int(p.tex_h));
+  bvec2 rep = notEqual(ivec2(p.texparam) & ivec2(0x10000, 0x20000), ivec2(0));
+  bvec2 flp = bvec2(rep.x && (p.texparam & 0x40000u) != 0u, rep.y && (p.texparam & 0x80000u) != 0u);
+  ivec2 lo = ivec2(int(p.row_base & 0xFFFFu), int(p.pad_ & 0xFFFFu)) - 32768, hi = ivec2(int(p.row_base >> 16), int(p.pad_ >> 16)) - 32768;
+  hi = max(hi - 1, lo);   // the DS reads no pixel at a span's far end (lean.vert)
+  v_pb = ivec4(mix(clamp(lo, ivec2(0), wh * 16 - 1), lo, rep), mix(clamp(hi, ivec2(0), wh * 16 - 1), hi, rep));
+  v_wrap = ivec4(mix(ivec2(0xFFFF), mix(wh - 1, 2 * wh - 1, flp), rep), mix(ivec2(0xFFFFF), 2 * wh - 1, flp));
+  bool wire = pa == 0u && (p.flags & (DS_PF_SHADOW | DS_PF_SHADOW_MASK)) == 0u;
+  v_tex = ivec4(int(p.tex_offset), wh.x, int(((p.attr >> 4) & 3u) | ((pa == 0u ? 31u : pa) << 2) | (fogbit << 7) | ((p.flags & DS_PF_TEXTURED) != 0u ? 256u : 0u) | (wire ? 512u : 0u)),
+               int(((p.attr >> 24) & 0x3Fu) | (fogbit << 6) | 0x80u));
+}
 void main() {
   uint pi = uint(gl_InstanceID + u_base);
   GpuPoly p = load_poly(pi);
@@ -19,7 +38,7 @@ void main() {
   // A polygon of four or more vertices is a fan around its centre (lean.vert has why), unless it lies
   // inside one column or row of pixels (the line case below).
   bool cfan = (pc.f.flags2 & DS_FF2_CENTRE) != 0u && p.nverts >= 4u && p.xmax != p.xmin && p.ybot != p.ytop;
-  if (cfan ? tri >= p.nverts : tri + 2u >= p.nverts) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); v_poly = 0u; v_rgb = vec3(0.0); v_st = vec2(0.0); v_zp = 0.0; return; }
+  if (cfan ? tri >= p.nverts : tri + 2u >= p.nverts) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); v_poly = 0u; v_rgb = vec3(0.0); v_st = vec2(0.0); v_zp = 0.0; v_pb = ivec4(0); v_wrap = ivec4(0); v_tex = ivec4(0); return; }
   uint vi = k == 0u ? 0u : tri + k;
   // The fan triangle's three vertices (the attribute planes below need them all); this one is vt.
   GpuVert ta = load_vert(p.first_vert), tb = load_vert(p.first_vert + tri + 1u), tc = load_vert(p.first_vert + tri + 2u);
@@ -62,7 +81,7 @@ void main() {
   float zd = ds_depth(vt, p.attr);
   float zc = ds_clip_z(zd, p.attr, w);
   gl_Position = vec4(x * w, y * w, zc, w);
-  v_poly = pi;
+  v_poly = pi; poly_out(p);
   v_rgb = a_rgb;
   v_st = a_st;
   v_zp = zd;

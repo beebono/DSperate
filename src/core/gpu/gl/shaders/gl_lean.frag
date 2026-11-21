@@ -13,6 +13,11 @@ flat in uint v_poly;
 in vec3 v_rgb;
 in vec2 v_st;
 in float v_zp;
+// The polygon's words, made ready by the vertex stage (gl_lean.vert poly_out): no load of the record here.
+flat in ivec4 v_pb;
+flat in ivec4 v_wrap;
+flat in ivec4 v_tex;
+#define DS_WRAP_VARY v_wrap
 layout(location = 0) out vec4 o_col;
 layout(location = 1) out vec4 o_fog;
 layout(location = 2) out uint o_id;
@@ -23,9 +28,6 @@ layout(location = 2) out uint o_id;
 layout(early_fragment_tests) in;
 #endif
 #include "ds_shade.glsl"
-// The polygon's texcoord range (row_base / pad_: s and t min | max << 16, each + 32768).
-ivec2 st_bounds_lo(GpuPoly p) { return ivec2(int(p.row_base & 0xFFFFu), int(p.pad_ & 0xFFFFu)) - 32768; }
-ivec2 st_bounds_hi(GpuPoly p) { return ivec2(int(p.row_base >> 16), int(p.pad_ >> 16)) - 32768; }
 #ifndef DS_EARLY
 // A wireframe polygon (alpha 0): the DS draws its edges only, a pixel a row
 // along a steep one and a pixel a column along a shallow one. The fan covers
@@ -59,21 +61,30 @@ void main() {
 #ifdef DS_WDEPTH
   gl_FragDepth = v_zp / 16777215.0;
 #endif
-  GpuPoly p = polys[v_poly];
-  bool textured = (p.flags & DS_PF_TEXTURED) != 0u;
-  // The vertices' colour, and their texture coordinates floored as the DS does and clamped to the polygon's range (lean.frag).
-  ivec3 rgb9 = ivec3(round(clamp(v_rgb, vec3(0.0), vec3(511.0))));
-  ivec2 st4 = clamp(ivec2(floor(v_st + 0.03125)), st_bounds_lo(p), st_bounds_hi(p));
-  DS_MP uint blendmode = (p.attr >> 4) & 3u;
-  DS_MP uint polyalpha = (p.attr >> 16) & 0x1Fu;
-  if (polyalpha == 0u) {   // wireframe: opaque lines
+  // As lean.frag, the Vulkan stage: the alpha first (the DS's integer, every test on it exact), then the colour in
+  // float, within one of the DS's 63 levels. The integer form of ds_shade.glsl with the record loaded and unpacked
+  // here was 25.6 arithmetic cycles on the G31 by the offline compiler, a third of them the unpacking and the wrap.
+  GpuPoly p;
+  p.tex_offset = uint(v_tex.x); p.tex_w = uint(v_tex.y);
+  bool textured = (v_tex.z & 256) != 0;
+  ivec2 st4 = clamp(ivec2(floor(v_st + 0.03125)), v_pb.xy, v_pb.zw);
+  DS_MP uint blendmode = uint(v_tex.z) & 3u, polyalpha = (uint(v_tex.z) >> 2) & 31u;
+  uint fogbit = (uint(v_tex.z) >> 7) & 1u;
 #ifndef DS_EARLY
-    if ((p.flags & (DS_PF_SHADOW | DS_PF_SHADOW_MASK)) == 0u && !wire_keeps(p)) discard;
-#endif
-    polyalpha = 31u;
+  if ((v_tex.z & 512) != 0) {   // wireframe: opaque lines (the record is read for these alone)
+    GpuPoly wp = polys[v_poly];
+    if (!wire_keeps(wp)) discard;
   }
-  DS_MP uvec4 src = shade_pixel(p, blendmode, polyalpha, textured, rgb9.r, rgb9.g, rgb9.b, st4.x, st4.y);
-  DS_MP uint alpha = src.a;
+#endif
+  DS_MP uint ta = 31u;
+  vec3 tc = vec3(63.0);
+  if (textured) {
+    uint texw = sample_tex(p, st4.x, st4.y);
+    ta = (texw >> 16) & 0x1Fu;
+    vec3 t5 = vec3(uvec3(texw, texw >> 5, texw >> 10) & 31u);
+    tc = t5 * 2.0 + step(0.5, t5);   // 5 bits to 6: doubled, + 1 unless 0
+  }
+  DS_MP uint alpha = (!textured || (blendmode & 1u) != 0u) ? polyalpha : ((ta + 1u) * (polyalpha + 1u) - 1u) >> 5;
 #ifndef DS_EARLY
   if (alpha <= pc.f.alpha_ref) discard;
 #endif
@@ -82,9 +93,25 @@ void main() {
 #elif DS_ALPHA_SEL == 2
   if (alpha == 31u) discard;
 #endif
-  uint fogbit = ((pc.f.dispcnt & 128u) != 0u && (p.attr & 0x8000u) != 0u) ? 1u : 0u;
+  vec3 vc = floor(clamp(v_rgb, vec3(0.0), vec3(511.0)) * 0.125);   // the vertex colour's 6 bits
+  bool mode2 = DS_TOON && blendmode == 2u, highlight = (pc.f.dispcnt & 2u) != 0u;
+  vec3 toon = vec3(0.0);
+  if (mode2) {
+    uint tw = ps.toon[uint(round(clamp(v_rgb.r, 0.0, 511.0))) >> 4];
+    vec3 t5 = vec3(uvec3(tw, tw >> 5, tw >> 10) & 31u);
+    toon = t5 * 2.0 + step(0.5, t5);
+    vc = highlight ? vc.rrr : toon;
+  }
+  vec3 col = vc;
+  if (textured) {
+    if ((blendmode & 1u) != 0u) col = mix(vc, tc, ta == 31u ? 1.0 : float(ta) * (1.0 / 32.0));   // decal
+    else col = ((tc + 1.0) * (vc + 1.0) - 1.0) * (1.0 / 64.0);                                      // modulate
+  }
+  if (mode2 && highlight) col = min(col + toon, vec3(63.0));
+  col = floor(col + 1e-3);   // cut off, as the DS's shifts do (lean.frag)
   DS_MP uint ab = alpha == 0u ? 0u : min(255u, (alpha + 1u) * 8u);
-  highp vec4 c = vec4(uvec4(src.rgb, ab));   // highp before the divide: the blend unit takes the value as is, and fp16's error moved blends by 1
+  highp uvec4 src = uvec4(uvec3(col), alpha);
+  highp vec4 c = vec4(col, float(ab));   // highp before the divide: the blend unit takes the value as is, and fp16's error moved blends by 1
   o_col = c / 255.0;
 #ifdef DS_FETCH
   // A translucent run in one pass (B3): the pixel beneath read from the
@@ -109,6 +136,6 @@ void main() {
 #endif
   o_fog = vec4(float(fogbit), 0.0, 0.0, 1.0);
   // Edge marking (gl_mark.frag): the polygon's id, fog bit, "drawn" and the pixel's DS depth, where a frame marks edges.
-  if ((pc.f.flags2 & DS_FF2_EDGEMARK) != 0u) o_id = ((p.attr >> 24) & 0x3Fu) | (fogbit << 6) | 0x80u | (uint(clamp(v_zp, 0.0, 16777215.0)) << 8);
+  if ((pc.f.flags2 & DS_FF2_EDGEMARK) != 0u) o_id = uint(v_tex.w) | (uint(clamp(v_zp, 0.0, 16777215.0)) << 8);
   else o_id = v_poly + 1u;
 }
