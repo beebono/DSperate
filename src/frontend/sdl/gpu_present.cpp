@@ -65,6 +65,10 @@ constexpr u32 kFrameWords = 256 * 192;     // one screen
 constexpr u32 kSlotPlanes = 9;                // present.frag SLOT_PLANES is this
 constexpr u32 kSlotWords = kSlotPlanes * kFrameWords;
 constexpr u32 kMergePlane = 4, kLinePlane = 8;
+// After the slots in `src`: colour correction as a table, a word for each of the 64^3 colours a pixel can have
+// (r | g << 6 | b << 12 -> 0xAARRGGBB). A merged screen is corrected in the shader, after its 3D layer is in
+// (present.frag lut()): its frame goes up as the core made it.
+constexpr u32 kLutWords = 64 * 64 * 64;
 constexpr int kSlots = 2;                  // frames in flight + the one being written
 constexpr int kMaxBufs = 8;
 constexpr u32 kBindings = 3;               // storage buffers: source frames, overlay, grid table (bindings 1..3)
@@ -177,6 +181,9 @@ struct GpuPresent::Impl {
   }
   VkSampler lsamp = VK_NULL_HANDLE;            // the layer is fetched by texel
   u64 merge_frames = 0;
+  // The colour table in `src` is of this correction (a copy: the caller's may be gone, or another at its address).
+  gpu::kern::ColourLut lut_of{};
+  bool lut_valid = false;
   u64 chk_frames = 0, chk_px = 0, chk_bad = 0, chk_live = 0, chk_cap = 0; // DS_MERGE3D_CHECK
   // The frames again as a sampled image for the filters: the texture unit
   // blends bilinear and seam taps for nothing, where the same blends from the
@@ -468,7 +475,7 @@ std::unique_ptr<GpuPresent> GpuPresent::open(ScanoutOut& out, std::string* why) 
   if (!d.dev->limits().graphics) return fail("the queue does no graphics");
   d.a->vkGetPhysicalDeviceMemoryProperties(d.vk->phys, &d.memprops);
 
-  d.src = d.dev->alloc(sizeof(u32) * kSlotWords * kSlots, Access::CpuWrite);
+  d.src = d.dev->alloc(sizeof(u32) * (kSlotWords * kSlots + kLutWords), Access::CpuWrite);
   if (!d.src) return fail("source buffer allocation failed");
   for (int s = 0; s < kSlots; ++s) { d.tab[s] = d.dev->alloc(sizeof(u32) * 128, Access::CpuWrite); if (!d.tab[s]) return fail("grid table allocation failed"); std::memset(d.tab[s].ptr, 0, sizeof(u32) * 128); }
   {
@@ -657,9 +664,25 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
   alignas(16) u32 line[256];
   bool shows[2] = {false, false};
   for (int v = 0; v < std::min(nviews, 2); ++v) if (views[v].shown) shows[views[v].screen & 1] = true;
+  // A screen the merge shader will draw is corrected there, after its 3D layer is in: the table for it, once a
+  // correction (no frame in flight reads it meanwhile: both slots are waited for).
+  bool lut_on[2] = {false, false};
+  if (colour && merge && d.merge_pipeline(false)) {
+    for (int k = 0; k < 2; ++k) { const Merge3D::Screen& m = merge->s[k]; lut_on[k] = m.view && m.words && m.lines && shows[k]; }
+    if ((lut_on[0] || lut_on[1]) && !(d.lut_valid && !std::memcmp(&d.lut_of, colour, sizeof d.lut_of))) {
+      for (int s = 0; s < kSlots; ++s) if (d.fence_live[s]) { a.vkWaitForFences(d.vk->dev, 1, &d.fence[s], VK_TRUE, ~0ull); }
+      u32* const t = static_cast<u32*>(d.src.ptr) + static_cast<size_t>(kSlots) * kSlotWords;
+      for (u32 i = 0; i < kLutWords; ++i) {
+        const u32 r = i & 63u, g = (i >> 6) & 63u, b = i >> 12;
+        t[i] = gpu::kern::colour_pixel(*colour, 0xFF000000u | ((r << 2 | r >> 4) << 16) | ((g << 2 | g >> 4) << 8) | (b << 2 | b >> 4));
+      }
+      d.dev->flush(d.src, static_cast<size_t>(kSlots) * kSlotWords * sizeof(u32), kLutWords * sizeof(u32));
+      std::memcpy(&d.lut_of, colour, sizeof d.lut_of); d.lut_valid = true;
+    }
+  }
   for (int s = 0; s < 2; ++s) {
     u32* const o = dst + static_cast<size_t>(s) * kFrameWords;
-    if (!colour || !shows[s]) { std::memcpy(o, fb[s], sizeof(u32) * kFrameWords); continue; }
+    if (!colour || !shows[s] || lut_on[s]) { std::memcpy(o, fb[s], sizeof(u32) * kFrameWords); continue; }
     for (u32 y = 0; y < 192; ++y) {
       std::memcpy(line, fb[s] + y * 256, sizeof line);
       gpu::kern::active::colour_correct(*colour, line);
@@ -766,6 +789,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     if (ms.scrolled) feat |= 32u;
     if (!ms.live || ms.coords) feat |= 64u;
     if (bright[scr]) feat |= 128u;
+    if (lut_on[scr]) feat |= 0x1000u;
     if (ms.scale >= 1 && ms.scale <= 7) feat |= ms.scale << 8;
     return feat;
   };
@@ -913,9 +937,10 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
         const u32 sx = static_cast<u32>(x) / sc;
         if (!m.words[sy * 256 + sx] || (ov_row && r.x + x >= ov.x && r.x + x < ov.x + ov.w)) continue;   // the merge's own pixels
         ++n;
-        if (((row[x] ^ want[sx]) & 0xFFFFFFu) == 0) continue;
+        const u32 exp = lut_on[k] ? gpu::kern::colour_pixel(*colour, want[sx]) : want[sx];   // corrected after the merge, as the shader does
+        if (((row[x] ^ exp) & 0xFFFFFFu) == 0) continue;
         if (d.chk_bad + bad < 16) std::fprintf(stderr, "gpu present: 3D merge check: frame %llu screen %d pixel %u,%u shows %06x, the CPU merge %06x (word %08x)\n", static_cast<unsigned long long>(d.frames), k, sx, sy,
-                                               row[x] & 0xFFFFFFu, want[sx] & 0xFFFFFFu, m.words[sy * 256 + sx]);
+                                               row[x] & 0xFFFFFFu, exp & 0xFFFFFFu, m.words[sy * 256 + sx]);
         ++bad;
       }
     }

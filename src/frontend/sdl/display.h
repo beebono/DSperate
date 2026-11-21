@@ -145,7 +145,7 @@ public:
   // or draws cells before the merge.
   bool merge3d_ok() const;
   // What keeps the window from merging it, for the menu's GPU 3D SCALE row.
-  enum class MergeBlock : u8 { None, NoVulkanPresent, Bilinear, Colour, ChunkySource, SeamBlend };
+  enum class MergeBlock : u8 { None, NoVulkanPresent, Bilinear, ChunkySource, SeamBlend };
   MergeBlock merge3d_block() const;
   // Where `screen` shows in this window, in the canvas's coordinates; false if it does not.
   bool screen_rect(int screen, frontend::Rect& out) const {

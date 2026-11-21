@@ -500,7 +500,6 @@ bool Display::merge3d_ok() const { return merge3d_block() == MergeBlock::None; }
 Display::MergeBlock Display::merge3d_block() const {
   if (!vk_present()) return MergeBlock::NoVulkanPresent;
   if (linear_) return MergeBlock::Bilinear;
-  if (colour_) return MergeBlock::Colour;
   if (src_gpu_) return MergeBlock::ChunkySource;
   if (seam_blend_)   // seams blend except at a whole scale or on a view shorter than the screen (GpuPresent::present)
     for (int i = 0; i < nviews_; ++i) {

@@ -62,7 +62,7 @@ public:
     u32 grid = 256;              // LCD grid brightness on a seam, 0..256 (256 = off)
     bool linear = false;         // video.linear
     u8 seam_blend = 0;           // video.seam: 1 blend, 2 blend in linear light
-    Merge3D merge;               // the 3D merge (a nearest view without colour correction)
+    Merge3D merge;               // the 3D merge (a nearest view)
     // Colour correction to apply to the frames as they are uploaded
     // (kern::colour_correct on the present thread); null: the frames
     // are shown as they are, corrected by the core or not at all.

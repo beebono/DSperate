@@ -29,7 +29,8 @@ layout(constant_id = 0) const uint FILTER = 0u;   // GpuPresent::Filter: 0 neare
 // What the pipeline's draws use (gpu_present.cpp picks the pipeline by it): 1 unused, 2 the LCD grid, 4 the
 // overlay, and in the merge 8 more than one texel to a panel pixel, 16 a captured image's coordinates, 32 BG0's
 // scroll, 64 a capture's 15-bit words, 128 master brightness; bits 8-10 the 3D layer's scale when it is known (0:
-// asked of the image); bit 11 the merge was made in a pass before this one, at the layer's scale, and is in `merged`.
+// asked of the image); bit 11 the merge was made in a pass before this one, at the layer's scale, and is in `merged`;
+// bit 12 the merged pixel is colour-corrected here (lut()).
 // The rest is compiled out: with all of it in, both builds ran out of registers on the
 // Mali-G52 and a 4x view cost 0.3 to 1.5 ms more.
 layout(constant_id = 1) const uint FEAT = 255u;
@@ -119,6 +120,15 @@ vec3 merge_texel(uint w, uint op, uint s, uvec4 p, uint lt) {
 // (the frame's pixel and the word are that one's): whole ratios make it the
 // box filter, and nothing of the image is skipped. The record is merged
 // texel by texel, never filtered first (colour and alpha are packed).
+// Colour correction of a merged pixel (FEAT bit 12): the table after the slots in `src` (gpu_present.cpp
+// kLutWords), a word for each colour of 6 bits a channel, which is what the core and the merge make (a mean of
+// several texels goes to the nearest). The frame of a merged screen is uploaded uncorrected: this is its only one.
+const uint LUT_BASE = 2u * SLOT_PLANES * 49152u;   // kSlots * kSlotWords
+vec3 lut(vec3 c) {
+  uvec3 q = uvec3(clamp(c, 0.0, 255.0) + 0.5) >> 2u;
+  return unpack(src[LUT_BASE + (q.r | (q.g << 6) | (q.b << 12))]);
+}
+
 vec3 merge3d(uint s, int sx, int sy, float fx, float fy) {
   uint mp = ((pc.b.y >> 8) & 255u) * 49152u;
   uint at = uint(sy) * 256u + uint(sx);
@@ -174,7 +184,10 @@ void main() {
     if ((FEAT & 0x800u) != 0u) {
       const int psc = int((FEAT >> 8) & 7u);   // the same texel merge3d would fetch
       col = round(texelFetch(merged, min(ivec2(vec2(fx, fy) * float(psc)), ivec2(256, 192) * psc - 1), 0).rgb * 255.0);
-    } else col = merge3d(src[pc.b.z + uint(sy) * 256u + uint(sx)], sx, sy, fx, fy);
+    } else {
+      col = merge3d(src[pc.b.z + uint(sy) * 256u + uint(sx)], sx, sy, fx, fy);
+      if ((FEAT & 0x1000u) != 0u) col = lut(col);
+    }
   }
   else
 #endif
