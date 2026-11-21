@@ -535,28 +535,86 @@ bool peek_state_ident(const std::string& path, u64& ident) {
   return ok;
 }
 
+// A quick fingerprint of a ROM image's contents, for telling apart images
+// whose headers and sizes agree (most hacks): the header and secure area,
+// the file tables (a hack that grows a file moves the ones behind it), and
+// 256 pages spread over the image. About 2 MB read, whatever the ROM's size.
+u64 quick_rom_hash(const NDS& nds) {
+  const ds::cart::Cart& c = *nds.cart;
+  const u32 size = c.rom_size();
+  u64 h = 1469598103934665603ull ^ size;
+  std::vector<u8> buf(0x8000);
+  const auto mix = [&](u32 off, u32 n) {
+    if (off >= size) return;
+    n = std::min(n, size - off);
+    for (u32 done = 0; done < n;) {
+      const u32 take = std::min<u32>(n - done, static_cast<u32>(buf.size()));
+      std::fill(buf.begin(), buf.end(), 0);
+      c.rom_read(off + done, buf.data(), take);
+      for (u32 i = 0; i < take; i += 8) { u64 w; std::memcpy(&w, &buf[i], 8); h = (h ^ w) * 1099511628211ull; }
+      done += take;
+    }
+  };
+  mix(0, 0x8000);
+  mix(c.header().fat_offset, std::min<u32>(c.header().fat_size, 512u << 10));
+  mix(c.header().fnt_offset, std::min<u32>(c.header().fnt_size, 512u << 10));
+  for (u32 i = 0; i < 256; ++i) mix(static_cast<u32>(static_cast<u64>(size) * i / 256) & ~0xFFFu, 0x1000);
+  return h;
+}
+
 // What a game's state files are named by: its code, and for every ROM image
 // with that code after the first one seen (a hack, another revision, homebrew
 // that shares a code) a ".vN" tag, so each image has slots and an auto state
 // of its own. Which image is which is kept in <CODE>.roms beside the states,
-// one identity a line, first seen first; the file appears only once a second
-// image does, and the first image keeps the untagged names it always had.
-// Set by Session::open.
+// a line an image, first seen first: the header identity a state records
+// (NDS::rom_id) and the contents' fingerprint. The file is written when a
+// game first has states, and the first image keeps the untagged names.
+// An image is fingerprinted at launch only when its code already has states
+// or a list to compare with. Set by Session::open.
 std::string g_state_key = "NONE";
+
+struct StateOwner {
+  struct Image { u64 id = 0, content = 0; bool known = false; };   // known: the fingerprint was taken (not a list or state from before it)
+  std::string index;            // <dir>/<CODE>.roms; empty with no cartridge
+  std::vector<Image> images;
+  u64 id = 0;
+  bool listed = false;          // this image is in the file
+} g_state_owner;
+
+bool write_state_index(const StateOwner& o) {
+  std::string text, err;
+  for (const StateOwner::Image& im : o.images) {
+    char line[48];
+    if (im.known) std::snprintf(line, sizeof line, "%016llx %016llx\n", static_cast<unsigned long long>(im.id), static_cast<unsigned long long>(im.content));
+    else std::snprintf(line, sizeof line, "%016llx\n", static_cast<unsigned long long>(im.id));
+    text += line;
+  }
+  if (ds::write_file_atomic(o.index, text.data(), text.size(), err)) return true;
+  std::fprintf(stderr, "state: %s\n", err.c_str());
+  return false;
+}
 
 std::string state_key_for(const NDS& nds, const std::string& dir) {
   const std::string code = code_key(nds);
+  StateOwner& o = g_state_owner;
+  o = StateOwner{};
   if (!nds.cart) return code;
-  const std::string index = dir + "/" + code + ".roms";
-  std::vector<u64> ids;
-  if (FILE* f = std::fopen(index.c_str(), "r")) {
-    char line[64];
-    while (std::fgets(line, sizeof line, f) && ids.size() < 99) { char* e; const u64 v = std::strtoull(line, &e, 16); if (e != line) ids.push_back(v); }
+  o.index = dir + "/" + code + ".roms";
+  o.id = nds.rom_id;
+  if (FILE* f = std::fopen(o.index.c_str(), "r")) {
+    char line[96];
+    while (std::fgets(line, sizeof line, f) && o.images.size() < 99) {
+      unsigned long long id = 0, content = 0;
+      const int n = std::sscanf(line, "%llx %llx", &id, &content);
+      if (n >= 1) o.images.push_back({id, content, n == 2});
+    }
     std::fclose(f);
   }
-  if (ids.empty()) {
-    // No second image yet. The untagged states say whose they are: ours or
-    // nobody's, and this image is the first; another's, and that one is.
+  if (o.images.empty()) {
+    // No list yet. The untagged states say whose they are, by header: nobody's
+    // (nothing to compare with, and nothing to write until a state is made),
+    // this header's (taken as this image's: states from before the
+    // fingerprint cannot say more), or another's, which is then the first.
     u64 other = 0; bool ours = false, theirs = false; time_t newest = 0;
     std::vector<std::string> names = {dir + "/" + code + ".auto.dss"};
     for (int i = 0; i < 10; ++i) names.push_back(dir + "/" + code + "." + std::to_string(i) + ".dss");
@@ -566,23 +624,38 @@ std::string state_key_for(const NDS& nds, const std::string& dir) {
       if (id == nds.rom_id) ours = true;
       else if (!theirs || st.st_mtime > newest) { theirs = true; other = id; newest = st.st_mtime; }
     }
-    if (ours || !theirs) return code;
-    ids.push_back(other);
+    if (!ours && !theirs) return code;
+    if (!ours) o.images.push_back({other, 0, false});
   }
+  const u64 content = quick_rom_hash(nds);
   size_t at = 0;
-  while (at < ids.size() && ids[at] != nds.rom_id) ++at;
-  if (at == ids.size()) {
-    ids.push_back(nds.rom_id);
-    std::string text, err;
-    for (const u64 v : ids) { char line[32]; std::snprintf(line, sizeof line, "%016llx\n", static_cast<unsigned long long>(v)); text += line; }
-    if (!ds::write_file_atomic(index, text.data(), text.size(), err)) {
+  for (; at < o.images.size(); ++at) {
+    const StateOwner::Image& im = o.images[at];
+    if (im.id == nds.rom_id && (!im.known || im.content == content)) break;
+  }
+  const bool fresh = at == o.images.size();
+  if (fresh) o.images.push_back({nds.rom_id, content, true});
+  if (fresh || !o.images[at].known) {
+    o.images[at].content = content; o.images[at].known = true;
+    if (!write_state_index(o)) {
       // Nowhere to remember it: the shared names, as before, and say so.
-      std::fprintf(stderr, "state: %s; this ROM shares its state slots with another that has the same game code\n", err.c_str());
+      if (at) std::fprintf(stderr, "state: this ROM shares its state slots with another that has the same game code\n");
       return code;
     }
-    std::fprintf(stderr, "state: another ROM image with the game code %s has states here; this one's are named %s.v%zu.*\n", code.c_str(), code.c_str(), at + 1);
+    if (fresh && at) std::fprintf(stderr, "state: another ROM image with the game code %s has states here; this one's are named %s.v%zu.*\n", code.c_str(), code.c_str(), at + 1);
   }
+  o.listed = true;
   return at == 0 ? code : code + ".v" + std::to_string(at + 1);
+}
+
+// A game's first state: from here on another image with its code has
+// something to be told apart from, so this one goes on the list.
+void note_state_saved(const NDS& nds) {
+  StateOwner& o = g_state_owner;
+  if (o.listed || o.index.empty() || !nds.cart || nds.rom_id != o.id) return;
+  o.images.push_back({o.id, quick_rom_hash(nds), true});
+  o.listed = write_state_index(o);
+  if (!o.listed) o.images.pop_back();
 }
 
 std::string state_path(NDS&, const std::string& dir, int slot) {
@@ -684,6 +757,7 @@ bool save_state_file(NDS& nds, const std::string& path, const ds::sdl::Display::
     return false;
   }
   std::fprintf(stderr, "state: saved %s (%zu KB)\n", path.c_str(), w.data().size() >> 10);
+  note_state_saved(nds);
   return true;
 }
 
