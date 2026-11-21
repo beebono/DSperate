@@ -12,7 +12,8 @@
 #          made (each edited function silently loses its profile). Exit 1 if
 #          the compiler/flags differ, 2 if only sources moved, 0 if current.
 # default  an instrumented aarch64 cross build, trained under qemu on the
-#          recorded scenes, three cart boots from frame 0 and (where the dumps are there) two DSiWare titles, writes
+#          recorded scenes, three cart boots from frame 0, five of them again through the GPU route with a
+#          raster that draws nothing, and (where the dumps are there) two DSiWare titles, writes
 #          the .gcda files into pgo/aarch64/ and a MANIFEST; then a "use" build
 #          from the committed profile in a *different* directory, reporting how
 #          many functions failed to find their profile (should be none straight
@@ -189,7 +190,20 @@ train nsmb   --frames 1500 "$DS_ROMS/New Super Mario Bros..nds" &
 # the scene again then (--record with --load-state keeps the start frame).
 train ghontour --guitar-grip --save "$HERE/scenes/ghontour.sav" --load-state "$HERE/scenes/ghontour.dss" \
   --replay "$HERE/scenes/ghontour.dsin" --frames 1200 "$DS_ROMS/Guitar Hero - On Tour.nds" &
-SCENES="mlbis sm64 etody dbori meteos gsdd st nsmb ghontour"
+# The GPU route's side of the CPU: the geometry stream and the list built from it, the texture arena, the submit
+# thread, and the 2D engines' split compose with its merge from the record (display captures above all: Golden
+# Sun and Spirit Tracks capture every frame). No GPU answers under qemu, so the raster is the one that draws
+# nothing (DS_GPU3D_API=null, gpu_raster.cpp), which is the same for the Vulkan and the OpenGL ES raster, and
+# DS_SPLIT3D=present runs the split with no presenter. Without these runs all of that was built cold, and a
+# PGO build was the slower one with GPU 3D on (Golden Sun's title: 555-566 of 1500 frames over 16.7 ms against
+# 107-113 unprofiled, 2026-11-20). The scenes are ones above again, so both routes weigh in the profile.
+train_gpu() { echo "  train: $1"; shift; DS_GPU3D_API=null DS_SPLIT3D=present $Q "$G" "${C[@]}" --gpu3d "$@" > /dev/null 2>&1 || echo "  (run failed: $*)"; }
+train_gpu gpu-gsdd  --frames 2400 "$DS_ROMS/Golden Sun - Dark Dawn.nds" &
+train_gpu gpu-st    --frames 2400 "$DS_ROMS/Legend of Zelda, The - Spirit Tracks.nds" &
+train_gpu gpu-nsmb  --frames 1500 "$DS_ROMS/New Super Mario Bros..nds" &
+train_gpu gpu-sm64  --replay "$HERE/scenes/sm64.dsin"  --frames 600 "$DS_ROMS/Super Mario 64 DS.nds" &
+train_gpu gpu-dbori --replay "$HERE/scenes/dbori.dsin" --frames 600 "$DS_ROMS/Dragon Ball - Origins.nds" &
+SCENES="mlbis sm64 etody dbori meteos gsdd st nsmb ghontour gpu-gsdd gpu-st gpu-nsmb gpu-sm64 gpu-dbori"
 if [ $DSI_OK = 1 ]; then
   # BIOS-only DSiWare: the launcher's hand-off is emulated over a synthetic
   # NAND, so this needs the four BIOS dumps and the DSi firmware but no NAND
