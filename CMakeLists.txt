@@ -121,6 +121,14 @@ elseif(DSPERATE_PGO STREQUAL "use")
     message(FATAL_ERROR "PGO profile in ${DSPERATE_PGO_DIR} was made for a different compiler or flags (fingerprint ${_ds_pgo_manifest}, this build ${_ds_pgo_fingerprint}); run tools/pgo_refresh.sh, or build with -DDSPERATE_PGO=OFF")
   endif()
   add_compile_options(-fprofile-use=${DSPERATE_PGO_DIR} -fprofile-prefix-path=${CMAKE_BINARY_DIR} -fprofile-correction)
+  # A build system does not know an object depends on its .gcda: after a profile refresh an incremental build
+  # kept every object it had, compiled from the profile before, and the binary was a mix of the two (2026-11-21:
+  # an evening of measurements of "the new profile" that were the old one's). The MANIFEST changes with every
+  # refresh, so its hash goes on every command line, and a change of it configures again and compiles everything.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${DSPERATE_PGO_DIR}/MANIFEST")
+  file(SHA1 "${DSPERATE_PGO_DIR}/MANIFEST" _ds_pgo_stamp)
+  string(SUBSTRING "${_ds_pgo_stamp}" 0 12 _ds_pgo_stamp)
+  add_compile_options(-DDSPERATE_PGO_PROFILE=${_ds_pgo_stamp})
   if(DSPERATE_PGO_STRICT)
     add_compile_options(-Wno-error=coverage-mismatch)
   else()
