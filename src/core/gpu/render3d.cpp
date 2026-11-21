@@ -3398,25 +3398,51 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   for (u32 i = 0; i < npoly; ++i) {
     const Polygon& p = *polys[i];
     if (p.degenerate) continue;
+    // A wireframe polygon (alpha 0): the DS draws its outline alone. Each edge
+    // goes into the list as the one-pixel quad along it (gpu_line_quad), an
+    // opaque polygon with the wireframe's attributes otherwise, so both
+    // rasters draw it with what they have. (tools/homebrew/wiretest is the
+    // test: no game on hand draws one.)
+    const bool wire = ((p.attr >> 16) & 0x1F) == 0 && !p.shadow_mask && !p.shadow;
+    for (u32 piece = 0, pieces = wire ? p.nverts : 1; piece < pieces; ++piece) {
     if (np >= DS_MAX_POLYS || nv + std::max<u32>(p.nverts, 4) > DS_MAX_VERTS) return false;
     if (first_ordered == ~0u && (alpha_all_fail || p.translucent || p.shadow_mask || p.shadow)) first_ordered = np;
     GpuPoly& o = gp[np];
     o = GpuPoly{};
-    o.first_vert = nv; o.nverts = p.nverts; o.attr = p.attr; o.texparam = p.texparam;
+    o.first_vert = nv; o.nverts = wire ? 2 : p.nverts; o.attr = wire ? p.attr | 0x001F0000u : p.attr; o.texparam = p.texparam;
     o.ytop = p.ytop; o.ybot = p.ybot; o.span_base = DS_SPAN_NONE; o.vbot = p.vbot;
     if (poly_dump()) o.vbot |= np << 16;   // the raster reorders the opaque records: the number travels with the record (lean.frag DS_POLY_DEBUG)
     o.flags = (p.translucent ? DS_PF_TRANSLUCENT : 0u) | (p.wbuffer ? DS_PF_WBUFFER : 0u) | (p.facing ? DS_PF_FRONTFACING : 0u) |
               (p.shadow_mask ? DS_PF_SHADOW_MASK : 0u) | (p.shadow ? DS_PF_SHADOW : 0u);
     s32 xmin = 0x7FFFFFFF, xmax = -0x7FFFFFFF;
-    for (u32 j = 0; j < p.nverts; ++j) {
-      const Vertex& v = gx.vertex(p.vtx[j]);
+    for (u32 j = 0; j < o.nverts; ++j) {
+      const u32 src = wire ? (piece + j) % p.nverts : j;
+      const Vertex& v = gx.vertex(p.vtx[src]);
       GpuVert& d = gv[nv + j];
-      d.sx = v.sx; d.sy = v.sy; d.z = p.z[j]; d.w = p.w[j]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1]; d.fx = v.fx; d.fy = v.fy;
+      d.sx = v.sx; d.sy = v.sy; d.z = p.z[src]; d.w = p.w[src]; d.r = v.fcol[0]; d.g = v.fcol[1]; d.b = v.fcol[2]; d.s = v.tex[0]; d.t = v.tex[1]; d.fx = v.fx; d.fy = v.fy;
       d.pad_ = 0;
       xmin = std::min(xmin, d.sx); xmax = std::max(xmax, d.sx);
     }
     o.xmin = xmin; o.xmax = xmax;
-    if (!p.shadow_mask && !p.shadow && ((p.texparam >> 26) & 7) == 0 && gpu_line_quad(o, gv + nv)) { o.xmin = std::min(gv[nv].sx, gv[nv + 3].sx); o.xmax = std::max(gv[nv + 1].sx, gv[nv + 2].sx); }
+    const bool as_line = wire || (!p.shadow_mask && !p.shadow && ((p.texparam >> 26) & 7) == 0);
+    s32 mid2x = 0, mid2y = 0; bool steep_edge = false;
+    if (wire) { mid2x = gv[nv].sx + gv[nv + 1].sx; mid2y = gv[nv].sy + gv[nv + 1].sy; steep_edge = std::abs(gv[nv + 1].sy - gv[nv].sy) >= std::abs(gv[nv + 1].sx - gv[nv].sx); }
+    if (as_line && gpu_line_quad(o, gv + nv)) {
+      if (wire) {
+        // The outline is the polygon's own outermost pixels: its right side
+        // and its bottom stop a pixel short of the edge, as its fill does.
+        s64 cx = 0, cy = 0;
+        for (u32 j = 0; j < p.nverts; ++j) { const Vertex& v = gx.vertex(p.vtx[j]); cx += v.sx; cy += v.sy; }
+        const s32 inx = (steep_edge && static_cast<s64>(mid2x) * p.nverts > 2 * cx) ? -1 : 0;
+        const s32 iny = (!steep_edge && static_cast<s64>(mid2y) * p.nverts > 2 * cy) ? -1 : 0;
+        for (u32 j = 0; j < 4; ++j) { GpuVert& d = gv[nv + j]; d.sx += inx; d.sy += iny; d.fx = d.sx * 16; d.fy = d.sy * 16; }
+        // ... and a top or bottom run ends a pixel short of the right corner, which the right side's own pixel is.
+        if (!steep_edge && gv[nv + 1].sx - gv[nv].sx > 1) for (u32 j = 1; j <= 2; ++j) { GpuVert& d = gv[nv + j]; d.sx -= 1; d.fx = d.sx * 16; }
+        o.ytop += iny; o.ybot += iny;
+      }
+      o.xmin = std::min(gv[nv].sx, gv[nv + 3].sx); o.xmax = std::max(gv[nv + 1].sx, gv[nv + 2].sx);
+    }
+    else if (wire) continue;   // an edge with both ends on one point
     nv += o.nverts;
     const u32 fmt = (p.texparam >> 26) & 7;
     if ((dispcnt_ & 1) && fmt != 0) {
@@ -3446,6 +3472,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
     }
     if (!(o.flags & DS_PF_TEXTURED)) o.flags |= gpu_alpha_passes(nullptr, o, gv + o.first_vert);
     ++np;
+    }
   }
   if (first_ordered == ~0u) first_ordered = np;
   *ps = GpuPost{};
