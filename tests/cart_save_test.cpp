@@ -11,6 +11,7 @@
 #include "check.h"
 
 #include <cstring>
+#include <memory>
 #include <initializer_list>
 #include <vector>
 
@@ -193,7 +194,31 @@ void test_state_carries_the_chip() {
 
 } // namespace
 
+// A header is the file's word. A "decrypted" secure area that starts late in
+// a page is re-encrypted across the page boundary, not past the page; a
+// binary size no card could carry is held to the card.
+void test_crafted_header() {
+  auto p = std::make_unique<NDS>();
+  NDS& nds = *p;
+  std::vector<u8> rom(1 << 20, 0);
+  std::memcpy(rom.data() + 0x0C, "ZZZZ", 4);
+  const u32 a9 = 0x4F00, marker = 0xE7FFDEFF, huge = 0xFFFFFFF0;
+  std::memcpy(rom.data() + 0x20, &a9, 4);          // arm9_rom_offset
+  std::memcpy(rom.data() + 0x2C, &huge, 4);        // arm9_size
+  std::memcpy(rom.data() + a9, &marker, 4);
+  const std::vector<u8> plain = rom;
+  Cart c(nds, std::move(rom));
+  u8 got[0x1000];
+  for (u32 i = 0; i < sizeof got; i += 4) { const u32 w = c.rom_read32_at(a9 - 0x100 + i); std::memcpy(got + i, &w, 4); }
+  CHECK(!std::memcmp(got, plain.data() + a9 - 0x100, 0x100));                       // before the area: untouched
+  CHECK(std::memcmp(got + 0x100, plain.data() + a9, 0x800) != 0);                   // the area: encrypted, both pages
+  CHECK(std::memcmp(got + 0x100 + 0x700, plain.data() + a9 + 0x700, 0x100) != 0);   // its tail in the second page too
+  CHECK(!std::memcmp(got + 0x900, plain.data() + a9 + 0x800, 0x700));               // after it: untouched
+  CHECK(c.boot_size(huge) == (1u << 20) && c.boot_size(0x1234) == 0x1234);
+}
+
 int main() {
+  test_crafted_header();
   test_size_classes();
   test_detect_from_first_read();
   test_detecting_write_is_kept();

@@ -172,7 +172,14 @@ void Spu::fifo_fill(Channel& c) {
 }
 
 template <typename T> T Spu::fifo_read(Channel& c) {
-  T v; std::memcpy(&v, reinterpret_cast<const u8*>(c.fifo) + c.fifo_rd, sizeof(T));
+  T v;
+  const u8* const bytes = reinterpret_cast<const u8*>(c.fifo);
+  if (c.fifo_rd + sizeof(T) <= sizeof c.fifo) std::memcpy(&v, bytes + c.fifo_rd, sizeof(T));
+  else {   // a read across the end wraps (a format changed mid-stream, or a state's position): never past the array
+    u8 b[sizeof(T)];
+    for (size_t i = 0; i < sizeof(T); ++i) b[i] = bytes[(c.fifo_rd + i) & 0x1F];
+    std::memcpy(&v, b, sizeof(T));
+  }
   c.fifo_rd = (c.fifo_rd + sizeof(T)) & 0x1F;
   c.fifo_level -= sizeof(T);
   if (c.fifo_level <= 16) fifo_fill(c);
@@ -284,7 +291,13 @@ void Spu::cap_flush(Capture& cp) {
 }
 
 template <typename T> void Spu::cap_write(Capture& cp, T v) {
-  std::memcpy(reinterpret_cast<u8*>(cp.fifo) + cp.fifo_wr, &v, sizeof(T));
+  u8* const bytes = reinterpret_cast<u8*>(cp.fifo);
+  if (cp.fifo_wr + sizeof(T) <= sizeof cp.fifo) std::memcpy(bytes + cp.fifo_wr, &v, sizeof(T));
+  else {   // as fifo_read: the capture width changed mid-run
+    u8 b[sizeof(T)];
+    std::memcpy(b, &v, sizeof(T));
+    for (size_t i = 0; i < sizeof(T); ++i) bytes[(cp.fifo_wr + i) & 0xF] = b[i];
+  }
   cp.fifo_wr = (cp.fifo_wr + sizeof(T)) & 0xF;
   cp.fifo_level += sizeof(T);
   if (cp.fifo_level >= 16) cap_flush(cp);
@@ -429,6 +442,14 @@ template <class S> void Spu::sync_state(S& s) {
   s.fields(cnt_, bias_, master_, muted_, mix_at_, batch_);
   s.fields(mix_period_, apply_bias_);   // appended: DS states leave the defaults
   s.end();
+  if constexpr (S::reading) {
+    // Positions that index arrays are the file's word: held to their arrays.
+    for (Channel& c : ch_) {
+      c.fifo_wr &= 7; c.fifo_rd &= 0x1F;
+      c.adpcm_idx = std::clamp(c.adpcm_idx, 0, 88); c.adpcm_idx_loop = std::clamp(c.adpcm_idx_loop, 0, 88);
+    }
+    for (Capture& cp : cap_) { cp.fifo_rd &= 3; cp.fifo_wr &= 0xF; }
+  }
   if constexpr (S::reading) timer_step_ = mix_period_ / 4;
   if constexpr (S::reading) { rd_ = wr_ = 0; silence_cycles_ = 0; nds_.sched.rebind(EventId::Spu, ev_mix); }
 }

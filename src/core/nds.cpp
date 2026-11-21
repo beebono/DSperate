@@ -399,8 +399,8 @@ void NDS::setup_direct_boot() {
     for (u32 i = 0; i < 0x800; i += 4) w32(h.arm9_ram_address + i, rd32(secure + i));
     arm9_start = 0x800;
   }
-  for (u32 i = arm9_start; i < h.arm9_size; i += 4) w32(h.arm9_ram_address + i, rom32(h.arm9_rom_offset + i));
-  for (u32 i = 0; i < h.arm7_size; i += 4) bus.dma_write32(Cpu::ARM7, h.arm7_ram_address + i, rom32(h.arm7_rom_offset + i));
+  for (u32 i = arm9_start; i < cart->boot_size(h.arm9_size); i += 4) w32(h.arm9_ram_address + i, rom32(h.arm9_rom_offset + i));
+  for (u32 i = 0; i < cart->boot_size(h.arm7_size); i += 4) bus.dma_write32(Cpu::ARM7, h.arm7_ram_address + i, rom32(h.arm7_rom_offset + i));
 
   // Firmware user settings, as the firmware copies them. The 0x20 pointer
   // holds in the 128 KB DSi image too (normalise_touch_calibration's bound).

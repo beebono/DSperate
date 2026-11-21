@@ -72,6 +72,9 @@ public:
   void rom_read(u32 addr, u8* dst, u32 n) const { rom_->read(addr, dst, n); }
   u32  rom_read32_at(u32 addr) const { return rom_->read32(addr); }
   u32 rom_size() const { return rom_->size(); }          // bytes in the image
+  // A boot binary's size as the header claims it, held to what a card can
+  // carry into memory: no more than the card, nor than the largest main RAM.
+  u32 boot_size(u32 claimed) const { const u32 most = rom_mask_ + 1 < (16u << 20) ? rom_mask_ + 1 : (16u << 20); return claimed < most ? claimed : most; }
   u32 rom_padded_size() const { return rom_mask_ + 1; }  // what the card wraps at
   const RomSource& source() const { return *rom_; }
   u32 chip_id() const { return chip_id_; }

@@ -4,6 +4,7 @@
 // Slot-1 retail cartridge. Protocol per GBATEK ("DS Cartridge Protocol",
 // "DS Cartridge Secure Area", "DS Cartridge Backup").
 #include "core/cart/cart.h"
+#include <algorithm>
 #include "core/state/state.h"
 #include "core/nds.h"
 
@@ -82,12 +83,21 @@ Cart::Cart(NDS& nds, std::unique_ptr<RomSource> rom) : nds_(nds), rom_(std::move
   if (a9 >= 0x4000 && a9 < 0x8000) {
     const u32 w0 = rom_->read32(a9), w4 = rom_->read32(a9 + 0x10);
     if (w0 == 0xE7FFDEFF && w4 != 0xE7FFDEFF) {
-      u8* sec = rom_->patch(a9) + (a9 & (RomSource::PAGE - 1));
+      // In a buffer of its own, then into the overlay page by page: the header
+      // says where the area starts, and it need not sit inside one page.
+      alignas(4) u8 sec[0x800];
+      rom_->read(a9, sec, sizeof sec);
       std::memcpy(sec, "encryObj", 8);
       key1_init(header_.game_code_u32(), 3, 2);
       for (u32 i = 0; i < 0x800; i += 8) key1_encrypt(reinterpret_cast<u32*>(sec + i));
       key1_init(header_.game_code_u32(), 2, 2);
       key1_encrypt(reinterpret_cast<u32*>(sec));
+      for (u32 i = 0; i < sizeof sec;) {
+        const u32 off = (a9 + i) & (RomSource::PAGE - 1);
+        const u32 take = std::min<u32>(sizeof sec - i, RomSource::PAGE - off);
+        std::memcpy(rom_->patch(a9 + i) + off, sec + i, take);
+        i += take;
+      }
     }
   }
   reset();

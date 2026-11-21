@@ -1822,6 +1822,7 @@ template <class S> void Io::sync_state(S& s) {
   for (CpuIo& c : cpu_io) {
     s.fields(c.ime, c.ie, c.if_, c.ipc_sync, c.ipc_fifo_cnt, c.fifo_out.data, c.fifo_out.head, c.fifo_out.count, c.fifo_out.last, c.postflg, c.dma_fill);
     for (Timer& t : c.timers) s.fields(t.reload, t.control, t.counter, t.start_time);
+    if constexpr (S::reading) { c.fifo_out.head &= 15; if (c.fifo_out.count > 16) c.fifo_out.count = 16; }   // the file's word, held to the FIFO
     if constexpr (S::reading) {
       static const bool dbg = std::getenv("DS_DEBUG_STATE") != nullptr;
       if (dbg) for (int i = 0; i < 4; ++i) { const Timer& t = c.timers[i];
@@ -1837,6 +1838,7 @@ template <class S> void Io::sync_state(S& s) {
            rtc.status1, rtc.status2, rtc.datetime, rtc.alarm1, rtc.alarm2, rtc.clock_adjust, rtc.free_reg);
   s.fields(cart.auxspicnt, cart.auxspidata, cart.romctrl, cart.cmd, cart.transfer_pos, cart.transfer_len, cart.fifo_count, cart.fifo, cart.fifo_head,
            cart.late, cart.next_word_at, cart.event_armed);
+  if constexpr (S::reading) { cart.fifo_head &= 1; if (cart.fifo_count > 2) cart.fifo_count = 2; }
   s.fields(math.divcnt, math.sqrtcnt, math.div_num, math.div_den, math.div_quot, math.div_rem, math.sqrt_val, math.sqrt_res);
   wifi.sync_state_regs(s);
   bool fast_load_state = false;   // a fast-load cart transfer in flight, from older states
