@@ -2236,7 +2236,15 @@ void Renderer3D::flush_batch(const Shade& sh) {
 // translucent blend rules, polygon-id stencil, and depth interactions);
 // Slope::step still advances one line at a time via the Edge's own cursors.
 void Renderer3D::render_chunk(s32 ya, s32 yb) {
-  for (s32 y = ya; y < yb; ++y) { clear_line(y); line_touched_[y] = false; prev_shadow_mask_[static_cast<u32>((y + 1) & (RING - 1))] = false; }
+  // A line's stencil row starts empty: a shadow polygon on a line no mask
+  // was drawn on shadows nothing there, instead of reading what another line
+  // (whichever last used the ring's row) left behind.
+  for (s32 y = ya; y < yb; ++y) {
+    clear_line(y); line_touched_[y] = false;
+    const u32 srow = static_cast<u32>((y + 1) & (RING - 1));
+    prev_shadow_mask_[srow] = false;
+    std::memset(&stencil_[256 * srow], 0, 256);
+  }
   // order_ is bucketed by ytop then list index, so a whole chunk's slice spans
   // several buckets and is NOT in list order; sort it by index first (at most
   // polygon count, once per chunk) before merging into the active list.
@@ -2978,7 +2986,9 @@ void Renderer3D::render(const Gpu3D& gx) {
   // An unchanged polygon list + registers still needs every texture it uses
   // validated (a memcmp each) in case VRAM changed underneath; the previous
   // colour buffer is kept only if nothing needed re-decoding.
-  if (gx.render_identical() && rendered_once_ && aa_ == aa_rendered_) {
+  // Not with a rear-plane bitmap: its picture and depth are texture VRAM (and
+  // an offset register) that nothing here watches.
+  if (gx.render_identical() && rendered_once_ && aa_ == aa_rendered_ && !(rs_->dispcnt & (1u << 14))) {
     for (u32 i = 0; i < gx.render_polygon_count(); ++i) {
       const Polygon& p = *polys[i];
       const u32 fmt = (p.texparam >> 26) & 7;
@@ -3706,7 +3716,13 @@ void Renderer3D::render_band(s32 y0, s32 y1, u32* dst) {
 
 template <class S> void Renderer3D::sync_output(S& s) {
   sync_all();
-  if constexpr (S::reading) { reset(); texcache_.clear(); job_have_snap_ = false; }   // the banks' bytes are the state's now
+  if constexpr (S::reading) {
+    if (gpu_frame_) gpu_job_wait();
+    reset(); texcache_.clear(); job_have_snap_ = false;   // the banks' bytes are the state's now
+    // The picture is the state's (out_ below), not the one the GPU raster of
+    // the session being replaced drew last; its next frame is a new one.
+    gpu_frame_ = false; geom_drawn_ = false;
+  }
   if constexpr (!S::reading) { if (gpu_frame_ && lean_) { gpu_job_wait(); if (const u32* g = lean_->newest_ready(false)) std::memcpy(out_[display_].data(), g, sizeof(u32) * 256 * 192); } }
   s.begin("R3DO");
   s.fields(rendered_once_, out_[display_]);   // reset() above leaves display_ at 0 on a load

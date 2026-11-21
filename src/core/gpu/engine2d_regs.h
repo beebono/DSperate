@@ -82,7 +82,7 @@ private:
   enum JKind : u8 { J_REG, J_PAL, J_OAM, J_POWCNT, J_MBRIGHT, J_LATCH };
   struct JEntry { u16 stamp; u8 kind; u8 width; u16 addr; u32 value; };
   // Fixed array + atomic count: main appends while the worker replays.
-  // On overflow, join the worker (Gpu::journal_full) then apply directly.
+  // On overflow the lines so far are drawn (Gpu::journal_full) and the rest kept; see queue().
   static constexpr size_t JOURNAL_CAP = 16384;
   std::array<JEntry, JOURNAL_CAP> journal_{};
   std::atomic<u32> jn_{0};

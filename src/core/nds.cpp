@@ -42,7 +42,9 @@ NDS::NDS()
   reset();
 }
 
-NDS::~NDS() = default;
+// gpu3d is declared after gpu and so destroyed first: the 2D side's worker and
+// a late capture in flight read its renderer, and are stopped before that.
+NDS::~NDS() { gpu.stop_jobs(); }
 
 void NDS::reset() {
   cheats.forget_writes();   // the journal's originals belong to the pre-reset machine

@@ -1686,6 +1686,11 @@ template <class S> void Gpu3D::sync_state(S& s) {
   // the later session we are replacing. Older states omit these fields.
   if constexpr (S::reading) { swap_wait_ = false; swap_busy_until_ = 0; }
   s.fields(swap_wait_, swap_busy_until_);
+  // A list swapped in since the last VBlank, and whether it equals the one
+  // before: the VBlank after the load decides from them whether the picture
+  // can be kept. An older state has neither and gets a fresh render.
+  if constexpr (S::reading) { swapped_ = true; list_same_ = false; }
+  s.fields(swapped_, list_same_);
   s.end();
   renderer_.sync_output(s);
   stack_err_ = gxstat_ & 0x8000u; box_result_ = gxstat_ & 2u; gxstat_ &= ~0x8002u;

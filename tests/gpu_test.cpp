@@ -85,9 +85,18 @@ static void test_text_bg_and_backdrop() {
   CHECK_EQ(out[0] & 0xFFFFFF, rgb18(0x7C00));
   CHECK_EQ(out[4] & 0xFFFFFF, rgb18(0x7C00));
   CHECK_EQ(out[8] & 0xFFFFFF, rgb18(0x83E0));
+  // A byte written to the scroll's high half leaves the low half: the register is write-only, nothing to merge with.
+  nds.io.write(Cpu::ARM9, 0x04000011, 8, 0);
+  out = render_a(nds, 0);
+  CHECK_EQ(out[0] & 0xFFFFFF, rgb18(0x7C00));
+  CHECK_EQ(out[8] & 0xFFFFFF, rgb18(0x83E0));
+  nds.io.write(Cpu::ARM9, 0x04000010, 8, 0);                 // and the low half alone scrolls back
+  out = render_a(nds, 0);
+  CHECK_EQ(out[0] & 0xFFFFFF, rgb18(0x001F));
   // Brightness down on BG0 by 8/16.
   w16(nds, 0x04000050, 0x00C1);                              // effect 3, target BG0
   w16(nds, 0x04000054, 8);
+  nds.io.write(Cpu::ARM9, 0x04000055, 8, 0);                 // the unused byte beside BLDY does not clear it
   w16(nds, 0x04000010, 0);
   out = render_a(nds, 0);
   CHECK_EQ(out[0] & 0xFF, 0x3Eu - ((0x3Eu * 8 + 7) >> 4));   // red channel darkened
@@ -190,6 +199,21 @@ static void lazy_mid(NDS& nds, u32 line, bool hblank) {
   if (line == 160 && hblank) nds.bus.dma_write16(Cpu::ARM9, 0x04000240, 0x0080);  // bank A to LCDC: BG0 reads nothing from line 161
 }
 static u32 px(const NDS& nds, u32 line, u32 x) { return nds.gpu.framebuffer(0)[line * 256 + x] & 0xFFFFFF; }
+// More writes in a frame than the journal holds (a palette rewritten every
+// line): the lines so far are drawn when it fills, so each line still shows
+// the colours of its own HBlank.
+static void flood_mid(NDS& nds, u32 line, bool hblank) {
+  if (!hblank || line >= 191) return;
+  for (u32 k = 0; k < 120; ++k) w16(nds, 0x05000000, static_cast<u16>((line + 1 + k) & 0x1F));   // 120 writes; the last is the next line's backdrop
+}
+static void test_lazy_journal_overflow() {
+  NDS lazy, direct;
+  lazy.gpu.set_lazy(true); direct.gpu.set_lazy(false);
+  for (NDS* n : {&lazy, &direct}) { lazy_setup(*n); run_display_frame(*n, flood_mid); }
+  CHECK(std::memcmp(lazy.gpu.framebuffer(0), direct.gpu.framebuffer(0), 256 * 192 * 4) == 0);
+  CHECK(std::memcmp(lazy.gpu.framebuffer(1), direct.gpu.framebuffer(1), 256 * 192 * 4) == 0);
+  CHECK(px(lazy, 20, 8) != px(lazy, 21, 8) && px(lazy, 150, 8) != px(lazy, 151, 8));
+}
 static void test_lazy_journal() {
   NDS lazy, direct;
   lazy.gpu.set_lazy(true); direct.gpu.set_lazy(false);
@@ -515,6 +539,7 @@ int main() {
   test_sprites_and_window();
   test_register_access();
   test_lazy_journal();
+  test_lazy_journal_overflow();
   test_lcd_grid();
   test_bilinear();
   if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }

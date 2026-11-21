@@ -35,6 +35,8 @@ class Gpu {
 public:
   explicit Gpu(NDS& nds);
   ~Gpu();
+  // Before the 3D engine goes (NDS::~NDS): nothing of this one may still be drawing from it.
+  void stop_jobs() { join_worker(); late_join(); }
   void reset();
 
   // Scheduler callbacks.
@@ -281,6 +283,7 @@ private:
   void update_phase();
   u16 master_bright_g_[2] = {0, 0};   // guest-visible; the engines hold the render-side value
   u32 capcnt_ = 0;
+  void capcnt_set(u32 v);
   bool capture_on_ = false;
   std::array<u16, 16> fifo_{};
   u8 fifo_rd_ = 0, fifo_wr_ = 0;
@@ -595,7 +598,10 @@ private:
   u64 join_wait_ns_ = 0;
   void finish_a();
 public:
-  void journal_full() { join_worker(JoinSite::Journal); }   // Engine2D::queue on a full journal
+  // Engine2D::queue on a full journal: the engine's lines the pending writes
+  // are for are drawn now (which replays them in order), so what is left is
+  // the current line's.
+  void journal_full(int engine) { join_worker(JoinSite::Journal); catch_up(1u << engine); }
 private:
   static void worker_job(void* self);
 

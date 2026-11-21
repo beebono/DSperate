@@ -68,6 +68,15 @@ Gpu::Gpu(NDS& nds) : engine{Engine2D(nds, 0), Engine2D(nds, 1)}, nds_(nds) {
   }
 }
 
+// DISPCAPCNT is read as each line is drawn. In a batched frame the lines
+// before the write are drawn first, with the value they had: a game that
+// changes the capture's source or blend mid-frame gets it from that line on.
+void Gpu::capcnt_set(u32 v) {
+  if (v == capcnt_) return;
+  if (capture_on_) catch_up(1);
+  capcnt_ = v;
+}
+
 Gpu::~Gpu() {
   late_join();
   const bool stat = std::getenv("DS_SPLIT3D") || std::getenv("DS_SPLIT_STAT");
@@ -139,7 +148,7 @@ void Gpu::reg_write(u32 addr, u32 width, u32 value) {
   if (r >= 0x64 && r < 0x70) {
     if (width == 32) {
       switch (r) {
-      case 0x64: capcnt_ = value & 0xEF3F1F1F; return;
+      case 0x64: capcnt_set(value & 0xEF3F1F1F); return;
       case 0x68: fifo_[fifo_wr_] = value & 0xFFFF; fifo_[fifo_wr_ + 1] = value >> 16; fifo_wr_ = (fifo_wr_ + 2) & 0xF; return;
       case 0x6C: mb(0, value & 0xC01F); return;
       default: return;
@@ -147,8 +156,8 @@ void Gpu::reg_write(u32 addr, u32 width, u32 value) {
     }
     if (width == 16) {
       switch (r) {
-      case 0x64: capcnt_ = (capcnt_ & 0xFFFF0000) | (value & 0x1F1F); return;
-      case 0x66: capcnt_ = (capcnt_ & 0x0000FFFF) | ((value & 0xEF3F) << 16); return;
+      case 0x64: capcnt_set((capcnt_ & 0xFFFF0000) | (value & 0x1F1F)); return;
+      case 0x66: capcnt_set((capcnt_ & 0x0000FFFF) | ((value & 0xEF3F) << 16)); return;
       case 0x68: fifo_[fifo_wr_] = value; return;
       case 0x6A: fifo_[fifo_wr_ + 1] = value; fifo_wr_ = (fifo_wr_ + 2) & 0xF; return;   // the write pointer advances on the high half
       case 0x6C: mb(0, value & 0xC01F); return;
@@ -156,10 +165,10 @@ void Gpu::reg_write(u32 addr, u32 width, u32 value) {
       }
     }
     switch (r) {
-    case 0x64: capcnt_ = (capcnt_ & 0xFFFFFF00) | (value & 0x1F); return;
-    case 0x65: capcnt_ = (capcnt_ & 0xFFFF00FF) | ((value & 0x1F) << 8); return;
-    case 0x66: capcnt_ = (capcnt_ & 0xFF00FFFF) | ((value & 0x3F) << 16); return;
-    case 0x67: capcnt_ = (capcnt_ & 0x00FFFFFF) | ((value & 0xEF) << 24); return;
+    case 0x64: capcnt_set((capcnt_ & 0xFFFFFF00) | (value & 0x1F)); return;
+    case 0x65: capcnt_set((capcnt_ & 0xFFFF00FF) | ((value & 0x1F) << 8)); return;
+    case 0x66: capcnt_set((capcnt_ & 0xFF00FFFF) | ((value & 0x3F) << 16)); return;
+    case 0x67: capcnt_set((capcnt_ & 0x00FFFFFF) | ((value & 0xEF) << 24)); return;
     case 0x68: fifo_[fifo_wr_] = static_cast<u16>(value * 0x0101); return;
     case 0x6A: fifo_[fifo_wr_ + 1] = static_cast<u16>(value * 0x0101); return;
     case 0x6B: fifo_wr_ = (fifo_wr_ + 2) & 0xF; return;
