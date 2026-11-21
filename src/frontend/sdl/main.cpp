@@ -2340,6 +2340,9 @@ sdl_ready:
   // every frame at the refresh interval and hide the clusters this finds.
   const double ticks_to_ms = 1e3 / static_cast<double>(SDL_GetPerformanceFrequency());
   std::vector<double> frame_ms, work_ms;   // emu slice; emu + present slice
+  std::vector<double> late_ms;             // how far past its deadline each paced frame's work ended (frame_report.h pacing_report)
+  u64 late_slips = 0;                      // of those, the frames late by more than the debt the pacer keeps
+  bool stats_frame = false, shown_started = false;
   if (frame_limit > 0) { frame_ms.reserve(static_cast<size_t>(frame_limit)); work_ms.reserve(static_cast<size_t>(frame_limit)); }
   Uint64 pace_ticks = 0, draw_ticks_total = 0;
   bool paused = false;
@@ -4557,7 +4560,9 @@ sdl_ready:
     emu_ticks += t1 - t0;
     draw_ticks += t2 - t1;
     draw_ticks_total += t2 - t1;
-    if (static_cast<long>(frames) >= stats_from) {
+    stats_frame = static_cast<long>(frames) >= stats_from;
+    if (stats_frame && !shown_started) { shown_started = true; display.shown_reset(); display2.shown_reset(); }
+    if (stats_frame) {
       frame_ms.push_back(static_cast<double>(t1 - t0) * ticks_to_ms);
       work_ms.push_back(static_cast<double>(t2 - t0) * ticks_to_ms);
       // DS_FRAME_SERIES=<path>: "emu work start end" per frame in run order:
@@ -4615,7 +4620,10 @@ sdl_ready:
     // rather than multiplying (ff_speed is a multiple of real time). 0 uncaps.
     const double scale = fast && ff_speed > 0 ? std::max(base_scale, static_cast<double>(ff_speed)) : base_scale;
     if ((fast && ff_speed <= 0) || limiter_off) pacer.reset();   // unthrottled: do not bank the time it gains
-    else pacer.wait(scale);
+    else {
+      pacer.wait(scale);
+      if (stats_frame) { late_ms.push_back(pacer.last_late_ms()); late_slips += pacer.last_slipped(); }
+    }
 
     pace_ticks += SDL_GetPerformanceCounter() - t3;
     fps_pace_ticks += SDL_GetPerformanceCounter() - t3;
@@ -4736,6 +4744,22 @@ sdl_ready:
     // frame actually is. Only worth reading with --no-vsync (with vsync
     // the present blocks and the tail pins to the refresh).
     ds::frame_report(work_ms, "work");
+    // What the two series above cannot say: whether a frame over its budget cost anything. The pacer's deadlines
+    // run on, so a long frame after a short one is still in time; and the display tier says what the panel showed.
+    ds::pacing_report(late_ms, late_slips);
+    {
+      const ds::sdl::Display* const ds2[2] = {&display, &display2};
+      for (int i = 0; i < 2; ++i) {
+        const ds::sdl::ScanoutOut::Shown s = ds2[i]->shown();
+        if (!s.known) { if (i == 0) std::fprintf(stderr, "shown: this display tier does not say what reached the panel\n"); continue; }
+        if (!(s.shown + s.dropped)) continue;
+        // The console's 59.83 frames a second on a faster panel leave a refresh without a new frame now and then.
+        const double due = s.refresh_hz > 0 ? static_cast<double>(s.shown) * std::max(0.0, s.refresh_hz * ds::kFrameBudgetMs / 1000.0 - 1.0) : 0.0;
+        std::fprintf(stderr, "shown (window %d): %llu of %llu frames reached the panel, %llu never did; %llu refreshes showed a frame again (%.0f are due at %.2f Hz)\n",
+                     i, static_cast<unsigned long long>(s.shown), static_cast<unsigned long long>(s.shown + s.dropped), static_cast<unsigned long long>(s.dropped),
+                     static_cast<unsigned long long>(s.repeats), due, s.refresh_hz);
+      }
+    }
     ds::prof::frame_breakdown(frame_ms);
     if (!frame_ms.empty())
       std::fprintf(stderr, "  (emulation only; excluded: present %.1f ms, pacing %.1f ms total over %zu frames)\n",

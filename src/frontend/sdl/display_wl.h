@@ -16,6 +16,7 @@
 #include "core/types.h"
 #include "scanout.h"
 
+#include <atomic>
 #include <cstddef>
 
 struct SDL_Window;
@@ -28,6 +29,7 @@ struct wl_buffer;
 struct wl_output;
 struct zwp_linux_dmabuf_v1;
 struct xdg_toplevel;
+struct wp_presentation_feedback;
 
 namespace ds::sdl {
 
@@ -62,8 +64,14 @@ public:
   void set_gpu_writes(bool on) override { gpu_writes_ = on; }
   void end_frame() override;       // attach + damage + commit + flush
 
-  // Public for the C listener table; not part of the interface.
+  // What the compositor says of each commit (wp_presentation, asked for under DS_FRAME_STATS alone).
+  Shown panel_shown() const override;
+  void panel_shown_reset() override;
+
+  // Public for the C listener tables; not part of the interface.
   static void on_release(void* data, struct wl_buffer* wb);
+  static void on_presented(void* data, struct wp_presentation_feedback* fb, u32 tv_sec_hi, u32 tv_sec_lo, u32 tv_nsec, u32 refresh, u32 seq_hi, u32 seq_lo, u32 flags);
+  static void on_discarded(void* data, struct wp_presentation_feedback* fb);
 
 private:
   struct Buf {
@@ -88,6 +96,10 @@ private:
   int pitch_ = 0;                         // row in pixels, w_ rounded up to 16
   int output_index_ = -1;                 // saved open() arg, for reopen()
   bool dead_ = false;                     // protocol error; stop submitting
+  // Written where the queue is dispatched (the presenting thread), read by the report.
+  std::atomic<u64> shown_{0}, dropped_{0}, repeats_{0}, refresh_ns_{0};
+  std::atomic<bool> shown_restart_{false};   // the next frame shown starts the count (panel_shown_reset, a reopen)
+  u64 last_shown_ns_ = 0;
 };
 
 } // namespace ds::sdl

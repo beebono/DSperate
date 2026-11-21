@@ -17,6 +17,8 @@ then to SDL's own paths.
   used to ask for fullscreen on a *specific* output (SDL cannot on Wayland --
   window positions are a client illusion there); the xdg_toplevel itself is
   SDL's, fetched via SDL_SysWMinfo.
+- `presentation-time.{h,c}`: wayland-protocols stable/presentation-time, same scanner. Only for
+  `DS_FRAME_STATS`: which committed frames reached the panel, and which refreshes repeated one.
 - `wayland-client{,-core}.h`, `wayland-util.h`, `wayland-version.h`: copied
   from libwayland 1.22 (MIT), with one local change: the prototypes of the
   thirteen functions `wl_dyn.h` maps to pointers are wrapped in

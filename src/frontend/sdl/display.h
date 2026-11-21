@@ -297,6 +297,11 @@ private:
   int               disp_divisor_ = 1;   // the divisor build_source_scale chose, restored after a page
   bool              page_ = false;
   std::unique_ptr<ScanoutOut> out_;     // tier 1; null on the surface tier
+public:
+  // What reached the panel, as the scanout tier is told (ScanoutOut::shown).
+  ScanoutOut::Shown shown() const { return out_ ? out_->panel_shown() : ScanoutOut::Shown{}; }
+  void shown_reset() { if (out_) out_->panel_shown_reset(); }
+private:
   bool              gpu_wanted_ = false;
   std::unique_ptr<FramePresenter> gpu_; // a GPU presenter (on top of out_ for the import one); null: software
   bool try_gpu_present();               // after out_ opened: import its buffers, switch draw() over

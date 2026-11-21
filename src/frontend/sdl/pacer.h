@@ -72,14 +72,21 @@ public:
     next_ += static_cast<Uint64>(scale > 0.0 ? period_ / scale : period_);
     Uint64 now = SDL_GetPerformanceCounter();
     if (relief_) now = relieve(now);
+    late_ = 0; slipped_ = false;
     if (now >= next_) {
+      late_ = now - next_;
       const Uint64 budget = static_cast<Uint64>(period_);   // cap debt at one frame
-      if (now - next_ > budget) next_ = now - budget;
+      if (now - next_ > budget) { next_ = now - budget; slipped_ = true; }
     } else {
       sleep_until(next_, now);
     }
     if (relief_) frame_start_ = SDL_GetPerformanceCounter();   // RT run starts here, not before the wait
   }
+
+  // The last wait(): how far past its deadline the frame's work ended (0: in time, and the wait slept the
+  // rest), and whether that was more than the frame of debt kept, so that the time over it is lost for good.
+  double last_late_ms() const { return static_cast<double>(late_) / ticks_per_ns() / 1e6; }
+  bool last_slipped() const { return slipped_; }
 
   // Spin cost in us/frame, averaged since the last call. Informational only.
   double spin_us() {
@@ -184,6 +191,8 @@ private:
   unsigned relief_n_ = 0;
   double period_ = 0;        // in performance-counter ticks
   Uint64 next_ = 0;
+  Uint64 late_ = 0;
+  bool slipped_ = false;
   double margin_ticks_ = 0;  // learned; starts at zero and grows into the first few frames
   double spin_ticks_ = 0;    // what the spin has cost since the last spin_us()
   unsigned spin_n_ = 0;

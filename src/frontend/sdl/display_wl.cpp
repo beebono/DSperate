@@ -7,6 +7,7 @@
 #include "wl/wayland-client.h"
 #include "wl/linux-dmabuf-v1.h"
 #include "wl/xdg-shell.h"
+#include "wl/presentation-time.h"
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
@@ -40,6 +41,7 @@ struct Globals {
   wl_registry* reg = nullptr;
   zwp_linux_dmabuf_v1* dmabuf = nullptr;
   wl_compositor* comp = nullptr;
+  wp_presentation* pres = nullptr;   // bound only under DS_FRAME_STATS
   wl_output* outputs[4] = {};
   int n_outputs = 0;
   bool tried = false;
@@ -72,6 +74,9 @@ void on_global(void* data, wl_registry* reg, u32 name, const char* iface, u32 ve
   } else if (!std::strcmp(iface, wl_compositor_interface.name)) {
     g->comp = static_cast<wl_compositor*>(wl_registry_bind(reg, name, &wl_compositor_interface, 1));
     wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(g->comp), g->q);
+  } else if (!std::strcmp(iface, wp_presentation_interface.name) && std::getenv("DS_FRAME_STATS")) {
+    g->pres = static_cast<wp_presentation*>(wl_registry_bind(reg, name, &wp_presentation_interface, 1));
+    wl_proxy_set_queue(reinterpret_cast<wl_proxy*>(g->pres), g->q);   // its feedback objects inherit the queue
   }
 }
 void on_global_remove(void*, wl_registry*, u32) {}
@@ -155,6 +160,40 @@ bool globals_init(wl_display* dpy) {
 void DmabufOut::on_release(void* data, wl_buffer*) { static_cast<Buf*>(data)->busy = false; }
 
 namespace { const wl_buffer_listener buf_listener = { DmabufOut::on_release }; }
+
+// A commit's fate. Shown: the time it reached the panel and the panel's refresh; more than one refresh since
+// the frame shown before it means the panel showed that one again in between. Discarded: a later commit took
+// its place before any refresh.
+void DmabufOut::on_presented(void* data, struct wp_presentation_feedback* fb, u32 tv_sec_hi, u32 tv_sec_lo, u32 tv_nsec, u32 refresh, u32, u32, u32) {
+  DmabufOut* o = static_cast<DmabufOut*>(data);
+  wp_presentation_feedback_destroy(fb);
+  const u64 t = ((static_cast<u64>(tv_sec_hi) << 32) | tv_sec_lo) * 1000000000ull + tv_nsec;
+  if (o->shown_restart_.exchange(false)) { o->shown_ = 0; o->dropped_ = 0; o->repeats_ = 0; o->last_shown_ns_ = 0; }
+  if (refresh) o->refresh_ns_ = refresh;
+  const u64 r = o->refresh_ns_;
+  if (o->last_shown_ns_ && r && t > o->last_shown_ns_) {
+    const u64 n = (t - o->last_shown_ns_ + r / 2) / r;   // refreshes from the last frame shown to this one
+    if (n > 1) o->repeats_ += n - 1;
+  }
+  o->last_shown_ns_ = t;
+  ++o->shown_;
+}
+void DmabufOut::on_discarded(void* data, struct wp_presentation_feedback* fb) {
+  wp_presentation_feedback_destroy(fb);
+  DmabufOut* o = static_cast<DmabufOut*>(data);
+  if (!o->shown_restart_) ++o->dropped_;
+}
+namespace {
+void on_sync_output(void*, struct wp_presentation_feedback*, wl_output*) {}
+const wp_presentation_feedback_listener feedback_listener = { on_sync_output, DmabufOut::on_presented, DmabufOut::on_discarded };
+}
+ScanoutOut::Shown DmabufOut::panel_shown() const {
+  Shown s;
+  s.known = g_.pres != nullptr; s.shown = shown_; s.dropped = dropped_; s.repeats = repeats_;
+  if (const u64 r = refresh_ns_) s.refresh_hz = 1e9 / static_cast<double>(r);
+  return s;
+}
+void DmabufOut::panel_shown_reset() { shown_restart_ = true; }
 
 namespace {
 // Non-immediate create: create_immed would turn a rejected buffer into a
@@ -268,6 +307,7 @@ void DmabufOut::close() {
   for (Buf& b : bufs_) drop_buf(b);
   // Size 0: a sink whose reopen failed must not look usable at its new size.
   dpy_ = nullptr; surf_ = nullptr; q_ = nullptr; cur_ = -1; dead_ = false; w_ = h_ = 0; pitch_ = 0;
+  shown_restart_ = true;   // a reopen is not a repeated frame
 }
 
 bool DmabufOut::dmabuf_plane(int buf, DmabufPlane& out) const {
@@ -304,6 +344,7 @@ void DmabufOut::end_frame() {
   b.busy = true;
   wl_surface_attach(surf_, b.wb, 0, 0);
   wl_surface_damage(surf_, 0, 0, w_, h_);
+  if (g_.pres) wp_presentation_feedback_add_listener(wp_presentation_feedback(g_.pres, surf_), &feedback_listener, this);
   wl_surface_commit(surf_);
   wl_display_flush(dpy_);
   cur_ = -1;

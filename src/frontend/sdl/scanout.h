@@ -45,6 +45,13 @@ public:
   struct DmabufPlane { int fd = -1; u32 offset = 0, stride_bytes = 0, width = 0, height = 0; u32 fourcc = 0; };
   virtual bool dmabuf_plane(int buf, DmabufPlane& out) const { (void)buf; (void)out; return false; }
   virtual void set_gpu_writes(bool on) { (void)on; }   // skip the CPU-write cache sync once the GPU owns writes
+
+  // What reached the panel (DS_FRAME_STATS), where the tier is told: frames shown, frames given to the tier and
+  // never shown, and refreshes that showed a frame again because no new one was ready. `known` false: the tier
+  // has no such report. Counted from panel_shown_reset() on.
+  struct Shown { bool known = false; u64 shown = 0, dropped = 0, repeats = 0; double refresh_hz = 0; };
+  virtual Shown panel_shown() const { return {}; }
+  virtual void panel_shown_reset() {}
 };
 
 } // namespace ds::sdl
