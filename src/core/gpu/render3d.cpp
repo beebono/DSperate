@@ -3324,7 +3324,7 @@ GpuTrace g_gpu_trace;
 inline double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }
 
-// A polygon whose vertices all lie on one line. The DS's raster
+// A polygon narrower than a pixel: its vertices all on one line, or nearly. The DS's raster
 // fills at least a pixel a row between a polygon's edges, so such a polygon
 // is a line one pixel wide (The Dark Spire draws its wireframe dungeon with
 // opaque quads squeezed flat); a GPU's triangle fill covers no pixel centre
@@ -3344,14 +3344,16 @@ static bool gpu_line_quad(vk::GpuPoly& o, vk::GpuVert* v) {
     const s64 ex = v[j].fx - v[k].fx, ey = v[j].fy - v[k].fy, dist = ex * ex + ey * ey;
     if (dist > far) { far = dist; ia = j; ib = k; }
   }
-  // Every vertex within an eighth of a pixel of the line through the ends, in
-  // the 28.4 positions: the game's two "sides" are a sixteenth apart and may
-  // sit either side of a pixel boundary.
+  // Every vertex within a pixel of the line through the ends, in the 28.4
+  // positions: narrower than a pixel all along, it is on the DS a pixel a row
+  // (or a column) whatever its width. The Dark Spire's two "sides" are a
+  // sixteenth apart; X-Scape's lines are slivers of every width, a third of
+  // them under a pixel.
   {
     const s64 ex = v[ib].fx - v[ia].fx, ey = v[ib].fy - v[ia].fy;
     for (u32 j = 0; j < n; ++j) {
       const s64 cross = ex * (v[j].fy - v[ia].fy) - ey * (v[j].fx - v[ia].fx);
-      if (cross * cross > 4 * far) return false;
+      if (cross * cross >= 256 * far) return false;
     }
     if (far == 0) return false;   // a point: left as it is
   }
