@@ -388,7 +388,10 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
   // scale 0 (the probes): DS_LEAN_SCALE, and the record read back at that size.
   { const char* e = std::getenv("DS_LEAN_SCALE"); d.scale = std::clamp(scale ? scale : e ? static_cast<u32>(std::atoi(e)) : 1u, 1u, 4u); W = 256 * d.scale; H = 192 * d.scale; }
   d.down = scale > 1;
-  d.mark_on = !(std::getenv("DS_LEAN_EDGEMARK") && std::atoi(std::getenv("DS_LEAN_EDGEMARK")) == 0);
+  // Not on Imagination's driver by default (PowerVR Rogue GE8300, 1.19): the marking pass draws into the record through
+  // its byte view with the pixels loaded, and there every pixel of the frame comes out with its red byte alone (no
+  // green, blue or alpha: a black screen wherever a game marks edges). DS_LEAN_EDGEMARK=1 turns it on regardless.
+  { const char* e = std::getenv("DS_LEAN_EDGEMARK"); d.mark_on = e ? std::atoi(e) != 0 : dev.limits().vendor_id != 0x1010u; }
   d.mark_width = d.scale;   // one DS pixel
   { const char* e = std::getenv("DS_LEAN_FLAT1X"); const char* fe = std::getenv("DS_LEAN_FINE");   // the debug read-back is the whole image: no corner frames beside it
     { const char* se = std::getenv("DS_LEAN_SOFT2X"); d.soft2x = d.scale > 1 && !(se && std::atoi(se) == 0); }
