@@ -14,6 +14,7 @@ struct Spirv {
   size_t     bytes = 0;      // vkCreateShaderModule wants a byte count
 };
 
+Spirv shader_lean_null();    // a fragment stage with no output (lean_null.frag)
 Spirv shader_tri_fs();       // a fullscreen triangle (the resolve subpass)
 Spirv shader_lean_vert();    // lean path (vk_lean.cpp): each polygon a fan
 Spirv shader_lean_frag();    // ... its one fragment stage

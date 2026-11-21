@@ -166,6 +166,12 @@ struct Lean::Impl {
   VkSampler samp_mark = VK_NULL_HANDLE;
   VkShaderModule mod_mark = VK_NULL_HANDLE;
   VkImageView ds_depth_view = VK_NULL_HANDLE;   // the depth aspect alone, for the resolve's input attachment
+  // The stencil-only passes (mask clear, shadow prep) have no fragment stage. Imagination's driver (PowerVR Rogue
+  // GE8300, 1.19: the TrimUI Brick and Smart Pro) dereferences null inside vkCreateGraphicsPipelines for such a
+  // pipeline, the mask clear's at once and the shadow prep's on a later build; there they get one that writes
+  // nothing. DS_LEAN_NULLFRAG=0/1 forces it off or on.
+  VkShaderModule mod_null = VK_NULL_HANDLE;
+  bool null_frag = false;
   VkShaderModule mod_vert = VK_NULL_HANDLE, mod_frag = VK_NULL_HANDLE, mod_frag_early = VK_NULL_HANDLE, mod_frag_opq = VK_NULL_HANDLE, mod_frag_trans = VK_NULL_HANDLE, mod_frag_fetch = VK_NULL_HANDLE, mod_res = VK_NULL_HANDLE, mod_fs = VK_NULL_HANDLE;
   // A translucent run in one pass (B3) where the device has VK_EXT_rasterization_order_attachment_access:
   // subpass 0 reads its own colour attachment in rasterisation order and the shader blends (lean.frag
@@ -339,7 +345,7 @@ struct Lean::Impl {
     if (layout) a.vkDestroyPipelineLayout(vk->dev, layout, nullptr);
     if (dsl) a.vkDestroyDescriptorSetLayout(vk->dev, dsl, nullptr);
     if (dsl_in) a.vkDestroyDescriptorSetLayout(vk->dev, dsl_in, nullptr);
-    for (VkShaderModule* m : {&mod_vert, &mod_frag, &mod_frag_early, &mod_frag_opq, &mod_frag_trans, &mod_frag_fetch, &mod_res, &mod_fs}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
+    for (VkShaderModule* m : {&mod_null, &mod_vert, &mod_frag, &mod_frag_early, &mod_frag_opq, &mod_frag_trans, &mod_frag_fetch, &mod_res, &mod_fs}) if (*m) a.vkDestroyShaderModule(vk->dev, *m, nullptr);
     if (texel_view) a.vkDestroyBufferView(vk->dev, texel_view, nullptr);
     if (texels) dev->free(texels);
     for (u32 i = 0; i < kSlots; ++i) for (Buffer* b : {&polys[i], &verts[i], &post[i], &out[i], &fine[i]}) if (*b) dev->free(*b);
@@ -423,6 +429,8 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
   };
   if (!shader(shader_lean_vert(), &d.mod_vert) || !shader(shader_lean_frag(), &d.mod_frag) || !shader(shader_lean_frag_early(), &d.mod_frag_early) || !shader(shader_lean_frag_opq(), &d.mod_frag_opq) || !shader(shader_lean_frag_trans(), &d.mod_frag_trans) || !shader(d.msaa ? shader_lean_resolve() : shader_lean_resolve_1x(), &d.mod_res) || !shader(shader_tri_fs(), &d.mod_fs))
     return fail("lean shaders rejected by the driver");
+  { const char* e = std::getenv("DS_LEAN_NULLFRAG"); d.null_frag = e ? std::atoi(e) != 0 : dev.limits().vendor_id == 0x1010u; }
+  if (d.null_frag && !shader(shader_lean_null(), &d.mod_null)) return fail("lean shaders rejected by the driver");
   d.raw = d.direct && d.fetch == 2 && !d.msaa;
   d.fold = d.raw;
   if (d.fetch && !shader(shader_lean_frag_fetch(d.fetch == 2), &d.mod_frag_fetch)) return fail("lean fetch shader rejected by the driver");
@@ -951,6 +959,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     const VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_VIEWPORT};   // the scissor: the frame's area but for Impl::sc's polygons; the viewport: the frame's (Impl::flat1x)
     VkPipelineDynamicStateCreateInfo dys{}; dys.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO; dys.dynamicStateCount = 3; dys.pDynamicStates = dyn;
     VkGraphicsPipelineCreateInfo gpi{}; gpi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO; gpi.stageCount = stencil_only ? 1 : 2; gpi.pStages = st;
+    if (stencil_only && d.null_frag) { st[1].module = d.mod_null; st[1].pSpecializationInfo = nullptr; gpi.stageCount = 2; }
     gpi.pVertexInputState = &vin; gpi.pInputAssemblyState = &ia; gpi.pViewportState = &vps; gpi.pRasterizationState = &rs; gpi.pMultisampleState = &ms;
     gpi.pDepthStencilState = &dss; gpi.pColorBlendState = &cbs; gpi.pDynamicState = &dys; gpi.layout = d.layout; gpi.renderPass = nm ? d.rp_nm : d.rp; gpi.subpass = 0;
     return a.vkCreateGraphicsPipelines(vk->dev, vk->pcache, 1, &gpi, nullptr, out) == VK_SUCCESS;

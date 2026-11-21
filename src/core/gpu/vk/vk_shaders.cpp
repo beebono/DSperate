@@ -21,6 +21,7 @@
   extern "C" const unsigned char sym##_data[], sym##_end[]
 
 DS_INCBIN(ds_vk_tri_fs, "tri_fs_vert.spv");
+DS_INCBIN(ds_vk_lean_null, "lean_null_frag.spv");
 DS_INCBIN(ds_vk_lean_vert, "lean_vert.spv");
 DS_INCBIN(ds_vk_lean_frag, "lean_frag.spv");
 DS_INCBIN(ds_vk_lean_frag_early, "lean_frag_early.spv");
@@ -58,6 +59,7 @@ Spirv pick(const char* file, const unsigned char* data, const unsigned char* end
 }  // namespace
 
 Spirv shader_tri_fs() { return pick("tri_fs_vert.spv", ds_vk_tri_fs_data, ds_vk_tri_fs_end); }
+Spirv shader_lean_null() { return pick("lean_null_frag.spv", ds_vk_lean_null_data, ds_vk_lean_null_end); }
 
 Spirv shader_lean_vert() { return pick("lean_vert.spv", ds_vk_lean_vert_data, ds_vk_lean_vert_end); }
 Spirv shader_lean_frag() { return pick("lean_frag.spv", ds_vk_lean_frag_data, ds_vk_lean_frag_end); }

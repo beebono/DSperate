@@ -92,6 +92,7 @@ public:
   std::mutex& queue_mutex() { return queue_mutex_; }
 
   struct Limits {
+    u32 vendor_id = 0;                   // VkPhysicalDeviceProperties::vendorID (0x1010: Imagination)
     u32 max_workgroup_invocations = 0;
     u32 max_shared_memory = 0;
     u32 subgroup_size = 0;

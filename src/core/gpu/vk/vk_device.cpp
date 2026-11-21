@@ -190,6 +190,7 @@ std::unique_ptr<Device> Device::create(std::string* why) {
   d.api.vkGetPhysicalDeviceProperties(d.phys, &props);
   d.api.vkGetPhysicalDeviceMemoryProperties(d.phys, &d.memprops);
   self->name_ = props.deviceName;
+  self->limits_.vendor_id = props.vendorID;
   self->limits_.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
   self->limits_.max_shared_memory = props.limits.maxComputeSharedMemorySize;
   self->limits_.max_storage_range = props.limits.maxStorageBufferRange;
