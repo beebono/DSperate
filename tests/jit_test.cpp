@@ -413,6 +413,10 @@ void directed() {
     {Cpu::ARM9, false, {0xE129F004, 0xE0840004, 0xE2800001}, {0, 0, 0, 0, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM7, false, {0xE129F004, 0xE0840004, 0xE2800001}, {0, 0, 0, 0, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     {Cpu::ARM9, false, {0xE129F004, 0xE0841004, 0xE129F005, 0xE0852005}, {0, 0, 0, 0, 0x5F, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    // LDR with an RRX offset reads C: the ADDS that clears it must not lose its flags as dead between
+    // an ADC that reads the earlier C (set) and a CMP that rewrites every flag.
+    {Cpu::ARM9, false, {0xE1500000, 0xE2A66000, 0xE2905000, 0xE7991062, 0xE1500000}, {0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {Cpu::ARM7, false, {0xE1500000, 0xE2A66000, 0xE2905000, 0xE7991062, 0xE1500000}, {0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
     // v5TE DSP multiplies (ARM9 only). Operands are chosen so the halves are
     // distinguishable and the accumulate overflows, which is the only way the
     // sticky Q flag is exercised. r6/r9/r13 are reserved by the harness.

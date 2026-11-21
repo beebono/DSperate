@@ -165,8 +165,11 @@ FlagUse arm_flag_use(u32 instr, bool a9) {
   case AOp::Mul: case AOp::Mla: case AOp::Umull: case AOp::Umlal: case AOp::Smull: case AOp::Smlal:
     if (s) u.writes = F_N | F_Z;
     break;
+  case AOp::LdrStrReg:
+    if (((instr >> 4) & 0xFF) == 0x06) u.reads |= F_C;   // an RRX offset shifts the carry in
+    break;
   case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::BlxReg: case AOp::Clz: case AOp::Pld:
-  case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg:
+  case AOp::LdrStrImm: case AOp::LdrStrHImm: case AOp::LdrStrHReg:
   case AOp::Ldm: case AOp::Stm:
   case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY: case AOp::SmlalXY: case AOp::Mrc:
     break;
