@@ -3324,6 +3324,62 @@ GpuTrace g_gpu_trace;
 inline double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 }
 
+// A polygon whose vertices all lie on one line. The DS's raster
+// fills at least a pixel a row between a polygon's edges, so such a polygon
+// is a line one pixel wide (The Dark Spire draws its wireframe dungeon with
+// opaque quads squeezed flat); a GPU's triangle fill covers no pixel centre
+// of it and drew nothing. It becomes the quad that covers what the DS does:
+// a pixel a row along a steep line (rows top to bottom, the last one left
+// out as for any polygon), a pixel a column along a shallow one. Both
+// rasters draw the list, so both get it. Untextured polygons only, as
+// DeSmuME's line detection (gfx3d.cpp GeneratePolygon), whose OpenGL
+// renderer draws these as GL lines: a textured polygon seen edge-on is left
+// to the triangle fill. False: not a line, nothing changed.
+static bool gpu_line_quad(vk::GpuPoly& o, vk::GpuVert* v) {
+  using vk::GpuVert;
+  const u32 n = o.nverts;
+  u32 ia = 0, ib = 0;
+  s64 far = -1;
+  for (u32 j = 0; j < n; ++j) for (u32 k = j + 1; k < n; ++k) {   // the two ends: the pair farthest apart
+    const s64 ex = v[j].fx - v[k].fx, ey = v[j].fy - v[k].fy, dist = ex * ex + ey * ey;
+    if (dist > far) { far = dist; ia = j; ib = k; }
+  }
+  // Every vertex within an eighth of a pixel of the line through the ends, in
+  // the 28.4 positions: the game's two "sides" are a sixteenth apart and may
+  // sit either side of a pixel boundary.
+  {
+    const s64 ex = v[ib].fx - v[ia].fx, ey = v[ib].fy - v[ia].fy;
+    for (u32 j = 0; j < n; ++j) {
+      const s64 cross = ex * (v[j].fy - v[ia].fy) - ey * (v[j].fx - v[ia].fx);
+      if (cross * cross > 4 * far) return false;
+    }
+    if (far == 0) return false;   // a point: left as it is
+  }
+  const s32 dx = v[ib].sx - v[ia].sx, dy = v[ib].sy - v[ia].sy;
+  const bool steep = std::abs(dy) >= std::abs(dx);
+  if (steep ? v[ia].sy > v[ib].sy : v[ia].sx > v[ib].sx) std::swap(ia, ib);
+  const GpuVert a = v[ia], b = v[ib];
+  GpuVert q[4] = {a, a, b, b};
+  if (steep) {
+    const s32 y1 = b.sy > a.sy ? b.sy : a.sy + 1;   // a flat one is still a row
+    q[0].sx = a.sx; q[1].sx = a.sx + 1; q[2].sx = b.sx + 1; q[3].sx = b.sx;
+    q[0].sy = q[1].sy = a.sy; q[2].sy = q[3].sy = y1;
+  } else {
+    q[0].sy = a.sy; q[1].sy = a.sy + 1; q[2].sy = b.sy + 1; q[3].sy = b.sy;
+    // Rising to the right, each row's run on the DS stops short of where the row above begins: a pixel to the left.
+    const s32 lean = b.sy < a.sy ? -1 : 0;
+    q[0].sx = q[1].sx = a.sx + lean; q[2].sx = q[3].sx = b.sx + 1 + lean;
+    std::swap(q[1], q[3]);   // left end top, right end top, right end bottom, left end bottom: xmin from q[0]/q[3]
+  }
+  for (GpuVert& c : q) { c.fx = c.sx * 16; c.fy = c.sy * 16; }
+  for (u32 j = 0; j < 4; ++j) v[j] = q[j];
+  o.nverts = 4;
+  s32 ytop = q[0].sy, ybot = q[0].sy; u32 vb = 0;
+  for (u32 j = 1; j < 4; ++j) { ytop = std::min(ytop, q[j].sy); if (q[j].sy > ybot) { ybot = q[j].sy; vb = j; } }
+  o.ytop = ytop; o.ybot = std::max(ytop, ybot - 1); o.vbot = (o.vbot & ~0xFFFFu) | vb;
+  return true;
+}
+
 bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 npoly) {
   using namespace ds::gpu::vk;
   const double t0 = g_gpu_trace.on ? now_ms() : 0;
@@ -3340,7 +3396,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   for (u32 i = 0; i < npoly; ++i) {
     const Polygon& p = *polys[i];
     if (p.degenerate) continue;
-    if (np >= DS_MAX_POLYS || nv + p.nverts > DS_MAX_VERTS) return false;
+    if (np >= DS_MAX_POLYS || nv + std::max<u32>(p.nverts, 4) > DS_MAX_VERTS) return false;
     if (first_ordered == ~0u && (alpha_all_fail || p.translucent || p.shadow_mask || p.shadow)) first_ordered = np;
     GpuPoly& o = gp[np];
     o = GpuPoly{};
@@ -3358,7 +3414,8 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
       xmin = std::min(xmin, d.sx); xmax = std::max(xmax, d.sx);
     }
     o.xmin = xmin; o.xmax = xmax;
-    nv += p.nverts;
+    if (!p.shadow_mask && !p.shadow && ((p.texparam >> 26) & 7) == 0 && gpu_line_quad(o, gv + nv)) { o.xmin = std::min(gv[nv].sx, gv[nv + 3].sx); o.xmax = std::max(gv[nv + 1].sx, gv[nv + 2].sx); }
+    nv += o.nverts;
     const u32 fmt = (p.texparam >> 26) & 7;
     if ((dispcnt_ & 1) && fmt != 0) {
       Shade sh; texture_fields(sh, p);
