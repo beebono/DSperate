@@ -1175,6 +1175,12 @@ private:
     cold_begin(fail);
     const size_t fb = cold_.size();
     emit_block_slow(list, load, writeback, rn, n, user_bank, pc_store_value);
+    // As the single-access slow path: these words went through the bus, so a
+    // store may have started a DMA, raised or unmasked an IRQ, or landed on
+    // code (this block's own tail included). The poll acts on it now, and
+    // leaves at the next instruction when the block must not go on.
+    call_stub(rt().poll);
+    e().word(make_key(pc_ + step(), thumb_));
     cold_end_jump(join);
     fm_walk(fb);
     if (!mode_fail.empty()) {
