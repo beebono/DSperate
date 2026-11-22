@@ -93,9 +93,11 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   can be started directly through NAND title shortcuts.
 - **DSi hardware.** SD card slot backed by a host folder (synced back, deletions
   included), microphone, DSi Wi-Fi, PictoChat, and Download Play from the Menu.
+  The cameras see a still: a picture from `paths.dsi_photos` picked under DS
+  OPTIONS in the menu, or colour bars. There is no live camera.
 - **Save states, the recompiler, idle skip and fastmem** all work in DSi sessions.
-- **Not yet:** the DSP (titles that start it warn, and camera or DSP audio apps
-  will not work) and DSi-enhanced carts in DSi mode (they run as DS games).
+- **Not yet:** the DSP (titles that start it warn, and DSP audio apps will not
+  work) and DSi-enhanced carts in DSi mode (they run as DS games).
 
 ### Local wireless and internet
 
@@ -199,7 +201,8 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
 
 Requires CMake ≥ 3.16, Ninja, a C++17 compiler, and SDL2 for the playable
 frontend. The vendored third-party code is miniz's DEFLATE decompressor,
-rcheevos, ENet and libslirp.
+rcheevos, ENet, libslirp and stb_image (public domain / MIT; decodes the
+DSi cameras' still).
 
     cmake --preset host && cmake --build --preset host && ctest --preset host
 

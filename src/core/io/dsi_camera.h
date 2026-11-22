@@ -3,9 +3,11 @@
 //
 // DSi's cameras: two Aptina sensors on I2C (0x78 outer, 0x7A inner) plus the camera module at
 // 0x04004200 (ARM9), framing at ~15 fps via an IRQ-started frame and a per-scanline event
-// feeding two 512-word pixel buffers the NDMA (mode 0x0B) drains. No image source; frames black.
+// feeding two 512-word pixel buffers the NDMA (mode 0x0B) drains. What the sensors see is a still
+// the frontend gives (DsiCamModule::set_image), or colour bars; there is no live camera.
 #pragma once
 #include "core/types.h"
+#include <algorithm>
 #include <array>
 #include <vector>
 
@@ -17,7 +19,16 @@ namespace ds::io {
 
 class DsiCamera {
  public:
-  explicit DsiCamera(u32 num) : num_(num), frame_(640 * 480 / 2) {}
+  static constexpr int W = 640, H = 480;   // the sensor's own frame; games ask for it scaled
+  explicit DsiCamera(u32 num) : num_(num), frame_(W * H / 2) { colour_bars(frame_.data()); }
+  // The picture in front of the sensor: W x H, YUV 4:2:2, two pixels a word
+  // (Y0 | U << 8 | Y1 << 16 | V << 24). Not machine state: a save state leaves it.
+  void set_frame(const u32* yuyv) { std::copy(yuyv, yuyv + W * H / 2, frame_.begin()); }
+  // A television test card's seven bars over a grey ramp, into a frame.
+  static void colour_bars(u32* yuyv);
+  // Any RGB picture (3 bytes a pixel) into a frame: scaled to fill it, the
+  // overhang cut evenly, so nothing is stretched.
+  static void frame_from_rgb(const u8* rgb, int w, int h, u32* yuyv);
   void reset();
   void release_reset() { reset_held_ = false; }
   bool activated() const;
@@ -46,8 +57,7 @@ class DsiCamera {
   std::array<u8, 0x8000> mcu_{};
   u16 frame_width_ = 0, frame_height_ = 0, frame_read_mode_ = 0, frame_format_ = 0;
   int internal_y_ = 0, transfer_y_ = 0;
-  // YUYV, two pixels per word; stays black. Heap-allocated (NDS lives on the stack in unit
-  // tests); not saved to state.
+  // Heap-allocated (NDS lives on the stack in unit tests); not saved to state.
   std::vector<u32> frame_;
 };
 
@@ -56,6 +66,8 @@ class DsiCamModule {
   explicit DsiCamModule(NDS& nds) : nds_(nds), cam_{DsiCamera(0), DsiCamera(1)} {}
   void reset();                       // schedules the first camera IRQ
   DsiCamera& camera(u32 i) { return cam_[i]; }
+  // Both sensors look at the same still. Null: the colour bars again.
+  void set_image(const u32* yuyv);
 
   static void irq_event(NDS& nds, u32 param);        // EventId::CamIrq
   static void transfer_event(NDS& nds, u32 line);    // EventId::CamTransfer

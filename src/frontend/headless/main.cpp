@@ -6,6 +6,7 @@
 #include "core/gpu/colour.h"
 #include "core/nds.h"
 #include "core/safe_file.h"
+#include "frontend/camera_image.h"
 #include "core/cpu/timing_mode.h"
 #include "core/pc_sampler.h"
 #include "core/mem/fastmem_census.h"
@@ -271,7 +272,7 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
-  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr, *save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false; const char* motion_pak = nullptr; ds::slot2::Motion motion;
+  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr, *save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false; const char* motion_pak = nullptr; ds::slot2::Motion motion; const char* camera_image = nullptr;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
@@ -391,6 +392,7 @@ int main(int argc, char** argv) {
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
     else if (arg("--save-out")) save_out = argv[++i];       // at exit, the battery save as the run left it (for checking what a game wrote)
+    else if (arg("--dsi-camera-image")) camera_image = argv[++i];   // the picture the DSi cameras see (JPEG, PNG, BMP); default colour bars
     else if (arg("--motion-pak")) motion_pak = argv[++i];   // retail | homebrew: the motion accessory in slot 2, held still (see --motion)
     else if (arg("--motion")) {                              // AX,AY,AZ[,GZ]: what it feels, m/s^2 and rad/s (default 0,0,9.80665: lying flat)
       if (std::sscanf(argv[++i], "%f,%f,%f,%f", &motion.ax, &motion.ay, &motion.az, &motion.gz) < 3) { std::fprintf(stderr, "--motion wants AX,AY,AZ[,GZ]\n"); return 2; }
@@ -432,7 +434,7 @@ int main(int argc, char** argv) {
   // No output may land on a file the run reads, or on an existing ROM, archive or save.
   {
     const char* const ins[] = {rom, bios9, bios7, fw, bios9i, bios7i, dsi_boot, dsi_nand, dsi_install, dsi_tmd, dsi_font,
-                               replay, save, gba_rom, gba_save, cheat_db, analog_db, load_state};
+                               replay, save, gba_rom, gba_save, cheat_db, analog_db, load_state, camera_image};
     const std::pair<const char*, const char*> outs[] = {
         {"--dump-frames", dump}, {"--dump-3d", rec3d_path}, {"--dump-3d-fine", fine3d_path},
         {"--dump-screens-scaled", screens_scaled_path}, {"--dump-gpu-frame", gpu_dump_path}, {"--hash-frames", hash_frames},
@@ -706,6 +708,11 @@ int main(int argc, char** argv) {
     if (!(nds.dsi && nds.dsi_nand_boot && lo)) { std::fprintf(stderr, "--dsi-autoload needs a NAND boot and --dsi-install or --dsi-autoload-id\n"); return 1; }
     nds.dsi_autoload(lo, hi);
     std::fprintf(stderr, "dsi: autoload %08x%08x (TLNC)\n", hi, lo);
+  }
+  if (camera_image) {
+    std::string err;
+    if (!ds::frontend::set_camera_image(nds, camera_image, err)) { std::fprintf(stderr, "camera: %s\n", err.c_str()); return 2; }
+    std::fprintf(stderr, "camera: looking at %s\n", camera_image);
   }
   if (motion_pak && std::strcmp(motion_pak, "retail") && std::strcmp(motion_pak, "homebrew")) { std::fprintf(stderr, "--motion-pak wants retail or homebrew\n"); return 2; }
   if (gba_rom || rumble_pak || guitar_grip || motion_pak) {

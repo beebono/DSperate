@@ -31,7 +31,55 @@ void DsiCamera::reset() {
   mcu_.fill(0);
   mcu_[0x2104] = 3;   // preview mode
   internal_y_ = transfer_y_ = 0;
-  std::fill(frame_.begin(), frame_.end(), 0u);
+}
+
+namespace {
+// BT.601, full range, as the sensor's YUV output is read back by the games.
+u32 yuyv_pair(const u8* a, const u8* b) {
+  const auto y = [](const u8* p) { return static_cast<u32>((77 * p[0] + 150 * p[1] + 29 * p[2] + 128) >> 8); };
+  const int r = (a[0] + b[0]) / 2, g = (a[1] + b[1]) / 2, bl = (a[2] + b[2]) / 2;
+  const auto c8 = [](int v) { return static_cast<u32>(v < 0 ? 0 : v > 255 ? 255 : v); };
+  const u32 u = c8(128 + ((-43 * r - 85 * g + 128 * bl) >> 8)), v = c8(128 + ((128 * r - 107 * g - 21 * bl) >> 8));
+  return y(a) | u << 8 | y(b) << 16 | v << 24;
+}
+} // namespace
+
+void DsiCamera::colour_bars(u32* yuyv) {
+  static const u8 bars[7][3] = {{191, 191, 191}, {191, 191, 0}, {0, 191, 191}, {0, 191, 0}, {191, 0, 191}, {191, 0, 0}, {0, 0, 191}};
+  for (int y = 0; y < H; ++y)
+    for (int x = 0; x < W; x += 2) {
+      u8 px[2][3];
+      for (int i = 0; i < 2; ++i) {
+        if (y < H * 3 / 4) std::copy(bars[(x + i) * 7 / W], bars[(x + i) * 7 / W] + 3, px[i]);
+        else { const u8 g = static_cast<u8>((x + i) * 255 / (W - 1)); px[i][0] = px[i][1] = px[i][2] = g; }   // a ramp, black to white
+      }
+      yuyv[y * (W / 2) + x / 2] = yuyv_pair(px[0], px[1]);
+    }
+}
+
+void DsiCamera::frame_from_rgb(const u8* rgb, int w, int h, u32* yuyv) {
+  if (!rgb || w <= 0 || h <= 0) { colour_bars(yuyv); return; }
+  // Fill 4:3 from the middle of the picture: the wider side loses its edges.
+  int cw = w, ch = h;
+  if (static_cast<s64>(w) * H > static_cast<s64>(h) * W) cw = static_cast<int>(static_cast<s64>(h) * W / H); else ch = static_cast<int>(static_cast<s64>(w) * H / W);
+  if (cw < 1) cw = 1;
+  if (ch < 1) ch = 1;
+  const int x0 = (w - cw) / 2, y0 = (h - ch) / 2;
+  for (int y = 0; y < H; ++y) {
+    const u8* row = rgb + static_cast<size_t>(y0 + static_cast<s64>(y) * ch / H) * w * 3;
+    for (int x = 0; x < W; x += 2) {
+      const u8* a = row + static_cast<size_t>(x0 + static_cast<s64>(x) * cw / W) * 3;
+      const u8* b = row + static_cast<size_t>(x0 + static_cast<s64>(x + 1) * cw / W) * 3;
+      yuyv[y * (W / 2) + x / 2] = yuyv_pair(a, b);
+    }
+  }
+}
+
+void DsiCamModule::set_image(const u32* yuyv) {
+  if (yuyv) { cam_[0].set_frame(yuyv); cam_[1].set_frame(yuyv); return; }
+  std::vector<u32> bars(DsiCamera::W * DsiCamera::H / 2);
+  DsiCamera::colour_bars(bars.data());
+  cam_[0].set_frame(bars.data()); cam_[1].set_frame(bars.data());
 }
 
 bool DsiCamera::activated() const {

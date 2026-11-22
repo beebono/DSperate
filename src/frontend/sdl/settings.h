@@ -47,6 +47,7 @@ enum class Dep : u8 {
   Slot2Link,          // the game reads GBA games (slot2/compat.h), and paths.gba_games is set
   RumblePak,          // the Rumble Pak is in slot 2 this session
   SolarSensor,        // a Boktai cartridge is in slot 2
+  DsiFirmware,        // DSi BIOS or firmware dumps are configured: the row is about the DSi
   Gpu3dScale,         // GPU 3D is on, on the Vulkan raster, and the windows can merge its image (the Vulkan present, no chunky cells)
 };
 
@@ -127,6 +128,10 @@ int settings_count(const Setting* table);
 constexpr int kMaxUiLanguages = 32;
 struct UiLanguage { std::string code, name; };
 void set_ui_languages(const std::vector<UiLanguage>& languages);
+// The pictures emu.dsi_camera_image can name: the files in paths.dsi_photos.
+// The first choice, always there, is the test pattern (an empty value).
+constexpr int kMaxCameraImages = 64;
+void set_camera_images(const std::vector<std::string>& names);
 
 std::string display_value(const Setting& s, const std::string& value);
 // Value one step in `dir`: clamped at the ends for numbers, wraps for choices.

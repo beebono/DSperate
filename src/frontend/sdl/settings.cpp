@@ -64,6 +64,13 @@ std::array<Choice, kMaxUiLanguages> kUiLanguages = [] {
   a[0] = Choice{"auto", N_("AUTO")};
   return a;
 }();
+// Filled by set_camera_images, as the languages are.
+std::array<Choice, kMaxCameraImages> kCameraImages = [] {
+  std::array<Choice, kMaxCameraImages> a{};
+  a.fill(Choice{"", ""});
+  a[0] = Choice{"", N_("TEST PATTERN")};
+  return a;
+}();
 const Choice kCorner[]   = {{"tl", N_("TOP LEFT")}, {"tr", N_("TOP RIGHT")}, {"bl", N_("BOTTOM LEFT")}, {"br", N_("BOTTOM RIGHT")}};
 
 constexpr Setting boolean(const char* k, const char* l, const char* def, u8 f, Dep d, const char* n) {
@@ -244,8 +251,21 @@ const Setting kUserSettings[] = {
          N_("NOT CHECKED AGAINST THE MONTH, AS THE CONSOLE DOES NOT EITHER")),
   pick("user.language", N_("LANGUAGE"), kLanguage, 6, "1", FlagRestart, Dep::None,
        N_("THE LANGUAGE MULTI-LANGUAGE GAMES START IN")),
+  pick("emu.dsi_camera_image", N_("DSI CAMERA PICTURE"), kCameraImages.data(), kMaxCameraImages, "", FlagLive | FlagVerbatim, Dep::DsiFirmware,
+       N_("WHAT THE DSI'S CAMERAS SEE: A PICTURE FROM PATHS.DSI_PHOTOS, OR COLOUR BARS")),
   end(),
 };
+
+void set_camera_images(const std::vector<std::string>& names) {
+  static std::vector<std::string> kept;
+  kept = names;
+  for (int i = 1; i < kMaxCameraImages; ++i) kCameraImages[i] = Choice{"", ""};
+  int n = 1;
+  for (const std::string& name : kept) {
+    if (n == kMaxCameraImages) break;
+    kCameraImages[n++] = Choice{name.c_str(), name.c_str()};
+  }
+}
 
 void set_ui_languages(const std::vector<UiLanguage>& languages) {
   // Owned here so the table's pointers stay valid; set once, at startup.
@@ -325,8 +345,9 @@ std::string display_value(const Setting& s, const std::string& value) {
     const int i = choice_index(s, v);
     if (i < 0) return v;   // unknown value: show as-is, not silently remapped
     const char* label = s.choices[i].label;
-    // Language names are their own; only the language row's AUTO is translated.
-    if ((s.flags & FlagVerbatim) && v != "auto") return label;
+    // Language names and file names are their own; only the row's first
+    // choice (AUTO, TEST PATTERN) is translated.
+    if ((s.flags & FlagVerbatim) && i != 0) return label;
     // A choice marked NC_(key, ...) has the setting's key as its context.
     const char* in_context = i18n::trc(s.key, label);
     return in_context != label ? in_context : i18n::tr(label);

@@ -46,6 +46,7 @@
 #include "input.h"
 #include "lid.h"
 #include "motion.h"
+#include "frontend/camera_image.h"
 #include "loader_cart.h"
 #include "frontend/i18n/i18n.h"
 
@@ -362,6 +363,36 @@ std::string g_save_failed;
 
 // False when the save file is there and could not be read: the game must not
 // start, or its first write would replace a save nobody has seen.
+// The DSi cameras' still: emu.dsi_camera_image, a file name in
+// paths.dsi_photos (or a path of its own); none, or one that will not
+// decode, is the colour bars.
+std::string camera_image_path(const ds::sdl::Config& cfg) {
+  const std::string name = cfg.str("emu.dsi_camera_image");
+  if (name.empty()) return "";
+  const std::string dir = cfg.str("paths.dsi_photos");
+  return name.find('/') != std::string::npos || dir.empty() ? name : dir + "/" + name;
+}
+void apply_camera_image(NDS& nds, const ds::sdl::Config& cfg) {
+  const ds::sdl::OffRealtime off_rt;   // a decode is a file read and some milliseconds of work
+  std::string err;
+  if (!ds::frontend::set_camera_image(nds, camera_image_path(cfg), err)) std::fprintf(stderr, "camera: %s; showing the colour bars\n", err.c_str());
+}
+// The pictures in paths.dsi_photos, by name, for the menu's row.
+std::vector<std::string> camera_images(const ds::sdl::Config& cfg) {
+  std::vector<std::string> names;
+  const std::string dir = cfg.str("paths.dsi_photos");
+  std::error_code ec;
+  if (dir.empty()) return names;
+  for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    if (!it->is_regular_file(ec)) continue;
+    std::string ext = it->path().extension().string();
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp") names.push_back(it->path().filename().string());
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
 // DeSmuME ends a .dsv with a 122-byte footer: a line of text, the chip's
 // parameters, a version and a cookie. The save loaded from such a file is
 // written back with it, so DeSmuME goes on reading the file; DraStic's .dsv is
@@ -1564,6 +1595,7 @@ static int run(int argc, char** argv) {
     for (const ds::i18n::Language& l : ds::i18n::languages()) langs.push_back({l.code, l.name});
     ds::sdl::set_ui_languages(langs);
   }
+  ds::sdl::set_camera_images(camera_images(cfg));
   // paths.dsi_nand stands in for --dsi-nand only under --dsi-mode.
   const std::string dsi_nand_cfg = dsi_mode_asked && !dsi_nand ? cfg.str("paths.dsi_nand") : std::string();
   if (!dsi_nand_cfg.empty()) dsi_nand = dsi_nand_cfg.c_str();
@@ -2311,6 +2343,7 @@ sdl_ready:
   // What slot 2 holds this session: the GBA game at `gba` (empty: none),
   // else the Rumble Pak when slot2.rumble wants one. Replaces what was there.
   ds::sdl::MotionSource motion;
+  apply_camera_image(nds, cfg);   // whatever the console is now: a later launch may be a DSi
   auto rumble_wanted = [&] {
     const std::string r = cfg.str("slot2.rumble", "auto");
     return r == "on" || (r == "auto" && !slot2_fixed && input.has_rumble());
@@ -3176,6 +3209,10 @@ sdl_ready:
         return cfg.str("paths.gba_games").empty() ? tr("NEEDS PATHS.GBA_GAMES") : "";
       case ds::sdl::Dep::RumblePak:
         return nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::RumblePak ? "" : tr("NO RUMBLE PAK IN SLOT 2");
+      case ds::sdl::Dep::DsiFirmware: {
+        const auto have = [&](const char* k) { const std::string p = cfg.str(k); return !p.empty() && std::filesystem::exists(p); };
+        return (have("paths.bios9i") && have("paths.bios7i")) || have("paths.dsi_firmware") ? "" : tr("NO DSI BIOS OR FIRMWARE");
+      }
       case ds::sdl::Dep::SolarSensor:
         return nds.gba_cart() && nds.gba_cart()->solar_sensor() ? "" : tr("NO BOKTAI CARTRIDGE IN SLOT 2");
       case ds::sdl::Dep::Gpu3dScale: {
@@ -3246,6 +3283,7 @@ sdl_ready:
       if (!ds::i18n::set_language(v)) std::fprintf(stderr, "lang: no %s translation, so the menus stay in English\n", v.c_str());
       return;
     }
+    if (is("emu.dsi_camera_image")) { apply_camera_image(nds, cfg); return; }
     if (is("slot2.solar")) { if (ds::slot2::GameCart* g = nds.gba_cart()) g->set_light_level(std::atoi(v.c_str())); return; }
     if (is("emu.frameskip")) { if (!net_live) fs_limit = std::atoi(v.c_str()); return; }
     if (is("emu.frameskip_mode")) { fs_adaptive = v != "fixed"; return; }

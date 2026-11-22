@@ -718,7 +718,29 @@ static void test_dma_ignores_tcm() {
   CHECK_EQ(r32(nds, alias), 0x11111111u);                          // the RAM beneath took it
 }
 
+// What the DSi cameras look at: a frame of YUV pairs, from the built-in bars or any RGB picture.
+static void test_camera_frames() {
+  using C = ds::io::DsiCamera;
+  std::vector<u32> f(C::W * C::H / 2);
+  C::colour_bars(f.data());
+  CHECK((f[0] & 0xFF) == 191 && ((f[0] >> 8) & 0xFF) == 128 && (f[0] >> 24) == 128);             // the grey bar: no colour
+  const u32 blue = f[C::W / 2 - 1];                                                              // the last bar
+  CHECK((blue & 0xFF) < 40 && ((blue >> 8) & 0xFF) > 200 && (blue >> 24) < 128);
+  CHECK((f[(C::H - 1) * (C::W / 2)] & 0xFF) == 0 && ((f[C::H * (C::W / 2) - 1] >> 16) & 0xFF) == 255);   // the ramp's ends
+  // A wide picture loses its sides, not its shape: red, a white middle third, red.
+  std::vector<u8> rgb(900 * 100 * 3);
+  for (int y = 0; y < 100; ++y) for (int x = 0; x < 900; ++x) { u8* p = &rgb[(y * 900 + x) * 3]; const bool mid = x >= 400 && x < 500; p[0] = 255; p[1] = p[2] = mid ? 255 : 0; }
+  C::frame_from_rgb(rgb.data(), 900, 100, f.data());
+  const u32 centre = f[240 * (C::W / 2) + 160], edge = f[240 * (C::W / 2)];
+  CHECK((centre & 0xFF) == 255 && (edge & 0xFF) < 100 && (edge >> 24) > 200);                    // white in the middle, red (high V) at the edge
+  u32 white = 0; for (int x = 0; x < C::W / 2; ++x) white += (f[x] & 0xFF) == 255;
+  CHECK(white > 220 && white < 260);                                                             // 100 of the 133 columns kept: three quarters
+  C::frame_from_rgb(nullptr, 0, 0, f.data());
+  CHECK((f[0] & 0xFF) == 191);                                                                   // nothing to show: the bars
+}
+
 int main() {
+  test_camera_frames();
   test_div();
   test_sqrt();
   test_vramcnt_layout();
