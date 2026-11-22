@@ -75,6 +75,45 @@ jobs:
         with:
           name: dsperate-linux-aarch64
           path: dsperate-*-linux-aarch64*.tar.gz
+  # x86-64, where nothing ships from: the interpreter and the portable kernels
+  # alone, so the one job that can run the whole suite under the sanitizers,
+  # and the place for the configuration with everything optional left out
+  # (no SDL, no network, no achievements; no Vulkan headers on this runner).
+  x86:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Tests under ASan and UBSan
+        run: |
+          cmake -S . -B build/san -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_SDL=OFF \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined" \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build/san
+          # Several tests keep a whole machine on the stack, and ASan's frames are several times the size.
+          ulimit -s 262144
+          ctest --test-dir build/san --output-on-failure
+      - name: Minimal configuration builds and passes
+        run: |
+          cmake -S . -B build/min -G Ninja -DCMAKE_BUILD_TYPE=Release -DDSPERATE_SDL=OFF -DDSPERATE_NET=OFF -DDSPERATE_CHEEVOS=OFF
+          cmake --build build/min
+          ctest --test-dir build/min --output-on-failure
+  # ARMv7 (the A30 class), cross-built and run under qemu: the second
+  # recompiler backend and the 32-bit NEON kernels, against the interpreter
+  # and the reference kernels (test_jit, test_kernels). No SDL: the runner has
+  # no armhf SDL2, and the frontend is the arm64 job's.
+  armv7:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-arm-linux-gnueabihf qemu-user-static
+      - name: Build and test
+        run: |
+          cmake --preset arm32-cross -DDSPERATE_SDL=OFF
+          cmake --build --preset arm32-cross
+          ctest --test-dir build/arm32 --output-on-failure
   # Tag v* to publish. The notes are a stand-in (name, tag, changelog link)
   # meant to be edited on GitHub afterwards.
   release:

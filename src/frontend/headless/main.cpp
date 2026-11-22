@@ -37,6 +37,7 @@
 #include <vector>
 #include <algorithm>
 #include <chrono>
+#include <sys/stat.h>   // output_path_safe; not only with the network code below
 #include <thread>
 #if DSPERATE_NET
 #include "net/lan_mp.h"
