@@ -245,6 +245,9 @@ public:
   void dsi_mic_clock(s16 sample);
   // Game has sampled AUX at least once.
   bool mic_used() const { return mic_used_; }
+  // The DSi's DSP has started listening: it takes the microphone through I2S,
+  // past the registers that otherwise say a game wants it.
+  void note_mic_wanted() { mic_used_ = true; }
   void update_key_irq();
   // EXMEMCNT. Bits 7-15 are the ARM9's and both CPUs read them; bits 0-6 (the
   // GBA slot's waits) are one copy per CPU. `exmemcnt` is the ARM9's register.

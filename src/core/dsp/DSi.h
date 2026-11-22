@@ -42,8 +42,9 @@ public:
   void CancelEvent(u32 id);
   void fire(u32 packed);
 
-  // The microphone is clocked into the DSP whenever I2S runs; nothing to switch.
-  struct { void Start(int) {} void Stop(int) {} } Mic;
+  // The microphone is clocked into the DSP whenever I2S runs, so there is
+  // nothing to switch here; a start does tell the frontend a title wants it.
+  struct MicLine { DSi* dsi = nullptr; void Start(int); void Stop(int) {} } Mic;
   DSi_DSP DSP;
 
 private:

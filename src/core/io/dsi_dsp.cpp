@@ -52,6 +52,7 @@ void DSi::ScheduleEvent(u32, bool, s32 delay, u32 funcid, u32 param) {
 }
 void DSi::CancelEvent(u32) { nds_.sched.cancel(ds::EventId::DsiDsp); }
 void DSi::fire(u32 packed) { if (EventFunc f = funcs_[(packed >> 24) & 3]; f && that_) f(that_, packed & 0xFFFFFF); }
+void DSi::MicLine::Start(int) { if (dsi) dsi->nds_.io.note_mic_wanted(); }
 void DSi_DSP::IrqRep0() { host->irq_rep(0); }
 void DSi_DSP::IrqRep1() { host->irq_rep(1); }
 void DSi_DSP::IrqRep2() { host->irq_rep(2); }
@@ -95,7 +96,7 @@ bool DsiDsp::make_hle(u32 crc) {
 // By the ID a core gives itself (and a save state records): class << 16 | version.
 void DsiDsp::make_hle_id(u32 id) {
   using namespace melonDS::DSP_HLE;
-  if (!shim_) { shim_ = std::make_unique<melonDS::DSi>(nds_); shim_->DSP.host = this; }
+  if (!shim_) { shim_ = std::make_unique<melonDS::DSi>(nds_); shim_->DSP.host = this; shim_->Mic.dsi = shim_.get(); }
   core_.reset(); teakra_ = nullptr; hle_ = false;
   nds_.sched.cancel(EventId::DsiDsp);
   shim_->refresh_nwram();
@@ -170,7 +171,8 @@ void DsiDsp::make_core() {
   ab.read32 = [this](std::uint32_t a) { return nds_.bus.dma_read32(Cpu::ARM9, a); };
   ab.write32 = [this](std::uint32_t a, std::uint32_t v) { nds_.bus.dma_write32(Cpu::ARM9, a, v); };
   t.SetAHBMCallback(ab);
-  t.SetMicEnableCallback([](bool) {});   // the microphone is clocked into it whenever I2S runs (sample_clock)
+  // The microphone is clocked into it whenever I2S runs (sample_clock); enabling it tells the frontend a title wants one.
+  t.SetMicEnableCallback([this](bool on) { if (on) nds_.io.note_mic_wanted(); });
 }
 
 void DsiDsp::reset() {
