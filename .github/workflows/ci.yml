@@ -19,6 +19,7 @@ jobs:
   # the binaries a handheld runs (see Package for the two tarballs). Other
   # devices build with their own toolchains; what they share with this job is
   # the committed PGO profiles (pgo/<arch>[-gcc<ver>]/), not a CI variant.
+  # Every job packages the same way: see tools/ci_package.sh.
   arm64:
     runs-on: ubuntu-24.04-arm
     steps:
@@ -56,35 +57,25 @@ jobs:
       # and its debug symbols, for a device whose runtime may be older than
       # the runner's or for a backtrace. Release carries no symbols, so that one
       # is rebuilt as RelWithDebInfo: -g is outside the PGO fingerprint, so the
-      # same profile applies.
+      # same profile applies. The rebuild is a different binary, so the tests
+      # are built and run again on it before it is packed.
       - name: Package
-        run: |
-          d=dsperate-${GITHUB_REF_NAME}-linux-aarch64
-          mkdir -p dist/$d dist/$d-static
-          cp build/host/src/frontend/sdl/dsperate build/host/src/frontend/headless/dsperate-headless dist/$d/
-          strip dist/$d/dsperate dist/$d/dsperate-headless
-          cp LICENSE README.md dist/$d/
-          tar -C dist -czf $d.tar.gz $d
-          cmake --preset host -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
-          cmake --build --preset host
-          cp build/host/src/frontend/sdl/dsperate build/host/src/frontend/headless/dsperate-headless \
-             LICENSE README.md dist/$d-static/
-          tar -C dist -czf $d-static.tar.gz $d-static
-          ls -l *.tar.gz
+        run: tools/ci_package.sh host build/host aarch64 strip
       - uses: actions/upload-artifact@v4
         with:
           name: dsperate-linux-aarch64
           path: dsperate-*-linux-aarch64*.tar.gz
-  # x86-64, where nothing ships from: the interpreter and the portable kernels
-  # alone, so the one job that can run the whole suite under the sanitizers,
-  # and the place for the configuration with everything optional left out
-  # (no SDL, no network, no achievements; no Vulkan headers on this runner).
+  # x86-64: the interpreter and the portable kernels alone (no JIT, no NEON),
+  # so the one job that can run the whole suite under the sanitizers, and the
+  # place for the configuration with everything optional left out (no SDL, no
+  # network, no achievements). Its tarballs are a desktop build for looking at
+  # a game or a bug on a PC, not a fast one, and carry no PGO profile.
   x86:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libsdl2-dev libvulkan-dev
       - name: Tests under ASan and UBSan
         run: |
           cmake -S . -B build/san -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DDSPERATE_SDL=OFF \
@@ -99,26 +90,53 @@ jobs:
           cmake -S . -B build/min -G Ninja -DCMAKE_BUILD_TYPE=Release -DDSPERATE_SDL=OFF -DDSPERATE_NET=OFF -DDSPERATE_CHEEVOS=OFF
           cmake --build build/min
           ctest --test-dir build/min --output-on-failure
+      - name: Build and test
+        run: |
+          cmake --preset host | tee configure.log
+          grep -q "Vulkan presenter and 3D raster enabled" configure.log || { echo "::error::Vulkan headers not found: the build would ship without GPU 3D and the Vulkan present"; exit 1; }
+          cmake --build --preset host
+          ctest --preset host --output-on-failure
+      - name: Package
+        run: tools/ci_package.sh host build/host x86_64 strip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsperate-linux-x86_64
+          path: dsperate-*-linux-x86_64*.tar.gz
   # ARMv7 (the A30 class), cross-built and run under qemu: the second
   # recompiler backend and the 32-bit NEON kernels, against the interpreter
-  # and the reference kernels (test_jit, test_kernels). No SDL: the runner has
-  # no armhf SDL2, and the frontend is the arm64 job's.
+  # and the reference kernels (test_jit, test_kernels). SDL2 and the Vulkan
+  # headers come from Ubuntu's armhf ports, which the runner's own package
+  # sources do not carry: they are held to amd64 and the ports added beside
+  # them. No PGO: pgo/armv7l belongs to the A30 toolchain's compiler, and an
+  # A30 itself needs that toolchain's old glibc, not this build.
   armv7:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-arm-linux-gnueabihf qemu-user-static
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo sed -i '/^Types:/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          printf 'Types: deb\nURIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: noble noble-updates noble-security\nComponents: main universe\nArchitectures: armhf\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/armhf.sources
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-arm-linux-gnueabihf qemu-user-static libsdl2-dev:armhf libvulkan-dev:armhf
       - name: Build and test
         run: |
-          cmake --preset arm32-cross -DDSPERATE_SDL=OFF
+          cmake --preset arm32-cross | tee configure.log
+          grep -q "Vulkan presenter and 3D raster enabled" configure.log || { echo "::error::Vulkan headers not found: the build would ship without GPU 3D and the Vulkan present"; exit 1; }
           cmake --build --preset arm32-cross
           ctest --test-dir build/arm32 --output-on-failure
+      - name: Package
+        run: tools/ci_package.sh arm32-cross build/arm32 armv7 arm-linux-gnueabihf-strip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsperate-linux-armv7
+          path: dsperate-*-linux-armv7*.tar.gz
   # Tag v* to publish. The notes are a stand-in (name, tag, changelog link)
   # meant to be edited on GitHub afterwards.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [arm64]
+    needs: [arm64, x86, armv7]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -128,14 +146,17 @@ jobs:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
-          name: dsperate-linux-aarch64
+          pattern: dsperate-linux-*
+          merge-multiple: true
       # Fail here, with the listing, rather than in gh's glob error: an
       # artefact uploaded under the wrong name is not downloaded at all.
       - name: Check the tarballs arrived
         run: |
           ls -l
-          test -f dsperate-${GITHUB_REF_NAME}-linux-aarch64.tar.gz
-          test -f dsperate-${GITHUB_REF_NAME}-linux-aarch64-static.tar.gz
+          for a in aarch64 x86_64 armv7; do
+            test -f dsperate-${GITHUB_REF_NAME}-linux-$a.tar.gz
+            test -f dsperate-${GITHUB_REF_NAME}-linux-$a-static.tar.gz
+          done
       - name: Write release notes
         run: |
           prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
@@ -151,9 +172,9 @@ jobs:
             echo
             echo "Games run without BIOS or firmware dumps (built-in FreeBIOS and a generated firmware); a set dumped from your own DS unlocks the firmware boot and cycle-exact SWI timing. None is included."
             echo
-            echo "Tarballs: \`linux-aarch64\` is dynamically linked and stripped -- the one to package. \`linux-aarch64-static\` carries libstdc++/libgcc inside and keeps its debug symbols, for a device whose runtime is older than the build's, or for a backtrace."
+            echo "Tarballs: \`linux-aarch64\` is the one for a handheld, and the only profile-guided build. \`linux-armv7\` is for 32-bit ARM with NEON, \`linux-x86_64\` a desktop build without the recompiler. Each is dynamically linked and stripped -- the one to package; its \`-static\` twin carries libstdc++/libgcc inside and keeps its debug symbols, for a device whose runtime is older than the build's, or for a backtrace."
           } > notes.md
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dsperate-*-linux-aarch64.tar.gz dsperate-*-linux-aarch64-static.tar.gz --title "DSperate ${GITHUB_REF_NAME}" --notes-file notes.md
+        run: gh release create "${GITHUB_REF_NAME}" dsperate-*-linux-*.tar.gz --title "DSperate ${GITHUB_REF_NAME}" --notes-file notes.md
