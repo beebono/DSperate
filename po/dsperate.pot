@@ -78,7 +78,7 @@ msgstr ""
 msgid "FULLSCREEN"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4839
+#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4855
 msgid "SCREENSHOT"
 msgstr ""
 
@@ -309,7 +309,7 @@ msgstr ""
 msgid "A INSERT   B NO GBA GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2508 src/frontend/sdl/main.cpp:3996
+#: src/frontend/sdl/main.cpp:2508 src/frontend/sdl/main.cpp:3997
 msgid "SAVE CANNOT BE READ"
 msgstr ""
 
@@ -476,145 +476,157 @@ msgstr ""
 msgid "ITS FOLDER HAS CHANGED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3504
+#: src/frontend/sdl/main.cpp:3505
 msgid "LOCAL WIRELESS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3569
+#: src/frontend/sdl/main.cpp:3570
 msgid "WAITING FOR HOST"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3609
+#: src/frontend/sdl/main.cpp:3610
 msgid "SCAN FAILED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3609
+#: src/frontend/sdl/main.cpp:3610
 msgid "THE NETWORK REFUSED IT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3615
+#: src/frontend/sdl/main.cpp:3616
 msgid "LOOKING FOR A SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3623
+#: src/frontend/sdl/main.cpp:3624
 msgid "NO SESSION FOUND"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3623
+#: src/frontend/sdl/main.cpp:3624
 msgid "NOBODY IS HOSTING HERE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3631 src/frontend/sdl/main.cpp:4520
+#: src/frontend/sdl/main.cpp:3632 src/frontend/sdl/main.cpp:4521
 msgid "JOINED A SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3667
+#: src/frontend/sdl/main.cpp:3668
 msgid "ACHIEVEMENT UNLOCKED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3687
+#: src/frontend/sdl/main.cpp:3688
 msgid "NOT AVAILABLE IN THIS BUILD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3690
+#: src/frontend/sdl/main.cpp:3691
 msgid "TURNED OFF"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3691
+#: src/frontend/sdl/main.cpp:3692
 msgid "NOT SIGNED IN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3692
+#: src/frontend/sdl/main.cpp:3693
 msgid "SIGNING IN..."
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3693 src/frontend/sdl/main.cpp:3695
+#: src/frontend/sdl/main.cpp:3694 src/frontend/sdl/main.cpp:3696
 msgid "SIGNED IN AS {1}"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3694
+#: src/frontend/sdl/main.cpp:3695
 msgid "LOADING ACHIEVEMENTS..."
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3697
+#: src/frontend/sdl/main.cpp:3698
 msgid "NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3699
+#: src/frontend/sdl/main.cpp:3700
 msgid "NO ACHIEVEMENTS FOR THIS ROM - HASH {1}"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3708
+#: src/frontend/sdl/main.cpp:3709
 msgid "{1}/{2} EARNED  {3}/{4} POINTS  (ENCORE)"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3708
+#: src/frontend/sdl/main.cpp:3709
 msgid "{1}/{2} EARNED  {3}/{4} POINTS"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:4190
+#: src/frontend/sdl/main.cpp:4191
 msgid "STATE {1} SAVED"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:4205
+#: src/frontend/sdl/main.cpp:4206
 msgid "STATE {1} LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4562
+#: src/frontend/sdl/main.cpp:4563
 msgid "GPU 3D UNAVAILABLE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4563
+#: src/frontend/sdl/main.cpp:4564
 msgid "DRAWING 3D ON THE CPU"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4572
+#: src/frontend/sdl/main.cpp:4573
 msgid "NOT SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4574
+#: src/frontend/sdl/main.cpp:4575
 msgid "CHECK THE CARD: FULL OR READ-ONLY?"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4582
+#: src/frontend/sdl/main.cpp:4583
 msgid "TURBO TIMING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4583
+#: src/frontend/sdl/main.cpp:4584
 msgid "NOT THE CONSOLE'S SPEED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4584
+#: src/frontend/sdl/main.cpp:4585
 msgid "GAMES MAY GLITCH OR HANG"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4590
+#: src/frontend/sdl/main.cpp:4591
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4603
+#: src/frontend/sdl/main.cpp:4606
+msgid "DSI"
+msgstr ""
+
+#: src/frontend/sdl/main.cpp:4607
+msgid "CPU TIMING IS NOT EXACT"
+msgstr ""
+
+#: src/frontend/sdl/main.cpp:4608
+msgid "SYSTEM APPS MAY HANG"
+msgstr ""
+
+#: src/frontend/sdl/main.cpp:4619
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4604
+#: src/frontend/sdl/main.cpp:4620
 msgid "UNKNOWN DSP PROGRAM"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4605
+#: src/frontend/sdl/main.cpp:4621
 msgid "WILL RUN VERY SLOWLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4840
+#: src/frontend/sdl/main.cpp:4856
 msgid "SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4840
+#: src/frontend/sdl/main.cpp:4856
 msgid "COULD NOT BE SAVED"
 msgstr ""
 

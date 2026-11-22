@@ -3425,6 +3425,7 @@ sdl_ready:
   };
   sd_note_toast();   // covers the state autoloaded at startup
   bool dsp_warned = false;   // the DSP warning below has been shown for this start
+  bool dsi_timing_warned = false;   // so has the timing one
 
   auto toast_step = [&] {
     if (toast_left > 0) { --toast_left; return; }
@@ -4594,6 +4595,21 @@ sdl_ready:
       shortcuts_note.clear();
     }
     // DSP is not emulated: say so on screen once per start.
+    // A DSi on the fast or turbo timing model: a setting (emu.timing, DS_TIMING) asked for it, or the session
+    // began as a DS and the recompiler has that model built in. Most DSiWare runs on it; some system software
+    // does not (the DSi Sound app hangs on a white screen), so say it once each time the console becomes a DSi.
+    if (const bool off_exact = nds.dsi && std::strcmp(ds::timing_name(), "exact") != 0; off_exact != dsi_timing_warned) {
+      dsi_timing_warned = off_exact;
+      if (off_exact) {
+        std::fprintf(stderr, "dsi: CPU timing is %s, not exact; most DSiWare runs on it, some DSi system apps hang (emu.timing = exact, or leave it unset)\n", ds::timing_name());
+        Toast t;
+        t.header = tr("DSI");
+        t.title = tr("CPU TIMING IS NOT EXACT");   // toast lines hold about 24 characters
+        t.detail = tr("SYSTEM APPS MAY HANG");
+        t.frames = TOAST_FRAMES * 2;
+        toast_queue.push_back(std::move(t));
+      }
+    }
     if (nds.dsi_dsp_started != dsp_warned) {
       dsp_warned = nds.dsi_dsp_started;
       if (dsp_warned) {
