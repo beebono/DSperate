@@ -252,7 +252,8 @@ const char* kUsage =
 #endif
     "  --autoload      start from the auto slot (emu.autosave's state) when there is one\n"
     "  --no-autoload   ignore it for this run, whatever emu.autoload says\n"
-    "  --saves DIR     battery saves go in DIR (paths.saves; default beside the ROM)\n"
+    "  --saves DIR     battery saves go in DIR (paths.saves; default beside the ROM). A game's\n"
+    "                  <rom>.dsv there (DeSmuME's or DraStic's) is used in place of <rom>.sav\n"
     "  --states DIR    save states and the auto slot go in DIR (paths.states; default beside the ROM)\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n"
@@ -315,6 +316,18 @@ std::string save_path(const std::string& rom, const std::string& dir) {
   return dir.empty() ? rom_stem(rom) + ".sav" : dir + "/" + base_name(rom_stem(rom)) + ".sav";
 }
 
+// A DS game's battery save: the .dsv DeSmuME and DraStic keep, where there is
+// one, used in place (read, and written back as it was found: see
+// g_dsv_footer); otherwise our own raw .sav. A .dsv is never created here.
+std::string cart_save_path(const std::string& rom, const std::string& dir) {
+  const std::string sav = save_path(rom, dir);
+  const std::string dsv = sav.substr(0, sav.size() - 4) + ".dsv";
+  struct stat st;
+  if (stat(dsv.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return sav;
+  if (stat(sav.c_str(), &st) == 0) std::fprintf(stderr, "save: using %s; the .sav beside it is left alone\n", dsv.c_str());
+  return dsv;
+}
+
 // video.aa: false / true. On the GPU raster true is 4x MSAA; the CPU raster
 // shows the hardware's blend. The older mode words still read: accurate /
 // enhanced / smooth as on, off as off.
@@ -348,8 +361,16 @@ std::string g_save_failed;
 
 // False when the save file is there and could not be read: the game must not
 // start, or its first write would replace a save nobody has seen.
+// DeSmuME ends a .dsv with a 122-byte footer: a line of text, the chip's
+// parameters, a version and a cookie. The save loaded from such a file is
+// written back with it, so DeSmuME goes on reading the file; DraStic's .dsv is
+// the bare image and has none. Empty for any other save.
+std::vector<u8> g_dsv_footer;
+constexpr size_t kDsvFooter = 122;
+
 bool load_save(NDS& nds, const std::string& path) {
   const ds::sdl::OffRealtime off_rt;
+  g_dsv_footer.clear();
   if (!nds.cart) return true;
   FILE* f = std::fopen(path.c_str(), "rb");
   if (!f) {
@@ -365,6 +386,12 @@ bool load_save(NDS& nds, const std::string& path) {
   std::fclose(f);
   if (read_error) { std::fprintf(stderr, "save: cannot read %s (stopped after %zu bytes)\n", path.c_str(), data.size()); return false; }
   const ds::cart::Cart::SaveLoad r = nds.cart->load_save(data.data(), data.size());
+  if (data.size() >= kDsvFooter && !std::memcmp(data.data() + data.size() - 16, "|-DESMUME SAVE-|", 16)) {
+    g_dsv_footer.assign(data.end() - kDsvFooter, data.end());
+    // The image will be written at the chip's size: the footer's three size
+    // fields (the data's, the padded one's, the memory's) say the same.
+    if (!r.fitted && r.chip_bytes) for (size_t at : {size_t{82}, size_t{86}, size_t{98}}) std::memcpy(&g_dsv_footer[at], &r.chip_bytes, 4);
+  }
   if (r.fitted) { VLOG("save: loaded %zu bytes from %s\n", data.size(), path.c_str()); return true; }
   // First write resizes to the chip's size, which would cut off/pad the
   // player's original: keep it as .bak.
@@ -386,7 +413,15 @@ void write_save(NDS& nds, const std::string& path) {
   if (!nds.cart || nds.cart->sram().empty()) return;
   const bool keep = nds.cart->sram_from_state();
   std::string err;
-  if (!ds::write_file_atomic(path, nds.cart->sram().data(), nds.cart->sram().size(), err, keep ? prestate_bak(path) : std::string())) {
+  const std::vector<u8>& sram = nds.cart->sram();
+  std::vector<u8> with_footer;
+  if (!g_dsv_footer.empty()) {
+    with_footer.reserve(sram.size() + g_dsv_footer.size());
+    with_footer.assign(sram.begin(), sram.end());
+    with_footer.insert(with_footer.end(), g_dsv_footer.begin(), g_dsv_footer.end());
+  }
+  const std::vector<u8>& out = g_dsv_footer.empty() ? sram : with_footer;
+  if (!ds::write_file_atomic(path, out.data(), out.size(), err, keep ? prestate_bak(path) : std::string())) {
     std::fprintf(stderr, "save: %s\n", err.c_str());
     g_save_failed = "GAME SAVE NOT WRITTEN";
     return;
@@ -884,7 +919,7 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   states_dir = cfg.str("paths.states", rom_dir);
   shots_dir = cfg.str("paths.screenshots", states_dir);
   g_state_key = state_key_for(nds, states_dir);
-  sav = save_arg ? std::string(save_arg) : save_path(rom_path, cfg.str("paths.saves"));
+  sav = save_arg ? std::string(save_arg) : cart_save_path(rom_path, cfg.str("paths.saves"));
   game_ini.clear();
   if (nds.cart) {
     game_ini = ds::sdl::Config::game_path_rom(rom_path);
