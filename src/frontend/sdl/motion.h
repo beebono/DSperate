@@ -21,12 +21,13 @@ public:
   // `want`: auto (the controller's own sensor, else the system's, else the
   // stick), pad, sensor or stick. `pad_has`: the open controller has an
   // accelerometer; its readings come through Input::pad_motion, not read(). `matrix`: nine numbers, rows of a rotation from the sensor's axes
-  // to the console's, for a sensor the system gives no mount matrix for;
-  // empty takes the system's (or the identity).
+  // to the console's, for a sensor the system gives no mount matrix for or a
+  // controller not held like a handheld; empty takes the system's (or the identity).
   void open(const std::string& want, const std::string& matrix, bool pad_has);
   void close();
   Kind kind() const { return kind_; }
   const std::string& name() const { return name_; }   // the sensor's, for the log
+  const float* matrix() const { return m_; }           // row-major, for Input::pad_motion
   // The reading for this frame. `sx`, `sy`: the stick, -1..1, right and up positive.
   slot2::Motion read(float sx, float sy) const;
 

@@ -288,19 +288,19 @@ static void test_motion_pak() {
     M p(M::Model::Retail);
     CHECK(p.rom_read16(0x123456) == 0xFCFF && p.identity() != M(M::Model::Homebrew).identity());
     auto byte = [&] { u32 v = 0; for (int i = 0; i < 4; ++i) v = v << 2 | p.sram_read8(0); return v; };
-    p.set_motion({g, 0, -g, 0});
+    p.set_motion({2 * g, 0, -g, 0});
     CHECK(p.sram_read8(0) == 0);                                // the cycle's last read, where a pak starts
     for (int cycle = 0; cycle < 2; ++cycle) {
       CHECK(byte() == 0xFF);                                    // sync
-      CHECK(byte() == 179 && byte() == 128 && byte() == 76);   // +1 g, 0, -1 g (0.7 and 0.3 of 256, cut)
+      CHECK(byte() == 25 && byte() == 128 && byte() == 76);    // X and Y read sign-turned: +2 g on X is 0.1 of 256, -1 g on Z 0.3 (cut)
       CHECK(p.sram_read8(0) == 0);
     }
     // A state taken mid-cycle resumes there.
-    CHECK(byte() == 0xFF); CHECK(p.sram_read8(0) == 2);         // into X: 179 = 10 11 00 11
+    CHECK(byte() == 0xFF); CHECK(p.sram_read8(0) == 0);         // into X: 25 = 00 01 10 01
     state::Writer w; w.begin("TEST"); p.sync_state(w); w.end();
-    M q(M::Model::Retail); q.set_motion({g, 0, -g, 0});
+    M q(M::Model::Retail); q.set_motion({2 * g, 0, -g, 0});
     state::Reader r(w.data().data(), w.data().size()); r.begin("TEST"); q.sync_state(r); r.end();
-    CHECK(r.ok() && q.sram_read8(0) == 3 && q.sram_read8(0) == 0 && q.sram_read8(0) == 3);
+    CHECK(r.ok() && q.sram_read8(0) == 1 && q.sram_read8(0) == 2 && q.sram_read8(0) == 1);
   }
 }
 

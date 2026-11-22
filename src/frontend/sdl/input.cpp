@@ -441,7 +441,7 @@ bool Input::pad_has_motion() const {
 #endif
 }
 
-bool Input::pad_motion(slot2::Motion& m) {
+bool Input::pad_motion(slot2::Motion& m, const float* r) {
 #if SDL_VERSION_ATLEAST(2, 0, 14)
   if (!pad_has_motion()) return false;
   if (!SDL_GameControllerIsSensorEnabled(pad_, SDL_SENSOR_ACCEL)) {
@@ -450,14 +450,18 @@ bool Input::pad_motion(slot2::Motion& m) {
   }
   float a[3];
   if (SDL_GameControllerGetSensorData(pad_, SDL_SENSOR_ACCEL, a, 3) != 0) return false;
-  // SDL's frame for a pad held flat: X right, Y up out of its face, Z towards
-  // the player. The console's has Y up the screen and Z out of it.
-  m.ax = a[0]; m.ay = -a[2]; m.az = a[1];
+  // SDL's frame as is: right for a handheld. Other ways of holding a
+  // controller are slot2.motion_matrix's to correct.
+  m.ax = r[0] * a[0] + r[1] * a[1] + r[2] * a[2];
+  m.ay = r[3] * a[0] + r[4] * a[1] + r[5] * a[2];
+  m.az = r[6] * a[0] + r[7] * a[1] + r[8] * a[2];
   float g[3];
-  m.gz = SDL_GameControllerIsSensorEnabled(pad_, SDL_SENSOR_GYRO) && SDL_GameControllerGetSensorData(pad_, SDL_SENSOR_GYRO, g, 3) == 0 ? g[1] : 0;
+  m.gz = SDL_GameControllerIsSensorEnabled(pad_, SDL_SENSOR_GYRO) && SDL_GameControllerGetSensorData(pad_, SDL_SENSOR_GYRO, g, 3) == 0
+             ? r[6] * g[0] + r[7] * g[1] + r[8] * g[2]
+             : 0;
   return true;
 #else
-  (void)m; return false;
+  (void)m; (void)r; return false;
 #endif
 }
 

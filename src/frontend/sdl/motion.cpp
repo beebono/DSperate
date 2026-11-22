@@ -74,7 +74,12 @@ std::string MotionSource::find_accel(const std::string& root) {
 void MotionSource::open(const std::string& want, const std::string& matrix, bool pad_has) {
   close();
   if (want == "off" || want == "none") return;
-  if ((want == "auto" || want == "pad") && pad_has) { kind_ = Kind::Pad; name_ = "the controller's sensor"; return; }
+  if ((want == "auto" || want == "pad") && pad_has) {
+    kind_ = Kind::Pad; name_ = "the controller's sensor";
+    for (int i = 0; i < 9; ++i) m_[i] = i % 4 == 0 ? 1.f : 0.f;
+    if (!matrix.empty() && !parse_matrix(matrix.c_str(), m_)) std::fprintf(stderr, "motion: slot2.motion_matrix wants nine numbers; ignored\n");
+    return;
+  }
   if (want != "stick") accel_dir_ = find_accel();
   if (accel_dir_.empty()) {
     if (want == "sensor" || want == "pad") std::fprintf(stderr, "motion: no accelerometer found (%s); the stick tilts instead\n", want == "pad" ? "controller" : "controller or IIO");

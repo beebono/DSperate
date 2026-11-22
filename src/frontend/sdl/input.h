@@ -129,10 +129,10 @@ public:
   // `strength` percent for `ms`, replacing whatever pulse was running.
   bool has_rumble() const;
   // The controller's own accelerometer (and gyroscope, where it has one), as a
-  // slot-2 motion accessory feels it. False when the pad has none: `m` is left.
-  // Turns the sensors on at the first call.
+  // slot-2 motion accessory feels it, through `r` (MotionSource::matrix()).
+  // False when the pad has none: `m` is left. Turns the sensors on at the first call.
   bool pad_has_motion() const;
-  bool pad_motion(slot2::Motion& m);
+  bool pad_motion(slot2::Motion& m, const float* r);
   void rumble(int strength, u32 ms);
   // While the Guitar Grip is in slot 2, its four fret bindings (keys/pad
   // grip_green, grip_red, grip_yellow, grip_blue) work the frets instead of

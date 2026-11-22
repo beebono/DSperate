@@ -405,7 +405,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # has it back while stylus_hold is held). A handheld with one stick: left
 # motion_matrix =               # nine numbers: the rotation from the sensor's axes to the console's
                                 # (X right, Y up the screen, Z towards you), for a sensor the system
-                                # gives no mount matrix for. Empty: the system's, or none
+                                # gives no mount matrix for. Empty: the system's, or none. A
+                                # controller's is taken as held like a handheld; lying flat, face
+                                # up: 1 0 0 0 0 -1 0 1 0
 # solar = 5                     # the solar sensor of a Boktai cartridge: 0 (dark) to 10 (full sun)
 
 [emu]

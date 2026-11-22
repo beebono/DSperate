@@ -361,8 +361,8 @@ u8 MotionPak::sram_read8(u32 addr) {
   // sync), four each give X, Y and Z, and the last answers 0.
   switch (step_) {
   case 0: value_ = 0xFF; break;
-  case 4: value_ = static_cast<u8>(accel8(motion_.ax)); break;
-  case 8: value_ = static_cast<u8>(accel8(motion_.ay)); break;
+  case 4: value_ = static_cast<u8>(accel8(-motion_.ax)); break;
+  case 8: value_ = static_cast<u8>(accel8(-motion_.ay)); break;
   case 12: value_ = static_cast<u8>(accel8(motion_.az)); break;
   case 16: step_ = 0; return 0;
   default: break;

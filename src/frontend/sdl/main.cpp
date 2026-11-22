@@ -4300,7 +4300,7 @@ sdl_ready:
       if (motion.kind() == ds::sdl::MotionSource::Kind::Stick) input.set_motion_stick(right ? "right" : "left");   // the row is live
       if (!menu_over_live && !log.reading()) input.stick_position(right, sx, sy);
       ds::slot2::Motion m;   // flat, for a replay and for a controller that has gone
-      if (!log.reading() && !(motion.kind() == ds::sdl::MotionSource::Kind::Pad ? input.pad_motion(m) : (m = motion.read(sx, sy), true))) m = ds::slot2::Motion{};
+      if (!log.reading() && !(motion.kind() == ds::sdl::MotionSource::Kind::Pad ? input.pad_motion(m, motion.matrix()) : (m = motion.read(sx, sy), true))) m = ds::slot2::Motion{};
       static_cast<ds::slot2::MotionPak&>(*nds.slot2).set_motion(m);
     }
     if (menu_over_live) {
