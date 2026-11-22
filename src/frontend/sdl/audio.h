@@ -100,6 +100,11 @@ private:
   static constexpr double DRC_CLAMP = 0.005;     // +/- 0.5 %
   static constexpr double DRC_SMOOTH = 1.0 / 32.0;   // depth EMA, ~0.5 s
   SDL_AudioDeviceID dev_ = 0, cap_ = 0;
+  // The output device went away under us (a Bluetooth or USB sink, HDMI unplugged, the daemon restarted): SDL stops
+  // the device and nothing queued is ever played. push() notices, closes it and tries the default device again
+  // about once a second until one opens.
+  bool lost_ = false, native_rate_ = true, quiet_open_ = false;
+  u32  lost_retry_ = 0;
   std::vector<s16> mic_;
   u32 frame_bytes_ = 0;
   u32 dev_samples_ = 0;     // got.samples: the device's own period

@@ -11,6 +11,7 @@
 namespace ds::sdl {
 
 bool Audio::open(bool native_rate) {
+  native_rate_ = native_rate;
   dbg_auto_ = std::getenv("DS_AUDIO_AUTO") != nullptr;   // log every buffer-size decision
   SDL_AudioSpec want{}, got{};
   want.freq = static_cast<int>(spu::Spu::SAMPLE_RATE);
@@ -34,7 +35,7 @@ bool Audio::open(bool native_rate) {
   want.samples = 2048;      // queue granularity only (no callback); fewer, larger device writes
   want.callback = nullptr;
   dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
-  if (!dev_) { std::fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError()); return false; }
+  if (!dev_) { if (!quiet_open_) std::fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError()); return false; }
   rate_ = got.freq > 0 ? static_cast<u32>(got.freq) : spu::Spu::SAMPLE_RATE;
   dev_samples_ = got.samples;
   frame_bytes_ = static_cast<u32>(static_cast<u64>(rate_) * 4 * CYCLES_PER_FRAME / ARM9_CLOCK_HZ);
@@ -84,6 +85,19 @@ const std::vector<s16>& Audio::capture() {
 
 void Audio::push(NDS& nds, bool drop) {
   in_rate_ = nds.spu.output_rate_hz();   // live: a DSi title can move it to 47.6 kHz via SNDEXCNT
+
+  // A device SDL has stopped is one that was removed (we never stop ours; a pause reads as paused).
+  if (dev_ && SDL_GetAudioDeviceStatus(dev_) == SDL_AUDIO_STOPPED) {
+    std::fprintf(stderr, "audio: the output device is gone; waiting for one\n");
+    SDL_CloseAudioDevice(dev_); dev_ = 0;
+    lost_ = true; lost_retry_ = 0; depth_ = -1;
+  }
+  if (!dev_ && lost_ && ++lost_retry_ >= 60) {
+    lost_retry_ = 0;
+    quiet_open_ = true;
+    if (open(native_rate_)) lost_ = false;
+    quiet_open_ = false;
+  }
 
   // Measure before queueing: depth is what's left to play, not plus this frame.
   if (dev_) {
