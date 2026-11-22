@@ -21,10 +21,8 @@ in float v_zp;
 flat in ivec4 v_pb;
 flat in ivec4 v_wrap;
 flat in ivec4 v_tex;
-#ifdef DS_EDGE_AA
 in vec3 v_edge;       // gl_lean.vert: the distance from each outline side, times w
 flat in int v_edir;
-#endif
 #define DS_WRAP_VARY v_wrap
 layout(location = 0) out vec4 o_col;
 layout(location = 1) out vec4 o_fog;
@@ -165,6 +163,12 @@ void main() {
   o_fog = vec4(float(fogbit), 0.0, 0.0, 1.0);
 #endif
   // Edge marking (gl_mark.frag): the polygon's id, fog bit, "drawn" and the pixel's DS depth, where a frame marks edges.
-  if ((pc.f.flags2 & DS_FF2_EDGEMARK) != 0u) o_id = uint(v_tex.w) | (uint(clamp(v_zp, 0.0, 16777215.0)) << 8);
+  // A polygon whose texture cuts texels out (bit 8) is "drawn" for the marking within a pixel of its own outline
+  // alone: a hole's rim is not an edge of the polygon, and was outlined texel by texel (Solatorobo's clouds).
+  if ((pc.f.flags2 & DS_FF2_EDGEMARK) != 0u) {
+    uint idw = uint(v_tex.w) & 0xFFu;
+    if ((v_tex.w & 256) != 0) { vec3 em = v_edge * gl_FragCoord.w; if (min(em.x, min(em.y, em.z)) >= 1.0) idw &= 0x7Fu; }
+    o_id = idw | (uint(clamp(v_zp, 0.0, 16777215.0)) << 8);
+  }
   else o_id = v_poly + 1u;
 }

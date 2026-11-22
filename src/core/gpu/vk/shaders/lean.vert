@@ -142,6 +142,11 @@ void main() {
     // Over the coordinate's change across one DS pixel (along x or y, whichever is more): under 1, an edge pixel. One
     // value a triangle, so the quotient interpolates as the coordinate does and the fragment stage needs no second varying.
     v_edge /= max(vec3(max(sa.x, sa.y), max(sb.x, sb.y), max(sc2.x, sc2.y)) / den, vec3(1e-9));
+    // The test is there for a texture that cuts texels out (the hole's rim is not the polygon's edge). It goes by
+    // the fan's triangle, and a polygon seen nearly edge-on has silhouette pixels in a triangle that does not own
+    // the outline side: two and three pixels "inside", and the outline had gaps (the left of every sphere in
+    // BlocksDS's edge-marking example). A polygon whose texture cuts nothing out: every pixel may be marked.
+    if ((p.flags & DS_PF_TEX_ALPHA) == 0u) v_edge = vec3(0.0);
   }
   v_rgb = vec3(float(vt.r), float(vt.g), float(vt.b));
   v_st = vec2(float(vt.s), float(vt.t)) - st_off;

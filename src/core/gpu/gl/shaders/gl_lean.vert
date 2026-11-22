@@ -17,8 +17,7 @@ out float v_zp;     // DS depth, perspective-correct
 flat out ivec4 v_pb;    // the texcoord range: s and t min, s and t max (a clamped axis: within the texture)
 flat out ivec4 v_wrap;  // texel = min(c & mask, fold - (c & mask)): mask.st, fold.st
 flat out ivec4 v_tex;   // arena offset, width, blend mode | alpha << 2 (a wireframe's 0 as 31) | fog bit << 7 | textured << 8, the edge-marking word's low bits
-#ifdef DS_EDGE_AA
-// Edge anti-aliasing (gl_resolve.frag): how far the pixel is from each side of the triangle that is the polygon's
+// Edge anti-aliasing (gl_resolve.frag) and the edge marking's outline test (gl_lean.frag): how far the pixel is from each side of the triangle that is the polygon's
 // own outline, in pixels along the axis the side is nearer to crossing (8 on a side inside the polygon), times w
 // (ES has no noperspective: the fragment stage multiplies by gl_FragCoord.w); and for each side the neighbour
 // that lies across it, two bits a side: 0 +x, 1 -x, 2 +y, 3 -y.
@@ -29,7 +28,6 @@ int edge_dir(vec2 pa, vec2 pb, vec2 inside) {
   if (dot(n, inside - pa) < 0.0) n = -n;   // towards the triangle
   return abs(s.x) >= abs(s.y) ? (n.y < 0.0 ? 2 : 3) : (n.x < 0.0 ? 0 : 1);
 }
-#endif
 void poly_out(GpuPoly p) {
   uint pa = (p.attr >> 16) & 0x1Fu;
   uint fogbit = ((pc.f.dispcnt & 128u) != 0u && (p.attr & 0x8000u) != 0u) ? 1u : 0u;
@@ -41,7 +39,7 @@ void poly_out(GpuPoly p) {
   v_pb = ivec4(mix(clamp(lo, ivec2(0), wh * 16 - 1), lo, rep), mix(clamp(hi, ivec2(0), wh * 16 - 1), hi, rep));
   v_wrap = ivec4(mix(ivec2(0xFFFF), mix(wh - 1, 2 * wh - 1, flp), rep), mix(ivec2(0xFFFFF), 2 * wh - 1, flp));
   v_tex = ivec4(int(p.tex_offset), wh.x, int(((p.attr >> 4) & 3u) | ((pa == 0u ? 31u : pa) << 2) | (fogbit << 7) | ((p.flags & DS_PF_TEXTURED) != 0u ? 256u : 0u)),
-               int(((p.attr >> 24) & 0x3Fu) | (fogbit << 6) | 0x80u));
+               int(((p.attr >> 24) & 0x3Fu) | (fogbit << 6) | 0x80u | ((p.flags & DS_PF_TEX_ALPHA) != 0u ? 0x100u : 0u)));   // bit 8: its texture cuts texels out (gl_lean.frag's edge-marking word)
 }
 void main() {
   uint pi = uint(gl_InstanceID + u_base);
@@ -51,9 +49,7 @@ void main() {
   // inside one column or row of pixels (the line case below).
   bool cfan = (pc.f.flags2 & DS_FF2_CENTRE) != 0u && p.nverts >= 4u && p.xmax != p.xmin && p.ybot != p.ytop;
   if (cfan ? tri >= p.nverts : tri + 2u >= p.nverts) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); v_poly = 0u; v_rgb = vec3(0.0); v_st = vec2(0.0); v_zp = 0.0; v_pb = ivec4(0); v_wrap = ivec4(0); v_tex = ivec4(0);
-#ifdef DS_EDGE_AA
     v_edge = vec3(0.0); v_edir = 0;
-#endif
     return; }
   uint vi = k == 0u ? 0u : tri + k;
   // The fan triangle's three vertices (the attribute planes below need them all); this one is vt.
@@ -98,8 +94,15 @@ void main() {
   float zc = ds_clip_z(zd, p.attr, w);
   gl_Position = vec4(x * w, y * w, zc, w);
   v_poly = pi; poly_out(p);
+  // The distances from the polygon's outline: for the edge blend (DS_EDGE_AA), and in a frame that marks edges for a
+  // polygon whose texture cuts texels out, whose pixels are marked on its outline alone (lean.vert has the same rule).
 #ifdef DS_EDGE_AA
-  {
+  const bool edge_aa = true;
+#else
+  const bool edge_aa = false;
+#endif
+  v_edge = vec3(0.0); v_edir = 0;
+  if (edge_aa || ((pc.f.flags2 & DS_FF2_EDGEMARK) != 0u && (p.flags & DS_PF_TEX_ALPHA) != 0u)) {
     // A barycentric coordinate is 0 on the side across its vertex and its gradient is that side, turned, over
     // twice the area: over its change along the steeper axis, the distance from the side in pixels (lean.vert).
     vec2 ea = vec2(float(ta.fx), float(ta.fy)) / 16.0, eb = vec2(float(tb.fx), float(tb.fy)) / 16.0, ec = vec2(float(tc.fx), float(tc.fy)) / 16.0;
@@ -112,7 +115,6 @@ void main() {
     v_edge = e * w;
     v_edir = edge_dir(eb, ec, ea) | (edge_dir(ea, ec, eb) << 2) | (edge_dir(ea, eb, ec) << 4);
   }
-#endif
   v_rgb = a_rgb;
   v_st = a_st;
   v_zp = zd;
