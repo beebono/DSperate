@@ -149,7 +149,7 @@ const Setting kEmuSettings[] = {
   pick("slot2.motion_source", N_("TILT FROM"), kMotionSrc, 4, "auto", FlagRestart, Dep::None,
        N_("THE CONTROLLER'S OR HANDHELD'S OWN SENSOR WHERE THERE IS ONE, ELSE A STICK")),
   pick("slot2.motion_stick", N_("TILT STICK"), kMotionStick, 2, "right", FlagLive, Dep::None,
-       N_("THE STICK THAT TILTS WHEN THERE IS NO SENSOR")),
+       N_("THE STICK THAT TILTS WHEN THERE IS NO SENSOR. THE PEN LETS GO OF IT MEANWHILE")),
   number("slot2.solar", N_("SOLAR SENSOR"), 0, 10, 1, "5", FlagLive, Dep::SolarSensor,
          N_("THE SUNLIGHT A BOKTAI CARTRIDGE SEES: 0 DARK, 10 FULL SUN")),
   pick("net.mode", N_("NETWORK FEATURES"), kNetMode, 5, "off", FlagLive, Dep::Net,

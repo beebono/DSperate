@@ -177,10 +177,20 @@ Input::AnalogMode Input::analog_mode() const {
 }
 
 bool Input::analog_claims(StylusAxis s) const {
+  if (s != StylusAxis::None && s == motion_stick_) return true;
   if (!analog_patch_ || s == StylusAxis::None) return false;
   const AnalogMode m = analog_mode();
   if (m == AnalogMode::Dual) return true;
   return s == (m == AnalogMode::Left ? StylusAxis::Left : m == AnalogMode::Right ? StylusAxis::Right : StylusAxis::None);
+}
+
+void Input::set_motion_stick(const std::string& which) {
+  const StylusAxis s = which == "left" ? StylusAxis::Left : which == "right" ? StylusAxis::Right : StylusAxis::None;
+  if (s == motion_stick_) return;
+  motion_stick_ = s;
+  // As set_analog_patch: directions the claimed stick was holding would otherwise stay held.
+  if (analog_claims(stick_dpad_)) { stick_ = 0; stick_prev_ = 0; dstick_x_ = dstick_y_ = 0; }
+  if (analog_claims(stick_face_)) face_stick_ = 0;
 }
 
 void Input::set_analog_patch(bool on) {

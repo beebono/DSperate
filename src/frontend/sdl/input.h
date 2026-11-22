@@ -36,6 +36,11 @@ public:
   // and stick_face let go of them, and the pen takes its stick back while the
   // pad.stylus_hold button is held (the pad modifier, while that is unbound).
   void set_analog_patch(bool on);
+  // The stick that tilts a slot-2 motion accessory while one is in the slot
+  // ("left", "right"; anything else: none). It is the accessory's then, as a
+  // patch's sticks are the patch's: the pen, stick_dpad and stick_face let go
+  // of it, and the pen takes it back while stylus_hold is held.
+  void set_motion_stick(const std::string& which);
 
   // DS_DUAL_SCREENS: "upper=<display>[:<touch>...],lower=...,none=<touch>..."
   // gives each physical panel its SDL display and touch devices (a touch is a
@@ -298,6 +303,7 @@ private:
   void fill_analog(input::Frame& f) const;
 
   enum class StylusAxis : u8 { None, Right, Left };
+  StylusAxis motion_stick_ = StylusAxis::None;   // set_motion_stick
   // The patch has this stick (set_analog_patch); the modifier does not change it.
   bool analog_claims(StylusAxis s) const;
   // Config spelling: none | left | right. Old stick_dpad = true/false still

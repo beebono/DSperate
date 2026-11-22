@@ -400,7 +400,9 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # own accelerometer (SDL); sensor: the handheld's (Linux IIO); stick:
                                 # a stick, up to 45 degrees each way. auto: the first of those there
                                 # is. A replay holds it flat
-# motion_stick = right          # right | left: the stick that tilts
+# motion_stick = right          # right | left: the stick that tilts. It is the accessory's while one is
+                                # in the slot: the pen, stick_dpad and stick_face let go of it (the pen
+                                # has it back while stylus_hold is held). A handheld with one stick: left
 # motion_matrix =               # nine numbers: the rotation from the sensor's axes to the console's
                                 # (X right, Y up the screen, Z towards you), for a sensor the system
                                 # gives no mount matrix for. Empty: the system's, or none

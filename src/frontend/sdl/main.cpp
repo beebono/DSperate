@@ -2399,6 +2399,7 @@ sdl_ready:
     session.gba_sav.clear();
     input.set_guitar_grip(false);
     motion.close();
+    input.set_motion_stick("");
     if (nds.dsi || !nds.cart) return;
     if (!gba.empty()) {
       const std::string sav = gba_save_path(gba, cfg);
@@ -2428,8 +2429,11 @@ sdl_ready:
       using MP = ds::slot2::MotionPak;
       nds.slot2 = std::make_unique<MP>(mo == "homebrew" ? MP::Model::Homebrew : MP::Model::Retail);
       motion.open(cfg.str("slot2.motion_source", "auto"), cfg.str("slot2.motion_matrix", ""), input.pad_has_motion());
+      // Tilted by a stick, that stick is the accessory's: on a handheld with one stick it is the pen's otherwise.
+      const std::string stick = cfg.str("slot2.motion_stick", "right") == "left" ? "left" : "right";
+      if (motion.kind() == ds::sdl::MotionSource::Kind::Stick) input.set_motion_stick(stick);
       std::fprintf(stderr, "slot2: %s, tilt from %s\n", mo == "homebrew" ? "DS Motion Card" : "DS Motion Pack",
-                   motion.kind() == ds::sdl::MotionSource::Kind::Stick ? "a stick" : motion.name().c_str());
+                   motion.kind() == ds::sdl::MotionSource::Kind::Stick ? ("the " + stick + " stick").c_str() : motion.name().c_str());
       return;
     }
     if (rumble_wanted()) {
@@ -4292,7 +4296,9 @@ sdl_ready:
     // the input log: a replay holds the console flat.
     if (nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::MotionPak) {
       float sx = 0, sy = 0;
-      if (!menu_over_live && !log.reading()) input.stick_position(cfg.str("slot2.motion_stick", "right") != "left", sx, sy);
+      const bool right = cfg.str("slot2.motion_stick", "right") != "left";
+      if (motion.kind() == ds::sdl::MotionSource::Kind::Stick) input.set_motion_stick(right ? "right" : "left");   // the row is live
+      if (!menu_over_live && !log.reading()) input.stick_position(right, sx, sy);
       ds::slot2::Motion m;   // flat, for a replay and for a controller that has gone
       if (!log.reading() && !(motion.kind() == ds::sdl::MotionSource::Kind::Pad ? input.pad_motion(m) : (m = motion.read(sx, sy), true))) m = ds::slot2::Motion{};
       static_cast<ds::slot2::MotionPak&>(*nds.slot2).set_motion(m);
