@@ -260,6 +260,7 @@ void Wifi::us_timer() {
         else if (txbusy & 0x0004) tx_cur_slot_ = 2;
         else if (txbusy & 0x0002) tx_cur_slot_ = 1;
         else if (txbusy & 0x0001) tx_cur_slot_ = 0;
+        else { tx_cur_slot_ = -1; com_status_ = 0; }   // only bits no slot answers to: nothing to send
       }
     } else {
       if (!is_mp_client_ || us_timestamp_ > next_sync_) {
@@ -269,6 +270,7 @@ void Wifi::us_timer() {
     }
   }
 
+  if ((com_status_ & 2) && (tx_cur_slot_ < 0 || tx_cur_slot_ > 5)) com_status_ &= ~2u;   // no slot (a loaded state, or the case above)
   if (com_status_ & 2) {
     const bool finished = process_tx(tx_slots_[tx_cur_slot_], tx_cur_slot_);
     if (finished) {
@@ -288,7 +290,7 @@ void Wifi::us_timer() {
     rx_time_ -= kTimerInterval;
     if (!(rx_time_ & rx_halfword_time_mask_)) {
       u16 addr = reg(W_RXTXAddr) << 1;
-      if (addr < 0x1FFF) ram16(addr, ld16(&rx_buffer_[rx_buffer_ptr_]));
+      if (addr < 0x1FFF) ram16(addr, rx_buffer_ptr_ + 2 <= rx_buffer_.size() ? ld16(&rx_buffer_[rx_buffer_ptr_]) : 0);   // a full-size frame's last halfwords run to the buffer's end
       increment_rx_addr(addr);
       reg(W_RXTXAddr) = addr >> 1;
       rx_buffer_ptr_ += 2;
@@ -319,7 +321,7 @@ u32 Wifi::num_clients(u16 mask) const {
   return n;
 }
 void Wifi::increment_tx_count(const TxSlot& slot) {
-  u8 cnt = ram_[slot.addr + 4];
+  u8 cnt = ram_[(slot.addr + 4) & 0x1FFF];
   if (cnt < 0xFF) cnt++;
   ram16(slot.addr + 4, cnt);
 }
@@ -331,7 +333,7 @@ void Wifi::report_mp_reply_errors(u16 clientfail) {
 
 void Wifi::tx_send_frame(const TxSlot& slot, int num) {
   u32 noseqno = 0;
-  if (ram_[slot.addr + 4]) noseqno = 2;
+  if (ram_[(slot.addr + 4) & 0x1FFF]) noseqno = 2;
   else if (num == 1) noseqno = (reg(W_TXSlotCmd) & 0x4000) ? 1 : 0;
   if (!noseqno) {
     if (!(reg(W_TXHeaderCnt) & 4)) ram16(slot.addr + 0xC + 22, reg(W_TXSeqNo) << 4);
@@ -346,7 +348,9 @@ void Wifi::tx_send_frame(const TxSlot& slot, int num) {
   }
   int len = slot.length;
   if (slot.addr + len > 0x1FF4) len = 0x1FF4 - slot.addr;
-  std::memcpy(tx_buffer_.data(), &ram_[slot.addr], 12 + len);
+  // A slot at the very end of the RAM leaves less than the 12-byte header: what is there, never past it.
+  const size_t ncopy = std::min<size_t>(static_cast<size_t>(std::max(12 + len, 0)), ram_.size() - slot.addr);
+  std::memcpy(tx_buffer_.data(), &ram_[slot.addr], ncopy);
   if (noseqno == 2) st16(&tx_buffer_[0xC], ld16(&tx_buffer_[0xC]) | 0x0800);
   if (cur_channel_ == 0) return;
   tx_buffer_[9] = static_cast<u8>(cur_channel_);
@@ -380,7 +384,7 @@ void Wifi::start_tx_locn(int nslot, int loc) {
   slot.valid = true;
   slot.addr = (reg(W_TXSlotLoc1 + loc * 4) & 0x0FFF) << 1;
   slot.length = ram16(slot.addr + 0xA) & 0x3FFF;
-  slot.rate = ram_[slot.addr + 8] == 0x14 ? 2 : 1;
+  slot.rate = ram_[(slot.addr + 8) & 0x1FFF] == 0x14 ? 2 : 1;
   slot.cur_phase = 0;
   slot.cur_phase_time = preamble_len(slot.rate);
 }
@@ -390,7 +394,7 @@ void Wifi::start_tx_cmd() {
   slot.valid = true;
   slot.addr = (reg(W_TXSlotCmd) & 0x0FFF) << 1;
   slot.length = ram16(slot.addr + 0xA) & 0x3FFF;
-  slot.rate = ram_[slot.addr + 8] == 0x14 ? 2 : 1;
+  slot.rate = ram_[(slot.addr + 8) & 0x1FFF] == 0x14 ? 2 : 1;
   mp_client_mask_ = ram16(slot.addr + 12 + 24 + 2) & mp_client_fail_;
   mp_client_fail_ &= mp_client_mask_;
   u32 duration = preamble_len(slot.rate) + slot.length * (slot.rate == 2 ? 4 : 8);
@@ -407,7 +411,7 @@ void Wifi::start_tx_beacon() {
   slot.valid = true;
   slot.addr = (reg(W_TXSlotBeacon) & 0x0FFF) << 1;
   slot.length = ram16(slot.addr + 0xA) & 0x3FFF;
-  slot.rate = ram_[slot.addr + 8] == 0x14 ? 2 : 1;
+  slot.rate = ram_[(slot.addr + 8) & 0x1FFF] == 0x14 ? 2 : 1;
   slot.cur_phase = 0;
   slot.cur_phase_time = preamble_len(slot.rate);
   reg(W_TXBusy) |= 0x0010;
@@ -513,11 +517,14 @@ bool Wifi::process_tx(TxSlot& slot, int num) {
       mp_reply_timer_ -= kTimerInterval;
       if (mp_reply_timer_ <= 0 && mp_client_mask_ != 0) {
         int nclient = 1;
-        while (!(mp_client_mask_ & (1 << nclient))) nclient++;
-        const u32 curclient = 1u << nclient;
-        if (!(mp_client_fail_ & curclient)) mp_client_reply_rx(nclient);
-        mp_reply_timer_ += 10 + reg(W_CmdReplyTime);
-        mp_client_mask_ &= static_cast<u16>(~curclient);
+        while (nclient < 16 && !(mp_client_mask_ & (1 << nclient))) nclient++;
+        if (nclient == 16) mp_client_mask_ = 0;   // only bit 0, which is no client: nobody left to answer
+        else {
+          const u32 curclient = 1u << nclient;
+          if (!(mp_client_fail_ & curclient)) mp_client_reply_rx(nclient);
+          mp_reply_timer_ += 10 + reg(W_CmdReplyTime);
+          mp_client_mask_ &= static_cast<u16>(~curclient);
+        }
       }
     }
     return false;
@@ -556,7 +563,7 @@ bool Wifi::process_tx(TxSlot& slot, int num) {
   case 1: {   // transmit done
     // for the MP CMD and reply slots, this is set later
     if (num != 1 && num != 5) ram16(slot.addr, 0x0001);
-    ram_[slot.addr + 5] = 0;
+    ram_[(slot.addr + 5) & 0x1FFF] = 0;
     if (num == 1) {
       if (reg(W_TXStatCnt) & 0x4000) { reg(W_TXStat) = 0x0800; set_irq(1); }
       set_status(5);
