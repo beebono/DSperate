@@ -58,7 +58,6 @@ namespace {
 // draws at a time: a rebuilt one takes over after the old one's last frame.
 u32 W = 256, H = 192;
 constexpr u32 kTexelWords = 2u << 20;   // 8 MB of decoded texels
-constexpr u32 kMaxDraws = 4096;
 // Stencil layout: bit 7 drawn, bit 6 shadow mask, bit 5 the last write was
 // translucent, bits 0-4 the pixel's polygon id as a per-frame code. The DS
 // rules that read the id are "equal translucent ids don't blend" and
@@ -1352,7 +1351,6 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     }
     prev_mask = mask;
     i = j;
-    if (draws > kMaxDraws) break;
   }
   if (npoly > first_ordered) std::memcpy(out_p + first_ordered, gp + first_ordered, sizeof(GpuPoly) * (npoly - first_ordered));
   if (npoly) d.dev->flush(d.polys[slot], 0, sizeof(GpuPoly) * npoly);

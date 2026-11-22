@@ -27,7 +27,6 @@ u32 W = 256, H = 192;   // 256 * scale x 192 * scale (DS_LEAN_SCALE, probe-only:
 // 3 translucent A, 4 translucent B, 5 shadow prep, 6 shadow, 7 shadow mask (+ clear), 8 opaque in the tail, 9 resolve, 10 record readback.
 const u32 g_skip = std::getenv("DS_LEAN_SKIP") ? static_cast<u32>(std::strtoul(std::getenv("DS_LEAN_SKIP"), nullptr, 16)) : 0u;
 constexpr u32 kTexelWords = 2u << 20;   // 8 MB of decoded texels, as the Vulkan raster's arena
-constexpr u32 kMaxDraws = 4096;
 constexpr u32 kPullW = 1024;            // the polygon/vertex textures' width in texels
 // The stencil layout and the pass kinds, vk_lean.cpp's.
 constexpr u32 S_DRAWN = 0x80, S_MASK = 0x40, S_T = 0x20, S_CODE = 0x1F;
@@ -745,7 +744,6 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     }
     prev_mask = mask;
     i = j;
-    if (draws > kMaxDraws) break;
   }
   a.glDisable(GL_STENCIL_TEST); a.glDisable(GL_DEPTH_TEST); a.glDepthMask(0);
   if (d.indexed) { a.glDisablei(GL_BLEND, 0); a.glDisablei(GL_BLEND, 1); a.glColorMaski(0, 1, 1, 1, 1); a.glColorMaski(1, 1, 1, 1, 1); a.glColorMaski(2, 1, 1, 1, 1); }
