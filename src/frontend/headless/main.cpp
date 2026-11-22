@@ -5,6 +5,7 @@
 // frames, optionally tracing instructions or dumping frames/audio.
 #include "core/gpu/colour.h"
 #include "core/nds.h"
+#include "core/safe_file.h"
 #include "core/cpu/timing_mode.h"
 #include "core/pc_sampler.h"
 #include "core/mem/fastmem_census.h"
@@ -270,7 +271,7 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
-  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false;
+  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr, *save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
@@ -389,6 +390,7 @@ int main(int argc, char** argv) {
     else if (arg("--dump-audio")) dump_audio = argv[++i];   // raw s16 stereo, 32768 Hz
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
+    else if (arg("--save-out")) save_out = argv[++i];       // at exit, the battery save as the run left it (for checking what a game wrote)
     else if (arg("--gba-rom")) gba_rom = argv[++i];         // a GBA game in slot 2 (DS mode only)
     else if (arg("--gba-save")) gba_save = argv[++i];       // its save, read-only like --save; default none
     else if (arg("--gba-save-out")) gba_save_out = argv[++i];   // at exit, the GBA save as the run left it (for checking what a game wrote)
@@ -430,7 +432,7 @@ int main(int argc, char** argv) {
     const std::pair<const char*, const char*> outs[] = {
         {"--dump-frames", dump}, {"--dump-3d", rec3d_path}, {"--dump-3d-fine", fine3d_path},
         {"--dump-screens-scaled", screens_scaled_path}, {"--dump-gpu-frame", gpu_dump_path}, {"--hash-frames", hash_frames},
-        {"--dump-scaled", scaled_path}, {"--dump-audio", dump_audio}, {"--gba-save-out", gba_save_out},
+        {"--dump-scaled", scaled_path}, {"--dump-audio", dump_audio}, {"--gba-save-out", gba_save_out}, {"--save-out", save_out},
         {"--pc-profile", pc_profile}, {"--save-state-at", save_state_path}};
     for (const auto& [opt, path] : outs)
       if (path && !output_path_safe(opt, path, ins, sizeof ins / sizeof ins[0])) return 2;
@@ -1107,6 +1109,12 @@ int main(int argc, char** argv) {
     std::string err;
     if (ds::slot2::write_save(*g, gba_save_out, err)) std::fprintf(stderr, "slot2: wrote the GBA save to %s\n", gba_save_out);
     else std::fprintf(stderr, "slot2: %s\n", err.c_str());
+  }
+  if (nds.cart && save_out) {
+    std::string err;
+    std::fprintf(stderr, "save: %u chip writes\n", nds.cart->sram_writes());
+    if (ds::write_file_atomic(save_out, nds.cart->sram().data(), nds.cart->sram().size(), err)) std::fprintf(stderr, "save: wrote %s\n", save_out);
+    else std::fprintf(stderr, "save: %s\n", err.c_str());
   }
   std::fprintf(stderr, "ran %llu frames, %llu cycles\n",
               static_cast<unsigned long long>(nds.frame_count),
