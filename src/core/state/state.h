@@ -79,7 +79,8 @@ public:
   size_t remaining() const { return ok_ ? static_cast<size_t>(chunk_end_ - p_) : 0; }
 
   template <class T> void put(T& v) {
-    if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) { if (more()) blob(&v, sizeof v); }
+    if constexpr (std::is_same_v<T, bool>) { u8 b = 0; if (more()) blob(&b, 1); v = b != 0; }   // a file's byte is not a bool until it is 0 or 1
+    else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>) { if (more()) blob(&v, sizeof v); }
     else if constexpr (std::is_array_v<T>) put_n(v, std::extent_v<T>);
     else if constexpr (is_std_array<T>::value) put_n(v.data(), v.size());
     else static_assert(sizeof(T) == 0, "sync_state: list the struct's fields, not the struct");
@@ -87,7 +88,8 @@ public:
   // Like put() per element, but bulk-copies whole elements at once (avoids
   // GCC reasoning a per-element loop past the array's end).
   template <class E> void put_n(E* e, size_t n) {
-    if constexpr (std::is_arithmetic_v<E> || std::is_enum_v<E>) {
+    if constexpr (std::is_same_v<E, bool>) { for (size_t i = 0; i < n; ++i) put(e[i]); }
+    else if constexpr (std::is_arithmetic_v<E> || std::is_enum_v<E>) {
       if (!ok_) return;
       const size_t whole = static_cast<size_t>(chunk_end_ - p_) / sizeof(E);
       const size_t k = whole < n ? whole : n;
