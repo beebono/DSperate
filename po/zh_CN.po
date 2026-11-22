@@ -82,7 +82,7 @@ msgstr "下个画中画位置"
 msgid "FULLSCREEN"
 msgstr "全屏"
 
-#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4832
+#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4833
 msgid "SCREENSHOT"
 msgstr "截图"
 
@@ -604,23 +604,23 @@ msgstr "游戏可能出错或卡死"
 msgid "NAND SHORTCUTS"
 msgstr "NAND 快捷方式"
 
-#: src/frontend/sdl/main.cpp:4596
+#: src/frontend/sdl/main.cpp:4597
 msgid "DSI DSP"
 msgstr "DSi DSP"
 
-#: src/frontend/sdl/main.cpp:4597
-msgid "GAME LIKELY WON'T WORK"
-msgstr "游戏可能无法运行"
-
 #: src/frontend/sdl/main.cpp:4598
-msgid "DSP IS NOT EMULATED"
-msgstr "未模拟 DSP"
+msgid "UNKNOWN DSP PROGRAM"
+msgstr "未知的 DSP 程序"
 
-#: src/frontend/sdl/main.cpp:4833
+#: src/frontend/sdl/main.cpp:4599
+msgid "WILL RUN VERY SLOWLY"
+msgstr "运行会非常缓慢"
+
+#: src/frontend/sdl/main.cpp:4834
 msgid "SAVED"
 msgstr "已保存"
 
-#: src/frontend/sdl/main.cpp:4833
+#: src/frontend/sdl/main.cpp:4834
 msgid "COULD NOT BE SAVED"
 msgstr "无法保存"
 
