@@ -25,14 +25,17 @@ DsiDsp::DsiDsp(NDS& nds) : nds_(nds) {}
 DsiDsp::~DsiDsp() { core_.reset(); }   // before the shim an HLE core unregisters from
 
 // ---- what the HLE sources see of the machine (src/core/dsp/DSi.h) ----
+// The ARM9's bus, for the DSP as a second master on it: the page table first
+// (Bus::dma_*), as a DMA goes. Bus::read8 and its like are the I/O and
+// unmapped-address path alone, and read RAM as nothing.
 } // namespace ds
 namespace melonDS {
-u8  DSi::ARM9Read8(u32 a) { return nds_.bus.read8(ds::Cpu::ARM9, a); }
-u16 DSi::ARM9Read16(u32 a) { return nds_.bus.read16(ds::Cpu::ARM9, a); }
-u32 DSi::ARM9Read32(u32 a) { return nds_.bus.read32(ds::Cpu::ARM9, a); }
-void DSi::ARM9Write8(u32 a, u8 v) { nds_.bus.write8(ds::Cpu::ARM9, a, v); }
-void DSi::ARM9Write16(u32 a, u16 v) { nds_.bus.write16(ds::Cpu::ARM9, a, v); }
-void DSi::ARM9Write32(u32 a, u32 v) { nds_.bus.write32(ds::Cpu::ARM9, a, v); }
+u8  DSi::ARM9Read8(u32 a) { return nds_.bus.dma_read8(ds::Cpu::ARM9, a); }
+u16 DSi::ARM9Read16(u32 a) { return nds_.bus.dma_read16(ds::Cpu::ARM9, a); }
+u32 DSi::ARM9Read32(u32 a) { return nds_.bus.dma_read32(ds::Cpu::ARM9, a); }
+void DSi::ARM9Write8(u32 a, u8 v) { nds_.bus.dma_write8(ds::Cpu::ARM9, a, v); }
+void DSi::ARM9Write16(u32 a, u16 v) { nds_.bus.dma_write16(ds::Cpu::ARM9, a, v); }
+void DSi::ARM9Write32(u32 a, u32 v) { nds_.bus.dma_write32(ds::Cpu::ARM9, a, v); }
 void DSi::refresh_nwram() {
   for (u32 i = 0; i < 8; ++i) { NWRAMMap_B[2][i] = nds_.bus.nwram_dsp(1, i); NWRAMMap_C[2][i] = nds_.bus.nwram_dsp(2, i); }
 }
@@ -160,12 +163,12 @@ void DsiDsp::make_core() {
   t.SetSharedMemoryCallback(sm);
   // The DSP masters the ARM9's bus through AHBM; at once, with no arbitration (as melonDS).
   Teakra::AHBMCallback ab;
-  ab.read8 = [this](std::uint32_t a) { return nds_.bus.read8(Cpu::ARM9, a); };
-  ab.write8 = [this](std::uint32_t a, std::uint8_t v) { nds_.bus.write8(Cpu::ARM9, a, v); };
-  ab.read16 = [this](std::uint32_t a) { return nds_.bus.read16(Cpu::ARM9, a); };
-  ab.write16 = [this](std::uint32_t a, std::uint16_t v) { nds_.bus.write16(Cpu::ARM9, a, v); };
-  ab.read32 = [this](std::uint32_t a) { return nds_.bus.read32(Cpu::ARM9, a); };
-  ab.write32 = [this](std::uint32_t a, std::uint32_t v) { nds_.bus.write32(Cpu::ARM9, a, v); };
+  ab.read8 = [this](std::uint32_t a) { return nds_.bus.dma_read8(Cpu::ARM9, a); };
+  ab.write8 = [this](std::uint32_t a, std::uint8_t v) { nds_.bus.dma_write8(Cpu::ARM9, a, v); };
+  ab.read16 = [this](std::uint32_t a) { return nds_.bus.dma_read16(Cpu::ARM9, a); };
+  ab.write16 = [this](std::uint32_t a, std::uint16_t v) { nds_.bus.dma_write16(Cpu::ARM9, a, v); };
+  ab.read32 = [this](std::uint32_t a) { return nds_.bus.dma_read32(Cpu::ARM9, a); };
+  ab.write32 = [this](std::uint32_t a, std::uint32_t v) { nds_.bus.dma_write32(Cpu::ARM9, a, v); };
   t.SetAHBMCallback(ab);
   t.SetMicEnableCallback([](bool) {});   // the microphone is clocked into it whenever I2S runs (sample_clock)
 }
@@ -310,7 +313,7 @@ void DsiDsp::pdata_write(u16 v) {
       addr |= static_cast<u32>(core_->DMAChan0GetDstHigh()) << 16;
       if (core_->AHBMGetDmaChannel(0) == 0 && core_->AHBMGetDirection(0) == 1) {
         switch (core_->AHBMGetUnitSize(0)) {
-        case 0: nds_.bus.write8(Cpu::ARM9, addr, static_cast<u8>(v)); break;
+        case 0: nds_.bus.dma_write8(Cpu::ARM9, addr, static_cast<u8>(v)); break;
         case 1: core_->AHBMWrite16(addr, v); break;
         case 2: core_->AHBMWrite32(addr, v); break;
         default: break;
@@ -336,7 +339,7 @@ u16 DsiDsp::pdata_dma_read() {
       addr |= static_cast<u32>(core_->DMAChan0GetDstHigh()) << 16;
       if (core_->AHBMGetDmaChannel(0) == 0 && core_->AHBMGetDirection(0) == 0) {
         switch (core_->AHBMGetUnitSize(0)) {
-        case 0: r = nds_.bus.read8(Cpu::ARM9, addr); break;
+        case 0: r = nds_.bus.dma_read8(Cpu::ARM9, addr); break;
         case 1: r = core_->AHBMRead16(addr); break;
         case 2: r = static_cast<u16>(core_->AHBMRead32(addr)); break;
         default: break;
