@@ -45,6 +45,7 @@
 #include "display.h"
 #include "input.h"
 #include "lid.h"
+#include "motion.h"
 #include "loader_cart.h"
 #include "frontend/i18n/i18n.h"
 
@@ -2309,6 +2310,7 @@ sdl_ready:
   const bool slot2_fixed = record || replay;
   // What slot 2 holds this session: the GBA game at `gba` (empty: none),
   // else the Rumble Pak when slot2.rumble wants one. Replaces what was there.
+  ds::sdl::MotionSource motion;
   auto rumble_wanted = [&] {
     const std::string r = cfg.str("slot2.rumble", "auto");
     return r == "on" || (r == "auto" && !slot2_fixed && input.has_rumble());
@@ -2317,6 +2319,7 @@ sdl_ready:
     nds.slot2.reset();
     session.gba_sav.clear();
     input.set_guitar_grip(false);
+    motion.close();
     if (nds.dsi || !nds.cart) return;
     if (!gba.empty()) {
       const std::string sav = gba_save_path(gba, cfg);
@@ -2337,6 +2340,17 @@ sdl_ready:
       nds.slot2 = std::make_unique<ds::slot2::GuitarGrip>();
       input.set_guitar_grip(true);
       VLOG("slot2: Guitar Grip\n");
+      return;
+    }
+    // A motion accessory: asked for, or the one game that will not start without its pack.
+    const std::string mo = cfg.str("slot2.motion", "auto");
+    const bool mo_auto = mo == "auto" && !slot2_fixed && ds::slot2::uses_motion_pack(nds.cart->header().game_code);
+    if (mo == "retail" || mo == "homebrew" || mo_auto) {
+      using MP = ds::slot2::MotionPak;
+      nds.slot2 = std::make_unique<MP>(mo == "homebrew" ? MP::Model::Homebrew : MP::Model::Retail);
+      motion.open(cfg.str("slot2.motion_source", "auto"), cfg.str("slot2.motion_matrix", ""));
+      std::fprintf(stderr, "slot2: %s, tilt from %s\n", mo == "homebrew" ? "DS Motion Card" : "DS Motion Pack",
+                   motion.kind() == ds::sdl::MotionSource::Kind::Sensor ? motion.name().c_str() : "a stick");
       return;
     }
     if (rumble_wanted()) {
@@ -4187,6 +4201,13 @@ sdl_ready:
     input.set_analog_patch(nds.analog_patch);
     input.update_stylus();
     ds::input::Frame in = input.frame();
+    // A motion accessory feels the handheld (or the stick) as it is now. Not in
+    // the input log: a replay holds the console flat.
+    if (nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::MotionPak) {
+      float sx = 0, sy = 0;
+      if (!menu_over_live && !log.reading()) input.stick_position(cfg.str("slot2.motion_stick", "right") != "left", sx, sy);
+      static_cast<ds::slot2::MotionPak&>(*nds.slot2).set_motion(log.reading() ? ds::slot2::Motion{} : motion.read(sx, sy));
+    }
     if (menu_over_live) {
       const bool lid_was = in.lid;
       in = ds::input::Frame{};

@@ -21,7 +21,7 @@ namespace ds::state { class Writer; class Reader; }
 
 namespace ds::slot2 {
 
-enum class Kind : u8 { None = 0, Game = 1, RumblePak = 2, GuitarGrip = 3 };
+enum class Kind : u8 { None = 0, Game = 1, RumblePak = 2, GuitarGrip = 3, MotionPak = 4 };
 
 class Device {
 public:
@@ -181,6 +181,45 @@ public:
 
 private:
   u8 frets_ = 0;
+};
+
+// What a motion accessory feels, in the console's own frame: X along the top
+// screen left to right, Y along it bottom to top, Z out of it towards the
+// player. Acceleration in m/s^2, with gravity in it as an accelerometer has
+// (a console lying flat, screens up, reads +g on Z); rotation in rad/s.
+struct Motion {
+  float ax = 0, ay = 0, az = 9.80665f;
+  float gz = 0;
+};
+
+// The motion accessories: the retail DS Motion Pack (Tony Hawk's Motion: a
+// three-axis accelerometer, read two bits at a time on the SRAM bus) and the
+// homebrew DS Motion Card/Pak (accelerometer and a Z gyroscope behind a
+// 16-bit shift register, the one libnds's motion code knows). Both answer the
+// ROM bus with A9-A8 low. Adapted from melonDS's GBACartMotionPak (GPLv3,
+// melonDS team).
+class MotionPak final : public Device {
+public:
+  enum class Model : u8 { Retail, Homebrew };
+  explicit MotionPak(Model model) : model_(model) { reset(); }
+  Kind kind() const override { return Kind::MotionPak; }
+  u64 identity() const override { return static_cast<u64>(model_); }
+  Model model() const { return model_; }
+  void reset() override { shift_ = 0; value_ = 0; step_ = 16; }
+  u16 rom_read16(u32) const override { return 0xFCFF; }
+  u8 sram_read8(u32 addr) override;
+  // What the sensors read now, set by the frontend each frame like the
+  // buttons; not machine state, so it is not in a save state.
+  void set_motion(const Motion& m) { motion_ = m; }
+  const Motion& motion() const { return motion_; }
+  void sync_state(state::Writer& w) override;
+  void sync_state(state::Reader& r) override;
+
+private:
+  Model model_;
+  Motion motion_;
+  u16 shift_ = 0;              // homebrew: the register being clocked out
+  u8 value_ = 0, step_ = 16;   // retail: the byte being read, and where in the 17-read cycle
 };
 
 } // namespace ds::slot2

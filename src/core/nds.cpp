@@ -732,7 +732,8 @@ bool NDS::load_state_into(state::Reader& r, std::string& err, state::Writer* und
     else {
       const char* was = kind == static_cast<u8>(slot2::Kind::Game) ? (slot2 && slot2->kind() == slot2::Kind::Game ? "another GBA game" : "a GBA game")
                       : kind == static_cast<u8>(slot2::Kind::RumblePak) ? "the Rumble Pak"
-                      : kind == static_cast<u8>(slot2::Kind::GuitarGrip) ? "the Guitar Grip" : "a device";
+                      : kind == static_cast<u8>(slot2::Kind::GuitarGrip) ? "the Guitar Grip"
+                      : kind == static_cast<u8>(slot2::Kind::MotionPak) ? (slot2 && slot2->kind() == slot2::Kind::MotionPak ? "the other motion accessory" : "a motion accessory") : "a device";
       std::fprintf(stderr, "state: made with %s in slot 2, and %s; slot 2 starts afresh\n", was, slot2 ? "something else is in it now" : "it is empty now");
       if (slot2) slot2->reset();
     }

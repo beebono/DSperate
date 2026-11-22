@@ -261,7 +261,51 @@ void test_linkage() {
 
 } // namespace
 
+// The motion accessories: what the frontend says they feel comes back through
+// each one's own read protocol.
+static void test_motion_pak() {
+  using M = slot2::MotionPak;
+  const float g = 9.80665f;
+  {
+    M p(M::Model::Homebrew);
+    CHECK(p.kind() == slot2::Kind::MotionPak && p.rom_read16(0) == 0xFCFF);
+    auto read = [&](u32 addr) { CHECK(p.sram_read8(addr) == 0); const u32 hi = p.sram_read8(0); return (hi << 8 | p.sram_read8(0)) >> 4; };
+    CHECK(read(10) == 0xF00);                                   // the ID, 0xF00F in the register
+    CHECK(read(2) == 2048 && read(4) == 2048);                  // flat: nothing on X and Y
+    const u32 z = read(6);
+    CHECK(z >= 2866 && z <= 2868);                              // +1 g of +-2.5 g over 4096
+    CHECK(read(8) == 1680);                                     // the gyroscope at rest
+    p.set_motion({-g, 2.5f * g, -3 * g, 1.0f});
+    const u32 x = read(2);
+    CHECK(x >= 1228 && x <= 1229 && read(4) == 4095 && read(6) == 0);   // -1 g, and both ends held
+    CHECK(read(8) == 1680 - 47);                                // 1 rad/s = 57.3 deg/s, the sign turned
+    CHECK(p.sram_read8(4) == 0);                                // Y latched, not yet clocked out
+    state::Writer w; w.begin("TEST"); p.sync_state(w); w.end();
+    M q(M::Model::Homebrew); state::Reader r(w.data().data(), w.data().size()); r.begin("TEST"); q.sync_state(r); r.end();
+    CHECK(r.ok() && q.sram_read8(0) == 0xFF && q.sram_read8(0) == 0xF0);   // 4095 << 4
+  }
+  {
+    M p(M::Model::Retail);
+    CHECK(p.rom_read16(0x123456) == 0xFCFF && p.identity() != M(M::Model::Homebrew).identity());
+    auto byte = [&] { u32 v = 0; for (int i = 0; i < 4; ++i) v = v << 2 | p.sram_read8(0); return v; };
+    p.set_motion({g, 0, -g, 0});
+    CHECK(p.sram_read8(0) == 0);                                // the cycle's last read, where a pak starts
+    for (int cycle = 0; cycle < 2; ++cycle) {
+      CHECK(byte() == 0xFF);                                    // sync
+      CHECK(byte() == 179 && byte() == 128 && byte() == 76);   // +1 g, 0, -1 g (0.7 and 0.3 of 256, cut)
+      CHECK(p.sram_read8(0) == 0);
+    }
+    // A state taken mid-cycle resumes there.
+    CHECK(byte() == 0xFF); CHECK(p.sram_read8(0) == 2);         // into X: 179 = 10 11 00 11
+    state::Writer w; w.begin("TEST"); p.sync_state(w); w.end();
+    M q(M::Model::Retail); q.set_motion({g, 0, -g, 0});
+    state::Reader r(w.data().data(), w.data().size()); r.begin("TEST"); q.sync_state(r); r.end();
+    CHECK(r.ok() && q.sram_read8(0) == 3 && q.sram_read8(0) == 0 && q.sram_read8(0) == 3);
+  }
+}
+
 int main() {
+  test_motion_pak();
   test_save_types();
   test_rom_bus();
   test_sram();

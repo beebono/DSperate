@@ -271,7 +271,7 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
-  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr, *save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false;
+  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr, *save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false; const char* motion_pak = nullptr; ds::slot2::Motion motion;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
@@ -391,6 +391,10 @@ int main(int argc, char** argv) {
     else if (arg("--replay")) replay = argv[++i];           // inputs recorded by dsperate-sdl --record; sets --frames to its length unless given
     else if (arg("--save")) save = argv[++i];               // battery save to start from; loaded read-only, never written back
     else if (arg("--save-out")) save_out = argv[++i];       // at exit, the battery save as the run left it (for checking what a game wrote)
+    else if (arg("--motion-pak")) motion_pak = argv[++i];   // retail | homebrew: the motion accessory in slot 2, held still (see --motion)
+    else if (arg("--motion")) {                              // AX,AY,AZ[,GZ]: what it feels, m/s^2 and rad/s (default 0,0,9.80665: lying flat)
+      if (std::sscanf(argv[++i], "%f,%f,%f,%f", &motion.ax, &motion.ay, &motion.az, &motion.gz) < 3) { std::fprintf(stderr, "--motion wants AX,AY,AZ[,GZ]\n"); return 2; }
+    }
     else if (arg("--gba-rom")) gba_rom = argv[++i];         // a GBA game in slot 2 (DS mode only)
     else if (arg("--gba-save")) gba_save = argv[++i];       // its save, read-only like --save; default none
     else if (arg("--gba-save-out")) gba_save_out = argv[++i];   // at exit, the GBA save as the run left it (for checking what a game wrote)
@@ -703,11 +707,19 @@ int main(int argc, char** argv) {
     nds.dsi_autoload(lo, hi);
     std::fprintf(stderr, "dsi: autoload %08x%08x (TLNC)\n", hi, lo);
   }
-  if (gba_rom || rumble_pak || guitar_grip) {
-    if ((gba_rom != nullptr) + rumble_pak + guitar_grip > 1) { std::fprintf(stderr, "--gba-rom, --rumble-pak and --guitar-grip each want slot 2\n"); return 2; }
+  if (motion_pak && std::strcmp(motion_pak, "retail") && std::strcmp(motion_pak, "homebrew")) { std::fprintf(stderr, "--motion-pak wants retail or homebrew\n"); return 2; }
+  if (gba_rom || rumble_pak || guitar_grip || motion_pak) {
+    if ((gba_rom != nullptr) + rumble_pak + guitar_grip + (motion_pak != nullptr) > 1) { std::fprintf(stderr, "--gba-rom, --rumble-pak, --guitar-grip and --motion-pak each want slot 2\n"); return 2; }
     if (nds.dsi) std::fprintf(stderr, "slot2: a DSi has no slot 2; ignored\n");
     else if (rumble_pak) { nds.slot2 = std::make_unique<ds::slot2::RumblePak>(); std::fprintf(stderr, "slot2: Rumble Pak\n"); }
     else if (guitar_grip) { nds.slot2 = std::make_unique<ds::slot2::GuitarGrip>(); std::fprintf(stderr, "slot2: Guitar Grip\n"); }
+    else if (motion_pak) {
+      const bool retail = !std::strcmp(motion_pak, "retail");
+      auto pak = std::make_unique<ds::slot2::MotionPak>(retail ? ds::slot2::MotionPak::Model::Retail : ds::slot2::MotionPak::Model::Homebrew);
+      pak->set_motion(motion);
+      nds.slot2 = std::move(pak);
+      std::fprintf(stderr, "slot2: %s, feeling %.2f %.2f %.2f m/s2, %.2f rad/s\n", retail ? "DS Motion Pack" : "DS Motion Card", motion.ax, motion.ay, motion.az, motion.gz);
+    }
     else {
       std::string err;
       std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game(gba_rom, gba_save ? gba_save : "", err);

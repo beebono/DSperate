@@ -48,6 +48,9 @@ const Choice kLanguage[] = {{"0", N_("JAPANESE")}, {"1", N_("ENGLISH")}, {"2", N
                             {"3", N_("GERMAN")}, {"4", N_("ITALIAN")}, {"5", N_("SPANISH")}};
 const Choice kCheck[]    = {{"false", "[ ]"}, {"true", "[X]"}};
 const Choice kRumble[]   = {{"auto", N_("AUTO")}, {"on", N_("ON")}, {"off", N_("OFF")}};
+const Choice kMotion[]   = {{"auto", N_("AUTO")}, {"retail", N_("MOTION PACK")}, {"homebrew", N_("MOTION CARD")}, {"off", N_("OFF")}};
+const Choice kMotionSrc[] = {{"auto", N_("AUTO")}, {"sensor", N_("SENSOR")}, {"stick", N_("STICK")}};
+const Choice kMotionStick[] = {{"right", N_("RIGHT")}, {"left", N_("LEFT")}};
 const Choice kAnalog[]   = {{"auto", N_("AUTO")}, {"off", N_("OFF")}, {"left", N_("LEFT STICK")}, {"right", N_("RIGHT STICK")}, {"dual", N_("TWO STICKS")}};
 const Choice kAnalogLayout[] = {{"auto", N_("AUTO")}, {"packed", N_("PACKED")}, {"extended", N_("EXTENDED")}};
 const Choice kLayout[]   = {{"vertical", N_("VERTICAL")}, {"horizontal", N_("HORIZONTAL")}, {"single", N_("SINGLE")},
@@ -131,6 +134,13 @@ const Setting kEmuSettings[] = {
        N_("IN SLOT 2 WHEN NO GBA GAME IS. AUTO: WHEN THE CONTROLLER CAN RUMBLE")),
   number("slot2.rumble_strength", N_("RUMBLE STRENGTH"), 10, 100, 10, "100", FlagLive, Dep::RumblePak,
          N_("HOW HARD THE MOTOR RUNS WHEN THE GAME RUMBLES"), nullptr, nullptr, "%"),
+  // TRANSLATORS: the slot-2 motion accessory (Tony Hawk's Motion came with one).
+  pick("slot2.motion", N_("MOTION PACK"), kMotion, 4, "auto", FlagRestart, Dep::None,
+       N_("A TILT SENSOR IN SLOT 2. AUTO: FOR THE GAME THAT NEEDS IT")),
+  pick("slot2.motion_source", N_("TILT FROM"), kMotionSrc, 3, "auto", FlagRestart, Dep::None,
+       N_("THE HANDHELD'S OWN SENSOR WHERE IT HAS ONE, ELSE A STICK")),
+  pick("slot2.motion_stick", N_("TILT STICK"), kMotionStick, 2, "right", FlagLive, Dep::None,
+       N_("THE STICK THAT TILTS WHEN THERE IS NO SENSOR")),
   number("slot2.solar", N_("SOLAR SENSOR"), 0, 10, 1, "5", FlagLive, Dep::SolarSensor,
          N_("THE SUNLIGHT A BOKTAI CARTRIDGE SEES: 0 DARK, 10 FULL SUN")),
   pick("net.mode", N_("NETWORK FEATURES"), kNetMode, 5, "off", FlagLive, Dep::Net,

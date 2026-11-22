@@ -176,6 +176,11 @@ public:
   // Last axis a capture took, as the physical control pushed ("-righty"),
   // before the remap. Empty if the capture was not an axis.
   const std::string& captured_raw_axis() const { return captured_raw_axis_; }
+  // A stick as it stands, -1..1, right and up positive (after the axis remap,
+  // before any dead zone): what tilts a slot-2 motion accessory.
+  void stick_position(bool right, float& x, float& y) const {
+    x = (right ? raw_rx_ : raw_lx_) / 32767.f; y = -(right ? raw_ry_ : raw_ly_) / 32767.f;
+  }
   static int action_count();
   static const char* key_hot_default(int i);
   static const char* pad_hot_default(int i);

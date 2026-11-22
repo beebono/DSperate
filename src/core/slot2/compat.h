@@ -26,4 +26,8 @@ bool accepts(const Linkage& link, const char gba_code[4]);
 // Guitar Grip in slot 2.
 bool uses_guitar_grip(const char ds_code[4]);
 
+// Whether the DS game (four letters; region ignored) needs the retail Motion
+// Pack in slot 2 to start.
+bool uses_motion_pack(const char ds_code[4]);
+
 } // namespace ds::slot2

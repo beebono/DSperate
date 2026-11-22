@@ -106,6 +106,10 @@ bool uses_guitar_grip(const char ds_code[4]) {
   return false;
 }
 
+bool uses_motion_pack(const char ds_code[4]) {
+  return std::memcmp("CTW", ds_code, 3) == 0;   // Tony Hawk's Motion (and Hue Pixel Painter on the same card)
+}
+
 bool accepts(const Linkage& link, const char gba_code[4]) {
   for (const char* const* c = link.gba; *c; ++c)
     if (std::memcmp(*c, gba_code, 3) == 0) return true;
