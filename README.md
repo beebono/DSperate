@@ -96,8 +96,12 @@ hardware. No DraStic code is in this tree. See [docs/techniques](docs/techniques
   The cameras see a still: a picture from `paths.dsi_photos` picked under DS
   OPTIONS in the menu, or colour bars. There is no live camera.
 - **Save states, the recompiler, idle skip and fastmem** all work in DSi sessions.
+- **DSi-enhanced game cards** run as the DS games they also are. With
+  `emu.dsi_enhanced` (DSI ENHANCED GAMES in the menu, best set per game) and the
+  DSi BIOS pair they run as a DSi, booted straight from the card. Experimental,
+  and heavier: the DSi's CPU is twice as fast.
 - **Not yet:** the DSP (titles that start it warn, and DSP audio apps will not
-  work) and DSi-enhanced carts in DSi mode (they run as DS games).
+  work).
 
 ### Local wireless and internet
 

@@ -341,9 +341,71 @@ void test_nand() {
   }
 }
 
+// A DSi-enhanced card: its DSi area is the DSi's to read, and only past the
+// first 0x3000 bytes; to a DS, or woken as a DS card, it is not there.
+void test_dsi_card() {
+  auto p = std::make_unique<NDS>();
+  NDS& nds = *p;
+  const u32 base = 0x100000;   // the DSi area at 1 MB (two 512 KB units)
+  auto make = [&](bool cut_dump) {
+    std::vector<u8> rom(2u << 20, 0);
+    std::memcpy(rom.data() + 0x0C, "VAAE", 4);                 // a listed retail code (Art Academy)
+    rom[0x12] = 2;                                             // runs on both
+    const u16 start = 2; std::memcpy(rom.data() + 0x92, &start, 2);
+    const u32 region = cut_dump ? 0 : 2; std::memcpy(rom.data() + 0x1B0, &region, 4);
+    for (u32 a : {0x8000u, 0x80000u, base, base + 0x2FFCu, base + 0x3000u}) std::memcpy(rom.data() + a, &a, 4);
+    return std::make_unique<Cart>(nds, std::move(rom));
+  };
+  auto read = [](Cart& c, u32 addr) { cmd(c, 0xB7, addr); return c.command_receive(); };
+  {
+    // In a DS: a DS card, whatever is asked.
+    auto c = make(false);
+    CHECK(c->dsi_capable() && (c->chip_id() & 0x40000000));
+    c->set_reset(false);
+    cmd(*c, 0x3D);                                             // a DS has no such wake-up
+    CHECK(!c->dsi_mode());
+    c->setup_direct_boot();
+    CHECK(!c->dsi_mode());
+    CHECK(read(*c, 0x80000) == 0x80000);
+    CHECK(read(*c, base + 0x3000) == 0x8000);                  // the DSi area: the DS area's first readable page instead
+    CHECK(read(*c, base) == 0x8000);
+  }
+  nds.set_dsi(true);
+  {
+    auto c = make(false);
+    c->setup_direct_boot();                                    // a DSi's direct boot leaves the card in its DSi mode
+    CHECK(c->dsi_mode());
+    CHECK(read(*c, 0x80000) == 0x80000);
+    CHECK(read(*c, base + 0x3000) == base + 0x3000);           // readable now
+    CHECK(read(*c, base) == 0x8000 && read(*c, base + 0x2FFC) != base + 0x2FFC);   // but not its key area
+    state::Writer w; c->sync_state(w);
+    auto d = make(false);
+    d->set_reset(false);
+    CHECK(!d->dsi_mode());
+    state::Reader r(w.data().data(), w.data().size()); d->sync_state(r);
+    CHECK(r.ok() && d->dsi_mode() && read(*d, base + 0x3000) == base + 0x3000);
+    d->set_reset(true); d->set_reset(false);                   // a reset is a DS card again until woken
+    CHECK(!d->dsi_mode());
+    cmd(*d, 0x3D);
+    CHECK(d->dsi_mode());
+    d->set_reset(true); d->set_reset(false);
+    cmd(*d, 0x3C);
+    CHECK(!d->dsi_mode());
+  }
+  {
+    // A dump with the DSi part cut off (no region flags) is a plain DS card: nothing is blocked or woken.
+    auto c = make(true);
+    CHECK(!(c->chip_id() & 0x40000000));
+    c->setup_direct_boot();
+    CHECK(!c->dsi_mode() && read(*c, base + 0x3000) == base + 0x3000 && read(*c, base) == base);
+  }
+  nds.set_dsi(false);
+}
+
 int main() {
   test_crafted_header();
   test_nand();
+  test_dsi_card();
   test_size_classes();
   test_detect_from_first_read();
   test_detecting_write_is_kept();

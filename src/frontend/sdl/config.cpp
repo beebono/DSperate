@@ -450,6 +450,11 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # card may take nothing else): opening one starts the title straight from the NAND
                                 # (its saves and settings), skipping the DSi Menu and its slow load.
                                 # Kept up to date at every start; false removes every .dspr.nds there
+# dsi_enhanced = false          # EXPERIMENTAL. true: a DSi-enhanced game card (one that runs on both
+                                # consoles) runs as a DSi, booted straight from the card. Needs the
+                                # DSi BIOS pair, and costs frame time: the DSi's CPU is twice as fast.
+                                # false: it runs as the DS game it also is. Best set in a game's own
+                                # file (the menu's SAVE TO row). A DSi-only card always runs as a DSi
 # dsi_camera_image =            # a file name in [paths] dsi_photos: the still both DSi cameras see,
                                 # cut to 4:3 from its middle. Empty: colour bars. There is no live camera
 # dsi_hide_installed = false    # --dsi-mode: hide the NAND dump's own DSiWare from the DSi Menu for

@@ -70,7 +70,13 @@ Cart::Cart(NDS& nds, std::unique_ptr<RomSource> rom) : nds_(nds), rom_(std::move
   if (size >= 1024 * 1024 && size <= 128 * 1024 * 1024) chip_id_ |= ((size >> 20) - 1) << 8;
   else chip_id_ |= (0x100 - (size >> 28)) << 8;
   // DSi-capable (unit code bit 1) with a nonzero DSi region: bit 30.
-  if ((header_.unit_code & 2) && twl_.region_flags != 0) chip_id_ |= 0x40000000;
+  if ((header_.unit_code & 2) && twl_.region_flags != 0) {
+    chip_id_ |= 0x40000000;
+    u16 start = 0;
+    std::memcpy(&start, &header_.reserved3[0x92 - 0x88], 2);
+    dsi_base_ = static_cast<u32>(start) << 19;
+    dsi_cart_ = dsi_base_ != 0;
+  }
   u32 sram_size = 0;
   save_type_ = save_type_for(header_.game_code_u32(), sram_size);
   ir_cart_ = (header_.game_code_u32() & 0xFF) == 'I';
@@ -118,7 +124,7 @@ Cart::Cart(NDS& nds, std::unique_ptr<RomSource> rom) : nds_(nds), rom_(std::move
 
 void Cart::reset() {
   in_reset_ = true; cmd_mode_ = data_mode_ = 0; rom_addr_ = 0; std::memset(rom_cmd_, 0, 8);
-  launch_read_ = false;
+  launch_read_ = false; dsi_mode_ = false;
   spi_pos_ = 0; spi_cmd_ = 0; spi_addr_ = 0; spi_status_ = 0;
   nand_window_ = 0; nand_addr_ = 0; nand_status_ = 0x20; nand_wpos_ = nand_wlen_ = 0; nand_wbuf_.fill(0);
 }
@@ -127,9 +133,10 @@ void Cart::set_reset(bool reset) {
   if (reset == in_reset_) return;
   in_reset_ = reset;
   cmd_mode_ = data_mode_ = 0; rom_addr_ = 0; std::memset(rom_cmd_, 0, 8);
+  dsi_mode_ = false;
 }
 
-void Cart::setup_direct_boot() { cmd_mode_ = 2; data_mode_ = 2; in_reset_ = false; }
+void Cart::setup_direct_boot() { cmd_mode_ = 2; data_mode_ = 2; in_reset_ = false; dsi_mode_ = dsi_cart_ && nds_.dsi; }
 
 // ---- KEY1 -----------------------------------------------------------------
 void Cart::key1_encrypt(u32* data) const {
@@ -168,9 +175,10 @@ void Cart::key1_apply_keycode(u32* keycode, u32 mod) {
     key1_[i] = temp[1]; key1_[i + 1] = temp[0];
   }
 }
-void Cart::key1_init(u32 idcode, u32 level, u32 mod) {
-  // Key table lives at ARM7 BIOS 0x30 (0x1048 bytes).
-  std::memcpy(key1_.data(), nds_.bus.bios7.get() + 0x30, key1_.size() * 4);
+void Cart::key1_init(u32 idcode, u32 level, u32 mod, bool dsi_key) {
+  // Key table lives at ARM7 BIOS 0x30 (0x1048 bytes); the DSi's own at ARM7i BIOS 0xC6D0.
+  if (dsi_key) std::memcpy(key1_.data(), nds_.bus.bios7i.get() + 0xC6D0, key1_.size() * 4);
+  else std::memcpy(key1_.data(), nds_.bus.bios7.get() + 0x30, key1_.size() * 4);
   u32 keycode[3] = {idcode, idcode >> 1, idcode << 1};
   if (level >= 1) key1_apply_keycode(keycode, mod);
   if (level >= 2) key1_apply_keycode(keycode, mod);
@@ -217,7 +225,10 @@ void Cart::command_start(const u8 cmd[8]) {
     std::memcpy(rom_cmd_, cmd, 8);
     switch (rom_cmd_[0]) {
     case 0x00: rom_addr_ = ((rom_cmd_[1] << 24) | (rom_cmd_[2] << 16) | (rom_cmd_[3] << 8) | rom_cmd_[4]) & 0xFFF; return;
-    case 0x3C: cmd_mode_ = 1; key1_init(header_.game_code_u32(), 2, 2); return;
+    case 0x3C: cmd_mode_ = 1; dsi_mode_ = false; key1_init(header_.game_code_u32(), 2, 2); return;
+    case 0x3D:   // a DSi's wake-up for a DSi card; anything else does not know it
+      if (dsi_cart_ && nds_.dsi) { cmd_mode_ = 1; dsi_mode_ = true; key1_init(header_.game_code_u32(), 1, 2, true); }
+      return;
     default: return;
     }
   }
@@ -236,7 +247,10 @@ void Cart::command_start(const u8 cmd[8]) {
                    dec[0], dec[1], dec[2], dec[3], dec[4], dec[5], dec[6], dec[7]);
     switch (rom_cmd_[0] & 0xF0) {
     case 0x40: data_mode_ = 2; return;                          // enable KEY2 data
-    case 0x20: rom_addr_ = (rom_cmd_[2] & 0xF0) << 8; return;   // secure area block
+    case 0x20:                                                  // secure area block
+      rom_addr_ = (rom_cmd_[2] & 0xF0) << 8;
+      if (dsi_mode_) rom_addr_ = rom_addr_ - 0x1000 + dsi_base_;   // the DSi area's own, in its first 0x3000 bytes
+      return;
     case 0xA0: cmd_mode_ = 2; return;                           // leave KEY1 mode
     default: return;
     }
@@ -249,6 +263,7 @@ void Cart::command_start(const u8 cmd[8]) {
     // which would otherwise forge the launch signal from an unrelated read.
     if (rom_addr_ == header_.arm9_rom_offset) launch_read_ = true;
     if (rom_addr_ < 0x8000) rom_addr_ = 0x8000 + (rom_addr_ & 0x1FF);   // secure area is not readable here
+    if (dsi_area_blocked(rom_addr_)) rom_addr_ = 0x8000 + (rom_addr_ & 0x1FF);
   }
 }
 
@@ -562,9 +577,14 @@ template <class S> void Cart::sync_state(S& s) {
     s.fields(nand_window_, nand_addr_, nand_status_, nand_wbuf_, nand_wpos_, nand_wlen_);
     if constexpr (S::reading) { nand_wpos_ &= 0x7FC; if (nand_wlen_ > 0x800) nand_wlen_ = 0x800; nand_build_id(); }
   }
+  if (dsi_cart_) {   // appended: a state from before has the card in its DS mode
+    if constexpr (S::reading) dsi_mode_ = false;
+    s.fields(dsi_mode_);
+    if constexpr (S::reading) dsi_mode_ = dsi_mode_ && nds_.dsi;
+  }
   s.end();
   if constexpr (S::reading) {
-    if (cmd_mode_ == 1) key1_init(header_.game_code_u32(), 2, 2);
+    if (cmd_mode_ == 1) { if (dsi_mode_) key1_init(header_.game_code_u32(), 1, 2, true); else key1_init(header_.game_code_u32(), 2, 2); }
   }
 }
 template void Cart::sync_state<state::Writer>(state::Writer&);

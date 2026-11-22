@@ -117,6 +117,10 @@ const char* kUsage =
     "                  override it per game, the filename one winning)\n"
     "  --version       print the release tag and the commit this was built from, and exit\n"
     "  --write-config F  write the default settings file (all keys commented) to F and exit\n"
+    "  --dsi-enhanced / --no-dsi-enhanced  EXPERIMENTAL. Run a DSi-enhanced game card as a DSi\n"
+    "                  (emu.dsi_enhanced; needs the DSi BIOS pair, and runs heavier: the DSi's CPU is\n"
+    "                  twice as fast). Off, such a card runs as the DS game it also is\n"
+    "  --ds-mode       run a title that works on both consoles (hybrid homebrew) as a DS\n"
     "  --dsi-mode      EXPERIMENTAL. Boot a DSi from its NAND (boot2, then the DSi Launcher)\n"
     "                  instead of the DS menu. Needs the DSi BIOS pair (--bios9i F --bios7i F, or\n"
     "                  paths.bios9i/bios7i), a NAND dump with its nocash footer (--dsi-nand F, or\n"
@@ -1442,6 +1446,7 @@ static int run(int argc, char** argv) {
   const char* dns_arg = nullptr;      // --dns: host, wiimmfi, or an address
   long stats_from = 0;   // frames run but left out of timing statistics
   bool dsi_mode = false;
+  bool ds_mode = false;          // --ds-mode: a title that can run either way runs as a DS
   const char* bios9i = nullptr; const char* bios7i = nullptr; const char* dsi_nand = nullptr;
   const char* dsi_title = nullptr; const char* dsi_tmd = nullptr; bool dsi_offline = false, dsi_hide_installed = false, dsi_menu = false;
   bool dsi_hle = false;          // --dsi-mode with title and no NAND: launcher hand-off, BIOS pair only
@@ -1472,6 +1477,9 @@ static int run(int argc, char** argv) {
     else if (arg("--bios7")) cli.set("paths.bios7", argv[++i]);
     else if (arg("--firmware")) cli.set("paths.firmware", argv[++i]);
     else if (flag("--dsi-mode")) dsi_mode = true;
+    else if (flag("--dsi-enhanced")) cli.set("emu.dsi_enhanced", "true");
+    else if (flag("--no-dsi-enhanced")) cli.set("emu.dsi_enhanced", "false");
+    else if (flag("--ds-mode")) ds_mode = true;
     else if (arg("--bios9i")) bios9i = argv[++i];
     else if (arg("--bios7i")) bios7i = argv[++i];
     else if (arg("--dsi-nand")) dsi_nand = argv[++i];
@@ -1596,6 +1604,32 @@ static int run(int argc, char** argv) {
     ds::sdl::set_ui_languages(langs);
   }
   ds::sdl::set_camera_images(camera_images(cfg));
+  // A ROM that can run on either console. Hybrid homebrew carries a DSiWare
+  // title ID and was taken for DSiWare above: without the DSi BIOS (or under
+  // --ds-mode) it runs as the DS program it also is. A DSi-enhanced game card
+  // runs as a DS game unless emu.dsi_enhanced asks for the DSi; a DSi-only
+  // card has no other way to run.
+  bool dsi_card = false;
+  {
+    u8 unit = 0; u32 title_hi = 0;
+    const bool header = rom && !rom_shortcut && ds::io::file_dsi_header(rom, unit, title_hi);
+    const auto exists = [&](const char* given, const char* key) { const std::string p = given ? std::string(given) : cfg.str(key); return !p.empty() && std::filesystem::exists(p); };
+    const bool have_bios = exists(bios9i, "paths.bios9i") && exists(bios7i, "paths.bios7i");
+    if (dsi_mode && !dsi_mode_asked && header && unit == 2 && (ds_mode || !have_bios)) {
+      dsi_mode = false;
+      if (!ds_mode) std::fprintf(stderr, "console: DS (%s also runs as a DSi, with the DSi BIOS pair in paths.bios9i/paths.bios7i)\n", rom);
+    } else if (!dsi_mode && !dsi_nand && header && (unit & 2) && title_hi != 0x00030004 && !(ds_mode && unit == 2)) {
+      ds::sdl::Config game = cfg;   // the game's own files can turn it on for that game
+      char code[4];
+      if (peek_game_code(rom, code)) game.load(ds::sdl::Config::game_path_code(code));
+      game.load(ds::sdl::Config::game_path_rom(rom));
+      const bool want = unit == 3 || (cli.has("emu.dsi_enhanced") ? cli.flag("emu.dsi_enhanced", false) : game.flag("emu.dsi_enhanced", false));
+      if (want && have_bios) dsi_mode = dsi_card = true;
+      else if (want) std::fprintf(stderr, unit == 3 ? "%s is a DSi-only card and needs the DSi BIOS pair: --bios9i/--bios7i, or paths.bios9i/paths.bios7i\n"
+                                                    : "console: DS (emu.dsi_enhanced needs the DSi BIOS pair, paths.bios9i/paths.bios7i, to run %s as a DSi)\n", rom);
+      if (want && !have_bios && unit == 3) return 2;
+    }
+  }
   // paths.dsi_nand stands in for --dsi-nand only under --dsi-mode.
   const std::string dsi_nand_cfg = dsi_mode_asked && !dsi_nand ? cfg.str("paths.dsi_nand") : std::string();
   if (!dsi_nand_cfg.empty()) dsi_nand = dsi_nand_cfg.c_str();
@@ -1603,11 +1637,11 @@ static int run(int argc, char** argv) {
   const std::string shortcut_nand = dsi_nand ? std::string(dsi_nand) : cfg.str("paths.dsi_nand");
   if (dsi_mode) {
     // A game named with a NAND is DSiWare, installed into the session's NAND.
-    dsi_hle = !dsi_nand && rom;
+    dsi_hle = !dsi_nand && rom && !dsi_card;
     if (!dsi_nand && !rom) { std::fprintf(stderr, "%s needs --dsi-nand (or paths.dsi_nand in %s) or a DSiWare title\n", dsi_mode_by, global_ini.c_str()); return 2; }
     if (dsi_hle && dsi_menu) { std::fprintf(stderr, "--dsi-menu needs --dsi-nand: without one there is no DSi Menu to boot\n"); return 2; }
     // Without a NAND the title goes in the slot (NDS::prepare_dsi_hle).
-    if (!dsi_hle) { dsi_title = rom; rom = nullptr; }
+    if (!dsi_hle && !dsi_card) { dsi_title = rom; rom = nullptr; }
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.colour", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
@@ -1776,6 +1810,14 @@ static int run(int argc, char** argv) {
     nds.set_dsi(true);
     nds.dsi_hle_launch = true;   // NAND and settings made once the title is in the slot
     std::fprintf(stderr, rom_shortcut ? "console: DSi, a title from its NAND without the DSi Menu (EXPERIMENTAL)\n" : "console: DSi without a NAND (EXPERIMENTAL)\n");
+  } else if (dsi_card) {
+    // A game card in a DSi's slot: no NAND and no launcher, the card booted directly (NDS::setup_direct_boot_dsi).
+    std::string err;
+    if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
+    if (!nds.bios_native_dsi) { std::fprintf(stderr, "dsi bios: %s or %s not found\n", dsi_bios9i.c_str(), dsi_bios7i.c_str()); return 1; }
+    if (!open_dsi_sd()) return 1;
+    nds.set_dsi(true);
+    std::fprintf(stderr, "console: DSi, for a DSi-enhanced game card (EXPERIMENTAL)\n");
   } else if (dsi_mode) {
     std::string err;
     if (!nds.load_dsi_bios(dsi_bios9i, dsi_bios7i, &err)) { std::fprintf(stderr, "dsi bios: %s\n", err.c_str()); return 1; }
@@ -2737,7 +2779,7 @@ sdl_ready:
   };
   ds::io::NandPersistPaths dsi_paths = rom_shortcut ? ds::io::NandPersistPaths::beside(shortcut_nand, cfg.str("paths.saves"))
                                      : dsi_hle ? hle_paths(rom_path)
-                                     : dsi_mode ? ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")) : ds::io::NandPersistPaths{};
+                                     : dsi_mode && dsi_nand ? ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")) : ds::io::NandPersistPaths{};
   // Earlier saves go back into the made-up NAND; that becomes the export baseline.
   auto import_dsiware_saves = [&] {
     if (replay) return;

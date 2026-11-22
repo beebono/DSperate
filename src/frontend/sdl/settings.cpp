@@ -129,6 +129,8 @@ const Setting kEmuSettings[] = {
           N_("SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM")),
   boolean("emu.autoload", N_("AUTOLOAD ON START"), "false", FlagRestart, Dep::None,
           N_("WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE")),
+  boolean("emu.dsi_enhanced", N_("DSI ENHANCED GAMES"), "false", FlagRestart, Dep::DsiFirmware,
+          N_("RUN DSI-ENHANCED GAME CARDS AS A DSI. NEEDS THE DSI BIOS, AND RUNS HEAVIER")),
   boolean("emu.dsi_hide_installed", N_("HIDE NAND DSIWARE"), "false", FlagRestart, Dep::None,
           N_("DSI MENU: HIDE THE NAND DUMP'S OWN TITLES. THE DUMP IS NOT CHANGED")),
   boolean("emu.dsi_nand_shortcuts", N_("DSI NAND LINKS"), "false", FlagLive, Dep::ShortcutsPath,

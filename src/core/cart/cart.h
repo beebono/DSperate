@@ -67,7 +67,8 @@ public:
 
   const Header& header() const { return header_; }
   const TwlHeader& twl() const { return twl_; }
-  bool dsi_capable() const { return (header_.unit_code & 2) != 0; }   // unit_code: 0 DS, 2 DS+DSi, 3 DSi only
+  bool dsi_capable() const { return (header_.unit_code & 2) != 0; }
+  bool dsi_mode() const { return dsi_mode_; }   // the card is in its DSi mode (see dsi_cart_)   // unit_code: 0 DS, 2 DS+DSi, 3 DSi only
   // Bounded reads of the image; past the end the bytes are 0xFF, as on a card.
   void rom_read(u32 addr, u8* dst, u32 n) const { rom_->read(addr, dst, n); }
   u32  rom_read32_at(u32 addr) const { return rom_->read32(addr); }
@@ -121,7 +122,9 @@ public:
   void decrypt_secure_area(u8 out[0x800]);
 
   // KEY1 (Blowfish) with the key table from the ARM7 BIOS.
-  void key1_init(u32 idcode, u32 level, u32 mod);
+  // `dsi_key`: the DSi's key table (ARM7i BIOS 0xC6D0), which a DSi card's
+  // DSi-mode secure area is under; otherwise the DS's (ARM7 BIOS 0x30).
+  void key1_init(u32 idcode, u32 level, u32 mod, bool dsi_key = false);
   void key1_encrypt(u32* data) const;
   void key1_decrypt(u32* data) const;
 
@@ -133,6 +136,17 @@ private:
   TwlHeader twl_{};
   u32 chip_id_ = 0;
   u32 rom_mask_ = 0;
+
+  // A DSi-enhanced or DSi-only card (and not a dump with the DSi part cut
+  // off): on a DSi the launcher wakes it with 3D instead of 3C, and from then
+  // on its DSi area (from dsi_base_) can be read, the first 0x3000 bytes of
+  // it only as the KEY1 secure area. Woken with 3C it is a DS card, and the
+  // whole DSi area reads as the DS area's last page does. Adapted from
+  // melonDS's NDSCart (GPLv3, melonDS team).
+  bool dsi_cart_ = false;
+  u32  dsi_base_ = 0;       // where the DSi area starts (header 0x92, in 512 KB units)
+  bool dsi_mode_ = false;   // woken with 3D (or direct-booted on a DSi)
+  bool dsi_area_blocked(u32 addr) const { return dsi_cart_ && listed_ && addr >= dsi_base_ && (!dsi_mode_ || addr < dsi_base_ + 0x3000); }
 
   bool in_reset_ = true;
   u32 cmd_mode_ = 0;        // 0 plain, 1 KEY1, 2 KEY2

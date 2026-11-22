@@ -50,6 +50,10 @@ bool nand_has_title(NandImage& nand, const u8* bios7i, u32 title_lo);
 // Cheap enough for every file in a game list: .nds/.dsi/.srl by header, .cia by extension alone
 // (read_dsiware checks it properly when opened), .zip by the entry it holds.
 bool file_is_dsiware(const std::string& path);
+// The unit code (header 0x12) and title ID high word (0x234) of a ROM file or
+// the ROM in a zip; false when they cannot be read. A DSi-enhanced card has
+// unit code 2 and is not DSiWare; unit code 2 can also run as a DS game.
+bool file_dsi_header(const std::string& path, u8& unit_code, u32& title_high);
 bool zip_is_dsiware(const std::string& path);
 // Whether a .zip's chosen entry is a .cia (needs read_dsiware to unwrap) rather than a direct image.
 bool zip_holds_cia(const std::string& path);
