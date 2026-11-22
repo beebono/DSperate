@@ -1707,6 +1707,10 @@ static int run(int argc, char** argv) {
   // the recompiler emits its stubs. DS_TIMING wins.
   if (cfg.has("emu.timing") && !std::getenv("DS_TIMING") && !ds::set_timing(cfg.str("emu.timing").c_str()))
     std::fprintf(stderr, "config: emu.timing = %s is not exact, fast or turbo; fast\n", cfg.str("emu.timing").c_str());
+  // A DSi session runs on the exact model unless told otherwise: the fast one is tuned on DS games, and
+  // DSi system software races it (the DSi Sound app hangs on a white screen entering either of its modes).
+  // It costs a DSiWare title 6-8% on an RK3566.
+  if (dsi_mode && !cfg.has("emu.timing") && !std::getenv("DS_TIMING")) ds::set_timing("exact");
   VLOG("cpu timing: %s\n", ds::timing_name());
   if (cfg.num("emu.host_cores", 0) > 0) ds::set_host_cores(static_cast<ds::u32>(cfg.num("emu.host_cores", 0)));   // DS_HOST_CORES still wins
   VLOG("host: %u cores\n", ds::host_cores());
@@ -2923,6 +2927,8 @@ sdl_ready:
       if (std::strcmp(key, "video.layout") == 0) return Disp::mode_name(effective_mode());
       Disp::Mode m;
       if (cycle_key(key, m)) return in_cycle(m) ? "true" : "false";
+      // Unset, the row shows what is running: a DSi session's default is exact.
+      if (std::strcmp(key, "emu.timing") == 0 && !cfg.has(key)) return ds::timing_name();
       return cfg.str(key, "");
     }
 

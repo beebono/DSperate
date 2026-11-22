@@ -272,7 +272,7 @@ int main(int argc, char** argv) {
   int scaled_n = 0; const char* scaled_path = nullptr;
   const char *rom = nullptr, *bios9 = nullptr, *bios7 = nullptr, *fw = nullptr, *trace = nullptr, *dump = nullptr, *hash_frames = nullptr, *dump_audio = nullptr, *replay = nullptr, *save = nullptr;
   const char* load_state = nullptr; const char* save_state_path = nullptr; int save_state_at = -1;
-  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr, *save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false; const char* motion_pak = nullptr; ds::slot2::Motion motion; const char* camera_image = nullptr;
+  const char *gba_rom = nullptr, *gba_save = nullptr, *gba_save_out = nullptr, *save_out = nullptr; int gba_light = 5; bool rumble_pak = false, guitar_grip = false; const char* motion_pak = nullptr; ds::slot2::Motion motion; const char* camera_image = nullptr; bool timing_given = false;
   const char* hide_screen = nullptr;
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
@@ -409,7 +409,7 @@ int main(int argc, char** argv) {
     else if (arg("--cheat")) enable_cheats.push_back(argv[++i]);   // enable one by name, or by "#N" from --list-cheats
     else if (!std::strcmp(argv[i], "--direct")) direct = true;
     else if (!std::strcmp(argv[i], "--interp")) jit = false;
-    else if (arg("--timing")) { const char* m = argv[++i]; if (!std::getenv("DS_TIMING") && !ds::set_timing(m)) { std::fprintf(stderr, "--timing: exact, fast or turbo\n"); return 2; } }   // CPU cycle model (timing_mode.h): fast (default) | exact | turbo; DS_TIMING wins
+    else if (arg("--timing")) { const char* m = argv[++i]; timing_given = true; if (!std::getenv("DS_TIMING") && !ds::set_timing(m)) { std::fprintf(stderr, "--timing: exact, fast or turbo\n"); return 2; } }   // CPU cycle model (timing_mode.h): fast (default) | exact | turbo; DS_TIMING wins
 
     else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
@@ -584,6 +584,8 @@ int main(int argc, char** argv) {
     if (want && !nds.bios_native_dsi) { std::fprintf(stderr, "DSi mode needs --bios9i/--bios7i\n"); return 1; }
     if (want && !capable) std::fprintf(stderr, "warning: --dsi with a DS-only header (unit code %02x)\n", nds.cart ? nds.cart->header().unit_code : 0);
     if (want) {
+      // A DSi runs on the exact timing model unless --timing or DS_TIMING says otherwise (see the SDL frontend).
+      if (!timing_given && !std::getenv("DS_TIMING")) ds::set_timing("exact");
       nds.set_dsi(true);
       nds.dsi_nand_boot = dsi_nand_boot;
       if (dsi_hle && rom && !nds.dsi_nand_boot) {
