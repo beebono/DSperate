@@ -609,6 +609,8 @@ bool NDS::save_state(state::Writer& w, std::string& err) {
     slot2->sync_state(w);
     w.end();
   }
+  // The DSi DSP's core, in a chunk of its own after the machine's.
+  if (dsi) { w.begin("DSPC"); io.dsp.sync_core(w); w.end(); }
   cheats.save_journal(w);   // there only when an analog code has written
   return true;
 }
@@ -742,6 +744,8 @@ bool NDS::load_state_into(state::Reader& r, std::string& err, state::Writer* und
     slot2->reset();
   }
   cheats.forget_writes();   // memory now matches the state, not the old journal
+  if (r.peek("DSPC")) { r.begin("DSPC"); io.dsp.sync_core(r); r.end(); }
+  else if (dsi) io.dsp.core_absent_in_state();
   if (r.peek("CHJR")) cheats.load_journal(r);   // frontends' own chunks may follow
   if (!r.ok()) { err = r.error(); return false; }
   if (dsi) {

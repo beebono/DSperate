@@ -1129,6 +1129,7 @@ int main(int argc, char** argv) {
     if (ds::slot2::write_save(*g, gba_save_out, err)) std::fprintf(stderr, "slot2: wrote the GBA save to %s\n", gba_save_out);
     else std::fprintf(stderr, "slot2: %s\n", err.c_str());
   }
+  if (nds.dsi_dsp_started) std::fprintf(stderr, "dsp: the title started the DSP\n");
   if (nds.cart && save_out) {
     std::string err;
     std::fprintf(stderr, "save: %u chip writes\n", nds.cart->sram_writes());

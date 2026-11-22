@@ -167,6 +167,11 @@ private:
   NDS& nds_;
   Timing timing_;
   gpu::VramMap vram_map_;
+public:
+  // The DSi DSP's own view of NWRAM B (its program) and C (its data): the
+  // 32 KB slot's host memory, or null where MBK gives the DSP none.
+  u8* nwram_dsp(int bank, u32 slot) const { return nwram_map_[bank][2][slot & 7]; }
+private:
   u32 vram_read(Cpu cpu, u32 addr, u32 width);
   u32 slot2_read(Cpu cpu, u32 addr, u32 width);    // 0x08000000-0x0AFFFFFF on a DS
   void slot2_write(Cpu cpu, u32 addr, u32 width, u32 v);

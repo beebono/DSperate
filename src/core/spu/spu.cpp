@@ -414,18 +414,22 @@ void Spu::mix() {
   s16 r = muted_ ? 0 : static_cast<s16>(std::clamp(out_r, -0x8000, 0x7FFF));
   if (nds_.dsi) {
     // Nothing reaches output/mic while SNDEXCNT disables I2S; otherwise each
-    // output sample is a mic sample clock, mixing NITRO with (silent) DSP.
+    // output sample is a mic sample clock, mixing NITRO with the DSP's output.
     const u16 sx = nds_.io.dsi.sndexcnt;
     if (!(sx & 0x8000)) {
       l = r = 0;
     } else {
-      nds_.io.dsi_mic_clock(nds_.io.mic_at(mix_at_));
+      const s16 mic = nds_.io.mic_at(mix_at_);
+      nds_.io.dsi_mic_clock(mic);
+      s16 dsp[2];
+      nds_.io.dsp.sample_clock(dsp, mic);
       if (sx & 0x4000) {
         l = r = 0;
       } else {
+        // SNDEXCNT's ratio: fn eighths NITRO, the rest the DSP.
         const int fn = std::min(sx & 0xF, 8);
-        l = static_cast<s16>((l * fn) >> 3);
-        r = static_cast<s16>((r * fn) >> 3);
+        l = static_cast<s16>(std::clamp((l * fn + dsp[0] * (8 - fn)) >> 3, -0x8000, 0x7FFF));
+        r = static_cast<s16>(std::clamp((r * fn + dsp[1] * (8 - fn)) >> 3, -0x8000, 0x7FFF));
       }
     }
   }

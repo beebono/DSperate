@@ -78,7 +78,7 @@ msgstr ""
 msgid "FULLSCREEN"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4832
+#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4833
 msgid "SCREENSHOT"
 msgstr ""
 
@@ -598,23 +598,23 @@ msgstr ""
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4596
+#: src/frontend/sdl/main.cpp:4597
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4597
-msgid "GAME LIKELY WON'T WORK"
-msgstr ""
-
 #: src/frontend/sdl/main.cpp:4598
-msgid "DSP IS NOT EMULATED"
+msgid "UNKNOWN DSP PROGRAM"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4833
+#: src/frontend/sdl/main.cpp:4599
+msgid "WILL RUN VERY SLOWLY"
+msgstr ""
+
+#: src/frontend/sdl/main.cpp:4834
 msgid "SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4833
+#: src/frontend/sdl/main.cpp:4834
 msgid "COULD NOT BE SAVED"
 msgstr ""
 

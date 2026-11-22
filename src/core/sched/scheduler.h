@@ -24,7 +24,7 @@ enum class EventId : u8 {
   Timer7_0, Timer7_1, Timer7_2, Timer7_3,
   Dma, Spu, Spi, Rtc, Cart, Gx3D, DisplayFifo, Div, Sqrt, LcdIrq, Wifi,
   // DSi only.
-  RtcClock, CamIrq, SdMmc, Sdio, NWifi, CamTransfer, CartPower1, CartPower2, Count
+  RtcClock, CamIrq, SdMmc, Sdio, NWifi, CamTransfer, CartPower1, CartPower2, DsiDsp, Count
 };
 
 // CPU interleave is event-bound: each CPU runs to the next scheduled event,
@@ -66,6 +66,9 @@ public:
   void settle(EventId id);
   // schedule() overwrites a live event rather than refusing to re-arm it.
   bool armed(EventId id) const { return (armed_ & (1u << static_cast<u32>(id))) != 0; }
+  // When an armed event is due and what it carries (for a subsystem that must re-make its event on load).
+  u64 at(EventId id) const { return at_[static_cast<u32>(id)]; }
+  u32 param(EventId id) const { return param_[static_cast<u32>(id)]; }
 
   // Current time, including the running CPU's cycles consumed so far, so
   // events scheduled mid-instruction are stamped relative to its position.

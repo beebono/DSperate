@@ -53,6 +53,38 @@ add_library(dsperate_core STATIC
   io/wifi.cpp
   io/dsi_aes.cpp
   io/dsi_dsp.cpp
+  dsp/DSP_HLE/UcodeBase.cpp
+  dsp/DSP_HLE/AACUcode.cpp
+  dsp/DSP_HLE/G711Ucode.cpp
+  dsp/DSP_HLE/GraphicsUcode.cpp
+  dsp/aac_decoder.cpp
+  dsp/faad2/libfaad/bits.c
+  dsp/faad2/libfaad/cfft.c
+  dsp/faad2/libfaad/common.c
+  dsp/faad2/libfaad/decoder.c
+  dsp/faad2/libfaad/drc.c
+  dsp/faad2/libfaad/error.c
+  dsp/faad2/libfaad/filtbank.c
+  dsp/faad2/libfaad/huffman.c
+  dsp/faad2/libfaad/is.c
+  dsp/faad2/libfaad/mdct.c
+  dsp/faad2/libfaad/mp4.c
+  dsp/faad2/libfaad/ms.c
+  dsp/faad2/libfaad/output.c
+  dsp/faad2/libfaad/pns.c
+  dsp/faad2/libfaad/pulse.c
+  dsp/faad2/libfaad/specrec.c
+  dsp/faad2/libfaad/syntax.c
+  dsp/faad2/libfaad/tns.c
+  dsp/teakra/src/ahbm.cpp
+  dsp/teakra/src/apbp.cpp
+  dsp/teakra/src/btdmp.cpp
+  dsp/teakra/src/dma.cpp
+  dsp/teakra/src/timer.cpp
+  dsp/teakra/src/memory_interface.cpp
+  dsp/teakra/src/mmio.cpp
+  dsp/teakra/src/processor.cpp
+  dsp/teakra/src/teakra.cpp
   io/dsi_camera.cpp
   io/dsi_sd.cpp
   io/dsi_nand_fs.cpp
@@ -179,3 +211,23 @@ if(DSPERATE_VULKAN)
     message(STATUS "DSperate: Vulkan headers not found, Vulkan presenter disabled")
   endif()
 endif()
+
+# The vendored teakra (dsp/teakra, MIT; melonDS's copy, unchanged): the DSi's
+# TeakLite II core. Its headers find one another through these directories,
+# and it is not held to this project's warnings.
+set_source_files_properties(dsp/teakra/src/ahbm.cpp dsp/teakra/src/apbp.cpp dsp/teakra/src/btdmp.cpp dsp/teakra/src/dma.cpp dsp/teakra/src/timer.cpp dsp/teakra/src/memory_interface.cpp dsp/teakra/src/mmio.cpp dsp/teakra/src/processor.cpp dsp/teakra/src/teakra.cpp PROPERTIES
+  COMPILE_OPTIONS "-w"
+  INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/dsp/teakra/include;${CMAKE_CURRENT_SOURCE_DIR}/dsp/teakra/src")
+
+# melonDS's high-level DSP programs (dsp/DSP_HLE, GPLv3; unchanged): not held to this project's warnings either.
+set_source_files_properties(dsp/DSP_HLE/UcodeBase.cpp dsp/DSP_HLE/AACUcode.cpp dsp/DSP_HLE/G711Ucode.cpp dsp/DSP_HLE/GraphicsUcode.cpp
+  PROPERTIES COMPILE_OPTIONS "-w")
+
+# The vendored FAAD2 (dsp/faad2, GPL-2.0-or-later; release 2.11.2, the AAC-LC
+# decoder alone: no SBR, parametric stereo, DRM, main/LTP/SSR profiles or
+# error-resilient tools, and those sources are not in the tree). It decodes
+# for the DSP's AAC program (the DSi Sound app).
+set_source_files_properties(dsp/faad2/libfaad/bits.c dsp/faad2/libfaad/cfft.c dsp/faad2/libfaad/common.c dsp/faad2/libfaad/decoder.c dsp/faad2/libfaad/drc.c dsp/faad2/libfaad/error.c dsp/faad2/libfaad/filtbank.c dsp/faad2/libfaad/huffman.c dsp/faad2/libfaad/is.c dsp/faad2/libfaad/mdct.c dsp/faad2/libfaad/mp4.c dsp/faad2/libfaad/ms.c dsp/faad2/libfaad/output.c dsp/faad2/libfaad/pns.c dsp/faad2/libfaad/pulse.c dsp/faad2/libfaad/specrec.c dsp/faad2/libfaad/syntax.c dsp/faad2/libfaad/tns.c PROPERTIES
+  COMPILE_OPTIONS "-w"
+  COMPILE_DEFINITIONS "LC_ONLY_DECODER;DISABLE_SBR;PACKAGE_VERSION=\"2.11.2\";HAVE_STDINT_H;HAVE_INTTYPES_H;HAVE_STRING_H;HAVE_MEMCPY;HAVE_LRINTF"
+  INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/dsp/faad2/libfaad;${CMAKE_CURRENT_SOURCE_DIR}/dsp/faad2/include")

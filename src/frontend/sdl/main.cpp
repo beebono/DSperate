@@ -4591,11 +4591,12 @@ sdl_ready:
     if (nds.dsi_dsp_started != dsp_warned) {
       dsp_warned = nds.dsi_dsp_started;
       if (dsp_warned) {
-        std::fprintf(stderr, "dsi: this title uses the DSi's DSP, which DSperate does not emulate; it will likely not work\n");
+        // Only a DSP program that is not one of the SDK's three gets here: those run at high level, at no cost to speak of.
+        std::fprintf(stderr, "dsi: this title runs a DSP program of its own, on the exact DSP core: far slower than real time on a handheld\n");
         Toast t;
         t.header = tr("DSI DSP");
-        t.title = tr("GAME LIKELY WON'T WORK");   // toast lines hold about 24 characters
-        t.detail = tr("DSP IS NOT EMULATED");
+        t.title = tr("UNKNOWN DSP PROGRAM");   // toast lines hold about 24 characters
+        t.detail = tr("WILL RUN VERY SLOWLY");
         t.frames = TOAST_FRAMES * 2;
         toast_queue.push_back(std::move(t));
       }
