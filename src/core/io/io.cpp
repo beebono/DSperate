@@ -877,9 +877,12 @@ void Io::cart_write_romctrl(u32 value) {
   static const bool drop_gaps = std::getenv("DS_CART_GAPS") && std::getenv("DS_CART_GAPS")[0] == '0';
   if (g_fast_timing && drop_gaps) cmddelay = 8;
   cart.event_armed = false;
-  if (cart.romctrl & (1u << 30)) {            // write direction: not supported; end after the command
-    nds_.sched.schedule(EventId::Cart, nds_.sched.now() + 2 * xfer * cmddelay, cart_ev, 0);
-    cart.event_armed = true;
+  if ((cart.romctrl & (1u << 30)) && bytes) {
+    // Write direction (a NAND cart's page data): the words come from the CPU
+    // through ROMDATA, and DRQ asks for each. They are passed on as they are
+    // written (cart_write_data); the bus clock between them is not modelled.
+    cart.romctrl |= 0x00800000u;
+    if (cart_dma_armed()) { nds_.dma.check(Cpu::ARM9, dma::MODE9_CART); nds_.dma.check(Cpu::ARM7, dma::MODE7_CART); }
     return;
   }
   if (bytes == 0) {
@@ -938,6 +941,7 @@ void Io::cart_schedule_receive(u64 from) {
 // transfer stalls (`late`) and resumes from the read that makes room.
 void Io::cart_catch_up_slow() {
   if (cart.event_armed || cart.late) return;
+  if (cart.romctrl & (1u << 30)) return;   // write direction: nothing arrives
   while (cart.transfer_pos < cart.transfer_len && cart.fifo_count < 2 && nds_.sched.now() >= cart.next_word_at)
     cart_receive_word(cart.next_word_at);
   if (!cart.event_armed && !cart.late && cart.transfer_pos < cart.transfer_len && cart_dma_armed()) {   // a DMA armed mid-transfer takes over
@@ -968,6 +972,19 @@ void Io::cart_end_transfer() {
 void Io::cart_event(u32 param) {
   cart.event_armed = false;
   if (param == 0) cart_end_transfer(); else cart_receive_word(nds_.dsi ? nds_.sched.event_base7() : nds_.sched.now());   // DSi: from ARM7's clock
+}
+
+// ROMDATA written during a write-direction transfer. As on the hardware, the
+// word moves on when its top byte is written.
+void Io::cart_write_data(u32 value, u32 mask) {
+  if (!(cart.romctrl & (1u << 30)) || !(cart.romctrl & 0x80000000u) || cart.transfer_pos >= cart.transfer_len) return;
+  cart.fifo[0] = (cart.fifo[0] & ~mask) | (value & mask);
+  if (!(mask & 0xFF000000u)) return;
+  if (nds_.cart) nds_.cart->command_transmit(cart.fifo[0]);
+  cart.transfer_pos += 4;
+  if (cart.transfer_pos < cart.transfer_len) return;   // DRQ stays up for the next word
+  cart.romctrl &= ~0x00800000u;
+  cart_end_transfer();
 }
 
 u32 Io::cart_read_data() {
@@ -1111,6 +1128,11 @@ u32 Io::read(Cpu cpu, u32 addr, u32 width) {
 
 void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
   if (prof::census && g_ioc.on) g_ioc.wr[cpu == Cpu::ARM9 ? 0 : 1][addr]++;
+  if ((addr & ~3u) == 0x04100010) {   // ROMDATA, write direction
+    const u32 sh = 8 * (addr & 3);
+    cart_write_data(value << sh, (width == 32 ? 0xFFFFFFFFu : width == 16 ? 0xFFFFu : 0xFFu) << sh);
+    return;
+  }
   if (cpu == Cpu::ARM7) spi_poll_streak_ = 0;
   if (nds_.dsi && (addr & 0xFFFFF000) == 0x04004000) { dsi_write(cpu, addr, width, value); return; }
   if (!io_unowned(addr - 0x04000000)) {

@@ -54,7 +54,7 @@ struct TwlHeader {
 };
 static_assert(sizeof(TwlHeader) == 0x378 - 0x180, "TWL header layout");
 
-enum class SaveType : u8 { None, EepromTiny, Eeprom, Flash, Detect };  // Detect: chip still unknown
+enum class SaveType : u8 { None, EepromTiny, Eeprom, Flash, Detect, Nand };  // Detect: chip still unknown; Nand: in the ROM chip, see below
 
 // Retail Slot-1 cartridge: ROM reads through the KEY1/KEY2 command protocol,
 // and the save chip on the AUXSPI bus.
@@ -83,6 +83,7 @@ public:
   void set_reset(bool reset);                   // /RES line (ROMCTRL bit 29)
   void command_start(const u8 cmd[8]);
   u32  command_receive();                       // next data word
+  void command_transmit(u32 word);              // a data word of a write-direction command (ROMCTRL bit 30)
   void setup_direct_boot();                     // cart already past KEY1 negotiation
 
   // Save chip (AUXSPI).
@@ -156,6 +157,24 @@ private:
   u32 spi_pos_ = 0; u8 spi_cmd_ = 0; u32 spi_addr_ = 0; u8 spi_status_ = 0;
   u8 spi_eeprom_tiny(u8 v); u8 spi_eeprom(u8 v); u8 spi_flash(u8 v);
   u8 spi_chip(u8 v);    // the byte to the chip the save type names
+
+  // NAND carts (WarioWare D.I.Y., Jam with the Band, Face Training): the save
+  // is a region of the ROM chip itself, reached with card commands and not the
+  // AUXSPI bus. The game opens a 128 KB window on it (B2), reads through B7,
+  // and writes 2 KB pages: write enable (85), the page's words (81), commit
+  // (82). 8B goes back to reading the ROM. Adapted from melonDS's
+  // CartRetailNAND (GPLv3, melonDS team).
+  u32 nand_base_ = 0;       // where the save starts in the card's address space (header 0x96 << 17)
+  u32 nand_window_ = 0;     // the open window's address; 0 = ROM mode
+  u32 nand_addr_ = 0;       // read or write position inside the window; 0 = none
+  u8  nand_status_ = 0x20;  // bit 5 ready, bit 4 write enabled
+  std::array<u8, 0x800> nand_wbuf_{};
+  u32 nand_wpos_ = 0, nand_wlen_ = 0;
+  std::array<u8, 0x30> nand_id_{};
+  void nand_build_id();
+  bool nand_command(const u8 cmd[8]);           // false: not a NAND command, the ROM's own
+  u32  nand_read32();
+  bool nand_window_ok() const { return nand_window_ >= nand_base_ && nand_window_ - nand_base_ < sram_.size(); }
 
   bool listed_ = true;
   std::vector<u8> detect_buf_;   // SaveType::Detect transaction so far; not saved to state

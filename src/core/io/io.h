@@ -357,6 +357,7 @@ private:
 
   void cart_write_romctrl(u32 value);
   u32  cart_read_data();
+  void cart_write_data(u32 value, u32 mask);
   void cart_end_transfer();
   void cart_receive_word(u64 at);
   void cart_schedule_receive(u64 from);
