@@ -2348,9 +2348,9 @@ sdl_ready:
     if (mo == "retail" || mo == "homebrew" || mo_auto) {
       using MP = ds::slot2::MotionPak;
       nds.slot2 = std::make_unique<MP>(mo == "homebrew" ? MP::Model::Homebrew : MP::Model::Retail);
-      motion.open(cfg.str("slot2.motion_source", "auto"), cfg.str("slot2.motion_matrix", ""));
+      motion.open(cfg.str("slot2.motion_source", "auto"), cfg.str("slot2.motion_matrix", ""), input.pad_has_motion());
       std::fprintf(stderr, "slot2: %s, tilt from %s\n", mo == "homebrew" ? "DS Motion Card" : "DS Motion Pack",
-                   motion.kind() == ds::sdl::MotionSource::Kind::Sensor ? motion.name().c_str() : "a stick");
+                   motion.kind() == ds::sdl::MotionSource::Kind::Stick ? "a stick" : motion.name().c_str());
       return;
     }
     if (rumble_wanted()) {
@@ -4206,7 +4206,9 @@ sdl_ready:
     if (nds.slot2 && nds.slot2->kind() == ds::slot2::Kind::MotionPak) {
       float sx = 0, sy = 0;
       if (!menu_over_live && !log.reading()) input.stick_position(cfg.str("slot2.motion_stick", "right") != "left", sx, sy);
-      static_cast<ds::slot2::MotionPak&>(*nds.slot2).set_motion(log.reading() ? ds::slot2::Motion{} : motion.read(sx, sy));
+      ds::slot2::Motion m;   // flat, for a replay and for a controller that has gone
+      if (!log.reading() && !(motion.kind() == ds::sdl::MotionSource::Kind::Pad ? input.pad_motion(m) : (m = motion.read(sx, sy), true))) m = ds::slot2::Motion{};
+      static_cast<ds::slot2::MotionPak&>(*nds.slot2).set_motion(m);
     }
     if (menu_over_live) {
       const bool lid_was = in.lid;

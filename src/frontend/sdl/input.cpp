@@ -422,6 +422,35 @@ void Input::detect_faces() {
                phys[0] != 0 && phys[2] != 2 ? "a/b and x/y" : phys[0] != 0 ? "a/b" : "x/y");
 }
 
+// SDL's sensors arrived in 2.0.14; an older library has none to offer.
+bool Input::pad_has_motion() const {
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+  return pad_ && SDL_GameControllerHasSensor(pad_, SDL_SENSOR_ACCEL) == SDL_TRUE;
+#else
+  return false;
+#endif
+}
+
+bool Input::pad_motion(slot2::Motion& m) {
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+  if (!pad_has_motion()) return false;
+  if (!SDL_GameControllerIsSensorEnabled(pad_, SDL_SENSOR_ACCEL)) {
+    SDL_GameControllerSetSensorEnabled(pad_, SDL_SENSOR_ACCEL, SDL_TRUE);
+    if (SDL_GameControllerHasSensor(pad_, SDL_SENSOR_GYRO)) SDL_GameControllerSetSensorEnabled(pad_, SDL_SENSOR_GYRO, SDL_TRUE);
+  }
+  float a[3];
+  if (SDL_GameControllerGetSensorData(pad_, SDL_SENSOR_ACCEL, a, 3) != 0) return false;
+  // SDL's frame for a pad held flat: X right, Y up out of its face, Z towards
+  // the player. The console's has Y up the screen and Z out of it.
+  m.ax = a[0]; m.ay = -a[2]; m.az = a[1];
+  float g[3];
+  m.gz = SDL_GameControllerIsSensorEnabled(pad_, SDL_SENSOR_GYRO) && SDL_GameControllerGetSensorData(pad_, SDL_SENSOR_GYRO, g, 3) == 0 ? g[1] : 0;
+  return true;
+#else
+  (void)m; return false;
+#endif
+}
+
 bool Input::has_rumble() const {
   return pad_ && SDL_GameControllerHasRumble(pad_);
 }

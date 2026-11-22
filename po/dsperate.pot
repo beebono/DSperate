@@ -78,7 +78,7 @@ msgstr ""
 msgid "FULLSCREEN"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4750
+#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4752
 msgid "SCREENSHOT"
 msgstr ""
 
@@ -94,36 +94,36 @@ msgstr ""
 msgid "FPS"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:838 src/frontend/sdl/main.cpp:1341 src/frontend/sdl/main.cpp:2929
+#: src/frontend/sdl/input.cpp:867 src/frontend/sdl/main.cpp:1341 src/frontend/sdl/main.cpp:2929
 #: src/frontend/sdl/main.cpp:2930 src/frontend/sdl/main.cpp:2966
 msgid "NONE"
 msgstr ""
 
 #. {1} is a DS button (A or B), {2} the button that resets the bindings.
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1081
+#: src/frontend/sdl/input.cpp:1110
 msgid "{1} IS UNREACHABLE; {2} TWICE RESETS"
 msgstr ""
 
 #. {1} and {2} are DS buttons (A, B, SELECT...).
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1090
+#: src/frontend/sdl/input.cpp:1119
 msgid "{1} AND {2} SHARE A KEY"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1091
+#: src/frontend/sdl/input.cpp:1120
 msgid "{1} AND {2} SHARE A BUTTON"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1094 src/frontend/sdl/input.cpp:1101
+#: src/frontend/sdl/input.cpp:1123 src/frontend/sdl/input.cpp:1130
 msgid "{1} HIDES PAD {2}"
 msgstr ""
 
 #. {1} is a hotkey (SAVE STATE...), {2} a DS button (A, B, SELECT...).
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1100
+#: src/frontend/sdl/input.cpp:1129
 msgid "{1} HIDES KEY {2}"
 msgstr ""
 
@@ -500,7 +500,7 @@ msgstr ""
 msgid "NOBODY IS HOSTING HERE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3545 src/frontend/sdl/main.cpp:4432
+#: src/frontend/sdl/main.cpp:3545 src/frontend/sdl/main.cpp:4434
 msgid "JOINED A SESSION"
 msgstr ""
 
@@ -562,55 +562,55 @@ msgstr ""
 msgid "STATE {1} LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4474
+#: src/frontend/sdl/main.cpp:4476
 msgid "GPU 3D UNAVAILABLE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4475
+#: src/frontend/sdl/main.cpp:4477
 msgid "DRAWING 3D ON THE CPU"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4484
+#: src/frontend/sdl/main.cpp:4486
 msgid "NOT SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4486
+#: src/frontend/sdl/main.cpp:4488
 msgid "CHECK THE CARD: FULL OR READ-ONLY?"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4494
+#: src/frontend/sdl/main.cpp:4496
 msgid "TURBO TIMING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4495
+#: src/frontend/sdl/main.cpp:4497
 msgid "NOT THE CONSOLE'S SPEED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4496
+#: src/frontend/sdl/main.cpp:4498
 msgid "GAMES MAY GLITCH OR HANG"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4502
+#: src/frontend/sdl/main.cpp:4504
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4514
+#: src/frontend/sdl/main.cpp:4516
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4515
+#: src/frontend/sdl/main.cpp:4517
 msgid "GAME LIKELY WON'T WORK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4516
+#: src/frontend/sdl/main.cpp:4518
 msgid "DSP IS NOT EMULATED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4751
+#: src/frontend/sdl/main.cpp:4753
 msgid "SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4751
+#: src/frontend/sdl/main.cpp:4753
 msgid "COULD NOT BE SAVED"
 msgstr ""
 
@@ -1154,6 +1154,10 @@ msgid "MOTION CARD"
 msgstr ""
 
 #: src/frontend/sdl/settings.cpp:52
+msgid "CONTROLLER"
+msgstr ""
+
+#: src/frontend/sdl/settings.cpp:52
 msgid "SENSOR"
 msgstr ""
 
@@ -1362,7 +1366,7 @@ msgid "TILT FROM"
 msgstr ""
 
 #: src/frontend/sdl/settings.cpp:141
-msgid "THE HANDHELD'S OWN SENSOR WHERE IT HAS ONE, ELSE A STICK"
+msgid "THE CONTROLLER'S OR HANDHELD'S OWN SENSOR WHERE THERE IS ONE, ELSE A STICK"
 msgstr ""
 
 #: src/frontend/sdl/settings.cpp:142

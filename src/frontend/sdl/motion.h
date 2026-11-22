@@ -2,7 +2,8 @@
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 //
 // Where a slot-2 motion accessory's readings come from: the handheld's own
-// accelerometer and gyroscope where it has them (Linux IIO), else a stick,
+// accelerometer and gyroscope where it has them (the controller's through SDL,
+// or the system's through Linux IIO), else a stick,
 // whose deflection tilts a console that is otherwise lying flat.
 #pragma once
 #include "core/slot2/slot2.h"
@@ -15,13 +16,14 @@ namespace ds::sdl {
 
 class MotionSource {
 public:
-  enum class Kind { None, Sensor, Stick };
+  enum class Kind { None, Pad, Sensor, Stick };
   ~MotionSource() { close(); }
-  // `want`: auto (the sensor if there is one, else the stick), sensor or
-  // stick. `matrix`: nine numbers, rows of a rotation from the sensor's axes
+  // `want`: auto (the controller's own sensor, else the system's, else the
+  // stick), pad, sensor or stick. `pad_has`: the open controller has an
+  // accelerometer; its readings come through Input::pad_motion, not read(). `matrix`: nine numbers, rows of a rotation from the sensor's axes
   // to the console's, for a sensor the system gives no mount matrix for;
   // empty takes the system's (or the identity).
-  void open(const std::string& want, const std::string& matrix);
+  void open(const std::string& want, const std::string& matrix, bool pad_has);
   void close();
   Kind kind() const { return kind_; }
   const std::string& name() const { return name_; }   // the sensor's, for the log

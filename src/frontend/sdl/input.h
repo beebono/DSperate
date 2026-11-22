@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include "core/slot2/slot2.h"
 #include "core/io/io.h"
 #include "core/input/input_log.h"
 
@@ -122,6 +123,11 @@ public:
   // forwards its rumble to the pwm-vibrator. rumble() runs both motors at
   // `strength` percent for `ms`, replacing whatever pulse was running.
   bool has_rumble() const;
+  // The controller's own accelerometer (and gyroscope, where it has one), as a
+  // slot-2 motion accessory feels it. False when the pad has none: `m` is left.
+  // Turns the sensors on at the first call.
+  bool pad_has_motion() const;
+  bool pad_motion(slot2::Motion& m);
   void rumble(int strength, u32 ms);
   // While the Guitar Grip is in slot 2, its four fret bindings (keys/pad
   // grip_green, grip_red, grip_yellow, grip_blue) work the frets instead of

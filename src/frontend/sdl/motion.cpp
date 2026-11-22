@@ -71,12 +71,13 @@ std::string MotionSource::find_accel(const std::string& root) {
   return found;
 }
 
-void MotionSource::open(const std::string& want, const std::string& matrix) {
+void MotionSource::open(const std::string& want, const std::string& matrix, bool pad_has) {
   close();
   if (want == "off" || want == "none") return;
+  if ((want == "auto" || want == "pad") && pad_has) { kind_ = Kind::Pad; name_ = "the controller's sensor"; return; }
   if (want != "stick") accel_dir_ = find_accel();
   if (accel_dir_.empty()) {
-    if (want == "sensor") std::fprintf(stderr, "motion: no accelerometer found (IIO); the stick tilts instead\n");
+    if (want == "sensor" || want == "pad") std::fprintf(stderr, "motion: no accelerometer found (%s); the stick tilts instead\n", want == "pad" ? "controller" : "controller or IIO");
     kind_ = Kind::Stick;
     return;
   }

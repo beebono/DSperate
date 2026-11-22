@@ -394,9 +394,10 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # motion = auto                 # auto | retail | homebrew | off: a motion accessory in slot 2 when no
                                 # GBA game or Guitar Grip is. retail: the DS Motion Pack; homebrew: the
                                 # DS Motion Card. auto: the pack, for Tony Hawk's Motion (which needs it)
-# motion_source = auto          # auto | sensor | stick: what tilts it. sensor: the handheld's own
-                                # accelerometer (Linux IIO); stick: a stick, up to 45 degrees each
-                                # way. auto: the sensor where there is one. A replay holds it flat
+# motion_source = auto          # auto | pad | sensor | stick: what tilts it. pad: the controller's
+                                # own accelerometer (SDL); sensor: the handheld's (Linux IIO); stick:
+                                # a stick, up to 45 degrees each way. auto: the first of those there
+                                # is. A replay holds it flat
 # motion_stick = right          # right | left: the stick that tilts
 # motion_matrix =               # nine numbers: the rotation from the sensor's axes to the console's
                                 # (X right, Y up the screen, Z towards you), for a sensor the system
