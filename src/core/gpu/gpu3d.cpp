@@ -1704,7 +1704,7 @@ template <class S> void Gpu3D::sync_state(S& s) {
         // A drawn polygon's edge walk steps vtx[] by nverts and stops at vbot.
         if (p.nverts > 10 || (!p.degenerate && (p.nverts == 0 || p.vtop >= p.nverts || p.vbot >= p.nverts))) { s.fail("polygon"); return; }
       }
-      else { Polygon copy = pram_[b * PRAM_BANK + i]; for (u32 j = 0; j < 10; ++j) copy.vtx[j] = static_cast<u16>(remap(copy.vtx[j], VRAM_BANK)); sync_polygon(s, copy); }
+      else { Polygon copy = pram_[b * PRAM_BANK + i]; for (u32 j = 0; j < 10; ++j) copy.vtx[j] = j < copy.nverts ? static_cast<u16>(remap(copy.vtx[j], VRAM_BANK)) : u16{0}; sync_polygon(s, copy); }   // the slots past nverts hold whatever the record's last user left (often the unsaved bank's): written as 0, so a state saved, loaded and saved again is the same bytes
     }
   }
   // GXSTAT's busy flag must follow the restored scheduler timeline, not

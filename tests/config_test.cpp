@@ -38,6 +38,7 @@ void test_parsing() {
         "# a comment\n"
         "; another\n"
         "autosave = true    # trailing comments are cut\n"
+        "state_dir = /roms/#1 disc;2/states   ; a # or ; inside a word is the value's own\n"
         "empty =\n"
         "[video]\n"
         "  lcd_grid = 0.5  \n"          // surrounding space is trimmed
@@ -47,6 +48,7 @@ void test_parsing() {
   CHECK(c.load(kPath));
   CHECK(c.num("emu.frameskip", 9) == 2);
   CHECK(c.flag("emu.autosave", false));
+  CHECK(c.str("emu.state_dir") == "/roms/#1 disc;2/states");
   CHECK(c.real("video.lcd_grid", 0.0) == 0.5);
   CHECK(c.str("video.chunky") == "mean");
   // A key with no value falls back for the typed readers, and the section is

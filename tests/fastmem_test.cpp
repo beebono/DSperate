@@ -53,7 +53,7 @@ bool faults(u8* p, bool store) {
 
 int main() {
   std::unique_ptr<HostArena> arena = HostArena::create(64 * 1024);
-  if (!arena) { std::printf("fastmem: no shared memory on this host, skipped\n"); return 0; }
+  if (!arena) { std::printf("fastmem: no shared memory on this host, skipped\n"); return 77; }   // ctest: skipped, not passed (SKIP_RETURN_CODE)
   u8* ram = arena->take(16 * 1024);
   u8* rom = arena->take(8 * 1024);
   CHECK(ram && rom && arena->take(64 * 1024) == nullptr);

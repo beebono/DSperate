@@ -75,7 +75,10 @@ bool Config::load(const std::string& path) {
     const size_t eq = line.find('=');
     if (eq == std::string::npos) continue;
     std::string k = trim(line.substr(0, eq)), v = trim(line.substr(eq + 1));
-    if (const size_t c = v.find_first_of("#;"); c != std::string::npos) v = trim(v.substr(0, c));
+    // A comment after a value starts at a # or ; that follows a blank (or leads): one inside a word is the
+    // value's own (a path such as /roms/#1 or Disc;2 was cut there).
+    for (size_t c = v.find_first_of("#;"); c != std::string::npos; c = v.find_first_of("#;", c + 1))
+      if (c == 0 || v[c - 1] == ' ' || v[c - 1] == '\t') { v = trim(v.substr(0, c)); break; }
     const std::string key = section.empty() ? k : section + "." + k;
     if (retired(key)) { std::fprintf(stderr, "config: %s is retired (3D is drawn on the CPU only) and is ignored (%s)\n", key.c_str(), path.c_str()); continue; }
     kv_[key] = v;

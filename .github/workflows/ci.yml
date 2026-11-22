@@ -7,6 +7,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# bash explicitly: Actions then runs each step with -eo pipefail. Left to the
+# default it is "bash -e", and a build piped into tee or grep that fails does
+# not fail the step.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Native arm64, the main target: the JIT and NEON paths on real silicon, and
   # the binaries a handheld runs (see Package for the two tarballs). Other
@@ -36,7 +43,7 @@ jobs:
           # "source locations ... have changed" is benign (the checkout path is
           # in the checksum; the counts still apply) and one per function, so it
           # is filtered; "control flow ... does not match" is a dropped profile.
-          cmake --build --preset host 2>&1 | grep -v "source locations for function" | tee build.log
+          cmake --build --preset host 2>&1 | { grep -v "source locations for function" || true; } | tee build.log
           echo "PGO: $(grep -c 'control flow of function' build.log || true) functions changed since the profile ($(sed -n 's/^commit //p' pgo/aarch64/MANIFEST | cut -c1-9), $(sed -n 's/^date //p' pgo/aarch64/MANIFEST)); $(grep -c 'data file not found' build.log || true) objects without one"
           ctest --preset host --output-on-failure
       - name: configs/default.ini matches the built-in defaults
