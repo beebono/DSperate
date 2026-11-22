@@ -36,7 +36,7 @@ void sha1(const u8* data, size_t len, u8 out[20]) {
   // block, or two when the length does not fit after the terminator.
   u8 tail[128] = {};
   const size_t rest = len - i;
-  std::memcpy(tail, data + i, rest);
+  if (rest) std::memcpy(tail, data + i, rest);   // no data at all: data may be null
   tail[rest] = 0x80;
   const size_t n = rest + 1 + 8 <= 64 ? 64 : 128;
   const u64 bits = static_cast<u64>(len) * 8;

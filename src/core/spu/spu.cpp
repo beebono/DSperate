@@ -276,7 +276,7 @@ s32 Spu::run_channel(Channel& c, u32 n) {
     }
     if (!(c.cnt & 0x80000000u)) break;
   }
-  return (static_cast<s32>(c.cur) << c.vol_shift) * c.volume;
+  return static_cast<s32>(c.cur) * (1 << c.vol_shift) * c.volume;   // (a shift of a negative value, written as the product it is)
 }
 
 // ---- capture ----------------------------------------------------------------

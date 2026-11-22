@@ -99,7 +99,8 @@ public:
   void blob(void* p, size_t n) {
     if (!ok_) return;
     if (static_cast<size_t>(chunk_end_ - p_) < n) { fail("short read"); std::memset(p, 0, n); return; }
-    std::memcpy(p, p_, n); p_ += n;
+    if (n) std::memcpy(p, p_, n);   // an empty vector's data() is null
+    p_ += n;
   }
   template <class T> void vec(std::vector<T>& v) {
     u32 n = 0; put(n);

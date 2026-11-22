@@ -390,7 +390,8 @@ bool nand_title_content_id(NandImage& nand, const u8* bios7i, u32 title_lo, u32&
   for (const FatVolume::Entry& e : fs.main().list(dir)) {
     if (e.dir() || e.name.size() != 12 || e.name.compare(8, 4, ".APP") != 0) continue;
     char* end = nullptr;
-    const unsigned long v = std::strtoul(e.name.substr(0, 8).c_str(), &end, 16);
+    const std::string stem = e.name.substr(0, 8);   // kept: `end` points into it
+    const unsigned long v = std::strtoul(stem.c_str(), &end, 16);
     if (end && *end == 0) { content_id = static_cast<u32>(v); return true; }
   }
   return false;

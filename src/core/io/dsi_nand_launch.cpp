@@ -90,8 +90,9 @@ bool app_entry(NandFs& nfs, u32 title_lo, FatVolume::Entry& app, u32& content_id
   if (!nfs.main().lookup("/title/00030004/" + hex8(title_lo) + "/content", dir) || !dir.dir()) return false;
   for (const FatVolume::Entry& e : nfs.main().list(dir)) {
     if (e.dir() || e.name.size() != 12 || e.name.compare(8, 4, ".APP") != 0) continue;
+    const std::string stem = e.name.substr(0, 8);   // kept: `end` points into it
     char* end = nullptr;
-    const unsigned long v = std::strtoul(e.name.substr(0, 8).c_str(), &end, 16);
+    const unsigned long v = std::strtoul(stem.c_str(), &end, 16);
     if (end && *end == 0) { app = e; content_id = static_cast<u32>(v); return true; }
   }
   return false;

@@ -440,8 +440,9 @@ void span_factor(s32 xv0, u32 n, s32 xdiff, s32 w0n, s32 w0d, s32 w1d, u32* fac)
   }
   for (u32 i = 0; i < n; ++i) {
     const s32 xv = xv0 + static_cast<s32>(i);
-    const u32 num = static_cast<u32>(xv * w0n) << 8;
-    const u32 den = static_cast<u32>(xv * w0d) + static_cast<u32>((xdiff - xv) * w1d);
+    // In 32 bits, wrapping (as the hardware's and the NEON kernel's do): unsigned, where that is defined.
+    const u32 num = (static_cast<u32>(xv) * static_cast<u32>(w0n)) << 8;
+    const u32 den = static_cast<u32>(xv) * static_cast<u32>(w0d) + static_cast<u32>(xdiff - xv) * static_cast<u32>(w1d);
     fac[i] = den == 0 ? 0 : num / den;
   }
 }
