@@ -31,11 +31,24 @@ uint fog_density(uint z) {
   uint d = ((ps.density[id] * (0x20000u - frac)) + (ps.density[id + 1u] * frac)) >> 17;
   return d >= 127u ? 128u : d;
 }
+// The rear plane where nothing is drawn (its alpha 0): fogged all the same when its fog bit is set, by the clear
+// depth, as the DS fogs every pixel of the finished picture. False: nothing to show there.
+bool rear_fog(out uvec3 rgb, out uint a5) {
+  rgb = uvec3(0u); a5 = 0u;
+  if ((pc.f.dispcnt & 128u) == 0u || (pc.f.clear_attr & 0x8000u) == 0u) return false;
+  uint d = fog_density(pc.f.clear_depth);
+  uint fc = ps.fog_color;
+  a5 = (((fc >> 16) & 0x1Fu) * d) >> 7;
+  if (a5 == 0u) return false;
+  rgb = uvec3(pc.f.clear_color & 63u, (pc.f.clear_color >> 8) & 63u, (pc.f.clear_color >> 16) & 63u);
+  if ((pc.f.dispcnt & 64u) == 0u) rgb = (uvec3(c15_to_18(fc, 0u), c15_to_18(fc, 4u), c15_to_18(fc, 9u)) * d + rgb * (128u - d)) >> 7;
+  return true;
+}
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   vec4 c = round(texelFetch(t_col, p, 0) * 255.0);
   float n = min(4.0, floor(max(c.r, max(c.g, c.b)) / 48.0));
-  if (n == 0.0) { o_word = 0u; return; }
+  if (n == 0.0) { uvec3 rr; uint ra; o_word = rear_fog(rr, ra) ? (rr.r | (rr.g << 8) | (rr.b << 16) | (ra << 24)) : 0u; return; }
   vec3 rgb = clamp(floor((c.rgb - 48.0 * n) * 4.0 / n + 0.5), vec3(0.0), vec3(63.0));
   float sa = clamp(floor((4.0 * c.a + n) * 0.125) - n, 0.0, 31.0 * n);   // the drawn samples' alphas, summed
   if ((pc.f.dispcnt & 128u) != 0u && texelFetch(t_fog, p, 0).r >= 0.5) {

@@ -142,6 +142,12 @@ public:
 
   u32 dispcnt() const { return dispcnt_; }
   const RenderState& render_state() const { return rstate_; }
+  // The rear plane is fogged where nothing is drawn and its own alpha is 0: the 3D layer then has a haze over the
+  // 2D layers in pixels the raster's image holds nothing for (the record has it: the resolve's rear_fog). Such a
+  // frame is composed from the record, not merged from the image (Gpu's split).
+  bool rear_fog_haze() const {
+    return (rstate_.dispcnt & 0x80u) && (rstate_.clear_attr1 & 0x8000u) && !((rstate_.clear_attr1 >> 16) & 0x1Fu) && ((rstate_.fog_color >> 16) & 0x1Fu);
+  }
   const Vertex& vertex(u32 idx) const { return vram_[idx]; }
   const Polygon* const* render_polygons() const { return render_polys_[raster_bank_].data(); }
   // The frame to render as a stream (DS_GPU_GEOM=only: the raster's vertex stage), or

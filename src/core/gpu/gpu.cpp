@@ -719,7 +719,7 @@ void Gpu::begin_frame() {
     const u32 un = cap_untagged_.load(std::memory_order_relaxed);
     if (capture_on_) cap_idle_ = 0; else if (++cap_idle_ > 4) cap_clean_ = 0;
     if (un != cap_untagged_seen_) { cap_untagged_seen_ = un; cap_clean_ = 0; } else if (capture_on_ && cap_clean_ < 255) ++cap_clean_;
-    const bool tracked = split_req_ && !scaling() && !(colour_lut_ && colour_cpu_) && !raw_active_ && nds_.gpu3d.renderer().gpu_layers();
+    const bool tracked = split_req_ && !scaling() && !(colour_lut_ && colour_cpu_) && !raw_active_ && nds_.gpu3d.renderer().gpu_layers() && !nds_.gpu3d.rear_fog_haze();
     if (capture_on_) { ++cap_frames_; if (cap_backoff_) ++cap_backoff_frames_; }
     if (cap_backoff_) --cap_backoff_;
     cap_late_ = capture_on_ && cap_late_ok_ && !cap_backoff_ && tracked && split_cap_ && nds_.gpu3d.renderer().gpu_scale() > 1 && ((capcnt_ >> 29) & 3) == 0 && cap_clean_ >= 3;
@@ -740,7 +740,7 @@ void Gpu::begin_frame() {
   }
   if (split_cur_.drawn) split_done_ = split_cur_;
   split_cur_ = SplitFrame{};
-  split_cur_.track = split_req_ && !scaling() && !(colour_lut_ && colour_cpu_) && !raw_active_ && nds_.gpu3d.renderer().gpu_layers();
+  split_cur_.track = split_req_ && !scaling() && !(colour_lut_ && colour_cpu_) && !raw_active_ && nds_.gpu3d.renderer().gpu_layers() && !nds_.gpu3d.rear_fog_haze();
   split_cur_.want = split_cur_.track && ref3d_.gpu;
   if (split_cur_.track && cap_words_.empty()) {
     for (Page& pg : pages_) for (int k = 0; k < 2; ++k) { pg.split_fb[k].assign(SCREEN_W * SCREEN_H, 0); pg.split_xy[k].assign(SCREEN_W * SCREEN_H, 0); }

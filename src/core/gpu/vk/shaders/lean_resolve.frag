@@ -49,12 +49,25 @@ uint fog_density(uint z) {
   uint d = ((ps.density[id] * (0x20000u - frac)) + (ps.density[id + 1u] * frac)) >> 17;
   return d >= 127u ? 128u : d;
 }
+// The rear plane where nothing is drawn (its alpha 0): fogged all the same when its fog bit is set, by the clear
+// depth, as the DS fogs every pixel of the finished picture. False: nothing to show there.
+bool rear_fog(out uvec3 rgb, out uint a5) {
+  rgb = uvec3(0u); a5 = 0u;
+  if ((pc.f.dispcnt & 128u) == 0u || (pc.f.clear_attr & 0x8000u) == 0u) return false;
+  uint d = fog_density(pc.f.clear_depth);
+  uint fc = ps.fog_color;
+  a5 = (((fc >> 16) & 0x1Fu) * d) >> 7;
+  if (a5 == 0u) return false;
+  rgb = uvec3(pc.f.clear_color & 63u, (pc.f.clear_color >> 8) & 63u, (pc.f.clear_color >> 16) & 63u);
+  if ((pc.f.dispcnt & 64u) == 0u) rgb = (uvec3(c15_to_18(fc, 0u), c15_to_18(fc, 4u), c15_to_18(fc, 9u)) * d + rgb * (128u - d)) >> 7;
+  return true;
+}
 // One sample, fogged by its own depth (the DS fogs the finished pixel once,
 // after blending, by the pixel's depth). False: undrawn.
 bool fogged(int s, vec4 c, bool wbuf, bool fog_on, bool fog_colour, uvec4 fogc, out uvec3 rgb, out uint a5) {
   uint ab = uint(round(c.a * 255.0));
   rgb = uvec3(0u); a5 = 0u;
-  if (ab == 0u) return false;
+  if (ab == 0u) return fog_on && rear_fog(rgb, a5);
   rgb = uvec3(round(c.rgb * 255.0));
   a5 = decode_alpha(ab);
   if (fog_on && LOAD(ms_fog, s).r > 0.5) {

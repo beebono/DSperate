@@ -31,11 +31,24 @@ uint fog_density(uint z) {
 }
 layout(constant_id = 3) const bool ds_fog = true;
 layout(constant_id = 5) const bool ds_raw = false;   // the tile's alpha byte is the 5-bit alpha already (vk_lean.cpp Impl::raw), with the fog flag in bit 7
+// The rear plane where nothing is drawn (its alpha 0): fogged all the same when its fog bit is set, by the clear
+// depth, as the DS fogs every pixel of the finished picture. False: nothing to show there.
+bool rear_fog(out uvec3 rgb, out uint a5) {
+  rgb = uvec3(0u); a5 = 0u;
+  if ((pc.f.dispcnt & 128u) == 0u || (pc.f.clear_attr & 0x8000u) == 0u) return false;
+  uint d = fog_density(pc.f.clear_depth);
+  uint fc = ps.fog_color;
+  a5 = (((fc >> 16) & 0x1Fu) * d) >> 7;
+  if (a5 == 0u) return false;
+  rgb = uvec3(pc.f.clear_color & 63u, (pc.f.clear_color >> 8) & 63u, (pc.f.clear_color >> 16) & 63u);
+  if ((pc.f.dispcnt & 64u) == 0u) rgb = (uvec3(c15_to_18(fc, 0u), c15_to_18(fc, 4u), c15_to_18(fc, 9u)) * d + rgb * (128u - d)) >> 7;
+  return true;
+}
 void main() {
   vec4 c = round(subpassLoad(t_col) * 255.0);
   bool fogged;
   if (ds_raw) { fogged = c.a >= 128.0; if (fogged) c.a -= 128.0; }   // the alpha itself, the fog flag in bit 7
-  if (c.a == 0.0) { o_col = vec4(0.0); return; }
+  if (c.a == 0.0) { uvec3 rr; uint ra; o_col = (ds_fog && rear_fog(rr, ra)) ? vec4(vec3(rr), float(ra)) / 255.0 : vec4(0.0); return; }
   vec3 rgb = c.rgb;
   float a5 = ds_raw ? c.a : c.a < 4.0 ? 0.0 : min(31.0, floor((c.a + 4.0) * 0.125) - 1.0);   // the draw's alpha byte is (a + 1) * 8
   if (!ds_raw) fogged = subpassLoad(t_fog).r > 0.5;
