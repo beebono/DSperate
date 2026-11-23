@@ -1571,8 +1571,8 @@ msgid ""
 "THE MOST THE GPU DRAWS 3D AT, TIMES THE DS'S (VULKAN ONLY). A SMALLER VIEW "
 "TAKES LESS. 2D STAYS AS IT IS"
 msgstr ""
-"GPU 绘制 3D 的最高倍率，相对 DS 原生分辨率（仅 Vulkan）。显示范围越小开销越"
-"低。2D 保持不变"
+"GPU 绘制 3D 的最高倍率，相对 DS 原生分辨率（仅 Vulkan）。显示范围较小时倍率"
+"随之降低。2D 保持不变"
 
 #: src/frontend/sdl/settings.cpp:201
 msgid "FPS COUNTER"

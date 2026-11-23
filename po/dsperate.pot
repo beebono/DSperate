@@ -94,36 +94,36 @@ msgstr ""
 msgid "FPS"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:877 src/frontend/sdl/main.cpp:1376 src/frontend/sdl/main.cpp:3014
+#: src/frontend/sdl/input.cpp:881 src/frontend/sdl/main.cpp:1376 src/frontend/sdl/main.cpp:3014
 #: src/frontend/sdl/main.cpp:3015 src/frontend/sdl/main.cpp:3051
 msgid "NONE"
 msgstr ""
 
 #. {1} is a DS button (A or B), {2} the button that resets the bindings.
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1120
+#: src/frontend/sdl/input.cpp:1124
 msgid "{1} IS UNREACHABLE; {2} TWICE RESETS"
 msgstr ""
 
 #. {1} and {2} are DS buttons (A, B, SELECT...).
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1129
+#: src/frontend/sdl/input.cpp:1133
 msgid "{1} AND {2} SHARE A KEY"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1130
+#: src/frontend/sdl/input.cpp:1134
 msgid "{1} AND {2} SHARE A BUTTON"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1133 src/frontend/sdl/input.cpp:1140
+#: src/frontend/sdl/input.cpp:1137 src/frontend/sdl/input.cpp:1144
 msgid "{1} HIDES PAD {2}"
 msgstr ""
 
 #. {1} is a hotkey (SAVE STATE...), {2} a DS button (A, B, SELECT...).
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/input.cpp:1139
+#: src/frontend/sdl/input.cpp:1143
 msgid "{1} HIDES KEY {2}"
 msgstr ""
 
