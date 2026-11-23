@@ -20,6 +20,9 @@ jobs:
   # devices build with their own toolchains; what they share with this job is
   # the committed PGO profiles (pgo/<arch>[-gcc<ver>]/), not a CI variant.
   # Every job packages the same way: see tools/ci_package.sh.
+  # A pull request is built and tested only: no tarballs (its ref name,
+  # "<number>/merge", is no file name: the Package step failed on every one),
+  # and no second, static build with its tests run again.
   arm64:
     runs-on: ubuntu-24.04-arm
     steps:
@@ -60,8 +63,10 @@ jobs:
       # same profile applies. The rebuild is a different binary, so the tests
       # are built and run again on it before it is packed.
       - name: Package
+        if: github.event_name != 'pull_request'
         run: tools/ci_package.sh host build/host aarch64 strip
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: dsperate-linux-aarch64
           path: dsperate-*-linux-aarch64*.tar.gz
@@ -97,8 +102,10 @@ jobs:
           cmake --build --preset host
           ctest --preset host --output-on-failure
       - name: Package
+        if: github.event_name != 'pull_request'
         run: tools/ci_package.sh host build/host x86_64 strip
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: dsperate-linux-x86_64
           path: dsperate-*-linux-x86_64*.tar.gz
@@ -127,8 +134,10 @@ jobs:
           cmake --build --preset arm32-cross
           ctest --test-dir build/arm32 --output-on-failure
       - name: Package
+        if: github.event_name != 'pull_request'
         run: tools/ci_package.sh arm32-cross build/arm32 armv7 arm-linux-gnueabihf-strip
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: dsperate-linux-armv7
           path: dsperate-*-linux-armv7*.tar.gz
