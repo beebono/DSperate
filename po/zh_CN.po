@@ -4,7 +4,7 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: DSperate\n"
-"PO-Revision-Date: 2026-11-08 11:00+0800\n"
+"PO-Revision-Date: 2026-11-23 08:50+0800\n"
 "Last-Translator: YinHeng <k332159915@gmail.com>\n"
 "Language-Team: Chinese (Simplified)\n"
 "Language: zh_CN\n"
@@ -440,7 +440,7 @@ msgstr "插槽 2 中没有震动包"
 
 #: src/frontend/sdl/main.cpp:3266
 msgid "NO DSI BIOS OR FIRMWARE"
-msgstr "没有 DSi BIOS 或固件"
+msgstr "无 DSi BIOS 或固件"
 
 #: src/frontend/sdl/main.cpp:3269
 msgid "NO BOKTAI CARTRIDGE IN SLOT 2"
@@ -594,7 +594,7 @@ msgstr "加速时序"
 
 #: src/frontend/sdl/main.cpp:4590
 msgid "NOT THE CONSOLE'S SPEED"
-msgstr "并非主机原本的速度"
+msgstr "并非实机原本的速度"
 
 #: src/frontend/sdl/main.cpp:4591
 msgid "GAMES MAY GLITCH OR HANG"
@@ -622,7 +622,7 @@ msgstr "DSi DSP"
 
 #: src/frontend/sdl/main.cpp:4626
 msgid "UNKNOWN DSP PROGRAM"
-msgstr "未知的 DSP 程序"
+msgstr "未知 DSP 程序"
 
 #: src/frontend/sdl/main.cpp:4627
 msgid "WILL RUN VERY SLOWLY"
@@ -1336,7 +1336,8 @@ msgid ""
 "EXACT IS THE CONSOLE'S, AND SLOWER TO RUN. TURBO GIVES GAMES MORE CPU: "
 "SMOOTHER, MAY BREAK SOME"
 msgstr ""
-"精确即主机原本的时序，运行较慢。加速给游戏更多 CPU：更流畅，部分游戏可能出错"
+"精确即实机原本的时序，运行较慢。加速给游戏更多 CPU 时间：更流畅，部分游戏可能"
+"出错"
 
 #: src/frontend/sdl/settings.cpp:128
 msgid "AUTOSAVE ON QUIT"
@@ -1425,7 +1426,7 @@ msgstr "倾斜摇杆"
 #: src/frontend/sdl/settings.cpp:152
 msgid ""
 "THE STICK THAT TILTS WHEN THERE IS NO SENSOR. THE PEN LETS GO OF IT MEANWHILE"
-msgstr "没有传感器时用于倾斜的摇杆。期间触摸笔不再使用该摇杆"
+msgstr "没有传感器时用于倾斜的摇杆。此时触摸笔不再使用该摇杆"
 
 #: src/frontend/sdl/settings.cpp:153
 msgid "SOLAR SENSOR"
@@ -1570,8 +1571,8 @@ msgid ""
 "THE MOST THE GPU DRAWS 3D AT, TIMES THE DS'S (VULKAN ONLY). A SMALLER VIEW "
 "TAKES LESS. 2D STAYS AS IT IS"
 msgstr ""
-"GPU 绘制 3D 的最高分辨率，为 DS 的倍数（仅 Vulkan）。画面较小时会降低。2D 保"
-"持不变"
+"GPU 绘制 3D 的最高倍率，相对 DS 原生分辨率（仅 Vulkan）。显示范围越小开销越"
+"低。2D 保持不变"
 
 #: src/frontend/sdl/settings.cpp:201
 msgid "FPS COUNTER"
