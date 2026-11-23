@@ -2735,6 +2735,40 @@ static u32 gpu_sprite(const vk::GpuPoly& o, const vk::GpuVert* v) {
   return DS_PF_SPRITE;
 }
 
+// A sprite (DS_PF_SPRITE) goes onto whole pixels, which is the DS's own place for it; a polygon of the 3D world
+// stays on its 28.4 position. A small flat tile of a mesh can pass gpu_sprite's test beside a larger one that does
+// not, and the two then cover the row (column) between them by different rules: Pokémon Platinum's floor, a tile
+// 112 x 12 px beside one 112 x 67 along y = 73.875, the row between drawn by neither and edge-marked black on both
+// sides, a seam that opened and closed as the camera moved. So a sprite joined through a shared vertex (the
+// same 28.4 position), directly or through other sprites, to a polygon that is not one is not a sprite either: its
+// mesh keeps one rule. Sprites that only meet each other (a HUD's tiles) stay on whole pixels.
+static void gpu_sprite_mesh(vk::GpuPoly* gp, u32 np, const vk::GpuVert* gv) {
+  using namespace ds::gpu::vk;
+  std::vector<u32> parent;   // union-find over the sprites, by index into gp
+  std::unordered_map<u64, u32> at;   // a sprite's vertex position -> a sprite there
+  for (u32 i = 0; i < np; ++i) if (gp[i].flags & DS_PF_SPRITE) { if (parent.empty()) { parent.resize(np); at.reserve(64); } parent[i] = i; }
+  if (parent.empty()) return;
+  auto find = [&](u32 x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  auto key = [&](const GpuVert& v) { return (u64(u32(v.fx)) << 32) | u32(v.fy); };
+  for (u32 i = 0; i < np; ++i) {
+    if (!(gp[i].flags & DS_PF_SPRITE)) continue;
+    for (u32 k = 0; k < gp[i].nverts; ++k) {
+      auto [it, fresh] = at.try_emplace(key(gv[gp[i].first_vert + k]), i);
+      if (!fresh) { const u32 a = find(i), b = find(it->second); if (a != b) parent[a] = b; }
+    }
+  }
+  std::vector<u8> meshed(np, 0);   // by root
+  bool any = false;
+  for (u32 i = 0; i < np; ++i) {
+    if (gp[i].flags & DS_PF_SPRITE) continue;
+    for (u32 k = 0; k < gp[i].nverts; ++k) {
+      const auto it = at.find(key(gv[gp[i].first_vert + k]));
+      if (it != at.end()) { meshed[find(it->second)] = 1; any = true; }
+    }
+  }
+  if (any) for (u32 i = 0; i < np; ++i) if ((gp[i].flags & DS_PF_SPRITE) && meshed[find(i)]) gp[i].flags &= ~DS_PF_SPRITE;
+}
+
 static u32 gpu_tex_clip(const TextureCache::Ref& r, const vk::GpuPoly& o, const vk::GpuVert* v, s32 rect[4]) {
   using namespace ds::gpu::vk;
   const u32 n = o.nverts;
@@ -2843,7 +2877,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
   std::unordered_map<const u32*, u32> arena;   // decoded texture -> word offset
   bool any_mask = false;
   for (u32 i = 0; i < npoly; ++i) any_mask = any_mask || (polys[i]->shadow_mask && !polys[i]->degenerate);
-  u32 first_ordered = ~0u;
+  u32 first_ordered = ~0u, nsprite = 0;
   const bool alpha_all_fail = rs_->alpha_ref >= 31;
   for (u32 i = 0; i < npoly; ++i) {
     const Polygon& p = *polys[i];
@@ -2881,7 +2915,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
         const bool may_alpha = (p.texparam & (1u << 29)) || fmt == 5 || fmt == 7 || fmt == 1 || fmt == 6;   // as gpu_submit
         if (may_alpha && gpu_alpha_tested(r, o, gv.data() + o.first_vert)) o.flags |= DS_PF_TEX_ALPHA;
         o.flags |= gpu_alpha_passes(&r, o, gv.data() + o.first_vert);
-        o.flags |= gpu_sprite(o, gv.data() + o.first_vert);
+        o.flags |= gpu_sprite(o, gv.data() + o.first_vert); nsprite += (o.flags & DS_PF_SPRITE) != 0;
       }
     }
     if (!(o.flags & DS_PF_TEXTURED)) o.flags |= gpu_alpha_passes(nullptr, o, gv.data() + o.first_vert);
@@ -2890,6 +2924,7 @@ void Renderer3D::gpu_dump(const Gpu3D& gx, const Polygon* const* polys, u32 npol
     shrun.insert(shrun.end(), run.begin(), run.end());
   }
   if (first_ordered == ~0u) first_ordered = static_cast<u32>(gp.size());
+  if (nsprite) gpu_sprite_mesh(gp.data(), static_cast<u32>(gp.size()), gv.data());
   GpuDumpHeader h;
   h.npoly = static_cast<u32>(gp.size()); h.nvert = static_cast<u32>(gv.size()); h.ntexels = static_cast<u32>(tex.size()); h.frame = nds_.frame_count;
   h.f.npoly = h.npoly; h.f.scale = 1; h.f.dispcnt = dispcnt_; h.f.alpha_ref = rs_->alpha_ref;
@@ -3391,7 +3426,7 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
   GpuVert* const gv = lean_->vert_buffer();
   u32 texcap = 0; u32* const tex = lean_->texel_buffer(&texcap);
   GpuPost* const ps = lean_->post_buffer();
-  u32 np = 0, nv = 0, first_ordered = ~0u;
+  u32 np = 0, nv = 0, first_ordered = ~0u, nsprite = 0;
   u32 sc_cap = 0, nsc = 0; Raster3D::Scissor* const sc_buf = lean_->scissor_buffer(&sc_cap);
   lean_->scissor_count(0);
   const bool alpha_all_fail = rs_->alpha_ref >= 31;
@@ -3468,13 +3503,14 @@ bool Renderer3D::gpu_submit(const Gpu3D& gx, const Polygon* const* polys, u32 np
       }
       if (may_alpha && gpu_alpha_tested(r, o, gv + o.first_vert)) o.flags |= DS_PF_TEX_ALPHA;
       o.flags |= gpu_alpha_passes(&r, o, gv + o.first_vert);
-      o.flags |= gpu_sprite(o, gv + o.first_vert);
+      o.flags |= gpu_sprite(o, gv + o.first_vert); nsprite += (o.flags & DS_PF_SPRITE) != 0;
     }
     if (!(o.flags & DS_PF_TEXTURED)) o.flags |= gpu_alpha_passes(nullptr, o, gv + o.first_vert);
     ++np;
     }
   }
   if (first_ordered == ~0u) first_ordered = np;
+  if (nsprite) gpu_sprite_mesh(gp, np, gv);
   *ps = GpuPost{};
   ps->fog_color = rs_->fog_color; ps->fog_offset = rs_->fog_offset; ps->fog_shift = rs_->fog_shift;
   for (u32 i = 0; i < rs_->fog_density.size() && i < 34; ++i) ps->density[i] = rs_->fog_density[i];
