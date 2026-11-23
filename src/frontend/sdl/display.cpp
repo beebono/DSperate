@@ -242,11 +242,27 @@ bool Display::open_kms(int rot) {
   if (turned) {
     // SDL reports the panel turned and would turn its own GLES frames before scanout (the RGA rotate patches of
     // ArkOS and dArkMoss on portrait panels mounted landscape). This sink scans out past SDL, so the turn is ours:
-    // the rotation asked for if it is a quarter turn, else SDL's usual one, 270 (DS_ROTATE=90 for a panel
-    // mounted the other way). A half turn asked for on top of it makes 90.
+    // SDL's own (frontend::sdl_panel_turn: 270 on the stock patch, 90 where the board boots fbcon=rotate:1, as
+    // the XU Mini M and E5 Plus do; DS_KMS_TURN=90|270 overrides), then the rotation asked for on top of it, as
+    // it is on any other panel (spruce's tate DS_ROTATE=270 included). Pointer events are SDL's: they come turned
+    // by SDL's part already, and map_point undoes ours (ptr_rot_).
+    int sdl_turn = 0;
+    if (const char* t = std::getenv("DS_KMS_TURN"); t && *t) sdl_turn = std::atoi(t);
+    if (sdl_turn != 90 && sdl_turn != 270) {
+      std::string cmdline;
+      if (std::FILE* f = std::fopen("/proc/cmdline", "r")) {
+        char buf[1024];
+        const size_t n = std::fread(buf, 1, sizeof buf, f);
+        cmdline.assign(buf, n);
+        std::fclose(f);
+      }
+      sdl_turn = frontend::sdl_panel_turn(cmdline);
+    }
     turned_ = true;
-    rot_ = (rot == 90 || rot == 270) ? rot : rot == 180 ? 90 : 270;
-    std::fprintf(stderr, "drm: SDL reports the %dx%d panel as %dx%d; scanning out at the panel's size, picture turned %d here\n", oh, ow, ow, oh, rot_);
+    ptr_rot_ = rot;
+    rot_ = (sdl_turn + rot) % 360;
+    std::fprintf(stderr, "drm: SDL reports the %dx%d panel as %dx%d (its turn %d); scanning out at the panel's size, picture turned %d here\n",
+                 oh, ow, ow, oh, sdl_turn, rot_);
   }
   out_ = std::move(dr);
   layout();
@@ -647,12 +663,13 @@ void Display::set_layout(const Layout& l) {
 }
 
 bool Display::map_point(int wx, int wy, int& screen, int& sx, int& sy) const {
-  // Pointer events arrive in presented pixels; inverse of rotate_out()'s mapping. (Not under turned_: SDL has
-  // turned them already.)
-  if (rot_ && scaled_ && !turned_) {
+  // Pointer events arrive in presented pixels; inverse of rotate_out()'s mapping. Under turned_ SDL has undone
+  // its own turn already, so only the one asked for on top of it is left.
+  const int prot = turned_ ? ptr_rot_ : rot_;
+  if (prot && scaled_) {
     const int lw = scaled_w_, lh = scaled_h_;
     int lx = wx, ly = wy;
-    switch (rot_) {
+    switch (prot) {
       case 270: lx = lw - 1 - wy; ly = wx; break;
       case 90:  lx = wy; ly = lh - 1 - wx; break;
       case 180: lx = lw - 1 - wx; ly = lh - 1 - wy; break;

@@ -141,6 +141,13 @@ static void overrides() {
     CHECK(pick_kms_mode(portrait, 1280, 720, &t) == -1 && !t);
     CHECK(pick_kms_mode(square, 720, 720, &t) == 0 && !t);
     CHECK(pick_kms_mode({}, 640, 480, &t) == -1 && !t);
+    // SDL's own turn on such a panel, from fbcon=rotate (dArkMoss bootargs).
+    CHECK(sdl_panel_turn("root=/dev/mmcblk0p2 rootwait rw net.ifnames=0 fbcon=rotate:1 console=/dev/ttyFIQ0 quiet\n") == 90);
+    CHECK(sdl_panel_turn("root=/dev/mmcblk0p2 fbcon=rotate:3 quiet") == 270);
+    CHECK(sdl_panel_turn("fbcon=font:VGA8x8,rotate:1") == 90);
+    CHECK(sdl_panel_turn("xfbcon=rotate:1 quiet") == 270);
+    CHECK(sdl_panel_turn("fbcon=rotate:0") == 270);
+    CHECK(sdl_panel_turn("") == 270);
   }
   CHECK(eq(plan_window({Sink::Count, "x11", "", "1"}), "surface,renderer"));
   CHECK(eq(plan_window({Sink::Dmabuf, "wayland", "0", ""}), "renderer"));

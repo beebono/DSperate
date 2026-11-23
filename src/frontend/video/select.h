@@ -75,4 +75,9 @@ constexpr u32 kSurfaceMaxPanelPx = 1500000;
 struct ModeSize { u32 w, h; };
 int pick_kms_mode(const std::vector<ModeSize>& modes, int w, int h, bool* turned);
 
+// How far such an SDL turns its frames before scanout, from the kernel command line: the RGA patches turn the
+// same way as the board's fbcon=rotate (1: 90, the XU Mini M's and E5 Plus's; 3: 270, the stock odroidgoa patch
+// on V10, RG351P, RGB10 and the Miniloong). Anything else is taken as 270.
+int sdl_panel_turn(const std::string& cmdline);
+
 } // namespace ds::frontend

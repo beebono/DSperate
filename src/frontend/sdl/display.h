@@ -281,7 +281,8 @@ private:
   bool              scaled_ = false;
   int               rot_wanted_ = 0;      // set_rotation(); DS_ROTATE otherwise
   int               rot_ = 0;             // in effect on the scanline tiers
-  bool              turned_ = false;      // KMS under an SDL that reports the panel turned: rot_ is the panel's turn, pointer events come logical
+  bool              turned_ = false;      // KMS under an SDL that reports the panel turned: rot_ is SDL's turn plus the one asked for
+  int               ptr_rot_ = 0;         // under turned_, the turn asked for: the one between SDL's pointer frame and ours
   int               phys_w_ = 0, phys_h_ = 0;   // the presented buffer's size (scaled_w_/h_ are logical)
   std::vector<u32>  stage_;               // the logical frame under rotation
   u32*              phys_px_ = nullptr;   // the presented buffer this frame, under rotation

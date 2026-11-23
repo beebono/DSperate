@@ -121,4 +121,22 @@ int pick_kms_mode(const std::vector<ModeSize>& modes, int w, int h, bool* turned
   return -1;
 }
 
+int sdl_panel_turn(const std::string& cmdline) {
+  for (size_t at = cmdline.find("fbcon="); at != std::string::npos; at = cmdline.find("fbcon=", at + 1)) {
+    if (at && cmdline[at - 1] != ' ') continue;
+    const size_t end = cmdline.find_first_of(" \n", at);
+    const std::string arg = cmdline.substr(at + 6, end == std::string::npos ? std::string::npos : end - at - 6);
+    // fbcon takes comma-separated options: rotate:N among them.
+    for (size_t o = 0; o < arg.size();) {
+      const size_t c = arg.find(',', o);
+      const std::string opt = arg.substr(o, c == std::string::npos ? std::string::npos : c - o);
+      if (opt == "rotate:1") return 90;
+      if (opt == "rotate:3") return 270;
+      if (c == std::string::npos) break;
+      o = c + 1;
+    }
+  }
+  return 270;
+}
+
 } // namespace ds::frontend
