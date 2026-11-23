@@ -69,6 +69,46 @@ struct Lean::Impl {
   // draw's colour attachment is read back as the record, its alpha byte decoded in the copy out of the PBO.
   bool direct = true;
   bool direct_slot[kSlots] = {};
+  // The crack fill (ds_crack.glsl has the test and why; gl_resolve.frag fills the frames that have a resolve): on a
+  // frame without one, here on the decoded record. DS_LEAN_CRACK=0: off.
+  bool crack = true;
+  std::vector<std::pair<u32, u32>> crack_fills;
+  void fill_cracks(u32* rec, u32 fw, u32 fh, int longest) {
+    const auto in = [&](int x, int y) { return x >= 0 && y >= 0 && x < static_cast<int>(fw) && y < static_cast<int>(fh); };
+    const auto full = [&](int x, int y) { return !in(x, y) || (rec[static_cast<u32>(y) * W + static_cast<u32>(x)] >> 24) == 31u; };   // the frame's edge counts
+    const auto cand = [&](int x, int y) { return in(x, y) && (rec[static_cast<u32>(y) * W + static_cast<u32>(x)] >> 24) == 0u; };
+    crack_fills.clear();
+    for (int y = 0; y < static_cast<int>(fh); ++y) {
+      const u32* row = rec + static_cast<u32>(y) * W;
+      for (int x = 0; x < static_cast<int>(fw); ++x) {
+        if (row[x] >> 24) continue;
+        for (int ax = 0; ax < 2; ++ax) {   // crack_axis: the line runs down (the two beside it left and right), then across
+          const int dx = ax, dy = 1 - ax, sx = dy, sy = dx;
+          if (!full(x - sx, y - sy) || !full(x + sx, y + sy)) continue;
+          int len = 1; bool ok = true;
+          for (int sg = -1; sg <= 1 && ok; sg += 2) {
+            ok = false;
+            for (int k = 1; k <= longest; ++k) {
+              const int qx = x + sg * k * dx, qy = y + sg * k * dy;
+              if (!full(qx - sx, qy - sy) || !full(qx + sx, qy + sy)) break;
+              if (full(qx, qy)) { ok = true; break; }
+              if (!cand(qx, qy) || ++len > longest) break;
+            }
+          }
+          if (!ok) continue;
+          int ax0 = x - sx, ay0 = y - sy, ax1 = x + sx, ay1 = y + sy;   // the two beside it: one of them twice at the frame's edge
+          if (!in(ax0, ay0)) { ax0 = ax1; ay0 = ay1; }
+          if (!in(ax1, ay1)) { ax1 = ax0; ay1 = ay0; }
+          const u32 p0 = rec[static_cast<u32>(ay0) * W + static_cast<u32>(ax0)], p1 = rec[static_cast<u32>(ay1) * W + static_cast<u32>(ax1)];
+          u32 m = 31u << 24;
+          for (u32 sh = 0; sh < 24; sh += 8) m |= ((((p0 >> sh) & 63u) + ((p1 >> sh) & 63u) + 1u) >> 1) << sh;
+          crack_fills.emplace_back(static_cast<u32>(y) * W + static_cast<u32>(x), m);
+          break;
+        }
+      }
+    }
+    for (const auto& [i, m] : crack_fills) rec[i] = m;   // after the tests: a filled pixel is no full neighbour to the next
+  }
   void copy_out(u32 slot) {
     u32* dst = out_host[slot].data();
     std::memcpy(dst, map_out[slot], sizeof(u32) * W * H);   // out of the uncached map in one go; decoded in cached memory
@@ -78,6 +118,7 @@ struct Lean::Impl {
       const u32 a5 = ab < 4u ? 0u : std::min(31u, (ab + 4u) / 8u - 1u);
       dst[i] = ab ? ((w & 0x00FFFFFFu) | (a5 << 24)) : 0u;
     }
+    if (crack) fill_cracks(dst, W, H, scale > 1 ? static_cast<int>(32u * scale) : 8);   // ds_crack.glsl, crack_longest
   }
   // Program sets: 0 with mode-2 (toon / highlight) shading, 1 without (DS_TOON false: a frame without mode-2
   // polygons). [set][W-depth][variant].
@@ -409,6 +450,9 @@ std::unique_ptr<Lean> Lean::create(bool aa, std::string* why) {
     d.wclip = wclip;
     const std::string vdefs = wclip ? "#define DS_WCLIP 1\n" : "";
     const std::string aadef = "#define DS_EDGE_AA 1\n";
+    // The crack fill (gl_resolve.frag, gl_mark.frag; lean_crack.frag is the Vulkan raster's). DS_LEAN_CRACK=0: off.
+    d.crack = !(std::getenv("DS_LEAN_CRACK") && std::atoi(std::getenv("DS_LEAN_CRACK")) == 0);
+    const std::string crackdef = d.crack ? "#define DS_CRACK 1\n" : "";
     const GLuint vs_lean = compile(a, GL_VERTEX_SHADER, source(text_lean_vert(), vdefs), &err);
     const GLuint vs_lean_aa = d.aa ? compile(a, GL_VERTEX_SHADER, source(text_lean_vert(), vdefs + aadef), &err) : 0;
     if (d.aa && !vs_lean_aa) { if (why) *why = err; return nullptr; }
@@ -425,7 +469,7 @@ std::unique_ptr<Lean> Lean::create(bool aa, std::string* why) {
     if (!d.prog_prep || !d.prog_mask) { if (why) *why = err; return nullptr; }
     a.glUseProgram(d.prog_prep); sampler(a, d.prog_prep, "polytex", 0); sampler(a, d.prog_prep, "verttex", 1); d.loc_base_prep = a.glGetUniformLocation(d.prog_prep, "u_base");
     for (u32 ea = 0; ea < (d.aa ? 2u : 1u); ++ea) {
-      const GLuint fs_res = compile(a, GL_FRAGMENT_SHADER, source(text_resolve_frag(), vdefs + (ea ? aadef : "")), &err);
+      const GLuint fs_res = compile(a, GL_FRAGMENT_SHADER, source(text_resolve_frag(), vdefs + crackdef + (ea ? aadef : "")), &err);
       GLuint& pr = d.prog_resolve[ea];
       pr = link(a, vs_fs, fs_res, &err);
       if (fs_res) a.glDeleteShader(fs_res);
@@ -433,7 +477,7 @@ std::unique_ptr<Lean> Lean::create(bool aa, std::string* why) {
       a.glUseProgram(pr); sampler(a, pr, "s_col", 2); sampler(a, pr, "s_depth", 3); sampler(a, pr, "s_fog", 4);
     }
     if (d.mark) {
-      const GLuint fs_mark = compile(a, GL_FRAGMENT_SHADER, source(text_mark_frag(), vdefs), &err);
+      const GLuint fs_mark = compile(a, GL_FRAGMENT_SHADER, source(text_mark_frag(), vdefs + crackdef), &err);
       d.prog_mark = link(a, vs_fs, fs_mark, &err);
       if (fs_mark) a.glDeleteShader(fs_mark);
       if (!d.prog_mark) { if (why) *why = err; return nullptr; }

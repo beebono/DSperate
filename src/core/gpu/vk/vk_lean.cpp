@@ -194,6 +194,16 @@ struct Lean::Impl {
   // input attachments, and with it in the render pass the G52 took 5.3 ms for a 2x frame with nothing drawn
   // (0.9 with the hardware's resolve); Spirit Tracks' 2x frame 8.2 -> 3.5 ms. The fog is then one depth's a pixel.
   bool mshw = false;
+  // The crack fill (lean_msdec.frag): a pixel no polygon covered, or covered in part, between polygons that cover all
+  // their neighbours (the DS's rounding leaves slivers between tiles whose sides nearly meet, Pokémon Platinum's
+  // ground) takes its neighbours' alpha and colour, in the hardware-resolved frame's record pass, which samples its
+  // inputs and so reads the neighbours for nothing more. DS_LEAN_CRACK=0: off. Every other frame (the resolve
+  // subpass, the direct output) is drawn into a scratch image, pre, and a pass like that one writes the record from
+  // it (lean_crack.frag): those read the pixel on the tile and cannot see its neighbours. On the G52 that pass costs
+  // 0.05-0.3 ms of a 1x frame, 0.25-0.55 at 2x and 1.4-1.7 at 4x (the hardware-resolved frames: under 0.1).
+  bool crack = false;
+  Img pre;                              // the frame before the fill, where the hardware does not resolve (lean_crack.frag)
+  VkImageView pren = VK_NULL_HANDLE;    // ... as normalised bytes: the direct output's colour
   Img msr, fogr, dsr;
   VkImageView dsr_depth_view = VK_NULL_HANDLE;
   VkRenderPass rp_hw[2][2] = {};   // [the id word kept][the fog flag and depth kept]: compatible, the stores differ
@@ -307,7 +317,8 @@ struct Lean::Impl {
     if (samp_dec) a.vkDestroySampler(vk->dev, samp_dec, nullptr);
     if (mod_dec) a.vkDestroyShaderModule(vk->dev, mod_dec, nullptr);
     if (dsr_depth_view) a.vkDestroyImageView(vk->dev, dsr_depth_view, nullptr);
-    for (Img* im : {&msr, &fogr, &dsr}) { if (im->view) a.vkDestroyImageView(vk->dev, im->view, nullptr); if (im->img) a.vkDestroyImage(vk->dev, im->img, nullptr); if (im->mem) a.vkFreeMemory(vk->dev, im->mem, nullptr); }
+    if (pren) a.vkDestroyImageView(vk->dev, pren, nullptr);
+    for (Img* im : {&msr, &fogr, &dsr, &pre}) { if (im->view) a.vkDestroyImageView(vk->dev, im->view, nullptr); if (im->img) a.vkDestroyImage(vk->dev, im->img, nullptr); if (im->mem) a.vkFreeMemory(vk->dev, im->mem, nullptr); }
     if (rp_keep) a.vkDestroyRenderPass(vk->dev, rp_keep, nullptr);
     if (layout_mark) a.vkDestroyPipelineLayout(vk->dev, layout_mark, nullptr);
     if (pool_mark) a.vkDestroyDescriptorPool(vk->dev, pool_mark, nullptr);
@@ -403,6 +414,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     d.direct = dev.limits().ordered_depth && d.scale >= 3;   // above 2x: see Impl::direct
   }
   d.mshw = d.msaa && dev.limits().depth_resolve;
+  { const char* e = std::getenv("DS_LEAN_CRACK"); d.crack = !(e && std::atoi(e) == 0); }
   d.mark = true;   // edge marking (Impl::mark)
 
   // Buffers.
@@ -526,6 +538,12 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     if (a.vkCreateImageView(vk->dev, &vi, nullptr, &d.res8[i]) != VK_SUCCESS) return fail("record byte view");
     vi.format = VK_FORMAT_R8G8B8A8_UNORM;
     if (a.vkCreateImageView(vk->dev, &vi, nullptr, &d.resn[i]) != VK_SUCCESS) return fail("record normalised view");
+  }
+  if (d.crack && !d.mshw) {   // the frame before the crack fill: a record image more, the draw's in place of the slot's
+    if (!make_image(VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | (d.direct ? VkImageUsageFlags{VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT} : 0u), VK_IMAGE_ASPECT_COLOR_BIT, d.pre, VK_SAMPLE_COUNT_1_BIT,
+                    VkImageCreateFlags{VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT})) return fail("crack fill image");
+    VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = d.pre.img; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = VK_FORMAT_R8G8B8A8_UNORM; vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (a.vkCreateImageView(vk->dev, &vi, nullptr, &d.pren) != VK_SUCCESS) return fail("crack fill image view");
   }
   if (d.down) {
     // The 1x record's pass: rec1 its one attachment, the frame's record image sampled.
@@ -668,7 +686,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
   }
   {
     for (u32 sl = 0; sl < Impl::kSlots; ++sl) {
-      const VkImageView colv = d.direct ? d.resn[sl] : d.col_ms.view;
+      const VkImageView colv = !d.direct ? d.col_ms.view : d.pren ? d.pren : d.resn[sl];
       VkDescriptorImageInfo di[3]{};
       di[0].imageView = colv; di[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
       di[1].imageView = d.ds_depth_view; di[1].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
@@ -723,10 +741,14 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     dep[2] = dep[0]; dep[2].dstSubpass = VK_SUBPASS_EXTERNAL; dep[2].dependencyFlags = 0;
     VkRenderPassCreateInfo rpi{}; rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO; rpi.attachmentCount = mark_ms ? 6 : d.mark ? 5 : 4; rpi.pAttachments = at; rpi.subpassCount = 2; rpi.pSubpasses = sp; rpi.dependencyCount = 2; rpi.pDependencies = dep;
     const VkAttachmentReference in0d[3] = {{0, VK_IMAGE_LAYOUT_GENERAL}, {1, VK_IMAGE_LAYOUT_GENERAL}, {3, VK_IMAGE_LAYOUT_GENERAL}};
+    if (d.pre.img) {   // the output is sampled by the crack fill's pass, not copied out
+      at[2].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      dep[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT; dep[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    }
     if (d.direct) {
       // One subpass: the colour stored as the output, the record attachment unused; depth and the fog flag are
       // read back in rasterisation order by the fog draw, as the colour is by it and by the translucent runs.
-      at[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; at[0].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      at[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; at[0].finalLayout = d.pre.img ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
       at[1].finalLayout = VK_IMAGE_LAYOUT_GENERAL; at[3].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
       at[2].format = VK_FORMAT_R8G8B8A8_UNORM; at[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; at[2].finalLayout = VK_IMAGE_LAYOUT_GENERAL;   // unused: the spare colour image stands in
       c0[1].layout = VK_IMAGE_LAYOUT_GENERAL; ds0.layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -783,16 +805,17 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
       if (a.vkCreateRenderPass(vk->dev, &rpi, nullptr, &d.rp_keep) != VK_SUCCESS) return fail("render pass (edge marking)");
     }
     for (u32 i = 0; i < Impl::kSlots; ++i) {
-      VkImageView views[6] = {d.direct ? d.resn[i] : d.col_ms.view, d.ds_ms.view, d.direct ? d.col_ms.view : d.res[i].view, d.fog_ms.view, mark_ms ? d.idm_ms.view : d.idm.view, d.idm.view};
+      VkImageView views[6] = {!d.direct ? d.col_ms.view : d.pren ? d.pren : d.resn[i], d.ds_ms.view, d.direct ? d.col_ms.view : d.pre.view ? d.pre.view : d.res[i].view, d.fog_ms.view, mark_ms ? d.idm_ms.view : d.idm.view, d.idm.view};
       VkFramebufferCreateInfo fbi{}; fbi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO; fbi.renderPass = d.rp; fbi.attachmentCount = mark_ms ? 6 : d.mark ? 5 : 4; fbi.pAttachments = views; fbi.width = W; fbi.height = H; fbi.layers = 1;
       const VkImageView views_hw[8] = {d.col_ms.view, d.ds_ms.view, d.msr.view, d.fog_ms.view, d.idm_ms.view, d.idm.view, d.fogr.view, d.dsr.view};
       if (d.mshw) { fbi.attachmentCount = 8; fbi.pAttachments = views_hw; }
       if (a.vkCreateFramebuffer(vk->dev, &fbi, nullptr, &d.fb[i]) != VK_SUCCESS) return fail("framebuffer");
       if (d.split) { fbi.renderPass = d.rp_nm; fbi.attachmentCount = 4; if (a.vkCreateFramebuffer(vk->dev, &fbi, nullptr, &d.fb_nm[i]) != VK_SUCCESS) return fail("framebuffer (no id attachment)"); }
     }
-    if (d.mshw) {
+    if (d.mshw || d.pre.img) {
       // The pass that writes the record from the resolved images (lean_msdec.frag): each slot's record its one attachment.
-      if (!shader(shader_lean_msdec(), &d.mod_dec)) return fail("resolve decode shader");
+      // And from the frame before the crack fill (lean_crack.frag; binding 0 alone).
+      if (!shader(d.mshw ? shader_lean_msdec() : shader_lean_crack(), &d.mod_dec)) return fail("resolve decode shader");
       VkAttachmentDescription t{}; t.format = VK_FORMAT_R32_UINT; t.samples = VK_SAMPLE_COUNT_1_BIT; t.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; t.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
       t.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; t.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE; t.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; t.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
       const VkAttachmentReference ar{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
@@ -824,17 +847,21 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
         if (a.vkCreateFramebuffer(vk->dev, &fbi, nullptr, &d.fb_dec[i]) != VK_SUCCESS) return fail("resolve decode framebuffer");
         VkDescriptorSetAllocateInfo dsa{}; dsa.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO; dsa.descriptorPool = d.pool_dec; dsa.descriptorSetCount = 1; dsa.pSetLayouts = &d.dsl_dec;
         if (a.vkAllocateDescriptorSets(vk->dev, &dsa, &d.set_dec[i]) != VK_SUCCESS) return fail("resolve decode descriptor set");
-        const VkDescriptorImageInfo im[3] = {{d.samp_dec, d.msr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {d.samp_dec, d.fogr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {d.samp_dec, d.dsr_depth_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}};
+        const VkDescriptorImageInfo im[3] = {{d.samp_dec, d.mshw ? d.msr.view : d.pre.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {d.samp_dec, d.fogr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {d.samp_dec, d.dsr_depth_view, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL}};
         const VkDescriptorBufferInfo bi{vk_buf(d.post[i]), 0, sizeof(GpuPost)};
         VkWriteDescriptorSet w[4]{};
         for (u32 k = 0; k < 4; ++k) { w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[k].dstSet = d.set_dec[i]; w[k].dstBinding = k; w[k].descriptorCount = 1;
           w[k].descriptorType = k < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; if (k < 3) w[k].pImageInfo = &im[k]; else w[k].pBufferInfo = &bi; }
-        a.vkUpdateDescriptorSets(vk->dev, 4, w, 0, nullptr);
+        if (d.mshw) a.vkUpdateDescriptorSets(vk->dev, 4, w, 0, nullptr); else a.vkUpdateDescriptorSets(vk->dev, 1, w, 0, nullptr);
       }
       VkPipelineShaderStageCreateInfo st[2]{};
       st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
       st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = d.mod_fs; st[0].pName = "main";
       st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = d.mod_dec; st[1].pName = "main";
+      const VkBool32 dec_crack = (d.mshw ? d.crack : !d.direct) ? VK_TRUE : VK_FALSE;   // constant_id 2: the crack fill (Impl::crack); in lean_crack.frag, the resolve's flags to read
+      const VkSpecializationMapEntry dec_me{2, 0, sizeof(VkBool32)};
+      const VkSpecializationInfo dec_si{1, &dec_me, sizeof(VkBool32), &dec_crack};
+      st[1].pSpecializationInfo = &dec_si;
       VkPipelineVertexInputStateCreateInfo vin{}; vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
       VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
       VkViewport vp{0.f, 0.f, static_cast<float>(W), static_cast<float>(H), 0.f, 1.f}; VkRect2D sc{{0, 0}, {W, H}};
@@ -876,6 +903,9 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
   const float msaa_sharp = std::getenv("DS_MSAA_SHARP") ? std::clamp(static_cast<float>(std::atof(std::getenv("DS_MSAA_SHARP"))), 0.0f, 1.0f) : 0.0f;
   const VkSpecializationMapEntry sharp_me{1, 0, sizeof(float)};
   const VkSpecializationInfo sharp_si{1, &sharp_me, sizeof(float), &msaa_sharp};
+  struct { float sharp; VkBool32 crack; } const res_sc{msaa_sharp, d.pre.img ? VK_TRUE : VK_FALSE};   // the resolve subpass's: and constant_id 2, the crack fill's flags
+  const VkSpecializationMapEntry res_me[2] = {{1, 0, sizeof(float)}, {2, offsetof(decltype(res_sc), crack), sizeof(VkBool32)}};
+  const VkSpecializationInfo res_si{2, res_me, sizeof(res_sc), &res_sc};
   // Pipelines: one vertex/fragment pair, the DS rules in depth, stencil and blend state.
   // Built through the device's pipeline cache (~7 s from SPIR-V on the Mali
   // blob, a fraction from the cache), which is written back once they exist.
@@ -972,7 +1002,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
     VkPipelineShaderStageCreateInfo st[2]{};
     st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     st[0].stage = VK_SHADER_STAGE_VERTEX_BIT; st[0].module = d.mod_fs; st[0].pName = "main";
-    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = d.mod_res; st[1].pName = "main"; st[1].pSpecializationInfo = &sharp_si;
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = d.mod_res; st[1].pName = "main"; st[1].pSpecializationInfo = &res_si;
     VkPipelineVertexInputStateCreateInfo vin{}; vin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     VkPipelineInputAssemblyStateCreateInfo ia{}; ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     VkViewport vp{0.f, 0.f, static_cast<float>(W), static_cast<float>(H), 0.f, 1.f}; VkRect2D sc{{0, 0}, {W, H}};
@@ -1366,7 +1396,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     occ(9, [&] { a.vkCmdDraw(cb, 3, 1, 0, 0); });
   }
   a.vkCmdEndRenderPass(cb);
-  if (d.mshw) {
+  if (d.mshw || d.pre.img) {
     VkRenderPassBeginInfo rb{}; rb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO; rb.renderPass = d.rp_dec; rb.framebuffer = d.fb_dec[slot]; rb.renderArea = {{0, 0}, {W, H}};
     a.vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
     a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_dec); a.vkCmdSetScissor(cb, 0, 1, &whole);
@@ -1381,7 +1411,7 @@ bool Lean::submit(u32 npoly, u32 nvert, u32 ntexels, const GpuFrame& fin) {
     a.vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
     a.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.pipe_mark); a.vkCmdSetScissor(cb, 0, 1, &whole);
     a.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, d.layout_mark, 0, 1, &d.set_mark[slot], 0, nullptr);
-    const u32 mpc[4] = {mark_clear, FS < d.scale ? FS : d.mark_width, (f.dispcnt & ~0x10u) | ((f.flags2 & DS_FF2_GAME_AA) ? 0x10u : 0u), W | (H << 16)};   // bit 4 the game's own; the frame's size
+    const u32 mpc[4] = {mark_clear, (FS < d.scale ? FS : d.mark_width) | (d.crack ? 0x80000000u | (((d.msaa || FS > 1) ? 32u * FS : 8u) << 16) : 0u), (f.dispcnt & ~0x10u) | ((f.flags2 & DS_FF2_GAME_AA) ? 0x10u : 0u), W | (H << 16)};   // bit 4 the game's own; the frame's size
     a.vkCmdPushConstants(cb, d.layout_mark, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(mpc), mpc);
     if (!((skip >> 13) & 1)) a.vkCmdDraw(cb, 3, 1, 0, 0);
     a.vkCmdEndRenderPass(cb);

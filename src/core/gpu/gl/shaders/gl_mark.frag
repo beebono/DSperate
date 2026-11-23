@@ -27,9 +27,25 @@ uint tap(ivec2 p, ivec2 size) {
   return texelFetch(s_ids, p, 0).r;
 }
 bool behind_other(uint c, uint n) { return ((c ^ n) & 0x3Fu) != 0u && (c >> 8) < (n >> 8); }
+// The crack fill (DS_CRACK; lean_mark.frag has why): a crack's pixel (ds_crack.glsl; filled by gl_resolve.frag, or
+// on the CPU in a frame without a resolve) is not the rear plane to its neighbours here. Drawn: not the rear
+// plane's id and depth (bit 7 is off inside a polygon whose texture cuts texels out).
+bool is_rear(uint w) { return ((w ^ clear_word()) & 0xFFFFFF3Fu) == 0u; }
+bool crack_in(ivec2 q) { ivec2 size = textureSize(s_ids, 0); return q.x >= 0 && q.y >= 0 && q.x < size.x && q.y < size.y; }
+bool crack_full(ivec2 q) { return !crack_in(q) || !is_rear(texelFetch(s_ids, q, 0).r); }
+bool crack_cand(ivec2 q) { return crack_in(q) && is_rear(texelFetch(s_ids, q, 0).r); }
+#include "ds_crack.glsl"
+bool crack_at(ivec2 q, ivec2 size) {
+#ifdef DS_CRACK
+  return crack_cand(q) && crack_axis(q, crack_longest(int(max(pc.f.scale, 1u)), false)) != 0;
+#else
+  return false;
+#endif
+}
+bool other_at(uint c, ivec2 q, ivec2 size) { return behind_other(c, tap(q, size)) && !crack_at(q, size); }
 bool edge_at(uint c, ivec2 p, ivec2 size, int d) {
-  return behind_other(c, tap(p + ivec2(-d, 0), size)) || behind_other(c, tap(p + ivec2(d, 0), size)) ||
-         behind_other(c, tap(p + ivec2(0, -d), size)) || behind_other(c, tap(p + ivec2(0, d), size));
+  return other_at(c, p + ivec2(-d, 0), size) || other_at(c, p + ivec2(d, 0), size) ||
+         other_at(c, p + ivec2(0, -d), size) || other_at(c, p + ivec2(0, d), size);
 }
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy), size = textureSize(s_ids, 0);

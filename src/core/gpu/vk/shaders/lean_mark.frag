@@ -45,15 +45,32 @@ uvec2 tap(ivec2 p, ivec2 size) {
   return word(texelFetch(ids, p, 0));
 }
 bool behind_other(uvec2 c, uvec2 n) { return ((c.x ^ n.x) & 0x3Fu) != 0u && c.y < n.y; }
+// With the crack fill on (width's bit 31; ds_crack.glsl): a crack's pixel, which no polygon covered and which has
+// the record's colour by now, is not the rear plane to its neighbours here: marked, it left a dark ring round
+// every filled crack (Pokémon Platinum's ground). Drawn here: an opaque polygon's id on the pixel.
+bool crack_on() { return (pc.width & 0x80000000u) != 0u; }
+uvec2 rear() { return uvec2(pc.clear_word & 0x3Fu, pc.clear_word >> 9); }
+bool is_rear(uvec2 n) { return (n.x & 0x3Fu) == rear().x && n.y == rear().y; }
+ivec2 frame_size() { return ivec2(int(pc.size & 0xFFFFu), int(pc.size >> 16)); }
+bool crack_in(ivec2 q) { ivec2 size = frame_size(); return q.x >= 0 && q.y >= 0 && q.x < size.x && q.y < size.y; }
+bool crack_full(ivec2 q) { return !crack_in(q) || !is_rear(word(texelFetch(ids, q, 0))); }
+bool crack_cand(ivec2 q) { return crack_in(q) && is_rear(word(texelFetch(ids, q, 0))); }
+#include "ds_crack.glsl"
+bool crack_at(ivec2 q, ivec2 size) { return crack_axis(q, int((pc.width >> 16) & 0x7FFFu)) != 0; }   // the fill's longest (bits 16-30)
+bool other_at(uvec2 c, ivec2 q, ivec2 size) {
+  uvec2 n = tap(q, size);
+  if (!behind_other(c, n)) return false;
+  return !(crack_on() && is_rear(n) && q.x >= 0 && q.y >= 0 && q.x < size.x && q.y < size.y && crack_at(q, size));
+}
 bool edge_at(uvec2 c, ivec2 p, ivec2 size, int d) {
-  return behind_other(c, tap(p + ivec2(-d, 0), size)) || behind_other(c, tap(p + ivec2(d, 0), size)) ||
-         behind_other(c, tap(p + ivec2(0, -d), size)) || behind_other(c, tap(p + ivec2(0, d), size));
+  return other_at(c, p + ivec2(-d, 0), size) || other_at(c, p + ivec2(d, 0), size) ||
+         other_at(c, p + ivec2(0, -d), size) || other_at(c, p + ivec2(0, d), size);
 }
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy), size = ivec2(int(pc.size & 0xFFFFu), int(pc.size >> 16));
   uvec2 c = word(texelFetch(ids, p, 0));
   if ((c.x & 0x80u) == 0u) discard;   // nothing opaque here, or not a polygon's edge
-  int w = int(pc.width);
+  int w = int(pc.width & 0xFFFFu);
   if (!edge_at(c, p, size, w)) discard;
   uint ec = ps.edge[(c.x & 0x3Fu) >> 3];
   uvec3 rgb = uvec3(c15_to_18(ec, 0u), c15_to_18(ec, 4u), c15_to_18(ec, 9u));

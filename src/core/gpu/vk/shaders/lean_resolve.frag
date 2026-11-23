@@ -36,6 +36,14 @@ layout(input_attachment_index = 2, set = 1, binding = 2) uniform subpassInputMS 
 layout(location = 0) out uint o_word;
 layout(constant_id = 1) const float ds_msaa_sharp = 0.0;
 uint decode_alpha(uint ab) { return ab < 4u ? 0u : min(31u, (ab + 4u) / 8u - 1u); }   // (a + 1) * 8
+// The crack fill (vk_lean.cpp, Impl::crack; lean_crack.frag reads these and takes them off): what was drawn on the
+// pixel, before the fog, in the word's top bits: 29 every sample at alpha 31, 30 every sample drawn, 31 any drawn.
+layout(constant_id = 2) const bool ds_crack = false;
+uint crack_flags(uint nd, uint nf) {
+  if (!ds_crack) return 0u;
+  return (nf == uint(NSAMPLES) ? 0x20000000u : 0u) | (nd == uint(NSAMPLES) ? 0x40000000u : 0u) | (nd != 0u ? 0x80000000u : 0u);
+}
+void crack_count(vec4 c, inout uint nd, inout uint nf) { uint ab = uint(round(c.a * 255.0)); if (ab != 0u) ++nd; if (decode_alpha(ab) == 31u) ++nf; }
 uint c15_to_18(uint c, uint shift) { uint v = ((shift == 0u ? (c << 1) : (c >> shift)) & 0x3Eu); return v != 0u ? v + 1u : v; }
 uint fog_density(uint z) {
   uint id, frac;
@@ -96,8 +104,10 @@ void main() {
       // mean of its drawn samples, alpha the mean over the group (undrawn 0).
       vec3 ca = vec3(0.0), cb = vec3(0.0);
       float na = 0.0, nb = 0.0, da = 0.0, db = 0.0, sa = 0.0, sb = 0.0;
+      uint nd = 0u, nf = 0u;
       for (int s = 0; s < 4; ++s) {
         uvec3 rgb; uint a5;
+        crack_count(c[s], nd, nf);
         bool drawn = fogged(s, c[s], wbuf, fog_on, fog_colour, fogc, rgb, a5);
         if (packUnorm4x8(c[s]) == k0) { na += 1.0; sa += float(a5); if (drawn) { ca += vec3(rgb); da += 1.0; } }
         else                          { nb += 1.0; sb += float(a5); if (drawn) { cb += vec3(rgb); db += 1.0; } }
@@ -109,21 +119,23 @@ void main() {
       vec3 col = da > 0.0 && db > 0.0 ? col_a * wa + col_b * wb : da > 0.0 ? col_a : col_b;
       float al = (na > 0.0 ? sa / na : 0.0) * wa + (nb > 0.0 ? sb / nb : 0.0) * wb;
       uvec3 m = min(uvec3(round(col)), uvec3(63u));
-      o_word = m.r | (m.g << 8) | (m.b << 16) | (min(uint(round(al)), 31u) << 24);
+      o_word = m.r | (m.g << 8) | (m.b << 16) | (min(uint(round(al)), 31u) << 24) | crack_flags(nd, nf);
       return;
     }
   }
 #endif
   uvec3 acc = uvec3(0u);
-  uint asum = 0u, n = 0u;
+  uint asum = 0u, n = 0u, nd = 0u, nf = 0u;
   for (int s = 0; s < NSAMPLES; ++s) {
     uvec3 rgb; uint a5;
-    if (!fogged(s, LOAD(ms_col, s), wbuf, fog_on, fog_colour, fogc, rgb, a5)) continue;
+    vec4 c = LOAD(ms_col, s);
+    crack_count(c, nd, nf);
+    if (!fogged(s, c, wbuf, fog_on, fog_colour, fogc, rgb, a5)) continue;
     acc += rgb; asum += a5; ++n;
   }
   if (n == 0u) { o_word = 0u; return; }
   uvec3 m = (acc + n / 2u) / n;
   uint r = min(m.r, 63u), g = min(m.g, 63u), b = min(m.b, 63u);
   uint a5 = min((asum + uint(NSAMPLES / 2)) / uint(NSAMPLES), 31u);
-  o_word = r | (g << 8) | (b << 16) | (a5 << 24);
+  o_word = r | (g << 8) | (b << 16) | (a5 << 24) | crack_flags(nd, nf);
 }

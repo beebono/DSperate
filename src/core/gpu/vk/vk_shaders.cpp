@@ -34,6 +34,7 @@ DS_INCBIN(ds_vk_lean_resolve_1x, "lean_resolve_1x_frag.spv");
 DS_INCBIN(ds_vk_lean_fog, "lean_fog_frag.spv");
 DS_INCBIN(ds_vk_lean_down, "lean_down_frag.spv");
 DS_INCBIN(ds_vk_lean_msdec, "lean_msdec_frag.spv");
+DS_INCBIN(ds_vk_lean_crack, "lean_crack_frag.spv");
 DS_INCBIN(ds_vk_lean_mark, "lean_mark_frag.spv");
 
 namespace ds::gpu::vk {
@@ -73,6 +74,7 @@ Spirv shader_lean_resolve_1x() { return pick("lean_resolve_1x_frag.spv", ds_vk_l
 Spirv shader_lean_mark() { return pick("lean_mark_frag.spv", ds_vk_lean_mark_data, ds_vk_lean_mark_end); }
 Spirv shader_lean_down() { return pick("lean_down_frag.spv", ds_vk_lean_down_data, ds_vk_lean_down_end); }
 Spirv shader_lean_msdec() { return pick("lean_msdec_frag.spv", ds_vk_lean_msdec_data, ds_vk_lean_msdec_end); }
+Spirv shader_lean_crack() { return pick("lean_crack_frag.spv", ds_vk_lean_crack_data, ds_vk_lean_crack_end); }
 Spirv shader_lean_fog() { return pick("lean_fog_frag.spv", ds_vk_lean_fog_data, ds_vk_lean_fog_end); }
 Spirv shader_lean_resolve() { return pick("lean_resolve_frag.spv", ds_vk_lean_resolve_data, ds_vk_lean_resolve_end); }
 #define DS_SPIRV(fn, sym, file) Spirv fn() { return pick(file, sym##_data, sym##_end); }
