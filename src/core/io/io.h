@@ -262,6 +262,17 @@ public:
   SpiFirmware spi_fw; SpiTouch spi_tsc; SpiPower spi_pm;
   const s16* mic_ = nullptr; size_t mic_count_ = 0; u64 mic_start_ = 0;
   mutable bool mic_used_ = false;
+  // The SDK's microphone auto-sampling interrupts the ARM7 at the sample rate (7.8 kHz in the DS Zeldas, 130
+  // interrupts a frame) whether or not anything is listening. An ARM7 timer whose handler has read the AUX input
+  // after each of its last MIC_IDLE_STREAK delivered interrupts has only one in MIC_IDLE_EVERY delivered while no
+  // input arrives (no samples from the frontend); the first frame with input ends it. Fast and turbo timing, DS
+  // mode; DS_MIC_IDLE=0 turns it off, DS_MIC_IDLE=N (2-255) sets the ratio. Not saved with a state.
+  static constexpr u32 MIC_IDLE_STREAK = 64, MIC_IDLE_EVERY = 16;
+  mutable u64 mic_conv_at_ = 0;                 // when the AUX input was last read
+  mutable bool mic_conv_new_ = false;
+  u64 mic_tim_irq_at_[4] = {};                  // each ARM7 timer's last delivered interrupt
+  u8  mic_tim_streak_[4] = {}, mic_tim_skip_[4] = {};
+  bool mic_idle_gate(int idx);                  // true: deliver this overflow's interrupt
   Rtc rtc;
   Cart cart;
   u16 arm7_bios_prot = 0;    // reads below this from outside the BIOS return garbage

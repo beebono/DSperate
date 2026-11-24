@@ -233,6 +233,25 @@ void Io::timer_schedule(Cpu cpu, int idx) {
   nds_.sched.schedule(id, t.start_time + cycles, timer_event, (static_cast<u32>(cpu) << 2) | idx);   // from the sample point, exact
 }
 
+// See mic_tim_streak_ (io.h).
+bool Io::mic_idle_gate(int idx) {
+  static const u32 every = [] {
+    const char* e = std::getenv("DS_MIC_IDLE");   // 0: every interrupt is delivered; N: one in N while the microphone is silent
+    if (!e) return MIC_IDLE_EVERY;
+    const int v = std::atoi(e);
+    return v >= 2 && v <= 255 ? static_cast<u32>(v) : 0u;
+  }();
+  if (!every || !g_fast_timing || nds_.dsi) return true;
+  if (mic_count_ != 0) { mic_tim_skip_[idx] = 0; mic_tim_irq_at_[idx] = nds_.sched.event_time(); return true; }   // input: full rate at once
+  if (mic_tim_skip_[idx]) { --mic_tim_skip_[idx]; return false; }
+  // Did the handler of this timer's last delivered interrupt read the microphone? A read shortly after it counts.
+  const bool sampled = mic_conv_new_ && mic_conv_at_ >= mic_tim_irq_at_[idx] && mic_conv_at_ - mic_tim_irq_at_[idx] < 8192;
+  if (sampled) { mic_conv_new_ = false; if (mic_tim_streak_[idx] < 255) ++mic_tim_streak_[idx]; } else mic_tim_streak_[idx] = 0;
+  mic_tim_irq_at_[idx] = nds_.sched.event_time();
+  if (mic_tim_streak_[idx] >= MIC_IDLE_STREAK) mic_tim_skip_[idx] = static_cast<u8>(every - 1);
+  return true;
+}
+
 void Io::timer_overflow(Cpu cpu, int idx) {
   Timer& t = cpu_io[ci(cpu)].timers[idx];
   t.counter = t.reload;
@@ -242,7 +261,7 @@ void Io::timer_overflow(Cpu cpu, int idx) {
   if (dbg && dbg_left > 0 && cpu == Cpu::ARM7) { --dbg_left;
     std::fprintf(stderr, "[state] arm7 timer%d overflow at %llu (now %llu) control %04x reload %04x\n", idx,
                  (unsigned long long)t.start_time, (unsigned long long)nds_.sched.now(), t.control, t.reload); }
-  if (t.control & 0x40) request_irq(cpu, IRQ_TIMER0 + idx);
+  if ((t.control & 0x40) && (cpu == Cpu::ARM9 || mic_idle_gate(idx))) request_irq(cpu, IRQ_TIMER0 + idx);
   if (idx < 3) {
     Timer& n = cpu_io[ci(cpu)].timers[idx + 1];
     if (n.running() && n.count_up()) {
@@ -531,6 +550,7 @@ void Io::set_mic(const s16* samples, size_t count) {
 // ADC would. Register 2 bit 0 (amplifier enable) not honoured.
 u16 Io::mic_sample() const {
   mic_used_ = true;
+  mic_conv_at_ = nds_.sched.now(); mic_conv_new_ = true;
   static const bool log = std::getenv("DS_MIC_LOG") != nullptr;
   if (log) {
     static u64 reads = 0, last_frame = 0; static int peak = 0;
