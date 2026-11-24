@@ -470,6 +470,7 @@ constexpr OneParam kOneParam;
 void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
   if (!geometry_on_) return;
   static const bool quads = !(std::getenv("DS_GX_QUAD") && std::getenv("DS_GX_QUAD")[0] == '0');
+  static const bool wide = !(std::getenv("DS_GX_WIDE") && std::getenv("DS_GX_WIDE")[0] == '0');   // DS_GX_WIDE=0: packed words other than four one-parameter commands go through the walk
   // The cursors ride in registers for the whole run and are written back once.
   struct BurstSink {
     u8* c; u32* p; u32 cn, pn, inf;
@@ -493,6 +494,32 @@ void Gpu3D::gxfifo_dma_burst(const u8* src, u32 n) {
         sink.cn += 4; sink.pn += 4;
         p.cur_cmd = 0; p.param_count = 1; p.total_params = 1;
         i += 5;
+        continue;
+      }
+    }
+    // Any other packed word that is one to four commands with parameters and nothing above them (a normal /
+    // texcoord / 16-bit vertex group is 1 + 1 + 2): all of it at once when the burst holds every parameter. A
+    // zero-parameter command or a NOP between commands leaves the word to the walk (taking those here too, a
+    // command at a time, measured slower than the walk on a Cortex-A35). The parser ends as the walk leaves it:
+    // no command pending, the counts those of the last command.
+    if (p.num_cmds == 0 && sink.inf == 0 && wide) {
+      u32 h;
+      std::memcpy(&h, src + i * 4, 4);
+      const u32 n0 = CMD_PARAMS[h & 0xFF], n1 = CMD_PARAMS[(h >> 8) & 0xFF], n2 = CMD_PARAMS[(h >> 16) & 0xFF], n3 = CMD_PARAMS[h >> 24];
+      u32 m = 0, total = 0, last = 0;
+      if (n0 == 0) {}
+      else if ((h >> 8) == 0) { m = 1; total = n0; last = n0; }
+      else if (n1 == 0) {}
+      else if ((h >> 16) == 0) { m = 2; total = n0 + n1; last = n1; }
+      else if (n2 == 0) {}
+      else if ((h >> 24) == 0) { m = 3; total = n0 + n1 + n2; last = n2; }
+      else if (n3 != 0) { m = 4; total = n0 + n1 + n2 + n3; last = n3; }
+      if (m && n - i > total) {
+        std::memcpy(sink.c + sink.cn, &h, 4);   // the bytes past m are zero and the next commit overwrites them (the log keeps 8 of slack)
+        std::memcpy(sink.p + sink.pn, src + i * 4 + 4, total * 4);
+        sink.cn += m; sink.pn += total;
+        p.cur_cmd = 0; p.param_count = last; p.total_params = last;
+        i += 1 + total;
         continue;
       }
     }
