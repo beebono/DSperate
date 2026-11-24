@@ -217,12 +217,16 @@ bool Display::open_disp(bool linear, bool vsync, int rot) {
 // only driver is Mali EGL over fbdev (H700 handhelds under BaseOS).
 bool Display::open_fbdev(bool vsync, int rot) {
   auto fo = std::make_unique<FbdevOut>();
+  if (gpu_wanted_) fo->set_bufs(FbdevOut::DEFAULT_BUFS + 1);
   if (!fo->open(win_, vsync)) return false;
   out_ = std::move(fo);
   scaled_ = true;
   rot_ = rot;
   layout();
   build_scale();
+  // The Vulkan present where fb0 is exported as a dma-buf (A133P disp2); no word where it is not (H700 Mali fb).
+  ScanoutOut::DmabufPlane p0;
+  if (out_->dmabuf_plane(0, p0) && try_gpu_present()) return true;
   std::fprintf(stderr, "video: fbdev scanout %dx%d, %s driver, scanline scaling, rot %d, vsync %s\n",
                out_->width(), out_->height(), SDL_GetCurrentVideoDriver(), rot_, vsync ? "on" : "off");
   return true;

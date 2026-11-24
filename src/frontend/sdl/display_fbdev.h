@@ -9,7 +9,10 @@
 // FBIOPAN_DISPLAY; SDL is kept only for the window/events/pad. The pan
 // itself blocks for the refresh on these drivers, so --no-vsync is a no-op.
 // open() fails cleanly if fb0 isn't 32bpp ARGB8888 or can't hold two panel
-// buffers, and Display falls back to SDL's own paths.
+// buffers, and Display falls back to SDL's own paths. Where the driver
+// exports fb0 as a dma-buf (FBIOGET_DMABUF: the Allwinner disp2 fb on the
+// TrimUI Smart Pro and other A133P boards), the Vulkan present draws
+// straight into the panel buffers, each one an offset in that one dma-buf.
 #pragma once
 
 #include "core/types.h"
@@ -27,11 +30,14 @@ namespace ds::sdl {
 
 class FbdevOut : public ScanoutOut {
 public:
-  static constexpr int MAX_BUFS = 3;
+  static constexpr int MAX_BUFS = 4, DEFAULT_BUFS = 3;
 
   // True if /dev/fb0 opens read-write and describes a 32bpp panel. Cheap,
   // cached; safe to call before SDL_Init.
   static bool available();
+
+  // Before open(): buffers to ask for (the GPU present keeps one more in flight).
+  void set_bufs(int n) { want_bufs_ = n < 2 ? 2 : n > MAX_BUFS ? MAX_BUFS : n; }
 
   // Resizes `win` to fb0's panel size (window has no size of its own on the
   // headless driver). False leaves nothing changed.
@@ -48,6 +54,7 @@ public:
 
   u32* begin_frame() override;
   void end_frame() override;
+  bool dmabuf_plane(int buf, DmabufPlane& out) const override;
 
 private:
   void pan(int buf);
@@ -62,6 +69,9 @@ private:
   size_t buf_bytes_ = 0;            // one buffer: line_length * yres
   int  w_ = 0, h_ = 0, stride_ = 0; // stride in pixels
   int  bufs_ = 0;
+  int  want_bufs_ = DEFAULT_BUFS;
+  int  dmabuf_ = -1;                // fb0 as a dma-buf (FBIOGET_DMABUF), or -1
+  u32  line_bytes_ = 0;
   fb_var_screeninfo var_{};
   bool vsync_ = true;
   bool pan_blocks_ = true;          // FBIOPAN_DISPLAY waits for the refresh (measured once)

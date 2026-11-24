@@ -303,7 +303,11 @@ struct GpuPresent::Impl {
   bool import(const ScanoutOut::DmabufPlane& p, Imported& b, std::string* why) {
     const VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;
     const bool mod = dev->limits().drm_modifier;
-    VkSubresourceLayout plane{}; plane.offset = p.offset; plane.rowPitch = p.stride_bytes;
+    // A buffer at an offset in a larger dma-buf (fbdev: the panel buffers of fb0's one export) is bound at that
+    // offset in the imported memory, not placed by the plane layout: the PowerVR driver reads the plane offset
+    // as 0, so every image landed on buffer 0 and the others showed black.
+    const VkDeviceSize at = p.offset;
+    VkSubresourceLayout plane{}; plane.offset = 0; plane.rowPitch = p.stride_bytes;
     VkImageDrmFormatModifierExplicitCreateInfoEXT mex{};
     mex.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
     mex.drmFormatModifier = 0;   // DRM_FORMAT_MOD_LINEAR
@@ -340,12 +344,13 @@ struct GpuPresent::Impl {
     if (type == ~0u) { if (why) *why = "no memory type for the imported dma-buf"; drop_import(b); return false; }
     const int dfd = dup(p.fd);   // the import takes ownership of the fd on success
     VkMemoryDedicatedAllocateInfo ded{}; ded.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO; ded.image = b.img;
-    VkImportMemoryFdInfoKHR imp{}; imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR; imp.pNext = &ded;
+    if (at && mr.alignment && at % mr.alignment) { close(dfd); if (why) *why = "scanout buffer offset not aligned for the image"; drop_import(b); return false; }
+    VkImportMemoryFdInfoKHR imp{}; imp.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR; imp.pNext = at ? nullptr : &ded;   // a dedicated allocation binds at 0 only
     imp.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT; imp.fd = dfd;
     VkMemoryAllocateInfo ai{}; ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO; ai.pNext = &imp;
-    ai.allocationSize = mr.size; ai.memoryTypeIndex = type;
+    ai.allocationSize = at + mr.size; ai.memoryTypeIndex = type;
     if (a->vkAllocateMemory(vk->dev, &ai, nullptr, &b.mem) != VK_SUCCESS) { close(dfd); if (why) *why = "vkAllocateMemory (import) failed"; drop_import(b); return false; }
-    if (a->vkBindImageMemory(vk->dev, b.img, b.mem, 0) != VK_SUCCESS) { if (why) *why = "vkBindImageMemory failed"; drop_import(b); return false; }
+    if (a->vkBindImageMemory(vk->dev, b.img, b.mem, at) != VK_SUCCESS) { if (why) *why = "vkBindImageMemory failed"; drop_import(b); return false; }
     VkImageViewCreateInfo vi{}; vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO; vi.image = b.img;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = fmt; vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     if (a->vkCreateImageView(vk->dev, &vi, nullptr, &b.view) != VK_SUCCESS) { if (why) *why = "vkCreateImageView failed"; drop_import(b); return false; }

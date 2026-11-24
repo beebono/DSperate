@@ -23,6 +23,13 @@ namespace {
 #define FBIO_WAITFORVSYNC _IOW('F', 0x20, u32)
 #endif
 
+// The Allwinner disp2 fb's export of the whole fb memory as a dma-buf (also
+// in other vendor kernels with the same number). Absent: ENOTTY or EINVAL.
+struct fb_dmabuf_export { u32 fd; u32 flags; };
+#define DS_FBIOGET_DMABUF _IOR('F', 0x21, struct fb_dmabuf_export)
+
+constexpr u32 FMT_XRGB8888 = 0x34325258;   // 'XR24'; the core writes 0xAARRGGBB and we are opaque
+
 constexpr const char* FB_PATH = "/dev/fb0";
 
 u64 now_ns() { timespec t{}; clock_gettime(CLOCK_MONOTONIC, &t); return static_cast<u64>(t.tv_sec) * 1000000000ull + static_cast<u64>(t.tv_nsec); }
@@ -65,11 +72,11 @@ bool FbdevOut::open(SDL_Window* win, bool vsync) {
   if (ioctl(fd_, FBIOGET_VSCREENINFO, &var_) != 0) { std::perror("fbdev: FBIOGET_VSCREENINFO"); close(); return false; }
   if (!is_argb8888(var_)) { std::fprintf(stderr, "fbdev: fb0 is not ARGB8888\n"); close(); return false; }
 
-  // Ask for three panels of virtual height; a driver that refuses keeps
+  // Ask for the panels of virtual height; a driver that refuses keeps
   // whatever it had, and two is still a usable tier.
-  if (var_.yres_virtual < var_.yres * MAX_BUFS) {
+  if (var_.yres_virtual < var_.yres * static_cast<u32>(want_bufs_)) {
     fb_var_screeninfo want = var_;
-    want.yres_virtual = var_.yres * MAX_BUFS;
+    want.yres_virtual = var_.yres * static_cast<u32>(want_bufs_);
     want.xres_virtual = var_.xres;
     want.yoffset = 0;
     want.activate = FB_ACTIVATE_NOW;
@@ -84,7 +91,7 @@ bool FbdevOut::open(SDL_Window* win, bool vsync) {
   stride_ = static_cast<int>(fix.line_length / 4);
   buf_bytes_ = static_cast<size_t>(fix.line_length) * var_.yres;
   bufs_ = static_cast<int>(var_.yres_virtual / var_.yres);
-  if (bufs_ > MAX_BUFS) bufs_ = MAX_BUFS;
+  if (bufs_ > want_bufs_) bufs_ = want_bufs_;
   while (bufs_ > 0 && buf_bytes_ * static_cast<size_t>(bufs_) > fix.smem_len) --bufs_;
   if (bufs_ < 2) { std::fprintf(stderr, "fbdev: fb0 holds %d panel buffer(s); two are needed\n", bufs_); close(); return false; }
 
@@ -93,6 +100,10 @@ bool FbdevOut::open(SDL_Window* win, bool vsync) {
   if (m == MAP_FAILED) { std::perror("fbdev: mmap"); map_ = nullptr; close(); return false; }
   map_ = static_cast<u8*>(m);
   std::memset(map_, 0, buf_bytes_ * static_cast<size_t>(bufs_));
+  line_bytes_ = fix.line_length;
+  fb_dmabuf_export ex{};
+  dmabuf_ = ioctl(fd_, DS_FBIOGET_DMABUF, &ex) == 0 ? static_cast<int>(ex.fd) : -1;
+  if (dmabuf_ >= 0) fcntl(dmabuf_, F_SETFD, FD_CLOEXEC);
 
   // Presenter thread always runs: FBIOPAN_DISPLAY blocks for the refresh, so
   // panning from end_frame() directly would stall emulation regardless.
@@ -104,7 +115,7 @@ bool FbdevOut::open(SDL_Window* win, bool vsync) {
   var_.yoffset = 0; var_.xoffset = 0;
   fit_window(win);
   thread_ = std::thread([this] { presenter(); });
-  std::fprintf(stderr, "fbdev: %dx%d, stride %d px, %d buffers, %u lines virtual\n", w_, h_, stride_, bufs_, var_.yres_virtual);
+  std::fprintf(stderr, "fbdev: %dx%d, stride %d px, %d buffers, %u lines virtual%s\n", w_, h_, stride_, bufs_, var_.yres_virtual, dmabuf_ >= 0 ? ", exported as a dma-buf" : "");
   return true;
 }
 
@@ -127,6 +138,8 @@ void FbdevOut::close() {
     munmap(map_, map_len_);
     map_ = nullptr;
   }
+  if (dmabuf_ >= 0) ::close(dmabuf_);
+  dmabuf_ = -1;
   if (fd_ >= 0) ::close(fd_);
   fd_ = -1;
   cur_ = -1;
@@ -157,6 +170,13 @@ void FbdevOut::end_frame() {
     pan(buf);
     displayed_ = buf;
   }
+}
+
+bool FbdevOut::dmabuf_plane(int buf, DmabufPlane& out) const {
+  if (dmabuf_ < 0 || buf < 0 || buf >= bufs_) return false;
+  out.fd = dmabuf_; out.offset = static_cast<u32>(static_cast<size_t>(buf) * buf_bytes_); out.stride_bytes = line_bytes_;
+  out.width = static_cast<u32>(w_); out.height = static_cast<u32>(h_); out.fourcc = FMT_XRGB8888;
+  return true;
 }
 
 void FbdevOut::pan(int buf) {
