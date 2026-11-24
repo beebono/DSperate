@@ -140,6 +140,7 @@ struct Lean::Impl {
   // the direct output. DS_LEAN_EDGEMARK=0 leaves the pass out (the attachment
   // stays); mark_width is the second neighbour distance in raster pixels: the scale, one DS pixel
   bool mark = false, mark_on = true;
+  bool no_lag = false;   // never the frame before under the lag rule (DS_GPU_NOLAG; Imagination by default)
   u32 mark_width = 1;
   // A frame of flat polygons alone (each at one depth and one w: sprites, backdrops, fades) is drawn at 1x into the
   // top left 256x192 of the slot's images, the viewport, scissor and render areas with it; fscale is each slot's
@@ -402,6 +403,11 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device> devp, bool msaa, std:
   // its byte view with the pixels loaded, and there every pixel of the frame comes out with its red byte alone (no
   // green, blue or alpha: a black screen wherever a game marks edges). DS_LEAN_EDGEMARK=1 turns it on regardless.
   { const char* e = std::getenv("DS_LEAN_EDGEMARK"); d.mark_on = e ? std::atoi(e) != 0 : dev.limits().vendor_id != 0x1010u; }
+  // The lag rule is off on Imagination's driver by default: the GE8300 (TrimUI Smart Pro) is late often enough at 1x
+  // (NSMB in play: ~110 of 600 frames) that the CPU composite kept showing the frame before's 3D, which reads as a
+  // flicker. Waiting for the frame instead cost the Smart Pro no median time (9.1-9.2 ms either way) and about 1 ms at
+  // p99 (14.5-14.8 against 13.6-13.7), 5-7 frames of 1500 over budget against 2-4. DS_GPU_NOLAG=0|1 sets it either way.
+  { const char* e = std::getenv("DS_GPU_NOLAG"); d.no_lag = e && *e ? std::atoi(e) != 0 : dev.limits().vendor_id == 0x1010u; }
   d.mark_width = d.scale;   // one DS pixel
   { const char* e = std::getenv("DS_LEAN_FLAT1X"); const char* fe = std::getenv("DS_LEAN_FINE");   // the debug read-back is the whole image: no corner frames beside it
     { const char* se = std::getenv("DS_LEAN_SOFT2X"); d.soft2x = d.scale > 1 && !(se && std::atoi(se) == 0); }
@@ -1602,7 +1608,7 @@ const u32* Lean::frame_ready(u64 want, bool allow_lag) {
   if (!d.gen) return nullptr;
   // The frame asked for, clamped to the resident ones (the newest when 0).
   // One not submitted yet: the newest under the lag rule if it is done, else nothing (the caller waits for the submit).
-  static const bool no_lag = std::getenv("DS_GPU_NOLAG") && std::atoi(std::getenv("DS_GPU_NOLAG")) != 0;   // debug: never the frame before (deterministic dumps)
+  const bool no_lag = d.no_lag;   // never the frame before (DS_GPU_NOLAG; Imagination by default)
   if (want > d.gen) {
     if (!allow_lag || no_lag) return nullptr;
     const int nf = d.slot_of(d.gen);
