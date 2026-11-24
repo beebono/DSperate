@@ -568,6 +568,26 @@ void Io::spi_release() {
   spi_pm.hold = false; spi_fw.hold = false; spi_fw.addr = 0; spi_tsc.pos = 0; spi_tsc.dsi_pos = 0;
 }
 
+u32 Io::romctrl_read_poll(Cpu cpu) {
+  cart_catch_up();
+  const u32 v = cart.romctrl;
+  // Waiting for a word: a read transfer under way, no DRQ, the word clock lazy (no DMA event) and not stalled.
+  if ((v & 0xC0800000u) != 0x80000000u || cart.event_armed || cart.late || cart.transfer_pos >= cart.transfer_len || nds_.dsi) { cart_poll_streak_ = 0; return v; }
+  static const bool off = std::getenv("DS_CART_POLL_SKIP") && std::getenv("DS_CART_POLL_SKIP")[0] == '0';
+  if (++cart_poll_streak_ >= CART_POLL_STREAK && !off && nds_.sched.idle_skip_enabled()) {
+    CpuContext& c = nds_.cpu(cpu);
+    const u64 now = nds_.sched.now();
+    if (nds_.sched.running() == &c && c.hot.cycle_budget > 0 && cart.next_word_at > now) {
+      // ARM9 cycles until the word, in the poller's own cycles, capped at the slice (see spicnt_read_arm7).
+      const u64 rem9 = cart.next_word_at - now;
+      const u64 own = cpu == Cpu::ARM9 ? rem9 : (rem9 + 1) / 2;
+      const s32 charge = own > static_cast<u64>(c.hot.cycle_budget) ? c.hot.cycle_budget : static_cast<s32>(own);
+      c.hot.cycle_budget -= charge;
+    }
+  }
+  return v;
+}
+
 u16 Io::spicnt_read_arm7() {
   if (!spi_busy()) { spi_poll_streak_ = 0; return spicnt_read(); }
   if (++spi_poll_streak_ >= SPI_POLL_STREAK && nds_.sched.idle_skip_enabled()) {
@@ -1115,6 +1135,7 @@ bool Io::census_env_on() { return g_ioc.on; }
 u32 Io::read(Cpu cpu, u32 addr, u32 width) {
   if (prof::census && g_ioc.on) g_ioc.rd[cpu == Cpu::ARM9 ? 0 : 1][addr]++;
   if (cpu == Cpu::ARM7 && (addr & ~3u) != 0x040001C0) spi_poll_streak_ = 0;
+  if (addr != 0x040001A4 || width != 32) cart_poll_streak_ = 0;
   if (nds_.dsi && (addr & 0xFFFFF000) == 0x04004000) return dsi_read(cpu, addr, width);
   if (!io_unowned(addr - 0x04000000)) {
     if (cpu == Cpu::ARM9 && gpu::Gpu3D::owns_reg(addr)) return nds_.gpu3d.read(addr, width);
@@ -1128,6 +1149,7 @@ u32 Io::read(Cpu cpu, u32 addr, u32 width) {
 
 void Io::write(Cpu cpu, u32 addr, u32 width, u32 value) {
   if (prof::census && g_ioc.on) g_ioc.wr[cpu == Cpu::ARM9 ? 0 : 1][addr]++;
+  cart_poll_streak_ = 0;
   if ((addr & ~3u) == 0x04100010) {   // ROMDATA, write direction
     const u32 sh = 8 * (addr & 3);
     cart_write_data(value << sh, (width == 32 ? 0xFFFFFFFFu : width == 16 ? 0xFFFFu : 0xFFu) << sh);
@@ -1161,7 +1183,7 @@ Io::Special Io::read32_special(Cpu cpu, u32 addr) {
   case 0x82: return {c.ime, true};
   case 0x84: return {c.ie, true};
   case 0x85: return {c.if_, true};
-  case 0x69: cart_catch_up(); return {cart.romctrl, true};
+  case 0x69: return {romctrl_read_poll(cpu), true};
   case 0xa0: return {divcnt_read(), true};
   case 0xa4: return {static_cast<u32>(math.div_num), true};
   case 0xa5: return {static_cast<u32>(math.div_num >> 32), true};

@@ -744,7 +744,7 @@ void Bus::io_write(Cpu cpu, u32 addr, u32 width, u32 v) {
   case 0x04:
     // ARM9 word stores to GXFIFO/direct command ports: straight to the
     // geometry engine instead of through io_unowned's slower path.
-    if (width == 32 && cpu == Cpu::ARM9 && addr - 0x04000400 < 0x1CC && !io::Io::census_on()) { nds_.gpu3d.gx_port_write(addr, v); return; }
+    if (width == 32 && cpu == Cpu::ARM9 && addr - 0x04000400 < 0x1CC && !io::Io::census_on()) { nds_.io.cart_poll_reset(); nds_.gpu3d.gx_port_write(addr, v); return; }
     nds_.io.write(cpu, addr, width, v); return;
   case 0x05: nds_.gpu.palette_store(cpu, addr, width, v); return;
   case 0x07: nds_.gpu.oam_store(cpu, addr, width, v); return;

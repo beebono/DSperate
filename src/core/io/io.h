@@ -266,6 +266,14 @@ public:
   Cart cart;
   u16 arm7_bios_prot = 0;    // reads below this from outside the BIOS return garbage
   bool cart_drq() { cart_catch_up(); return (cart.romctrl & 0x00800000) != 0; }
+  // ROMCTRL polled for the next word's DRQ (a CPU copy loop spins on it between words, a dozen reads a word):
+  // after this many back-to-back reads that find none, the rest of the wait for the word is charged to the
+  // polling CPU's budget instead of spun, as the SPI busy wait is. Any other register access by either CPU
+  // starts the count again. DS mode only; DS_IDLE_SKIP=0 or DS_CART_POLL_SKIP=0 disables.
+  static constexpr u32 CART_POLL_STREAK = 3;
+  u32 cart_poll_streak_ = 0;
+  u32 romctrl_read_poll(Cpu cpu);
+  void cart_poll_reset() { cart_poll_streak_ = 0; }
   // Hot: every ROMCTRL/ROMDATA read.
   void cart_catch_up() { if (cart.transfer_pos < cart.transfer_len) cart_catch_up_slow(); }
   // ARM7 0x04800000-0x0480FFFF, gated on POWCNT2 bit 1.
