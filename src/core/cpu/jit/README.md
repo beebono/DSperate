@@ -29,7 +29,7 @@ the stubs and the translator behind the `backend` interface in
 | `a32/emit.h` | A32 (ARMv7) encoder, ARM state |
 | `a32/convention.h` | the ARMv7 register map: guest r0-r3 and sp pinned in r4-r8, budget r9, page table r10, context r11; the other guest registers in memory and a per-block cache; guest NZCVQ in the APSR |
 | `a32/stubs.cpp` | the ARMv7 stubs (AAPCS32: `blx` to Thumb-2 helpers, struct return in memory, 8-byte stack frames) |
-| `a32/translate.cpp` | ARMv7 translator: register cache, data processing / multiplies / branches (static and indirect) by field substitution with native flags and predication, single loads/stores and same-page LDM/STM (pc included) with a page-table fast path, same-mode MSR; the rest through the fallback stub; same block shape as a64 |
+| `a32/translate.cpp` | ARMv7 translator: register cache, data processing / multiplies / branches (static and indirect) by field substitution with native flags and predication, single loads/stores (LDR pc included) and same-page LDM/STM (pc included) with a page-table fast path, block transfers off that path word by word through the slow stubs, user-bank LDM/STM, exception returns and jump tables, ARM9 CP15 reads, SWP under fast timing, same-mode MSR; the rest through the fallback stub; same block shape as a64. `DS_JIT_A32_LEGACY=1` sends the forms ported from a64 on 2026-11-23 back to the interpreter, for timing the two on one binary |
 
 The ARMv7 backend's gates, run after every step: `test_jit` under qemu-arm (1600 trials), the five replay
 scenes' 300-frame hashes against the AArch64 JIT's, and strict mode against
@@ -106,8 +106,10 @@ calls `jit_h_ld*/st*` — the interpreter's own `mem_read*/mem_write*` paths
 minus the cost — through a pure-call stub that spills only the caller-saved
 guest registers, then repeats the tail (writeback, cost) and polls; the
 whole instruction is never re-executed by the interpreter. LDM/STM/PUSH/POP
-take the fast path when the whole transfer sits in one 2 KB page and fall
-back to the interpreter otherwise.
+take the fast path when the whole transfer sits in one 2 KB page; otherwise
+the cold path does the same word accesses through the slow stubs
+(`emit_block_slow`, both backends), and only a load of r15 off the fast path
+goes back to the interpreter.
 
 **Fallback.** Anything not inlined — MSR that changes mode, SWI, coprocessor
 reads, PC-destination ALU ops, user-bank transfers, SWP, LDRD/STRD, the v5
@@ -148,7 +150,7 @@ still makes the two engines byte-equal; `test_jit` runs every trial under both
 models, and the stubs are re-emitted when the model changes between attaches.
 Both backends implement it. On the ARMv7 one it also inlines the ARM7 accesses
 whose numC the exact model's cost table cannot express (`needs_fallback_cost7`);
-SWP is inlined under fast on AArch64 only and stays interpreted on ARMv7.
+SWP is inlined under fast on both backends.
 The ARM9's data constant depends on the base register, known at translation:
 SP-based accesses (the stack, in DTCM) cost 0, all others 5; the ARM7's cost
 2; refills 4 / 2 (`DS_FAST=d9s,d9,d7,r9,r7` overrides them). The interpreter

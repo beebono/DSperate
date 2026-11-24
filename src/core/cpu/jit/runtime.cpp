@@ -263,6 +263,7 @@ static void perf_map_stubs(const Runtime& r) {
     const std::string pre = c == 0 ? "jit_stub9_" : "jit_stub7_";
     add(jc.dispatch, (pre + "dispatch").c_str()); add(jc.link, (pre + "link").c_str()); add(jc.fallback, (pre + "fallback").c_str());
     add(jc.branch_indirect, (pre + "branch_indirect").c_str()); add(jc.branch_indirect_cdi, (pre + "branch_indirect_cdi").c_str());
+    add(jc.branch_indirect_poll, (pre + "branch_indirect_poll").c_str());
   }
   std::sort(v.begin(), v.end());
   for (size_t i = 0; i < v.size(); ++i) {

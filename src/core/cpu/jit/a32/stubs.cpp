@@ -379,14 +379,8 @@ void emit_stubs(Runtime& rt) {
     }
     size_t to_body = e.b_fwd();
 
-    // branch_indirect: r0 = target | T.
-    jc.branch_indirect = e.cur();
-    e.mrs_apsr(R_FN);
-    e.dp_imm(SUB, false, R_SP, R_SP, 8);
-    e.str(R_FN, R_SP, 0);
-    e.tst_imm(0, 1);
-    e.and_imm(0, 0, ~3u, EQ);
-    e.bind(to_body);
+    // The refill charge of a jump to r0 = target | T (guest flags parked at [sp]); r0 is kept.
+    auto refill_body = [&] {
     e.ldr(1, R_CTX, OFF_CPSR);
     e.bfi(1, 0, 5, 1);
     e.str(1, R_CTX, OFF_CPSR);
@@ -432,10 +426,46 @@ void emit_stubs(Runtime& rt) {
       e.add_reg(1, 1, 3);
     }
     e.sub_reg(R_BUDGET, R_BUDGET, 1);
-    e.ldr(R_FN, R_SP, 0);
-    e.dp_imm(ADD, false, R_SP, R_SP, 8);
-    e.msr_apsr_nzcvq(R_FN);
+    };
+    auto park_flags = [&] {
+      e.mrs_apsr(R_FN);
+      e.dp_imm(SUB, false, R_SP, R_SP, 8);
+      e.str(R_FN, R_SP, 0);
+      e.tst_imm(0, 1);
+      e.and_imm(0, 0, ~3u, EQ);
+    };
+    auto unpark_flags = [&] {
+      e.ldr(R_FN, R_SP, 0);
+      e.dp_imm(ADD, false, R_SP, R_SP, 8);
+      e.msr_apsr_nzcvq(R_FN);
+    };
+
+    // branch_indirect: r0 = target | T.
+    jc.branch_indirect = e.cur();
+    park_flags();
+    e.bind(to_body);
+    refill_body();
+    unpark_flags();
     e.b(jc.dispatch);
+
+    // branch_indirect_poll: the same, then the interpreter's per-instruction IRQ
+    // check: an exception return or a load to pc may leave a pending IRQ
+    // takeable, and it is taken before the target's first instruction.
+    jc.branch_indirect_poll = e.cur();
+    park_flags();
+    refill_body();
+    e.mov(2, 0);                                // the poll uses r0 and r1
+    {
+      std::vector<size_t> leave;
+      emit_poll(e, leave);
+      e.mov(0, 2);
+      unpark_flags();
+      e.b(jc.dispatch);
+      for (size_t f : leave) e.bind(f);
+      e.mov(0, 2);
+      unpark_flags();
+      e.b(rt.exit_key);
+    }
   }
 
   rt.stubs_end = (e.size() + 63) & ~size_t{63};

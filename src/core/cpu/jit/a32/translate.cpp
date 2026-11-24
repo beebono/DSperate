@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -38,6 +39,12 @@ constexpr u32 OFF_TIMING9 = offsetof(CpuContext, timing9);
 constexpr u32 OFF_TIMING7 = offsetof(CpuContext, timing7);
 constexpr u32 OFF_COST7   = offsetof(CpuContext, cost7);
 static_assert(OFF_COST7 < 4096, "CpuContext timing pointers must be reachable from r11");
+static_assert(offsetof(CpuContext, pu_region) + 8 * sizeof(u32) < 4096 && offsetof(CpuContext, cp15_itcm) < 4096 &&
+              offsetof(CpuContext, cp15_dtcm) < 4096 && offsetof(CpuContext, cp15_control) < 4096 &&
+              offsetof(CpuContext, pu_data_cacheable) < 4096 && offsetof(CpuContext, pu_code_cacheable) < 4096 &&
+              offsetof(CpuContext, pu_data_bufferable) < 4096 && offsetof(CpuContext, pu_data_perm) < 4096 &&
+              offsetof(CpuContext, pu_code_perm) < 4096, "CP15 fields must be reachable from r11 (arm_mrc)");
+static_assert(OFF_BANK_R13 < 4096 && OFF_BANK_R14 < 4096, "user bank slots must be reachable from r11");
 
 constexpr u32 F_N = 8, F_Z = 4, F_C = 2, F_V = 1, F_ALL = 15;
 
@@ -58,8 +65,27 @@ u32 cond_reads(u32 cond) {
 
 struct FlagUse { u32 reads, writes; };
 
+using shape::ldm_user_inline;
 using shape::mcr_is_nop;
 using shape::msr_inline;
+
+// MOVS pc, rm (LSL #0): the register form of the exception return (`movs pc, lr`
+// ends the BIOS SWI handlers). Local to the backend: block shape does not depend on it.
+bool exc_return_reg(u32 instr) {
+  if ((instr >> 28) != 0xE || arm::decode_arm(instr) != AOp::DpImmShift) return false;
+  if (!(instr & (1u << 20)) || ((instr >> 12) & 0xF) != 15 || ((instr >> 21) & 0xF) != 0xD) return false;
+  return (instr & 0xFF0) == 0 && (instr & 0xF) != 15;
+}
+bool exc_return(u32 instr) { return shape::dp_exc_return(instr) || exc_return_reg(instr); }
+
+// DS_JIT_A32_LEGACY=1: writes to pc (exception returns, jump tables, LDR pc),
+// CP15 reads, SWP, user-bank LDM/STM and block transfers that leave the fast
+// path go through the interpreter again, as before they were inlined here:
+// the switch for timing the two on one binary.
+bool legacy_fallbacks() {
+  static const bool on = std::getenv("DS_JIT_A32_LEGACY") != nullptr;
+  return on;
+}
 
 // Must agree with the liveness pass, which treats these as reading every flag.
 bool arm_needs_fallback(u32 instr, bool a9) {
@@ -71,12 +97,20 @@ bool arm_needs_fallback(u32 instr, bool a9) {
   case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift: {
     const u32 opcode = (instr >> 21) & 0xF;
     const bool test = opcode >= 8 && opcode <= 0xB;
-    if (rd == 15 && !test) return true;
+    if (rd == 15 && !test) {
+      if (legacy_fallbacks()) return true;
+      if (exc_return(instr)) return false;
+      // Other writes to pc: S=0 (jump tables, `add pc, pc, rX, lsl #2`) inline as
+      // an indirect branch; S=1 restores the CPSR and stays interpreted.
+      return (instr & (1u << 20)) || op == AOp::DpRegShift;
+    }
     return op == AOp::DpRegShift && ((instr >> 8) & 0xF) == 15;
   }
   case AOp::Mrs: case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::Pld:
     return false;
   case AOp::Mcr: return !mcr_is_nop(instr, a9);
+  case AOp::Mrc:       // ARM9 CP15 reads: a constant or a context field (cp15_read)
+    return legacy_fallbacks() || !a9 || ((instr >> 8) & 0xF) != 15 || rd == 15;
   case AOp::MsrReg: case AOp::MsrImm: return !msr_inline(instr);
   case AOp::BlxReg: case AOp::Clz: return !a9;
   case AOp::Mul: case AOp::Mla:
@@ -88,7 +122,8 @@ bool arm_needs_fallback(u32 instr, bool a9) {
            ((op == AOp::SmlaXY || op == AOp::SmlawY) && rd == 15);
   case AOp::LdrStrImm: case AOp::LdrStrReg: {
     const bool l = instr & (1u << 20), p = instr & (1u << 24), w = instr & (1u << 21);
-    return (l && rd == 15) || (rn == 15 && (!p || w)) || (op == AOp::LdrStrReg && (instr & 0xF) == 15);
+    const bool b = instr & (1u << 22);
+    return (l && rd == 15 && (b || legacy_fallbacks())) || (rn == 15 && (!p || w)) || (op == AOp::LdrStrReg && (instr & 0xF) == 15);
   }
   case AOp::LdrStrHImm: case AOp::LdrStrHReg: {
     const bool l = instr & (1u << 20), p = instr & (1u << 24), w = instr & (1u << 21);
@@ -96,7 +131,9 @@ bool arm_needs_fallback(u32 instr, bool a9) {
     return (!l && sh != 1) || rd == 15 || (rn == 15 && (!p || w)) || (op == AOp::LdrStrHReg && (instr & 0xF) == 15);
   }
   case AOp::Ldm: case AOp::Stm:
-    return (instr & (1u << 22)) || (instr & 0xFFFF) == 0 || rn == 15;
+    return ((instr & (1u << 22)) && (legacy_fallbacks() || !ldm_user_inline(instr))) || (instr & 0xFFFF) == 0 || rn == 15;
+  case AOp::Swp: case AOp::Swpb:   // fast timing only: exact's two-access CDI combine stays interpreted
+    return legacy_fallbacks() || !g_fast_timing || rd == 15 || rn == 15 || (instr & 0xF) == 15;
   default:
     return true;
   }
@@ -127,6 +164,7 @@ FlagUse arm_flag_use(u32 instr, bool a9) {
   const u32 opcode = (instr >> 21) & 0xF;
   switch (op) {
   case AOp::DpImm: case AOp::DpImmShift: case AOp::DpRegShift: {
+    if (exc_return(instr)) return {0, F_ALL};   // the CPSR comes back whole from the SPSR
     if (opcode == 5 || opcode == 6 || opcode == 7) u.reads |= F_C;                 // ADC SBC RSC
     if (op == AOp::DpImmShift && ((instr >> 4) & 0xFF) == 0x06) u.reads |= F_C;    // RRX (ROR #0)
     if (s) {
@@ -151,12 +189,13 @@ FlagUse arm_flag_use(u32 instr, bool a9) {
     u.reads = F_ALL;                                   // mode-change path syncs CPSR via the interpreter
     if ((instr & (1u << 19)) && !(instr & (1u << 22))) u.writes = F_ALL;   // f field of the CPSR; MSR SPSR must not claim the flags
     break;
-  case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::BlxReg: case AOp::Clz: case AOp::Pld: case AOp::Mcr:
+  case AOp::B: case AOp::Bl: case AOp::Bx: case AOp::BlxReg: case AOp::Clz: case AOp::Pld: case AOp::Mcr: case AOp::Mrc:
   case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY:
   case AOp::LdrStrReg:
     if (((instr >> 4) & 0xFF) == 0x06) u.reads |= F_C;   // an RRX offset shifts the carry in
     break;
   case AOp::LdrStrImm: case AOp::LdrStrHImm: case AOp::LdrStrHReg: case AOp::Ldm: case AOp::Stm:
+  case AOp::Swp: case AOp::Swpb:
     break;
   default: u = {F_ALL, F_ALL}; break;
   }
@@ -234,6 +273,10 @@ public:
   }
   void release(u32 host) {
     for (u32 s = 0; s < NSLOT; ++s) if (HOST[s] == host) { locked_ &= ~(1u << s); slots_[s] = Slot{}; }
+  }
+  // Lock a temp again: a restore (the end of a cold path) drops every lock.
+  void lock(u32 host) {
+    for (u32 s = 0; s < NSLOT; ++s) if (HOST[s] == host) locked_ |= 1u << s;
   }
   // Keep a slot cached but let the rest of this instruction evict it.
   void unlock(u32 host) {
@@ -323,6 +366,8 @@ private:
   u32 code_region7_ = 0;
   bool bl_prefix_valid_ = false;
   u32  bl_prefix_lr_ = 0;
+  u32  dp_dst_ = 0xFF;        // host register that takes a data-processing result written to pc
+  int  charge_as_ = -1;       // fast timing: what emit_single charges instead of numC + one access (SWP)
 
   u8* cold_buf_;
   Emitter cold_;
@@ -653,7 +698,9 @@ private:
 
   // `a`: locked temp, base writeback already done. `const_nd` >= 0: data cost
   // known at translate time (ARM9 pc-relative literal).
-  void emit_single(Mem m, u32 a, u32 data, u32 rd, bool cdi, int const_nd = -1) {
+  // `hdst` != 0xFF: a load into that locked temp, not into guest `rd`, with no
+  // poll on the slow path (a load to pc: the branch that follows polls).
+  void emit_single(Mem m, u32 a, u32 data, u32 rd, bool cdi, int const_nd = -1, u32 hdst = 0xFF) {
     const bool load = is_load(m), word = is_word(m);
     // Fast timing: numC + a constant, charged where the exact model charges
     // (after the access), one instruction, no table load or combine.
@@ -680,7 +727,7 @@ private:
     }
     e().add_reg(en, en, a);
     u32 d = 0;
-    if (load) d = cache_.write(rd, false);
+    if (load) d = hdst != 0xFF ? hdst : cache_.write(rd, false);
     auto site = [&] { if (fast) fm_fault_here(); };
     switch (m) {
     case Mem::Ld32: e().and_imm(en, en, ~3u); site(); e().ldr(d, en, 0); e().lsl_imm(en, a, 3); e().ror_reg(d, d, en); break;
@@ -698,7 +745,7 @@ private:
     case Mem::St16: e().and_imm(en, en, ~1u); site(); e().strh(data, en, 0); break;
     case Mem::St8:  site(); e().strb(data, en, 0); break;
     }
-    if (ftime) charge_now(fast_cost(1));
+    if (ftime) charge_now(charge_as_ >= 0 ? static_cast<u32>(charge_as_) : fast_cost(1));
     else if (!const_cost) {
       const u32 c = cache_.temp();
       if (a9_) { emit_data_cost(a, c, en, word, false, !load); emit_charge(c, a, en, en, cdi); }
@@ -725,30 +772,109 @@ private:
     call_stub(load ? rt().slow_load[size_index(m)] : rt().slow_store[size_index(m)]);
     if (load) {
       emit_load_post(m, 0, 1, 2);
-      if (const u32 h = pinned_host(rd); h != 0xFF) e().mov(h, 0); else e().str(0, R_CTX, off_reg(rd));
+      if (hdst != 0xFF) e().push(0x3);              // value and address: the charge below may use every scratch register
+      else if (const u32 h = pinned_host(rd); h != 0xFF) e().mov(h, 0); else e().str(0, R_CTX, off_reg(rd));
     }
-    if (ftime) charge_now(fast_cost(1));
+    if (ftime) charge_now(charge_as_ >= 0 ? static_cast<u32>(charge_as_) : fast_cost(1));
     else if (!const_cost) {
       if (a9_) { emit_data_cost(1, 2, 3, word, false, !load); emit_charge(2, 1, 3, SCRATCH4, cdi); }
       else { emit_cost7(1, 2, 3, slot7); e().sub_reg(R_BUDGET, R_BUDGET, 2); }
     }
-    call_stub(rt().poll);
-    e().word(make_key(pc_ + step(), thumb_));
+    if (hdst == 0xFF) {
+      call_stub(rt().poll);
+      e().word(make_key(pc_ + step(), thumb_));
+    }
     cache_.restore(s1);
     cache_.reload();
+    if (hdst != 0xFF) { e().pop(1u << hdst); e().pop(1u << a); }   // `a` back too: SWP stores through it next
     cold_end_jump(join);
   }
 
   // Fast path within one 2 KB page. Cold path is the interpreter, so rn keeps its
   // old value until after the transfer; writeback value in `t_w` (0xFF: equals `a`).
-  void emit_block_transfer(u32 instr, u32 list, bool load, bool writeback, u32 rn, u32 a, u32 t_w, u32 pc_store_value, bool interwork_pc = false) {
+  // USR/SYS slot for r`i`, or 0 if the register in use is already the user's.
+  static u32 user_bank_off(u32 i) { return i == 13 ? OFF_BANK_R13 : i == 14 ? OFF_BANK_R14 : 0; }
+
+  // A block transfer off the fast path (page split, MMIO, read-only or code
+  // pages): the same word accesses through the slow stubs, not the whole
+  // instruction through the interpreter. Cold code in the cache state of the
+  // branch point; `a` and the writeback value move to r1 and r3, which the stubs
+  // preserve. LDM with r15 never reaches here.
+  void emit_block_slow(u32 list, bool load, bool writeback, u32 rn, u32 a, u32 t_w, bool user_bank, u32 pc_store_value) {
+    assert(in_cold());
+    const u32 n = static_cast<u32>(__builtin_popcount(list));
+    cache_.writeback();                              // every guest register not pinned is current in memory
+    { const u32 d[2] = {1, 3}, sr[2] = {a, t_w == 0xFF ? a : t_w}; emit_permute(d, sr, 2); }
+    e().and_imm(1, 1, ~3u);                          // a Thumb base may be unaligned
+    if (load && !a9_) {                              // the ARM7's BIOS answers a read by where it comes from
+      e().mov_imm(SCRATCH4, pc_ + (thumb_ ? 4 : 8));
+      e().str(SCRATCH4, R_CTX, off_reg(15));
+    }
+    auto set_guest = [&](u32 g, u32 src) {
+      if (const u32 h = pinned_host(g); h != 0xFF) e().mov(h, src); else e().str(src, R_CTX, off_reg(g));
+    };
+    bool first = true;
+    for (u32 i = 0; i < 16; ++i) {
+      if (!(list & (1u << i))) continue;
+      const u32 ub = user_bank ? user_bank_off(i) : 0;
+      if (load) {
+        call_stub(rt().slow_load[2]);
+        if (ub) e().str(0, R_CTX, ub); else set_guest(i, 0);
+      } else {
+        // STM of its own base: old base if first in list, else new (ARM7).
+        if (i == 15) e().mov_imm(2, pc_store_value);
+        else if (ub) e().ldr(2, R_CTX, ub);
+        else if (i == rn && writeback && cpu::stm_stores_new_base(a9_, first)) e().mov(2, 3);
+        else if (const u32 h = pinned_host(i); h != 0xFF) e().mov(2, h);
+        else e().ldr(2, R_CTX, off_reg(i));
+        call_stub(rt().slow_store[2]);
+      }
+      e().add_imm(1, 1, 4, 1);
+      first = false;
+    }
+    // LDM loading its own base keeps the loaded value where the CPU's rule says so.
+    if (writeback && (!load || cpu::ldm_writeback_wins(a9_, thumb_, list, rn))) set_guest(rn, 3);
+    // Cost after the transfers, as the interpreter and the single-access slow path
+    // charge it. Per word, since the words may span pages.
+    if (g_fast_timing) charge_now(fast_cost(n));
+    else {
+      e().sub_imm(1, 1, n * 4, 1);
+      for (u32 k = 0; k < n; ++k) {
+        if (k == 0) emit_data_cost(1, 0, SCRATCH4, true, false, !load);
+        else {
+          e().add_imm(3, 1, k * 4, 3);
+          emit_data_cost(3, 2, SCRATCH4, true, true, !load);
+          e().add_reg(0, 0, 2);
+        }
+      }
+      emit_charge(0, 1, 2, 3, load);
+    }
+    // As the single-access slow path: these words went through the bus, so a
+    // store may have started a DMA, raised or unmasked an IRQ, or landed on
+    // code. The poll acts on it now, and leaves at the next instruction.
+    call_stub(rt().poll);
+    e().word(make_key(pc_ + step(), thumb_));
+  }
+
+  void emit_block_transfer(u32 instr, u32 list, bool load, bool writeback, u32 rn, u32 a, u32 t_w, u32 pc_store_value, bool interwork_pc = false,
+                           bool user_bank = false) {
     const u32 n = static_cast<u32>(__builtin_popcount(list));
     const bool pc_in_list = load && (list & 0x8000);
     flush_pending();
     const u32 f = flags_begin();
     const u32 en = cache_.temp(), e2 = cache_.temp();
     const RegCache::State s0 = cache_.save();
-    std::vector<size_t> fail;
+    std::vector<size_t> fail, mode_fail;
+    // LDM^/STM^ inline only from IRQ/SVC/ABT/UND; other modes go to the interpreter.
+    if (user_bank) {
+      constexpr u32 INLINABLE_MODES = (1u << 0x12) | (1u << 0x13) | (1u << 0x17) | (1u << 0x1B);
+      e().ldr(e2, R_CTX, OFF_CPSR);
+      e().and_imm(e2, e2, 0x1F);
+      e().mov_imm(en, INLINABLE_MODES);
+      e().lsr_reg(en, en, e2);
+      e().tst_imm(en, 1);
+      mode_fail.push_back(e().b_fwd(EQ));
+    }
     e().add_imm(e2, a, n * 4 - 1, e2);
     e().eor_reg(e2, e2, a);
     e().dp_reg(MOV, true, e2, 0, e2, LSR, mem::PAGE_SHIFT);
@@ -782,6 +908,7 @@ private:
       for (u32 i = 0; i < 16; ++i) {
         if (!(list & (1u << i))) continue;
         if (i == 15) { hpc = cache_.temp(); e().ldr(hpc, en, 4 * k); ++k; continue; }
+        if (const u32 ub = user_bank ? user_bank_off(i) : 0) { e().ldr(R_LR, en, 4 * k); e().str(R_LR, R_CTX, ub); ++k; continue; }
         const u32 h = cache_.write(i, false);
         e().ldr(h, en, 4 * k);
         cache_.unlock(h);
@@ -797,6 +924,7 @@ private:
         if (!(list & (1u << i))) continue;
         u32 src;
         bool tmp = false;
+        if (const u32 ub = user_bank ? user_bank_off(i) : 0) { e().ldr(R_LR, R_CTX, ub); e().str(R_LR, en, 4 * k); ++k; first = false; continue; }
         if (i == 15) { src = cache_.temp(); e().mov_imm(src, pc_store_value); tmp = true; }
         else if (i == rn && writeback && cpu::stm_stores_new_base(a9_, first)) src = wv;
         else src = cache_.read(i);
@@ -866,10 +994,20 @@ private:
     if (f != 0xFF) e().msr_apsr_nzcvq(f);
     const size_t fb = cold_.size();                   // walk failures enter here
     cache_.restore(s0);
-    emit_fallback(instr, false);
+    if (legacy_fallbacks()) emit_fallback(instr, false);
+    else emit_block_slow(list, load, writeback, rn, a, t_w, user_bank, pc_store_value);
     cache_.restore(s1);
     cache_.reload();
     cold_end_jump(join);
+    if (!mode_fail.empty()) {
+      cold_begin(mode_fail);
+      if (f != 0xFF) e().msr_apsr_nzcvq(f);
+      cache_.restore(s0);
+      emit_fallback(instr, false);
+      cache_.restore(s1);
+      cache_.reload();
+      cold_end_jump(join);
+    }
     if (fast) { cold_begin({}); fm_cold_walk(a, en, patch, !load, fb); cur_ = &hot_; }
   }
 
@@ -939,7 +1077,7 @@ private:
     }
   }
   // `cdi`: LDM/POP to pc; `hnumd`/`haddr` feed the stub's post-jump charge.
-  void emit_branch_indirect(u32 htarget, bool interwork, bool cdi = false, u32 hnumd = 0, u32 haddr = 0) {
+  void emit_branch_indirect(u32 htarget, bool interwork, bool cdi = false, u32 hnumd = 0, u32 haddr = 0, bool poll = false) {
     assert(cond_ == AL);
     cache_.flush();                                 // temps keep their values
     // The charge here, not through flush_pending: the flush above unlocked every slot, so a
@@ -956,7 +1094,7 @@ private:
       if (thumb_) e().orr_imm(SCRATCH0, SCRATCH0, 1);
       else e().and_imm(SCRATCH0, SCRATCH0, ~1u);
     }
-    jump_stub(cdi ? jc_.branch_indirect_cdi : jc_.branch_indirect);
+    jump_stub(cdi ? jc_.branch_indirect_cdi : poll ? jc_.branch_indirect_poll : jc_.branch_indirect);
     ended_ = true;
   }
   template <class Taken>
@@ -1007,12 +1145,15 @@ private:
   void translate_arm(u32 instr, bool fb);
   void translate_thumb(u16 instr, bool fb);
   void arm_data_processing(u32 instr, AOp op);
+  void arm_dp_to_pc(u32 instr, AOp op);
+  void arm_mrc(u32 instr);
   void arm_multiply(u32 instr, AOp op);
   void arm_dsp_multiply(u32 instr, AOp op);
   void arm_msr(u32 instr, AOp op);
   void arm_ldr_str(u32 instr, AOp op);
   void arm_ldr_str_h(u32 instr, AOp op);
   void arm_ldm_stm(u32 instr, bool load);
+  void arm_swp(u32 instr, bool byte);
   void thumb_alu(u16 instr);
   void thumb_ldr_str(u16 instr, TOp op);
   void thumb_push_pop(u16 instr);
@@ -1123,6 +1264,15 @@ void Translator::arm_ldr_str(u32 instr, AOp op) {
     note_dep(addr, mem::Timing::RETIME_DATA);
     const_nd = cpu_.timing9[addr >> 12][2];
   }
+  if (l && rd == 15) {
+    // Load to pc: the data cost as any load (charge_CDI before the jump), then an
+    // indirect branch that charges the refill and takes a pending IRQ as the
+    // interpreter's next instruction would. ARMv5 interworks on bit 0.
+    const u32 t = cache_.temp();
+    emit_single(Mem::Ld32, a, 0xFF, 0, true, const_nd, t);
+    emit_branch_indirect(t, a9_, false, 0, 0, true);
+    return;
+  }
   if (l) emit_single(b ? Mem::Ld8 : Mem::Ld32, a, 0xFF, rd, true, const_nd);
   else emit_single(b ? Mem::St8 : Mem::St32, a, data, 0, false);
   cache_.release(a);
@@ -1160,8 +1310,40 @@ void Translator::arm_ldm_stm(u32 instr, bool load) {
     if (u) e().add_imm(t_w, hb, n * 4, t_w); else e().sub_imm(t_w, hb, n * 4, t_w);
   }
   cache_.unlock(hb);
-  emit_block_transfer(instr, list, load, w, rn, a, t_w, pc_ + 12, a9_);
+  emit_block_transfer(instr, list, load, w, rn, a, t_w, pc_ + 12, a9_, (instr & (1u << 22)) != 0);
   if (!ended_) cache_.release(a);
+}
+
+// SWP/SWPB (fast timing): load into a temporary, write rd, then store. Only the
+// store's slow path polls, so a poll that leaves at the next instruction finds
+// rd written and nothing left to do. The instruction charges once, numC + two
+// accesses, as the interpreter's charge_CDI after both.
+void Translator::arm_swp(u32 instr, bool byte) {
+  const u32 rn = (instr >> 16) & 0xF, rd = (instr >> 12) & 0xF, rm = instr & 0xF;
+  const u32 a = cache_.temp(), t = cache_.temp();
+  { const u32 hn = cache_.read(rn); e().mov(a, hn); cache_.unlock(hn); }
+  charge_as_ = 0;
+  emit_single(byte ? Mem::Ld8 : Mem::Ld32, a, 0xFF, 0, true, -1, t);
+  cache_.lock(a); cache_.lock(t);
+  u32 data;
+  if (rd == rm) {   // swap in place: rm takes the loaded word, t the old rm to store
+    const u32 hm = cache_.write(rm, true);
+    e().eor_reg(hm, hm, t);
+    e().eor_reg(t, t, hm);
+    e().eor_reg(hm, hm, t);
+    cache_.unlock(hm);
+    data = t;
+  } else {
+    const u32 hd = cache_.write(rd, false);
+    e().mov(hd, t);
+    cache_.unlock(hd);
+    data = cache_.read(rm);
+  }
+  charge_as_ = static_cast<int>(numC_internal() + 2 * fast_data(cpu_, cur_raw_, thumb_));
+  emit_single(byte ? Mem::St8 : Mem::St32, a, data, 0, false);
+  charge_as_ = -1;
+  cache_.release(a);
+  cache_.release(t);
 }
 
 void Translator::thumb_ldr_str(u16 instr, TOp op) {
@@ -1276,13 +1458,75 @@ void Translator::arm_data_processing(u32 instr, AOp op) {
   if (!mov) hn = reg_read(rn, pcv);
   if (op != AOp::DpImm) hm = reg_read(instr & 0xF, pcv);
   if (op == AOp::DpRegShift) hs = cache_.read((instr >> 8) & 0xF);
-  const u32 hd = test ? 0 : cache_.write(rd, cond_ != AL);
+  const u32 hd = test ? 0 : dp_dst_ != 0xFF ? dp_dst_ : cache_.write(rd, cond_ != AL);
   const DpOp dop = static_cast<DpOp>(opcode);
   const Shift sh = static_cast<Shift>((instr >> 5) & 3);
   flush_pending();   // before the body: an S body rewrites the predicating flags
   if (op == AOp::DpImm) e().dp_imm(dop, s, hd, hn, instr & 0xFFF, cond_);
   else if (op == AOp::DpImmShift) e().dp_reg(dop, s, hd, hn, hm, sh, (instr >> 7) & 0x1F, cond_);
   else e().dp_regshift(dop, s, hd, hn, hm, sh, hs, cond_);
+}
+
+// A data-processing write to pc, unconditional here (translate_arm branches
+// around a conditional one). With S: the exception return, CPSR back from the
+// SPSR through the helper (call_full carries the pinned registers and the
+// flags across the bank switch), then a branch that polls, since I may now be
+// clear. Without S: a jump table, the result into a temporary and the refill
+// as any ARMv5 data-processing write to pc (no interworking; the stub aligns).
+void Translator::arm_dp_to_pc(u32 instr, AOp op) {
+  const u32 opcode = (instr >> 21) & 0xF, rn = (instr >> 16) & 0xF;
+  const u32 t = cache_.temp();
+  if (!exc_return(instr)) {
+    dp_dst_ = t;
+    arm_data_processing(instr, op);
+    dp_dst_ = 0xFF;
+    emit_branch_indirect(t, false);
+    return;
+  }
+  if (op == AOp::DpImmShift) e().mov(t, reg_read(instr & 0xF, pc_ + 8));
+  else {
+    const u32 imm = rotr(instr & 0xFF, ((instr >> 8) & 0xF) * 2);
+    if (opcode == 0xD) e().mov_imm(t, imm);
+    else {
+      const u32 hn = reg_read(rn, pc_ + 8);
+      if (opcode == 0x2) e().sub_imm(t, hn, imm, t); else e().add_imm(t, hn, imm, t);
+    }
+  }
+  add_pending(numC(pc_));
+  flush_pending();                 // while `t` is still locked: the flush below frees every slot
+  cache_.flush();
+  if (t != 1) e().mov(1, t);
+  e().mov(0, R_CTX);
+  e().mov_ptr(R_FN, reinterpret_cast<const void*>(&jit_h_exc_return));
+  call_stub(rt().call_full);
+  emit_branch_indirect(SCRATCH0, true, false, 0, 0, true);   // restored T in bit 0
+}
+
+// MRC p15 (ARM9, rd != pc): cp15_read's values, charge_CI(3). Ends the block
+// as before (block_shape); the block links on to the next instruction.
+void Translator::arm_mrc(u32 instr) {
+  const u32 crn = (instr >> 16) & 0xF, rd = (instr >> 12) & 0xF, crm = instr & 0xF, opc2 = (instr >> 5) & 7;
+  add_pending(numC_internal() + 3);
+  flush_pending();
+  const u32 hr = cache_.write(rd, cond_ != AL);
+  auto field = [&](size_t off) { e().ldr(hr, R_CTX, static_cast<s32>(off), cond_); };
+  switch ((crn << 8) | (crm << 4) | opc2) {
+  case 0x000: e().mov_imm(hr, 0x41059461, cond_); break;   // main ID
+  case 0x001: e().mov_imm(hr, 0x0F0D2112, cond_); break;   // cache type
+  case 0x002: e().mov_imm(hr, 0x00140180, cond_); break;   // TCM size
+  case 0x100: field(offsetof(CpuContext, cp15_control)); break;
+  case 0x200: field(offsetof(CpuContext, pu_data_cacheable)); break;
+  case 0x201: field(offsetof(CpuContext, pu_code_cacheable)); break;
+  case 0x300: field(offsetof(CpuContext, pu_data_bufferable)); break;
+  case 0x502: field(offsetof(CpuContext, pu_data_perm)); break;
+  case 0x503: field(offsetof(CpuContext, pu_code_perm)); break;
+  case 0x600: case 0x610: case 0x620: case 0x630: case 0x640: case 0x650: case 0x660: case 0x670:
+  case 0x601: case 0x611: case 0x621: case 0x631: case 0x641: case 0x651: case 0x661: case 0x671:
+    field(offsetof(CpuContext, pu_region) + crm * sizeof(u32)); break;
+  case 0x910: field(offsetof(CpuContext, cp15_dtcm)); break;
+  case 0x911: field(offsetof(CpuContext, cp15_itcm)); break;
+  default: e().mov_imm(hr, 0, cond_); break;
+  }
 }
 
 void Translator::arm_multiply(u32 instr, AOp op) {
@@ -1396,10 +1640,18 @@ void Translator::translate_arm(u32 instr, bool fb) {
     return;
   }
 
+  if ((op == AOp::DpImm || op == AOp::DpImmShift) && ((instr >> 12) & 0xF) == 15 &&
+      !(((instr >> 21) & 0xF) >= 8 && ((instr >> 21) & 0xF) <= 0xB)) {
+    auto taken = [&] { arm_dp_to_pc(instr, op); };
+    if (cond != 0xE) emit_branch_cond(cond, taken); else taken();
+    return;
+  }
+
   // Memory and MSR (dynamic cost / interpreter cold path): conditional forms branch
   // around the body with the cache empty on both arms; the skipped arm charges numC.
   switch (op) {
   case AOp::LdrStrImm: case AOp::LdrStrReg: case AOp::LdrStrHImm: case AOp::LdrStrHReg: case AOp::Ldm: case AOp::Stm:
+  case AOp::Swp: case AOp::Swpb:
   case AOp::MsrReg: case AOp::MsrImm: {
     size_t skip = 0;
     if (cond != 0xE) {
@@ -1413,6 +1665,7 @@ void Translator::translate_arm(u32 instr, bool fb) {
     case AOp::LdrStrHImm: case AOp::LdrStrHReg: arm_ldr_str_h(instr, op); break;
     case AOp::Ldm: arm_ldm_stm(instr, true); break;
     case AOp::Stm: arm_ldm_stm(instr, false); break;
+    case AOp::Swp: case AOp::Swpb: arm_swp(instr, op == AOp::Swpb); break;
     default: arm_msr(instr, op); break;
     }
     if (cond != 0xE) {
@@ -1484,6 +1737,7 @@ void Translator::translate_arm(u32 instr, bool fb) {
   }
   case AOp::Pld: add_pending(numC(pc_)); break;
   case AOp::Mcr: add_pending(numC(pc_) + 2); break;      // charge_CI(2)
+  case AOp::Mrc: arm_mrc(instr); break;
   case AOp::SmlaXY: case AOp::SmulXY: case AOp::SmlawY: case AOp::SmulwY:
     arm_dsp_multiply(instr, op);
     break;
