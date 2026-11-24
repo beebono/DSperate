@@ -213,11 +213,29 @@ void on_timing_changed(CpuContext& cpu) {
   if (churn::on()) { static bool reg = (std::atexit(churn::report), true); (void)reg; }
   u64 killed = 0;
   if (t.retime_pending()) {
-    for (Block* b : jc.all_blocks) {
+    // Two passes, each fetching ahead: with tens of thousands of blocks every one is a cache miss, twice
+    // (its flags, its dependencies), and a kill is three more (its code, its LUT slot, the block map).
+    // The frame in which the DSi menu hands over to a title does this three times and kills ~15k blocks.
+    static std::vector<Block*> victims;
+    victims.clear();
+    Block* const* all = jc.all_blocks.data();
+    const size_t n = jc.all_blocks.size();
+    constexpr size_t AHEAD = 8;
+    for (size_t k = 0; k < n; ++k) {
+      if (k + AHEAD < n) { __builtin_prefetch(&all[k + AHEAD]->dead); __builtin_prefetch(&all[k + AHEAD]->ndep); }
+      Block* b = all[k];
       if (b->dead) continue;
       bool hit = b->dep_overflow;
       for (u32 i = 0; i < b->ndep && !hit; ++i) hit = (t.retime_flag(b->dep_page[i]) & b->dep_kind[i]) != 0;
-      if (!hit) continue;
+      if (hit) victims.push_back(b);
+    }
+    for (size_t k = 0; k < victims.size(); ++k) {
+      if (k + AHEAD < victims.size()) {
+        const Block* nb = victims[k + AHEAD];
+        __builtin_prefetch(nb->entry, 1);
+        __builtin_prefetch(&jc.lut[(nb->key >> 1) & (LUT_SIZE - 1)], 1);
+      }
+      Block* b = victims[k];
       remove_from_page_lists(b);
       kill_block(jc, b, false);
       ++killed;
