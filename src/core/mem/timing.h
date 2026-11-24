@@ -61,6 +61,9 @@ public:
   static constexpr u32 REFILL9_BYTES  = 0x100000 * 4;
 
   Timing();
+  ~Timing();
+  Timing(const Timing&) = delete;
+  Timing& operator=(const Timing&) = delete;
   void reset();
 
   // Addresses are in bytes; table granularity rounds.
@@ -73,7 +76,9 @@ public:
   void update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify = true);
   void notify_cpu9(const CpuContext& cpu);
 
-  const u8 (*cpu9() const)[8] { return reinterpret_cast<const u8 (*)[8]>(cpu9_.get()); }
+  bool shared9() const { return shared_; }   // the open range is still one page of memory (see shared_)
+  void unshare9();                           // give it its own; what a non-uniform update does (public for the test)
+  const u8 (*cpu9() const)[8] { return reinterpret_cast<const u8 (*)[8]>(cpu9_); }
   const u8 (*cpu7() const)[4] { return reinterpret_cast<const u8 (*)[4]>(bus7()); }
 
   const u8* cost7() const { return tim7_.get() + COST7_OFFSET; }
@@ -134,8 +139,21 @@ private:
   u32  nc7_values_[NC7_SLOTS] = {};
   bool cost7_ready_ = false;   // set_region7 keeps the table current once this is true
   std::unique_ptr<u8[]> regions7_; // 0x20000
-  std::unique_ptr<u8[]> cpu9_;     // [0, CPU9_BYTES) 8 bytes per page, then the refill table
-  u8* refill9_rw() const { return cpu9_.get() + REFILL9_OFFSET; }
+  u8* cpu9_ = nullptr;             // [0, CPU9_BYTES) 8 bytes per page, then the refill table
+  u8* refill9_rw() const { return cpu9_ + REFILL9_OFFSET; }
+  // The open address space [SHARED_LO, SHARED_HI) is 92% of the table and one slot throughout unless a game
+  // puts a PU region or a TCM edge up there. While that holds (`shared_`), every host page of the two tables
+  // over it is a mapping of the same page of memory, so that a change of the ARM9's clock, which moves every
+  // slot, writes one page and not 11 MB. unshare9() gives the range its own memory, for good, the first time
+  // it would stop being uniform. Linux only; DS_TIMING_SHARE=0 turns it off.
+  static constexpr u32 SHARED_LO = 0x10000, SHARED_HI = 0xFC000;   // pages; both ends on a 64 MB line (host pages to 64 KB)
+  bool   shared_ = false;
+  bool   mapped_ = false;          // cpu9_ is an mmap, not a new[]
+  size_t host_page_ = 4096;
+  void share9();
+  bool shared_range9(const CpuContext& cpu, u32 first, u32 last);   // true: [first, last) of the shared range is done
+  void rebuild_cpu9(const CpuContext& cpu, u32 first, u32 last);
+  void put_refill9(u32 page, u32 entry);
   void build_refill9(u32 first_page, u32 last_page);   // [first, last), clamped
 };
 
