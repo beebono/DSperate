@@ -171,6 +171,7 @@ void reset_arena() {
   for (JitCpu& jc : r.cpus) {
     for (Block* b : jc.all_blocks) if (!b->pooled) delete b;
     jc.all_blocks.clear();
+    for (std::vector<Block*>& v : jc.region_blocks) v.clear();
     jc.blocks.clear();
     jc.parked.clear();
     std::memset(jc.region_live, 0, sizeof jc.region_live);
@@ -368,6 +369,7 @@ static void install(JitCpu& jc, Block* b) {
   if (b->span_hi) b->span_hash = span_hash(jc, b);
   register_block(jc, b);
   jc.all_blocks.push_back(b);
+  jc.region_blocks[key_pc(b->key) >> 24].push_back(b);
   r.blocks_live++;
   r.stats.blocks_translated++;
   r.stats.code_bytes += b->size;
@@ -847,7 +849,11 @@ void remapped(CpuContext& cpu, u32 lo, u32 hi) {
   for (u32 r = lo >> 24; r <= hi >> 24; ++r) any |= jc.region_live[r];
   if (!any) return;
   u64 killed = 0;
-  for (Block* b : jc.all_blocks) {
+  // Only the blocks of the regions in the range (and the one below it, for a block that runs into lo): walking
+  // all_blocks cost ~2 ms a call with ~12k blocks, and Pokemon White remaps VRAM often enough in a battle for that
+  // to put frames over budget (v4.0.1).
+  for (u32 r = lo >> 24 ? (lo >> 24) - 1 : 0; r <= hi >> 24; ++r)
+  for (Block* b : jc.region_blocks[r]) {
     if (b->dead) continue;
     const u32 pc = key_pc(b->key);
     if (pc > hi || static_cast<u64>(pc) + b->guest_len - 1 < lo) continue;
