@@ -1217,6 +1217,7 @@ void Translator::arm_msr(u32 instr, AOp op) {
     e().msr_apsr_nzcvq(f);
   } else if (mem_mask) e().ldr(t2, R_CTX, OFF_CPSR);
   add_pending(numC(pc_));
+  const u32 charged = pending_;    // what the cold path owes: it joins after this charge
   flush_pending();
   if (mem_mask) {
     if (mem_mask == 0xC0) { e().ubfx(t3, wv, 6, 2); e().bfi(t2, t3, 6, 2); }
@@ -1239,7 +1240,20 @@ void Translator::arm_msr(u32 instr, AOp op) {
   cold_begin(fail);
   e().msr_apsr_nzcvq(f);
   cache_.restore(s0);
-  emit_fallback(instr, false);
+  if (legacy_fallbacks()) emit_fallback(instr, false);
+  else {
+    // Mode change or user mode: set_cpsr through the helper, as the AArch64
+    // backend does. call_full carries the pinned registers (r13 changes bank)
+    // and the flags; every other guest register is in the context already.
+    charge_now(charged);
+    if (wv != 1) e().mov(1, wv);
+    e().mov(0, R_CTX);
+    e().mov_imm(2, ((fields & 1) ? 0x000000FFu : 0) | ((fields & 2) ? 0x0000FF00u : 0)
+                 | ((fields & 4) ? 0x00FF0000u : 0) | ((fields & 8) ? 0xFF000000u : 0));
+    e().mov_ptr(R_FN, reinterpret_cast<const void*>(&jit_h_msr_cpsr));
+    call_stub(rt().call_full);
+    if (fields & 1) { call_stub(rt().poll); e().word(make_key(pc_ + 4, thumb_)); }   // I may have changed
+  }
   cache_.restore(s1);
   cache_.reload();
   cold_end_jump(join);
