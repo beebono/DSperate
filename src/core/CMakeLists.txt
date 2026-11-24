@@ -48,6 +48,7 @@ add_library(dsperate_core STATIC
   gpu/kernels_ref.cpp
   gpu/colour.cpp
   spu/spu.cpp
+  spu/output_filter.cpp
   input/input_log.cpp
   io/io.cpp
   io/wifi.cpp

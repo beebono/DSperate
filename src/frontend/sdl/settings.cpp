@@ -122,6 +122,8 @@ const Setting kEmuSettings[] = {
   number("audio.buffer_size", N_("AUDIO BUFFER"), 20, 200, 10, "auto", FlagLive, Dep::None,
          N_("SOUND HELD AHEAD. LOWER IS LESS DELAY, LESS SLACK BEFORE A LATE FRAME IS HEARD"),
          "auto", N_("AUTO"), " MS"),
+  boolean("audio.hw_filter", N_("HARDWARE AUDIO"), "false", FlagLive, Dep::None,
+          N_("THE CONSOLE'S OWN OUTPUT: A DS'S 10 BITS AND NOTHING ABOVE 16 KHZ, OR A DSI'S CODEC FILTER")),
   // Turbo is not the console's speed: the host warns once a session when it is picked here (main.cpp).
   pick("emu.timing", N_("CPU TIMING"), kTiming, 3, "fast", FlagRestart, Dep::None,
        N_("EXACT IS THE CONSOLE'S, AND SLOWER TO RUN. TURBO GIVES GAMES MORE CPU: SMOOTHER, MAY BREAK SOME")),

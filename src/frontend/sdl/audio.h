@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DSperate - Nintendo DS emulator. Copyright (C) 2026 DSperate contributors.
 #pragma once
+#include "core/spu/output_filter.h"
 #include "core/spu/spu.h"
 
 #include <SDL2/SDL.h>
@@ -75,6 +76,11 @@ public:
   const Stats& stats() const { return stats_; }
   void reset_stats() { stats_ = Stats{}; }
 
+  // audio.hw_filter: the console's output stage (spu/output_filter.h) instead of the plain linear resampler, the
+  // DS's or the DSi's by the machine running. The 10-bit half is the core's (Spu::set_ten_bit).
+  void set_hw_filter(bool on) { if (on != hw_filter_) { hw_filter_ = on; filter_.reset(); } }
+  bool hw_filter() const { return hw_filter_; }
+
   void set_volume(int percent);   // 0..100
   int  volume() const { return volume_; }
   void set_muted(bool m) { muted_ = m; }
@@ -113,6 +119,8 @@ private:
   s16 prev_l_ = 0, prev_r_ = 0;   // resampler state: previous input frame
   u32 phase_ = 0;                // output phase within the input step, 16.16
   std::vector<s16> out_;
+  bool hw_filter_ = false;
+  spu::OutputFilter filter_;
   bool over_ = false;    // queue not being consumed; dropping until back at target
   void apply_target_ms(double ms);
   // Raises the queue by inserting silence at a moment it's already dry, since

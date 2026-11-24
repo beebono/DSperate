@@ -136,21 +136,26 @@ void Audio::push(NDS& nds, bool drop) {
     // Always resampled, even at matching rates, since the trim is applied
     // here. Step is input frames per output frame, 16.16.
     const double ratio = in_rate_ / rate_ * speed_ * (1.0 + trim_);
-    const u32 step = static_cast<u32>(ratio * 65536.0 + 0.5);
-    out_.resize((static_cast<size_t>(n / ratio) + 2) * 2);
     size_t m = 0;
-    for (size_t i = 0; i < n; ++i) {
-      const s16 cl = buf[i * 2], cr = buf[i * 2 + 1];
-      while (phase_ < 0x10000) {
-        const u32 f = phase_;
-        if ((m + 1) * 2 > out_.size()) out_.resize(out_.size() * 2);
-        out_[m * 2]     = static_cast<s16>(prev_l_ + (((cl - prev_l_) * static_cast<s32>(f)) >> 16));
-        out_[m * 2 + 1] = static_cast<s16>(prev_r_ + (((cr - prev_r_) * static_cast<s32>(f)) >> 16));
-        ++m;
-        phase_ += step;
+    if (hw_filter_) {
+      out_.clear();
+      m = filter_.process(nds.dsi ? spu::OutputFilter::Model::Dsi : spu::OutputFilter::Model::Ds, buf, n, ratio, rate_, out_);
+    } else {
+      const u32 step = static_cast<u32>(ratio * 65536.0 + 0.5);
+      out_.resize((static_cast<size_t>(n / ratio) + 2) * 2);
+      for (size_t i = 0; i < n; ++i) {
+        const s16 cl = buf[i * 2], cr = buf[i * 2 + 1];
+        while (phase_ < 0x10000) {
+          const u32 f = phase_;
+          if ((m + 1) * 2 > out_.size()) out_.resize(out_.size() * 2);
+          out_[m * 2]     = static_cast<s16>(prev_l_ + (((cl - prev_l_) * static_cast<s32>(f)) >> 16));
+          out_[m * 2 + 1] = static_cast<s16>(prev_r_ + (((cr - prev_r_) * static_cast<s32>(f)) >> 16));
+          ++m;
+          phase_ += step;
+        }
+        phase_ -= 0x10000;
+        prev_l_ = cl; prev_r_ = cr;
       }
-      phase_ -= 0x10000;
-      prev_l_ = cl; prev_r_ = cr;
     }
     s16* out = out_.data();
     if (muted_) std::memset(out, 0, m * 4);

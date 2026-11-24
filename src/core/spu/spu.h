@@ -37,6 +37,9 @@ public:
   // or 47605.1 Hz in DSi high-rate mode. Use for stream conversion.
   double output_rate_hz() const { return static_cast<double>(ARM9_CLOCK_HZ) / mix_period_; }
   void set_apply_bias(bool on) { apply_bias_ = on; }
+  // audio.hw_filter: the speaker output cut to the DS's 10 bits (GBATEK: the DAC takes 0..3FFh after the bias),
+  // as melonDS does. The DS only (no SOUNDBIAS stage on the DSi); captures keep their 16 bits. Not saved.
+  void set_ten_bit(bool on) { ten_bit_ = on; }
   void catch_up();
 
   // Output ring (stereo frames). `take` copies up to `max_frames` into `dst`
@@ -116,6 +119,7 @@ private:
   u32  mix_period_ = MIX_PERIOD;         // MIX_PERIOD, or MIX_PERIOD_47K on a DSi with SNDEXCNT bit 13
   u32  timer_step_ = TIMER_STEP;         // mix_period_ / 4
   bool apply_bias_ = true;               // SOUNDBIAS: DS yes, DSi no
+  bool ten_bit_ = false;                 // set_ten_bit
   u32  batch_ = 16;                      // samples per mix event
 
   static constexpr size_t RING_FRAMES = 16384;   // half a second

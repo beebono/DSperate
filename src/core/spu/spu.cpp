@@ -412,6 +412,8 @@ void Spu::mix() {
   // On the DSi, POWCNT2 bit 0 only silences the NITRO mixer.
   s16 l = muted_ ? 0 : static_cast<s16>(std::clamp(out_l, -0x8000, 0x7FFF));
   s16 r = muted_ ? 0 : static_cast<s16>(std::clamp(out_r, -0x8000, 0x7FFF));
+  // The DAC's 10 bits: the low 6 of the 16-bit sample (bias and the -8000h centring are whole steps of 40h).
+  if (ten_bit_ && apply_bias_) { l = static_cast<s16>(l & ~0x3F); r = static_cast<s16>(r & ~0x3F); }
   if (nds_.dsi) {
     // Nothing reaches output/mic while SNDEXCNT disables I2S; otherwise each
     // output sample is a mic sample clock, mixing NITRO with the DSP's output.

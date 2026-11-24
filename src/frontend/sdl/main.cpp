@@ -196,6 +196,8 @@ const char* kUsage =
     "                  network share that fits in memory, where a page read mid-frame is a round trip)\n"
     "  --no-audio      run without sound\n"
     "  --volume N      0..100\n"
+    "  --hw-audio      the console's own output stage (audio.hw_filter): a DS's 10 bits and nothing\n"
+    "                  above 16.4 kHz, or a DSi's codec filter (flat to 0.45 fs); --no-hw-audio: off\n"
     "  --audio-buffer X  how much sound is held ahead: auto (the default) or milliseconds;\n"
     "                  audio.buffer_size. Lower is less delay and less slack before a\n"
     "                  late frame is heard as a gap\n"
@@ -1554,6 +1556,8 @@ static int run(int argc, char** argv) {
     else if (flag("--no-gpu-present")) cli.set("video.gpu_present", "false");
     else if (flag("--no-audio")) cli.set("audio.enabled", "false");
     else if (arg("--volume")) cli.set("audio.volume", argv[++i]);
+    else if (flag("--hw-audio")) cli.set("audio.hw_filter", "true");
+    else if (flag("--no-hw-audio")) cli.set("audio.hw_filter", "false");
     else if (arg("--audio-buffer")) cli.set("audio.buffer_size", argv[++i]);
     else if (arg("--speed")) cli.set("emu.speed", argv[++i]);
     else if (arg("--limiter")) cli.set("emu.limiter", argv[++i]);
@@ -1652,7 +1656,7 @@ static int run(int argc, char** argv) {
   }
   auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.small_screen_fx", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.colour", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
-                                              "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "video.gpu3d_scale", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
+                                              "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "audio.hw_filter", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "video.gpu3d_scale", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
   const std::string bios9 = cfg.str("paths.bios9"), bios7 = cfg.str("paths.bios7");
   const std::string dsi_fw = cfg.str("paths.dsi_firmware");
@@ -2067,6 +2071,9 @@ sdl_ready:
   ds::sdl::Audio audio;
   if (audio_on) audio.open(cfg.flag("audio.native_rate", true));
   audio.set_volume(cfg.num("audio.volume", 100));
+  // audio.hw_filter: the output stage in the frontend, the 10 bits in the core (the DS's alone; Spu::set_ten_bit).
+  const auto apply_hw_audio = [&](bool on) { audio.set_hw_filter(on); nds.spu.set_ten_bit(on); };
+  apply_hw_audio(cfg.flag("audio.hw_filter", false));
   // buffer_size (ms) supersedes latency_frames; the old key is still read
   // when buffer_size is unset.
   auto apply_audio_buffer = [&audio](const std::string& v) {
@@ -3362,6 +3369,7 @@ sdl_ready:
     if (is("emu.speed")) { speed_pct = std::atoi(v.c_str()); apply_limiter(); return; }
     if (is("emu.limiter")) { limiter_mode = v; apply_limiter(); return; }
     if (is("audio.buffer_size")) { apply_audio_buffer(v); return; }
+    if (is("audio.hw_filter")) { apply_hw_audio(on); return; }
     if (is("audio.latency_frames")) { audio.set_buffer_ms(std::atoi(v.c_str()) * ds::sdl::Audio::FRAME_MS); return; }
     if (is("emu.ff_speed")) { ff_speed = std::atoi(v.c_str()); return; }
     if (is("emu.ff_skip")) { ff_skip = std::atoi(v.c_str()); return; }
