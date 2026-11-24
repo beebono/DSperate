@@ -160,6 +160,8 @@ const char* kUsage =
     "                  secondary at least --dominant-threshold of it, and the secondary the room left)\n"
     "                  or a ratio such as 0.5\n"
     "  --dominant-threshold T  the smallest secondary auto accepts, 0.1..0.99 (default 0.25)\n"
+    "  --no-small-screen-fx  the smaller screen of pip and dominant layouts plain: no grid, seams,\n"
+    "                  bilinear or chunky (video.small_screen_fx; --small-screen-fx turns them back on)\n"
     "  --integer-scale [M]  whole panel pixels per DS pixel: under (default when bare; the largest\n"
     "                  that fits, letterboxed) | over (the smallest that covers, cropped, keeping the\n"
     "                  edge between the screens) | off\n"
@@ -1205,6 +1207,7 @@ struct VideoSetup {
   int    chunky_cell = -1;
   u32    chunky_thresh = 180 * 256;
   ds::sdl::Display::Layout layout;
+  bool   small_screen_fx = true;   // video.small_screen_fx: effects on the smaller screen too
   std::vector<ds::sdl::Display::Mode> layout_cycle;
   bool   gpu_present = false;
   // Boot-only, see above.
@@ -1301,6 +1304,7 @@ bool parse_video(const ds::sdl::Config& cfg, VideoSetup& vs) {
       vs.layout.dominant = std::clamp(v, 0.1, 0.99);
     }
     vs.layout.dominant_min = std::clamp(cfg.real("video.dominant_threshold", 0.25), 0.1, 0.99);
+    vs.small_screen_fx = cfg.flag("video.small_screen_fx", true);
   }
   return true;
 }
@@ -1338,6 +1342,7 @@ bool open_displays(const VideoSetup& vs, ds::sdl::Display& display, ds::sdl::Dis
   display.set_integer_scale(vs.int_scale);
   display.set_grid_strength(vs.linear ? 0.0 : vs.grid_s);
   display.set_seam_blend(vs.seam_blend);
+  display.set_small_screen_fx(vs.small_screen_fx);
   if (!vs.linear) display.set_disp_grid(static_cast<u8>(((256 - vs.grid) * 255) / 256));
   return display.open("DSperate", vs.scale, vs.fullscreen, vs.linear, vs.vsync, vs.layout);
 }
@@ -1500,6 +1505,8 @@ static int run(int argc, char** argv) {
     else if (arg("--screen-gap")) cli.set("video.screen_gap", argv[++i]);
     else if (arg("--dominant-ratio")) cli.set("video.dominant_ratio", argv[++i]);
     else if (arg("--dominant-threshold")) cli.set("video.dominant_threshold", argv[++i]);
+    else if (flag("--small-screen-fx")) cli.set("video.small_screen_fx", "true");
+    else if (flag("--no-small-screen-fx")) cli.set("video.small_screen_fx", "false");
     else if (flag("--integer-scale")) cli.set("video.integer_scale", optional("under"));
     else if (arg("--frames")) frame_limit = std::atol(argv[++i]);
     else if (flag("--rtc-host")) rtc_host = true;
@@ -1643,7 +1650,7 @@ static int run(int argc, char** argv) {
     // Without a NAND the title goes in the slot (NDS::prepare_dsi_hle).
     if (!dsi_hle && !dsi_card) { dsi_title = rom; rom = nullptr; }
   }
-  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.integer_scale",
+  auto apply_cli = [&] { for (const char* k : {"paths.bios9", "paths.bios7", "paths.firmware", "paths.saves", "paths.states", "video.scale", "video.dual_window", "video.layout", "video.screen", "video.pip_alpha", "video.screen_gap", "video.dominant_ratio", "video.dominant_threshold", "video.small_screen_fx", "video.integer_scale",
                                               "video.fullscreen", "video.linear", "video.lcd_grid", "video.colour", "video.chunky", "video.chunky_threshold", "video.chunky_cell", "video.seam", "video.sink", "video.disp", "video.fbdev", "video.gpu_present", "video.vsync", "audio.enabled", "audio.volume",
                                               "audio.mic", "emu.jit", "emu.timing", "emu.speed", "emu.limiter", "emu.pacing", "audio.buffer_size", "audio.latency_frames", "emu.frameskip", "emu.frameskip_mode", "emu.frameskip_capture", "video.aa", "video.gpu3d", "video.gpu3d_scale", "cart.preload", "emu.autosave_png", "emu.autoload", "cheevos.enabled", "cheevos.token_file", "cheevos.username"}) if (cli.has(k)) cfg.set(k, cli.str(k)); };
   apply_cli();
@@ -2113,7 +2120,7 @@ sdl_ready:
     const bool at_source = display.effects_at_source();
     for (int i = 0; i < 2; ++i) {
       if (!scaled) { nds.gpu.set_scale_target(i, ds::gpu::Gpu::ScaleTarget{}); continue; }
-      ds::gpu::Gpu::ScaleTarget st = plain
+      ds::gpu::Gpu::ScaleTarget st = plain || target[i].plain   // the menu's text pages, or the smaller screen under video.small_screen_fx off
           ? ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun_plain}
           : ds::gpu::Gpu::ScaleTarget{target[i].px, target[i].pitch, target[i].h, target[i].xrun, at_source || !target[i].grid ? 256u : grid, display.chunky_on(i) ? chunky : static_cast<u8>(0), chunky_thresh,
                                       at_source ? static_cast<u8>(0) : seam_blend, target[i].seam_w,
@@ -3239,6 +3246,9 @@ sdl_ready:
         return l.pip_alpha < 1.0 ? "" : tr("ONLY WHEN THE PIP FADES");
       case ds::sdl::Dep::Dominant:
         return dominant ? "" : tr("DOMINANT LAYOUTS ONLY");
+      case ds::sdl::Dep::SmallScreen:
+        if (!pip && !dominant) return tr("PIP AND DOMINANT LAYOUTS ONLY");
+        return panel_effects() ? "" : tr("THIS SCREEN SCALES IN HARDWARE");
       case ds::sdl::Dep::DominantThreshold:
         if (!dominant) return tr("DOMINANT LAYOUTS ONLY");
         return cfg.str("video.dominant_ratio", "auto") == "auto" ? "" : tr("ONLY WHEN THE RATIO IS AUTO");
@@ -3313,6 +3323,8 @@ sdl_ready:
     host.pending_mode.clear();
     display.set_layout(want.layout);
     vs.layout = want.layout;
+    display.set_small_screen_fx(want.small_screen_fx);
+    vs.small_screen_fx = want.small_screen_fx;
     pip_alpha = static_cast<int>(want.layout.pip_alpha * 255.0 + 0.5);
     apply_visibility();
     menu_dirty = true;
@@ -3384,7 +3396,8 @@ sdl_ready:
       return;
     }
     if (is("video.layout") || is("video.screen") || is("video.pip_corner") || is("video.pip_scale") ||
-        is("video.pip_alpha") || is("video.screen_gap") || is("video.dominant_ratio") || is("video.dominant_threshold")) {
+        is("video.pip_alpha") || is("video.screen_gap") || is("video.dominant_ratio") || is("video.dominant_threshold") ||
+        is("video.small_screen_fx")) {
       host.layout_wanted = true;
       return;
     }

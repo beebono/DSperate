@@ -35,7 +35,7 @@ public:
   // Tier reopened at a new size: drop and re-import its buffers.
   bool reimport(ScanoutOut& out);
 
-  struct View { int screen; SDL_Rect rect; bool shown; bool blends; bool grid = false; };   // grid: LCD grid applies to this view
+  struct View { int screen; SDL_Rect rect; bool shown; bool blends; bool grid = false; bool plain = false; };   // grid: LCD grid applies to this view; plain: nearest, no filter or grid (video.small_screen_fx)
   // One frame: take a buffer from the tier, upload fb[0..1], draw,
   // submit. `lw`x`lh` is the logical (unrotated) frame the rects are laid
   // out in; `rot` maps it onto the presented buffer. False if nothing shown.

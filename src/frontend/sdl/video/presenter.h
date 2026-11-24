@@ -53,7 +53,7 @@ class FramePresenter {
 public:
   virtual ~FramePresenter() = default;
 
-  struct View { int screen; frontend::Rect rect; bool shown; bool blends; bool grid = false; };   // grid: LCD grid applies to this view
+  struct View { int screen; frontend::Rect rect; bool shown; bool blends; bool grid = false; bool plain = false; };   // grid: LCD grid applies to this view; plain: nearest, no effects
   struct Params {
     int rot = 0;                 // presented = logical rotated by this
     int lw = 0, lh = 0;          // the logical (unrotated) frame the rects are laid out in

@@ -759,7 +759,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
   bool need_image = false;
   for (int v = 0; v < std::min(nviews, 2); ++v) {
     const SDL_Rect& r = views[v].rect;
-    vfilter[v] = filter & 3u; vgrid[v] = views[v].grid;
+    vfilter[v] = views[v].plain ? kNearest : filter & 3u; vgrid[v] = views[v].grid && !views[v].plain;
     if (filter == kSeamBlend || filter == kSeamLinear) {
       vgrid[v] = false;   // the seams stand in for the grid
       if (r.h < 192 || (r.w % 256 == 0 && r.h % 192 == 0)) vfilter[v] = kNearest;
@@ -769,7 +769,7 @@ bool GpuPresent::present(ScanoutOut& out, const u32* const fb[2], const View* vi
     // multiple of the layer, or smaller than it, has none to blend and is merged as a nearest view is). Where
     // that pass cannot be made the view goes without its filter and not without its 3D.
     const int scr = views[v].screen & 1;
-    if (views[v].shown && r.w > 0 && r.h > 0 && merging[scr] && (filter & 3u) != kNearest) {
+    if (views[v].shown && r.w > 0 && r.h > 0 && merging[scr] && (filter & 3u) != kNearest && !views[v].plain) {
       const int lw3 = 256 * static_cast<int>(merge->s[scr].scale), lh3 = 192 * static_cast<int>(merge->s[scr].scale);
       const u32 sc = merge->s[scr].scale;
       u32 mf = filter & 3u;

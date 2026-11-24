@@ -223,6 +223,8 @@ const Setting kLayoutSettings[] = {
           N_("THE SMALLER SCREEN'S SIZE. AUTO FITS WHOLE PIXELS"), "auto", N_("AUTO")),
   percent("video.dominant_threshold", N_("DOMINANT THRESHOLD"), 10, 99, 5, "0.25", FlagDeferred, Dep::DominantThreshold,
           N_("THE SMALLEST SECONDARY AUTO WILL ACCEPT")),
+  boolean("video.small_screen_fx", N_("SMALL SCREEN FX"), "true", FlagDeferred, Dep::SmallScreen,
+          N_("VISUAL FX ON THE SMALLER SCREEN TOO. OFF SHOWS IT PLAIN: NO GRID, SEAMS, BILINEAR OR CHUNKY")),
   check("video.layout_cycle.vertical", N_("CYCLE VERTICAL"), "true", FlagLive, Dep::OneWindow,
         N_("THE LAYOUT HOTKEYS STEP THROUGH THE TICKED LAYOUTS")),
   check("video.layout_cycle.horizontal", N_("CYCLE HORIZONTAL"), "true", FlagLive, Dep::OneWindow,

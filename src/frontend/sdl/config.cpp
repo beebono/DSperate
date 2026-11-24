@@ -279,6 +279,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # at least dominant_threshold of it, and the other grows into the room left;
                                 # or a number, the smaller screen's size relative to the dominant one (0.5)
 # dominant_threshold = 0.25     # auto: the smallest secondary it accepts, 0.1..0.99
+# small_screen_fx = true        # false: the smaller screen of pip and dominant layouts shown plain, with no
+                                # lcd_grid, seam, linear or chunky (colour still applies to both)
 # dual_window = false           # one window per panel (dual-screen handhelds). DS_DUAL_SCREENS in the
                                 # environment sets each panel's SDL display and touch devices, e.g.
                                 # "upper=1,lower=0:goodix" (touch by name substring or #N; "none=<touch>"

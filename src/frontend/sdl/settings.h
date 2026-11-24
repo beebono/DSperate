@@ -37,6 +37,7 @@ enum class Dep : u8 {
   PipTouchHold,       // Pip, and the inset is not fully opaque (it is a fade timer)
   Dominant,           // the layout is dominant_v or dominant_h
   DominantThreshold,  // Dominant, and dominant_ratio is auto
+  SmallScreen,        // pip or dominant (there is a smaller screen), on a tier with panel effects
   Net,                // the build has the Wi-Fi transports (DSPERATE_NET)
   NetInternet,        // net.mode is internet: the DNS choice means nothing otherwise
   // No network session is up (not just none requested): frameskip, fast

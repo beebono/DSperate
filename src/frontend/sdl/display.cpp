@@ -417,6 +417,7 @@ bool Display::source_targets(Target out[SCREENS]) {
   for (int i = 0; i < nviews_; ++i) {
     const View& v = views_[i];
     out[v.screen] = Target{src_side_[v.screen].data(), SCREEN_W, SCREEN_H, xrun_[v.screen].data(), seam_w_[v.screen].data(), nullptr, nullptr, false, xrun_plain_[v.screen].data()};
+    out[v.screen].plain = plain_screen(v.screen);
   }
   return true;
 }
@@ -503,7 +504,7 @@ bool Display::prepare_gpu(GpuFrame& f) {
   }
   FramePresenter::Params& p = f.params;
   out_size(p.lw, p.lh);
-  for (int i = 0; i < nviews_; ++i) f.v[i] = FramePresenter::View{views_[i].screen, views_[i].rect, views_[i].shown, !views_[i].direct, grid_on(views_[i].screen)};
+  for (int i = 0; i < nviews_; ++i) f.v[i] = FramePresenter::View{views_[i].screen, views_[i].rect, views_[i].shown, !views_[i].direct, grid_on(views_[i].screen), plain_screen(views_[i].screen)};
   f.n = nviews_;
   p.rot = rot_; p.inset_alpha = inset_alpha_; p.linear = linear_;
   p.seam_blend = src_gpu_ ? 0 : seam_blend_;   // cells at source: their seams were the core's to draw
@@ -647,6 +648,16 @@ void Display::toggle_fullscreen() {
   margins_dirty_ = true;
 }
 
+void Display::set_small_screen_fx(bool on) {
+  if (on == small_fx_) return;
+  sync();
+  small_fx_ = on;
+  if (!win_ || disp_) return;   // before open(): its layout builds the tables
+  layout();
+  build_scale();
+  margins_dirty_ = true;
+}
+
 void Display::set_layout(const Layout& l) {
   sync();
   if (only_screen_ >= 0) return;
@@ -768,7 +779,7 @@ void Display::build_source_scale() {
     int cell = 2;
     const u32 pw = static_cast<u32>(std::lround(v.rect.w * s)), ph = static_cast<u32>(std::lround(v.rect.h * s));
     // Shown smaller than the screen: flattening before a downscale is only blur.
-    src_chunky_[v.screen] = s > 0.0 && pw >= SCREEN_W && ph >= SCREEN_H;
+    src_chunky_[v.screen] = s > 0.0 && pw >= SCREEN_W && ph >= SCREEN_H && !plain_screen(v.screen);
     if (!src_chunky_[v.screen]) { if (disp_) disp_->set_view_cell(i, 1); continue; }
     if (chunky_cell_ != 0) {
       u32 P = 0;
@@ -847,9 +858,10 @@ void Display::build_scale() {
     // Chunky: the even pixel's run widens over the odd one's (left as a
     // zero-length run scale_row skips); destination coverage is unchanged.
     cells_[v.screen] = {};
-    src_chunky_[v.screen] = chunky_;
-    bool pair = chunky_;
-    if (chunky_) {
+    const bool fx_chunky = chunky_ && !plain_screen(v.screen);   // the plain screen: no cells, no pairs
+    src_chunky_[v.screen] = fx_chunky;
+    bool pair = fx_chunky;
+    if (fx_chunky) {
       // Cell of P panel pixels needs P to divide both dimensions, <=256 cells across.
       const u32 w = static_cast<u32>(v.rect.w), h = static_cast<u32>(v.rect.h);
       u32 P = 0;
@@ -979,6 +991,7 @@ void Display::targets(u32* px, u32 stride, int w, int h, Target out[SCREENS]) {
                              static_cast<u32>(y0), static_cast<u32>(std::max(y0, y1))};
     } else
       out[v.screen] = Target{side_[v.screen].data(), static_cast<u32>(v.rect.w), static_cast<u32>(v.rect.h), xrun_[v.screen].data(), seam_w_[v.screen].data(), lin_sx_[v.screen].data(), lin_wx_[v.screen].data(), grid_on(v.screen), xrun_plain_[v.screen].data()};
+    out[v.screen].plain = plain_screen(v.screen);
   }
 }
 
