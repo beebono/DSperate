@@ -264,6 +264,23 @@ void Timing::update_cpu9(const CpuContext& cpu, u32 start, u32 end, bool notify)
           if (!retime_flags_[i]) { if (retime_list_.size() < RETIME_LIST_MAX) retime_list_.push_back(i); else retime_overflow_ = true; }
           retime_flags_[i] |= f;
         }
+        // The pages after this one in the run that held the same old slot get the same answers to every
+        // question above (the page before each now has this slot too, so its refill entry is R). A change
+        // of the ARM9's clock moves all million pages, and through the general path that was ~27 ms.
+        if (old_w != W) {
+          u32 n = i + 1;
+          for (; n < j; ++n) {
+            u64 o; std::memcpy(&o, &cpu9_[n * 8], 8);
+            if (o != old_w) break;
+            std::memcpy(&cpu9_[n * 8], &W, 8);
+            if (changed) std::memcpy(refill + (n - 1) * 4, &R, 4);
+            if (f && (retime_flags_[n] & f) != f) {
+              if (!retime_flags_[n]) { if (retime_list_.size() < RETIME_LIST_MAX) retime_list_.push_back(n); else retime_overflow_ = true; }
+              retime_flags_[n] |= f;
+            }
+          }
+          i = n - 1;
+        }
       }
     }
   }
