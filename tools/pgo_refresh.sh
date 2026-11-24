@@ -248,10 +248,11 @@ ninja -C "$VBUILD" > "$VBUILD/pgo-warnings.log" 2>&1 || { tail -20 "$VBUILD/pgo-
 # and the two fallbacks (miniz's inflate, the reference kernels). What matters
 # is whether anything *outside* those groups went untrained -- that is a scene
 # that stopped running, and it used to hide behind a count.
-# Four more are the SDL frontend's alone though they are built elsewhere: the window layout and the display tier
-# choice (src/frontend/video), the menu's translations (src/frontend/i18n), and the table of games that read a
-# GBA cartridge (core/slot2/compat.cpp: only the frontend's slot-2 prompt asks it).
-UNTRAINED='src/frontend/sdl/|src#frontend#video#|src#frontend#i18n#|slot2#compat|rcheevos|cheevos|tools#|miniz|kernels_ref'
+# Five more are the SDL frontend's alone though they are built elsewhere: the window layout and the display tier
+# choice (src/frontend/video), the menu's translations (src/frontend/i18n), the table of games that read a
+# GBA cartridge (core/slot2/compat.cpp: only the frontend's slot-2 prompt asks it), and the console's output
+# stage (core/spu/output_filter.cpp: audio.hw_filter runs it in the frontend's audio path).
+UNTRAINED='src/frontend/sdl/|src#frontend#video#|src#frontend#i18n#|slot2#compat|spu#output_filter|rcheevos|cheevos|tools#|miniz|kernels_ref'
 missing=$(grep -c "data file not found" "$VBUILD/pgo-warnings.log" || true)
 unexpected=$(grep "data file not found" "$VBUILD/pgo-warnings.log" | grep -cE -v "$UNTRAINED" || true)
 mismatch=$(grep -c "control flow of function" "$VBUILD/pgo-warnings.log" || true)   # "source locations ... changed" is benign: the counts still apply
