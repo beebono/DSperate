@@ -135,6 +135,17 @@ void code_write_hook(u8* host, u32 len) {
 
 constexpr size_t PARKED_PER_KEY = 4;
 
+// A block joins or leaves live_64k: once where it starts and, if that is another 64 KB, once where it ends.
+void count_live(JitCpu& jc, const Block* b, bool add) {
+  const u32 first = key_pc(b->key) >> 16;
+  const u32 last = static_cast<u32>((static_cast<u64>(key_pc(b->key)) + b->guest_len - 1) >> 16) & 0xFFFF;
+  for (u32 k = first;; k = last) {
+    u32& n = jc.live_64k[k];
+    if (add) ++n; else if (n) --n;
+    if (k == last) break;
+  }
+}
+
 void kill_block(JitCpu& jc, Block* b) {
   if (b->dead) return;
   b->dead = true;
@@ -150,7 +161,7 @@ void kill_block(JitCpu& jc, Block* b) {
   const u32 idx = (b->key >> 1) & (LUT_SIZE - 1);
   if (static_cast<u32>(jc.lut[idx]) == b->key) jc.lut[idx] = LUT_EMPTY_KEY;
   jc.blocks.erase(b->key);
-  if (u32& n = jc.region_live[key_pc(b->key) >> 24]) --n;
+  count_live(jc, b, false);
   g_rt.stats.blocks_invalidated++;
 }
 
@@ -171,10 +182,11 @@ void reset_arena() {
   for (JitCpu& jc : r.cpus) {
     for (Block* b : jc.all_blocks) if (!b->pooled) delete b;
     jc.all_blocks.clear();
-    for (std::vector<Block*>& v : jc.region_blocks) v.clear();
+    jc.blocks_64k.clear();
     jc.blocks.clear();
     jc.parked.clear();
-    std::memset(jc.region_live, 0, sizeof jc.region_live);
+    std::memset(jc.live_64k, 0, sizeof jc.live_64k);
+    jc.longest_block = 0;
     if (jc.lut) for (u32 i = 0; i < LUT_SIZE; ++i) jc.lut[i] = LUT_EMPTY_KEY;
   }
   for (auto& kv : r.code_pages) set_code_tag(kv.first, false);
@@ -321,7 +333,7 @@ static void register_block(JitCpu& jc, Block* b) {
     v.add(b, lo, hi);
   }
   jc.blocks[b->key] = b;
-  ++jc.region_live[pc >> 24];
+  count_live(jc, b, true);
   lut_insert(jc, b);
 }
 
@@ -369,7 +381,8 @@ static void install(JitCpu& jc, Block* b) {
   if (b->span_hi) b->span_hash = span_hash(jc, b);
   register_block(jc, b);
   jc.all_blocks.push_back(b);
-  jc.region_blocks[key_pc(b->key) >> 24].push_back(b);
+  jc.blocks_64k[key_pc(b->key) >> 16].push_back(b);
+  jc.longest_block = std::max(jc.longest_block, b->guest_len);
   r.blocks_live++;
   r.stats.blocks_translated++;
   r.stats.code_bytes += b->size;
@@ -846,14 +859,19 @@ void remapped(CpuContext& cpu, u32 lo, u32 hi) {
   if (!cpu.jit) return;
   JitCpu& jc = *static_cast<JitCpu*>(cpu.jit);
   u32 any = 0;
-  for (u32 r = lo >> 24; r <= hi >> 24; ++r) any |= jc.region_live[r];
+  for (u32 k = lo >> 16; k <= hi >> 16; ++k) any |= jc.live_64k[k];
   if (!any) return;
   u64 killed = 0;
-  // Only the blocks of the regions in the range (and the one below it, for a block that runs into lo): walking
-  // all_blocks cost ~2 ms a call with ~12k blocks, and Pokemon White remaps VRAM often enough in a battle for that
-  // to put frames over budget (v4.0.1).
-  for (u32 r = lo >> 24 ? (lo >> 24) - 1 : 0; r <= hi >> 24; ++r)
-  for (Block* b : jc.region_blocks[r]) {
+  // Only the blocks of the 64 KB pieces in the range, and of those below it that a block reaching into lo can
+  // start in: walking all_blocks cost ~2 ms a call with ~12k blocks, and Pokemon White remaps VRAM often enough
+  // in a battle for that to put frames over budget (v4.0.1). Lists by pc >> 24 were not fine enough either: the
+  // DSi menu moves a WRAM window ~70 times a frame while it starts a title, and walking every 02xxxxxx and
+  // 03xxxxxx block for each made those frames 140-230 ms on the RG DS Plus.
+  for (u32 k = (lo > jc.longest_block ? lo - jc.longest_block : 0) >> 16; k <= hi >> 16; ++k) {
+  if (!jc.live_64k[k]) continue;   // a block is counted where it starts
+  const auto it = jc.blocks_64k.find(k);
+  if (it == jc.blocks_64k.end()) continue;
+  for (Block* b : it->second) {
     if (b->dead) continue;
     const u32 pc = key_pc(b->key);
     if (pc > hi || static_cast<u64>(pc) + b->guest_len - 1 < lo) continue;
@@ -864,6 +882,7 @@ void remapped(CpuContext& cpu, u32 lo, u32 hi) {
     remove_from_page_lists(b);
     kill_block(jc, b);   // parked: it comes back only if the address shows its bytes again
     ++killed;
+  }
   }
   if (killed) jc.ctx->hot.alerts |= ALERT_INVALIDATED;
 }

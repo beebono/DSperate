@@ -340,10 +340,12 @@ void Bus::apply_wram(bool nwram, bool windows_only) {
     }
     PageTable& pt = nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9).page_table;
     u8** cells = wram_cells_[c];
+    u32 moved_lo = partial ? 0x04000000 : 0x03000000, moved_hi = partial ? 0x03000000 : 0x04000000;   // the cells that changed
     for (u32 a = lo; a < hi; a += CELL) {
       const u32 k = (a - 0x03000000) / CELL;
       u8* host = wram_cell_host(c, win, a);
       if (partial && cells[k] == host) continue;
+      if (partial) { moved_lo = std::min(moved_lo, a); moved_hi = std::max(moved_hi, a + CELL); }
       cells[k] = host;
       u8* pages[PAGES];
       for (u32 i = 0; i < PAGES; ++i) pages[i] = host ? host + (i << PAGE_SHIFT) : nullptr;
@@ -352,8 +354,8 @@ void Bus::apply_wram(bool nwram, bool windows_only) {
     wram_key_[c] = key;
     std::memcpy(wram_win_[c], win, sizeof win);
 #if DSPERATE_JIT
-    // WRAMCNT or a DSi window moved: code translated from 03xxxxxx may be other bytes now.
-    jit::remapped(nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9), 0x03000000, 0x03FFFFFF);
+    // WRAMCNT or a DSi window moved: code translated from the cells that moved may be other bytes now.
+    if (moved_lo < moved_hi) jit::remapped(nds_.cpu(c ? Cpu::ARM7 : Cpu::ARM9), moved_lo, moved_hi - 1);
 #endif
   }
 }
