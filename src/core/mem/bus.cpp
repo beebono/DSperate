@@ -374,7 +374,7 @@ void Bus::update_nwram(bool windows_only) {
   std::memset(nwram_map_, 0, sizeof nwram_map_);
   if (nds_.dsi) {
     const io::DsiIo& d = nds_.io.dsi;
-    if (getenv("DS_DEBUG_MBK"))
+    if (static const bool debug = std::getenv("DS_DEBUG_MBK") != nullptr; debug)
       std::fprintf(stderr, "[nwram] rebuild scfg_ext %08x/%08x (bit25 a9=%d a7=%d) t=%llu\n",
                    d.scfg_ext[0], d.scfg_ext[1], (d.scfg_ext[0] >> 25) & 1, (d.scfg_ext[1] >> 25) & 1,
                    (unsigned long long)nds_.sched.now());

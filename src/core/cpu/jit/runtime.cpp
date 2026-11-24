@@ -135,7 +135,8 @@ void code_write_hook(u8* host, u32 len) {
 
 constexpr size_t PARKED_PER_KEY = 4;
 
-// A block joins or leaves live_64k: once where it starts and, if that is another 64 KB, once where it ends.
+// A block joins or leaves the live counts: live_64k once where it starts and, if that is another 64 KB, once
+// where it ends; its piece's where it starts.
 void count_live(JitCpu& jc, const Block* b, bool add) {
   const u32 first = key_pc(b->key) >> 16;
   const u32 last = static_cast<u32>((static_cast<u64>(key_pc(b->key)) + b->guest_len - 1) >> 16) & 0xFFFF;
@@ -144,14 +145,17 @@ void count_live(JitCpu& jc, const Block* b, bool add) {
     if (add) ++n; else if (n) --n;
     if (k == last) break;
   }
+  if (add) ++jc.pieces[key_pc(b->key) >> JitCpu::PIECE_SHIFT].live;
+  else if (const auto it = jc.pieces.find(key_pc(b->key) >> JitCpu::PIECE_SHIFT); it != jc.pieces.end() && it->second.live) --it->second.live;
 }
 
-void kill_block(JitCpu& jc, Block* b) {
+// `park` false: the caller drops every parked translation next (a retime), so this one need not be kept.
+void kill_block(JitCpu& jc, Block* b, bool park = true) {
   if (b->dead) return;
   b->dead = true;
   // Linked callers now land in the dispatcher, which revives or retranslates.
   std::memcpy(b->entry_words, b->entry, backend::ENTRY_PATCH);
-  {
+  if (park) {
     std::vector<Block*>& v = jc.parked[b->key];
     if (v.size() >= PARKED_PER_KEY) v.erase(v.begin());
     v.push_back(b);
@@ -182,7 +186,7 @@ void reset_arena() {
   for (JitCpu& jc : r.cpus) {
     for (Block* b : jc.all_blocks) if (!b->pooled) delete b;
     jc.all_blocks.clear();
-    jc.blocks_64k.clear();
+    jc.pieces.clear();
     jc.blocks.clear();
     jc.parked.clear();
     std::memset(jc.live_64k, 0, sizeof jc.live_64k);
@@ -215,7 +219,7 @@ void on_timing_changed(CpuContext& cpu) {
       for (u32 i = 0; i < b->ndep && !hit; ++i) hit = (t.retime_flag(b->dep_page[i]) & b->dep_kind[i]) != 0;
       if (!hit) continue;
       remove_from_page_lists(b);
-      kill_block(jc, b);
+      kill_block(jc, b, false);
       ++killed;
     }
   }
@@ -381,7 +385,11 @@ static void install(JitCpu& jc, Block* b) {
   if (b->span_hi) b->span_hash = span_hash(jc, b);
   register_block(jc, b);
   jc.all_blocks.push_back(b);
-  jc.blocks_64k[key_pc(b->key) >> 16].push_back(b);
+  {
+    JitCpu::Piece& piece = jc.pieces[key_pc(b->key) >> JitCpu::PIECE_SHIFT];
+    piece.blocks.push_back(b);
+    piece.reach = std::max(piece.reach, static_cast<u32>(std::min<u64>(static_cast<u64>(key_pc(b->key)) + b->guest_len - 1, 0xFFFFFFFFu)));
+  }
   jc.longest_block = std::max(jc.longest_block, b->guest_len);
   r.blocks_live++;
   r.stats.blocks_translated++;
@@ -509,7 +517,7 @@ static void invalidate_blocks(const u8* host_page, std::vector<Block*> victims) 
 }
 
 void invalidate_cpu(JitCpu& jc) {
-  for (Block* b : jc.all_blocks) if (!b->dead) { remove_from_page_lists(b); kill_block(jc, b); }
+  for (Block* b : jc.all_blocks) if (!b->dead) { remove_from_page_lists(b); kill_block(jc, b, false); }
   jc.blocks.clear();
   jc.parked.clear();
   if (jc.ctx) jc.ctx->hot.alerts |= ALERT_INVALIDATED;
@@ -862,16 +870,16 @@ void remapped(CpuContext& cpu, u32 lo, u32 hi) {
   for (u32 k = lo >> 16; k <= hi >> 16; ++k) any |= jc.live_64k[k];
   if (!any) return;
   u64 killed = 0;
-  // Only the blocks of the 64 KB pieces in the range, and of those below it that a block reaching into lo can
-  // start in: walking all_blocks cost ~2 ms a call with ~12k blocks, and Pokemon White remaps VRAM often enough
-  // in a battle for that to put frames over budget (v4.0.1). Lists by pc >> 24 were not fine enough either: the
-  // DSi menu moves a WRAM window ~70 times a frame while it starts a title, and walking every 02xxxxxx and
-  // 03xxxxxx block for each made those frames 140-230 ms on the RG DS Plus.
-  for (u32 k = (lo > jc.longest_block ? lo - jc.longest_block : 0) >> 16; k <= hi >> 16; ++k) {
-  if (!jc.live_64k[k]) continue;   // a block is counted where it starts
-  const auto it = jc.blocks_64k.find(k);
-  if (it == jc.blocks_64k.end()) continue;
-  for (Block* b : it->second) {
+  // Only the blocks of the 16 KB pieces in the range, and of those below it that have a block reaching into lo:
+  // walking all_blocks cost ~2 ms a call with ~12k blocks, and Pokemon White remaps VRAM often enough in a battle
+  // for that to put frames over budget (v4.0.1). Lists by pc >> 24 were not fine enough either: the DSi menu moves
+  // a WRAM window ~70 times a frame while it starts a title, and walking every 02xxxxxx and 03xxxxxx block for
+  // each made those frames 140-230 ms on the RG DS Plus.
+  for (u32 k = (lo > jc.longest_block ? lo - jc.longest_block : 0) >> JitCpu::PIECE_SHIFT; k <= hi >> JitCpu::PIECE_SHIFT; ++k) {
+  if (!jc.live_64k[k >> (16 - JitCpu::PIECE_SHIFT)]) continue;   // a block is counted where it starts
+  const auto it = jc.pieces.find(k);
+  if (it == jc.pieces.end() || !it->second.live || it->second.reach < lo) continue;
+  for (Block* b : it->second.blocks) {
     if (b->dead) continue;
     const u32 pc = key_pc(b->key);
     if (pc > hi || static_cast<u64>(pc) + b->guest_len - 1 < lo) continue;

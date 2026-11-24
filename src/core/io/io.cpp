@@ -1911,9 +1911,11 @@ void Io::reprice_clock9_store(u32 idx) {
   a9.data_cycles = a9.timing9[0x04004004 >> 12][4 + idx];
 }
 
+static bool debug_mbk() { static const bool on = std::getenv("DS_DEBUG_MBK") != nullptr; return on; }
+
 // One MBK1-5 byte: slot `slot` of bank A (0), B (1) or C (2).
 void Io::mbk_map_slot(int bank, int slot, u8 value) {
-  if (getenv("DS_DEBUG_MBK")) std::fprintf(stderr, "[mbk] slot %c[%d] = %02x  t=%llu\n", "ABC"[bank], slot, value, (unsigned long long)nds_.sched.now());
+  if (debug_mbk()) std::fprintf(stderr, "[mbk] slot %c[%d] = %02x  t=%llu\n", "ABC"[bank], slot, value, (unsigned long long)nds_.sched.now());
   value &= bank == 0 ? ~0x72 : ~0x60;
   const u32 prot_bit = bank == 0 ? slot : bank == 1 ? 8 + slot : 16 + slot;
   if (dsi.mbk[0][8] & (1u << prot_bit)) return;
@@ -1975,7 +1977,7 @@ void Io::mbk_map_range(Cpu cpu, int bank, u32 value) {
   u32& reg = dsi.mbk[ci(cpu)][5 + bank];
   if (reg == value) return;
   reg = value;
-  if (getenv("DS_DEBUG_MBK")) {
+  if (debug_mbk()) {
     const u32 start = bank == 0 ? 0x03000000 + (((value >> 4) & 0xFF) << 16) : 0x03000000 + (((value >> 3) & 0x1FF) << 15);
     const u32 end   = bank == 0 ? 0x03000000 + (((value >> 20) & 0x1FF) << 16) : 0x03000000 + (((value >> 19) & 0x3FF) << 15);
     std::fprintf(stderr, "[mbk] range %c cpu%d val %08x -> %08x-%08x size %u  t=%llu\n",

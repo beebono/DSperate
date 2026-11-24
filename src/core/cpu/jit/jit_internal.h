@@ -132,8 +132,13 @@ struct JitCpu {
   // Live blocks by 64 KB of guest space, each counted where it starts and, if elsewhere, where it ends:
   // jit::remapped's question "is there code here at all".
   u32 live_64k[1u << 16] = {};
-  std::unordered_map<u32, std::vector<Block*>> blocks_64k;   // all_blocks by pc >> 16 (dead ones too): what jit::remapped walks, not all_blocks
-  u32 longest_block = 0;                     // the largest guest_len so far: how far below a remapped range a block reaching into it can start
+  // all_blocks by pc >> 14 (dead ones too; 16 KB, the size of a WRAM cell): what jit::remapped walks, not
+  // all_blocks. `live`: how many are not dead. `reach`: the highest last byte of any of them, so a walk can
+  // tell whether a piece below the remapped range has a block reaching into it.
+  struct Piece { std::vector<Block*> blocks; u32 live = 0, reach = 0; };
+  static constexpr u32 PIECE_SHIFT = 14;
+  std::unordered_map<u32, Piece> pieces;
+  u32 longest_block = 0;                     // the largest guest_len so far: how far below a remapped range such a block can start
   std::unordered_map<u32, std::vector<Block*>> parked;   // killed translations, newest last
   // Cold-code threshold (DS_JIT_WARM, opt-in): lookups per key (direct-mapped,
   // the LUT's hash) before a block is translated; below it the slice is
