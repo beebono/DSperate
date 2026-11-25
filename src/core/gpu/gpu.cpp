@@ -143,6 +143,7 @@ u32 Gpu::reg_read(u32 addr, u32 width) {
 
 void Gpu::reg_write(u32 addr, u32 width, u32 value) {
   const u32 r = addr - 0x04000000;
+  ++writes_2d[r >= 0x1000];
   // MASTER_BRIGHT: guest copy here, render side via the journal.
   auto mb = [&](int e, u16 v) { master_bright_g_[e] = v; engine[e].master_bright_write(v); };
   if (r >= 0x64 && r < 0x70) {
@@ -204,6 +205,7 @@ void Gpu::palette_store(Cpu cpu, u32 addr, u32 width, u32 value) {
   u8* host = nds_.bus.palette.get() + off;
   if (std::memcmp(host, &value, n) == 0) return;
   if (nds_.cpu(cpu).page_table.entry(addr) & mem::TAG_CODE) mem::store_code(host, &value, n); else std::memcpy(host, &value, n);
+  ++writes_2d[off >> 10];
   engine[off >> 10].palette_written(off & 0x3FF, width, value);
 }
 void Gpu::oam_store(Cpu cpu, u32 addr, u32 width, u32 value) {
@@ -211,6 +213,7 @@ void Gpu::oam_store(Cpu cpu, u32 addr, u32 width, u32 value) {
   u8* host = nds_.bus.oam.get() + off;
   if (std::memcmp(host, &value, n) == 0) return;
   if (nds_.cpu(cpu).page_table.entry(addr) & mem::TAG_CODE) mem::store_code(host, &value, n); else std::memcpy(host, &value, n);
+  ++writes_2d[off >> 10];
   engine[off >> 10].oam_written(off & 0x3FF, width, value);
 }
 

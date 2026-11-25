@@ -144,6 +144,7 @@ void CpuContext::jump(u32 addr, bool interwork) {
 void CpuContext::raise_exception(Exception e) {
   u32 vector = 0, mode = 0x13; s32 lr_adj = 0;
   const bool was_thumb = thumb();
+  if (e == Exception::Undefined || e == Exception::PrefetchAbort || e == Exception::DataAbort) ++faults;
   switch (e) {
   case Exception::Reset:         vector = 0x00; mode = 0x13; break;
   case Exception::Undefined:     vector = 0x04; mode = 0x1B; lr_adj = was_thumb ? 2 : 4; break;

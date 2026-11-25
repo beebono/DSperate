@@ -96,6 +96,9 @@ struct CpuContext {
   // the per-page cost table or TCM windows change.
   void (*jit_timing_changed)(CpuContext&) = nullptr;
   void* jit = nullptr;
+  // Undefined-instruction and abort exceptions raised so far (headless --sweep-log):
+  // diagnostics only, not machine state, so not in save states.
+  u32 faults = 0;
 
   void reset(Cpu which, NDS* nds);
   template <class S> void sync_state(S& s);   // page table/timing pointers rebuilt by Bus::relink

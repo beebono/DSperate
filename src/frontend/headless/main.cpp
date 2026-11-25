@@ -277,6 +277,7 @@ int main(int argc, char** argv) {
   int frameskip = 0;    // --frameskip N: skip drawing N of every N+1 frames (fixed; the SDL frontend also has the adaptive mode)
   bool frameskip_capture = false;
   int stats_from = 0;   // --stats-from N: first frame counted in the timing statistics
+  const char* sweep_log = nullptr;   // --sweep-log FILE: per-frame signals for the compatibility sweep (tools/compat-sweep)
   const char* pc_profile = nullptr;
   int dump_from = 0, dump_count = 0;   // --dump-from/--dump-count: window of a large dump
   std::vector<int> dump_at;   // --dump-at F1,F2,..: only these frames (replaces the window)
@@ -385,6 +386,7 @@ int main(int argc, char** argv) {
     else if (arg("--dump-gpu-frame", 2)) { gpu_dump_frame = std::atol(argv[++i]); gpu_dump_path = argv[++i]; }   // N FILE: frame N's polygon list in the GPU raster's layout (vk_dump.h)
 
     else if (arg("--hash-frames")) hash_frames = argv[++i];   // FILE: "frame top bottom" per frame, FNV-1a 64 of each screen's 0xAARRGGBB (the video golden hashes)
+    else if (arg("--sweep-log")) sweep_log = argv[++i];       // FILE: one line per frame for the compatibility sweep: screen hashes (as --hash-frames) and fill colours, polygons, 2D writes, DISPCNT, MASTER_BRIGHT, audio peak, CPU faults, PCs (header line names the columns)
     else if (arg("--dump-scaled", 2)) { scaled_n = std::atoi(argv[++i]); scaled_path = argv[++i]; }   // N FILE: both screens through the scanline scaler at Nx, raw BGRA
     else if (arg("--dump-from")) dump_from = std::atoi(argv[++i]);    // first frame to dump
     else if (arg("--dump-count")) dump_count = std::atoi(argv[++i]);  // how many (0 = to the end)
@@ -441,7 +443,7 @@ int main(int argc, char** argv) {
         {"--dump-frames", dump}, {"--dump-3d", rec3d_path}, {"--dump-3d-fine", fine3d_path},
         {"--dump-screens-scaled", screens_scaled_path}, {"--dump-gpu-frame", gpu_dump_path}, {"--hash-frames", hash_frames},
         {"--dump-scaled", scaled_path}, {"--dump-audio", dump_audio}, {"--gba-save-out", gba_save_out}, {"--save-out", save_out},
-        {"--pc-profile", pc_profile}, {"--save-state-at", save_state_path}};
+        {"--pc-profile", pc_profile}, {"--save-state-at", save_state_path}, {"--sweep-log", sweep_log}};
     for (const auto& [opt, path] : outs)
       if (path && !output_path_safe(opt, path, ins, sizeof ins / sizeof ins[0])) return 2;
   }
@@ -787,6 +789,12 @@ int main(int argc, char** argv) {
   if (gpu3d) { std::string why; if (!nds.gpu3d.renderer().set_gpu(true, &why)) std::fprintf(stderr, "gpu3d: unavailable (%s), drawing on the CPU\n", why.c_str()); }
   FILE* hash_out = hash_frames ? std::fopen(hash_frames, "w") : nullptr;
   if (hash_frames && !hash_out) { std::fprintf(stderr, "could not open %s\n", hash_frames); return 1; }
+  FILE* sweep_out = sweep_log ? std::fopen(sweep_log, "w") : nullptr;
+  if (sweep_log && !sweep_out) { std::fprintf(stderr, "could not open %s\n", sweep_log); return 1; }
+  // fill: the screen's colour when every pixel is that colour, else "-". 2D writes and
+  // faults are this frame's; dispcnt/bright are the guest's registers at the frame's end.
+  if (sweep_out) std::fputs("frame\ttop\tbot\ttop_fill\tbot_fill\tpolys\tw2d_a\tw2d_b\tdispcnt_a\tdispcnt_b\tbright_a\tbright_b\tpeak\tfaults9\tfaults7\tpc9\tpc7\n", sweep_out);
+  ds::u32 sweep_faults[2] = {};
   ds::input::Log log;
   if (replay) {
     if (!log.open_read(replay)) { std::fprintf(stderr, "cannot read %s\n", replay); return 1; }
@@ -1035,10 +1043,33 @@ int main(int argc, char** argv) {
       auto fnv = [](const ds::u32* p) { ds::u64 h = 1469598103934665603ull; for (ds::u32 k = 0; k < ds::SCREEN_W * ds::SCREEN_H; ++k) h = (h ^ p[k]) * 1099511628211ull; return h; };
       std::fprintf(hash_out, "%d %016llx %016llx\n", i, (unsigned long long)fnv(nds.gpu.framebuffer(0)), (unsigned long long)fnv(nds.gpu.framebuffer(1)));
     }
-    if (audio_out) {
+    int audio_peak = 0;
+    if (audio_out || sweep_out) {
       ds::s16 buf[2048 * 2]; size_t n;
-      while ((n = nds.spu.take(buf, 2048)) != 0) std::fwrite(buf, 4, n, audio_out);
+      while ((n = nds.spu.take(buf, 2048)) != 0) {
+        if (audio_out) std::fwrite(buf, 4, n, audio_out);
+        for (size_t k = 0; k < n * 2; ++k) audio_peak = std::max(audio_peak, std::abs(static_cast<int>(buf[k])));
+      }
     } else nds.spu.drain();
+    if (sweep_out) {
+      ds::u64 h[2]; long long fill[2];
+      for (int s = 0; s < 2; ++s) {
+        const ds::u32* p = nds.gpu.framebuffer(s);
+        ds::u64 x = 1469598103934665603ull; ds::u32 diff = 0;
+        for (ds::u32 k = 0; k < ds::SCREEN_W * ds::SCREEN_H; ++k) { x = (x ^ p[k]) * 1099511628211ull; diff |= p[k] ^ p[0]; }
+        h[s] = x; fill[s] = diff ? -1 : static_cast<long long>(p[0]);
+      }
+      char fs[2][12];
+      for (int s = 0; s < 2; ++s) { if (fill[s] < 0) std::strcpy(fs[s], "-"); else std::snprintf(fs[s], sizeof fs[s], "%08llx", fill[s]); }
+      auto& c9 = nds.cpu(ds::Cpu::ARM9); auto& c7 = nds.cpu(ds::Cpu::ARM7);
+      std::fprintf(sweep_out, "%d\t%016llx\t%016llx\t%s\t%s\t%u\t%u\t%u\t%08x\t%08x\t%04x\t%04x\t%d\t%u\t%u\t%08x\t%08x\n", i,
+                   (unsigned long long)h[0], (unsigned long long)h[1], fs[0], fs[1], nds.gpu3d.render_polygon_count(),
+                   nds.gpu.writes_2d[0], nds.gpu.writes_2d[1], nds.gpu.engine[0].read(0x04000000, 32), nds.gpu.engine[1].read(0x04001000, 32),
+                   nds.gpu.engine[0].master_bright(), nds.gpu.engine[1].master_bright(), audio_peak,
+                   c9.faults - sweep_faults[0], c7.faults - sweep_faults[1], c9.hot.regs[15], c7.hot.regs[15]);
+      nds.gpu.writes_2d[0] = nds.gpu.writes_2d[1] = 0;
+      sweep_faults[0] = c9.faults; sweep_faults[1] = c7.faults;
+    }
 #if DSPERATE_JIT
     if (i == stats_from && jit) ds::jit::density_reset();
 #endif
@@ -1078,6 +1109,7 @@ int main(int argc, char** argv) {
   }
   if (dump_out) std::fclose(dump_out);
   if (hash_out) std::fclose(hash_out);
+  if (sweep_out) std::fclose(sweep_out);
   if (scaled_out) std::fclose(scaled_out);
   if (audio_out) std::fclose(audio_out);
   if (ts.pc_hist) {

@@ -69,6 +69,10 @@ public:
   }
   u32  reg_read(u32 addr, u32 width);
   void reg_write(u32 addr, u32 width, u32 value);
+  // 2D register, palette and OAM writes per engine (0 = A, 1 = B) since the reader
+  // last cleared them: the headless --sweep-log's measure of 2D drawing work.
+  // Counted on these slow paths only; VRAM stores through fastmem are not seen.
+  u32 writes_2d[2] = {};
   void set_powcnt(u16 value);
 
   // Journal stamp for a write to engine `e`: twice the first display line it
