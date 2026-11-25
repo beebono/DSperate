@@ -36,6 +36,7 @@ subset; `--frames` sets the length; `--extra "..."` passes headless arguments
 | `wait_settled.sh DIR [-- CMD]` | waits until DIR has had no change in file count, bytes or newest mtime for `QUIET_SECS` (900), then runs CMD |
 | `run_sweep.py` | the runner: one headless run per game in parallel (`--jobs`, default half the cores, since a job keeps ~2 cores busy with the 2D and 3D workers) |
 | `classify.py OUT` | `classify.tsv`, `summary.md` (counts and the outlier list), `sheet-<phase>-<category>.html` |
+| `review.py DIR [SET...]` | `DIR/REVIEW.md`: the games worth looking at by eye (broken, regressed, stuck, ignoring input, frozen after input, no progress), each with its idle and mash screenshot strips, over one or more sets' outputs under DIR |
 
 ## Signals
 
