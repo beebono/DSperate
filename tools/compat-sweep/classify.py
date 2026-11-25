@@ -9,7 +9,8 @@ OUT/summary.md (counts, outliers) and OUT/sheet-<phase>-<category>.html
 (the screenshot strips, for looking through by eye).
 
 Per phase, a game is one of:
-  failed        the run did not finish (crash, timeout, early exit)
+  failed        the run did not finish (crash, timeout)
+  exited        the run ended cleanly early: the title quit (DSiWare returning to the DSi Menu)
   no-boot       never shows a non-uniform picture
   faulting      the CPUs raise undefined/abort exceptions (rarely legitimate)
   frozen        the picture stops changing and the sound stops, 30 s before the end
@@ -32,7 +33,8 @@ TAIL = 1800          # frames: the window the end state is judged on (30 s)
 MASH_START, MASH_PERIOD, MASH_OFFSETS = 120, 40, (0, 12, 24)
 RESPONSE = 10        # frames after an input in which a change counts as its answer
 ACCEPTED_MIN = 3     # inputs answered for the game to count as having taken input
-ORDER = ["failed", "no-boot", "faulting", "frozen", "static", "loop", "animated-2d", "animated-3d"]
+BAD = ("failed", "exited", "no-boot", "faulting", "frozen")   # end states that count against a game
+ORDER = ["failed", "exited", "no-boot", "faulting", "frozen", "static", "loop", "animated-2d", "animated-3d"]
 
 def load(path):
     rows = []
@@ -86,8 +88,10 @@ def accepted_inputs(fm, fi):
     return n
 
 def category(f, rec):
-    if f is None or rec.get("rc", 0) != 0 or not f["finished"]:
+    if f is None or rec.get("rc", 0) != 0:
         return "failed"
+    if not f["finished"]:
+        return "exited"   # the run ended cleanly before its last frame: the title quit (a DSiWare title back to the DSi Menu)
     if f["nonuniform"] == 0:
         return "no-boot"
     if f["faults"] > 0:
@@ -130,7 +134,7 @@ def main():
             fi, fm = feats.get("idle"), feats.get("mash")
             acc = accepted_inputs(fm, fi) if fi and fm else 0
             row["accepted"] = acc
-            if ORDER.index(row["mash"]) < ORDER.index(row["idle"]) and row["mash"] in ORDER[:4]:
+            if ORDER.index(row["mash"]) < ORDER.index(row["idle"]) and row["mash"] in BAD:
                 o = "regressed"
             elif acc >= ACCEPTED_MIN:
                 o = "progressed"
@@ -141,7 +145,11 @@ def main():
             if f:
                 f.pop("pairs", None); f.pop("hashes", None)
         j = res["jit"].get(g)
-        row["jit"] = j.get("verdict", "") + (f"@{j['first_diff']}" if j and j.get("verdict") == "DIFF" else "") if j else ""
+        if j:   # records before the runner said "failed" label a failed run DIFF with first_diff "run failed"
+            v = "failed" if j.get("first_diff") == "run failed" else j.get("verdict", "")
+            row["jit"] = v + (f"@{j['first_diff']}" if v == "DIFF" else "")
+        else:
+            row["jit"] = ""
         rows.append(row)
     cols = ["file", "idle", "mash", "mash_vs_idle", "accepted", "jit", "idle_detail", "mash_detail"]
     with open(os.path.join(out, "classify.tsv"), "w") as fh:
@@ -151,8 +159,8 @@ def main():
     # Outliers: anything that fails or dies in the mash, a mash that broke or
     # changed nothing, every JIT difference, and an idle run that died unless the
     # mash got past it (a still, silent title screen reads as frozen when idle).
-    outl = [r for r in rows if r.get("mash") in ORDER[:4] or r.get("mash_vs_idle") in ("regressed", "same")
-            or (r.get("idle") in ORDER[:4] and r.get("mash_vs_idle") != "progressed")
+    outl = [r for r in rows if r.get("mash") in BAD or r.get("mash_vs_idle") in ("regressed", "same")
+            or (r.get("idle") in BAD and r.get("mash_vs_idle") != "progressed")
             or r.get("jit", "").startswith("DIFF")]
     with open(os.path.join(out, "summary.md"), "w") as fh:
         fh.write(f"# Compatibility sweep\n\n{len(games)} games classified.\n\n| category | idle | mash |\n|---|---|---|\n")

@@ -46,7 +46,9 @@ writes per engine, both DISPCNTs and MASTER_BRIGHTs, the audio peak, CPU faults
 (undefined instruction and abort exceptions) and both PCs. Five screenshots per
 run (frames 300, 1200, 2400, 3600 and the last) go into one PNG strip.
 
-Categories, judged on the last 30 s: `failed`, `no-boot`, `faulting`,
+Categories, judged on the last 30 s: `failed` (crash, timeout), `exited` (the
+run ended cleanly early: the title quit, as DSiWare does when it goes back to
+the DSi Menu), `no-boot`, `faulting`,
 `frozen` (picture and sound stopped; a still, silent title screen looks the same, so
 an idle `frozen` only counts when the mash does not get past it), `static`
 (picture stopped, sound plays),

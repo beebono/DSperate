@@ -173,11 +173,14 @@ def run_one(game, gid, rom, a, base_args, mash, tmp):
         hi, hj = os.path.join(tmp, gid + ".interp"), os.path.join(tmp, gid + ".jit")
         rci, wi = run([a.headless] + args + ["--hash-frames", hi, rom], env, a.timeout)
         envj = dict(env, DS_JIT_STRICT="1")
-        rcj, wj = run(a.qemu.split() + [a.jit_headless] + args + ["--hash-frames", hj, rom], envj, a.timeout * 4,
-                      os.path.join(jd, gid + ".err"))
+        if rci == 0:   # nothing to compare against when the interpreter run failed
+            rcj, wj = run(a.qemu.split() + [a.jit_headless] + args + ["--hash-frames", hj, rom], envj, a.timeout * 4,
+                          os.path.join(jd, gid + ".err"))
+        else:
+            rcj, wj = "skipped", 0
         d = first_diff(hi, hj) if rci == 0 and rcj == 0 else "run failed"
         rec.update(rc_interp=rci, rc_jit=rcj, wall_interp=wi, wall_jit=wj, first_diff=d,
-                   verdict="same" if d is None else "DIFF")
+                   verdict="same" if d is None else "failed" if d == "run failed" else "DIFF")
         if d is not None:   # keep both hash files for a closer look
             for p, ext in ((hi, ".interp.h"), (hj, ".jit.h")):
                 if os.path.exists(p): os.replace(p, os.path.join(jd, gid + ext))
