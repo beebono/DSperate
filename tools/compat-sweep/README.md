@@ -31,7 +31,8 @@ subset; `--frames` sets the length; `--extra "..."` passes headless arguments
 
 | file | what it does |
 |---|---|
-| `tabulate.py SET OUT` | reads each zip's central directory: `games.tsv` (one row per dump, No-Intro tags parsed, broken zips flagged), `titles.tsv` (one row per title with the dump to sweep: retail over beta/demo/kiosk, cartridge over Virtual Console, USA > World > Europe > Japan, newest revision) |
+| `tabulate.py SET OUT` | reads each zip's central directory: `games.tsv` (one row per dump, No-Intro tags parsed, its kind, broken zips flagged), `titles.tsv` (one row per title with the dump to sweep: retail over beta/demo/kiosk, cartridge over Virtual Console, USA > World > Europe > Japan, newest revision) |
+| `romsets.py` | what to run from a zip, shared by the two above: the image of a cartridge dump (`.nds`, `.dsi`, iQue `.ids`), or for DSiWare in the CDN layout (content files, `tmd.<version>`, `titleKey.bin`) the app (content 0) of the newest version's TMD |
 | `wait_settled.sh DIR [-- CMD]` | waits until DIR has had no change in file count, bytes or newest mtime for `QUIET_SECS` (900), then runs CMD |
 | `run_sweep.py` | the runner: one headless run per game in parallel (`--jobs`, default half the cores, since a job keeps ~2 cores busy with the 2D and 3D workers) |
 | `classify.py OUT` | `classify.tsv`, `summary.md` (counts and the outlier list), `sheet-<phase>-<category>.html` |
@@ -58,6 +59,26 @@ frames, then every 40 frames A, Start and a tap in the bottom screen's centre
 column (x 128, y cycling 96, 72, 120, 48, 144: where menus put their buttons),
 4 frames each, never two at once (L+R+Start+Select resets many games) and no B
 (it backs out of menus).
+
+## DSi cartridges and DSiWare
+
+The runner picks the machine per dump (`--dsi-bios DIR` or `$DS_DSI_BIOS`:
+`dsi_bios9.bin`, `dsi_bios7.bin`, `dsi_firmware.bin`): DS cartridges run as a
+DS, DSi-enhanced ones included (`--dsi-mode` runs them as a DSi, for a second
+pass); DSi cartridges as a DSi; DSiWare as a DSi with `--dsi-hle-launch` (the
+app handed over as the DSi launcher does, on a NAND synthesised in memory: no
+NAND dump needed). A DSi runs on the exact timing model (both frontends choose
+it unless told otherwise). `(Program)` dumps (factory test software: most of
+the No-Intro DSi cartridge set) are left out unless `--exclude ''`.
+
+Open (2026-11-24): the strict JIT does not match the interpreter on several
+DSi titles under exact timing, reproducibly and with the interpreter
+deterministic (the qemu interpreter matches the host): DSiWare 101 Pinball
+World from frame 179, 10-Byou Sou, 101 MiniGolf World, 101 Shark Pets; the
+DSi cartridges System - Flaw and NOE Movie Player. A DS cartridge in DSi mode
+(Super Mario 64 DS) matches, so it is not DSi mode itself but something these
+titles use (NAND saves through SD/MMC and NDMA, the cameras: unverified).
+`tools/video_golden.sh` has no DSi scene, so this was never gated.
 
 ## The JIT check
 

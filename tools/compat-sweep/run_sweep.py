@@ -4,6 +4,9 @@
 
   run_sweep.py --set DIR --list titles.tsv --out OUT --phase idle|mash|jit [options]
 
+DS cartridges run as a DS, DSi cartridges and DSiWare (CDN layout: the newest
+version's app, see romsets.py) as a DSi; --dsi-mode runs DS cartridges as a DSi.
+
 Phases (see README.md):
   idle  no input for --frames frames: boot, title, attract mode
   mash  the same length with the standard synthetic input (A, Start and a tap on
@@ -19,6 +22,8 @@ goes under OUT. Results are appended to
 OUT/results-<phase>.jsonl; a game already there is skipped, so a run resumes.
 """
 import argparse, concurrent.futures as cf, json, os, re, shutil, subprocess, sys, tempfile, threading, time, zipfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from romsets import pick
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
@@ -95,27 +100,45 @@ def first_diff(a, b):
     return None if len(la) == len(lb) else f"length {len(la)} vs {len(lb)}"
 
 def extract(src, tmp, gid):
-    """A zipped ROM, unpacked into this job's own scratch directory. The headless
-    would cache it in <set>/.dsperate/ (cart/zip_cache.h): a write into the set,
-    and a race between parallel jobs."""
+    """The ROM to run, unpacked into this job's own scratch directory, and its kind
+    (romsets.py). The headless would cache a zip in <set>/.dsperate/
+    (cart/zip_cache.h): a write into the set, and a race between parallel jobs."""
     if not src.lower().endswith(".zip"):
-        return src, None
+        ext = os.path.splitext(src)[1].lower()
+        return src, None, "dsi-cart" if ext == ".dsi" else "ds-cart"
     d = os.path.join(tmp, gid); os.makedirs(d, exist_ok=True)
     with zipfile.ZipFile(src) as z:
-        e = next(i for i in z.infolist() if i.filename.lower().endswith((".nds", ".srl", ".dsi", ".ids")))
-        dst = os.path.join(d, "rom" + os.path.splitext(e.filename)[1].lower())
-        with z.open(e) as fi, open(dst, "wb") as fo:
+        e = pick(z)
+        dst = os.path.join(d, "rom" + e["ext"])
+        with z.open(e["entry"]) as fi, open(dst, "wb") as fo:
             shutil.copyfileobj(fi, fo, 4 << 20)
-    return dst, d
+    return dst, d, e["kind"]
+
+def machine_args(kind, a):
+    """BIOS, firmware and launch flags for a kind of dump. DS cartridges run as a DS
+    (DSi-enhanced ones included) unless --dsi-mode; DSi cartridges and DSiWare as a
+    DSi, DSiWare handed over as the DSi launcher does, on a synthesised NAND."""
+    ds = ["--bios9", os.path.join(a.bios, "bios9.bin"), "--bios7", os.path.join(a.bios, "bios7.bin")]
+    dsi = kind != "ds-cart" or a.dsi_mode
+    if not dsi:
+        return ds + ["--firmware", os.path.join(a.bios, "firmware.bin")]
+    if not a.dsi_bios:
+        raise LookupError(f"{kind} needs --dsi-bios")
+    args = ds + ["--bios9i", os.path.join(a.dsi_bios, "dsi_bios9.bin"), "--bios7i", os.path.join(a.dsi_bios, "dsi_bios7.bin"),
+                 "--firmware", os.path.join(a.dsi_bios, "dsi_firmware.bin"), "--dsi"]
+    return args + (["--dsi-hle-launch"] if kind == "dsiware" else [])
 
 def one(game, a, base_args, mash, tmp):
     gid = game_id(game)
+    rec = {"file": game, "id": gid, "phase": a.phase, "frames": a.frames}
     try:
-        rom, scratch = extract(os.path.join(a.set, game), tmp, gid)
-    except (zipfile.BadZipFile, StopIteration, OSError) as e:
-        return {"file": game, "id": gid, "phase": a.phase, "frames": a.frames, "rc": "bad-zip", "error": repr(e)}
+        rom, scratch, kind = extract(os.path.join(a.set, game), tmp, gid)
+    except (zipfile.BadZipFile, LookupError, ValueError, OSError) as e:
+        return dict(rec, rc="bad-zip", error=repr(e))
     try:
-        return run_one(game, gid, rom, a, base_args, mash, tmp)
+        return dict(run_one(game, gid, rom, a, machine_args(kind, a) + base_args, mash, tmp), kind=kind)
+    except LookupError as e:
+        return dict(rec, rc="setup", error=str(e))
     finally:
         if scratch:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -173,12 +196,16 @@ def main():
     ap.add_argument("--frames", type=int, default=5400, help="frames per run (default 5400 = 90 s)")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))
     ap.add_argument("--bios", default=os.environ.get("DS_BIOS"), help="directory with bios9.bin, bios7.bin, firmware.bin (default $DS_BIOS)")
+    ap.add_argument("--dsi-bios", default=os.environ.get("DS_DSI_BIOS"),
+                    help="directory with dsi_bios9.bin, dsi_bios7.bin, dsi_firmware.bin, for DSi cartridges and DSiWare (default $DS_DSI_BIOS)")
+    ap.add_argument("--dsi-mode", action="store_true", help="run DS cartridges as a DSi too (for the DSi-enhanced ones)")
     ap.add_argument("--headless", default=os.path.join(REPO, "build/host/src/frontend/headless/dsperate-headless"))
     ap.add_argument("--jit-headless", default=os.path.join(REPO, "build/aarch64/src/frontend/headless/dsperate-headless"))
     ap.add_argument("--qemu", default="qemu-aarch64-static -L /usr/aarch64-linux-gnu", help="runner for --jit-headless (empty on an AArch64 host)")
     ap.add_argument("--jit-input", choices=("idle", "mash"), default="mash")
     ap.add_argument("--timeout", type=int, default=600, help="seconds per run (the qemu JIT run gets 4x)")
     ap.add_argument("--only", help="regex on the file name")
+    ap.add_argument("--exclude", default=r"\(Program\)", help="regex on the file name to leave out (default: factory test programs)")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--extra", default="", help="more headless arguments, space-separated")
     a = ap.parse_args()
@@ -191,6 +218,8 @@ def main():
     games = game_list(a.list, a.set)
     if a.only:
         games = [g for g in games if re.search(a.only, g)]
+    if a.exclude:
+        games = [g for g in games if not re.search(a.exclude, g)]
     res_path = os.path.join(a.out, f"results-{a.phase}.jsonl")
     done = set()
     if os.path.exists(res_path):
@@ -201,8 +230,7 @@ def main():
     mash = os.path.join(a.out, f"mash-{a.frames}.dsin")
     if not os.path.exists(mash):
         write_mash(mash, a.frames)
-    base = ["--bios9", os.path.join(a.bios, "bios9.bin"), "--bios7", os.path.join(a.bios, "bios7.bin"),
-            "--firmware", os.path.join(a.bios, "firmware.bin"), "--direct"] + a.extra.split()
+    base = ["--direct"] + a.extra.split()
     lock = threading.Lock()
     t0, n = time.monotonic(), 0
     with tempfile.TemporaryDirectory(prefix="sweep-", dir=a.out) as tmp, open(res_path, "a") as res, \
