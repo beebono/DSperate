@@ -37,6 +37,7 @@ subset; `--frames` sets the length; `--extra "..."` passes headless arguments
 | `run_sweep.py` | the runner: one headless run per game in parallel (`--jobs`, default half the cores, since a job keeps ~2 cores busy with the 2D and 3D workers) |
 | `classify.py OUT` | `classify.tsv`, `summary.md` (counts and the outlier list), `sheet-<phase>-<category>.html` |
 | `review.py DIR [SET...]` | `DIR/REVIEW.md`: the games worth looking at by eye (broken, regressed, stuck, ignoring input, frozen after input, no progress), each with its idle and mash screenshot strips, over one or more sets' outputs under DIR |
+| `probe_touch.py` | for games stuck on a screen: replays the mash with a save state at its end, taps the bottom screen on a grid from it and measures how much of the picture each tap changes (heat map per game); `--verify` flags taps that go back to a screen the run already showed (a Back or No); `--plan` picks the fewest tap points that move the most games on, for a wider mash |
 
 ## Signals
 
