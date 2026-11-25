@@ -29,7 +29,7 @@ least --min-change), for a mash that taps them in turn (tools/mkdsin.py).
 """
 import argparse, concurrent.futures as cf, json, os, re, subprocess, sys, tempfile, threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from run_sweep import extract, machine_args, REPO
+from run_sweep import extract, machine_args, mash_path, REPO
 
 FSZ = 256 * 192 * 4 * 2   # one --dump-frames frame: both screens, 0xAARRGGBB
 
@@ -67,7 +67,8 @@ def state(g, a, tmp):
     rom, scratch, kind = extract(os.path.join(a.sets[g["set"]], g["file"]), tmp, gid)
     base = [a.headless] + machine_args(kind, a) + ["--direct"]
     st, hf = os.path.join(tmp, gid + ".st"), os.path.join(tmp, gid + ".h")
-    mash = os.path.join(a.sweep, g["set"], f"mash-{g['frames']}.dsin")
+    od = os.path.join(a.sweep, g["set"]); mj = os.path.join(od, "mash.json")
+    mash = mash_path(od, json.load(open(mj)).get("kind", "standard") if os.path.exists(mj) else "standard", g["frames"])
     run(base + ["--frames", str(g["frames"]), "--replay", mash, "--save-state-at", f"{g['frames']}:{st}", "--hash-frames", hf, rom])
     try:   # the rerun must end where the sweep's mash run did
         last = open(hf).read().split("\n")[-2].split()

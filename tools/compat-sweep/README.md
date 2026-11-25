@@ -67,6 +67,18 @@ column (x 128, y cycling 96, 72, 120, 48, 144: where menus put their buttons),
 4 frames each, never two at once (L+R+Start+Select resets many games) and no B
 (it backs out of menus).
 
+`--mash wide` (`mash-wide-<frames>.dsin`) is for a second pass over the games
+the standard mash left stuck: every 72 frames A, Start, a tap cycling through
+the 12 points `probe_touch.py --plan` picked over the 206 stuck games of the
+2026-11-25 sweep (`WIDE_TAPS` in `run_sweep.py`: the left button of a pair,
+keyboard OK corners, flags), D-pad Down (held-sideways menus: Flametail) and a
+left-to-right swipe along the bottom of the bottom screen (page turns: the
+classic book collections, Peakvox Route Candle). Give it its own `--out`; the
+runner writes the schedule to `OUT/mash.json`, which `classify.py` counts
+accepted inputs by. For the comparison with idle, copy the games' lines of the
+first pass's `results-idle.jsonl` into the new `--out` and link its
+`logs/idle` and `shots/idle`.
+
 ## DSi cartridges and DSiWare
 
 The runner picks the machine per dump (`--dsi-bios DIR` or `$DS_DSI_BIOS`:

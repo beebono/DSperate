@@ -44,14 +44,35 @@ def game_id(rel):
     return re.sub(r"[^A-Za-z0-9._()+,-]+", "_", stem)[:150]
 
 TAP_Y = (96, 72, 120, 48, 144)   # the bottom screen's centre column, where menus put their buttons
+# The wide mash's taps: the points probe_touch.py --plan picked over the standard
+# mash's 206 stuck games (2026-11-25), most games moved on first.
+WIDE_TAPS = ((84, 116), (220, 172), (92, 148), (196, 92), (28, 92), (148, 156),
+             (36, 180), (124, 164), (228, 28), (204, 124), (108, 92), (68, 28))
+# Each mash's schedule, for classify.py's accepted-input count (written to OUT/mash.json):
+# an input at START + k*PERIOD + each offset.
+MASHES = {"standard": dict(start=120, period=40, offsets=[0, 12, 24]),
+          "wide": dict(start=120, period=72, offsets=[0, 12, 24, 36, 48])}
 
-def write_mash(path, frames, start=120, period=40):
-    """The standard mash, written by tools/mkdsin.py: A, Start, then a tap in the
-    bottom screen's centre column (its height cycling through TAP_Y), 4 frames
-    each, 12 frames apart, every `period` frames."""
-    args = []
-    for k, c in enumerate(range(start, frames, period)):
-        args += [f"k{c}:1:4", f"k{c + 12}:8:4", f"{c + 24}:128,{TAP_Y[k % len(TAP_Y)]}:4"]
+def mash_path(out, kind, frames):
+    return os.path.join(out, f"mash-{frames}.dsin" if kind == "standard" else f"mash-{kind}-{frames}.dsin")
+
+def write_mash(path, frames, kind="standard"):
+    """A mash, written by tools/mkdsin.py, 4 frames per input, one at a time, no B:
+    standard  every 40 frames A, Start, then a tap in the bottom screen's centre
+              column (its height cycling through TAP_Y), 12 frames apart
+    wide      every 72 frames A, Start, a tap (cycling through WIDE_TAPS), D-pad
+              Down (held-sideways menus: Flametail), then a left-to-right swipe
+              along the bottom of the bottom screen over 20 frames (page turns:
+              the classic book collections, Peakvox Route Candle)"""
+    m = MASHES[kind]; args = []
+    for k, c in enumerate(range(m["start"], frames, m["period"])):
+        args += [f"k{c}:1:4", f"k{c + 12}:8:4"]
+        if kind == "standard":
+            args.append(f"{c + 24}:128,{TAP_Y[k % len(TAP_Y)]}:4")
+        else:
+            x, y = WIDE_TAPS[k % len(WIDE_TAPS)]
+            args += [f"{c + 24}:{x},{y}:4", f"k{c + 36}:128:4"]
+            args += [f"{c + 48 + i}:{12 + 12 * i},180:1" for i in range(20)]
     subprocess.run([sys.executable, os.path.join(REPO, "tools", "mkdsin.py"), path, str(frames)] + args, check=True)
 
 def shots_png(raw, png, n):
@@ -205,6 +226,7 @@ def main():
     ap.add_argument("--headless", default=os.path.join(REPO, "build/host/src/frontend/headless/dsperate-headless"))
     ap.add_argument("--jit-headless", default=os.path.join(REPO, "build/aarch64/src/frontend/headless/dsperate-headless"))
     ap.add_argument("--qemu", default="qemu-aarch64-static -L /usr/aarch64-linux-gnu", help="runner for --jit-headless (empty on an AArch64 host)")
+    ap.add_argument("--mash", choices=sorted(MASHES), default="standard", help="the mash phase's input (see write_mash)")
     ap.add_argument("--jit-input", choices=("idle", "mash"), default="mash")
     ap.add_argument("--timeout", type=int, default=600, help="seconds per run (the qemu JIT run gets 4x)")
     ap.add_argument("--only", help="regex on the file name")
@@ -230,9 +252,14 @@ def main():
             done = {json.loads(l)["file"] for l in fh if l.strip()}
     todo = [g for g in games if g not in done][: a.limit]
     print(f"{len(games)} games, {len(done)} already done, running {len(todo)} with {a.jobs} jobs", flush=True)
-    mash = os.path.join(a.out, f"mash-{a.frames}.dsin")
+    mash = mash_path(a.out, a.mash, a.frames)
     if not os.path.exists(mash):
-        write_mash(mash, a.frames)
+        write_mash(mash, a.frames, a.mash)
+    if a.phase == "mash":   # classify.py counts accepted inputs on this schedule
+        mj = os.path.join(a.out, "mash.json")
+        if os.path.exists(mj) and json.load(open(mj)).get("kind") != a.mash and done:
+            sys.exit(f"{a.out} has mash results from another mash ({mj}); use another --out")
+        json.dump(dict(MASHES[a.mash], kind=a.mash), open(mj, "w"))
     base = ["--direct"] + a.extra.split()
     lock = threading.Lock()
     t0, n = time.monotonic(), 0

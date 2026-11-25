@@ -28,8 +28,8 @@ does not use). The accepted count is in classify.tsv.
 import html, json, os, sys, collections
 
 TAIL = 1800          # frames: the window the end state is judged on (30 s)
-# The mash's input schedule (run_sweep.write_mash): A at START + k*PERIOD, Start 12
-# frames later, a tap 24 frames later.
+# The mash's input schedule (run_sweep.write_mash): inputs at START + k*PERIOD + each
+# offset. OUT/mash.json (written by run_sweep.py) gives it; without one, the standard mash.
 MASH_START, MASH_PERIOD, MASH_OFFSETS = 120, 40, (0, 12, 24)
 RESPONSE = 10        # frames after an input in which a change counts as its answer
 ACCEPTED_MIN = 3     # inputs answered for the game to count as having taken input
@@ -111,7 +111,11 @@ def results(out, phase):
     return d
 
 def main():
+    global MASH_START, MASH_PERIOD, MASH_OFFSETS
     out = sys.argv[1]
+    mj = os.path.join(out, "mash.json")
+    if os.path.exists(mj):
+        m = json.load(open(mj)); MASH_START, MASH_PERIOD, MASH_OFFSETS = m["start"], m["period"], tuple(m["offsets"])
     res = {ph: results(out, ph) for ph in ("idle", "mash", "jit")}
     games = sorted(set(res["idle"]) | set(res["mash"]))
     rows, cats = [], {"idle": collections.defaultdict(list), "mash": collections.defaultdict(list)}
