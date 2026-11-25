@@ -295,6 +295,7 @@ int main(int argc, char** argv) {
   TraceState ts;
   bool rtc_host = false;              // --rtc-host: free-running clock seeded from the wall
   const char* fw_override = nullptr;  // --firmware-override: sidecar of changed firmware pages
+  bool dsi_user_sync = false;         // --dsi-user-sync: the owner's settings between it and the NAND's TWLCFG
   bool no_aa = false;
   const char* colour = nullptr;   // --colour
   bool frames_given = false;
@@ -413,6 +414,7 @@ int main(int argc, char** argv) {
 
     else if (flag("--rtc-host")) rtc_host = true;                            // INEXACT by construction: runs stop being reproducible
     else if (arg("--firmware-override")) fw_override = argv[++i];            // load it, and write back what the firmware changed
+    else if (flag("--dsi-user-sync")) dsi_user_sync = true;                      // with --firmware-override and --dsi-persist: sync the owner's settings with TWLCFG, as the SDL frontend's emu.dsi_user_sync
     else if (arg("--colour")) colour = argv[++i];                            // colour correction (video.colour): off | nds | nds_lite; shows in --dump-frames / --hash
     else if (flag("--no-aa")) no_aa = true;                                  // 3D anti-aliasing off (Renderer3D::set_aa); inexact, for measurement
     else if (flag("--aa-enhanced")) no_aa = false;                           // the old enhanced mode: plain anti-aliasing, as --aa on the SDL frontend
@@ -558,6 +560,13 @@ int main(int argc, char** argv) {
     std::string err;
     if (!nds.load_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware override: %s\n", err.c_str());
     else if (!err.empty()) std::fprintf(stderr, "firmware override: warning: %s\n", err.c_str());
+  }
+  if (dsi_user_sync && fw_override && dsi_persist && nds.dsi_nand.valid()) {   // (nds.dsi is set further down)
+    std::vector<std::string> notes;
+    nds.sync_dsi_owner(notes);
+    for (const std::string& n : notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
+    std::string err;
+    if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware override: cannot save: %s\n", err.c_str());
   }
   nds.reset();
   if (rtc_host) nds.io.start_rtc_clock();   // after reset(), which clears the RTC

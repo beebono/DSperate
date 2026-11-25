@@ -555,11 +555,17 @@ static void test_firmware_override() {
     CHECK_EQ(nds->firmware[0x3FE06], 'H');
   }
   {
-    // A firmware of another size is refused outright.
+    // A firmware of another size shares only the settings tail, and only when
+    // its own settings sit there too (a retail DS/DSi pair: firmware_test).
+    // This one has no settings block: nothing goes in, and the pages are
+    // carried through its saves for the image they came from.
     auto nds = fresh();
     nds->firmware.assign(0x20000, 0xFF);
     nds->fw_page_dirty.assign(nds->firmware.size() / NDS::FW_PAGE, 0);
-    CHECK_EQ(nds->load_firmware_override(path, err), false);
+    CHECK_EQ(nds->load_firmware_override(path, err), true);
+    CHECK_EQ(nds->fw_dirty_pages, 0u);
+    CHECK_EQ(nds->fw_foreign_pages.empty(), false);
+    CHECK_EQ(nds->firmware[0x1FE06], 0xFF);
   }
   std::remove(path);
 }

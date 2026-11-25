@@ -186,6 +186,128 @@ void test_sidecar_round_trip() {
   }
 }
 
+// One sidecar for the DS and the DSi firmware: the tail pages (user settings,
+// Wi-Fi slots) go into either image; a DS user block over a DSi image keeps
+// the DSi's extended block; another image's own pages survive the other's save.
+const char* kDsiFw = "firmware_test_dsi.bin";
+
+void write_image(const char* path, const std::vector<u8>& fw) {
+  std::ofstream f(path, std::ios::binary);
+  f.write(reinterpret_cast<const char*>(fw.data()), static_cast<std::streamsize>(fw.size()));
+}
+
+void check_ext(const ds::NDS& nds, u8 language, u16 mask) {
+  const u32 base = nds.user_settings_offset();
+  for (u32 blk = 0; blk < 2; ++blk) {
+    const u8* u = nds.firmware.data() + base + blk * 0x100;
+    CHECK(u[0x74] == 0x01);
+    CHECK(u[0x75] == language);
+    CHECK(rd16(u + 0x76) == mask);
+    CHECK(rd16(u + 0xFE) == ds::bios::crc16(u + 0x74, 0x8A, 0xFFFF));
+  }
+}
+
+void test_shared_between_ds_and_dsi() {
+  ds::bios::UserSettings ds_user, dsi_user;
+  ds_user.nickname = "DsName";
+  dsi_user.nickname = "DsiName";
+  write_image(kFw, ds::bios::generate_firmware(ds_user));
+  write_image(kDsiFw, ds::bios::generate_firmware_dsi(dsi_user, 1, 0x26));   // USA: en fr es
+  std::remove(kOvr);
+  std::string err;
+
+  // A DS session: a new nickname and language, and a page outside the shared tail.
+  {
+    ds::NDS nds;
+    load(nds);
+    ds::bios::UserSettings u;
+    CHECK(nds.read_user_settings(u));
+    u.nickname = "Shared";
+    u.language = 2;   // French, which the DSi's mask has
+    CHECK(nds.write_user_settings(ds::NDS::UserField::Nickname, u));
+    CHECK(nds.write_user_settings(ds::NDS::UserField::Language, u));
+    nds.firmware[0x1000] = 0x5A;
+    nds.firmware_written(0x1000);
+    CHECK(nds.save_firmware_override(kOvr, err));
+  }
+  // The DSi firmware takes the settings and keeps its extended block, the
+  // language following; the DS-only page is not put into it.
+  {
+    ds::NDS nds;
+    CHECK(nds.load_bios("", "", kDsiFw, {}, &err));
+    CHECK(nds.firmware.size() == 0x20000);
+    const u8 untouched = nds.firmware[0x1000];
+    CHECK(nds.load_firmware_override(kOvr, err));
+    ds::bios::UserSettings u;
+    CHECK(nds.read_user_settings(u));
+    CHECK(u.nickname == "Shared");
+    CHECK(u.language == 2);
+    check_crcs(nds);
+    check_ext(nds, 2, 0x26);
+    CHECK(nds.firmware[0x1000] == untouched);
+    CHECK(nds.fw_override_user);
+    // The menu's LANGUAGE row on a DSi image moves the extended block too.
+    u.language = 5;   // Spanish, in the mask
+    CHECK(nds.write_user_settings(ds::NDS::UserField::Language, u));
+    check_crcs(nds);
+    check_ext(nds, 5, 0x26);
+    u.language = 2;
+    CHECK(nds.write_user_settings(ds::NDS::UserField::Language, u));
+    // A DSi-side change (as DSi System Settings writes the flash), saved:
+    // the DS-only page rides through.
+    u.nickname = "FromDsi";
+    CHECK(nds.write_user_settings(ds::NDS::UserField::Nickname, u));
+    nds.fw_sync_stamp[0] = 0x1234; nds.fw_sync_stamp[1] = 0x5678;
+    CHECK(nds.save_firmware_override(kOvr, err));
+  }
+  // Back on the DS: the DSi's change, its own page, the fingerprints.
+  {
+    ds::NDS nds;
+    load(nds);
+    CHECK(nds.load_firmware_override(kOvr, err));
+    ds::bios::UserSettings u;
+    CHECK(nds.read_user_settings(u));
+    CHECK(u.nickname == "FromDsi");
+    CHECK(u.language == 2);
+    check_crcs(nds);
+    CHECK(nds.firmware[0x1000] == 0x5A);
+    CHECK(nds.fw_sync_stamp[0] == 0x1234 && nds.fw_sync_stamp[1] == 0x5678);
+  }
+
+  // A format 1 sidecar (DS pages by absolute index) still loads, into either image.
+  {
+    std::vector<u8> fw = ds::bios::generate_firmware(ds_user);
+    const u32 base = static_cast<u32>(rd16(fw.data() + 0x20)) << 3;
+    std::ofstream f(kOvr, std::ios::binary | std::ios::trunc);
+    f.write("DSFWOVR1", 8);
+    // Old name, then the CRC the DS menu would have written over it.
+    const char* name = "Oldie";
+    for (u32 blk = 0; blk < 2; ++blk) {
+      u8* blkp = fw.data() + base + blk * 0x100;
+      for (u32 i = 0; i < 10; ++i) { blkp[0x06 + 2 * i] = i < 5 ? static_cast<u8>(name[i]) : 0; blkp[0x07 + 2 * i] = 0; }
+      blkp[0x1A] = 5; blkp[0x1B] = 0;
+      const u16 crc = ds::bios::crc16(blkp, 0x70, 0xFFFF);
+      blkp[0x72] = static_cast<u8>(crc); blkp[0x73] = static_cast<u8>(crc >> 8);
+    }
+    const u32 head[4] = {static_cast<u32>(fw.size()), 0, ds::NDS::FW_PAGE, 2};
+    f.write(reinterpret_cast<const char*>(head), sizeof head);
+    for (u32 page = base / 256; page < base / 256 + 2; ++page) {
+      f.write(reinterpret_cast<const char*>(&page), 4);
+      f.write(reinterpret_cast<const char*>(fw.data() + page * 256), 256);
+    }
+  }
+  for (const char* image : {kFw, kDsiFw}) {
+    ds::NDS nds;
+    CHECK(nds.load_bios("", "", image, {}, &err));
+    CHECK(nds.load_firmware_override(kOvr, err));
+    ds::bios::UserSettings u;
+    CHECK(nds.read_user_settings(u));
+    CHECK(u.nickname == "Oldie");
+    check_crcs(nds);
+  }
+  std::remove(kDsiFw);
+}
+
 } // namespace
 
 // The emulated access point goes into the first free slot of a firmware and
@@ -227,6 +349,7 @@ int main() {
   test_round_trip();
   test_one_field_at_a_time();
   test_sidecar_round_trip();
+  test_shared_between_ds_and_dsi();
   std::remove(kFw);
   std::remove(kOvr);
   std::printf("firmware: ok\n");

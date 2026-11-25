@@ -1663,6 +1663,22 @@ static int run(int argc, char** argv) {
   const std::string dsi_fw = cfg.str("paths.dsi_firmware");
   const bool have_dsi_fw = !dsi_fw.empty() && std::filesystem::exists(dsi_fw);
   const std::string fw = dsi_mode && have_dsi_fw && !cli.has("paths.firmware") ? dsi_fw : cfg.str("paths.firmware");
+  // One owner for the DS and the DSi (emu.dsi_user_sync, on by default): both
+  // firmware images keep their settings in the same override
+  // (paths.firmware_override, else beside the DS dump, else beside the DSi's),
+  // and the DSi's TWLCFG follows it (NDS::sync_dsi_owner). Off, the DSi
+  // firmware has its own override beside its dump and TWLCFG is left alone.
+  const bool owner_sync = cfg.flag("emu.dsi_user_sync", true);
+  auto override_for = [&](const std::string& image) -> std::string {
+    const bool dsi_image = !dsi_fw.empty() && image == dsi_fw;
+    if (!dsi_image || owner_sync) {
+      const std::string set = cfg.str("paths.firmware_override");
+      if (!set.empty()) return set;
+      const std::string ds_fw = cfg.str("paths.firmware");
+      if (!ds_fw.empty() && std::filesystem::exists(ds_fw)) return ds_fw + ".ovr";
+    }
+    return image + ".ovr";
+  };
   const std::string dsi_bios9i = bios9i ? std::string(bios9i) : cfg.str("paths.bios9i");
   const std::string dsi_bios7i = bios7i ? std::string(bios7i) : cfg.str("paths.bios7i");
   auto have_dsi_bios = [&] { return !dsi_bios9i.empty() && !dsi_bios7i.empty() && std::filesystem::exists(dsi_bios9i) && std::filesystem::exists(dsi_bios7i); };
@@ -1908,9 +1924,11 @@ static int run(int argc, char** argv) {
     std::fprintf(stderr, "console: DSi (EXPERIMENTAL)\n");
   }
   nds.reset();
-  // Sidecar beside the dump, not written into it. None in DSi mode.
-  std::string fw_override = dsi_mode ? std::string() : cfg.str("paths.firmware_override", fw + ".ovr");
-  if (!nds.firmware_synthetic && !fw_override.empty()) {
+  // Sidecar beside the dump, not written into it (override_for above).
+  std::string fw_override = nds.firmware_synthetic ? std::string() : override_for(fw);
+  u64 fw_saved_writes = 0, fw_writes_seen = 0, fw_quiet_since = 0;
+  auto load_fw_settings = [&] {
+    if (nds.firmware_synthetic || fw_override.empty()) return;
     std::string err;
     if (!nds.load_firmware_override(fw_override, err)) {
       if (err != "cannot open") std::fprintf(stderr, "firmware settings: %s: %s\n", fw_override.c_str(), err.c_str());
@@ -1919,7 +1937,32 @@ static int run(int argc, char** argv) {
     } else {
       std::fprintf(stderr, "firmware settings: %s -- warning: %s\n", fw_override.c_str(), err.c_str());
     }
-  }
+    fw_saved_writes = fw_writes_seen = nds.fw_writes;   // what it holds is on disk already
+  };
+  auto save_fw_settings = [&] {
+    if (replay || fw_override.empty() || nds.fw_writes == fw_saved_writes) return;
+    fw_saved_writes = nds.fw_writes;
+    std::string err;
+    if (!nds.save_firmware_override(fw_override, err)) std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
+    else VLOG("firmware settings: saved to %s\n", fw_override.c_str());
+  };
+  // The owner's settings between the firmware and a real NAND's TWLCFG, after
+  // the NAND's sidecar is in and before the guest runs. A TWLCFG it rewrites
+  // goes out to `nand_paths` first, then the fingerprints saying so.
+  auto sync_owner = [&](const ds::io::NandPersistPaths& nand_paths) {
+    if (!owner_sync || replay || nds.firmware_synthetic || fw_override.empty() || !nds.dsi_nand.valid() || nds.dsi_nand_synthetic) return;
+    const u64 before = nds.dsi_nand.writes;
+    std::vector<std::string> notes;
+    nds.sync_dsi_owner(notes);
+    for (const std::string& n : notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
+    if (nds.dsi_nand.writes != before) {
+      const ds::io::NandPersistReport r = ds::io::nand_export(nds.dsi_nand, nds.bus.bios7i.get(), nand_paths);
+      for (const std::string& n : r.notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
+    }
+    save_fw_settings();
+  };
+  load_fw_settings();
+  if (dsi_mode && nds.dsi_nand_boot && dsi_nand) sync_owner(ds::io::NandPersistPaths::beside(dsi_nand, cfg.str("paths.saves")));
   VideoSetup vs;
   if (!parse_video(cfg, vs)) return 2;
   const u32& grid = vs.grid;
@@ -2351,7 +2394,9 @@ sdl_ready:
       std::fprintf(stderr, "dsi: font %s not found; using DSperate's own\n", nds.dsi_font_path.c_str());
       nds.dsi_font_path.clear();
     }
-    if (!nds.prepare_dsi_hle(user, &err, &made)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); return false; }
+    ds::bios::UserSettings owner = user;   // [user]; a real firmware's own settings when the two are one owner
+    if (owner_sync && !nds.firmware_synthetic) nds.read_user_settings(owner);
+    if (!nds.prepare_dsi_hle(owner, &err, &made)) { std::fprintf(stderr, "dsi: %s\n", err.c_str()); return false; }
     for (const std::string& m : made) std::fprintf(stderr, "dsi: %s\n", m.c_str());
     return true;
   };
@@ -2814,7 +2859,7 @@ sdl_ready:
     if (r.saves || r.photos) std::fprintf(stderr, "dsi: restored %d title saves, %d photos\n", r.saves, r.photos);
     for (const std::string& n : r.notes) std::fprintf(stderr, "dsi: %s\n", n.c_str());
   };
-  if (dsi_hle) import_dsiware_saves();
+  if (dsi_hle) { import_dsiware_saves(); sync_owner(dsi_paths); }
   u64 nand_writes_seen = nds.dsi_nand.writes, nand_quiet_since = 0, nand_exported = nds.dsi_nand.writes;
   auto flush_dsi = [&] {
     if (!dsi_mode || save_readonly || nds.dsi_nand.writes == nand_exported) return;
@@ -2839,6 +2884,7 @@ sdl_ready:
     if (!save_readonly) write_gba_save(nds, session.gba_sav);
     flush_dsi();
     flush_sd();
+    save_fw_settings();
   };
   // The slot-2 GBA game's save goes out like the battery save, once writes
   // have stopped for a second. The Rumble Pak's motor follows the game: any
@@ -3941,7 +3987,7 @@ sdl_ready:
         return;
       }
       if (!open_dsi_sd()) return;
-      // Replaces the DS firmware; its settings sidecar left alone from here on.
+      // Replaces the DS firmware (its settings saved by flush_save above); the DSi's takes its override.
       if (have_dsi_fw && !cli.has("paths.firmware") && fw != dsi_fw) {
         if (!nds.load_bios(bios9, bios7, dsi_fw, user, &err)) {
           std::fprintf(stderr, "launcher: dsi firmware: %s\n", err.c_str());
@@ -3949,8 +3995,9 @@ sdl_ready:
           return;
         }
         nds.set_wifi_mac_suffix(static_cast<u32>(cfg.num("net.mac_suffix", 0)));
-        fw_override.clear();
-        host.fw_override.clear();
+        fw_override = nds.firmware_synthetic ? std::string() : override_for(dsi_fw);
+        host.fw_override = fw_override;
+        load_fw_settings();
         VLOG("launcher: DSi firmware %s\n", dsi_fw.c_str());
       }
       nds.dsi_nand.close();
@@ -4004,6 +4051,7 @@ sdl_ready:
     if (pick_dsi) {
       dsi_paths = pick_shortcut ? ds::io::NandPersistPaths::beside(shortcut_nand, cfg.str("paths.saves")) : hle_paths(pick);
       import_dsiware_saves();
+      sync_owner(dsi_paths);
       nand_writes_seen = nand_exported = nds.dsi_nand.writes;
       std::fprintf(stderr, "launcher: %s on the DSi (EXPERIMENTAL)\n", pick.c_str());
     }
@@ -4662,13 +4710,7 @@ sdl_ready:
     }
     if (nds.power_off) {
       if (boot_firmware) {
-        std::string err;
-        if (fw_override.empty()) {
-          // DSi mode: nothing is kept (see fw_override)
-        } else if (nds.firmware_override_dirty() && !nds.save_firmware_override(fw_override, err))
-          std::fprintf(stderr, "firmware settings: cannot save %s: %s\n", fw_override.c_str(), err.c_str());
-        else if (nds.firmware_override_dirty())
-          std::fprintf(stderr, "firmware settings: saved to %s\n", fw_override.c_str());
+        save_fw_settings();
         std::fprintf(stderr, "power off: rebooting the firmware\n");
         apply_cheat_changes();
         autosave_now();       // the reset below discards the session
@@ -5044,6 +5086,10 @@ sdl_ready:
     if (nds.slot2 && nds.slot2->rumble_events() != rumble_seen) {
       rumble_seen = nds.slot2->rumble_events();
       input.rumble(cfg.num("slot2.rumble_strength", 100), 40);
+    }
+    if (nds.fw_writes != fw_saved_writes) {   // the firmware's own settings menu, or DSi System Settings
+      if (nds.fw_writes != fw_writes_seen) { fw_writes_seen = nds.fw_writes; fw_quiet_since = frames; }
+      else if (frames - fw_quiet_since >= 60) save_fw_settings();
     }
     if (dsi_mode && nds.dsi_nand.writes != nand_exported) {
       if (nds.dsi_nand.writes != nand_writes_seen) { nand_writes_seen = nds.dsi_nand.writes; nand_quiet_since = frames; }

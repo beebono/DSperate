@@ -153,12 +153,26 @@ struct NDS {
   // the sidecar restores the dump's original settings.
   //
   // Both take the sidecar's path and report the reason on failure. save_
-  // returns true and writes nothing when no page has changed.
+  // returns true and writes nothing when nothing has changed.
+  //
+  // One sidecar serves the DS and the DSi firmware alike: the pages of the
+  // last FW_SHARED_TAIL bytes (the two user-settings copies and the Wi-Fi
+  // slots, laid out alike from the end of every retail image) are kept by
+  // their distance from the end and go into whichever image is loaded. A
+  // DS user block keeps a DSi image's extended block (its language mask).
+  // Any other page belongs to the image it came from; another image's are
+  // carried through a save untouched.
   static constexpr u32 FW_PAGE = 256;   // the flash's page, and the sidecar's granularity
+  static constexpr u32 FW_SHARED_TAIL = 0xC00;
   bool load_firmware_override(const std::string& path, std::string& err);
   bool save_firmware_override(const std::string& path, std::string& err);
-  bool firmware_override_dirty() const { return fw_dirty_pages > 0; }
+  bool firmware_override_dirty() const { return fw_dirty_pages > 0 || fw_sync_dirty; }
   void firmware_written(u32 offset);   // called from the SPI page-write path
+  // DSi: the owner's settings between the firmware's user block and the
+  // NAND's TWLCFG (io/dsi_user_sync.h), whichever side changed since the
+  // last sync; the fingerprints go into the override. Call with the NAND and
+  // the override loaded, before the boot reads either. Notes say what moved.
+  void sync_dsi_owner(std::vector<std::string>& notes);
   void run_frame();
   // run_frame() in pieces: runs up to `cycles` of the current frame, true
   // when it completed. Lets local wireless answer a peer's CMD within a
@@ -195,6 +209,14 @@ struct NDS {
   std::vector<u8> fw_page_dirty;
   u32 fw_dirty_pages = 0;
   u64 firmware_id = 0;           // identity of the pristine dump; an override names it
+  // From the override: another image's own pages (kept for its save), the
+  // owner-sync fingerprints, and whether it carried a changed user block.
+  struct FwForeignPage { u32 image_size, page; std::vector<u8> data; };
+  std::vector<FwForeignPage> fw_foreign_pages;
+  u32 fw_sync_stamp[2] = {};      // firmware, NAND (0: never synced)
+  bool fw_sync_dirty = false;
+  bool fw_override_user = false;
+  u64 fw_writes = 0;              // counts firmware writes and syncs: a frontend saves the override when it moves
   // Identity of the two BIOS images in bus.bios9/bios7. A save state usually
   // restores the ARM7 mid-BIOS-routine, but the BIOS isn't part of the
   // state, so the header carries this to refuse a load against a different pair.

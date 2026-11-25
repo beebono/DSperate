@@ -184,6 +184,11 @@ add_executable(test_nand_fs nand_fs_test.cpp)
 target_link_libraries(test_nand_fs PRIVATE dsperate_core)
 add_test(NAME nand_fs COMMAND test_nand_fs)
 
+# The owner's settings between a DSi firmware and its NAND's TWLCFG, on a made-up NAND.
+add_executable(test_dsi_user_sync dsi_user_sync_test.cpp)
+target_link_libraries(test_dsi_user_sync PRIVATE dsperate_core)
+add_test(NAME dsi_user_sync COMMAND test_dsi_user_sync)
+
 add_executable(test_sd_card sd_card_test.cpp)
 target_link_libraries(test_sd_card PRIVATE dsperate_core)
 add_test(NAME sd_card COMMAND test_sd_card)

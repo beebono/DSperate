@@ -257,6 +257,8 @@ const Setting kUserSettings[] = {
          N_("NOT CHECKED AGAINST THE MONTH, AS THE CONSOLE DOES NOT EITHER")),
   pick("user.language", N_("LANGUAGE"), kLanguage, 6, "1", FlagRestart, Dep::None,
        N_("THE LANGUAGE MULTI-LANGUAGE GAMES START IN")),
+  boolean("emu.dsi_user_sync", N_("SYNC DSI SETTINGS"), "true", FlagRestart, Dep::DsiFirmware,
+          N_("ONE OWNER FOR THE DS AND THE DSI MENU. OFF KEEPS THE DSI'S SETTINGS APART")),
   pick("emu.dsi_camera_image", N_("DSI CAMERA PICTURE"), kCameraImages.data(), kMaxCameraImages, "", FlagLive | FlagVerbatim, Dep::DsiFirmware,
        N_("WHAT THE DSI'S CAMERAS SEE: A PICTURE FROM PATHS.DSI_PHOTOS, OR COLOUR BARS")),
   end(),

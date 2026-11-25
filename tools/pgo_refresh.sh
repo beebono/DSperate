@@ -252,7 +252,8 @@ ninja -C "$VBUILD" > "$VBUILD/pgo-warnings.log" 2>&1 || { tail -20 "$VBUILD/pgo-
 # choice (src/frontend/video), the menu's translations (src/frontend/i18n), the table of games that read a
 # GBA cartridge (core/slot2/compat.cpp: only the frontend's slot-2 prompt asks it), and the console's output
 # stage (core/spu/output_filter.cpp: audio.hw_filter runs it in the frontend's audio path).
-UNTRAINED='src/frontend/sdl/|src#frontend#video#|src#frontend#i18n#|slot2#compat|spu#output_filter|rcheevos|cheevos|tools#|miniz|kernels_ref'
+# The DSi owner-settings sync (core/io/dsi_user_sync.cpp) runs once a boot, and headless only with --dsi-user-sync.
+UNTRAINED='src/frontend/sdl/|src#frontend#video#|src#frontend#i18n#|slot2#compat|spu#output_filter|rcheevos|cheevos|tools#|miniz|kernels_ref|dsi_user_sync'
 missing=$(grep -c "data file not found" "$VBUILD/pgo-warnings.log" || true)
 unexpected=$(grep "data file not found" "$VBUILD/pgo-warnings.log" | grep -cE -v "$UNTRAINED" || true)
 mismatch=$(grep -c "control flow of function" "$VBUILD/pgo-warnings.log" || true)   # "source locations ... changed" is benign: the counts still apply

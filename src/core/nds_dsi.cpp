@@ -6,6 +6,7 @@
 // title. Mirrors melonDS DSi::SetupDirectBoot (DSi-mode branch).
 #include "core/nds.h"
 #include "core/io/dsi_nand_synth.h"
+#include "core/io/dsi_user_sync.h"
 #include "core/io/dsi_nand_launch.h"
 #include "core/crypto/sha1.h"
 #include "core/cpu/cp15.h"
@@ -285,6 +286,21 @@ void NDS::dsi_soft_reset() {
 #endif
 }
 
+void NDS::sync_dsi_owner(std::vector<std::string>& notes) {
+  if (firmware_synthetic || !dsi_nand.valid()) return;
+  const io::OwnerSyncResult r = io::sync_owner(dsi_nand, bus.bios7i.get(), firmware, fw_sync_stamp[0], fw_sync_stamp[1], fw_override_user);
+  for (const std::string& n : r.notes) notes.push_back("console settings: " + n);
+  if (r.what == io::OwnerSync::Unavailable) return;
+  for (u32 off : r.fw_touched) firmware_written(off);
+  if (r.fw_stamp != fw_sync_stamp[0] || r.nand_stamp != fw_sync_stamp[1]) {
+    fw_sync_stamp[0] = r.fw_stamp; fw_sync_stamp[1] = r.nand_stamp;
+    fw_sync_dirty = true;
+    ++fw_writes;
+  }
+  if (r.what == io::OwnerSync::ToNand) notes.push_back("console settings: the firmware's owner settings went into the DSi's (TWLCFG)");
+  if (r.what == io::OwnerSync::ToFirmware) notes.push_back("console settings: the DSi's owner settings (TWLCFG) went into the firmware");
+}
+
 bool NDS::load_dsi_nand_title(u32 title_lo, std::string* err) {
   if (!dsi_nand.valid()) { if (err) *err = "no NAND is loaded"; return false; }
   if (!bios_native_dsi) { if (err) *err = "the DSi BIOS pair is not loaded"; return false; }
@@ -339,6 +355,9 @@ bool NDS::prepare_dsi_hle(const bios::UserSettings& user, std::string* err, std:
     for (u8 b : firmware) firmware_id = (firmware_id ^ b) * 1099511628211ull;
     fw_page_dirty.assign((firmware.size() + FW_PAGE - 1) / FW_PAGE, 0);
     fw_dirty_pages = 0;
+    fw_foreign_pages.clear();
+    fw_sync_stamp[0] = fw_sync_stamp[1] = 0;
+    fw_sync_dirty = fw_override_user = false;
     note("firmware: a generated DSi firmware carrying the user settings");
   }
   if (dsi_boot_blobs.empty() && !dsi_nand.valid()) {

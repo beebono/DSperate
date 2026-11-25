@@ -93,6 +93,7 @@ add_library(dsperate_core STATIC
   io/dsi_title_install.cpp
   io/dsi_nand_launch.cpp
   io/dsi_nand_synth.cpp
+  io/dsi_user_sync.cpp
   io/dsi_sd_card.cpp
   io/dsi_font.cpp
   io/dsi_nwifi.cpp

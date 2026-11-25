@@ -148,6 +148,9 @@ bool NDS::load_bios(const std::string& p9, const std::string& p7, const std::str
   for (u8 b : firmware) firmware_id = (firmware_id ^ b) * 1099511628211ull;
   fw_page_dirty.assign((firmware.size() + FW_PAGE - 1) / FW_PAGE, 0);
   fw_dirty_pages = 0;
+  fw_foreign_pages.clear();
+  fw_sync_stamp[0] = fw_sync_stamp[1] = 0;
+  fw_sync_dirty = fw_override_user = false;
   normalise_touch_calibration();
   normalise_boot_mode();
   firmware_ap_slot = bios::stamp_access_point(firmware);
@@ -221,7 +224,14 @@ bool NDS::write_user_settings(UserField field, const bios::UserSettings& in) {
     case UserField::Colour:        u[0x02] = static_cast<u8>(in.favourite_colour & 15); break;
     case UserField::BirthdayMonth: u[0x03] = (in.birthday_month >= 1 && in.birthday_month <= 12) ? in.birthday_month : 1; break;
     case UserField::BirthdayDay:   u[0x04] = (in.birthday_day >= 1 && in.birthday_day <= 31) ? in.birthday_day : 1; break;
-    case UserField::Language:      wr16(u + 0x64, static_cast<u16>((rd16(u + 0x64) & ~7) | (in.language & 7))); break;   // backlight bits share this halfword
+    case UserField::Language:
+      wr16(u + 0x64, static_cast<u16>((rd16(u + 0x64) & ~7) | (in.language & 7)));   // backlight bits share this halfword
+      // A DSi image's extended block holds the language its own titles read, where its mask allows it.
+      if (u[0x74] == 0x01 && (rd16(u + 0x76) >> (in.language & 7) & 1)) {
+        u[0x75] = static_cast<u8>(in.language & 7);
+        wr16(u + 0xFE, bios::crc16(u + 0x74, 0x8A, 0xFFFF));
+      }
+      break;
     }
     wr16(u + 0x70, counter);
     wr16(u + 0x72, bios::crc16(u, 0x70, 0xFFFF));
@@ -233,36 +243,77 @@ bool NDS::write_user_settings(UserField field, const bios::UserSettings& in) {
 
 void NDS::firmware_written(u32 offset) {
   if (firmware_synthetic) return;   // nothing on disk to persist against
+  ++fw_writes;
   const u32 page = offset / FW_PAGE;
   if (page >= fw_page_dirty.size() || fw_page_dirty[page]) return;
   fw_page_dirty[page] = 1;
   fw_dirty_pages++;
 }
 
-// Sidecar format: "DSFWOVR1", firmware size, dump identity, page size, page
-// count, then that many (u32 page index, page bytes) records.
+// Sidecar format 1: "DSFWOVR1", firmware size, dump identity, page size, page
+// count, then that many (u32 page index, page bytes) records, all of the image
+// it was made from. Format 2: "DSFWOVR2", firmware size, dump identity, page
+// size, record count, the two owner-sync fingerprints, a reserved word, then
+// (u32 image size, u32 page, page bytes) records: image size 0 is a shared
+// page, its `page` counted back from the end of the image (1 = the last).
 namespace {
-constexpr char kFwOvrMagic[8] = {'D', 'S', 'F', 'W', 'O', 'V', 'R', '1'};
+constexpr char kFwOvrMagic1[8] = {'D', 'S', 'F', 'W', 'O', 'V', 'R', '1'};
+constexpr char kFwOvrMagic2[8] = {'D', 'S', 'F', 'W', 'O', 'V', 'R', '2'};
+constexpr u32 kSharedPages = NDS::FW_SHARED_TAIL / NDS::FW_PAGE;
+
+// A DS user block (no extended block at 0x74) over a DSi image's keeps the
+// image's extended block, its language following the DS field where the
+// block's language mask allows it.
+void merge_user_block(u8* cur, const u8* in) {
+  if (in[0x74] == 0x01 || cur[0x74] != 0x01) { std::memcpy(cur, in, kUserBlockSize); return; }
+  std::memcpy(cur, in, 0x74);
+  const u8 lang = in[0x64] & 7;
+  if (rd16(cur + 0x76) >> lang & 1) cur[0x75] = lang;
+  wr16(cur + 0xFE, bios::crc16(cur + 0x74, 0x8A, 0xFFFF));
+}
 } // namespace
+
+// Retail images keep the user settings in their last 0x200 bytes; the shared
+// tail is laid out from there. An image that does not is never shared with.
+static bool fw_tail_shared(const NDS& n) {
+  return n.firmware.size() >= NDS::FW_SHARED_TAIL && n.user_settings_offset() == n.firmware.size() - 2 * kUserBlockSize;
+}
 
 bool NDS::load_firmware_override(const std::string& path, std::string& err) {
   if (firmware_synthetic) { err = "generated firmware has no settings to override"; return false; }
   std::ifstream f(path, std::ios::binary);
   if (!f) { err = "cannot open"; return false; }
-  char magic[8]; u32 head[4];
-  if (!f.read(magic, 8) || std::memcmp(magic, kFwOvrMagic, 8) != 0) { err = "not a firmware override"; return false; }
-  if (!f.read(reinterpret_cast<char*>(head), sizeof head)) { err = "truncated header"; return false; }
-  if (head[0] != firmware.size()) { err = "made from a firmware of a different size"; return false; }
-  // Not fatal: settings pages are the same shape in every retail firmware.
-  if (head[1] != static_cast<u32>(firmware_id)) err = "made from a different firmware dump";
+  char magic[8];
+  if (!f.read(magic, 8)) { err = "not a firmware override"; return false; }
+  const bool v1 = std::memcmp(magic, kFwOvrMagic1, 8) == 0, v2 = std::memcmp(magic, kFwOvrMagic2, 8) == 0;
+  if (!v1 && !v2) { err = "not a firmware override"; return false; }
+  u32 head[7] = {};
+  if (!f.read(reinterpret_cast<char*>(head), (v1 ? 4 : 7) * sizeof(u32))) { err = "truncated header"; return false; }
   if (head[2] != FW_PAGE) { err = "unknown page size"; return false; }
+  // Not fatal: settings pages are the same shape in every retail firmware.
+  if (head[0] == firmware.size() && head[1] != static_cast<u32>(firmware_id)) err = "made from a different firmware dump";
+  const bool shared = fw_tail_shared(*this);
+  const u32 pages = static_cast<u32>(fw_page_dirty.size());
+  const u32 user_page = user_settings_offset() / FW_PAGE;
+  std::vector<u8> data(FW_PAGE);
   for (u32 i = 0; i < head[3]; ++i) {
-    u32 page;
-    if (!f.read(reinterpret_cast<char*>(&page), 4)) { err = "truncated"; return false; }
-    if (page >= fw_page_dirty.size()) { err = "page out of range"; return false; }
-    if (!f.read(reinterpret_cast<char*>(firmware.data() + page * FW_PAGE), FW_PAGE)) { err = "truncated"; return false; }
-    firmware_written(page * FW_PAGE);
+    u32 image = head[0], page = 0;
+    if (v2 && !f.read(reinterpret_cast<char*>(&image), 4)) { err = "truncated"; return false; }
+    if (!f.read(reinterpret_cast<char*>(&page), 4) || !f.read(reinterpret_cast<char*>(data.data()), FW_PAGE)) { err = "truncated"; return false; }
+    // Format 1 names its own image's pages: its tail is shared all the same.
+    if (v1 && image >= FW_SHARED_TAIL && page < image / FW_PAGE && page >= (image - FW_SHARED_TAIL) / FW_PAGE) { page = image / FW_PAGE - page; image = 0; }
+    if (image == 0 && (page == 0 || page > kSharedPages)) { err = "page out of range"; return false; }
+    u32 at;
+    if (image == 0 && shared) at = pages - page;
+    else if (image == firmware.size()) at = page;
+    else { fw_foreign_pages.push_back({image, page, data}); continue; }   // another image's: kept for the save
+    if (at >= pages) { err = "page out of range"; return false; }
+    u8* dst = firmware.data() + at * FW_PAGE;
+    if (shared && user_page && (at == user_page || at == user_page + 1)) { merge_user_block(dst, data.data()); fw_override_user = true; }
+    else std::memcpy(dst, data.data(), FW_PAGE);
+    firmware_written(at * FW_PAGE);
   }
+  if (v2) { fw_sync_stamp[0] = head[4]; fw_sync_stamp[1] = head[5]; }
   // An override may carry a real calibration from the firmware's wizard; normalise again over it.
   normalise_touch_calibration();
   normalise_boot_mode();
@@ -271,24 +322,37 @@ bool NDS::load_firmware_override(const std::string& path, std::string& err) {
 }
 
 bool NDS::save_firmware_override(const std::string& path, std::string& err) {
-  if (!fw_dirty_pages) return true;
+  if (!firmware_override_dirty()) return true;
   if (firmware_synthetic) { err = "generated firmware is not persisted"; return false; }
+  const bool shared = fw_tail_shared(*this);
+  const u32 pages = static_cast<u32>(fw_page_dirty.size());
+  struct Rec { u32 image, page; const u8* data; };
+  std::vector<Rec> recs;
+  for (u32 page = 0; page < pages; ++page) {
+    if (!fw_page_dirty[page]) continue;
+    const u8* d = firmware.data() + page * FW_PAGE;
+    if (shared && pages - page <= kSharedPages) recs.push_back({0, pages - page, d});
+    else recs.push_back({static_cast<u32>(firmware.size()), page, d});
+  }
+  for (const FwForeignPage& p : fw_foreign_pages) recs.push_back({p.image_size, p.page, p.data.data()});
   const std::string tmp = path + ".tmp";
   {
     std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
     if (!f) { err = "cannot write"; return false; }
-    const u32 head[4] = {static_cast<u32>(firmware.size()), static_cast<u32>(firmware_id), FW_PAGE, fw_dirty_pages};
-    f.write(kFwOvrMagic, 8);
+    const u32 head[7] = {static_cast<u32>(firmware.size()), static_cast<u32>(firmware_id), FW_PAGE, static_cast<u32>(recs.size()),
+                         fw_sync_stamp[0], fw_sync_stamp[1], 0};
+    f.write(kFwOvrMagic2, 8);
     f.write(reinterpret_cast<const char*>(head), sizeof head);
-    for (u32 page = 0; page < fw_page_dirty.size(); ++page) {
-      if (!fw_page_dirty[page]) continue;
-      f.write(reinterpret_cast<const char*>(&page), 4);
-      f.write(reinterpret_cast<const char*>(firmware.data() + page * FW_PAGE), FW_PAGE);
+    for (const Rec& r : recs) {
+      f.write(reinterpret_cast<const char*>(&r.image), 4);
+      f.write(reinterpret_cast<const char*>(&r.page), 4);
+      f.write(reinterpret_cast<const char*>(r.data), FW_PAGE);
     }
     if (!f) { err = "write failed"; return false; }
   }
   // Rename over the old one so an interrupted write can't leave a truncated override.
   if (std::rename(tmp.c_str(), path.c_str()) != 0) { err = "cannot replace"; std::remove(tmp.c_str()); return false; }
+  fw_sync_dirty = false;
   return true;
 }
 
