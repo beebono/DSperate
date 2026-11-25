@@ -61,6 +61,7 @@ using ds::i18n::trf;
 #include <dirent.h>
 #include <algorithm>
 #include "mic_alsa.h"
+#include "mic_queue.h"
 
 #include <SDL2/SDL.h>
 #include <sched.h>
@@ -2560,16 +2561,19 @@ sdl_ready:
   startup_off_rt.reset();
   ds::sdl::Lid lid;
   if (!replay) lid.open();
-  std::vector<s16> mic, mic_raw, mic_queue;
+  std::vector<s16> mic, mic_raw;
   // ADC sits well off zero; one-pole DC blocker, ~25 Hz at 32768 Hz.
   // audio.mic_gain scales what remains (default 0.25).
   double dc = 0.0;
   // Noise gate: floor is the slowest-rising rms seen; a frame under
-  // audio.mic_gate times it (default 5, 0 = off) is sent as silence.
+  // audio.mic_gate times it (default 5, 0 = off) is sent as silence. Only
+  // while the game reads the touchscreen controller's AUX input (loudness
+  // detection): a recording through the DSi's microphone FIFO or DSP keeps
+  // every frame, as gating it cut speech into 16 ms pieces.
   const double mic_gate = cfg.real("audio.mic_gate", 5.0);
   double mic_floor = 1e9;
   const double mic_gain = cfg.real("audio.mic_gain", 0.25);
-  const size_t mic_per_frame = ds::spu::Spu::SAMPLE_RATE * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ;   // 547
+  ds::sdl::MicQueue mic_queue(double(ds::spu::Spu::SAMPLE_RATE) * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ);   // ~547.7 a frame
 
   // Wall-clock pacing when there is no audio queue to pace against.
   const double frame_ns = 1e9 * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ;
@@ -4352,19 +4356,17 @@ sdl_ready:
           const double y = (v - dc) * mic_gain;
           v = static_cast<s16>(y > 32767 ? 32767 : (y < -32768 ? -32768 : y));
         }
-        // Capture arrives in bursts; queue and hand out a frame at a time,
-        // dropping backlog so a stall doesn't turn into latency.
-        mic_queue.insert(mic_queue.end(), mic_raw.begin(), mic_raw.end());
-        if (mic_queue.size() > mic_per_frame * 4) mic_queue.erase(mic_queue.begin(), mic_queue.end() - mic_per_frame * 2);
-        const size_t take = mic_queue.size() < mic_per_frame ? mic_queue.size() : mic_per_frame;
-        mic.assign(mic_queue.begin(), mic_queue.begin() + take);
-        mic_queue.erase(mic_queue.begin(), mic_queue.begin() + take);
+        // Capture arrives in bursts (1024 samples every other frame from ALSA
+        // on the RG DS Plus); the queue keeps a reserve so every frame gets a
+        // whole frame's worth: the core spreads a short frame across the
+        // frame, playing it slow.
+        mic_queue.frame(mic_raw.data(), mic_raw.size(), mic);
         if (mic_gate > 0 && !mic.empty()) {
           double sq = 0;
           for (s16 v : mic) sq += double(v) * v;
           const double rms = std::sqrt(sq / mic.size());
           mic_floor = rms < mic_floor ? rms : mic_floor + (rms - mic_floor) * 0.002;   // drops at once, creeps up
-          if (rms < mic_floor * mic_gate + 16) std::fill(mic.begin(), mic.end(), 0);
+          if (rms < mic_floor * mic_gate + 16 && nds.io.mic_aux_recent()) std::fill(mic.begin(), mic.end(), 0);
         }
       }
       if (static const bool mic_log = std::getenv("DS_MIC_LOG") != nullptr; mic_log) {
@@ -4372,7 +4374,8 @@ sdl_ready:
         for (s16 v : mic) { msq += double(v) * v; if (std::abs(int(v)) > mpeak) mpeak = std::abs(int(v)); }
         mtotal += static_cast<u32>(mic.size());
         if (++mframes == 60) {
-          std::fprintf(stderr, "[mic] capture: %u samples/60 frames, peak %d, rms %.0f\n", mtotal, mpeak, mtotal ? std::sqrt(msq / mtotal) : 0.0);
+          std::fprintf(stderr, "[mic] capture: %u samples/60 frames, peak %d, rms %.0f, queue %zu (reserve %.0f), %u underruns, gate %s\n", mtotal, mpeak, mtotal ? std::sqrt(msq / mtotal) : 0.0,
+                       mic_queue.level(), mic_queue.target(), mic_queue.underruns(), mic_gate > 0 && nds.io.mic_aux_recent() ? "on" : "off");
           mframes = mtotal = 0; mpeak = 0; msq = 0;
         }
       }

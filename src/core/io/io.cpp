@@ -548,6 +548,11 @@ void Io::set_mic(const s16* samples, size_t count) {
 // AUX sits behind the PMIC mic amplifier: register 3 bits 0-1 pick the gain
 // (x20/40/80/160); frontend samples assumed at x20, scaled/clipped like the
 // ADC would. Register 2 bit 0 (amplifier enable) not honoured.
+bool Io::mic_aux_recent() const {
+  const u64 now = nds_.sched.now();
+  return mic_conv_at_ != 0 && now >= mic_conv_at_ && now - mic_conv_at_ < 2 * CYCLES_PER_FRAME;
+}
+
 u16 Io::mic_sample() const {
   mic_used_ = true;
   mic_conv_at_ = nds_.sched.now(); mic_conv_new_ = true;

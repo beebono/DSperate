@@ -109,6 +109,12 @@ add_executable(test_config config_test.cpp ../src/frontend/sdl/config.cpp)
 target_link_libraries(test_config PRIVATE dsperate_core)
 add_test(NAME config COMMAND test_config)
 
+# The microphone queue, also frontend code (header only): bursty capture in,
+# one steady frame of samples out.
+add_executable(test_mic_queue mic_queue_test.cpp)
+target_link_libraries(test_mic_queue PRIVATE dsperate_core)
+add_test(NAME mic_queue COMMAND test_mic_queue)
+
 # Input, for the menu's way back from a broken binding: the fallback layer and
 # the reachability warning both have to stay silent under the defaults, which
 # only a test will keep true. Guarded because it needs SDL2's headers, which

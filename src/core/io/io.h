@@ -245,6 +245,10 @@ public:
   void dsi_mic_clock(s16 sample);
   // Game has sampled AUX at least once.
   bool mic_used() const { return mic_used_; }
+  // The game read the touchscreen controller's AUX input (the DS way to the microphone) within the last
+  // two frames, as opposed to recording through the DSi's MIC_CNT FIFO or its DSP. The frontend's noise
+  // gate, which serves loudness detection, applies only then.
+  bool mic_aux_recent() const;
   // The DSi's DSP has started listening: it takes the microphone through I2S,
   // past the registers that otherwise say a game wants it.
   void note_mic_wanted() { mic_used_ = true; }

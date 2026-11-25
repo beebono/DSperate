@@ -78,7 +78,7 @@ msgstr ""
 msgid "FULLSCREEN"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4882
+#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4885
 msgid "SCREENSHOT"
 msgstr ""
 
@@ -94,8 +94,8 @@ msgstr ""
 msgid "FPS"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:881 src/frontend/sdl/main.cpp:1383 src/frontend/sdl/main.cpp:3028
-#: src/frontend/sdl/main.cpp:3029 src/frontend/sdl/main.cpp:3065
+#: src/frontend/sdl/input.cpp:881 src/frontend/sdl/main.cpp:1384 src/frontend/sdl/main.cpp:3032
+#: src/frontend/sdl/main.cpp:3033 src/frontend/sdl/main.cpp:3069
 msgid "NONE"
 msgstr ""
 
@@ -127,510 +127,510 @@ msgstr ""
 msgid "{1} HIDES KEY {2}"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:860
+#: src/frontend/sdl/main.cpp:861
 msgid "REJECTED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1355
+#: src/frontend/sdl/main.cpp:1356
 msgid "MODIFIER"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1356
+#: src/frontend/sdl/main.cpp:1357
 msgid "STYLUS TAP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1357
+#: src/frontend/sdl/main.cpp:1358
 msgid "STYLUS TAP (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1358
+#: src/frontend/sdl/main.cpp:1359
 msgid "STYLUS STICK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1359
+#: src/frontend/sdl/main.cpp:1360
 msgid "STYLUS HOLD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1360
+#: src/frontend/sdl/main.cpp:1361
 msgid "STICK DPAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1361
+#: src/frontend/sdl/main.cpp:1362
 msgid "STICK ABXY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1363
+#: src/frontend/sdl/main.cpp:1364
 msgid "GRIP GREEN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1364
+#: src/frontend/sdl/main.cpp:1365
 msgid "GRIP RED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1365
+#: src/frontend/sdl/main.cpp:1366
 msgid "GRIP YELLOW"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1366
+#: src/frontend/sdl/main.cpp:1367
 msgid "GRIP BLUE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1367
+#: src/frontend/sdl/main.cpp:1368
 msgid "GRIP STRUM"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1368
+#: src/frontend/sdl/main.cpp:1369
 msgid "GRIP STRUM (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1371
+#: src/frontend/sdl/main.cpp:1372
 msgid "L STICK RIGHT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1372
+#: src/frontend/sdl/main.cpp:1373
 msgid "L STICK DOWN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1373
+#: src/frontend/sdl/main.cpp:1374
 msgid "R STICK RIGHT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1374
+#: src/frontend/sdl/main.cpp:1375
 msgid "R STICK DOWN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1375
+#: src/frontend/sdl/main.cpp:1376
 msgid "L2 AXIS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1376
+#: src/frontend/sdl/main.cpp:1377
 msgid "R2 AXIS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1386
+#: src/frontend/sdl/main.cpp:1387
 msgid "L STICK X"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1386
+#: src/frontend/sdl/main.cpp:1387
 msgid "L STICK Y"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1386
+#: src/frontend/sdl/main.cpp:1387
 msgid "R STICK X"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:1386
+#: src/frontend/sdl/main.cpp:1387
 msgid "R STICK Y"
 msgstr ""
 
 #. an inverted axis: {1} is the stick axis, e.g. L STICK X.
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:1390
+#: src/frontend/sdl/main.cpp:1391
 msgid "{1} INV"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2220
+#: src/frontend/sdl/main.cpp:2221
 msgid "COMPILING SHADERS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2221
+#: src/frontend/sdl/main.cpp:2222
 msgid "FIRST TIME ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2272
+#: src/frontend/sdl/main.cpp:2273
 msgid "STOPPING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2273
+#: src/frontend/sdl/main.cpp:2274
 msgid "WAITING ON THE CARD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2274
+#: src/frontend/sdl/main.cpp:2275
 msgid "UNPACKING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2275
+#: src/frontend/sdl/main.cpp:2276
 msgid "FIRST LAUNCH ONLY    B CANCELS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2300
+#: src/frontend/sdl/main.cpp:2301
 msgid "ANY BUTTON RETURNS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2308
+#: src/frontend/sdl/main.cpp:2309
 msgid "FILE CANNOT BE READ"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2309
+#: src/frontend/sdl/main.cpp:2310
 msgid "THE ZIP IS DAMAGED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2310
+#: src/frontend/sdl/main.cpp:2311
 msgid "NO GAME IN THE ZIP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2312
+#: src/frontend/sdl/main.cpp:2313
 msgid "ZIP NOT SUPPORTED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2313
+#: src/frontend/sdl/main.cpp:2314
 msgid "NOT A DS GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2331
+#: src/frontend/sdl/main.cpp:2332
 msgid "FIRMWARE IS BAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2331
+#: src/frontend/sdl/main.cpp:2332
 msgid "DS BIOS IS BAD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2471
+#: src/frontend/sdl/main.cpp:2472
 msgid "NO GBA GAME (RUMBLE PAK)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2471
+#: src/frontend/sdl/main.cpp:2472
 msgid "NO GBA GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2502
+#: src/frontend/sdl/main.cpp:2503
 msgid "GBA CARTRIDGE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2502
+#: src/frontend/sdl/main.cpp:2503
 msgid "THIS GAME SUPPORTS THESE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2502
+#: src/frontend/sdl/main.cpp:2503
 msgid "DON'T ASK AGAIN FOR THIS GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2503
+#: src/frontend/sdl/main.cpp:2504
 msgid "A INSERT   B NO GBA GAME"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2526 src/frontend/sdl/main.cpp:4022
+#: src/frontend/sdl/main.cpp:2527 src/frontend/sdl/main.cpp:4026
 msgid "SAVE CANNOT BE READ"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2549
+#: src/frontend/sdl/main.cpp:2550
 msgid "STATE NOT LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2739
+#: src/frontend/sdl/main.cpp:2743
 msgid "NO SHORTCUT FOLDER"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2743
+#: src/frontend/sdl/main.cpp:2747
 msgid "NO DSI NAND (PATHS.DSI_NAND)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2744
+#: src/frontend/sdl/main.cpp:2748
 msgid "NO DSI BIOS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2745
+#: src/frontend/sdl/main.cpp:2749
 msgid "THE DSI NAND CANNOT BE READ"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:2748
+#: src/frontend/sdl/main.cpp:2752
 msgid "THE DSI BIOS CANNOT BE READ"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:2753
+#: src/frontend/sdl/main.cpp:2757
 msgid "{1} ADDED, {2} REMOVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3028 src/frontend/sdl/settings.cpp:54
+#: src/frontend/sdl/main.cpp:3032 src/frontend/sdl/settings.cpp:54
 msgid "LEFT STICK"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3028 src/frontend/sdl/settings.cpp:54
+#: src/frontend/sdl/main.cpp:3032 src/frontend/sdl/settings.cpp:54
 msgid "RIGHT STICK"
 msgstr ""
 
 #. a hotkey's second binding: {1} is the hotkey, e.g. SAVE STATE.
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3060
+#: src/frontend/sdl/main.cpp:3064
 msgid "{1} (2)"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3146
+#: src/frontend/sdl/main.cpp:3150
 msgid "IN THE FIRMWARE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3232 src/frontend/sdl/main.cpp:3272
+#: src/frontend/sdl/main.cpp:3236 src/frontend/sdl/main.cpp:3276
 msgid "NOT DURING A NETWORK SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3233
+#: src/frontend/sdl/main.cpp:3237
 msgid "ONLY WITH FRAMESKIP ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3235 src/frontend/sdl/main.cpp:3237 src/frontend/sdl/main.cpp:3258
+#: src/frontend/sdl/main.cpp:3239 src/frontend/sdl/main.cpp:3241 src/frontend/sdl/main.cpp:3262
 msgid "THIS SCREEN SCALES IN HARDWARE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3238 src/frontend/sdl/main.cpp:3240 src/frontend/sdl/main.cpp:3242
+#: src/frontend/sdl/main.cpp:3242 src/frontend/sdl/main.cpp:3244 src/frontend/sdl/main.cpp:3246
 msgid "BILINEAR IS ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3243
+#: src/frontend/sdl/main.cpp:3247
 msgid "ONLY WITH CHUNKY ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3246
+#: src/frontend/sdl/main.cpp:3250
 msgid "THIS SCREEN IS ALWAYS FULL"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3248
+#: src/frontend/sdl/main.cpp:3252
 msgid "NOT WITH TWO WINDOWS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3250 src/frontend/sdl/main.cpp:3252
+#: src/frontend/sdl/main.cpp:3254 src/frontend/sdl/main.cpp:3256
 msgid "PIP LAYOUT ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3253
+#: src/frontend/sdl/main.cpp:3257
 msgid "ONLY WHEN THE PIP FADES"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3255 src/frontend/sdl/main.cpp:3260
+#: src/frontend/sdl/main.cpp:3259 src/frontend/sdl/main.cpp:3264
 msgid "DOMINANT LAYOUTS ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3257
+#: src/frontend/sdl/main.cpp:3261
 msgid "PIP AND DOMINANT LAYOUTS ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3261
+#: src/frontend/sdl/main.cpp:3265
 msgid "ONLY WHEN THE RATIO IS AUTO"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3266
+#: src/frontend/sdl/main.cpp:3270
 msgid "THIS BUILD HAS NO NETWORKING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3270
+#: src/frontend/sdl/main.cpp:3274
 msgid "ONLY WITH NETWORK FEATURES ON INTERNET"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3274
+#: src/frontend/sdl/main.cpp:3278
 msgid "NEEDS PATHS.DSI_GAMES OR PATHS.GAMES"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3276
+#: src/frontend/sdl/main.cpp:3280
 msgid "A DSI HAS NO GBA SLOT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3277
+#: src/frontend/sdl/main.cpp:3281
 msgid "THIS GAME READS NO GBA GAMES"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3278
+#: src/frontend/sdl/main.cpp:3282
 msgid "NEEDS PATHS.GBA_GAMES"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3280
+#: src/frontend/sdl/main.cpp:3284
 msgid "NO RUMBLE PAK IN SLOT 2"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3283
+#: src/frontend/sdl/main.cpp:3287
 msgid "NO DSI BIOS OR FIRMWARE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3286
+#: src/frontend/sdl/main.cpp:3290
 msgid "NO BOKTAI CARTRIDGE IN SLOT 2"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3291
+#: src/frontend/sdl/main.cpp:3295
 msgid "GPU 3D IS NOT AVAILABLE HERE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3291
+#: src/frontend/sdl/main.cpp:3295
 msgid "ONLY WITH GPU 3D ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3292
+#: src/frontend/sdl/main.cpp:3296
 msgid "VULKAN ONLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3296
+#: src/frontend/sdl/main.cpp:3300
 msgid "NEEDS THE VULKAN PRESENT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3297
+#: src/frontend/sdl/main.cpp:3301
 msgid "NOT WITH CHUNKY ON"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3445
+#: src/frontend/sdl/main.cpp:3449
 msgid "SD CARD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3446
+#: src/frontend/sdl/main.cpp:3450
 msgid "LEFT OUT OF THE STATE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3447
+#: src/frontend/sdl/main.cpp:3451
 msgid "THE STATE HAD NO CARD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3447
+#: src/frontend/sdl/main.cpp:3451
 msgid "ITS FOLDER HAS CHANGED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3530
+#: src/frontend/sdl/main.cpp:3534
 msgid "LOCAL WIRELESS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3595
+#: src/frontend/sdl/main.cpp:3599
 msgid "WAITING FOR HOST"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3635
+#: src/frontend/sdl/main.cpp:3639
 msgid "SCAN FAILED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3635
+#: src/frontend/sdl/main.cpp:3639
 msgid "THE NETWORK REFUSED IT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3641
+#: src/frontend/sdl/main.cpp:3645
 msgid "LOOKING FOR A SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3649
+#: src/frontend/sdl/main.cpp:3653
 msgid "NO SESSION FOUND"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3649
+#: src/frontend/sdl/main.cpp:3653
 msgid "NOBODY IS HOSTING HERE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3657 src/frontend/sdl/main.cpp:4548
+#: src/frontend/sdl/main.cpp:3661 src/frontend/sdl/main.cpp:4551
 msgid "JOINED A SESSION"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3693
+#: src/frontend/sdl/main.cpp:3697
 msgid "ACHIEVEMENT UNLOCKED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3713
+#: src/frontend/sdl/main.cpp:3717
 msgid "NOT AVAILABLE IN THIS BUILD"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3716
+#: src/frontend/sdl/main.cpp:3720
 msgid "TURNED OFF"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3717
+#: src/frontend/sdl/main.cpp:3721
 msgid "NOT SIGNED IN"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3718
+#: src/frontend/sdl/main.cpp:3722
 msgid "SIGNING IN..."
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3719 src/frontend/sdl/main.cpp:3721
+#: src/frontend/sdl/main.cpp:3723 src/frontend/sdl/main.cpp:3725
 msgid "SIGNED IN AS {1}"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3720
+#: src/frontend/sdl/main.cpp:3724
 msgid "LOADING ACHIEVEMENTS..."
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3723
+#: src/frontend/sdl/main.cpp:3727
 msgid "NO ACHIEVEMENTS PUBLISHED FOR THIS GAME YET"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3725
+#: src/frontend/sdl/main.cpp:3729
 msgid "NO ACHIEVEMENTS FOR THIS ROM - HASH {1}"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3734
+#: src/frontend/sdl/main.cpp:3738
 msgid "{1}/{2} EARNED  {3}/{4} POINTS  (ENCORE)"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:3734
+#: src/frontend/sdl/main.cpp:3738
 msgid "{1}/{2} EARNED  {3}/{4} POINTS"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:4216
+#: src/frontend/sdl/main.cpp:4220
 msgid "STATE {1} SAVED"
 msgstr ""
 
 #. {1}, {2}... are filled in by the program; keep each one, in any order.
-#: src/frontend/sdl/main.cpp:4231
+#: src/frontend/sdl/main.cpp:4235
 msgid "STATE {1} LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4590
+#: src/frontend/sdl/main.cpp:4593
 msgid "GPU 3D UNAVAILABLE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4591
+#: src/frontend/sdl/main.cpp:4594
 msgid "DRAWING 3D ON THE CPU"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4600
+#: src/frontend/sdl/main.cpp:4603
 msgid "NOT SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4602
+#: src/frontend/sdl/main.cpp:4605
 msgid "CHECK THE CARD: FULL OR READ-ONLY?"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4610
+#: src/frontend/sdl/main.cpp:4613
 msgid "TURBO TIMING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4611
+#: src/frontend/sdl/main.cpp:4614
 msgid "NOT THE CONSOLE'S SPEED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4612
+#: src/frontend/sdl/main.cpp:4615
 msgid "GAMES MAY GLITCH OR HANG"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4618
+#: src/frontend/sdl/main.cpp:4621
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4633
+#: src/frontend/sdl/main.cpp:4636
 msgid "DSI"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4634
+#: src/frontend/sdl/main.cpp:4637
 msgid "CPU TIMING IS NOT EXACT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4635
+#: src/frontend/sdl/main.cpp:4638
 msgid "SYSTEM APPS MAY HANG"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4646
+#: src/frontend/sdl/main.cpp:4649
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4647
+#: src/frontend/sdl/main.cpp:4650
 msgid "UNKNOWN DSP PROGRAM"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4648
+#: src/frontend/sdl/main.cpp:4651
 msgid "WILL RUN VERY SLOWLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4883
+#: src/frontend/sdl/main.cpp:4886
 msgid "SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4883
+#: src/frontend/sdl/main.cpp:4886
 msgid "COULD NOT BE SAVED"
 msgstr ""
 
