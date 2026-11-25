@@ -51,7 +51,10 @@ Categories, judged on the last 30 s: `failed`, `no-boot`, `faulting`,
 an idle `frozen` only counts when the mash does not get past it), `static`
 (picture stopped, sound plays),
 `loop` (a few pictures cycling), `animated-2d`, `animated-3d`. The mash phase is
-also set against idle: `progressed`, `same` (the input changed nothing: the
+also set against idle: `progressed` (the game took the input: at least 3 of
+the mash's presses or taps changed the picture within 10 frames, counted only
+where the picture was still before the press or the answer is a picture the idle
+run never showed), `same` (the input changed nothing: the
 game wants another button or a touch somewhere else) or `regressed`.
 
 The mash (`mash-<frames>.dsin`, written by `tools/mkdsin.py`): nothing for 120

@@ -17,13 +17,21 @@ Per phase, a game is one of:
   loop          the last 30 s cycle through a few pictures (blinking PRESS START)
   animated-2d   the last 30 s keep making new pictures, no 3D
   animated-3d   the same with 3D polygons (attract modes are usually here)
-The mash phase is also compared with idle: progressed (new pictures and work the
-idle run never showed), same (nothing new: input ignored, or a touch/other
-button is needed), regressed (worse category than idle: the input broke it).
+The mash phase is also compared with idle: regressed (worse category than idle:
+the input broke it), progressed (the game took the input: at least ACCEPTED_MIN
+presses or taps changed the picture within RESPONSE frames, where the picture had
+been still before the press or the new one never appeared in the idle run), or
+same (it did not: input ignored, or it needs a button or a touch spot the mash
+does not use). The accepted count is in classify.tsv.
 """
 import html, json, os, sys, collections
 
 TAIL = 1800          # frames: the window the end state is judged on (30 s)
+# The mash's input schedule (run_sweep.write_mash): A at START + k*PERIOD, Start 12
+# frames later, a tap 24 frames later.
+MASH_START, MASH_PERIOD, MASH_OFFSETS = 120, 40, (0, 12, 24)
+RESPONSE = 10        # frames after an input in which a change counts as its answer
+ACCEPTED_MIN = 3     # inputs answered for the game to count as having taken input
 ORDER = ["failed", "no-boot", "faulting", "frozen", "static", "loop", "animated-2d", "animated-3d"]
 
 def load(path):
@@ -60,8 +68,22 @@ def features(rows, frames):
         audio_tail=max((int(r[12]) for r in tail), default=0),
         faults=sum(int(r[13]) + int(r[14]) for r in rows),
         pcs_tail=len({(r[15], r[16]) for r in tail}),
-        hashes=set(pairs),
+        hashes=set(pairs), pairs=pairs,
     )
+
+def accepted_inputs(fm, fi):
+    """How many of the mash's inputs the picture answered (see the docstring)."""
+    pairs, idle, n = fm["pairs"], fi["hashes"], 0
+    for c in range(MASH_START, len(pairs), MASH_PERIOD):
+        for o in MASH_OFFSETS:
+            t = c + o
+            if t < 4 or t >= len(pairs):
+                continue
+            pre = pairs[t - 1]
+            still = all(pairs[k] == pre for k in range(t - 4, t))
+            if any(pairs[k] != pre and (still or pairs[k] not in idle) for k in range(t, min(t + RESPONSE, len(pairs)))):
+                n += 1
+    return n
 
 def category(f, rec):
     if f is None or rec.get("rc", 0) != 0 or not f["finished"]:
@@ -106,17 +128,22 @@ def main():
                                        f"3dframes={f['frames_3d']} w2d={f['w2d']} faults={f['faults']} lastchg={f['last_change']}")
         if row.get("idle") and row.get("mash"):
             fi, fm = feats.get("idle"), feats.get("mash")
+            acc = accepted_inputs(fm, fi) if fi and fm else 0
+            row["accepted"] = acc
             if ORDER.index(row["mash"]) < ORDER.index(row["idle"]) and row["mash"] in ORDER[:4]:
                 o = "regressed"
-            elif fi and fm and len(fm["hashes"] - fi["hashes"]) > 120 and fm["tail_changes"] > 0:
+            elif acc >= ACCEPTED_MIN:
                 o = "progressed"
             else:
                 o = "same"
             row["mash_vs_idle"] = o; outcome[o] += 1
+        for f in feats.values():   # the per-frame data is done with: ~10 GB over a full DS set if kept
+            if f:
+                f.pop("pairs", None); f.pop("hashes", None)
         j = res["jit"].get(g)
         row["jit"] = j.get("verdict", "") + (f"@{j['first_diff']}" if j and j.get("verdict") == "DIFF" else "") if j else ""
         rows.append(row)
-    cols = ["file", "idle", "mash", "mash_vs_idle", "jit", "idle_detail", "mash_detail"]
+    cols = ["file", "idle", "mash", "mash_vs_idle", "accepted", "jit", "idle_detail", "mash_detail"]
     with open(os.path.join(out, "classify.tsv"), "w") as fh:
         fh.write("\t".join(cols) + "\n")
         for r in rows:
