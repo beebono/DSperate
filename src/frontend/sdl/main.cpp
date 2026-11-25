@@ -2563,7 +2563,7 @@ sdl_ready:
   if (!replay) lid.open();
   std::vector<s16> mic, mic_raw;
   // ADC sits well off zero; one-pole DC blocker, ~25 Hz at 32768 Hz.
-  // audio.mic_gain scales what remains (default 0.25).
+  // audio.mic_gain scales what remains (default 0.75).
   double dc = 0.0;
   // Noise gate: floor is the slowest-rising rms seen; a frame under
   // audio.mic_gate times it (default 5, 0 = off) is sent as silence. Only
@@ -2572,7 +2572,7 @@ sdl_ready:
   // every frame, as gating it cut speech into 16 ms pieces.
   const double mic_gate = cfg.real("audio.mic_gate", 5.0);
   double mic_floor = 1e9;
-  const double mic_gain = cfg.real("audio.mic_gain", 0.25);
+  const double mic_gain = cfg.real("audio.mic_gain", 0.75);
   ds::sdl::MicQueue mic_queue(double(ds::spu::Spu::SAMPLE_RATE) * ds::CYCLES_PER_FRAME / ds::ARM9_CLOCK_HZ);   // ~547.7 a frame
 
   // Wall-clock pacing when there is no audio queue to pace against.

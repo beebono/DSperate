@@ -368,7 +368,7 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # analog smoothing is undocumented and not modelled. false: linear resampling
 # mic = true                    # open the microphone
 # mic_dev = plughw:0,0          # ALSA capture device
-# mic_gain = 0.25               # microphone level, after the DC offset is removed
+# mic_gain = 0.75               # microphone level, after the DC offset is removed
 # mic_gate = 5                  # noise gate: a frame quieter than this many times the quietest level
                                 # heard is sent as silence; 0 = off. Only for games that listen through
                                 # the DS touchscreen controller (blowing, shouting): a DSi recording
