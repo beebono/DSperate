@@ -38,6 +38,7 @@ subset; `--frames` sets the length; `--extra "..."` passes headless arguments
 | `classify.py OUT` | `classify.tsv`, `summary.md` (counts and the outlier list), `sheet-<phase>-<category>.html` |
 | `review.py DIR [SET...]` | `DIR/REVIEW.md`: the games worth looking at by eye (broken, regressed, stuck, ignoring input, frozen after input, no progress), each with its idle and mash screenshot strips, over one or more sets' outputs under DIR; with `--menus [--second DIR2]`, `DIR/MENUS.md` instead: a checklist of the games that took input but may not have got past their first menus, each with the mash run (DIR2: a wide-mash pass) that took the most input |
 | `probe_touch.py` | for games stuck on a screen: replays the mash with a save state at its end, taps the bottom screen on a grid from it and measures how much of the picture each tap changes (heat map per game); `--verify` flags taps that go back to a screen the run already showed (a Back or No); `--plan` picks the fewest tap points that move the most games on, for a wider mash |
+| `guide.py` | a hand pass over a `review.py --menus` checklist: each unticked game opens in the SDL frontend (unpacked by the script, saves and states kept in the output directory), and on closing it asks y (works: ticks the box) / n (unsure) / x (broken or hung), with a note, into `OUT/guided.tsv`; resumes |
 
 ## Signals
 
