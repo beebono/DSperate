@@ -15,6 +15,15 @@ path. Groups, most telling first, each game in the first group it fits:
   frozen after input  took input, then ended frozen
   no progress       the rest of the mash-against-idle "same"
 Small groups are open, large ones folded (<details>).
+
+  review.py SWEEP_DIR --menus [--second DIR2]
+
+Writes SWEEP_DIR/MENUS.md instead: a checklist of the games that took the mash's
+input but may have got no further than their first menus (they took 3 to
+MENU_ACC-1 inputs and ended on a still or looping screen, or kept animating with
+fewer than MENU_DISTINCT distinct pictures). DIR2 is a second pass over some of
+the games (run_sweep.py --mash wide, laid out like SWEEP_DIR); per game the run
+that took the most input is the one shown.
 """
 import csv, os, sys, urllib.parse
 
@@ -48,7 +57,67 @@ def groups(rows):
 def link(path):
     return urllib.parse.quote(path)
 
+MENU_ACC, MENU_DISTINCT = 20, 200
+
+def detail(r, k):
+    import re
+    m = re.search(k + r"=(-?\d+)", r.get("mash_detail") or "")
+    return int(m.group(1)) if m else 0
+
+def maybe_menus(r):
+    acc = int(r.get("accepted") or 0)
+    if r["mash_vs_idle"] != "progressed" or acc >= MENU_ACC:
+        return False
+    return r["mash"] in ("static", "loop") or (r["mash"].startswith("animated") and detail(r, "distinct") < MENU_DISTINCT)
+
+def menus(root, second):
+    import json
+    def load(d, s):
+        p = os.path.join(d, s, "classify.tsv")
+        if not os.path.exists(p):
+            return {}
+        rows = {r["file"]: dict(r, dir=d) for r in csv.DictReader(open(p), delimiter="\t")}
+        for l in open(os.path.join(d, s, "results-mash.jsonl")):
+            j = json.loads(l)
+            if j["file"] in rows: rows[j["file"]]["gid"] = j["id"]
+        return rows
+    sets = sorted(d for d in os.listdir(root) if os.path.exists(os.path.join(root, d, "classify.tsv")))
+    lines = ["# Possibly only the first menus", "",
+             f"Games that took the mash's input (3 to {MENU_ACC - 1} inputs answered) but ended on a still or looping screen, "
+             f"or kept animating with fewer than {MENU_DISTINCT} distinct pictures. Each shows the run with the most input taken "
+             "(the standard mash, or the wide mash where it was rerun), frames 300, 1200, 2400, 3600, 5399. "
+             "Tick a box (`[x]`) once a game is seen to be past its menus or fine.", ""]
+    total = 0
+    for s in sets:
+        a, b = load(root, s), load(second, s) if second else {}
+        pick = {}
+        for f, r in a.items():
+            r2 = b.get(f)
+            best = r2 if r2 and int(r2.get("accepted") or 0) >= int(r.get("accepted") or 0) else r
+            if maybe_menus(best):
+                pick[f] = best
+        if not pick:
+            continue
+        lines += [f"## {s} ({len(pick)})", ""]
+        for f in sorted(pick, key=str.lower):
+            r = pick[f]; total += 1
+            which = "wide" if r["dir"] != root else "standard"
+            lines.append(f"- [ ] **{f[:-4] if f.endswith('.zip') else f}**: {r['mash']}, accepted {r.get('accepted')}, "
+                         f"{detail(r, 'distinct')} pictures ({which} mash)")
+            png = os.path.join(r["dir"], s, "shots", "mash", r.get("gid", "") + ".png")
+            if os.path.exists(png):
+                lines += ["", f"  ![{s}]({link(os.path.relpath(png, root))})", ""]
+    with open(os.path.join(root, "MENUS.md"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    print(os.path.join(root, "MENUS.md"), total, "games")
+
 def main():
+    if "--menus" in sys.argv:
+        argv = [x for x in sys.argv[1:] if x != "--menus"]
+        second = None
+        if "--second" in argv:
+            i = argv.index("--second"); second = os.path.abspath(argv[i + 1]); del argv[i:i + 2]
+        return menus(os.path.abspath(argv[0]), second)
     root = os.path.abspath(sys.argv[1])
     sets = sys.argv[2:] or sorted(d for d in os.listdir(root) if os.path.exists(os.path.join(root, d, "classify.tsv")))
     lines = ["# Sweep review: games worth a look", "",
