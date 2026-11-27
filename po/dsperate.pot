@@ -78,7 +78,7 @@ msgstr ""
 msgid "FULLSCREEN"
 msgstr ""
 
-#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4927
+#: src/frontend/sdl/input.cpp:116 src/frontend/sdl/main.cpp:4928
 msgid "SCREENSHOT"
 msgstr ""
 
@@ -508,7 +508,7 @@ msgstr ""
 msgid "NOBODY IS HOSTING HERE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:3707 src/frontend/sdl/main.cpp:4599
+#: src/frontend/sdl/main.cpp:3707 src/frontend/sdl/main.cpp:4600
 msgid "JOINED A SESSION"
 msgstr ""
 
@@ -570,67 +570,67 @@ msgstr ""
 msgid "STATE {1} LOADED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4641
+#: src/frontend/sdl/main.cpp:4642
 msgid "GPU 3D UNAVAILABLE"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4642
+#: src/frontend/sdl/main.cpp:4643
 msgid "DRAWING 3D ON THE CPU"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4651
+#: src/frontend/sdl/main.cpp:4652
 msgid "NOT SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4653
+#: src/frontend/sdl/main.cpp:4654
 msgid "CHECK THE CARD: FULL OR READ-ONLY?"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4661
+#: src/frontend/sdl/main.cpp:4662
 msgid "TURBO TIMING"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4662
+#: src/frontend/sdl/main.cpp:4663
 msgid "NOT THE CONSOLE'S SPEED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4663
+#: src/frontend/sdl/main.cpp:4664
 msgid "GAMES MAY GLITCH OR HANG"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4669
+#: src/frontend/sdl/main.cpp:4670
 msgid "NAND SHORTCUTS"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4684
+#: src/frontend/sdl/main.cpp:4685
 msgid "DSI"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4685
+#: src/frontend/sdl/main.cpp:4686
 msgid "CPU TIMING IS NOT EXACT"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4686
+#: src/frontend/sdl/main.cpp:4687
 msgid "SYSTEM APPS MAY HANG"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4697
+#: src/frontend/sdl/main.cpp:4698
 msgid "DSI DSP"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4698
+#: src/frontend/sdl/main.cpp:4699
 msgid "UNKNOWN DSP PROGRAM"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4699
+#: src/frontend/sdl/main.cpp:4700
 msgid "WILL RUN VERY SLOWLY"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4928
+#: src/frontend/sdl/main.cpp:4929
 msgid "SAVED"
 msgstr ""
 
-#: src/frontend/sdl/main.cpp:4928
+#: src/frontend/sdl/main.cpp:4929
 msgid "COULD NOT BE SAVED"
 msgstr ""
 
