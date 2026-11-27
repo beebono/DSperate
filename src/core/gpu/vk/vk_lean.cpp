@@ -13,6 +13,7 @@ std::unique_ptr<Lean> Lean::create(std::shared_ptr<Device>, bool, std::string* w
 bool Lean::msaa() const { return false; }
 void Lean::wait_pipelines() {}
 u32 Lean::scale() const { return 1; }
+bool Lean::merge_at_1x() const { return false; }
 const u32* Lean::fine_for(const u32*) const { return nullptr; }
 GpuPoly* Lean::poly_buffer() { return nullptr; }
 GpuVert* Lean::vert_buffer() { return nullptr; }
@@ -366,6 +367,11 @@ struct Lean::Impl {
 Lean::~Lean() { if (d_) d_->destroy(); }
 bool Lean::msaa() const { return d_->msaa; }
 u32 Lean::scale() const { return d_->scale; }
+// Imagination (the TrimUI Smart Pro's GE8300): the CPU composite of the 1x record jumps back a frame now and then
+// (NSMB's intro, Mario and the flowers), while the same frames through the present's merge are clean and the
+// record itself matches the image (DS_MERGE3D_CHECK). Cause not found (2026-11-27): not the lag rule, the
+// readback memory's caching, frameskip, the handed frame, early engine A or line lag.
+bool Lean::merge_at_1x() const { return d_->dev->limits().vendor_id == 0x1010u; }
 const u32* Lean::fine_for(const u32* o) const {
   for (u32 i = 0; i < Impl::kSlots; ++i) if (o == d_->out[i].ptr) return static_cast<const u32*>(d_->fine[i].ptr);
   return nullptr;

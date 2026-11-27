@@ -105,6 +105,7 @@ public:
   // render() left the stream frame undrawn: the caller builds its list and calls render() again.
   bool take_geom_refused() { const bool r = geom_refused_; geom_refused_ = false; return r; }
   const char* gpu_api() const;   // the backend drawing (gpu_active()), else ""
+  bool gpu_merge_at_1x() const;  // Raster3D::merge_at_1x of the raster in use
 private:
   NDS& nds_;
   // Holds a whole chunk of scanlines at once (render_chunk draws chunk at a

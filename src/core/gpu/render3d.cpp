@@ -3313,6 +3313,7 @@ bool Renderer3D::gpu_layer(u64 gen, Layer3D* out) {
 }
 
 const char* Renderer3D::gpu_api() const { return gpu_on_ && lean_ ? lean_->api() : ""; }
+bool Renderer3D::gpu_merge_at_1x() const { return gpu_on_ && lean_ && lean_->has_layers() && lean_->merge_at_1x(); }
 bool Renderer3D::geom_ready() const { return gpu_on_ && lean_ && lean_->takes_streams(); }
 
 bool Renderer3D::set_gpu(bool on, std::string* why) {

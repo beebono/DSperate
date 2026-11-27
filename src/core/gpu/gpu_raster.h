@@ -47,6 +47,9 @@ public:
   virtual const char* api() const = 0;   // "Vulkan" / "OpenGL ES"
   virtual bool msaa() const = 0;   // 4x MSAA in use (else 1 sample: the device could not)
   virtual u32 scale() const { return 1; }
+  // The frames should reach the panel from the raster's own image (the 3D merge) at 1x too, not only above it:
+  // where a CPU composite of the 1x record shows wrong (Imagination: the picture jumps back a frame now and then).
+  virtual bool merge_at_1x() const { return false; }
 
   // Frame input: polygons, vertices and post tables are host staging
   // (rewritten freely between submits); the texel arena is mapped device

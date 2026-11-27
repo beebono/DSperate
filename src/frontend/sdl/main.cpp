@@ -4498,7 +4498,8 @@ sdl_ready:
     // It is how a raster above 1x (video.gpu3d_scale) reaches the panel. At
     // 1x, where the readback is nearly free, it only costs the present's GPU
     // time, so there it is off unless DS_MERGE3D=1 asks (=0: never, and a
-    // finer raster shows as its 1x record).
+    // finer raster shows as its 1x record), or the raster wants it at 1x
+    // (Raster3D::merge_at_1x: Imagination).
     {
       static const int merge_env = [] { const char* e = std::getenv("DS_MERGE3D"); return e && *e ? std::atoi(e) != 0 : -1; }();
       // The raster follows the setting and the windows (rebuilt at its next frame; frames in between show at the old scale).
@@ -4511,7 +4512,7 @@ sdl_ready:
         }
         r3.set_gpu_scale(want);
       }
-      const bool merge3d = merge_env >= 0 ? merge_env != 0 : nds.gpu3d.renderer().gpu_scale() > 1;
+      const bool merge3d = merge_env >= 0 ? merge_env != 0 : nds.gpu3d.renderer().gpu_scale() > 1 || nds.gpu3d.renderer().gpu_merge_at_1x();
       nds.gpu.set_split3d_present(merge3d && display.merge3d_ok() && (!dual_window || display2.merge3d_ok()));
     }
     const bool skipped = nds.gpu.will_skip_frame();

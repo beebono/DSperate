@@ -38,6 +38,7 @@ public:
   const char* api() const override { return "Vulkan"; }
   bool msaa() const override;
   u32 scale() const override;   // the attachment scale (see create)
+  bool merge_at_1x() const override;   // Imagination
   GpuPoly* poly_buffer() override;
   GpuVert* vert_buffer() override;
   u32*     texel_buffer(u32* capacity) override;
