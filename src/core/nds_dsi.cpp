@@ -587,16 +587,20 @@ void NDS::setup_direct_boot_dsi() {
       auto put_str = [&](u32 addr, const char* str) { for (const char* c = str; *c; ++c) w8_7(addr++, static_cast<u8>(*c)); w8_7(addr, 0); };
       char title[64];
       std::snprintf(title, sizeof title, "nand:/title/%08x/%08x", t.title_id_hi, t.title_id_lo);
-      char pub[96];
+      char pub[96], prv[96];
       std::snprintf(pub, sizeof pub, "%s/data/public.sav", title);
+      std::snprintf(prv, sizeof prv, "%s/data/private.sav", title);
       struct Mount { u32 hdr; const char* name; const char* path; };
       std::vector<Mount> entries = {
         {0x00008141, "nand",    "/"},
         {0x0000A142, "nand2",   "/"},
         {0x00041144, "shared1", "nand:/shared1"},
         {0x00063146, "photo",   "nand2:/photo"},
-        {0x00060948, "dataPub", pub},
       };
+      // The save archives the header declares, as the launcher mounts them: private (G) before public (H),
+      // each only when its size is non-zero. Ball Fighter (USA), private only, cannot save without dataPrv.
+      if (t.private_sav_size) entries.push_back({0x00060947, "dataPrv", prv});
+      if (t.public_sav_size) entries.push_back({0x00060948, "dataPub", pub});
       // A title with SD card access (header bit 3) gets the card's root too, regardless of slot state.
       if (t.access_control & (1u << 3)) entries.push_back({0x00060049, "sdmc", "/"});
       u32 o = tbl;
