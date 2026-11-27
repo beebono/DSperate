@@ -130,7 +130,10 @@ elseif(DSPERATE_PGO STREQUAL "use")
   string(SUBSTRING "${_ds_pgo_stamp}" 0 12 _ds_pgo_stamp)
   add_compile_options(-DDSPERATE_PGO_PROFILE=${_ds_pgo_stamp})
   if(DSPERATE_PGO_STRICT)
-    add_compile_options(-Wno-error=coverage-mismatch)
+    # Each warning is one line, without GCC's source and caret lines (thousands of
+    # them, one function's location checksum after another), so a log filters them.
+    # Changes no code; outside the fingerprint (CMAKE_CXX_FLAGS alone).
+    add_compile_options(-Wno-error=coverage-mismatch -fno-diagnostics-show-caret)
   else()
     add_compile_options(-Wno-missing-profile -Wno-coverage-mismatch)
   endif()

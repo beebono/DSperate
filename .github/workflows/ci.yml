@@ -48,11 +48,14 @@ jobs:
         run: |
           cmake --preset host -DDSPERATE_PGO=use -DDSPERATE_PGO_STRICT=ON | tee configure.log
           grep -q "Vulkan presenter and 3D raster enabled" configure.log || { echo "::error::Vulkan headers not found: the build would ship without GPU 3D and the Vulkan present"; exit 1; }
-          # "source locations ... have changed" is benign (the checkout path is
-          # in the checksum; the counts still apply) and one per function, so it
-          # is filtered; "control flow ... does not match" is a dropped profile.
-          cmake --build --preset host 2>&1 | { grep -v "source locations for function" || true; } | tee build.log
-          echo "PGO: $(grep -c 'control flow of function' build.log || true) functions changed since the profile ($(sed -n 's/^commit //p' pgo/aarch64/MANIFEST | cut -c1-9), $(sed -n 's/^date //p' pgo/aarch64/MANIFEST)); $(grep -c 'data file not found' build.log || true) objects without one"
+          # STRICT warns once per function, one line each (-fno-diagnostics-show-caret):
+          # "source locations ... have changed" is benign (the checkout path is in
+          # the checksum; the counts still apply), "control flow ... does not
+          # match" is a dropped profile, "profile ... not found" a function the
+          # training never ran. All of them go to build.log alone (thousands of
+          # lines); the log shows the rest of the build and the summary below.
+          cmake --build --preset host 2>&1 | tee build.log | { grep -v -E '\[-W(coverage-mismatch|missing-profile)\]|: In (member |static member )?function |: In instantiation of |: At global scope:|required from here|data file not found' || true; }
+          echo "PGO: $(grep -c 'control flow of function' build.log || true) functions changed since the profile ($(sed -n 's/^commit //p' pgo/aarch64/MANIFEST | cut -c1-9), $(sed -n 's/^date //p' pgo/aarch64/MANIFEST)); $(grep -c 'source locations for function' build.log || true) moved; $(grep -c -- '-Wmissing-profile' build.log || true) never trained; $(grep -c 'data file not found' build.log || true) objects without one"
           ctest --preset host --output-on-failure
       - name: configs/default.ini matches the built-in defaults
         run: tools/gen_example_configs.sh && git diff --exit-code configs/default.ini
@@ -74,7 +77,8 @@ jobs:
       - name: Install dependencies
         run: tools/ci_deps.sh native
       - name: Build, test and package
-        run: tools/ci_package.sh static host build/host aarch64 strip -DDSPERATE_PGO=use -DDSPERATE_PGO_STRICT=ON
+        # The profile's state is the arm64 job's to report: not STRICT here.
+        run: tools/ci_package.sh static host build/host aarch64 strip -DDSPERATE_PGO=use
       - uses: actions/upload-artifact@v4
         with:
           name: dsperate-linux-aarch64-static
