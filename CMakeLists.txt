@@ -136,7 +136,13 @@ elseif(DSPERATE_PGO STREQUAL "use")
   endif()
 endif()
 
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+# LTO, unless the configure says otherwise: CI's sanitizer and minimal builds
+# pass -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF. They ship nothing, and with
+# LTO every test executable redid the whole program's optimisation at its link
+# (20 of the sanitizer job's 22 minutes).
+if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+endif()
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
