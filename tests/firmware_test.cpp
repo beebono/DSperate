@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -58,7 +59,8 @@ void test_round_trip() {
   in.birthday_day = 5;
   in.language = 3;
   write_dump(in);
-  ds::NDS nds;
+  auto nds_heap = std::make_unique<ds::NDS>();   // several MB: not on the stack
+  ds::NDS& nds = *nds_heap;
   load(nds);
   ds::bios::UserSettings out;
   CHECK(nds.read_user_settings(out));
@@ -84,7 +86,8 @@ void test_one_field_at_a_time() {
   in.birthday_day = 5;
   in.language = 1;
   write_dump(in);
-  ds::NDS nds;
+  auto nds_heap = std::make_unique<ds::NDS>();   // several MB: not on the stack
+  ds::NDS& nds = *nds_heap;
   load(nds);
 
   ds::bios::UserSettings u;
@@ -151,7 +154,8 @@ void test_sidecar_round_trip() {
   }
 
   {
-    ds::NDS nds;
+    auto nds_heap = std::make_unique<ds::NDS>();   // several MB: not on the stack
+    ds::NDS& nds = *nds_heap;
     load(nds);
     ds::bios::UserSettings u;
     CHECK(nds.read_user_settings(u));
@@ -172,7 +176,8 @@ void test_sidecar_round_trip() {
 
   // A fresh console with the sidecar sees the change.
   {
-    ds::NDS nds;
+    auto nds_heap = std::make_unique<ds::NDS>();   // several MB: not on the stack
+    ds::NDS& nds = *nds_heap;
     load(nds);
     ds::bios::UserSettings fresh;
     CHECK(nds.read_user_settings(fresh));
@@ -218,7 +223,8 @@ void test_shared_between_ds_and_dsi() {
 
   // A DS session: a new nickname and language, and a page outside the shared tail.
   {
-    ds::NDS nds;
+    auto nds_heap = std::make_unique<ds::NDS>();   // several MB: not on the stack
+    ds::NDS& nds = *nds_heap;
     load(nds);
     ds::bios::UserSettings u;
     CHECK(nds.read_user_settings(u));
@@ -233,7 +239,8 @@ void test_shared_between_ds_and_dsi() {
   // The DSi firmware takes the settings and keeps its extended block, the
   // language following; the DS-only page is not put into it.
   {
-    ds::NDS nds;
+    auto nds_heap = std::make_unique<ds::NDS>();   // several MB: not on the stack
+    ds::NDS& nds = *nds_heap;
     CHECK(nds.load_bios("", "", kDsiFw, {}, &err));
     CHECK(nds.firmware.size() == 0x20000);
     const u8 untouched = nds.firmware[0x1000];
@@ -262,7 +269,8 @@ void test_shared_between_ds_and_dsi() {
   }
   // Back on the DS: the DSi's change, its own page, the fingerprints.
   {
-    ds::NDS nds;
+    auto nds_heap = std::make_unique<ds::NDS>();   // several MB: not on the stack
+    ds::NDS& nds = *nds_heap;
     load(nds);
     CHECK(nds.load_firmware_override(kOvr, err));
     ds::bios::UserSettings u;
@@ -297,7 +305,8 @@ void test_shared_between_ds_and_dsi() {
     }
   }
   for (const char* image : {kFw, kDsiFw}) {
-    ds::NDS nds;
+    auto nds_heap = std::make_unique<ds::NDS>();   // several MB: not on the stack
+    ds::NDS& nds = *nds_heap;
     CHECK(nds.load_bios("", "", image, {}, &err));
     CHECK(nds.load_firmware_override(kOvr, err));
     ds::bios::UserSettings u;
