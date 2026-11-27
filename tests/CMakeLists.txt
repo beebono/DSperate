@@ -109,6 +109,11 @@ add_executable(test_config config_test.cpp ../src/frontend/sdl/config.cpp)
 target_link_libraries(test_config PRIVATE dsperate_core)
 add_test(NAME config COMMAND test_config)
 
+# Which file a battery save is in (.sav / .dsv / .srm), and RetroArch's rzip.
+add_executable(test_save_file save_file_test.cpp ../src/frontend/sdl/save_file.cpp)
+target_link_libraries(test_save_file PRIVATE dsperate_core)
+add_test(NAME save_file COMMAND test_save_file)
+
 # The microphone queue, also frontend code (header only): bursty capture in,
 # one steady frame of samples out.
 add_executable(test_mic_queue mic_queue_test.cpp)

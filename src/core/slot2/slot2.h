@@ -138,6 +138,9 @@ private:
 // Loads a GBA ROM (a loose .gba) and its save. A missing save file is no
 // save, an unreadable ROM is nullptr with the reason in `err`.
 std::unique_ptr<GameCart> load_game(const std::string& rom_path, const std::string& save_path, std::string& err);
+// The same with the save already read (the frontend's .sav or RetroArch .srm);
+// a size no GBA save chip has is dropped.
+std::unique_ptr<GameCart> load_game_with_save(const std::string& rom_path, std::vector<u8> save, std::string& err);
 // Reads only the header of a GBA ROM: its game code and title. False when
 // the file isn't one (too short, or no 0x96 fixed byte).
 bool peek_game(const std::string& rom_path, char code[5], char title[13]);

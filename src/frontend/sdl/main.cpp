@@ -48,6 +48,7 @@
 #include "motion.h"
 #include "frontend/camera_image.h"
 #include "loader_cart.h"
+#include "save_file.h"
 #include "frontend/i18n/i18n.h"
 
 using ds::i18n::tr;
@@ -264,7 +265,8 @@ const char* kUsage =
     "  --autoload      start from the auto slot (emu.autosave's state) when there is one\n"
     "  --no-autoload   ignore it for this run, whatever emu.autoload says\n"
     "  --saves DIR     battery saves go in DIR (paths.saves; default beside the ROM). A game's\n"
-    "                  <rom>.dsv there (DeSmuME's or DraStic's) is used in place of <rom>.sav\n"
+    "                  <rom>.dsv (DraStic) or <rom>.srm (RetroArch) there or beside the ROM is\n"
+    "                  used as found; with more than one, the game asks (emu.save_file)\n"
     "  --states DIR    save states and the auto slot go in DIR (paths.states; default beside the ROM)\n"
     "  --save F        battery save to start from, instead of <rom>.sav\n"
     "                  (a --replay never writes the save back, so a scene repeats)\n"
@@ -327,17 +329,10 @@ std::string save_path(const std::string& rom, const std::string& dir) {
   return dir.empty() ? rom_stem(rom) + ".sav" : dir + "/" + base_name(rom_stem(rom)) + ".sav";
 }
 
-// A DS game's battery save: the .dsv DeSmuME and DraStic keep, where there is
-// one, used in place (read, and written back as it was found: see
-// g_dsv_footer); otherwise our own raw .sav. A .dsv is never created here.
-std::string cart_save_path(const std::string& rom, const std::string& dir) {
-  const std::string sav = save_path(rom, dir);
-  const std::string dsv = sav.substr(0, sav.size() - 4) + ".dsv";
-  struct stat st;
-  if (stat(dsv.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return sav;
-  if (stat(sav.c_str(), &st) == 0) std::fprintf(stderr, "save: using %s; the .sav beside it is left alone\n", dsv.c_str());
-  return dsv;
-}
+// The battery save's file, and the GBA game's, are chosen when the game
+// starts (save_file.h): emu.save_file / slot2.gba_save_file, else the one
+// file there is, else the player picks.
+std::string strip_ext(const std::string& p) { return p.substr(0, p.size() - 4); }
 
 // video.aa: false / true. On the GPU raster true is 4x MSAA; the CPU raster
 // shows the hardware's blend. The older mode words still read: accurate /
@@ -403,9 +398,9 @@ std::vector<std::string> camera_images(const ds::sdl::Config& cfg) {
 }
 
 // DeSmuME ends a .dsv with a 122-byte footer: a line of text, the chip's
-// parameters, a version and a cookie. The save loaded from such a file is
-// written back with it, so DeSmuME goes on reading the file; DraStic's .dsv is
-// the bare image and has none. Empty for any other save.
+// parameters, a version and a cookie, and DraStic writes it too. The save
+// loaded from such a file is written back with it, so the other emulator goes
+// on reading the file; a .dsv without one stays bare. Empty for any other save.
 std::vector<u8> g_dsv_footer;
 constexpr size_t kDsvFooter = 122;
 
@@ -413,19 +408,18 @@ bool load_save(NDS& nds, const std::string& path) {
   const ds::sdl::OffRealtime off_rt;
   g_dsv_footer.clear();
   if (!nds.cart) return true;
-  FILE* f = std::fopen(path.c_str(), "rb");
-  if (!f) {
-    if (errno != ENOENT) { std::fprintf(stderr, "save: cannot open %s: %s\n", path.c_str(), std::strerror(errno)); return false; }
-    if (!nds.cart->save_type_listed()) VLOG("save: game code not in the save list; the chip is detected on first use\n");
-    return true;
-  }
   std::vector<u8> data;
-  u8 buf[65536];
-  for (size_t got; (got = std::fread(buf, 1, sizeof buf, f)) > 0;) data.insert(data.end(), buf, buf + got);
+  std::string read_err;
   // A read cut short is not a save of another size: nothing is loaded, and no .bak is made from the part read.
-  const bool read_error = std::ferror(f) != 0;
-  std::fclose(f);
-  if (read_error) { std::fprintf(stderr, "save: cannot read %s (stopped after %zu bytes)\n", path.c_str(), data.size()); return false; }
+  switch (ds::sdl::read_save_file(path, data, read_err)) {
+    case ds::sdl::ReadResult::Missing:
+      if (!nds.cart->save_type_listed()) VLOG("save: game code not in the save list; the chip is detected on first use\n");
+      return true;
+    case ds::sdl::ReadResult::Error: std::fprintf(stderr, "save: %s\n", read_err.c_str()); return false;
+    case ds::sdl::ReadResult::Ok: break;
+  }
+  // RetroArch reads a bare .srm whatever its compression setting, so it is written back bare.
+  if (ds::sdl::is_rzip_file(path)) std::fprintf(stderr, "save: %s is RetroArch-compressed; it is written back uncompressed, which RetroArch reads\n", path.c_str());
   const ds::cart::Cart::SaveLoad r = nds.cart->load_save(data.data(), data.size());
   if (data.size() >= kDsvFooter && !std::memcmp(data.data() + data.size() - 16, "|-DESMUME SAVE-|", 16)) {
     g_dsv_footer.assign(data.end() - kDsvFooter, data.end());
@@ -940,7 +934,8 @@ struct Session {
   std::string game_ini;         // per-game settings; empty when there is no cart
   std::string states_dir;       // save states (and the autosave's PNG)
   std::string shots_dir;        // manual screenshots (F9); paths.screenshots, else states_dir
-  std::string sav;              // battery save
+  std::string sav;              // battery save: the .sav until the game starts and one is chosen
+  bool sav_pinned = false;      // --save named it
   std::string gba_sav;          // the slot-2 GBA game's save; empty with no game in slot 2
   std::string cheats_on_path;   // which cheats are on, one name per line
   ds::cheat::GameCheats cheats; // the database entry for this ROM; the menu points at its groups
@@ -960,7 +955,8 @@ void Session::open(NDS& nds, const ds::sdl::Config& cfg, const std::string& rom,
   states_dir = cfg.str("paths.states", rom_dir);
   shots_dir = cfg.str("paths.screenshots", states_dir);
   g_state_key = state_key_for(nds, states_dir);
-  sav = save_arg ? std::string(save_arg) : cart_save_path(rom_path, cfg.str("paths.saves"));
+  sav = save_arg ? std::string(save_arg) : save_path(rom_path, cfg.str("paths.saves"));
+  sav_pinned = save_arg != nullptr;
   game_ini.clear();
   if (nds.cart) {
     game_ini = ds::sdl::Config::game_path_rom(rom_path);
@@ -2454,6 +2450,114 @@ sdl_ready:
     const std::string r = cfg.str("slot2.rumble", "auto");
     return r == "on" || (r == "auto" && !slot2_fixed && input.has_rumble());
   };
+  // A prompt before the game starts: `rows` to pick from, then a "don't ask
+  // again" toggle. A picks; B (and a quit) gives `on_back` with nothing kept.
+  auto run_picker = [&](const char* title, const char* note, const std::vector<std::string>& rows, int sel,
+                        const char* remember_label, const char* hint, int on_back, bool& remember) -> int {
+    const int toggle = static_cast<int>(rows.size());
+    std::vector<std::string> shown = rows;
+    bool moving = false;
+    int picked = -1;
+    remember = false;
+    Uint32 moved_at = SDL_GetTicks(), drawn_at = 0;
+    input.set_menu_open(true);
+    display.set_page(true);
+    for (bool dirty = true; picked < 0;) {
+      SDL_Event e;
+      while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
+      if (input.quit() || g_signalled) { picked = on_back; remember = false; break; }
+      using B = ds::io::Io::Button;
+      const u32 p = input.take_menu_presses();
+      const auto pressed = [&](u32 b) { return ((p >> b) & 1) != 0; };
+      if (pressed(B::BTN_UP) || pressed(B::BTN_DOWN)) {
+        sel = (sel + (pressed(B::BTN_UP) ? toggle : 1)) % (toggle + 1);
+        moved_at = SDL_GetTicks();
+        dirty = true;
+      }
+      if (pressed(B::BTN_A)) {
+        if (sel == toggle) { remember = !remember; dirty = true; }
+        else picked = sel;
+      }
+      if (pressed(B::BTN_B)) { picked = on_back; remember = false; }
+      // Redrawn now and then even unchanged: right after startup a Wayland
+      // window can drop the first frames committed before it is configured.
+      if ((dirty || moving || SDL_GetTicks() - drawn_at >= 200) && picked < 0) {
+        dirty = false;
+        drawn_at = SDL_GetTicks();
+        draw_overlay_frame([&](const ds::sdl::Canvas& c) {
+          moving = ds::sdl::draw_picker(c, title, note, shown, sel, remember, remember_label, hint, SDL_GetTicks() - moved_at);
+        });
+        display.flush();
+        if (dual_window) display2.flush();
+      }
+      SDL_Delay(moving ? 30 : 10);
+    }
+    (void)input.take_actions();   // a hotkey pressed over the prompt is not for the game
+    input.set_menu_open(false);
+    display.set_page(false);
+    return picked;
+  };
+  // Keeps `key` = `value` in the game's own file ("don't ask again").
+  auto remember_for_game = [&](const char* key, const std::string& value) {
+    cfg.set(key, value);
+    if (session.game_ini.empty()) return;
+    if (!ds::sdl::Config::store(session.game_ini, key, value)) std::fprintf(stderr, "settings: cannot write %s\n", session.game_ini.c_str());
+    else VLOG("settings: %s = %s kept for this game in %s\n", key, value.c_str(), session.game_ini.c_str());
+  };
+  // Which save file a game uses (save_file.h). `stems`: the saves folder's
+  // <name> first, then the one beside the ROM. `key` forces a kind; under auto
+  // the one file there is is used, several are offered (under --record or
+  // --replay, the first of `kinds` found, so a run starts the same way).
+  auto choose_save_file = [&](const char* key, const std::vector<ds::sdl::SaveKind>& kinds, const std::vector<std::string>& stems,
+                              const char* what) -> std::string {
+    using ds::sdl::SaveKind;
+    const std::string setting = cfg.str(key, "auto");
+    const std::vector<ds::sdl::SaveFile> found = ds::sdl::find_saves(stems, kinds);
+    SaveKind forced;
+    if (ds::sdl::parse_save_kind(setting, forced) && std::find(kinds.begin(), kinds.end(), forced) != kinds.end()) {
+      for (const ds::sdl::SaveFile& f : found)
+        if (f.kind == forced) return f.path;
+      const std::string made = stems[0] + ds::sdl::save_ext(forced);
+      VLOG("%s: %s = %s and there is none yet; the first save makes %s\n", what, key, setting.c_str(), made.c_str());
+      return made;
+    }
+    if (setting != "auto") std::fprintf(stderr, "%s: %s = %s is not one of auto | %s; auto\n", what, key, setting.c_str(), kinds.size() == 3 ? "sav | dsv | srm" : "sav | srm");
+    if (found.empty()) return stems[0] + ".sav";
+    if (found.size() == 1) return found[0].path;
+    if (slot2_fixed) {
+      std::fprintf(stderr, "%s: several save files; %s for the recording or replay\n", what, found[0].path.c_str());
+      return found[0].path;
+    }
+    const int def = ds::sdl::newest_save(found);
+    std::vector<std::string> rows;
+    for (const ds::sdl::SaveFile& f : found) {
+      const char* tag = f.kind == SaveKind::Dsv ? tr("DRASTIC") : f.kind == SaveKind::Srm ? tr("RETROARCH") : tr("RAW");
+      std::string ext = ds::sdl::save_ext(f.kind);
+      for (char& c : ext) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      char when[32] = "";
+      const std::time_t t = static_cast<std::time_t>(f.mtime);
+      if (const std::tm* tm = std::localtime(&t)) std::strftime(when, sizeof when, "%Y-%m-%d %H:%M", tm);
+      const uint64_t kb = (f.bytes + 1023) / 1024;
+      std::string row = std::string(tag) + " (" + ext + ")  " + when + "  " + std::to_string(kb) + " KB";
+      if (f.blank) row += std::string("  ") + tr("BLANK");
+      if (f.compressed) row += std::string("  ") + tr("COMPRESSED");
+      if (f.beside_rom) row += std::string("  ") + tr("BESIDE THE ROM");
+      rows.push_back(row);
+    }
+    bool remember = false;
+    const int picked = run_picker(tr("SAVE FILE"), tr("THIS GAME HAS MORE THAN ONE SAVE"), rows, def, tr("DON'T ASK AGAIN FOR THIS GAME"),
+                                  tr("A USE THIS SAVE   B THE NEWEST"), def, remember);
+    const ds::sdl::SaveFile& f = found[static_cast<size_t>(picked)];
+    std::fprintf(stderr, "%s: using %s; the other save files are left alone\n", what, f.path.c_str());
+    if (remember) remember_for_game(key, ds::sdl::save_kind_name(f.kind));
+    return f.path;
+  };
+  auto choose_cart_save = [&]() -> std::string {
+    if (session.sav_pinned || !nds.cart) return session.sav;
+    using ds::sdl::SaveKind;
+    return choose_save_file("emu.save_file", {SaveKind::Sav, SaveKind::Dsv, SaveKind::Srm},
+                            {strip_ext(save_path(session.rom_path, cfg.str("paths.saves"))), rom_stem(session.rom_path)}, "save");
+  };
   auto fill_slot2 = [&](const std::string& gba) {
     nds.slot2.reset();
     session.gba_sav.clear();
@@ -2462,9 +2566,18 @@ sdl_ready:
     input.set_motion_stick("");
     if (nds.dsi || !nds.cart) return;
     if (!gba.empty()) {
-      const std::string sav = gba_save_path(gba, cfg);
+      using ds::sdl::SaveKind;
+      std::string sav = choose_save_file("slot2.gba_save_file", {SaveKind::Sav, SaveKind::Srm},
+                                         {strip_ext(gba_save_path(gba, cfg)), rom_stem(gba)}, "slot2");
+      std::vector<u8> save;
       std::string err;
-      if (std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game(gba, sav, err)) {
+      if (ds::sdl::read_save_file(sav, save, err) == ds::sdl::ReadResult::Error) {
+        // Not written to either: the game's first save would replace one nobody has seen.
+        std::fprintf(stderr, "slot2: %s; the GBA game runs without its save, and nothing is written\n", err.c_str());
+        sav.clear();
+        save.clear();
+      }
+      if (std::unique_ptr<ds::slot2::GameCart> g = ds::slot2::load_game_with_save(gba, std::move(save), err)) {
         g->set_light_level(cfg.num("slot2.solar", 5));
         std::fprintf(stderr, "slot2: %s [%s], save %s%s\n", rom_stem(base_name(gba)).c_str(), g->game_code(),
                      ds::slot2::save_type_name(g->save_type()), g->solar_sensor() ? ", solar sensor" : "");
@@ -2515,59 +2628,20 @@ sdl_ready:
       if (offers[i].path == fixed) sel = static_cast<int>(i);
     }
     rows.push_back(rumble_wanted() ? tr("NO GBA GAME (RUMBLE PAK)") : tr("NO GBA GAME"));
-    const int none = static_cast<int>(rows.size()) - 1, toggle = none + 1;
+    const int none = static_cast<int>(rows.size()) - 1;
     if (cfg.str("slot2.gba") == "none") sel = none;
-    bool remember = false, moving = false;
-    int picked = -1;
-    Uint32 moved_at = SDL_GetTicks(), drawn_at = 0;
-    input.set_menu_open(true);
-    display.set_page(true);
-    for (bool dirty = true; picked < 0;) {
-      SDL_Event e;
-      while (SDL_PollEvent(&e)) input.handle(e, display, dual_window ? &display2 : nullptr);
-      if (input.quit() || g_signalled) { picked = none; break; }
-      using B = ds::io::Io::Button;
-      const u32 p = input.take_menu_presses();
-      const auto pressed = [&](u32 b) { return ((p >> b) & 1) != 0; };
-      if (pressed(B::BTN_UP) || pressed(B::BTN_DOWN)) {
-        sel = (sel + (pressed(B::BTN_UP) ? toggle : 1)) % (toggle + 1);
-        moved_at = SDL_GetTicks();
-        dirty = true;
-      }
-      if (pressed(B::BTN_A)) {
-        if (sel == toggle) { remember = !remember; dirty = true; }
-        else picked = sel;
-      }
-      if (pressed(B::BTN_B)) { picked = none; remember = false; }   // B: nothing this time, nothing kept
-      // Redrawn now and then even unchanged: right after startup a Wayland
-      // window can drop the first frames committed before it is configured.
-      if ((dirty || moving || SDL_GetTicks() - drawn_at >= 200) && picked < 0) {
-        dirty = false;
-        drawn_at = SDL_GetTicks();
-        draw_overlay_frame([&](const ds::sdl::Canvas& c) {
-          moving = ds::sdl::draw_picker(c, tr("GBA CARTRIDGE"), tr("THIS GAME SUPPORTS THESE"), rows, sel, remember, tr("DON'T ASK AGAIN FOR THIS GAME"),
-                                        tr("A INSERT   B NO GBA GAME"), SDL_GetTicks() - moved_at);
-        });
-        display.flush();
-        if (dual_window) display2.flush();
-      }
-      SDL_Delay(moving ? 30 : 10);
-    }
-    (void)input.take_actions();   // a hotkey pressed over the prompt is not for the game
-    input.set_menu_open(false);
-    display.set_page(false);
+    bool remember = false;
+    const int picked = run_picker(tr("GBA CARTRIDGE"), tr("THIS GAME SUPPORTS THESE"), rows, sel, tr("DON'T ASK AGAIN FOR THIS GAME"),
+                                  tr("A INSERT   B NO GBA GAME"), none, remember);
     const std::string path = picked < none ? offers[static_cast<size_t>(picked)].path : std::string();
     if (remember && !session.game_ini.empty()) {
-      const std::string v = path.empty() ? "none" : gba_setting(path, cfg);
-      for (const auto& [k, val] : {std::pair<const char*, std::string>{"slot2.ask", "false"}, {"slot2.gba", v}}) {
-        cfg.set(k, val);
-        if (!ds::sdl::Config::store(session.game_ini, k, val)) std::fprintf(stderr, "settings: cannot write %s\n", session.game_ini.c_str());
-      }
-      VLOG("slot2: remembered %s for this game in %s\n", v.c_str(), session.game_ini.c_str());
+      remember_for_game("slot2.ask", "false");
+      remember_for_game("slot2.gba", path.empty() ? "none" : gba_setting(path, cfg));
     }
     return path;
   };
   fill_slot2(choose_slot2());
+  session.sav = choose_cart_save();
   // A replay must start from the same battery save every time, so it's loaded read-only.
   if (!load_save(nds, session.sav)) { start_failed(rom_path, tr("SAVE CANNOT BE READ")); return quit_early(1); }
   const bool save_readonly = replay != nullptr;
@@ -4068,6 +4142,7 @@ sdl_ready:
     session.load_enabled(nds);
     session.refresh_analog(nds, cfg);
     fill_slot2(choose_slot2());
+    session.sav = choose_cart_save();
     rumble_seen = gba_writes_seen = 0;
     if (!load_save(nds, session.sav)) {
       // Nothing of this game may be written over a save that could not be read.

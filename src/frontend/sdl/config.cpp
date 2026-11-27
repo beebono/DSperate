@@ -394,6 +394,8 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
 # gba =                         # the GBA game in slot 2 when not asking: a .gba path, or a file name
                                 # in paths.gba_games; none or empty for no game. --gba-rom sets it
                                 # for one run. Its save is written back as the game changes it
+# gba_save_file = auto          # auto | sav | srm: the GBA game's save file, as [emu] save_file:
+                                # <GBA ROM>.sav or .srm in paths.gba_saves, then beside the GBA ROM
 # rumble = auto                 # auto | on | off: the DS Rumble Pak when no GBA game is in the slot.
                                 # auto: when the controller has a rumble motor (the handheld's own,
                                 # on ROCKNIX). Off under --record/--replay unless on
@@ -486,6 +488,14 @@ R"(# DSperate settings. Command-line flags override this file. Two files next
                                 # wins over it, and an auto state that cannot be read is a warning,
                                 # not a failure: the game boots as usual. The state is kept, so a
                                 # SIGKILL still leaves the last clean exit's state to resume from
+# save_file = auto              # auto | sav | dsv | srm: the file a game's battery save is in. sav is
+                                # ours (the bare chip image), dsv DraStic's (DeSmuME's footer kept
+                                # when the file has one), srm RetroArch's (melonDS DS; its compressed
+                                # files are read, and written back bare, which RetroArch also reads).
+                                # Looked for in paths.saves, then beside the ROM. auto: the one file
+                                # there is; with more than one, the game asks before it starts, the
+                                # newest picked, and "don't ask again" sets this in the game's own
+                                # file. A kind with no file yet is made at the first save
 # autosave_png = false          # a picture with the auto state, laid out as the window shows it:
                                 # true = <states>/<GAMECODE>.auto.png | a path = that file (for a
                                 # launcher's game switcher). Taken from the emulator's own frame, so

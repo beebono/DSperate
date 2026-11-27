@@ -274,7 +274,7 @@ template <class S> void GameCart::sync(S& s) {
   }
 }
 
-std::unique_ptr<GameCart> load_game(const std::string& rom_path, const std::string& save_path, std::string& err) {
+std::unique_ptr<GameCart> load_game_with_save(const std::string& rom_path, std::vector<u8> save, std::string& err) {
   std::ifstream f(rom_path, std::ios::binary | std::ios::ate);
   if (!f) { err = "cannot open " + rom_path; return nullptr; }
   const std::streamoff size = f.tellg();
@@ -284,7 +284,15 @@ std::unique_ptr<GameCart> load_game(const std::string& rom_path, const std::stri
   f.seekg(0);
   if (!f.read(reinterpret_cast<char*>(rom.data()), size)) { err = "cannot read " + rom_path; return nullptr; }
   if (!header_ok(rom.data())) { err = rom_path + " has no GBA header"; return nullptr; }
+  if (save.size() > 256 * 1024) save.clear();
+  if (!save.empty() && save_type_for_size(save.size()) == SaveType::None) {
+    std::fprintf(stderr, "slot2: a %zu-byte save is a size no GBA save chip has; ignored\n", save.size());
+    save.clear();
+  }
+  return std::make_unique<GameCart>(std::move(rom), std::move(save));
+}
 
+std::unique_ptr<GameCart> load_game(const std::string& rom_path, const std::string& save_path, std::string& err) {
   std::vector<u8> save;
   if (!save_path.empty()) {
     std::ifstream s(save_path, std::ios::binary | std::ios::ate);
@@ -295,13 +303,9 @@ std::unique_ptr<GameCart> load_game(const std::string& rom_path, const std::stri
         s.seekg(0);
         if (!s.read(reinterpret_cast<char*>(save.data()), n)) save.clear();
       }
-      if (!save.empty() && save_type_for_size(save.size()) == SaveType::None) {
-        std::fprintf(stderr, "slot2: %s is %zu bytes, a size no GBA save chip has; ignored\n", save_path.c_str(), save.size());
-        save.clear();
-      }
     }
   }
-  return std::make_unique<GameCart>(std::move(rom), std::move(save));
+  return load_game_with_save(rom_path, std::move(save), err);
 }
 
 bool peek_game(const std::string& rom_path, char code[5], char title[13]) {

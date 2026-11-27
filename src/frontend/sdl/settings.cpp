@@ -47,6 +47,9 @@ const Choice kWifiDns[]  = {{"wiimmfi", "WIIMMFI"}, {"host", NC_("wifi.dns", "HO
 const Choice kLanguage[] = {{"0", N_("JAPANESE")}, {"1", N_("ENGLISH")}, {"2", N_("FRENCH")},
                             {"3", N_("GERMAN")}, {"4", N_("ITALIAN")}, {"5", N_("SPANISH")}};
 const Choice kCheck[]    = {{"false", "[ ]"}, {"true", "[X]"}};
+// The battery save's file (save_file.h): auto uses the one there is, or asks.
+const Choice kSaveFile[] = {{"auto", N_("AUTO")}, {"sav", N_("RAW (.SAV)")}, {"dsv", N_("DRASTIC (.DSV)")}, {"srm", N_("RETROARCH (.SRM)")}};
+const Choice kGbaSaveFile[] = {{"auto", N_("AUTO")}, {"sav", N_("RAW (.SAV)")}, {"srm", N_("RETROARCH (.SRM)")}};
 const Choice kRumble[]   = {{"auto", N_("AUTO")}, {"on", N_("ON")}, {"off", N_("OFF")}};
 const Choice kMotion[]   = {{"auto", N_("AUTO")}, {"retail", N_("MOTION PACK")}, {"homebrew", N_("MOTION CARD")}, {"off", N_("OFF")}};
 const Choice kMotionSrc[] = {{"auto", N_("AUTO")}, {"pad", N_("CONTROLLER")}, {"sensor", N_("SENSOR")}, {"stick", N_("STICK")}};
@@ -131,6 +134,8 @@ const Setting kEmuSettings[] = {
           N_("SAVE A STATE WHEN THE EMULATOR EXITS, TO RESUME FROM")),
   boolean("emu.autoload", N_("AUTOLOAD ON START"), "false", FlagRestart, Dep::None,
           N_("WHEN A GAME STARTS, RESUME FROM ITS AUTOSAVED STATE IF THERE IS ONE")),
+  pick("emu.save_file", N_("SAVE FILE"), kSaveFile, 4, "auto", FlagRestart, Dep::None,
+       N_("WHICH OF A GAME'S SAVE FILES IT USES. AUTO: THE ONLY ONE, OR ASK WHEN THERE ARE MORE")),
   boolean("emu.dsi_enhanced", N_("DSI ENHANCED GAMES"), "false", FlagRestart, Dep::DsiFirmware,
           N_("RUN DSI-ENHANCED GAME CARDS AS A DSI. NEEDS THE DSI BIOS, AND RUNS HEAVIER")),
   boolean("emu.dsi_hide_installed", N_("HIDE NAND DSIWARE"), "false", FlagRestart, Dep::None,
@@ -140,6 +145,8 @@ const Setting kEmuSettings[] = {
   // Always this game's own file: "don't ask again" wrote it there.
   boolean("slot2.ask", N_("ASK FOR GBA GAME"), "true", FlagRestart, Dep::Slot2Link,
           N_("BEFORE THIS GAME STARTS, OFFER THE GBA GAMES IT READS. KEPT FOR THIS GAME")),
+  pick("slot2.gba_save_file", N_("GBA SAVE FILE"), kGbaSaveFile, 3, "auto", FlagRestart, Dep::Slot2Link,
+       N_("WHICH OF THE GBA GAME'S SAVE FILES IT USES. AUTO: THE ONLY ONE, OR ASK WHEN THERE ARE MORE")),
   // TRANSLATORS: Nintendo's slot-2 accessory: its official name in your language where it has one.
   pick("slot2.rumble", N_("RUMBLE PAK"), kRumble, 3, "auto", FlagRestart, Dep::None,
        N_("IN SLOT 2 WHEN NO GBA GAME IS. AUTO: WHEN THE CONTROLLER CAN RUMBLE")),
