@@ -152,8 +152,8 @@ Both backends implement it. On the ARMv7 one it also inlines the ARM7 accesses
 whose numC the exact model's cost table cannot express (`needs_fallback_cost7`);
 SWP is inlined under fast on both backends.
 The ARM9's data constant depends on the base register, known at translation:
-SP-based accesses (the stack, in DTCM) cost 0, all others 5; the ARM7's cost
-2; refills 4 / 2 (`DS_FAST=d9s,d9,d7,r9,r7` overrides them). The interpreter
+SP-based accesses (the stack, in DTCM) cost 0, all others 3; the ARM7's cost
+2; refills 3 / 2 (`DS_FAST=d9s,d9,d7,r9,r7` overrides them). The interpreter
 derives the same split from the opcode (`fast_sp_based`). One constant cannot
 fit: exact overlaps a DTCM access with the fetch, so stack-heavy frame logic
 (ST, NSMB) pays nothing for data, while main-RAM-bound idle work (PW2's) pays

@@ -38,9 +38,15 @@ namespace ds {
 // Origins showed 415 new top-screen frames in 1800 against exact's 458. With
 // 4 and 3 both match or pass exact, and the boot scenes (GS:DD, ST, PH, NSMB,
 // Mario Kart) keep their frame counts.
+// d9 went from 4 to 3 on 2026-11-27: Hotel for Dogs (USA) froze on its first
+// picture and Luxor - Pharaoh's Challenge (USA) at the Mumbo Jumbo logo with
+// d9 4 (both run from d9 3 or r9 1; Luxor freezes under exact as well, which
+// charges main RAM where the console mostly hits its data cache). On the RG DS
+// Plus the scene set's mean frame times moved by 0.1 ms or less (Pokemon
+// White +0.07), no frames were lost, and the 3D swap counts held or rose.
 // Turbo: Okamiden's wide views hold 30 fps from d9 2, r9 2 down (one slip in
 // 240 frames at exactly that); 1 and 2 leave a margin. The ARM7 is left alone.
-struct FastTiming { u32 d9s = 0, d9 = 4, d7 = 2, r9 = 3, r7 = 2; };
+struct FastTiming { u32 d9s = 0, d9 = 3, d7 = 2, r9 = 3, r7 = 2; };
 constexpr FastTiming kTurboTiming{0, 1, 2, 2, 2};
 extern bool g_fast_timing;
 extern FastTiming g_fast;
