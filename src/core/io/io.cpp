@@ -1283,6 +1283,9 @@ u32 Io::read16(Cpu cpu, u32 addr) {
   case 0x103: return (!a9 && (powcnt2 & 2)) ? wifiwaitcnt : 0;
   case 0x5d: case 0x63: case 0x69: case 0x6f: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000BA) / 12) >> 16);
   case 0x5c: case 0x62: case 0x68: case 0x6e: return static_cast<u16>(nds_.dma.read_cnt(cpu, (addr - 0x040000B8) / 12));
+  // DMA fill by halves: a 16-bit DMA from 0x040000EC (the SDK's MI_DmaFill16) reads its value here.
+  case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
+    return static_cast<u16>(c.dma_fill[(addr - 0x040000E0) / 4] >> (8 * (addr & 2)));
   case 0x104: return static_cast<u16>(c.ime);
   case 0x108: return static_cast<u16>(c.ie);
   case 0x109: return static_cast<u16>(c.ie >> 16);
@@ -1377,6 +1380,10 @@ void Io::write16(Cpu cpu, u32 addr, u16 value) {
   case 0x5a: case 0x5b: case 0x60: case 0x61: case 0x66: case 0x67: case 0x6c: case 0x6d: {
     const int i = (addr - 0x040000B4) / 12; const u32 old = nds_.dma.read_dst(cpu, i);
     nds_.dma.write_dst(cpu, i, ((addr - 0x040000B4) % 12) ? ((old & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((old & 0xFFFF0000) | value)); return;
+  }
+  case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77: {   // DMA fill by halves
+    u32& f = c.dma_fill[(addr - 0x040000E0) / 4];
+    f = (addr & 2) ? ((f & 0x0000FFFF) | (static_cast<u32>(value) << 16)) : ((f & 0xFFFF0000) | value); return;
   }
   case 0x104: c.ime = value & 1; update_irq(cpu); return;
   case 0x108: c.ie = (c.ie & 0xFFFF0000) | value; update_irq(cpu); return;
