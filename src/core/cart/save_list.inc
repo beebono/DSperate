@@ -3,14 +3,15 @@
 // Types: 0 none, 1 = 512 B EEPROM, 2 = 8 KB, 3 = 64 KB, 4 = 128 KB EEPROM, 5 = 256 KB, 6 = 512 KB, 7 = 1 MB, 8 = 8 MB FLASH.
 // Corrected here (re-apply after a regeneration): CDLS Drawn to Life - Edicion Bob Esponja 4 -> 5, as CDLE/CDLP (melonDS lists 4; the game reports a save error).
 // Also 4 -> 5: Tokuten Ryoku Gakushuu DS TQHJ, TQGJ, TQMJ, TQCJ, TQAJ (they read the chip past 128 KB, to 0x33000/0x40000; CX4J, the other TQAJ release, is 5). TQHJ shows a write error as 4.
-// Also, by trying each type on the game (2026-11-26): TQ3P 3 in 1 - Animals 1 -> 2; TF2E Disney Two Pack 0 -> 1 (it has a chip); VM4E/VM4P Kids Learn Music / Music for Kids 2 -> 1; VT3Z Toy Story 3 Target edition 1 -> 2 (as VT3E); BPNE Snake Safari 2 -> 1 (BPNP, not in the set, is 2 and likely the same).
+// Also, by trying each type on the game (2026-11-26): TR4D Jewel Match & 4 Elements 1 -> 2; TQ3P 3 in 1 - Animals 1 -> 2; TF2E Disney Two Pack 0 -> 1 (it has a chip); VM4E/VM4P Kids Learn Music / Music for Kids 2 -> 1; VT3Z Toy Story 3 Target edition 1 -> 2 (as VT3E); BPNE Snake Safari 2 -> 1 (BPNP, not in the set, is 2 and likely the same).
+// And the Maru Goukaku titles that showed a write error: TAQJ/TAAJ (Special Takken, Special Kaigo Fukushishi) 4 -> 7 as the other Special titles (TPPJ, TFQJ, TC4J); TG4J (2011 Gyousei Shoshi) 3 -> 5 as the 2011 series (TFPJ, TJHJ, TKMJ). 256 KB and 1 MB both pass.
 {0x41464141,4}, {0x414D4155,8}, {0x43363341,8}, {0x43443241,2},
 {0x43495941,1}, {0x434D5341,2}, {0x434E5341,2}, {0x43575A41,2},
 {0x44323643,1}, {0x44324254,2}, {0x44324C43,1}, {0x44325542,2},
 {0x44325942,1}, {0x44334444,1}, {0x44334542,1}, {0x44334754,2},
 {0x44334756,2}, {0x44335141,1}, {0x44335159,2}, {0x44335254,2},
 {0x44335742,2}, {0x44335942,1}, {0x44343642,1}, {0x44344259,1},
-{0x44344443,1}, {0x44345254,1}, {0x44345542,2}, {0x44345942,1},
+{0x44344443,1}, {0x44345254,2}, {0x44345542,2}, {0x44345942,1},
 {0x44353243,2}, {0x44353642,1}, {0x44353842,1}, {0x44354259,2},
 {0x44354442,2}, {0x44354659,1}, {0x44354841,1}, {0x44354C42,2},
 {0x44354C43,1}, {0x44355342,1}, {0x44355542,2}, {0x44355942,1},
@@ -633,7 +634,7 @@
 {0x4A344341,1}, {0x4A344342,2}, {0x4A344343,3}, {0x4A344354,7},
 {0x4A344359,3}, {0x4A344454,1}, {0x4A344541,2}, {0x4A344543,3},
 {0x4A344642,2}, {0x4A344654,5}, {0x4A344659,3}, {0x4A344742,2},
-{0x4A344743,3}, {0x4A344754,3}, {0x4A344759,3}, {0x4A344841,1},
+{0x4A344743,3}, {0x4A344754,5}, {0x4A344759,3}, {0x4A344841,1},
 {0x4A344859,1}, {0x4A344941,3}, {0x4A344A59,2}, {0x4A344B41,3},
 {0x4A344B42,2}, {0x4A344B43,3}, {0x4A344B59,2}, {0x4A344C41,1},
 {0x4A344C42,2}, {0x4A344C43,2}, {0x4A344C59,2}, {0x4A344D54,2},
@@ -705,7 +706,7 @@
 {0x4A395959,2}, {0x4A395A41,3}, {0x4A395A42,2}, {0x4A395A59,2},
 {0x4A413241,2}, {0x4A413243,2}, {0x4A413341,6}, {0x4A413442,2},
 {0x4A413443,1}, {0x4A413541,1}, {0x4A413641,5}, {0x4A413841,1},
-{0x4A414154,4}, {0x4A414156,8}, {0x4A414159,2}, {0x4A414259,2},
+{0x4A414154,7}, {0x4A414156,8}, {0x4A414159,2}, {0x4A414259,2},
 {0x4A414356,1}, {0x4A414441,6}, {0x4A414459,3}, {0x4A414543,3},
 {0x4A414559,3}, {0x4A414641,3}, {0x4A414659,3}, {0x4A414843,3},
 {0x4A414859,3}, {0x4A414941,1}, {0x4A414943,3}, {0x4A414A41,3},
@@ -933,7 +934,7 @@
 {0x4A505841,5}, {0x4A505842,2}, {0x4A505859,3}, {0x4A505A41,2},
 {0x4A505A55,3}, {0x4A505A59,2}, {0x4A513242,1}, {0x4A513341,3},
 {0x4A513441,1}, {0x4A513442,2}, {0x4A513541,1}, {0x4A513641,1},
-{0x4A513742,5}, {0x4A513841,5}, {0x4A514154,4}, {0x4A514159,3},
+{0x4A513742,5}, {0x4A513841,5}, {0x4A514154,7}, {0x4A514159,3},
 {0x4A514254,2}, {0x4A514341,1}, {0x4A514359,2}, {0x4A514441,2},
 {0x4A514443,1}, {0x4A514459,3}, {0x4A514541,2}, {0x4A514542,2},
 {0x4A514641,2}, {0x4A514654,7}, {0x4A514659,2}, {0x4A514842,2},
