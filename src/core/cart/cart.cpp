@@ -79,7 +79,13 @@ Cart::Cart(NDS& nds, std::unique_ptr<RomSource> rom) : nds_(nds), rom_(std::move
   }
   u32 sram_size = 0;
   save_type_ = save_type_for(header_.game_code_u32(), sram_size);
-  ir_cart_ = (header_.game_code_u32() & 0xFF) == 'I';
+  // Infrared carts: the save chip sits behind the IR chip and every save command comes
+  // prefixed with 0x00. Game codes starting with 'I' (the Pokemon carts), and a few others:
+  // UEIJ Hoshizora Navi (Japan) sends only 0x00-prefixed commands and shows a backup memory
+  // error without this.
+  static constexpr u32 kIrCodes[] = {0x4A494555 /* UEIJ */};
+  ir_cart_ = (header_.game_code_u32() & 0xFF) == 'I' ||
+             std::find(std::begin(kIrCodes), std::end(kIrCodes), header_.game_code_u32()) != std::end(kIrCodes);
   listed_ = known_game_code(header_.game_code_u32());
   if (listed_) sram_.assign(sram_size, 0xFF);
   else save_type_ = SaveType::Detect;   // load_save or the first save access names the chip
